@@ -8,9 +8,9 @@ import SwiftUI
 /// Spaces, never takes focus, and ignores mouse events except in the error
 /// state (which shows a Retry button).
 final class HUDPanel {
-    /// Host size: the largest capsule (260×44) plus room for the 20 pt
-    /// shadow and the ±12 pt entrance offset so nothing clips.
-    static let panelSize = NSSize(width: 320, height: 104)
+    /// Host size: the largest capsule (420×56 listening pill) plus room for
+    /// the 20 pt shadow and the ±12 pt entrance offset so nothing clips.
+    static let panelSize = NSSize(width: 480, height: 120)
 
     let model = HUDModel()
 
@@ -72,13 +72,13 @@ final class HUDPanel {
         let x = visible.midX - Self.panelSize.width / 2
 
         // The capsule is vertically centered in the panel.
-        let capsuleInset = (Self.panelSize.height - 44) / 2
+        let capsuleInset = (Self.panelSize.height - HUDGeometry.height) / 2
         let y: CGFloat
         switch AppConfig.shared.hudPosition {
         case .bottomCenter:
-            y = visible.minY + 20 - capsuleInset
+            y = visible.minY + VeloraSpacing.xl - capsuleInset
         case .topCenter:
-            y = visible.maxY - 20 - 44 - capsuleInset
+            y = visible.maxY - VeloraSpacing.xl - HUDGeometry.height - capsuleInset
         }
         panel.setFrameOrigin(NSPoint(x: x, y: y))
     }

@@ -1,0 +1,8 @@
+{
+  "name": "Default",
+  "prompt": "General-purpose dictation. Produce clean, well-punctuated prose. Keep the user's wording and sentence order; only fix punctuation, capitalization, fillers, and self-corrections.",
+  "formatting": "full",
+  "apps": [],
+  "vocabulary": [],
+  "replacements": {}
+}

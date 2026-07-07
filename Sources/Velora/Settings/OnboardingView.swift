@@ -1,4 +1,5 @@
 import Combine
+import Foundation
 import SwiftUI
 
 /// Onboarding state: current step, live permission status (polled — the
@@ -50,7 +51,14 @@ final class OnboardingModel: ObservableObject {
     func refreshPermissions() {
         microphoneGranted = Permissions.microphoneGranted
         microphoneDenied = Permissions.microphoneDenied
-        accessibilityGranted = Permissions.accessibilityGranted
+        let accessibilityNow = Permissions.accessibilityGranted
+        if accessibilityNow, !accessibilityGranted {
+            // Event taps created before the grant stay dead; tell the app to
+            // reinstall the hotkey monitor immediately.
+            NSLog("Velora: accessibility granted during onboarding")
+            NotificationCenter.default.post(name: .veloraAccessibilityGranted, object: nil)
+        }
+        accessibilityGranted = accessibilityNow
     }
 
     func advance() {
@@ -74,6 +82,15 @@ final class OnboardingModel: ObservableObject {
         Permissions.promptAccessibility()
         Permissions.openAccessibilitySettings()
     }
+}
+
+/// Fixed vertical rhythm shared by every onboarding step: title pinned
+/// 32 pt from the top, content centered in the remaining space, primary
+/// button pinned 32 pt above the page dots, 24 pt side margins.
+private enum OnboardingLayout {
+    static let titleTop: CGFloat = 32
+    static let buttonBottom: CGFloat = 32
+    static let sideMargin: CGFloat = 24
 }
 
 /// Five-step onboarding flow (design brief §4.2): welcome → microphone →
@@ -100,28 +117,48 @@ struct OnboardingView: View {
         .frame(width: 640, height: 520)
     }
 
+    // MARK: - Step scaffold
+
+    /// Shared vertical structure: fixed title, centered content block,
+    /// pinned primary button (see `OnboardingLayout`).
+    private func stepLayout(
+        title: String,
+        @ViewBuilder content: () -> some View,
+        @ViewBuilder button: () -> some View
+    ) -> some View {
+        VStack(spacing: 0) {
+            Text(title)
+                .font(.title.weight(.semibold))
+                .padding(.top, OnboardingLayout.titleTop)
+
+            VStack(spacing: VeloraSpacing.xl) {
+                content()
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            button()
+                .padding(.bottom, OnboardingLayout.buttonBottom)
+        }
+        .padding(.horizontal, OnboardingLayout.sideMargin)
+    }
+
     // MARK: - Steps
 
     private var welcomeStep: some View {
-        VStack(spacing: 20) {
-            Spacer()
+        stepLayout(title: "Welcome to Velora") {
             Image(systemName: "waveform.circle.fill")
                 .font(.system(size: 96))
-                .foregroundStyle(Color.accentColor)
-            Text("Welcome to Velora")
-                .font(.largeTitle.weight(.semibold))
+                .foregroundStyle(VeloraBrand.iconGradient)
             Text("Hold a key, speak, release — polished text appears wherever you're typing. Entirely on this Mac.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            Spacer()
+        } button: {
             Button("Get Started") { model.advance() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
-            Spacer().frame(height: 8)
         }
-        .padding(.top, 24)
     }
 
     private var microphoneStep: some View {
@@ -159,67 +196,56 @@ struct OnboardingView: View {
     private func permissionStep(
         title: String, card: PermissionCard, continueEnabled: Bool
     ) -> some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Text(title)
-                .font(.title.weight(.semibold))
+        stepLayout(title: title) {
             card
-            Spacer()
+        } button: {
             Button("Continue") { model.advance() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(!continueEnabled)
         }
-        .padding(.top, 24)
     }
 
     private var hotkeyStep: some View {
-        VStack(spacing: 24) {
-            Spacer()
-            Text("Your dictation key")
-                .font(.title.weight(.semibold))
-            Text("Hold it and talk. Release to insert. Double-tap to lock recording on.")
+        stepLayout(title: "Your dictation key") {
+            Text("Hold it and talk — release to insert. A quick tap locks recording on; tap again to finish.")
                 .font(.body)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(width: 440)
 
-            KeycapView(label: model.hotkey.keycapLabel)
-
-            Picker("Hotkey", selection: $model.hotkey) {
-                ForEach(HotkeyChoice.allCases) { choice in
-                    Text(choice.displayName).tag(choice)
-                }
-            }
-            .labelsHidden()
-            .frame(width: 220)
-
-            Spacer()
+            // The recorder is keycap-styled; click it to capture any combo
+            // or a bare modifier, or use a quick pick below.
+            HotkeyRecorderView(hotkey: $model.hotkey)
+                .fixedSize(horizontal: true, vertical: false)
+        } button: {
             Button("Continue") { model.advance() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
-        .padding(.top, 24)
     }
 
     private var tryItStep: some View {
-        VStack(spacing: 16) {
-            Text("Try it")
-                .font(.title.weight(.semibold))
-                .padding(.top, 32)
+        stepLayout(title: "Try it") {
             Text("Click into the text field, hold \(model.hotkey.displayName), and speak.")
                 .font(.body)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
 
             TryItEditor()
                 .frame(width: 480, height: 160)
 
-            if model.dictationSucceeded {
-                Label("That's it — you're ready.", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(Color(nsColor: .systemGreen))
-                    .font(.callout.weight(.medium))
-                    .transition(.opacity)
+            // Fixed-height slot so the success label never shifts the layout.
+            Group {
+                if model.dictationSucceeded {
+                    Label("That's it — you're ready.", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(Color(nsColor: .systemGreen))
+                        .font(.callout.weight(.medium))
+                        .transition(.opacity)
+                }
             }
-
-            Spacer()
+            .frame(height: VeloraSpacing.xl)
+        } button: {
             Button("Finish") { model.onFinish?() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -232,7 +258,7 @@ struct OnboardingView: View {
     private var footer: some View {
         ZStack {
             // 6 pt dot page indicator
-            HStack(spacing: 8) {
+            HStack(spacing: VeloraSpacing.s) {
                 ForEach(OnboardingModel.Step.allCases, id: \.rawValue) { step in
                     Circle()
                         .fill(step == model.step ? Color.accentColor : Color.secondary.opacity(0.3))
@@ -254,10 +280,10 @@ struct OnboardingView: View {
                     .foregroundStyle(.tertiary)
                 }
             }
-            .padding(.horizontal, 20)
+            .padding(.horizontal, OnboardingLayout.sideMargin)
         }
         .frame(height: 44)
-        .padding(.bottom, 8)
+        .padding(.bottom, VeloraSpacing.s)
     }
 }
 
@@ -272,7 +298,7 @@ struct PermissionCard: View {
     let action: () -> Void
 
     var body: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: VeloraSpacing.m) {
             ZStack {
                 Circle()
                     .fill(Color.accentColor.opacity(granted ? 0.0 : 0.15))
@@ -291,7 +317,7 @@ struct PermissionCard: View {
             }
             .animation(.easeInOut(duration: 0.2), value: granted)
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 Text(title)
                     .font(.system(size: 15, weight: .semibold))
                 Text(explanation)
@@ -305,7 +331,7 @@ struct PermissionCard: View {
             Button(granted ? "Granted" : buttonTitle, action: action)
                 .disabled(granted)
         }
-        .padding(16)
+        .padding(VeloraSpacing.l)
         .frame(width: 480)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .overlay(
@@ -316,6 +342,8 @@ struct PermissionCard: View {
 
 // MARK: - Keycap (design brief §4.2 step 4)
 
+/// Static keycap chip (menus, labels). The interactive recorder in
+/// `HotkeyRecorderView` shares this design language.
 struct KeycapView: View {
     let label: String
 
@@ -340,7 +368,7 @@ private struct TryItEditor: View {
         TextEditor(text: $text)
             .font(.body)
             .scrollContentBackground(.hidden)
-            .padding(8)
+            .padding(VeloraSpacing.s)
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
             .overlay(
                 RoundedRectangle(cornerRadius: 8)

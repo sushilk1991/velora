@@ -27,13 +27,17 @@ final class TextInserter {
     private static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
     /// Inserts `text` into the app identified by `bundleID`, choosing the
-    /// strategy from per-app configuration.
+    /// strategy from per-app configuration. Every attempt is logged so
+    /// `log show --predicate 'process == "Velora"'` tells the whole story.
     func insert(_ text: String, targetBundleID: String?) {
         if let bundleID = targetBundleID,
            AppConfig.shared.typingFallbackApps.contains(bundleID) {
+            NSLog(
+                "Velora: insert method=type target=%@ trusted=%@ chars=%ld",
+                bundleID, Permissions.accessibilityGranted ? "yes" : "no", text.count)
             insertViaTyping(text)
         } else {
-            insertViaPasteboard(text)
+            insertViaPasteboard(text, targetBundleID: targetBundleID)
         }
     }
 
@@ -49,7 +53,10 @@ final class TextInserter {
     /// insertion target was lost (focus change, secure field) — the user
     /// pastes manually.
     func copyToClipboard(_ text: String) {
-        writeDictation(text, to: NSPasteboard.general)
+        let changeCount = writeDictation(text, to: NSPasteboard.general)
+        NSLog(
+            "Velora: clipboard fallback chars=%ld changeCount=%ld (no synthetic input)",
+            text.count, changeCount)
     }
 
     /// Writes the dictated text as a transient + concealed string item so
@@ -64,8 +71,9 @@ final class TextInserter {
         return pasteboard.changeCount
     }
 
-    func insertViaPasteboard(_ text: String) {
+    func insertViaPasteboard(_ text: String, targetBundleID: String? = nil) {
         let pasteboard = NSPasteboard.general
+        let changeCountBefore = pasteboard.changeCount
 
         // Snapshot every item with every representation it carries.
         let saved: [NSPasteboardItem] = (pasteboard.pasteboardItems ?? []).map { item in
@@ -79,6 +87,11 @@ final class TextInserter {
         }
 
         let ourChangeCount = writeDictation(text, to: pasteboard)
+        NSLog(
+            "Velora: insert method=paste target=%@ trusted=%@ changeCount %ld→%ld",
+            targetBundleID ?? "unknown",
+            Permissions.accessibilityGranted ? "yes" : "no",
+            changeCountBefore, ourChangeCount)
 
         postCommandV()
 

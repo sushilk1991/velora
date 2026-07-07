@@ -5,12 +5,14 @@ import Foundation
 protocol StatusItemControllerDelegate: AnyObject {
     func statusItemToggleDictation()
     func statusItemOpenSettings()
+    func statusItemOpenSetupAssistant()
     func statusItemCheckPermissions()
 }
 
 /// The menubar presence (design brief §3): template SF Symbol that swaps per
 /// state, and a minimal menu — Start Dictation, last three transcriptions
-/// (click copies), Settings…, Check Permissions… (degraded only), Quit.
+/// (click copies), Settings…, Setup Assistant…, Check Permissions… (degraded
+/// only), Quit.
 final class StatusItemController: NSObject, NSMenuDelegate {
     enum IconState {
         case idle, recording, transcribing, error
@@ -130,6 +132,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         settings.target = self
         menu.addItem(settings)
 
+        let assistant = NSMenuItem(
+            title: "Setup Assistant…", action: #selector(openSetupAssistant), keyEquivalent: "")
+        assistant.target = self
+        menu.addItem(assistant)
+
         if degradedReason != nil || Permissions.anyMissing {
             let check = NSMenuItem(
                 title: "Check Permissions…", action: #selector(checkPermissions), keyEquivalent: "")
@@ -164,6 +171,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openSettings() {
         delegate?.statusItemOpenSettings()
+    }
+
+    @objc private func openSetupAssistant() {
+        delegate?.statusItemOpenSetupAssistant()
     }
 
     @objc private func checkPermissions() {

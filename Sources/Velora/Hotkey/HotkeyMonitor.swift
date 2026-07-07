@@ -2,9 +2,9 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-/// Receives raw hotkey transitions. Interpretation (hold vs tap vs
-/// double-tap-lock) lives in `DictationController`; this type only reports
-/// clean down/up edges for the configured key plus Esc presses.
+/// Receives raw hotkey transitions. Interpretation (hold-to-talk vs
+/// tap-to-lock) lives in `DictationController`; this type only reports
+/// clean down/up edges for the configured hotkey plus Esc presses.
 /// All callbacks are on the main queue.
 protocol HotkeyMonitorDelegate: AnyObject {
     func hotkeyDown()
@@ -12,7 +12,16 @@ protocol HotkeyMonitorDelegate: AnyObject {
     func escapePressed()
 }
 
-/// Global hotkey listener.
+/// Global hotkey listener for arbitrary recorded hotkeys (`Hotkey`).
+///
+/// Matching rules:
+/// - Modifier-only hotkeys (Right ⌥, Fn, …) match `flagsChanged` events on
+///   their own key code; down/up comes from the modifier's flag bit.
+/// - Key combos match `keyDown` with the exact required ⌘⌥⇧⌃ set
+///   (superset-tolerant on the device-dependent Fn/numeric-pad bits, which
+///   arrow keys and F-keys raise on their own). The up edge is the key's
+///   `keyUp` regardless of modifier state, so releasing a modifier a beat
+///   early never strands a recording.
 ///
 /// Primary path: a listen-only `CGEventTap` (session tap) for
 /// keyDown/keyUp/flagsChanged. Falls back to `NSEvent` global monitors when
@@ -22,13 +31,27 @@ protocol HotkeyMonitorDelegate: AnyObject {
 final class HotkeyMonitor {
     weak var delegate: HotkeyMonitorDelegate?
 
-    /// The key being listened for; updated live from settings.
-    var hotkey: HotkeyChoice = AppConfig.shared.hotkey
+    /// The hotkey being listened for; updated live from settings.
+    var hotkey: Hotkey = AppConfig.shared.hotkey {
+        didSet {
+            guard hotkey != oldValue else { return }
+            modifierIsDown = false
+            comboIsDown = false
+            NSLog("Velora: hotkey monitor now listening for %@", hotkey.displayLabel)
+        }
+    }
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var globalMonitor: Any?
+    private var recorderObserver: NSObjectProtocol?
     private var modifierIsDown = false
+    /// Tracks an active combo press so keyUp matches even after the user
+    /// releases the modifiers first.
+    private var comboIsDown = false
+    /// True while the settings/onboarding shortcut recorder is capturing;
+    /// hotkey matching is suspended so the capture can't start dictation.
+    private var suspended = false
     private(set) var usingEventTap = false
 
     private static let escKeyCode: Int64 = 53
@@ -40,6 +63,17 @@ final class HotkeyMonitor {
         guard eventTap == nil, globalMonitor == nil else { return }
         if !startEventTap() {
             startGlobalMonitor()
+        }
+        if recorderObserver == nil {
+            recorderObserver = NotificationCenter.default.addObserver(
+                forName: .veloraHotkeyRecordingActive, object: nil, queue: .main
+            ) { [weak self] note in
+                guard let self else { return }
+                self.suspended = (note.object as? Bool) ?? false
+                NSLog(
+                    "Velora: hotkey matching %@",
+                    self.suspended ? "suspended (recorder capturing)" : "resumed")
+            }
         }
     }
 
@@ -56,10 +90,16 @@ final class HotkeyMonitor {
             NSEvent.removeMonitor(monitor)
             globalMonitor = nil
         }
+        if let observer = recorderObserver {
+            NotificationCenter.default.removeObserver(observer)
+            recorderObserver = nil
+        }
     }
 
-    /// Tears down and reinstalls monitoring — call after a permission grant.
+    /// Tears down and reinstalls monitoring — call after a permission grant
+    /// (an event tap created before the grant stays dead until reinstalled).
     func restart() {
+        NSLog("Velora: hotkey monitor restarting")
         stop()
         start()
     }
@@ -111,15 +151,14 @@ final class HotkeyMonitor {
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let flags = event.flags
+        let flags = event.flags.rawValue
 
         switch type {
         case .flagsChanged:
-            handleFlagsChanged(keyCode: keyCode, optionDown: flags.contains(.maskAlternate),
-                               fnDown: flags.contains(.maskSecondaryFn))
+            handleFlagsChanged(keyCode: keyCode, flags: flags)
         case .keyDown:
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-            handleKeyDown(keyCode: keyCode, isRepeat: isRepeat)
+            handleKeyDown(keyCode: keyCode, flags: flags, isRepeat: isRepeat)
         case .keyUp:
             handleKeyUp(keyCode: keyCode)
         default:
@@ -134,14 +173,13 @@ final class HotkeyMonitor {
             matching: [.flagsChanged, .keyDown, .keyUp]
         ) { [weak self] event in
             guard let self else { return }
+            let flags = Hotkey.cgFlags(from: event.modifierFlags)
             switch event.type {
             case .flagsChanged:
-                self.handleFlagsChanged(
-                    keyCode: Int64(event.keyCode),
-                    optionDown: event.modifierFlags.contains(.option),
-                    fnDown: event.modifierFlags.contains(.function))
+                self.handleFlagsChanged(keyCode: Int64(event.keyCode), flags: flags)
             case .keyDown:
-                self.handleKeyDown(keyCode: Int64(event.keyCode), isRepeat: event.isARepeat)
+                self.handleKeyDown(
+                    keyCode: Int64(event.keyCode), flags: flags, isRepeat: event.isARepeat)
             case .keyUp:
                 self.handleKeyUp(keyCode: Int64(event.keyCode))
             default:
@@ -154,31 +192,53 @@ final class HotkeyMonitor {
 
     // MARK: - Shared event interpretation
 
-    private func handleFlagsChanged(keyCode: Int64, optionDown: Bool, fnDown: Bool) {
-        guard hotkey.isModifier, keyCode == hotkey.keyCode else { return }
-        let isDown: Bool
-        switch hotkey {
-        case .rightOption: isDown = optionDown
-        case .fn: isDown = fnDown
-        default: return
-        }
+    private func handleFlagsChanged(keyCode: Int64, flags: UInt64) {
+        guard !suspended else { return }
+        guard hotkey.isModifierOnly,
+              keyCode == hotkey.keyCode,
+              let mask = Hotkey.modifierMask(forKeyCode: keyCode)
+        else { return }
+        let isDown = flags & mask.rawValue != 0
         guard isDown != modifierIsDown else { return }
         modifierIsDown = isDown
-        emit(isDown ? { $0.hotkeyDown() } : { $0.hotkeyUp() })
+        emitHotkey(down: isDown)
     }
 
-    private func handleKeyDown(keyCode: Int64, isRepeat: Bool) {
+    private func handleKeyDown(keyCode: Int64, flags: UInt64, isRepeat: Bool) {
         if keyCode == Self.escKeyCode {
-            emit { $0.escapePressed() }
+            if !suspended {
+                emit { $0.escapePressed() }
+            }
             return
         }
-        guard !hotkey.isModifier, keyCode == hotkey.keyCode, !isRepeat else { return }
-        emit { $0.hotkeyDown() }
+        guard !suspended,
+              !hotkey.isModifierOnly,
+              keyCode == hotkey.keyCode,
+              !isRepeat, !comboIsDown
+        else { return }
+        // Exact match on the device-independent modifiers only.
+        let required = hotkey.modifiers & Hotkey.strictModifierMask
+        guard flags & Hotkey.strictModifierMask == required else { return }
+        comboIsDown = true
+        NSLog(
+            "Velora: hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
+            hotkey.displayLabel, keyCode, flags)
+        emitHotkey(down: true)
     }
 
     private func handleKeyUp(keyCode: Int64) {
-        guard !hotkey.isModifier, keyCode == hotkey.keyCode else { return }
-        emit { $0.hotkeyUp() }
+        // Deliberately no modifier check: the up edge is the key itself, so
+        // dropping a modifier before the key still ends the hold cleanly.
+        guard !hotkey.isModifierOnly, keyCode == hotkey.keyCode, comboIsDown else { return }
+        comboIsDown = false
+        emitHotkey(down: false)
+    }
+
+    private func emitHotkey(down: Bool) {
+        NSLog(
+            "Velora: hotkey %@ (source=%@)",
+            down ? "down" : "up", usingEventTap ? "tap" : "nsevent")
+        emit(down ? { $0.hotkeyDown() } : { $0.hotkeyUp() })
     }
 
     private func emit(_ action: @escaping (HotkeyMonitorDelegate) -> Void) {

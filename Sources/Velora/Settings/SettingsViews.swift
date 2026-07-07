@@ -30,7 +30,7 @@ enum SettingsTab: CaseIterable {
         case .general: return 230
         case .dictation: return 330
         case .model: return 400
-        case .shortcuts: return 240
+        case .shortcuts: return 320
         case .about: return 320
         }
     }
@@ -85,7 +85,7 @@ struct DictationSettingsView: View {
                 }
                 .pickerStyle(.radioGroup)
             } footer: {
-                Text("With Hold to talk, double-tap the hotkey to lock recording on. Esc always cancels.")
+                Text("With Hold to talk, a quick tap locks recording on; tap again to finish. Esc always cancels.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -152,7 +152,7 @@ struct ModelSettingsView: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 60, alignment: .trailing)
                     }
-                    .padding(.vertical, 2)
+                    .padding(.vertical, VeloraSpacing.xs)
                 }
             }
             Section {
@@ -191,13 +191,11 @@ struct ShortcutsSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Dictation hotkey", selection: $model.hotkey) {
-                    ForEach(HotkeyChoice.allCases) { choice in
-                        Text(choice.displayName).tag(choice)
-                    }
+                LabeledContent("Dictation hotkey") {
+                    HotkeyRecorderView(hotkey: $model.hotkey)
                 }
             } footer: {
-                Text("Hold to dictate, double-tap to lock recording on. A fully custom shortcut recorder is coming in a future release.")
+                Text("Click the shortcut, then press any key combo — or press and release a bare modifier like Right Option. Esc cancels recording.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -219,11 +217,11 @@ struct AboutSettingsView: View {
     }
 
     var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: VeloraSpacing.m) {
             Image(systemName: "waveform.circle.fill")
                 .font(.system(size: 56))
-                .foregroundStyle(Color.accentColor)
-                .padding(.top, 24)
+                .foregroundStyle(VeloraBrand.iconGradient)
+                .padding(.top, VeloraSpacing.xl)
             Text("Velora")
                 .font(.title2.weight(.semibold))
             Text("Version \(version)")
@@ -234,19 +232,28 @@ struct AboutSettingsView: View {
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
 
-            HStack(spacing: 16) {
-                Link("GitHub", destination: URL(string: "https://github.com/velora-app/velora")!)
-                Link("Report an Issue", destination: URL(string: "https://github.com/velora-app/velora/issues")!)
+            HStack(spacing: VeloraSpacing.l) {
+                link("GitHub", "https://github.com/velora-app/velora")
+                link("Report an Issue", "https://github.com/velora-app/velora/issues")
             }
-            .padding(.top, 4)
+            .padding(.top, VeloraSpacing.xs)
 
             Spacer()
 
             Text("Built with parakeet-mlx, mlx-whisper, and mlx-lm.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)
-                .padding(.bottom, 16)
+                .padding(.bottom, VeloraSpacing.l)
         }
         .frame(width: 580, height: SettingsTab.about.preferredHeight)
+    }
+
+    /// Link that quietly renders nothing if the URL literal is malformed
+    /// (keeps the view force-unwrap free).
+    @ViewBuilder
+    private func link(_ title: String, _ urlString: String) -> some View {
+        if let url = URL(string: urlString) {
+            Link(title, destination: url)
+        }
     }
 }

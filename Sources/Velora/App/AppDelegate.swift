@@ -17,6 +17,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsController: SettingsWindowController?
     private var onboardingController: OnboardingWindowController?
     private var hotkeyObserver: NSObjectProtocol?
+    private var accessibilityObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
@@ -53,8 +54,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.hotkeyMonitor.hotkey = self.config.hotkey
         }
 
+        // Accessibility just flipped to granted (onboarding live-poll): an
+        // event tap created before the grant is dead — reinstall immediately
+        // so the hotkey works without an app relaunch.
+        accessibilityObserver = NotificationCenter.default.addObserver(
+            forName: .veloraAccessibilityGranted, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.hotkeyMonitor.restart()
+            self.refreshDegradedState()
+        }
+
+        // Onboarding must come back for a user who skipped it or whose
+        // permissions broke (e.g. a TCC re-grant after re-signing), not just
+        // on first launch.
         if !config.onboardingComplete {
             showOnboarding()
+        } else if Permissions.anyMissing {
+            NSLog(
+                "Velora: permissions missing at launch (mic=%@ accessibility=%@) — reopening setup assistant",
+                Permissions.microphoneGranted ? "yes" : "no",
+                Permissions.accessibilityGranted ? "yes" : "no")
+            showOnboarding(startingAt: firstMissingPermissionStep)
         }
     }
 
@@ -65,6 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         supervisor.stop()
         if let hotkeyObserver {
             NotificationCenter.default.removeObserver(hotkeyObserver)
+        }
+        if let accessibilityObserver {
+            NotificationCenter.default.removeObserver(accessibilityObserver)
         }
     }
 
@@ -90,6 +114,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsController = SettingsWindowController(supervisor: supervisor)
         }
         settingsController?.show()
+    }
+
+    /// The onboarding step to reopen at: the first missing permission, or
+    /// welcome when everything is granted.
+    private var firstMissingPermissionStep: OnboardingModel.Step {
+        if !Permissions.microphoneGranted { return .microphone }
+        if !Permissions.accessibilityGranted { return .accessibility }
+        return .welcome
     }
 
     // MARK: - Degraded state (menubar error icon + Check Permissions…)
@@ -125,7 +157,7 @@ extension AppDelegate: DictationControllerDelegate {
         switch phase {
         case .idle:
             statusController.setIconState(.idle)
-        case .recording, .awaitingSecondTap:
+        case .recording:
             statusController.setIconState(.recording)
         case .transcribing:
             statusController.setIconState(.transcribing)
@@ -142,6 +174,10 @@ extension AppDelegate: StatusItemControllerDelegate {
 
     func statusItemOpenSettings() {
         showSettings()
+    }
+
+    func statusItemOpenSetupAssistant() {
+        showOnboarding(startingAt: firstMissingPermissionStep)
     }
 
     func statusItemCheckPermissions() {

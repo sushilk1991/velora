@@ -45,6 +45,7 @@ CATEGORY_BY_BUNDLE: dict[str, str] = {
     "com.mitchellh.ghostty": "code",
     "dev.warp.Warp-Stable": "code",
     "dev.zed.Zed": "code",
+    "com.cmuxterm.app": "code",  # cmux
     # browsers → default
     "com.apple.Safari": "browser",
     "com.google.Chrome": "browser",

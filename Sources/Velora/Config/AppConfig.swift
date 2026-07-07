@@ -1,68 +1,9 @@
 import Foundation
 
-/// The dictation hotkey. A full key-recorder UI is P1; P0 offers a curated
-/// list of keys that work well as push-to-talk triggers (bare modifiers and
-/// F-keys, detected via CGEventTap / NSEvent global monitors).
-enum HotkeyChoice: String, CaseIterable, Identifiable {
-    case rightOption
-    case fn
-    case f13, f14, f15, f16, f17, f18, f19
-
-    var id: String { rawValue }
-
-    /// Human-readable name shown in settings and onboarding.
-    var displayName: String {
-        switch self {
-        case .rightOption: return "Right Option (⌥)"
-        case .fn: return "Fn / Globe"
-        case .f13: return "F13"
-        case .f14: return "F14"
-        case .f15: return "F15"
-        case .f16: return "F16"
-        case .f17: return "F17"
-        case .f18: return "F18"
-        case .f19: return "F19"
-        }
-    }
-
-    /// Short keycap label for the onboarding keycap view.
-    var keycapLabel: String {
-        switch self {
-        case .rightOption: return "⌥ right"
-        case .fn: return "fn"
-        default: return displayName
-        }
-    }
-
-    /// Virtual key code (kVK_*) for key-based hotkeys; modifier hotkeys are
-    /// matched on `flagsChanged` instead.
-    var keyCode: Int64 {
-        switch self {
-        case .rightOption: return 61  // kVK_RightOption
-        case .fn: return 63           // kVK_Function
-        case .f13: return 105
-        case .f14: return 107
-        case .f15: return 113
-        case .f16: return 106
-        case .f17: return 64
-        case .f18: return 79
-        case .f19: return 80
-        }
-    }
-
-    /// Whether the hotkey arrives as a `flagsChanged` event (bare modifier)
-    /// rather than keyDown/keyUp.
-    var isModifier: Bool {
-        switch self {
-        case .rightOption, .fn: return true
-        default: return false
-        }
-    }
-}
-
 /// How the hotkey drives recording.
 enum HotkeyMode: String, CaseIterable, Identifiable {
-    /// Hold to talk; release to transcribe. Double-tap locks recording on.
+    /// Hold to talk; release to transcribe. A quick tap locks recording on;
+    /// the next tap ends it.
     case hold
     /// Each press toggles recording on/off.
     case toggle
@@ -131,7 +72,10 @@ final class AppConfig {
 
     private enum Key {
         static let onboardingComplete = "velora.onboardingComplete"
-        static let hotkey = "velora.hotkey"
+        /// Legacy P0 curated-picker value (`HotkeyChoice` raw string).
+        static let legacyHotkey = "velora.hotkey"
+        /// Recorder-era hotkey (`Hotkey.defaultsRepresentation` dictionary).
+        static let hotkey = "velora.hotkey.v2"
         static let hotkeyMode = "velora.hotkeyMode"
         static let soundsEnabled = "velora.soundsEnabled"
         static let soundVolume = "velora.soundVolume"
@@ -145,7 +89,6 @@ final class AppConfig {
 
     private init() {
         defaults.register(defaults: [
-            Key.hotkey: HotkeyChoice.rightOption.rawValue,
             Key.hotkeyMode: HotkeyMode.hold.rawValue,
             Key.soundsEnabled: true,
             Key.soundVolume: 40.0,
@@ -155,6 +98,19 @@ final class AppConfig {
             Key.autoPunctuation: true,
             Key.sttModel: STTModel.all[0].id,
         ])
+        migrateLegacyHotkeyIfNeeded()
+    }
+
+    /// One-time migration: users upgrading from the P0 curated hotkey picker
+    /// keep their choice in the new recorder storage format.
+    private func migrateLegacyHotkeyIfNeeded() {
+        guard defaults.dictionary(forKey: Key.hotkey) == nil,
+              let legacy = defaults.string(forKey: Key.legacyHotkey),
+              let migrated = Hotkey(legacyChoice: legacy)
+        else { return }
+        defaults.set(migrated.defaultsRepresentation, forKey: Key.hotkey)
+        NSLog("Velora: migrated legacy hotkey '%@' to recorder format (%@)",
+              legacy, migrated.displayLabel)
     }
 
     // MARK: - App-side preferences
@@ -164,9 +120,16 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: Key.onboardingComplete) }
     }
 
-    var hotkey: HotkeyChoice {
-        get { HotkeyChoice(rawValue: defaults.string(forKey: Key.hotkey) ?? "") ?? .rightOption }
-        set { defaults.set(newValue.rawValue, forKey: Key.hotkey) }
+    /// The dictation hotkey (recorder format; default Right Option).
+    var hotkey: Hotkey {
+        get {
+            if let dict = defaults.dictionary(forKey: Key.hotkey),
+               let stored = Hotkey(defaultsRepresentation: dict) {
+                return stored
+            }
+            return .rightOption
+        }
+        set { defaults.set(newValue.defaultsRepresentation, forKey: Key.hotkey) }
     }
 
     var hotkeyMode: HotkeyMode {
@@ -229,6 +192,7 @@ final class AppConfig {
         "com.mitchellh.ghostty",
         "org.alacritty",
         "net.kovidgoyal.kitty",
+        "com.cmuxterm.app",
     ]
 
     // MARK: - config.json for the engine

@@ -7,8 +7,9 @@ protocol EngineSupervisorDelegate: AnyObject {
 }
 
 /// Spawns and babysits the Python inference engine
-/// (`uv run --project <repo>/engine velora-engine`), owns the socket client,
-/// and restarts the engine with exponential backoff when it crashes.
+/// (`uv run --project <engine dir> velora-engine`, engine dir resolved by
+/// `ResourceLocator.locateEngine()`), owns the socket client, and restarts
+/// the engine with exponential backoff when it crashes.
 ///
 /// If the engine project or `uv` cannot be found, the app stays alive in a
 /// degraded state and keeps probing the socket — an externally launched
@@ -81,11 +82,13 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private func spawnEngineProcess() {
         guard process == nil || process?.isRunning == false else { return }
 
-        guard let engineDir = ResourceLocator.engineDirectory else {
+        guard let engine = ResourceLocator.locateEngine() else {
             state = .degraded("Engine project not found (set VELORA_ENGINE_DIR)")
             return
         }
-        guard let uv = findUV() else {
+        // Prefer the uv shipped in the bundle (self-contained distribution);
+        // fall back to a system install for dev/checkout runs.
+        guard let uv = ResourceLocator.bundledUV?.path ?? findUV() else {
             state = .degraded("uv not found — install from https://astral.sh/uv")
             return
         }
@@ -95,16 +98,30 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         // --parent-pid lets the engine self-exit if this app dies without a
         // clean shutdown (crash, force-quit) — no zombie MLX process.
         proc.arguments = [
-            "run", "--project", engineDir.path, "velora-engine",
+            "run", "--project", engine.directory.path, "velora-engine",
             "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
         ]
-        proc.currentDirectoryURL = engineDir
+        proc.currentDirectoryURL = engine.directory
 
         var env = ProcessInfo.processInfo.environment
         let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin",
                           "\(NSHomeDirectory())/.local/bin"]
         env["PATH"] = (extraPaths + [(env["PATH"] ?? "/usr/bin:/bin")]).joined(separator: ":")
+        if engine.isBundled {
+            // Keep every uv side effect (interpreter installs, wheel cache)
+            // under Application Support — never inside the signed bundle.
+            let support = ResourceLocator.applicationSupportDirectory
+            env["UV_CACHE_DIR"] = support.appendingPathComponent("uv-cache").path
+            env["UV_PYTHON_INSTALL_DIR"] = support.appendingPathComponent("python").path
+        }
         proc.environment = env
+
+        // First run on a fresh machine: `uv run` creates the venv and
+        // downloads Python deps, which can take minutes. There is no launch
+        // deadline — the connect loop polls until the socket appears and uv's
+        // progress goes to engine.log — so we just flag it for diagnosability.
+        let firstBootstrap = !FileManager.default.fileExists(
+            atPath: engine.directory.appendingPathComponent(".venv").path)
 
         // Engine logs go to a file so crashes are diagnosable. Append (never
         // truncate) so the evidence from a crash survives the restart spawn.
@@ -116,8 +133,15 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             handle.seekToEndOfFile()
             let stamp = ISO8601DateFormatter().string(from: Date())
             handle.write(Data("\n===== engine spawn \(stamp) =====\n".utf8))
+            if firstBootstrap {
+                handle.write(Data(
+                    "First-run bootstrap: uv is creating the engine venv and downloading Python dependencies (can take several minutes; progress below).\n".utf8))
+            }
             proc.standardOutput = handle
             proc.standardError = handle
+        }
+        if firstBootstrap {
+            NSLog("Velora: first-run engine bootstrap — venv creation may take several minutes")
         }
 
         proc.terminationHandler = { [weak self] p in

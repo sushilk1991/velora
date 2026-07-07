@@ -18,21 +18,26 @@ protocol DictationControllerDelegate: AnyObject {
 ///
 /// Hotkey semantics (hold mode, docs/SPEC.md):
 /// - hold ≥ 0.35 s, release → transcribe (push-to-talk)
-/// - double-tap (down-up-down within 0.35 s) → recording locks on;
-///   the next tap (or Esc) ends it
-/// - a single short tap that never becomes a double-tap → cancel
+/// - short tap (< 0.35 s) → recording locks on immediately;
+///   the next tap (or Esc) stops it and transcribes
 /// - Esc always cancels cleanly; nothing is inserted
 final class DictationController: NSObject {
     enum Phase: Equatable {
         case idle
         case recording(locked: Bool)
-        /// Short tap released; recording continues briefly awaiting a second
-        /// tap (double-tap lock) before being cancelled.
-        case awaitingSecondTap
         case transcribing
+
+        /// Short label for log lines.
+        var label: String {
+            switch self {
+            case .idle: return "idle"
+            case .recording(let locked): return locked ? "recording(locked)" : "recording(hold)"
+            case .transcribing: return "transcribing"
+            }
+        }
     }
 
-    /// Hold shorter than this is a "tap"; also the double-tap window.
+    /// Hold shorter than this is a "tap" (which locks recording on).
     private static let tapThreshold: TimeInterval = 0.35
     /// Give up on the engine this long after `stop`.
     private static let transcribeTimeout: TimeInterval = 20
@@ -51,6 +56,7 @@ final class DictationController: NSObject {
     private(set) var phase: Phase = .idle {
         didSet {
             guard phase != oldValue else { return }
+            NSLog("Velora: phase %@ → %@", oldValue.label, phase.label)
             delegate?.dictationController(self, didChangePhase: phase)
         }
     }
@@ -60,8 +66,10 @@ final class DictationController: NSObject {
     private var recordingStart: Date?
     private var hotkeyDownAt: Date?
     private var rawTranscript: String?
-    private var tapWindowTimer: Timer?
     private var transcribeTimer: Timer?
+    /// When set, the error HUD's action button runs this instead of retrying
+    /// dictation (e.g. "Open Settings" for a missing Accessibility grant).
+    private var errorRetryAction: (() -> Void)?
 
     init(
         supervisor: EngineSupervisor,
@@ -80,10 +88,8 @@ final class DictationController: NSObject {
     }
 
     var isRecording: Bool {
-        switch phase {
-        case .recording, .awaitingSecondTap: return true
-        default: return false
-        }
+        if case .recording = phase { return true }
+        return false
     }
 
     // MARK: - Menubar entry point
@@ -93,7 +99,7 @@ final class DictationController: NSObject {
         switch phase {
         case .idle:
             startRecording(locked: true)
-        case .recording, .awaitingSecondTap:
+        case .recording:
             stopAndTranscribe()
         case .transcribing:
             break
@@ -105,6 +111,12 @@ final class DictationController: NSObject {
     private func retryFromError() {
         hud.transition(to: .hidden(.cancel))
         phase = .idle
+        if let action = errorRetryAction {
+            errorRetryAction = nil
+            hud.model.retryTitle = "Retry"
+            action()
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
             self?.startRecording(locked: true)
         }
@@ -117,15 +129,19 @@ final class DictationController: NSObject {
 
         // Secure input (password fields): refuse with an error HUD.
         guard !SecureInput.isActive else {
+            NSLog("Velora: recording refused — secure input active")
             showError("Secure input active — dictation unavailable")
             return
         }
-        guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        guard micStatus == .authorized else {
+            NSLog("Velora: recording refused — mic auth status=%ld", micStatus.rawValue)
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
             showError("Microphone access needed")
             return
         }
         guard supervisor.isReady else {
+            NSLog("Velora: recording refused — engine not ready")
             showError("Speech engine is starting…")
             return
         }
@@ -135,6 +151,16 @@ final class DictationController: NSObject {
         rawTranscript = nil
         recordingStart = Date()
 
+        // Context chip: the target app's actual icon + the client-side
+        // detected mode label (ModeCategory mirrors the engine's map).
+        let targetApp = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        hud.model.beginSession(context: HUDSessionContext(
+            appIcon: targetApp?.icon,
+            modeName: ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
+
+        NSLog(
+            "Velora: engine start session=%@ target=%@",
+            sessionID, sessionContext?.bundleID ?? "unknown")
         supervisor.send([
             "cmd": "start",
             "session": sessionID,
@@ -162,11 +188,10 @@ final class DictationController: NSObject {
 
     private func stopAndTranscribe() {
         guard isRecording else { return }
-        tapWindowTimer?.invalidate()
-        tapWindowTimer = nil
 
         capture.stop()
         sounds.play(.stop)
+        NSLog("Velora: engine stop session=%@", sessionID)
         supervisor.send(["cmd": "stop", "session": sessionID])
         hud.transition(to: .transcribing)
         phase = .transcribing
@@ -184,12 +209,11 @@ final class DictationController: NSObject {
     /// Esc or explicit cancel: stop everything, insert nothing.
     func cancel() {
         guard phase != .idle else { return }
-        tapWindowTimer?.invalidate()
-        tapWindowTimer = nil
         transcribeTimer?.invalidate()
         transcribeTimer = nil
 
         capture.stop()
+        NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
         hud.model.recordingStart = nil
         hud.transition(to: .hidden(.cancel))
@@ -200,8 +224,9 @@ final class DictationController: NSObject {
         capture.stop()
         transcribeTimer?.invalidate()
         transcribeTimer = nil
-        tapWindowTimer?.invalidate()
-        tapWindowTimer = nil
+        errorRetryAction = nil
+        hud.model.retryTitle = "Retry"
+        NSLog("Velora: error HUD — %@", message)
         sounds.play(.error)
         hud.transition(to: .error(message))
         phase = .idle
@@ -212,12 +237,24 @@ final class DictationController: NSObject {
     /// Routed here by the AppDelegate from the supervisor.
     func handleEngineEvent(_ event: EngineEvent) {
         switch event {
+        case .partial(let session, let text):
+            // Live transcript: stream the running partial into the HUD pill.
+            guard session == sessionID, phase != .idle else { return }
+            if hud.model.transcriptTail.isEmpty, !text.isEmpty {
+                NSLog("Velora: first partial session=%@ chars=%ld", session, text.count)
+            }
+            hud.model.updatePartial(text)
+
         case .transcript(let session, let raw, _):
             guard session == sessionID else { return }
             rawTranscript = raw
+            // Keep the final recognized text visible under the transcribing
+            // shimmer even if no partial covered the last words.
+            hud.model.updatePartial(raw)
 
         case .final(let session, let text, let raw, let mode, let cleanupMs, _):
             guard session == sessionID, phase == .transcribing else { return }
+            NSLog("Velora: engine final session=%@ chars=%ld", session, text.count)
             transcribeTimer?.invalidate()
             transcribeTimer = nil
             finishInsertion(
@@ -262,11 +299,22 @@ final class DictationController: NSObject {
 
         let context = sessionContext
 
-        // Recheck the target immediately before synthesizing input: focus may
-        // have moved (or a secure field taken over) while transcribing. Never
-        // paste/type blind — fall back to the clipboard and tell the user.
+        // Recheck the target immediately before synthesizing input: the
+        // Accessibility grant may be missing (posting CGEvents would silently
+        // no-op), focus may have moved, or a secure field taken over while
+        // transcribing. Never paste/type blind — fall back to the clipboard
+        // and tell the user.
+        let trusted = Permissions.accessibilityGranted
+        let canPost = TextInserter.canPostEvents
         var fallbackMessage: String?
-        if SecureInput.isActive {
+        var isPermissionFallback = false
+        if !trusted || !canPost {
+            NSLog(
+                "Velora: insertion blocked — accessibility trusted=%@ canPostEvents=%@",
+                trusted ? "yes" : "no", canPost ? "yes" : "no")
+            fallbackMessage = "Permission needed — text copied to clipboard"
+            isPermissionFallback = true
+        } else if SecureInput.isActive {
             fallbackMessage = "Secure field — copied to clipboard"
         } else if let target = context?.bundleID,
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier != target {
@@ -274,7 +322,19 @@ final class DictationController: NSObject {
         }
 
         if let fallbackMessage {
+            NSLog("Velora: insert fallback session=%@ — %@", sessionID, fallbackMessage)
             inserter.copyToClipboard(text)
+            errorRetryAction = nil
+            hud.model.retryTitle = "Retry"
+            if isPermissionFallback {
+                // The error HUD's action button opens the Accessibility pane
+                // (after re-registering the TCC prompt for this signature).
+                hud.model.retryTitle = "Open Settings"
+                errorRetryAction = {
+                    Permissions.promptAccessibility()
+                    Permissions.openAccessibilitySettings()
+                }
+            }
             sounds.play(.error)
             hud.transition(to: .error(fallbackMessage))
             phase = .idle
@@ -316,7 +376,7 @@ extension DictationController: HotkeyMonitorDelegate {
         switch (config.hotkeyMode, phase) {
         case (.toggle, .idle):
             startRecording(locked: true)
-        case (.toggle, .recording), (.toggle, .awaitingSecondTap):
+        case (.toggle, .recording):
             stopAndTranscribe()
         case (.toggle, .transcribing):
             break
@@ -324,11 +384,6 @@ extension DictationController: HotkeyMonitorDelegate {
         case (.hold, .idle):
             hotkeyDownAt = Date()
             startRecording(locked: false)
-        case (.hold, .awaitingSecondTap):
-            // Second tap within the window → lock recording on.
-            tapWindowTimer?.invalidate()
-            tapWindowTimer = nil
-            phase = .recording(locked: true)
         case (.hold, .recording(locked: true)):
             // Tap while locked → finish.
             stopAndTranscribe()
@@ -345,21 +400,15 @@ extension DictationController: HotkeyMonitorDelegate {
         if heldFor >= Self.tapThreshold {
             stopAndTranscribe()
         } else {
-            // Short tap: keep recording briefly; second tap locks, timeout cancels.
-            phase = .awaitingSecondTap
-            tapWindowTimer?.invalidate()
-            tapWindowTimer = Timer.scheduledTimer(
-                withTimeInterval: Self.tapThreshold, repeats: false
-            ) { [weak self] _ in
-                guard let self, self.phase == .awaitingSecondTap else { return }
-                self.cancel()
-            }
+            // Short tap: recording locks on; the next tap (or Esc) ends it.
+            NSLog("Velora: tap (%.0f ms) — recording locked on", heldFor * 1000)
+            phase = .recording(locked: true)
         }
     }
 
     func escapePressed() {
         switch phase {
-        case .recording, .awaitingSecondTap, .transcribing:
+        case .recording, .transcribing:
             cancel()
         case .idle:
             // Dismiss a lingering error HUD.

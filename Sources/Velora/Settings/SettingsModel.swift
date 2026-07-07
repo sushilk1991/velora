@@ -6,6 +6,10 @@ import ServiceManagement
 extension Notification.Name {
     /// Hotkey choice changed — the hotkey monitor re-reads its config.
     static let veloraHotkeyChanged = Notification.Name("VeloraHotkeyChanged")
+    /// Accessibility flipped from denied to granted (onboarding live-poll) —
+    /// the hotkey monitor reinstalls so a pre-grant dead event tap comes back
+    /// without an app relaunch.
+    static let veloraAccessibilityGranted = Notification.Name("VeloraAccessibilityGranted")
 }
 
 /// Observable bridge between the SwiftUI settings/onboarding UI and
@@ -111,7 +115,7 @@ final class SettingsModel: ObservableObject {
 
     // MARK: - Shortcuts
 
-    @Published var hotkey: HotkeyChoice {
+    @Published var hotkey: Hotkey {
         didSet {
             guard hotkey != oldValue else { return }
             config.hotkey = hotkey
