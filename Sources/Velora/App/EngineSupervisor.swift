@@ -1,5 +1,15 @@
 import Foundation
 
+/// Engine events the Settings/History UI observes out-of-band from the
+/// dictation flow (which keeps its own delegate routing untouched).
+extension Notification.Name {
+    /// A `status` reply arrived. `userInfo["payload"]` is the raw `[String: Any]`
+    /// (carries `models`, `save_audio`, `audio_retention_days`, `language`, …).
+    static let veloraEngineStatus = Notification.Name("VeloraEngineStatus")
+    /// A `reprocessed` reply arrived. `object` is the `EngineEvent.reprocessed`.
+    static let veloraEngineReprocessed = Notification.Name("VeloraEngineReprocessed")
+}
+
 /// Observes supervisor health for UI (menubar state) and dictation gating.
 protocol EngineSupervisorDelegate: AnyObject {
     func engineSupervisor(_ supervisor: EngineSupervisor, didChangeState state: EngineSupervisor.State)
@@ -232,6 +242,11 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
                 restartAttempts = 0
                 state = .ready
             }
+        case .status(let payload):
+            NotificationCenter.default.post(
+                name: .veloraEngineStatus, object: nil, userInfo: ["payload": payload])
+        case .reprocessed:
+            NotificationCenter.default.post(name: .veloraEngineReprocessed, object: event)
         default:
             break
         }

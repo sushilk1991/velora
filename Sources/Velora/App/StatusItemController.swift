@@ -5,6 +5,7 @@ import Foundation
 protocol StatusItemControllerDelegate: AnyObject {
     func statusItemToggleDictation()
     func statusItemOpenSettings()
+    func statusItemOpenHistory()
     func statusItemOpenSetupAssistant()
     func statusItemCheckPermissions()
 }
@@ -128,6 +129,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
+        let historyItem = NSMenuItem(
+            title: "History…", action: #selector(openHistory), keyEquivalent: "")
+        historyItem.target = self
+        menu.addItem(historyItem)
+
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
@@ -171,6 +177,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openSettings() {
         delegate?.statusItemOpenSettings()
+    }
+
+    @objc private func openHistory() {
+        delegate?.statusItemOpenHistory()
     }
 
     @objc private func openSetupAssistant() {

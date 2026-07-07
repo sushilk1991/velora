@@ -214,3 +214,38 @@ def test_code_mode_strips_trailing_period(config):
 def test_code_mode_keeps_ellipsis(config):
     gate = run_gate("wait...", config, bundle_id="com.apple.Terminal")
     assert gate.text == "wait..."
+
+
+# ---- non-Latin script routing (skip English-tuned cleanup LLM) ----
+
+
+def test_hindi_skips_llm(config):
+    hindi = "नमस्ते आज मौसम बहुत अच्छा है क्या आप मेरे साथ बाजार चलेंगे"
+    gate = run_gate(hindi, config)
+    assert gate.use_llm is False
+    assert gate.reason == "non_latin_script"
+    assert gate.system_prompt is None
+    assert "नमस्ते" in gate.text  # preserved verbatim, not rewritten
+
+
+def test_accented_latin_still_uses_llm(config):
+    # café/naïve are Latin — must not be misrouted as non-Latin.
+    text = "we visited the café and the naïve tourist ordered a très large coffee please"
+    gate = run_gate(text, config)
+    assert gate.use_llm is True
+
+
+def test_is_mostly_non_latin_helper():
+    assert formatting.is_mostly_non_latin("नमस्ते दुनिया") is True
+    assert formatting.is_mostly_non_latin("hello world") is False
+    assert formatting.is_mostly_non_latin("café résumé") is False
+    assert formatting.is_mostly_non_latin("") is False
+
+
+def test_cjk_sentence_routes_non_latin_not_short(config):
+    # Unspaced CJK splits to one "word" but must take the non-Latin path
+    # (no Latin period appended), not short_utterance.
+    gate = run_gate("这是一个中文测试今天天气很好", config)
+    assert gate.use_llm is False
+    assert gate.reason == "non_latin_script"
+    assert not gate.text.endswith(".")

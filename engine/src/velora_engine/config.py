@@ -18,7 +18,7 @@ from typing import Any
 
 log = logging.getLogger("velora.config")
 
-DEFAULT_STT_MODEL = "mlx-community/parakeet-tdt-0.6b-v2"
+DEFAULT_STT_MODEL = "mlx-community/whisper-large-v3-turbo"
 DEFAULT_CLEANUP_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -31,6 +31,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "language": "auto",
     "auto_punctuation": True,
     "max_recording_s": 300,
+    # Audio archive: keep a clip of each dictation so it can be re-transcribed
+    # later with a better model (history → reprocess). On by default (a core
+    # feature); user-toggleable. Retained 6 months, total capped at 4 GB, and
+    # stored 0600 under ~/.velora/audio — as private as the transcripts.
+    "save_audio": True,
+    "audio_retention_days": 180,
+    "audio_max_mb": 4096,
 }
 
 DEFAULT_MAX_RECORDING_S = 300.0
@@ -85,6 +92,10 @@ class Config:
         return self.home / "modes"
 
     @property
+    def audio_dir(self) -> Path:
+        return self.home / "audio"
+
+    @property
     def socket_path(self) -> Path:
         return self.home / "engine.sock"
 
@@ -122,6 +133,26 @@ class Config:
         except (TypeError, ValueError):
             return DEFAULT_MAX_RECORDING_S
         return value if value > 0 else DEFAULT_MAX_RECORDING_S
+
+    @property
+    def save_audio(self) -> bool:
+        return bool(self.data.get("save_audio", True))
+
+    @property
+    def audio_retention_days(self) -> float:
+        try:
+            value = float(self.data.get("audio_retention_days", 180))
+        except (TypeError, ValueError):
+            return 180.0
+        return value if value > 0 else 180.0
+
+    @property
+    def audio_max_bytes(self) -> int:
+        try:
+            mb = float(self.data.get("audio_max_mb", 4096))
+        except (TypeError, ValueError):
+            mb = 4096.0
+        return int(mb * 1024 * 1024) if mb > 0 else 0
 
     @property
     def global_vocabulary(self) -> list[str]:

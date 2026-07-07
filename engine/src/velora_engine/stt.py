@@ -292,6 +292,19 @@ def create_backend(model_id: str, language: str = "auto") -> STTBackend:
     return ParakeetBackend(model_id)
 
 
+def transcribe_clip(backend: STTBackend, pcm: np.ndarray, chunk_samples: int = SAMPLE_RATE) -> str:
+    """Batch-transcribe a whole PCM clip through any backend (used by reprocess).
+
+    Drives the same start/feed/finalize path a live session uses, so streaming
+    (parakeet) and batch (whisper) backends both work. Runs on the caller's
+    thread — MLX is thread-affine, so call this on the STT executor.
+    """
+    backend.start_session()
+    for i in range(0, len(pcm), chunk_samples):
+        backend.feed_chunk(pcm[i : i + chunk_samples])
+    return backend.finalize()
+
+
 def pcm_from_payload(payload: bytes) -> np.ndarray:
     """Decode an AUDIO frame payload: 16kHz mono Float32 LE."""
     if len(payload) % 4 != 0:

@@ -3,13 +3,15 @@ import SwiftUI
 /// Settings tabs (design brief §4.1): grouped forms, fixed 580 pt width,
 /// height hugging content. No custom chrome, one accent color.
 enum SettingsTab: CaseIterable {
-    case general, dictation, model, shortcuts, about
+    case general, dictation, model, modes, history, shortcuts, about
 
     var title: String {
         switch self {
         case .general: return "General"
         case .dictation: return "Dictation"
         case .model: return "Model"
+        case .modes: return "Modes"
+        case .history: return "History"
         case .shortcuts: return "Shortcuts"
         case .about: return "About"
         }
@@ -20,6 +22,8 @@ enum SettingsTab: CaseIterable {
         case .general: return "gearshape"
         case .dictation: return "mic"
         case .model: return "cpu"
+        case .modes: return "slider.horizontal.3"
+        case .history: return "clock.arrow.circlepath"
         case .shortcuts: return "keyboard"
         case .about: return "info.circle"
         }
@@ -28,8 +32,10 @@ enum SettingsTab: CaseIterable {
     var preferredHeight: CGFloat {
         switch self {
         case .general: return 230
-        case .dictation: return 330
+        case .dictation: return 430
         case .model: return 400
+        case .modes: return 600
+        case .history: return 560
         case .shortcuts: return 320
         case .about: return 320
         }
@@ -68,11 +74,14 @@ struct GeneralSettingsView: View {
 
 struct DictationSettingsView: View {
     @ObservedObject var model: SettingsModel
+    @State private var archiveSize: String = "…"
 
+    /// Whisper language codes, weighted toward the most-spoken languages.
     private static let languages: [(String, String)] = [
-        ("auto", "Automatic"), ("en", "English"), ("es", "Spanish"),
-        ("fr", "French"), ("de", "German"), ("it", "Italian"),
-        ("pt", "Portuguese"), ("ja", "Japanese"), ("zh", "Chinese"),
+        ("auto", "Auto-detect"), ("en", "English"), ("hi", "Hindi"),
+        ("es", "Spanish"), ("zh", "Mandarin Chinese"), ("ar", "Arabic"),
+        ("fr", "French"), ("pt", "Portuguese"), ("de", "German"),
+        ("it", "Italian"), ("ja", "Japanese"),
     ]
 
     var body: some View {
@@ -98,6 +107,19 @@ struct DictationSettingsView: View {
                 Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
             }
             Section {
+                Toggle(isOn: $model.saveAudio) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Save audio for reprocessing")
+                        Text("Clips are stored locally at ~/.velora/audio for \(Int(model.audioRetentionDays / 30)) months and used by History → Reprocess.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                LabeledContent("Archive size", value: archiveSize)
+            } header: {
+                Text("Audio archive")
+            }
+            Section {
                 Toggle("Play sounds", isOn: $model.soundsEnabled)
                 HStack {
                     Text("Volume")
@@ -112,6 +134,25 @@ struct DictationSettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 580, height: SettingsTab.dictation.preferredHeight)
+        .task(id: model.saveAudio) { archiveSize = await Self.archiveSizeDescription() }
+    }
+
+    /// Sums the archived-clip directory size off the main thread.
+    private static func archiveSizeDescription() async -> String {
+        let path = AppConfig.audioDirectory.path
+        return await Task.detached(priority: .utility) { () -> String in
+            let fm = FileManager.default
+            guard fm.fileExists(atPath: path),
+                  let files = fm.enumerator(atPath: path)
+            else { return "Empty" }
+            var total: Int64 = 0
+            while let file = files.nextObject() as? String {
+                let attrs = try? fm.attributesOfItem(atPath: path + "/" + file)
+                total += (attrs?[.size] as? Int64) ?? 0
+            }
+            return total == 0 ? "Empty"
+                : ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+        }.value
     }
 }
 
@@ -121,12 +162,42 @@ struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = "…"
 
+    /// One row in the picker / catalog. Prefers the engine's advertised models
+    /// (so newly-shipped models appear without an app update); falls back to the
+    /// static catalog before the first `status` reply lands.
+    private struct Choice: Identifiable {
+        let id: String
+        let name: String
+        let detail: String
+        let size: String
+    }
+
+    private var choices: [Choice] {
+        let engine = model.sttEngineModels
+        if !engine.isEmpty {
+            return engine.map {
+                Choice(id: $0.id, name: $0.displayName,
+                       detail: $0.backend.isEmpty ? "On-device" : $0.backend, size: $0.size)
+            }
+        }
+        return STTModel.all.map {
+            Choice(id: $0.id, name: $0.displayName, detail: $0.languages, size: $0.size)
+        }
+    }
+
+    /// The cleanup model the engine advertises, if any (falls back to the
+    /// shipped default label).
+    private var cleanupModelName: String {
+        model.engineModels.first { $0.kind == "cleanup" }?.displayName
+            ?? "Qwen3-4B Instruct (4-bit)"
+    }
+
     var body: some View {
         Form {
             Section {
                 Picker("Speech model", selection: $model.sttModel) {
-                    ForEach(STTModel.all) { sttModel in
-                        Text(sttModel.displayName).tag(sttModel.id)
+                    ForEach(choices) { choice in
+                        Text(choice.name).tag(choice.id)
                     }
                 }
             } footer: {
@@ -135,34 +206,34 @@ struct ModelSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section("Available models") {
-                ForEach(STTModel.all) { sttModel in
+                ForEach(choices) { choice in
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(sttModel.displayName)
-                            Text(sttModel.languages)
+                            Text(choice.name)
+                            Text(choice.detail)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Text(sttModel.speed)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(sttModel.size)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .frame(width: 60, alignment: .trailing)
+                        if !choice.size.isEmpty {
+                            Text(choice.size)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(width: 72, alignment: .trailing)
+                        }
                     }
                     .padding(.vertical, VeloraSpacing.xs)
                 }
             }
             Section {
-                LabeledContent("Cleanup model", value: "Qwen3-4B Instruct (4-bit)")
+                LabeledContent("Cleanup model", value: cleanupModelName)
                 LabeledContent("Model storage", value: storageUsed)
             }
         }
         .formStyle(.grouped)
         .frame(width: 580, height: SettingsTab.model.preferredHeight)
         .task { storageUsed = await Self.modelStorageDescription() }
+        .onAppear { model.requestStatus() }
     }
 
     /// Sums the HuggingFace hub cache size off the main thread.

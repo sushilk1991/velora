@@ -189,6 +189,20 @@ def _is_chat(mode: Mode, category: str | None) -> bool:
     return category == "chat" or mode.name.lower() == "message"
 
 
+def is_mostly_non_latin(text: str) -> bool:
+    """True when most letters are outside the Latin range (Devanagari, CJK,
+    Arabic, Cyrillic, …). The cleanup LLM's system prompt is English and the
+    small model risks corrupting or "answering" non-Latin dictation — so we run
+    the deterministic path instead and keep the (already strong) raw STT."""
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    # Latin Extended-B ends at U+024F, so accented Latin (café, naïve) stays
+    # "Latin"; Devanagari (U+0900+), Arabic (U+0600+), CJK, etc. count as non.
+    non_latin = sum(1 for c in letters if ord(c) > 0x024F)
+    return non_latin / len(letters) > 0.5
+
+
 # --- LLM system prompt assembly ----------------------------------------------
 
 # Static prefix — kept identical across all requests so the LLM prompt cache
@@ -292,6 +306,15 @@ def run_gate(
             # A trailing period breaks shell commands; STT adds one reflexively.
             out = re.sub(r"(?<!\.)\.$", "", out)
         return GateResult(mode, category, False, "formatting_off", out, None, replacements)
+
+    if is_mostly_non_latin(text):
+        # Non-Latin script (Hindi, Chinese, Arabic, …): skip the English-tuned
+        # cleanup LLM; deterministic tidy + spoken-command + replacements only.
+        # Checked BEFORE the short-utterance path so an unspaced CJK sentence
+        # (which splits to few "words") doesn't get a Latin period appended.
+        out = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
+        out = apply_replacements(out, replacements)
+        return GateResult(mode, category, False, "non_latin_script", out, None, replacements)
 
     if len(text.split()) < SHORT_UTTERANCE_WORDS:
         out = scrub_fillers(apply_spoken_commands(text))

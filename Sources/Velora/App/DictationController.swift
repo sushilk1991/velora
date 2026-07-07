@@ -278,14 +278,14 @@ final class DictationController: NSObject {
             // shimmer even if no partial covered the last words.
             hud.model.updatePartial(raw)
 
-        case .final(let session, let text, let raw, let mode, let cleanupMs, _):
+        case .final(let session, let text, let raw, let mode, let cleanupMs, _, let audio):
             guard session == sessionID, phase == .transcribing else { return }
             NSLog("Velora: engine final session=%@ chars=%ld", session, text.count)
             transcribeTimer?.invalidate()
             transcribeTimer = nil
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
-                mode: mode, cleanupMs: cleanupMs)
+                mode: mode, cleanupMs: cleanupMs, audio: audio)
 
         case .error(let session, let message):
             // Only errors scoped to the active session may end the dictation;
@@ -314,7 +314,7 @@ final class DictationController: NSObject {
         }
     }
 
-    private func finishInsertion(text: String, raw: String, mode: String?, cleanupMs: Int?) {
+    private func finishInsertion(text: String, raw: String, mode: String?, cleanupMs: Int?, audio: String?) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             // Nothing recognized — treat as a quiet cancel, not an error.
@@ -341,7 +341,7 @@ final class DictationController: NSObject {
             hud.model.retryTitle = "Retry"
             hud.transition(to: .inserted)
             phase = .idle
-            recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs)
+            recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs, audio: audio)
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
             scheduleInsertedHide()
             return
@@ -392,7 +392,7 @@ final class DictationController: NSObject {
             phase = .idle
         }
 
-        recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs)
+        recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs, audio: audio)
 
         guard fallbackMessage == nil else { return }
 
@@ -401,7 +401,7 @@ final class DictationController: NSObject {
     }
 
     private func recordHistory(
-        text: String, raw: String, context: AppContext?, mode: String?, cleanupMs: Int?
+        text: String, raw: String, context: AppContext?, mode: String?, cleanupMs: Int?, audio: String?
     ) {
         let durationMs = recordingStart.map { Int(-$0.timeIntervalSinceNow * 1000) } ?? 0
         history.insert(
@@ -413,7 +413,8 @@ final class DictationController: NSObject {
                 final: text,
                 mode: mode,
                 durationMs: durationMs,
-                cleanupMs: cleanupMs))
+                cleanupMs: cleanupMs,
+                audioPath: audio))
     }
 
     /// Inserted state holds 600 ms after the 150 ms flash + morph, then hides.

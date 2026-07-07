@@ -12,12 +12,58 @@ extension Notification.Name {
     static let veloraAccessibilityGranted = Notification.Name("VeloraAccessibilityGranted")
 }
 
+/// A model the running engine advertises via the `status` reply. Drives the
+/// dynamic STT picker (new engine models appear without an app update) and the
+/// History reprocess menu.
+struct EngineModel: Identifiable, Equatable {
+    let id: String
+    /// "stt" | "cleanup"
+    let kind: String
+    let backend: String
+    let size: String
+    let description: String
+
+    /// Short human label — the description if present, else the repo basename.
+    var displayName: String {
+        if !description.isEmpty { return description }
+        return id.split(separator: "/").last.map(String.init) ?? id
+    }
+
+    /// Decodes the array under `status.models`; tolerates missing/typed fields.
+    static func parse(_ raw: Any?) -> [EngineModel] {
+        guard let array = raw as? [[String: Any]] else { return [] }
+        return array.compactMap { dict in
+            guard let id = dict["id"] as? String else { return nil }
+            let size: String
+            if let s = dict["size"] as? String { size = s }
+            else if let n = dict["size"] as? NSNumber { size = "\(n) GB" }
+            else { size = "" }
+            return EngineModel(
+                id: id,
+                kind: dict["kind"] as? String ?? "stt",
+                backend: dict["backend"] as? String ?? "",
+                size: size,
+                description: dict["description"] as? String ?? "")
+        }
+    }
+}
+
 /// Observable bridge between the SwiftUI settings/onboarding UI and
 /// `AppConfig` + the engine. Writing a property persists it and, where
 /// relevant, pushes `reload_config` / `set_model` to the engine.
 final class SettingsModel: ObservableObject {
     private let config = AppConfig.shared
     private weak var supervisor: EngineSupervisor?
+    private var statusObserver: NSObjectProtocol?
+
+    /// Models advertised by the running engine (from the `status` reply). Empty
+    /// until the first reply arrives; the UI falls back to the static catalog.
+    @Published var engineModels: [EngineModel] = []
+    /// Retention window for archived clips, reported by the engine (days).
+    @Published var audioRetentionDays: Double = 180
+
+    /// STT models the engine offers, in advertised order.
+    var sttEngineModels: [EngineModel] { engineModels.filter { $0.kind == "stt" } }
 
     init(supervisor: EngineSupervisor?) {
         self.supervisor = supervisor
@@ -31,6 +77,33 @@ final class SettingsModel: ObservableObject {
         language = config.language
         autoPunctuation = config.autoPunctuation
         sttModel = config.sttModel
+        saveAudio = config.saveAudio
+
+        statusObserver = NotificationCenter.default.addObserver(
+            forName: .veloraEngineStatus, object: nil, queue: .main
+        ) { [weak self] note in
+            self?.applyStatus(note.userInfo?["payload"] as? [String: Any])
+        }
+        requestStatus()
+    }
+
+    deinit {
+        if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
+    }
+
+    /// Asks the engine for its current status (models, retention, …). Cheap;
+    /// safe to call whenever a settings surface appears.
+    func requestStatus() {
+        supervisor?.send(["cmd": "status"])
+    }
+
+    private func applyStatus(_ payload: [String: Any]?) {
+        guard let payload else { return }
+        let models = EngineModel.parse(payload["models"])
+        if !models.isEmpty { engineModels = models }
+        if let days = payload["audio_retention_days"] as? NSNumber {
+            audioRetentionDays = days.doubleValue
+        }
     }
 
     // MARK: - General
@@ -110,6 +183,14 @@ final class SettingsModel: ObservableObject {
             guard sttModel != oldValue else { return }
             config.sttModel = sttModel
             supervisor?.send(["cmd": "set_model", "model": sttModel])
+        }
+    }
+
+    @Published var saveAudio: Bool {
+        didSet {
+            guard saveAudio != oldValue else { return }
+            config.saveAudio = saveAudio
+            supervisor?.send(["cmd": "reload_config"])
         }
     }
 

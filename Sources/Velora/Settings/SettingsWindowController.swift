@@ -5,12 +5,14 @@ import SwiftUI
 /// System Settings idiom) hosting one SwiftUI grouped form per tab.
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
+    private let tabController: NSTabViewController
 
-    init(supervisor: EngineSupervisor?) {
+    init(supervisor: EngineSupervisor?, history: HistoryStore) {
         model = SettingsModel(supervisor: supervisor)
 
         let tabController = NSTabViewController()
         tabController.tabStyle = .toolbar
+        self.tabController = tabController
 
         for tab in SettingsTab.allCases {
             let hosting: NSViewController
@@ -21,6 +23,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 hosting = NSHostingController(rootView: DictationSettingsView(model: model))
             case .model:
                 hosting = NSHostingController(rootView: ModelSettingsView(model: model))
+            case .modes:
+                hosting = NSHostingController(rootView: ModesSettingsView(supervisor: supervisor))
+            case .history:
+                hosting = NSHostingController(rootView: HistorySettingsView(
+                    model: model, history: history, supervisor: supervisor))
             case .shortcuts:
                 hosting = NSHostingController(rootView: ShortcutsSettingsView(model: model))
             case .about:
@@ -49,8 +56,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         fatalError("init(coder:) is not supported")
     }
 
-    /// Shows the window, activating the app so it becomes key.
-    func show() {
+    /// Shows the window, activating the app so it becomes key. Optionally
+    /// selects a specific tab (e.g. the menubar "History…" item).
+    func show(selecting tab: SettingsTab? = nil) {
+        if let tab, let index = SettingsTab.allCases.firstIndex(of: tab) {
+            tabController.selectedTabViewItemIndex = index
+        }
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)

@@ -80,7 +80,9 @@ async def test_full_dictation_flow(engine):
     client = await connect(sock)
     ready = await client.recv()
     assert ready["event"] == "ready"
-    assert "parakeet" in ready["stt_model"]
+    from velora_engine.config import DEFAULT_STT_MODEL
+
+    assert ready["stt_model"] == DEFAULT_STT_MODEL
 
     await client.send_json({"cmd": "start", "session": "s1", "context": {"bundle_id": "com.apple.Notes", "app_name": "Notes", "mode": None}})
     for _ in range(10):  # ~1s of audio

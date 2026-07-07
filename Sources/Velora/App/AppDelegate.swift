@@ -29,6 +29,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.writeEngineConfigIfMissing()
 
         history = HistoryStore()
+        // Transcript text is tiny and kept indefinitely; only the audio archive
+        // expires (the engine prunes clips). Play just disables when a row's
+        // clip has aged out. `pruneOlderThan` stays available for a future
+        // user-configurable text-retention setting.
         dictation = DictationController(
             supervisor: supervisor,
             contextTracker: contextTracker,
@@ -109,11 +113,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onboardingController?.show(startingAt: step)
     }
 
-    private func showSettings() {
+    private func showSettings(selecting tab: SettingsTab? = nil) {
         if settingsController == nil {
-            settingsController = SettingsWindowController(supervisor: supervisor)
+            settingsController = SettingsWindowController(supervisor: supervisor, history: history)
         }
-        settingsController?.show()
+        settingsController?.show(selecting: tab)
     }
 
     /// The onboarding step to reopen at: the first missing permission, or
@@ -174,6 +178,10 @@ extension AppDelegate: StatusItemControllerDelegate {
 
     func statusItemOpenSettings() {
         showSettings()
+    }
+
+    func statusItemOpenHistory() {
+        showSettings(selecting: .history)
     }
 
     func statusItemOpenSetupAssistant() {

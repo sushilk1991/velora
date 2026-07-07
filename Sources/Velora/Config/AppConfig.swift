@@ -28,16 +28,40 @@ struct STTModel: Identifiable, Equatable {
     let speed: String
     let languages: String
 
+    // Fallback catalog + source of the default model (`all[0]`). The live
+    // picker is driven by the engine's registry (status.models); this list
+    // must stay ordered to match it — turbo is the default. See
+    // engine/src/velora_engine/models.py and docs/research/stt-multilingual-decision.md.
     static let all: [STTModel] = [
-        STTModel(
-            id: "mlx-community/parakeet-tdt-0.6b-v2",
-            displayName: "Parakeet TDT 0.6B",
-            size: "~0.6 GB", speed: "Fastest (streaming)", languages: "English"
-        ),
         STTModel(
             id: "mlx-community/whisper-large-v3-turbo",
             displayName: "Whisper Large v3 Turbo",
-            size: "~1.6 GB", speed: "Fast", languages: "Multilingual"
+            size: "~1.6 GB", speed: "Fast", languages: "Multilingual — Hindi, Indian English, 99 langs"
+        ),
+        STTModel(
+            id: "mlx-community/whisper-large-v3-mlx",
+            displayName: "Whisper Large v3 (full)",
+            size: "~3.1 GB", speed: "Slower", languages: "Multilingual — highest accuracy"
+        ),
+        STTModel(
+            id: "knownsense/whisper-hindi-apex-mlx",
+            displayName: "Whisper Hindi/Hinglish (Apex)",
+            size: "~1.6 GB", speed: "Fast", languages: "Hindi & Hinglish (Romanized)"
+        ),
+        STTModel(
+            id: "mlx-community/parakeet-tdt-0.6b-v3",
+            displayName: "Parakeet TDT 0.6B v3",
+            size: "~2.5 GB", speed: "Fastest (live streaming)", languages: "English + 24 European"
+        ),
+        STTModel(
+            id: "mlx-community/parakeet-tdt-0.6b-v2",
+            displayName: "Parakeet TDT 0.6B v2",
+            size: "~2.3 GB", speed: "Fastest (live streaming)", languages: "English only"
+        ),
+        STTModel(
+            id: "mlx-community/whisper-large-v3-turbo-q4",
+            displayName: "Whisper Turbo (4-bit)",
+            size: "~0.5 GB", speed: "Fast", languages: "Multilingual — smallest, roughest"
         ),
     ]
 }
@@ -70,6 +94,16 @@ final class AppConfig {
         veloraDirectory.appendingPathComponent("history.sqlite3")
     }
 
+    /// `~/.velora/modes` — one JSON file per mode (engine + editor shared).
+    static var modesDirectory: URL {
+        veloraDirectory.appendingPathComponent("modes", isDirectory: true)
+    }
+
+    /// `~/.velora/audio` — archived dictation clips for History → Reprocess.
+    static var audioDirectory: URL {
+        veloraDirectory.appendingPathComponent("audio", isDirectory: true)
+    }
+
     private enum Key {
         static let onboardingComplete = "velora.onboardingComplete"
         /// Legacy P0 curated-picker value (`HotkeyChoice` raw string).
@@ -84,6 +118,7 @@ final class AppConfig {
         static let language = "velora.language"
         static let autoPunctuation = "velora.autoPunctuation"
         static let sttModel = "velora.sttModel"
+        static let saveAudio = "velora.saveAudio"
         static let typingFallbackApps = "velora.typingFallbackApps"
     }
 
@@ -97,6 +132,7 @@ final class AppConfig {
             Key.language: "auto",
             Key.autoPunctuation: true,
             Key.sttModel: STTModel.all[0].id,
+            Key.saveAudio: true,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -176,6 +212,13 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: Key.sttModel); writeEngineConfig() }
     }
 
+    /// Whether the engine archives each dictation's audio clip under
+    /// `~/.velora/audio` (enables History → Reprocess). Default on.
+    var saveAudio: Bool {
+        get { defaults.bool(forKey: Key.saveAudio) }
+        set { defaults.set(newValue, forKey: Key.saveAudio); writeEngineConfig() }
+    }
+
     /// Bundle ids that should use CGEvent unicode typing instead of ⌘V paste
     /// (terminals and other paste-hostile apps). User-extendable.
     var typingFallbackApps: [String] {
@@ -215,8 +258,9 @@ final class AppConfig {
     }
 
     /// Read-modify-writes the engine-facing config file: only the app-owned
-    /// keys (stt_model, language, auto_punctuation) are updated; engine-owned
-    /// keys (cleanup model/flags, vocabulary, replacements, …) are preserved.
+    /// keys (stt_model, language, auto_punctuation, save_audio) are updated;
+    /// engine-owned keys (cleanup model/flags, vocabulary, replacements, …)
+    /// are preserved.
     /// The engine reads this at startup and on `reload_config`.
     func writeEngineConfig() {
         ensureVeloraDirectory()
@@ -228,6 +272,7 @@ final class AppConfig {
         payload["stt_model"] = sttModel
         payload["language"] = language
         payload["auto_punctuation"] = autoPunctuation
+        payload["save_audio"] = saveAudio
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])

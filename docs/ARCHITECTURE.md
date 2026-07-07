@@ -49,11 +49,33 @@ app → engine  {"cmd":"stop","session":"uuid"}             # user released hotk
 engine → app  {"event":"partial","session":"...","text":"..."}       # optional, P1 HUD display
 engine → app  {"event":"transcript","session":"...","raw":"...","ms":412}
 engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode":"chat",
-               "cleanup_ms":389,"cleanup_applied":true}
+               "cleanup_ms":389,"cleanup_applied":true,"audio":"uuid.flac"}   # audio present when archived
 ```
-Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`.
+Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
 
-**Latency budget:** STT streams during speech (parakeet `transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms). Cleanup hard timeout 1500ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
+**Audio archive + reprocess.** When `save_audio` is on (default), each session's
+raw PCM is written to `~/.velora/audio/<session>.flac` (FLAC via libsndfile,
+~5× smaller than 16-bit WAV; 0600). The `final` event then carries `audio` (the
+clip basename), which the app stores in history. Retention runs on engine start
+and after each save: clips older than `audio_retention_days` (default 180) are
+deleted, then a total-size cap (`audio_max_mb`, default 4096) evicts oldest-first.
+Reprocessing re-transcribes a saved clip, optionally with a different model:
+```
+app → engine  {"cmd":"reprocess","audio":"uuid.flac","id":42,
+               "stt_model":"mlx-community/whisper-large-v3-mlx","mode":null,"language":"hi"}
+engine → app  {"event":"reprocessed","id":42,"audio":"uuid.flac","raw":"...","text":"...",
+               "mode":"Default","stt_model":"...","stt_ms":1830,"cleanup_ms":0,"cleanup_applied":false}
+```
+A model different from the live one is loaded once and cached across reprocess calls.
+
+**STT models.** Default is `whisper-large-v3-turbo` (multilingual — Hindi, Indian
+English, and the top world languages; batch decode on stop). The picker also
+offers full `whisper-large-v3` (highest accuracy), a Hindi/Hinglish specialist,
+and the parakeet models (English/European, live streaming partials). Non-Latin
+transcripts (Devanagari, CJK, Arabic) skip the English-tuned cleanup LLM and take
+the deterministic path — see the formatting gate.
+
+**Latency budget:** with a parakeet model, STT streams during speech (`transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms) and live partials feed the HUD. With the default whisper model, decode is batch on `stop` (a few hundred ms for typical clips on Apple Silicon; no live partials — the quality/multilingual tradeoff). Cleanup hard timeout 1500ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
 
 ## Smart formatting policy (the "smart as Wispr Flow" part)
 

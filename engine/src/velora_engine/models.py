@@ -20,25 +20,58 @@ class ModelInfo:
 
 REGISTRY: list[ModelInfo] = [
     ModelInfo(
+        id="mlx-community/whisper-large-v3-turbo",
+        kind="stt",
+        backend="whisper",
+        size="1.6 GB",
+        description=(
+            "Default — fast & multilingual (99 languages incl. Hindi, Indian "
+            "English, Mandarin, Arabic, Spanish, French). Best all-round balance."
+        ),
+    ),
+    ModelInfo(
+        id="mlx-community/whisper-large-v3-mlx",
+        kind="stt",
+        backend="whisper",
+        size="3.1 GB",
+        description=(
+            "Highest accuracy. Full Whisper large-v3 — same languages as the "
+            "default but more accurate on hard accents and noise. Slower, larger."
+        ),
+    ),
+    ModelInfo(
+        id="knownsense/whisper-hindi-apex-mlx",
+        kind="stt",
+        backend="whisper",
+        size="1.6 GB",
+        description=(
+            "Hindi & Hinglish specialist (Romanized output). Fine-tuned on 700+ "
+            "hours of Hindi/English code-switching — best for heavy Hinglish."
+        ),
+    ),
+    ModelInfo(
+        id="mlx-community/parakeet-tdt-0.6b-v3",
+        kind="stt",
+        backend="parakeet",
+        size="2.5 GB",
+        description=(
+            "Fastest — live streaming preview while you speak. English + 24 "
+            "European languages (no Hindi/Mandarin/Arabic)."
+        ),
+    ),
+    ModelInfo(
         id="mlx-community/parakeet-tdt-0.6b-v2",
         kind="stt",
         backend="parakeet",
         size="2.3 GB",
-        description="Default. Fastest and most accurate English STT; streams during recording.",
+        description="Fastest English-only, live streaming. Lowest latency for pure English.",
     ),
     ModelInfo(
-        id="mlx-community/whisper-large-v3-turbo",
+        id="mlx-community/whisper-large-v3-turbo-q4",
         kind="stt",
         backend="whisper",
-        size="1.5 GB",
-        description="Fallback. Multilingual; batch transcription with hallucination guard.",
-    ),
-    ModelInfo(
-        id="mlx-community/distil-whisper-large-v3",
-        kind="stt",
-        backend="whisper",
-        size="1.4 GB",
-        description="Alternative Whisper distil model; fast, slightly rougher output.",
+        size="0.5 GB",
+        description="Smallest multilingual. 4-bit turbo — least disk/RAM, roughest quality.",
     ),
     ModelInfo(
         id="mlx-community/Qwen3-4B-Instruct-2507-4bit",

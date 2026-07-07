@@ -27,11 +27,21 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+import numpy as np
+
 from . import __version__, formatting, models, protocol
+from .audio_store import AudioStore
 from .cleanup import CleanupEngine
 from .config import Config
 from .formatting import STATIC_SYSTEM_PROMPT
-from .stt import SAMPLE_RATE, STTBackend, create_backend, fake_stt_enabled, pcm_from_payload
+from .stt import (
+    SAMPLE_RATE,
+    STTBackend,
+    create_backend,
+    fake_stt_enabled,
+    pcm_from_payload,
+    transcribe_clip,
+)
 
 T = TypeVar("T")
 
@@ -69,6 +79,10 @@ class Session:
         # The connection that started this session. A displaced client's
         # cleanup must only abort a session it still owns (reconnect race).
         self.owner = owner
+        # Raw PCM kept for the audio archive (independent of the STT queue, so
+        # dropped-for-latency frames are still archived). Bounded by
+        # max_recording_s; cleared on finalize/abort.
+        self.pcm_chunks: list[np.ndarray] = []
 
 
 class Engine:
@@ -76,6 +90,14 @@ class Engine:
         self.config = config
         self.parent_pid = parent_pid
         self.stt: STTBackend = create_backend(config.stt_model, config.language)
+        # A lazily-loaded backend used only for reprocessing history with a
+        # DIFFERENT model than the live one; cached so re-transcribing several
+        # clips with the same model doesn't reload it each time.
+        self._reprocess_backend: STTBackend | None = None
+        # Reprocess runs off the dispatch loop; this flag blocks a live session
+        # from starting mid-reprocess (they'd race on the shared STT backend).
+        self._reprocessing = False
+        self.audio = AudioStore(config.audio_dir)
         self.stt_ready = asyncio.Event()
         self.cleanup: CleanupEngine | None = None
         self.session: Session | None = None
@@ -102,6 +124,13 @@ class Engine:
             self.shutdown.set()
             return
         self.stt_ready.set()
+        # Enforce audio retention once at startup (deletes clips > 6 months and
+        # trims the archive under its size cap).
+        if self.config.save_audio:
+            with contextlib.suppress(Exception):
+                await asyncio.to_thread(
+                    self.audio.prune, self.config.audio_retention_days, self.config.audio_max_bytes
+                )
         if self.config.cleanup_enabled and not fake_stt_enabled():
             engine = CleanupEngine(self.config.cleanup_model)
             try:
@@ -258,6 +287,8 @@ class Engine:
                 await self._send({"event": "config_reloaded"})
             elif cmd == "set_model":
                 await self._cmd_set_model(msg)
+            elif cmd == "reprocess":
+                await self._cmd_reprocess(msg)
             else:
                 await self._error(f"unknown command: {cmd!r}")
         except Exception as exc:  # noqa: BLE001 — commands must never crash the engine
@@ -267,6 +298,11 @@ class Engine:
     # ---------------- session state machine ----------------
 
     async def _cmd_start(self, msg: dict[str, Any]) -> None:
+        if self._reprocessing:
+            # A background reprocess may be using the live STT backend; starting
+            # now would corrupt its stream state. Ask the app to retry.
+            await self._error("busy reprocessing a clip — try again in a moment")
+            return
         if self.session is not None:
             log.warning("start while session %s active — discarding it", self.session.id)
             await self._abort_session("superseded by new start")
@@ -319,6 +355,10 @@ class Engine:
         except ValueError as exc:
             await self._error(f"bad audio frame: {exc}", session.id)
             return
+        # Archive the raw audio before queueing for STT: a frame dropped below
+        # for latency reasons must still make it into the saved clip.
+        if self.config.save_audio:
+            session.pcm_chunks.append(chunk)
         try:
             session.queue.put_nowait(chunk)
         except asyncio.QueueFull:
@@ -367,6 +407,7 @@ class Engine:
             return
         self.session = None
         session.cancelled = True
+        session.pcm_chunks = []  # discard archived audio for a cancelled session
         await self._drain_feeder(session)
         await self._stt_call(self.stt.reset)
         log.info("session %s discarded (%s)", session.id, why)
@@ -402,31 +443,16 @@ class Engine:
 
         # Stage 2: formatting pipeline.
         ctx = session.context
-        gate = formatting.run_gate(
+        text, mode_name, cleanup_ms, cleanup_applied, reason = await self._apply_formatting(
             raw,
-            self.config,
             bundle_id=ctx.get("bundle_id"),
             app_name=ctx.get("app_name"),
             explicit_mode=ctx.get("mode"),
         )
-        cleanup_ms = 0
-        cleanup_applied = False
-        if not raw.strip():
-            text, reason = "", "empty_transcript"
-        elif gate.use_llm and self.cleanup is not None and self.cleanup.loaded:
-            result = await self.cleanup.cleanup(raw, gate.system_prompt or STATIC_SYSTEM_PROMPT)
-            cleanup_ms = result.ms
-            cleanup_applied = result.applied
-            reason = result.reason or "llm"
-            if result.applied:
-                text = formatting.postprocess(result.text, gate)
-            else:  # fall back to raw, still honoring spoken newline commands
-                text = formatting.postprocess(formatting.apply_spoken_commands(raw), gate)
-        elif gate.use_llm:
-            text = formatting.postprocess(formatting.apply_spoken_commands(raw), gate)
-            reason = "cleanup_unavailable"
-        else:
-            text, reason = gate.text, gate.reason
+
+        # Stage 3: archive the audio clip (off the event loop) so it can be
+        # reprocessed later. Failure never affects the dictation result.
+        audio_name = await self._archive_audio(session)
 
         total_ms = int((time.perf_counter() - t_stop) * 1000)
         final_evt: dict[str, Any] = {
@@ -434,23 +460,82 @@ class Engine:
             "session": session.id,
             "text": text,
             "raw": raw,
-            "mode": gate.mode.name,
+            "mode": mode_name,
             "cleanup_ms": cleanup_ms,
             "cleanup_applied": cleanup_applied,
         }
+        if audio_name:
+            final_evt["audio"] = audio_name
         if auto_stopped:
             final_evt["auto_stopped"] = True
         await self._send(final_evt)
         log.info(
-            "session %s done: stt_ms=%d gate=%s cleanup_ms=%d cleanup_applied=%s total_ms=%d samples=%d",
+            "session %s done: stt_ms=%d mode=%s reason=%s cleanup_ms=%d cleanup_applied=%s total_ms=%d samples=%d audio=%s",
             session.id,
             stt_ms,
-            gate.reason if not gate.use_llm else f"llm({reason})",
+            mode_name,
+            reason,
             cleanup_ms,
             cleanup_applied,
             total_ms,
             session.samples,
+            audio_name or "-",
         )
+
+    async def _apply_formatting(
+        self,
+        raw: str,
+        bundle_id: str | None,
+        app_name: str | None,
+        explicit_mode: str | None,
+    ) -> tuple[str, str, int, bool, str]:
+        """Run the gate + optional LLM cleanup. Returns
+        (text, mode_name, cleanup_ms, cleanup_applied, reason). Shared by live
+        finalize and history reprocessing."""
+        gate = formatting.run_gate(
+            raw,
+            self.config,
+            bundle_id=bundle_id,
+            app_name=app_name,
+            explicit_mode=explicit_mode,
+        )
+        if not raw.strip():
+            return "", gate.mode.name, 0, False, "empty_transcript"
+        if gate.use_llm and self.cleanup is not None and self.cleanup.loaded:
+            result = await self.cleanup.cleanup(raw, gate.system_prompt or STATIC_SYSTEM_PROMPT)
+            if result.applied:
+                text = formatting.postprocess(result.text, gate)
+            else:
+                text = formatting.postprocess(formatting.apply_spoken_commands(raw), gate)
+            return text, gate.mode.name, result.ms, result.applied, result.reason or "llm"
+        if gate.use_llm:
+            text = formatting.postprocess(formatting.apply_spoken_commands(raw), gate)
+            return text, gate.mode.name, 0, False, "cleanup_unavailable"
+        return gate.text, gate.mode.name, 0, False, gate.reason
+
+    async def _archive_audio(self, session: Session) -> str | None:
+        """Persist the session's PCM as a clip and prune the archive. Off-thread;
+        never raises into the caller."""
+        if not self.config.save_audio or not session.pcm_chunks:
+            return None
+        chunks = session.pcm_chunks
+        session.pcm_chunks = []
+        try:
+            pcm = np.concatenate(chunks)
+        except ValueError:
+            return None
+        name = await asyncio.to_thread(self.audio.save, session.id, pcm)
+        if name:
+            # Prune is an O(clips) stat sweep — keep it OFF the stop→final path;
+            # fire-and-forget so it never adds latency to the user's result.
+            asyncio.create_task(self._prune_audio_bg())
+        return name
+
+    async def _prune_audio_bg(self) -> None:
+        with contextlib.suppress(Exception):
+            await asyncio.to_thread(
+                self.audio.prune, self.config.audio_retention_days, self.config.audio_max_bytes
+            )
 
     # ---------------- misc commands ----------------
 
@@ -463,6 +548,9 @@ class Engine:
                 "cleanup_model": self.config.cleanup_model,
                 "cleanup_enabled": self.config.cleanup_enabled,
                 "cleanup_loaded": bool(self.cleanup and self.cleanup.loaded),
+                "save_audio": self.config.save_audio,
+                "audio_retention_days": self.config.audio_retention_days,
+                "language": self.config.language,
                 "models": models.registry_payload(),
                 "version": __version__,
             }
@@ -497,6 +585,90 @@ class Engine:
         self.config.save()
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)
+
+    async def _stt_for_reprocess(self, model_id: str, language: str) -> STTBackend:
+        """Return a loaded backend for `model_id`: the live one if it matches,
+        else a cached/freshly-loaded reprocessing backend."""
+        if model_id == self.stt.model_id:
+            if hasattr(self.stt, "language"):
+                self.stt.language = language
+            return self.stt
+        cached = self._reprocess_backend
+        if cached is not None and cached.model_id == model_id:
+            if hasattr(cached, "language"):
+                cached.language = language
+            return cached
+        if not fake_stt_enabled():
+            await asyncio.to_thread(models.ensure_downloaded, model_id)
+        backend = create_backend(model_id, language)
+        await self._stt_call(backend.load)
+        self._reprocess_backend = backend
+        return backend
+
+    async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
+        """Re-transcribe a saved audio clip, optionally with a different model,
+        mode, or language. Validates synchronously, then runs the (possibly
+        slow) transcription off the dispatch loop so live control frames stay
+        responsive. Emits a `reprocessed` event echoing the caller's id."""
+        if self.session is not None:
+            await self._error("reprocess: busy (dictation in progress)")
+            return
+        if self._reprocessing:
+            await self._error("reprocess: busy (another reprocess in progress)")
+            return
+        name = msg.get("audio")
+        if not name or not isinstance(name, str):
+            await self._error("reprocess: missing 'audio'")
+            return
+        self._reprocessing = True
+        asyncio.create_task(self._run_reprocess(dict(msg), name))
+
+    async def _run_reprocess(self, msg: dict[str, Any], name: str) -> None:
+        model_id = str(msg.get("stt_model") or self.stt.model_id)
+        language = str(msg.get("language") or self.config.language)
+        # Restore the live backend's language afterwards: _stt_for_reprocess may
+        # borrow the live backend and set its language for this call.
+        saved_language = getattr(self.stt, "language", None)
+        try:
+            try:
+                pcm = await asyncio.to_thread(self.audio.load, name)
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                await self._error(f"reprocess: audio unavailable: {exc}")
+                return
+            t0 = time.perf_counter()
+            try:
+                backend = await self._stt_for_reprocess(model_id, language)
+                raw = await self._stt_call(transcribe_clip, backend, pcm)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("reprocess transcription failed")
+                await self._error(f"reprocess failed: {exc}")
+                return
+            stt_ms = int((time.perf_counter() - t0) * 1000)
+            text, mode_name, cleanup_ms, cleanup_applied, _reason = await self._apply_formatting(
+                raw,
+                bundle_id=msg.get("bundle_id"),
+                app_name=msg.get("app_name"),
+                explicit_mode=msg.get("mode"),
+            )
+            evt: dict[str, Any] = {
+                "event": "reprocessed",
+                "audio": name,
+                "raw": raw,
+                "text": text,
+                "mode": mode_name,
+                "stt_model": model_id,
+                "stt_ms": stt_ms,
+                "cleanup_ms": cleanup_ms,
+                "cleanup_applied": cleanup_applied,
+            }
+            if msg.get("id") is not None:
+                evt["id"] = msg.get("id")
+            await self._send(evt)
+            log.info("reprocess %s with %s: stt_ms=%d mode=%s", name, model_id, stt_ms, mode_name)
+        finally:
+            if saved_language is not None and hasattr(self.stt, "language"):
+                self.stt.language = saved_language
+            self._reprocessing = False
 
 
 # ---------------- entrypoint ----------------

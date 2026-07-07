@@ -13,10 +13,19 @@ enum EngineEvent {
     case transcript(session: String, raw: String, ms: Int)
 
     /// Final text to insert. `cleanupApplied == false` means `text` carries the
-    /// raw transcript (cleanup skipped, failed, or over budget).
+    /// raw transcript (cleanup skipped, failed, or over budget). `audio` is the
+    /// basename of the archived clip under `~/.velora/audio/`, when archiving
+    /// is on.
     case final(
         session: String, text: String, raw: String, mode: String?,
-        cleanupMs: Int?, cleanupApplied: Bool)
+        cleanupMs: Int?, cleanupApplied: Bool, audio: String?)
+
+    /// Result of a History `reprocess` command: a re-run of an archived clip
+    /// through a (possibly different) STT model / mode. Routed to the History
+    /// UI, not the live dictation flow.
+    case reprocessed(
+        id: Int64?, audio: String, raw: String, text: String, mode: String?,
+        sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool)
 
     /// Engine-reported error, optionally scoped to a session.
     case error(session: String?, message: String)
@@ -52,6 +61,18 @@ enum EngineEvent {
                 raw: object["raw"] as? String ?? (object["text"] as? String ?? ""),
                 mode: object["mode"] as? String,
                 cleanupMs: object["cleanup_ms"] as? Int,
+                cleanupApplied: object["cleanup_applied"] as? Bool ?? false,
+                audio: object["audio"] as? String)
+        case "reprocessed":
+            return .reprocessed(
+                id: (object["id"] as? Int).map(Int64.init),
+                audio: object["audio"] as? String ?? "",
+                raw: object["raw"] as? String ?? "",
+                text: object["text"] as? String ?? "",
+                mode: object["mode"] as? String,
+                sttModel: object["stt_model"] as? String,
+                sttMs: object["stt_ms"] as? Int ?? 0,
+                cleanupMs: object["cleanup_ms"] as? Int ?? 0,
                 cleanupApplied: object["cleanup_applied"] as? Bool ?? false)
         case "error":
             return .error(
