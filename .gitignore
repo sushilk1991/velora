@@ -1,0 +1,27 @@
+# macOS
+.DS_Store
+
+# Swift / SwiftPM
+.build/
+*.xcodeproj
+DerivedData/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+
+# Models & audio samples (downloaded at runtime)
+models/
+*.wav
+*.mp3
+*.flac
+
+# Spikes are throwaway
+spikes/
+
+# Logs
+*.log
+.yoyo/
