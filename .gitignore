@@ -26,3 +26,6 @@ spikes/
 *.log
 .yoyo/
 .pytest_cache/
+
+# Built app bundle and DMG
+build/
