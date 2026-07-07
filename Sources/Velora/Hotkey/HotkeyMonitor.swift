@@ -100,8 +100,18 @@ final class HotkeyMonitor {
     /// (an event tap created before the grant stays dead until reinstalled).
     func restart() {
         NSLog("Velora: hotkey monitor restarting")
+        resetLatchedState()
         stop()
         start()
+    }
+
+    /// Clears cached modifier/combo latches. Called when the tap is disabled
+    /// then re-enabled (a missed flagsChanged edge would otherwise strand
+    /// `modifierIsDown == true`, making the next real press look like "no
+    /// change" and emit nothing — the hotkey goes dead) and on any restart.
+    private func resetLatchedState() {
+        modifierIsDown = false
+        comboIsDown = false
     }
 
     // MARK: - CGEventTap path
@@ -144,8 +154,16 @@ final class HotkeyMonitor {
     }
 
     private func handleTapEvent(type: CGEventType, event: CGEvent) {
-        // The system disables taps that stall; re-enable and move on.
+        // The system disables taps that stall or that fire while another
+        // process synthesizes input (our own ⌘V paste triggers
+        // `.tapDisabledByUserInput`). Re-enable, and CRUCIALLY reset the
+        // latched modifier/combo state: an up-edge we missed while disabled
+        // would otherwise wedge `modifierIsDown == true` and kill the hotkey.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            NSLog(
+                "Velora: hotkey tap disabled (%@) — re-enabling and resetting latched state",
+                type == .tapDisabledByTimeout ? "timeout" : "userInput")
+            resetLatchedState()
             if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             return
         }

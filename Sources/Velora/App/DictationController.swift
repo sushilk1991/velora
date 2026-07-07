@@ -64,6 +64,7 @@ final class DictationController: NSObject {
     private var sessionID = ""
     private var sessionContext: AppContext?
     private var recordingStart: Date?
+    private var transcribeStartedAt: Date?
     private var hotkeyDownAt: Date?
     private var rawTranscript: String?
     private var transcribeTimer: Timer?
@@ -126,6 +127,12 @@ final class DictationController: NSObject {
 
     private func startRecording(locked: Bool) {
         guard phase == .idle else { return }
+
+        // A fresh press supersedes any lingering error/fallback HUD: clear its
+        // one-shot retry action so we start clean (the transition to
+        // `.listening` below replaces the error visual).
+        errorRetryAction = nil
+        hud.model.retryTitle = "Retry"
 
         // Secure input (password fields): refuse with an error HUD.
         guard !SecureInput.isActive else {
@@ -195,6 +202,7 @@ final class DictationController: NSObject {
         supervisor.send(["cmd": "stop", "session": sessionID])
         hud.transition(to: .transcribing)
         phase = .transcribing
+        transcribeStartedAt = Date()
 
         transcribeTimer?.invalidate()
         transcribeTimer = Timer.scheduledTimer(
@@ -204,6 +212,24 @@ final class DictationController: NSObject {
             self.supervisor.send(["cmd": "cancel", "session": self.sessionID])
             self.showError("Transcription timed out")
         }
+    }
+
+    /// If we've been stuck in `.transcribing` past the timeout with no engine
+    /// result, cancel the wedged session and return to `.idle` so the hotkey
+    /// works again. Returns true when a reset happened.
+    @discardableResult
+    private func resetIfStuckTranscribing() -> Bool {
+        guard phase == .transcribing else { return false }
+        let elapsed = transcribeStartedAt.map { -$0.timeIntervalSinceNow } ?? 0
+        guard elapsed >= Self.transcribeTimeout else { return false }
+        NSLog("Velora: hotkey while stuck transcribing %.1fs — self-resetting", elapsed)
+        transcribeTimer?.invalidate()
+        transcribeTimer = nil
+        supervisor.send(["cmd": "cancel", "session": sessionID])
+        hud.model.recordingStart = nil
+        hud.transition(to: .hidden(.cancel))
+        phase = .idle
+        return true
     }
 
     /// Esc or explicit cancel: stop everything, insert nothing.
@@ -299,6 +325,28 @@ final class DictationController: NSObject {
 
         let context = sessionContext
 
+        // Own-window insertion (onboarding try-it): the TextEditor lives inside
+        // Velora's own window. AppContextTracker deliberately ignores Velora's
+        // own activations, so `context.bundleID` is some *other* app while the
+        // real frontmost is us — the "focus changed" guard below would always
+        // divert to the clipboard and nothing would land in the box. When we
+        // ourselves are frontmost, insert straight into our key window's
+        // focused text view via the responder chain (zero TCC), skip the
+        // fallback, and still fire the inserted notification.
+        let ownBundleID = Bundle.main.bundleIdentifier ?? "com.velora.app"
+        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == ownBundleID,
+           inserter.insertIntoOwnWindow(text) {
+            NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
+            errorRetryAction = nil
+            hud.model.retryTitle = "Retry"
+            hud.transition(to: .inserted)
+            phase = .idle
+            recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs)
+            NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
+            scheduleInsertedHide()
+            return
+        }
+
         // Recheck the target immediately before synthesizing input: the
         // Accessibility grant may be missing (posting CGEvents would silently
         // no-op), focus may have moved, or a secure field taken over while
@@ -344,6 +392,17 @@ final class DictationController: NSObject {
             phase = .idle
         }
 
+        recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs)
+
+        guard fallbackMessage == nil else { return }
+
+        NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
+        scheduleInsertedHide()
+    }
+
+    private func recordHistory(
+        text: String, raw: String, context: AppContext?, mode: String?, cleanupMs: Int?
+    ) {
         let durationMs = recordingStart.map { Int(-$0.timeIntervalSinceNow * 1000) } ?? 0
         history.insert(
             DictationRecord(
@@ -355,12 +414,10 @@ final class DictationController: NSObject {
                 mode: mode,
                 durationMs: durationMs,
                 cleanupMs: cleanupMs))
+    }
 
-        guard fallbackMessage == nil else { return }
-
-        NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
-
-        // Inserted state holds 600 ms after the 150 ms flash + morph.
+    /// Inserted state holds 600 ms after the 150 ms flash + morph, then hides.
+    private func scheduleInsertedHide() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15 + 0.6) { [weak self] in
             guard let self, self.hud.model.state == .inserted else { return }
             self.hud.model.recordingStart = nil
@@ -373,6 +430,12 @@ final class DictationController: NSObject {
 
 extension DictationController: HotkeyMonitorDelegate {
     func hotkeyDown() {
+        // Self-heal a wedged transcribe: normally `transcribeTimer` recovers,
+        // but a missed event or a hung engine shouldn't strand the hotkey. If
+        // we're still transcribing well past the timeout, reset to idle first
+        // so this press starts a fresh dictation instead of being swallowed.
+        if phase == .transcribing { resetIfStuckTranscribing() }
+
         switch (config.hotkeyMode, phase) {
         case (.toggle, .idle):
             startRecording(locked: true)

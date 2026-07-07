@@ -46,6 +46,39 @@ final class TextInserter {
         CGPreflightPostEventAccess()
     }
 
+    // MARK: - Own-window insertion (no TCC)
+
+    /// Inserts `text` into the first responder of Velora's own key window via
+    /// the responder chain — used when Velora itself is frontmost (the
+    /// onboarding try-it TextEditor). This is our own process, so it needs
+    /// ZERO Accessibility/TCC (exactly right for first-run, before the user
+    /// has granted anything, and it dodges the "focus changed" clipboard
+    /// diversion that fires because the context tracker ignores Velora's own
+    /// activations). Returns false when there is no text responder to receive
+    /// the insertion, so the caller can fall back.
+    @discardableResult
+    func insertIntoOwnWindow(_ text: String) -> Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder else {
+            NSLog("Velora: own-window insert — no key window / first responder")
+            return false
+        }
+        // SwiftUI TextEditor / NSTextField field editors are backed by an
+        // NSTextView; insertText(_:replacementRange:) respects the selection.
+        if let textView = responder as? NSTextView {
+            textView.insertText(text, replacementRange: textView.selectedRange())
+            NSLog("Velora: own-window insert via NSTextView chars=%ld", text.count)
+            return true
+        }
+        // Any other responder that accepts insertText: (e.g. NSText).
+        if responder.responds(to: #selector(NSText.insertText(_:))) {
+            _ = NSApp.sendAction(#selector(NSText.insertText(_:)), to: responder, from: text)
+            NSLog("Velora: own-window insert via responder insertText chars=%ld", text.count)
+            return true
+        }
+        NSLog("Velora: own-window insert — first responder is not a text target")
+        return false
+    }
+
     // MARK: - Pasteboard + ⌘V
 
     /// Puts `text` on the general pasteboard (marked transient + concealed)
