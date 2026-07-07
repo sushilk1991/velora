@@ -109,6 +109,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension AppDelegate: EngineSupervisorDelegate {
     func engineSupervisor(_ supervisor: EngineSupervisor, didChangeState state: EngineSupervisor.State) {
+        dictation.handleEngineStateChange(state)
         refreshDegradedState()
     }
 

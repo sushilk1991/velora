@@ -5,8 +5,8 @@ import Foundation
 /// Float32, delivered as ~100 ms chunks (1600 samples / 6400 bytes) for the
 /// engine, plus normalized RMS levels for the HUD waveform.
 ///
-/// Chunk callbacks fire on the audio tap thread (callers forward to their own
-/// queue); level callbacks are delivered on the main queue.
+/// Chunk callbacks fire on a private serial queue (callers forward to their
+/// own queue); level callbacks are delivered on the main queue.
 final class AudioCapture {
     enum CaptureError: LocalizedError {
         case noInputDevice
@@ -28,8 +28,15 @@ final class AudioCapture {
     private static let chunkFrames = 1600
 
     private var engine: AVAudioEngine?
-    private var pending: [Float] = []
     private(set) var isRunning = false
+
+    /// All pending-buffer state below is confined to `bufferQueue`: the tap
+    /// callback (audio thread) hops onto it to accumulate/emit, and `stop()`
+    /// drains it synchronously — no concurrent Array mutation.
+    private let bufferQueue = DispatchQueue(label: "com.velora.capture.buffer")
+    private var pending: [Float] = []
+    private var chunkHandler: ((Data) -> Void)?
+    private var levelHandler: ((Float) -> Void)?
 
     /// Starts capture. `onChunk` receives raw Float32 LE PCM (~100 ms each);
     /// `onLevel` receives a 0…1 normalized loudness per chunk (main queue).
@@ -54,7 +61,11 @@ final class AudioCapture {
             throw CaptureError.converterUnavailable
         }
 
-        pending.removeAll(keepingCapacity: true)
+        bufferQueue.sync {
+            pending.removeAll(keepingCapacity: true)
+            chunkHandler = onChunk
+            levelHandler = onLevel
+        }
 
         input.installTap(onBus: 0, bufferSize: 1024, format: inFormat) { [weak self] buffer, _ in
             guard let self else { return }
@@ -77,24 +88,9 @@ final class AudioCapture {
             if convError != nil { return }
             guard let channel = out.floatChannelData?[0], out.frameLength > 0 else { return }
 
-            // Accumulate and emit fixed ~100 ms chunks.
-            self.pending.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
-            while self.pending.count >= Self.chunkFrames {
-                let chunk = Array(self.pending.prefix(Self.chunkFrames))
-                self.pending.removeFirst(Self.chunkFrames)
-
-                let data = chunk.withUnsafeBufferPointer { Data(buffer: $0) }
-                onChunk(data)
-
-                // RMS → dBFS → normalized 0…1 with a −50 dBFS floor
-                // (design brief §2 pipeline).
-                var sum: Float = 0
-                for sample in chunk { sum += sample * sample }
-                let rms = (sum / Float(chunk.count)).squareRoot()
-                let db = 20 * log10(max(rms, 1e-7))
-                let level = max(0, min(1, (db + 50) / 50))
-                DispatchQueue.main.async { onLevel(level) }
-            }
+            // Copy out of the tap's buffer, then accumulate on bufferQueue.
+            let samples = Array(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
+            self.bufferQueue.async { self.accumulate(samples) }
         }
 
         do {
@@ -108,12 +104,52 @@ final class AudioCapture {
     }
 
     /// Stops capture and tears down the tap. Safe to call when not running.
+    ///
+    /// Synchronously drains the buffer queue: already-queued tap callbacks
+    /// run first, then the partial tail chunk (< 100 ms) is flushed to the
+    /// chunk handler as-is — so the last syllable reaches the engine before
+    /// the caller sends `stop`.
     func stop() {
         guard isRunning, let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         self.engine = nil
-        pending.removeAll()
         isRunning = false
+
+        bufferQueue.sync {
+            if !pending.isEmpty, let handler = chunkHandler {
+                let data = pending.withUnsafeBufferPointer { Data(buffer: $0) }
+                handler(data)
+            }
+            pending.removeAll()
+            chunkHandler = nil
+            levelHandler = nil
+        }
+    }
+
+    // MARK: - Buffer accumulation (bufferQueue only)
+
+    /// Appends converted samples and emits fixed ~100 ms chunks.
+    private func accumulate(_ samples: [Float]) {
+        guard chunkHandler != nil else { return }  // stopped; drop stragglers
+        pending.append(contentsOf: samples)
+        while pending.count >= Self.chunkFrames {
+            let chunk = Array(pending.prefix(Self.chunkFrames))
+            pending.removeFirst(Self.chunkFrames)
+
+            let data = chunk.withUnsafeBufferPointer { Data(buffer: $0) }
+            chunkHandler?(data)
+
+            // RMS → dBFS → normalized 0…1 with a −50 dBFS floor
+            // (design brief §2 pipeline).
+            var sum: Float = 0
+            for sample in chunk { sum += sample * sample }
+            let rms = (sum / Float(chunk.count)).squareRoot()
+            let db = 20 * log10(max(rms, 1e-7))
+            let level = max(0, min(1, (db + 50) / 50))
+            if let onLevel = levelHandler {
+                DispatchQueue.main.async { onLevel(level) }
+            }
+        }
     }
 }

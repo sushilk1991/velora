@@ -169,6 +169,40 @@ def test_llm_path_prescrubbed(config):
     assert gate.text.startswith("so I think")
 
 
+# ---- auto_punctuation config key ----
+
+
+def test_auto_punctuation_default_on(config):
+    assert config.auto_punctuation is True
+    gate = run_gate("send the report", config)
+    assert gate.text == "Send the report."
+
+
+def test_auto_punctuation_off_short_utterance_left_as_dictated(config):
+    config.data["auto_punctuation"] = False
+    gate = run_gate("send the report", config)
+    assert gate.use_llm is False
+    assert gate.text == "send the report"  # no capitalization, no period
+
+
+def test_auto_punctuation_off_chat_short_utterance(config):
+    config.data["auto_punctuation"] = False
+    gate = run_gate("sounds good to me", config, bundle_id="com.tinyspeck.slackmacgap")
+    assert gate.text == "sounds good to me"
+
+
+def test_auto_punctuation_off_adds_llm_prompt_line(config):
+    config.data["auto_punctuation"] = False
+    gate = run_gate(LONG, config)
+    assert gate.use_llm is True
+    assert "Do not add terminal punctuation the speaker did not dictate." in gate.system_prompt
+
+
+def test_auto_punctuation_on_no_extra_prompt_line(config):
+    gate = run_gate(LONG, config)
+    assert "Do not add terminal punctuation" not in gate.system_prompt
+
+
 # ---- code mode trailing period ----
 
 

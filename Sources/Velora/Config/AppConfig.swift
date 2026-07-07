@@ -233,12 +233,16 @@ final class AppConfig {
 
     // MARK: - config.json for the engine
 
-    /// Ensures `~/.velora` exists (socket home, config, history).
+    /// Ensures `~/.velora` exists (socket home, config, history) with owner-only
+    /// permissions — it holds every transcript and the engine socket.
     @discardableResult
     func ensureVeloraDirectory() -> Bool {
         do {
             try FileManager.default.createDirectory(
-                at: Self.veloraDirectory, withIntermediateDirectories: true)
+                at: Self.veloraDirectory, withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700], ofItemAtPath: Self.veloraDirectory.path)
             return true
         } catch {
             NSLog("Velora: failed to create ~/.velora: \(error)")
@@ -246,15 +250,20 @@ final class AppConfig {
         }
     }
 
-    /// Writes the engine-facing config file. The engine reads this at startup
-    /// and on `reload_config`.
+    /// Read-modify-writes the engine-facing config file: only the app-owned
+    /// keys (stt_model, language, auto_punctuation) are updated; engine-owned
+    /// keys (cleanup model/flags, vocabulary, replacements, …) are preserved.
+    /// The engine reads this at startup and on `reload_config`.
     func writeEngineConfig() {
         ensureVeloraDirectory()
-        let payload: [String: Any] = [
-            "stt_model": sttModel,
-            "language": language,
-            "auto_punctuation": autoPunctuation,
-        ]
+        var payload: [String: Any] = [:]
+        if let data = try? Data(contentsOf: Self.configFileURL),
+           let existing = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            payload = existing  // tolerate missing/corrupt file: start fresh
+        }
+        payload["stt_model"] = sttModel
+        payload["language"] = language
+        payload["auto_punctuation"] = autoPunctuation
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])

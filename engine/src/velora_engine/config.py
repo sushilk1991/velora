@@ -28,7 +28,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "default_mode": "Default",
     "vocabulary": [],
     "replacements": {},
+    "language": "auto",
+    "auto_punctuation": True,
+    "max_recording_s": 300,
 }
+
+DEFAULT_MAX_RECORDING_S = 300.0
 
 VALID_FORMATTING = ("off", "light", "full")
 
@@ -101,6 +106,24 @@ class Config:
         return str(self.data.get("default_mode") or "Default")
 
     @property
+    def language(self) -> str:
+        """Dictation language ("auto" = autodetect; only whisper honors it)."""
+        return str(self.data.get("language") or "auto").strip() or "auto"
+
+    @property
+    def auto_punctuation(self) -> bool:
+        return bool(self.data.get("auto_punctuation", True))
+
+    @property
+    def max_recording_s(self) -> float:
+        """Max recording duration before the engine auto-finalizes a session."""
+        try:
+            value = float(self.data.get("max_recording_s", DEFAULT_MAX_RECORDING_S))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_RECORDING_S
+        return value if value > 0 else DEFAULT_MAX_RECORDING_S
+
+    @property
     def global_vocabulary(self) -> list[str]:
         return [str(v) for v in self.data.get("vocabulary", []) or []]
 
@@ -110,7 +133,13 @@ class Config:
 
     # ---- lifecycle ----
     def reload(self) -> None:
-        self.home.mkdir(parents=True, exist_ok=True)
+        # 0700: ~/.velora holds transcripts (history.sqlite3), config, and the
+        # engine socket — keep it private to the user.
+        self.home.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            os.chmod(self.home, 0o700)
+        except OSError as exc:  # pragma: no cover — permissions best-effort
+            log.warning("could not chmod %s to 0700: %s", self.home, exc)
         self._load_or_create_config()
         self._ensure_builtin_modes()
         self._load_modes()

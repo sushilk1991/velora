@@ -157,11 +157,12 @@ def guard_whisper_result(result: dict[str, Any]) -> str:
             continue
         cr = seg.get("compression_ratio")
         lp = seg.get("avg_logprob")
+        # Log lengths only — never transcript text (privacy: engine.log is plaintext).
         if cr is not None and cr > _COMPRESSION_RATIO_THRESHOLD:
-            log.info("whisper guard: dropped segment (compression_ratio=%.2f): %r", cr, seg_text[:60])
+            log.info("whisper guard: dropped segment (compression_ratio=%.2f, %d chars)", cr, len(seg_text))
             continue
         if lp is not None and lp < _LOGPROB_THRESHOLD and cr is not None and cr > 2.0:
-            log.info("whisper guard: dropped segment (logprob=%.2f cr=%.2f): %r", lp, cr, seg_text[:60])
+            log.info("whisper guard: dropped segment (logprob=%.2f cr=%.2f, %d chars)", lp, cr, len(seg_text))
             continue
         # drop non-text junk (e.g. "!!!!" runs)
         if not re.search(r"[A-Za-z0-9]", seg_text):
@@ -171,11 +172,22 @@ def guard_whisper_result(result: dict[str, Any]) -> str:
     return _trim_repeated_tail(text)
 
 
+def whisper_language(language: str | None) -> str | None:
+    """Map config `language` to mlx-whisper's arg: "auto"/empty → None (autodetect)."""
+    if not language:
+        return None
+    language = language.strip()
+    if not language or language.lower() == "auto":
+        return None
+    return language
+
+
 class WhisperBackend:
     """Fallback batch STT via mlx-whisper, with hallucination guard."""
 
-    def __init__(self, model_id: str) -> None:
+    def __init__(self, model_id: str, language: str = "auto") -> None:
         self.model_id = model_id
+        self.language = language
         self._model_path = model_id  # resolved to a local path in load()
         self._chunks: list[np.ndarray] = []
         self._loaded = False
@@ -208,10 +220,17 @@ class WhisperBackend:
             return ""
         audio = np.concatenate(self._chunks)
         self._chunks = []
+        # Whole-recording batch decode. The accumulated PCM is bounded by the
+        # server's max_recording_s cap (default 300s ≈ 18 MB Float32), so this
+        # can't grow without limit — but long batches are still slow.
+        duration_s = len(audio) / SAMPLE_RATE
+        if duration_s > 60:
+            log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
         result = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=self._model_path,
             condition_on_previous_text=False,
+            language=whisper_language(self.language),
             fp16=True,
         )
         return guard_whisper_result(result)
@@ -230,8 +249,9 @@ class FakeBackend:
 
     DEFAULT_TEXT = "hello world this is a fake transcript"
 
-    def __init__(self, model_id: str = "fake") -> None:
+    def __init__(self, model_id: str = "fake", language: str = "auto") -> None:
         self.model_id = model_id
+        self.language = language
         self.samples = 0
         self.sessions = 0
 
@@ -259,12 +279,16 @@ def fake_stt_enabled() -> bool:
     return os.environ.get("VELORA_FAKE_STT", "") == "1"
 
 
-def create_backend(model_id: str) -> STTBackend:
-    """Backend selection from config (and VELORA_FAKE_STT for tests)."""
+def create_backend(model_id: str, language: str = "auto") -> STTBackend:
+    """Backend selection from config (and VELORA_FAKE_STT for tests).
+
+    `language` is honored by whisper only ("auto" → autodetect); parakeet is
+    English-only, so it ignores the setting.
+    """
     if fake_stt_enabled():
-        return FakeBackend(model_id)
+        return FakeBackend(model_id, language)
     if "whisper" in model_id.lower():
-        return WhisperBackend(model_id)
+        return WhisperBackend(model_id, language)
     return ParakeetBackend(model_id)
 
 

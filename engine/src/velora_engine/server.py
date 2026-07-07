@@ -31,13 +31,19 @@ from . import __version__, formatting, models, protocol
 from .cleanup import CleanupEngine
 from .config import Config
 from .formatting import STATIC_SYSTEM_PROMPT
-from .stt import STTBackend, create_backend, fake_stt_enabled, pcm_from_payload
+from .stt import SAMPLE_RATE, STTBackend, create_backend, fake_stt_enabled, pcm_from_payload
 
 T = TypeVar("T")
 
 log = logging.getLogger("velora.server")
 
 PARENT_POLL_S = 2.0
+
+# Bound the per-session audio queue: ~60s of backlog at 100ms chunks. If STT
+# falls that far behind realtime, frames are dropped; past MAX_DROPPED_FRAMES
+# the session is aborted with an error event (fail loudly instead of OOM).
+QUEUE_MAX_FRAMES = 600
+MAX_DROPPED_FRAMES = 50
 
 
 def _pid_alive(pid: int) -> bool:
@@ -51,21 +57,25 @@ def _pid_alive(pid: int) -> bool:
 
 
 class Session:
-    def __init__(self, session_id: str, context: dict[str, Any]) -> None:
+    def __init__(self, session_id: str, context: dict[str, Any], owner: asyncio.StreamWriter | None = None) -> None:
         self.id = session_id
         self.context = context or {}
-        self.queue: asyncio.Queue[Any] = asyncio.Queue()
+        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=QUEUE_MAX_FRAMES)
         self.feeder: asyncio.Task[None] | None = None
         self.cancelled = False
         self.samples = 0
+        self.dropped = 0  # frames dropped because the queue was full
         self.started = time.perf_counter()
+        # The connection that started this session. A displaced client's
+        # cleanup must only abort a session it still owns (reconnect race).
+        self.owner = owner
 
 
 class Engine:
     def __init__(self, config: Config, parent_pid: int | None = None) -> None:
         self.config = config
         self.parent_pid = parent_pid
-        self.stt: STTBackend = create_backend(config.stt_model)
+        self.stt: STTBackend = create_backend(config.stt_model, config.language)
         self.stt_ready = asyncio.Event()
         self.cleanup: CleanupEngine | None = None
         self.session: Session | None = None
@@ -106,7 +116,13 @@ class Engine:
         socket_path.parent.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(FileNotFoundError):
             socket_path.unlink()
-        self._server = await asyncio.start_unix_server(self._on_client, path=str(socket_path))
+        # Pre-set a restrictive umask so the socket is never world-accessible,
+        # even for the instant between bind and the explicit chmod below.
+        old_umask = os.umask(0o177)
+        try:
+            self._server = await asyncio.start_unix_server(self._on_client, path=str(socket_path))
+        finally:
+            os.umask(old_umask)
         os.chmod(socket_path, 0o600)
         log.info("listening on %s (pid %d, parent %s)", socket_path, os.getpid(), self.parent_pid)
 
@@ -170,15 +186,23 @@ class Engine:
         except Exception:
             log.exception("client handler error")
         finally:
-            if self.writer is writer:
-                self.writer = None
-            with contextlib.suppress(Exception):
-                writer.close()
-            await self._abort_session("client disconnected")
+            await self._client_cleanup(writer)
             log.info("client %d disconnected", gen)
             if self.parent_pid is not None and not _pid_alive(self.parent_pid):
                 log.info("client gone and parent pid dead — exiting")
                 self.shutdown.set()
+
+    async def _client_cleanup(self, writer: asyncio.StreamWriter) -> None:
+        """Tear down one connection. Only aborts the session it still owns:
+        a displaced old handler must never discard a session the new client
+        started (reconnect race)."""
+        if self.writer is writer:
+            self.writer = None
+        with contextlib.suppress(Exception):
+            writer.close()
+        session = self.session
+        if session is not None and session.owner is writer:
+            await self._abort_session("client disconnected")
 
     async def _send(self, obj: dict[str, Any]) -> None:
         writer = self.writer
@@ -227,6 +251,10 @@ class Engine:
                 await self._cmd_status()
             elif cmd == "reload_config":
                 self.config.reload()
+                # Whisper reads `language` at transcribe time; propagate the
+                # (possibly changed) setting without reloading the backend.
+                if hasattr(self.stt, "language"):
+                    self.stt.language = self.config.language
                 await self._send({"event": "config_reloaded"})
             elif cmd == "set_model":
                 await self._cmd_set_model(msg)
@@ -246,7 +274,7 @@ class Engine:
         context = msg.get("context") or {}
         if not isinstance(context, dict):
             context = {}
-        session = Session(session_id, context)
+        session = Session(session_id, context, owner=self.writer)
         await self._stt_call(self.stt.start_session)
         session.feeder = asyncio.create_task(self._feed_loop(session))
         self.session = session
@@ -264,6 +292,8 @@ class Engine:
             chunk = await session.queue.get()
             if chunk is None:
                 return
+            if session.cancelled:  # aborted: just drain, don't feed STT
+                continue
             try:
                 partial = await self._stt_call(self.stt.feed_chunk, chunk)
             except Exception:
@@ -289,11 +319,44 @@ class Engine:
         except ValueError as exc:
             await self._error(f"bad audio frame: {exc}", session.id)
             return
+        try:
+            session.queue.put_nowait(chunk)
+        except asyncio.QueueFull:
+            session.dropped += 1
+            if session.dropped == 1 or session.dropped % 25 == 0:
+                log.warning(
+                    "session %s: audio queue full — dropping frames (%d dropped)",
+                    session.id,
+                    session.dropped,
+                )
+            if session.dropped > MAX_DROPPED_FRAMES:
+                await self._error(
+                    "audio queue overflow: transcription can't keep up — session aborted",
+                    session.id,
+                )
+                await self._abort_session("audio queue overflow")
+            return
         session.samples += len(chunk)
-        session.queue.put_nowait(chunk)
+        if session.samples > self.config.max_recording_s * SAMPLE_RATE:
+            # Max-duration guard: auto-finalize as if `stop` was received, so a
+            # stuck/locked recording can't accumulate audio (and, on the whisper
+            # backend, batch-decode latency) without bound.
+            log.warning(
+                "session %s hit max recording duration (%.0fs) — auto-finalizing",
+                session.id,
+                self.config.max_recording_s,
+            )
+            self.session = None
+            await self._finalize_session(session, auto_stopped=True)
 
     async def _drain_feeder(self, session: Session) -> None:
-        session.queue.put_nowait(None)
+        try:
+            session.queue.put_nowait(None)
+        except asyncio.QueueFull:
+            # Queue jammed (STT stalled). Cancel the feeder instead of blocking
+            # the dispatch loop behind a wedged backend.
+            if session.feeder is not None:
+                session.feeder.cancel()
         if session.feeder is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await session.feeder
@@ -322,6 +385,9 @@ class Engine:
             await self._error("stop: no active session", msg.get("session"))
             return
         self.session = None
+        await self._finalize_session(session)
+
+    async def _finalize_session(self, session: Session, auto_stopped: bool = False) -> None:
         t_stop = time.perf_counter()
         await self._drain_feeder(session)
         try:
@@ -363,17 +429,18 @@ class Engine:
             text, reason = gate.text, gate.reason
 
         total_ms = int((time.perf_counter() - t_stop) * 1000)
-        await self._send(
-            {
-                "event": "final",
-                "session": session.id,
-                "text": text,
-                "raw": raw,
-                "mode": gate.mode.name,
-                "cleanup_ms": cleanup_ms,
-                "cleanup_applied": cleanup_applied,
-            }
-        )
+        final_evt: dict[str, Any] = {
+            "event": "final",
+            "session": session.id,
+            "text": text,
+            "raw": raw,
+            "mode": gate.mode.name,
+            "cleanup_ms": cleanup_ms,
+            "cleanup_applied": cleanup_applied,
+        }
+        if auto_stopped:
+            final_evt["auto_stopped"] = True
+        await self._send(final_evt)
         log.info(
             "session %s done: stt_ms=%d gate=%s cleanup_ms=%d cleanup_applied=%s total_ms=%d samples=%d",
             session.id,
@@ -417,7 +484,7 @@ class Engine:
         if not fake_stt_enabled():
             await asyncio.to_thread(models.ensure_downloaded, model_id)
         if kind == "stt":
-            backend = create_backend(model_id)
+            backend = create_backend(model_id, self.config.language)
             await self._stt_call(backend.load)
             self.stt = backend
             self.config.data["stt_model"] = model_id

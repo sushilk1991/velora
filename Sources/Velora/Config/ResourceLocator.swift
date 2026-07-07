@@ -42,15 +42,26 @@ enum ResourceLocator {
         return ancestor(of: cwd, where: isRepoRoot)
     }
 
-    /// The engine project directory (`<repo>/engine`), honoring the
-    /// `VELORA_ENGINE_DIR` override. Returns nil when unavailable — the app
-    /// then runs in degraded mode (no local transcription).
+    /// The engine project directory (`<repo>/engine`). Resolution order:
+    ///  1. `VELORA_ENGINE_DIR` env (dev override, always wins),
+    ///  2. `VeloraEngineDir` Info.plist key (baked in by make-app.sh so the
+    ///     bundled .app works when moved outside the checkout),
+    ///  3. repo-ancestor scan (bare `swift build` binaries).
+    /// Returns nil when unavailable — the app then runs in degraded mode
+    /// (no local transcription).
     static var engineDirectory: URL? {
         let fm = FileManager.default
         if let override = ProcessInfo.processInfo.environment["VELORA_ENGINE_DIR"],
            !override.isEmpty {
             let url = URL(fileURLWithPath: override, isDirectory: true)
             return fm.fileExists(atPath: url.path) ? url : nil
+        }
+        if let baked = Bundle.main.object(forInfoDictionaryKey: "VeloraEngineDir") as? String,
+           !baked.isEmpty {
+            let url = URL(fileURLWithPath: baked, isDirectory: true)
+            if fm.fileExists(atPath: url.appendingPathComponent("pyproject.toml").path) {
+                return url
+            }
         }
         guard let root = repoRoot else { return nil }
         let engine = root.appendingPathComponent("engine", isDirectory: true)

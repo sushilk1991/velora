@@ -225,15 +225,29 @@ final class DictationController: NSObject {
                 mode: mode, cleanupMs: cleanupMs)
 
         case .error(let session, let message):
-            // Session-scoped errors during an active dictation surface in the
-            // HUD; global engine errors surface only if we're mid-flight.
-            if let session, session != sessionID { return }
-            if phase != .idle {
+            // Only errors scoped to the active session may end the dictation;
+            // global or foreign-session errors are logged and ignored.
+            if session == sessionID, phase != .idle {
                 showError(message)
+            } else {
+                NSLog("Velora: engine error (session %@): %@", session ?? "none", message)
             }
 
         default:
             break
+        }
+    }
+
+    /// Routed here by the AppDelegate on supervisor state changes: an engine
+    /// crash or disconnect mid-dictation fails fast instead of leaving the
+    /// user hanging until the transcribe timeout.
+    func handleEngineStateChange(_ state: EngineSupervisor.State) {
+        guard phase != .idle else { return }
+        switch state {
+        case .ready, .connecting:
+            break
+        case .stopped, .launching, .degraded:
+            showError("Engine crashed — restarting")
         }
     }
 
@@ -247,10 +261,28 @@ final class DictationController: NSObject {
         }
 
         let context = sessionContext
-        inserter.insert(text, targetBundleID: context?.bundleID)
 
-        hud.transition(to: .inserted)
-        phase = .idle
+        // Recheck the target immediately before synthesizing input: focus may
+        // have moved (or a secure field taken over) while transcribing. Never
+        // paste/type blind — fall back to the clipboard and tell the user.
+        var fallbackMessage: String?
+        if SecureInput.isActive {
+            fallbackMessage = "Secure field — copied to clipboard"
+        } else if let target = context?.bundleID,
+                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier != target {
+            fallbackMessage = "Focus changed — copied to clipboard"
+        }
+
+        if let fallbackMessage {
+            inserter.copyToClipboard(text)
+            sounds.play(.error)
+            hud.transition(to: .error(fallbackMessage))
+            phase = .idle
+        } else {
+            inserter.insert(text, targetBundleID: context?.bundleID)
+            hud.transition(to: .inserted)
+            phase = .idle
+        }
 
         let durationMs = recordingStart.map { Int(-$0.timeIntervalSinceNow * 1000) } ?? 0
         history.insert(
@@ -263,6 +295,8 @@ final class DictationController: NSObject {
                 mode: mode,
                 durationMs: durationMs,
                 cleanupMs: cleanupMs))
+
+        guard fallbackMessage == nil else { return }
 
         NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
 

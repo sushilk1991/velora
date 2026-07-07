@@ -2,13 +2,13 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>CFBundleIdentifier</key>
-	<string>com.velora.app</string>
-	<key>CFBundleName</key>
-	<string>Velora</string>
 	<key>CFBundleDisplayName</key>
 	<string>Velora</string>
 	<key>CFBundleExecutable</key>
+	<string>Velora</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.velora.app</string>
+	<key>CFBundleName</key>
 	<string>Velora</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
@@ -20,9 +20,11 @@
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Velora uses the microphone to transcribe your speech into text. Audio never leaves this Mac.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Velora uses the microphone to transcribe your speech into text. Audio never leaves this Mac.</string>
+	<key>VeloraEngineDir</key>
+	<string>/Users/sushil/Code/Velora/engine</string>
 </dict>
 </plist>

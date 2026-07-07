@@ -86,6 +86,9 @@ final class EngineClient {
         generation += 1  // invalidate any running read loop
         stateLock.unlock()
         guard sock >= 0 else { return }
+        // shutdown before close: unblocks a read() parked in the read loop so
+        // the stale loop exits promptly instead of lingering on a recycled fd.
+        shutdown(sock, SHUT_RDWR)
         close(sock)
         if notify {
             DispatchQueue.main.async { [weak self] in
@@ -175,6 +178,11 @@ final class EngineClient {
             let length = Int(UInt32(littleEndian: rawLength))  // type byte + payload
             guard length >= 1, length <= 32 * 1024 * 1024 else { break }  // engine's cap
             guard let body = readExact(length) else { break }
+            // Re-check after the blocking reads: a frame read by a stale loop
+            // (disconnected mid-read, fd possibly recycled by a reconnect)
+            // must never reach the parser as if it came from the new
+            // connection.
+            guard isCurrent() else { break }
             let type = body[body.startIndex]
             let payload = body.dropFirst()
 

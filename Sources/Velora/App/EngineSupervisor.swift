@@ -92,7 +92,12 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: uv)
-        proc.arguments = ["run", "--project", engineDir.path, "velora-engine"]
+        // --parent-pid lets the engine self-exit if this app dies without a
+        // clean shutdown (crash, force-quit) — no zombie MLX process.
+        proc.arguments = [
+            "run", "--project", engineDir.path, "velora-engine",
+            "--parent-pid", String(ProcessInfo.processInfo.processIdentifier),
+        ]
         proc.currentDirectoryURL = engineDir
 
         var env = ProcessInfo.processInfo.environment
@@ -101,11 +106,16 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         env["PATH"] = (extraPaths + [(env["PATH"] ?? "/usr/bin:/bin")]).joined(separator: ":")
         proc.environment = env
 
-        // Engine logs go to a file so crashes are diagnosable.
+        // Engine logs go to a file so crashes are diagnosable. Append (never
+        // truncate) so the evidence from a crash survives the restart spawn.
         let logURL = AppConfig.veloraDirectory.appendingPathComponent("engine.log")
-        FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
         if let handle = try? FileHandle(forWritingTo: logURL) {
             handle.seekToEndOfFile()
+            let stamp = ISO8601DateFormatter().string(from: Date())
+            handle.write(Data("\n===== engine spawn \(stamp) =====\n".utf8))
             proc.standardOutput = handle
             proc.standardError = handle
         }
@@ -141,13 +151,17 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
 
     private func terminateProcess() {
-        guard let proc = process, proc.isRunning else { return }
+        guard let proc = process, proc.isRunning else { process = nil; return }
         proc.terminationHandler = nil
         proc.terminate()  // SIGTERM
-        let pid = proc.processIdentifier
-        DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
-            if proc.isRunning { kill(pid, SIGKILL) }
+        // Called from applicationWillTerminate: the app exits as soon as we
+        // return, so an async SIGKILL fallback would never fire. Block briefly
+        // for a graceful exit, then escalate synchronously.
+        let deadline = Date().addingTimeInterval(2.0)
+        while proc.isRunning && Date() < deadline {
+            usleep(50_000)  // 50 ms poll
         }
+        if proc.isRunning { kill(proc.processIdentifier, SIGKILL) }
         process = nil
     }
 

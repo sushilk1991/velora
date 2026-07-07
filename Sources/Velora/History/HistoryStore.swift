@@ -32,6 +32,9 @@ final class HistoryStore {
         if sqlite3_open(url.path, &handle) == SQLITE_OK {
             db = handle
             createTableIfNeeded()
+            // Transcript store is owner-only (default umask would be 0644).
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path)
         } else {
             NSLog("Velora: failed to open history database at %@", url.path)
             if handle != nil { sqlite3_close(handle) }

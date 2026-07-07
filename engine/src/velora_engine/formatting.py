@@ -152,10 +152,14 @@ _SENTENCE_END_RE = re.compile(r"[.!?…](?:['\")\]]*)$")
 _INTERNAL_TERMINATOR_RE = re.compile(r"[.!?…]\s+\S")
 
 
-def _punctuation_only(text: str, chat_style: bool) -> str:
-    """Short-utterance path: capitalize, terminal punctuation, nothing else."""
+def _punctuation_only(text: str, chat_style: bool, auto_punctuation: bool = True) -> str:
+    """Short-utterance path: capitalize, terminal punctuation, nothing else.
+
+    With auto_punctuation off, the text is left as dictated (whitespace tidy
+    only): no capitalization, no added terminal period.
+    """
     text = _tidy_whitespace(text)
-    if not text:
+    if not text or not auto_punctuation:
         return text
     if text[:1].islower():
         text = text[:1].upper() + text[1:]
@@ -233,6 +237,8 @@ _STRENGTH_INSTRUCTIONS = {
 def build_system_prompt(mode: Mode, config: Config, app_name: str | None, category: str | None) -> str:
     parts = [STATIC_SYSTEM_PROMPT]
     parts.append(_STRENGTH_INSTRUCTIONS.get(mode.formatting, _STRENGTH_INSTRUCTIONS["full"]))
+    if not config.auto_punctuation:
+        parts.append("Do not add terminal punctuation the speaker did not dictate.")
     if mode.prompt.strip():
         parts.append("Mode instructions: " + mode.prompt.strip())
     if app_name:
@@ -288,7 +294,7 @@ def run_gate(
 
     if len(text.split()) < SHORT_UTTERANCE_WORDS:
         out = scrub_fillers(apply_spoken_commands(text))
-        out = _punctuation_only(out, chat_style)
+        out = _punctuation_only(out, chat_style, config.auto_punctuation)
         out = apply_replacements(out, replacements)
         return GateResult(mode, category, False, "short_utterance", out, None, replacements)
 

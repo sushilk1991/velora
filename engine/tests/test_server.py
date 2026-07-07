@@ -5,11 +5,13 @@ import asyncio
 import json
 import shutil
 import tempfile
+import threading
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+import velora_engine.server as server_mod
 from velora_engine import protocol
 from velora_engine.config import Config
 from velora_engine.server import Engine
@@ -98,6 +100,9 @@ async def test_full_dictation_flow(engine):
     assert final["cleanup_applied"] is False
     assert final["text"] == "hello world this is a fake transcript"
     assert isinstance(final["cleanup_ms"], int)
+    assert "auto_stopped" not in final  # only present on max-duration auto-stop
+    # socket must be private to the user
+    assert (sock.stat().st_mode & 0o777) == 0o600
     client.close()
 
 
@@ -184,3 +189,165 @@ async def test_status_and_reload(engine):
     await client.send_json({"cmd": "reload_config"})
     assert (await client.recv())["event"] == "config_reloaded"
     client.close()
+
+
+# ---- session ownership across reconnect (codex#4 / claude M5) ----
+
+
+class FakeWriter:
+    """Stands in for an asyncio.StreamWriter in ownership unit tests."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    async def drain(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+
+async def test_displaced_client_cleanup_keeps_new_session(home, fake_stt):
+    """A displaced old handler's cleanup must not abort the new client's session."""
+    eng = Engine(Config(), parent_pid=None)
+    eng.stt_ready.set()
+    w_old, w_new = FakeWriter(), FakeWriter()
+
+    eng.writer = w_old
+    await eng._cmd_start({"session": "s-old", "context": {}})
+    assert eng.session is not None and eng.session.owner is w_old
+
+    # new client connects and starts its own session
+    eng.writer = w_new
+    await eng._cmd_start({"session": "s-new", "context": {}})
+    assert eng.session.id == "s-new" and eng.session.owner is w_new
+
+    # old handler's finally runs late: must NOT discard the new session
+    await eng._client_cleanup(w_old)
+    assert eng.session is not None and eng.session.id == "s-new"
+    assert w_old.closed
+
+    # the owning connection's cleanup does abort it
+    await eng._client_cleanup(w_new)
+    assert eng.session is None
+
+
+async def test_reconnect_new_client_flow_survives(engine):
+    """End-to-end: reconnect mid-dictation; the new client's session completes."""
+    eng, sock = engine
+    a = await connect(sock)
+    await a.recv_event("ready")
+    await a.send_json({"cmd": "start", "session": "s1", "context": {}})
+    await a.send_audio(AUDIO)
+    for _ in range(200):
+        if eng.session is not None:
+            break
+        await asyncio.sleep(0.01)
+
+    b = await connect(sock)  # displaces a
+    await b.recv_event("ready")
+    await b.send_json({"cmd": "start", "session": "s2", "context": {}})
+    await b.send_audio(AUDIO)
+    await b.send_json({"cmd": "stop", "session": "s2"})
+    final = await b.recv_event("final")
+    assert final["session"] == "s2"
+    a.close()
+    b.close()
+
+
+# ---- bounded audio queue (codex#7 / claude M4) ----
+
+
+async def test_queue_overflow_aborts_session(engine, monkeypatch):
+    eng, sock = engine
+    monkeypatch.setattr(server_mod, "QUEUE_MAX_FRAMES", 3)
+    monkeypatch.setattr(server_mod, "MAX_DROPPED_FRAMES", 5)
+    release = threading.Event()
+
+    def stuck_feed(chunk):  # simulate STT far below realtime
+        release.wait(10)
+        return None
+
+    monkeypatch.setattr(eng.stt, "feed_chunk", stuck_feed)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "s-of", "context": {}})
+    for _ in range(12):  # capacity (3) + in-flight (1) + drops past threshold
+        await client.send_audio(AUDIO)
+
+    evt = await client.recv(timeout=5)
+    assert evt["event"] == "error"
+    assert "overflow" in evt["message"]
+    assert evt["session"] == "s-of"
+    release.set()
+
+    # engine recovered: idle again and responsive
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv())["event"] == "pong"
+    assert eng.session is None
+    client.close()
+
+
+# ---- max recording duration auto-stop ----
+
+
+async def test_auto_stop_at_max_duration(engine):
+    eng, sock = engine
+    eng.config.data["max_recording_s"] = 0.05  # 800 samples at 16 kHz
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "s-cap", "context": {}})
+    await client.send_audio(AUDIO)  # 1600 samples > cap → auto-finalize, no stop sent
+
+    transcript = await client.recv_event("transcript")
+    assert transcript["session"] == "s-cap"
+    final = await client.recv_event("final")
+    assert final["session"] == "s-cap"
+    assert final["auto_stopped"] is True
+    assert final["text"] == "hello world this is a fake transcript"
+    assert eng.session is None
+    client.close()
+
+
+# ---- config key consumption: language ----
+
+
+def test_whisper_language_mapping(monkeypatch):
+    monkeypatch.delenv("VELORA_FAKE_STT", raising=False)
+    from velora_engine.stt import WhisperBackend, create_backend, whisper_language
+
+    assert whisper_language("auto") is None
+    assert whisper_language("AUTO") is None
+    assert whisper_language("") is None
+    assert whisper_language(None) is None
+    assert whisper_language(" de ") == "de"
+
+    backend = create_backend("mlx-community/whisper-large-v3-turbo", "de")
+    assert isinstance(backend, WhisperBackend)
+    assert backend.language == "de"
+    # parakeet is English-only: language is ignored (no attribute consumed)
+    parakeet = create_backend("mlx-community/parakeet-tdt-0.6b-v2", "de")
+    assert not isinstance(parakeet, WhisperBackend)
+
+
+async def test_reload_config_propagates_language(engine, home):
+    eng, sock = engine
+    assert eng.config.language == "auto"
+    client = await connect(sock)
+    await client.recv_event("ready")
+    (home / "config.json").write_text(json.dumps({"language": "de"}))
+    await client.send_json({"cmd": "reload_config"})
+    await client.recv_event("config_reloaded")
+    assert eng.config.language == "de"
+    assert eng.stt.language == "de"  # FakeBackend mirrors the whisper attribute
+    client.close()
+
+
+# ---- transcript privacy (M7) ----
+
+
+def test_velora_home_created_private(config):
+    assert (config.home.stat().st_mode & 0o777) == 0o700
