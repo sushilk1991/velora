@@ -30,6 +30,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "replacements": {},
     "language": "auto",
     "auto_punctuation": True,
+    # Romanize non-English (Devanagari/CJK/…) output into the Latin alphabet —
+    # e.g. Hindi speech → natural Hinglish in English letters, not Devanagari.
+    # Off by default; opt-in. Uses the multilingual cleanup LLM.
+    "romanize_output": False,
     "max_recording_s": 300,
     # Audio archive: keep a clip of each dictation so it can be re-transcribed
     # later with a better model (history → reprocess). On by default (a core
@@ -124,6 +128,11 @@ class Config:
     @property
     def auto_punctuation(self) -> bool:
         return bool(self.data.get("auto_punctuation", True))
+
+    @property
+    def romanize_output(self) -> bool:
+        """Write non-Latin output in the Latin alphabet (Hindi → Hinglish)."""
+        return bool(self.data.get("romanize_output", False))
 
     @property
     def max_recording_s(self) -> float:

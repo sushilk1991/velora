@@ -76,6 +76,7 @@ final class SettingsModel: ObservableObject {
         appearance = config.appearance
         language = config.language
         autoPunctuation = config.autoPunctuation
+        romanizeOutput = config.romanizeOutput
         sttModel = config.sttModel
         saveAudio = config.saveAudio
 
@@ -164,6 +165,14 @@ final class SettingsModel: ObservableObject {
     @Published var autoPunctuation: Bool {
         didSet {
             config.autoPunctuation = autoPunctuation
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+
+    @Published var romanizeOutput: Bool {
+        didSet {
+            guard romanizeOutput != oldValue else { return }
+            config.romanizeOutput = romanizeOutput
             supervisor?.send(["cmd": "reload_config"])
         }
     }

@@ -73,7 +73,10 @@ English, and the top world languages; batch decode on stop). The picker also
 offers full `whisper-large-v3` (highest accuracy), a Hindi/Hinglish specialist,
 and the parakeet models (English/European, live streaming partials). Non-Latin
 transcripts (Devanagari, CJK, Arabic) skip the English-tuned cleanup LLM and take
-the deterministic path — see the formatting gate.
+the deterministic path — see the formatting gate. Opt-in `romanize_output` instead
+routes non-Latin text through the multilingual LLM to transliterate it into the Latin
+alphabet (Hindi → natural Hinglish; the words are kept, not translated). The length-ratio
+divergence guard is disabled for that pass since transliteration changes length.
 
 **Latency budget:** with a parakeet model, STT streams during speech (`transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms) and live partials feed the HUD. With the default whisper model, decode is batch on `stop` (a few hundred ms for typical clips on Apple Silicon; no live partials — the quality/multilingual tradeoff). Cleanup hard timeout 1500ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
 

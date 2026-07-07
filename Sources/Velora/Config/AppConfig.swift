@@ -119,6 +119,7 @@ final class AppConfig {
         static let autoPunctuation = "velora.autoPunctuation"
         static let sttModel = "velora.sttModel"
         static let saveAudio = "velora.saveAudio"
+        static let romanizeOutput = "velora.romanizeOutput"
         static let typingFallbackApps = "velora.typingFallbackApps"
     }
 
@@ -133,6 +134,7 @@ final class AppConfig {
             Key.autoPunctuation: true,
             Key.sttModel: STTModel.all[0].id,
             Key.saveAudio: true,
+            Key.romanizeOutput: false,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -219,6 +221,13 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: Key.saveAudio); writeEngineConfig() }
     }
 
+    /// Romanize non-English output — write Hindi/other non-Latin speech in the
+    /// Latin alphabet (natural Hinglish) instead of the native script.
+    var romanizeOutput: Bool {
+        get { defaults.bool(forKey: Key.romanizeOutput) }
+        set { defaults.set(newValue, forKey: Key.romanizeOutput); writeEngineConfig() }
+    }
+
     /// Bundle ids that should use CGEvent unicode typing instead of ⌘V paste
     /// (terminals and other paste-hostile apps). User-extendable.
     var typingFallbackApps: [String] {
@@ -273,6 +282,7 @@ final class AppConfig {
         payload["language"] = language
         payload["auto_punctuation"] = autoPunctuation
         payload["save_audio"] = saveAudio
+        payload["romanize_output"] = romanizeOutput
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])

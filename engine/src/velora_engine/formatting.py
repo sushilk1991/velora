@@ -235,6 +235,16 @@ STATIC_SYSTEM_PROMPT = (
     "8. Chat messages: casual tone, no trailing period on a single short sentence.\n"
 )
 
+# Romanization prompt (opt-in `romanize_output`): transliterate non-Latin
+# dictation into natural Latin-script form (Hindi → Hinglish), NOT translate.
+ROMANIZE_SYSTEM_PROMPT = (
+    "You transliterate dictation into the Latin alphabet (Romanized). "
+    "Rewrite the user's text using only English letters, as natural romanized "
+    "text (e.g. Hindi becomes Hinglish). Do NOT translate — keep the exact same "
+    "words and meaning, only change the script. Keep any already-English words "
+    "as they are. Remove filler sounds. Output only the romanized text, nothing else."
+)
+
 _STRENGTH_INSTRUCTIONS = {
     "light": (
         "Formatting strength: LIGHT. Only punctuation, capitalization, filler "
@@ -281,6 +291,7 @@ class GateResult:
     text: str  # deterministic result (final text when use_llm is False)
     system_prompt: str | None = None
     replacements: dict[str, str] = field(default_factory=dict)
+    romanize: bool = False  # LLM pass is a script transliteration, not cleanup
 
 
 def run_gate(
@@ -308,12 +319,18 @@ def run_gate(
         return GateResult(mode, category, False, "formatting_off", out, None, replacements)
 
     if is_mostly_non_latin(text):
-        # Non-Latin script (Hindi, Chinese, Arabic, …): skip the English-tuned
-        # cleanup LLM; deterministic tidy + spoken-command + replacements only.
-        # Checked BEFORE the short-utterance path so an unspaced CJK sentence
-        # (which splits to few "words") doesn't get a Latin period appended.
-        out = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
-        out = apply_replacements(out, replacements)
+        cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
+        if getattr(config, "romanize_output", False):
+            # Opt-in: transliterate non-Latin → Latin script via the LLM
+            # (Hindi → natural Hinglish). Deterministic transliteration reads
+            # badly (no schwa deletion); the multilingual LLM does it well.
+            return GateResult(
+                mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT, replacements, romanize=True
+            )
+        # Otherwise keep the native script and skip the English-tuned cleanup
+        # LLM. Checked BEFORE the short-utterance path so an unspaced CJK
+        # sentence doesn't get a Latin period appended.
+        out = apply_replacements(cleaned, replacements)
         return GateResult(mode, category, False, "non_latin_script", out, None, replacements)
 
     if len(text.split()) < SHORT_UTTERANCE_WORDS:

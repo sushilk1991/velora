@@ -105,6 +105,14 @@ struct DictationSettingsView: View {
                     }
                 }
                 Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
+                Toggle(isOn: $model.romanizeOutput) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Write output in English letters")
+                        Text("Transliterate non-English speech to the Latin alphabet — e.g. Hindi becomes Hinglish (\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947} \u{2192} \u{201C}namaste\u{201D}). Keeps the words, not a translation.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             Section {
                 Toggle(isOn: $model.saveAudio) {

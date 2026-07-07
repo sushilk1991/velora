@@ -502,7 +502,13 @@ class Engine:
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
         if gate.use_llm and self.cleanup is not None and self.cleanup.loaded:
-            result = await self.cleanup.cleanup(raw, gate.system_prompt or STATIC_SYSTEM_PROMPT)
+            if gate.romanize:
+                # Transliteration: skip the length-ratio guard and allow longer.
+                result = await self.cleanup.cleanup(
+                    raw, gate.system_prompt or STATIC_SYSTEM_PROMPT, timeout_ms=4000, check_ratio=False
+                )
+            else:
+                result = await self.cleanup.cleanup(raw, gate.system_prompt or STATIC_SYSTEM_PROMPT)
             if result.applied:
                 text = formatting.postprocess(result.text, gate)
             else:
@@ -551,6 +557,7 @@ class Engine:
                 "save_audio": self.config.save_audio,
                 "audio_retention_days": self.config.audio_retention_days,
                 "language": self.config.language,
+                "romanize_output": self.config.romanize_output,
                 "models": models.registry_payload(),
                 "version": __version__,
             }

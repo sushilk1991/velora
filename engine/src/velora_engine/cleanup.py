@@ -161,24 +161,34 @@ class CleanupEngine:
         self._cache_tokens = tokens + gen_tokens
         return "".join(out_text), timed_out
 
-    def _run(self, raw: str, system_prompt: str, timeout_ms: int) -> CleanupResult:
+    def _run(self, raw: str, system_prompt: str, timeout_ms: int, check_ratio: bool = True) -> CleanupResult:
         t0 = time.perf_counter()
         deadline = t0 + timeout_ms / 1000.0
         with self._lock:
             input_tokens = len(self._tokenizer.encode(raw))
-            max_tokens = max(MIN_MAX_TOKENS, int(input_tokens * OUTPUT_TOKEN_FACTOR))
+            # Romanization (check_ratio off) expands length, so give the
+            # generator more headroom than the usual 1.8x cleanup budget.
+            factor = OUTPUT_TOKEN_FACTOR if check_ratio else 3.0
+            max_tokens = max(MIN_MAX_TOKENS, int(input_tokens * factor))
             text, timed_out = self._generate_locked(system_prompt, raw, max_tokens, deadline)
         ms = int((time.perf_counter() - t0) * 1000)
         if timed_out:
             log.warning("cleanup timeout after %dms — returning raw", ms)
             return CleanupResult(raw, False, ms, "timeout")
-        reason = check_divergence(raw, text)
-        if reason is not None:
-            log.warning("cleanup divergence guard tripped (%s) — returning raw", reason)
-            return CleanupResult(raw, False, ms, reason)
+        # The divergence guard is a length-ratio over-editing check; a script
+        # transliteration legitimately changes length, so skip it when romanizing.
+        if check_ratio:
+            reason = check_divergence(raw, text)
+            if reason is not None:
+                log.warning("cleanup divergence guard tripped (%s) — returning raw", reason)
+                return CleanupResult(raw, False, ms, reason)
+        elif not text.strip():
+            return CleanupResult(raw, False, ms, "empty_output")
         return CleanupResult(text.strip(), True, ms)
 
-    async def cleanup(self, raw: str, system_prompt: str, timeout_ms: int = TIMEOUT_MS) -> CleanupResult:
+    async def cleanup(
+        self, raw: str, system_prompt: str, timeout_ms: int = TIMEOUT_MS, check_ratio: bool = True
+    ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure."""
         if not self.loaded:
             return CleanupResult(raw, False, 0, "llm_not_loaded")
@@ -188,7 +198,7 @@ class CleanupEngine:
             # the lock serializes any next request behind it).
             loop = asyncio.get_running_loop()
             return await asyncio.wait_for(
-                loop.run_in_executor(self._executor, self._run, raw, system_prompt, timeout_ms),
+                loop.run_in_executor(self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio),
                 timeout=timeout_ms / 1000.0 + 3.0,
             )
         except asyncio.TimeoutError:

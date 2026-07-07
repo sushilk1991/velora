@@ -249,3 +249,26 @@ def test_cjk_sentence_routes_non_latin_not_short(config):
     assert gate.use_llm is False
     assert gate.reason == "non_latin_script"
     assert not gate.text.endswith(".")
+
+
+def test_romanize_routes_non_latin_to_llm(config):
+    config.data["romanize_output"] = True
+    gate = run_gate("नमस्ते आज मौसम बहुत अच्छा है क्या आप ठीक हैं", config)
+    assert gate.use_llm is True
+    assert gate.romanize is True
+    assert gate.reason == "romanize"
+    assert gate.system_prompt == formatting.ROMANIZE_SYSTEM_PROMPT
+
+
+def test_romanize_off_keeps_native_script(config):
+    config.data["romanize_output"] = False
+    gate = run_gate("नमस्ते आज मौसम बहुत अच्छा है क्या आप ठीक हैं", config)
+    assert gate.use_llm is False
+    assert gate.reason == "non_latin_script"
+
+
+def test_romanize_ignores_latin_text(config):
+    # English text is unaffected by the romanize toggle (already Latin).
+    config.data["romanize_output"] = True
+    gate = run_gate("please schedule the meeting for tomorrow at three pm", config)
+    assert gate.romanize is False
