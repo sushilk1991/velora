@@ -12,7 +12,7 @@ Two processes, one product:
                 │ Unix domain socket  ~/.velora/engine.sock
                 │ Framed protocol: JSON control + raw PCM audio frames
 ┌───────────────┴──────────────── velora-engine (Python 3.12, uv) ───────────────────┐
-│ STT: parakeet-mlx (parakeet-tdt-0.6b-v3, streaming) │ fallback mlx-whisper turbo   │
+│ STT: parakeet-mlx (parakeet-tdt-0.6b-v2, streaming) │ fallback mlx-whisper turbo   │
 │ Cleanup/format: mlx-lm (Qwen3-4B-Instruct-2507-4bit) with prompt cache             │
 │ Smart-format policy: mode resolution (app bundle id → mode file) + prompt builder  │
 │ Model manager: HuggingFace download, warm/unload lifecycle                         │
@@ -53,7 +53,7 @@ engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode"
 ```
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`.
 
-**Latency budget:** STT streams during speech (parakeet `transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms). Cleanup budget 700ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
+**Latency budget:** STT streams during speech (parakeet `transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms). Cleanup hard timeout 1500ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
 
 ## Smart formatting policy (the "smart as Wispr Flow" part)
 
@@ -112,12 +112,12 @@ Velora/
 ├── Package.swift            # SwiftPM app
 ├── Sources/Velora/...
 ├── engine/                  # uv project (pyproject.toml)
-│   └── src/velora_engine/...
+│   ├── src/velora_engine/...
+│   └── tests/               # engine pytest + protocol integration tests
 ├── Resources/               # Info.plist, sounds, icon
-├── scripts/                 # make-app.sh, bench.sh, download-samples.sh
+├── scripts/                 # make-app.sh, make-sounds.sh, engine-smoke.py
 ├── docs/                    # SPEC, ARCHITECTURE, research/
-├── Makefile                 # build / run / bench / test / app
-└── tests/                   # engine pytest + protocol integration tests
+├── Makefile                 # build / run / test / app / sounds
 ```
 
 ## Testing strategy
@@ -125,4 +125,4 @@ Velora/
 - Engine unit tests (pytest): formatting gate, protocol framing, divergence guard, mode resolution.
 - Integration: scripted client feeds real WAV PCM over the socket → asserts transcript + formatted output + latency budgets (this is the E2E harness; runs headless, no TCC needed).
 - App: XCTest is unavailable without Xcode → swift-testing via SwiftPM where possible; UI/permission paths verified manually + via the try-it onboarding step.
-- Bench: `make bench` reports STT RTF, stop→transcript ms, cleanup ms on the sample corpus.
+- Bench: `scripts/engine-smoke.py` reports stop→transcript / stop→final latencies per run.

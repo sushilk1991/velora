@@ -1,6 +1,6 @@
 # Velora — build orchestration (SwiftPM + hand-rolled .app; no Xcode).
 
-.PHONY: build release app run sounds clean
+.PHONY: build release app run sounds clean test
 
 build:
 	swift build
@@ -19,3 +19,6 @@ sounds:
 
 clean:
 	rm -rf .build build
+
+test:
+	cd engine && uv run pytest -q

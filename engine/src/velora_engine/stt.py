@@ -64,8 +64,12 @@ class ParakeetBackend:
     def load(self) -> None:
         from parakeet_mlx import from_pretrained
 
+        from .models import ensure_downloaded
+
         t0 = time.perf_counter()
-        self._model = from_pretrained(self.model_id)
+        # Resolve to the local snapshot so a cached model loads with zero
+        # network requests (local-first).
+        self._model = from_pretrained(ensure_downloaded(self.model_id))
         log.info("parakeet loaded %s in %.2fs", self.model_id, time.perf_counter() - t0)
 
     def start_session(self) -> None:
@@ -172,6 +176,7 @@ class WhisperBackend:
 
     def __init__(self, model_id: str) -> None:
         self.model_id = model_id
+        self._model_path = model_id  # resolved to a local path in load()
         self._chunks: list[np.ndarray] = []
         self._loaded = False
 
@@ -179,8 +184,11 @@ class WhisperBackend:
         import mlx.core as mx
         from mlx_whisper.load_models import load_model
 
+        from .models import ensure_downloaded
+
+        self._model_path = ensure_downloaded(self.model_id)
         t0 = time.perf_counter()
-        model = load_model(self.model_id, dtype=mx.float16)
+        model = load_model(self._model_path, dtype=mx.float16)
         mx.eval(model.parameters())
         del model  # mlx_whisper's ModelHolder reloads by repo id at transcribe time
         self._loaded = True
@@ -202,7 +210,7 @@ class WhisperBackend:
         self._chunks = []
         result = mlx_whisper.transcribe(
             audio,
-            path_or_hf_repo=self.model_id,
+            path_or_hf_repo=self._model_path,
             condition_on_previous_text=False,
             fp16=True,
         )

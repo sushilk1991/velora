@@ -61,10 +61,22 @@ def lookup(model_id: str) -> ModelInfo | None:
 
 
 def ensure_downloaded(model_id: str) -> str:
-    """Download (or verify) a model snapshot; returns the local path."""
-    from huggingface_hub import snapshot_download
+    """Return the local snapshot path, downloading only when not cached.
 
-    log.info("ensuring model %s is downloaded ...", model_id)
+    Local-first: a complete cached snapshot is used without any network
+    request — the Hub is only contacted when files are actually missing.
+    """
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        path = snapshot_download(repo_id=model_id, local_files_only=True)
+        log.info("model %s found in local cache at %s", model_id, path)
+        return path
+    except LocalEntryNotFoundError:
+        pass
+
+    log.info("downloading model %s ...", model_id)
     t0 = time.perf_counter()
     path = snapshot_download(repo_id=model_id)
     log.info("model %s ready at %s (%.1fs)", model_id, path, time.perf_counter() - t0)

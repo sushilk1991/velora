@@ -74,8 +74,11 @@ class CleanupEngine:
     def load(self, warm_system_prompt: str | None = None) -> None:
         from mlx_lm import load
 
+        from .models import ensure_downloaded
+
         t0 = time.perf_counter()
-        self._model, self._tokenizer = load(self.model_id)
+        # Local path, not repo id: a cached model must load without network.
+        self._model, self._tokenizer = load(ensure_downloaded(self.model_id))
         log.info("cleanup LLM loaded %s in %.2fs", self.model_id, time.perf_counter() - t0)
         if warm_system_prompt:
             t0 = time.perf_counter()
