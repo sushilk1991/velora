@@ -36,13 +36,22 @@ final class AudioCapture {
     private let bufferQueue = DispatchQueue(label: "com.velora.capture.buffer")
     private var pending: [Float] = []
     private var chunkHandler: ((Data) -> Void)?
-    private var levelHandler: ((Float) -> Void)?
+    private var levelHandler: (([Float]) -> Void)?
+
+    /// FFT window fed the spectrum analyzer; a ~1024-sample rolling buffer with
+    /// a short hop so the HUD updates ~30x/s (lively) instead of ~10x/s.
+    private let spectrum = SpectrumAnalyzer(fftSize: 1024, bandCount: WaveformLevelStore.halfCount, sampleRate: AudioCapture.sampleRate)
+    private static let spectrumWindow = 1024
+    private static let spectrumHop = 512  // ~32 ms at 16 kHz
+    private var spectrumBuffer: [Float] = []
+    private var sinceLastSpectrum = 0
 
     /// Starts capture. `onChunk` receives raw Float32 LE PCM (~100 ms each);
-    /// `onLevel` receives a 0…1 normalized loudness per chunk (main queue).
+    /// `onLevel` receives a frequency spectrum (0…1 per band, main queue) for
+    /// the HUD waveform, roughly every 32 ms.
     func start(
         onChunk: @escaping (Data) -> Void,
-        onLevel: @escaping (Float) -> Void
+        onLevel: @escaping ([Float]) -> Void
     ) throws {
         guard !isRunning else { return }
 
@@ -63,6 +72,8 @@ final class AudioCapture {
 
         bufferQueue.sync {
             pending.removeAll(keepingCapacity: true)
+            spectrumBuffer.removeAll(keepingCapacity: true)
+            sinceLastSpectrum = 0
             chunkHandler = onChunk
             levelHandler = onLevel
         }
@@ -122,6 +133,7 @@ final class AudioCapture {
                 handler(data)
             }
             pending.removeAll()
+            spectrumBuffer.removeAll()
             chunkHandler = nil
             levelHandler = nil
         }
@@ -129,26 +141,31 @@ final class AudioCapture {
 
     // MARK: - Buffer accumulation (bufferQueue only)
 
-    /// Appends converted samples and emits fixed ~100 ms chunks.
+    /// Appends converted samples, emits fixed ~100 ms chunks to the engine, and
+    /// emits a frequency spectrum for the HUD on a short (~32 ms) hop.
     private func accumulate(_ samples: [Float]) {
         guard chunkHandler != nil else { return }  // stopped; drop stragglers
         pending.append(contentsOf: samples)
         while pending.count >= Self.chunkFrames {
             let chunk = Array(pending.prefix(Self.chunkFrames))
             pending.removeFirst(Self.chunkFrames)
-
             let data = chunk.withUnsafeBufferPointer { Data(buffer: $0) }
             chunkHandler?(data)
+        }
 
-            // RMS → dBFS → normalized 0…1 with a −50 dBFS floor
-            // (design brief §2 pipeline).
-            var sum: Float = 0
-            for sample in chunk { sum += sample * sample }
-            let rms = (sum / Float(chunk.count)).squareRoot()
-            let db = 20 * log10(max(rms, 1e-7))
-            let level = max(0, min(1, (db + 50) / 50))
+        // Rolling FFT window for the HUD waveform: keep the last ~1024 samples,
+        // recompute the spectrum every ~512 samples so the bars react to pitch
+        // and loudness ~30x/s.
+        spectrumBuffer.append(contentsOf: samples)
+        if spectrumBuffer.count > Self.spectrumWindow {
+            spectrumBuffer.removeFirst(spectrumBuffer.count - Self.spectrumWindow)
+        }
+        sinceLastSpectrum += samples.count
+        if sinceLastSpectrum >= Self.spectrumHop, spectrumBuffer.count >= Self.spectrumWindow / 2 {
+            sinceLastSpectrum = 0
+            let bands = spectrum.process(spectrumBuffer)
             if let onLevel = levelHandler {
-                DispatchQueue.main.async { onLevel(level) }
+                DispatchQueue.main.async { onLevel(bands) }
             }
         }
     }

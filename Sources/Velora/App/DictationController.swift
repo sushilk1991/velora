@@ -62,6 +62,12 @@ final class DictationController: NSObject {
     }
 
     private var sessionID = ""
+    /// The session the user explicitly cancelled (Esc / stuck-transcribe / error).
+    /// A late `final` for this id must be ignored; a `final` for the current
+    /// `sessionID` that is NOT this one is always honored, even if `phase`
+    /// drifted (e.g. a missed hotkeyUp left us in `.recording`), so a valid
+    /// transcription is never silently lost.
+    private var cancelledSessionID: String?
     private var sessionContext: AppContext?
     private var recordingStart: Date?
     private var transcribeStartedAt: Date?
@@ -183,7 +189,7 @@ final class DictationController: NSObject {
         do {
             try capture.start(
                 onChunk: { data in client.send(audio: data) },
-                onLevel: { [weak self] level in self?.hud.model.levels.push(level) })
+                onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) })
         } catch {
             supervisor.send(["cmd": "cancel", "session": sessionID])
             showError(error.localizedDescription)
@@ -202,13 +208,21 @@ final class DictationController: NSObject {
         supervisor.send(["cmd": "stop", "session": sessionID])
         hud.transition(to: .transcribing)
         phase = .transcribing
-        transcribeStartedAt = Date()
+        armTranscribeTimeout()
+    }
 
+    /// (Re)arms the stop→final watchdog. Reset on `transcript` progress so a
+    /// slow LLM cleanup after a long batch (whisper) decode doesn't trip it.
+    /// A late `final` that arrives after this fires is still honored (see the
+    /// `.final` handler) unless the user explicitly cancelled.
+    private func armTranscribeTimeout() {
+        transcribeStartedAt = Date()
         transcribeTimer?.invalidate()
         transcribeTimer = Timer.scheduledTimer(
             withTimeInterval: Self.transcribeTimeout, repeats: false
         ) { [weak self] _ in
             guard let self, self.phase == .transcribing else { return }
+            NSLog("Velora: transcribe timeout — session=%@", self.sessionID)
             self.supervisor.send(["cmd": "cancel", "session": self.sessionID])
             self.showError("Transcription timed out")
         }
@@ -238,6 +252,9 @@ final class DictationController: NSObject {
         transcribeTimer?.invalidate()
         transcribeTimer = nil
 
+        // Mark this session cancelled so a late `final` for it is refused
+        // (the user explicitly gave up on it).
+        cancelledSessionID = sessionID
         capture.stop()
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
@@ -277,12 +294,28 @@ final class DictationController: NSObject {
             // Keep the final recognized text visible under the transcribing
             // shimmer even if no partial covered the last words.
             hud.model.updatePartial(raw)
+            // Progress signal: the engine has decoded and is now formatting.
+            // Refresh the timeout so a slow LLM cleanup after a long batch
+            // transcription doesn't trip the stop→final deadline.
+            if phase == .transcribing { armTranscribeTimeout() }
 
         case .final(let session, let text, let raw, let mode, let cleanupMs, _, let audio):
-            guard session == sessionID, phase == .transcribing else { return }
-            NSLog("Velora: engine final session=%@ chars=%ld", session, text.count)
+            // Honor a valid final for the CURRENT session even if phase drifted
+            // from .transcribing — a missed hotkeyUp can leave us in .recording,
+            // or a timeout can have reset us to .idle. The only final we refuse
+            // is one for a session the user explicitly cancelled. Never silently
+            // lose a real transcription.
+            guard session == sessionID, session != cancelledSessionID else {
+                NSLog("Velora: ignoring final for session=%@ (current=%@ cancelled=%@)",
+                      session, sessionID, cancelledSessionID ?? "none")
+                return
+            }
+            NSLog("Velora: engine final session=%@ chars=%ld phase=%@", session, text.count, phase.label)
             transcribeTimer?.invalidate()
             transcribeTimer = nil
+            // If we never observed the stop edge, capture is still running — stop
+            // it now so the mic releases and we don't keep streaming audio.
+            if isRecording { capture.stop() }
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
                 mode: mode, cleanupMs: cleanupMs, audio: audio)

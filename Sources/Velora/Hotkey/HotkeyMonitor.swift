@@ -105,12 +105,28 @@ final class HotkeyMonitor {
         start()
     }
 
-    /// Clears cached modifier/combo latches. Called when the tap is disabled
-    /// then re-enabled (a missed flagsChanged edge would otherwise strand
-    /// `modifierIsDown == true`, making the next real press look like "no
-    /// change" and emit nothing — the hotkey goes dead) and on any restart.
+    /// Resyncs cached modifier/combo latches to the ACTUAL live key state.
+    /// Called when the tap is disabled then re-enabled (our own ⌘V paste
+    /// triggers `.tapDisabledByUserInput`) and on restart.
+    ///
+    /// A blind reset to `false` wedges both ways: it fixes a stranded
+    /// `modifierIsDown == true` (missed up-edge → hotkey dead), but if the
+    /// modifier is *physically held* when the tap re-enables — e.g. the paste's
+    /// tap-disable is delivered right after the user has begun holding the key
+    /// for the NEXT dictation — forcing `false` desyncs the latch, so the
+    /// eventual release sees "no change" and never emits `hotkeyUp`, stranding
+    /// the recording (and the engine's `final` is then dropped downstream).
+    /// Query the live modifier flags instead so the latch always matches reality.
     private func resetLatchedState() {
-        modifierIsDown = false
+        if hotkey.isModifierOnly, let mask = Hotkey.modifierMask(forKeyCode: hotkey.keyCode) {
+            let live = CGEventSource.flagsState(.combinedSessionState)
+            modifierIsDown = live.rawValue & mask.rawValue != 0
+        } else {
+            modifierIsDown = false
+        }
+        // Combos: the up edge is the key's own keyUp regardless of modifiers,
+        // and a missed keyUp is recovered by the next keyDown (comboIsDown gate),
+        // so clearing is safe.
         comboIsDown = false
     }
 

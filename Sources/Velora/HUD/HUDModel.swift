@@ -98,18 +98,32 @@ final class WaveformLevelStore {
     static let halfCount = barCount / 2
 
     private let lock = NSLock()
-    /// Index 0 = center (newest) … `halfCount - 1` = outer edge (oldest).
+    /// Index 0 = center bars (LOW frequency) … `halfCount - 1` = outer edge
+    /// (HIGH frequency). A live frequency spectrum, so the bars respond to
+    /// pitch (which bands light up) as well as loudness (how tall they get).
     private var targets = [Float](repeating: 0, count: WaveformLevelStore.halfCount)
     private var display = [CGFloat](repeating: 4, count: WaveformLevelStore.halfCount)
     private var latestLevel: Float = 0
 
-    /// Appends a new level (0…1) at the center; the oldest level falls off
-    /// the outer edges.
-    func push(_ level: Float) {
+    /// Sets the target bar heights from a frequency spectrum: `bands[0]` (low)
+    /// maps to the center bars, the highest band to the outer edges. Each value
+    /// is a 0…1 magnitude. Bass in the middle reads as a natural, lively
+    /// center-weighted waveform.
+    func push(_ bands: [Float]) {
+        guard !bands.isEmpty else { return }
         lock.lock()
-        targets.removeLast()
-        targets.insert(level, at: 0)
-        latestLevel = level
+        var peak: Float = 0
+        for i in 0..<Self.halfCount {
+            // Map halfCount bars onto the provided bands (nearest, tolerant of
+            // a mismatched count).
+            let idx = bands.count == Self.halfCount
+                ? i
+                : min(bands.count - 1, i * bands.count / Self.halfCount)
+            let v = max(0, min(1, bands[idx]))
+            targets[i] = v
+            peak = max(peak, v)
+        }
+        latestLevel = peak
         lock.unlock()
     }
 
@@ -133,19 +147,27 @@ final class WaveformLevelStore {
         lock.lock()
         defer { lock.unlock() }
 
-        let idle = latestLevel < 0.03
+        let idle = latestLevel < 0.04
+        let maxH = HUDGeometry.waveformSize.height
         for i in 0..<Self.halfCount {
             let target: CGFloat
             if settle {
                 target = 4
             } else if idle {
-                // standing wave rippling outward from the center:
-                // 4 + 2·sin(t·2π·0.8 + i·0.5)
-                target = 4 + 2 * CGFloat(sin(time * 2 * .pi * 0.8 + Double(i) * 0.5))
+                // Breathing standing wave: two rippling components so the idle
+                // state still feels alive without looking mechanical.
+                let a = sin(time * 2 * .pi * 0.9 + Double(i) * 0.55)
+                let b = sin(time * 2 * .pi * 0.37 - Double(i) * 0.3)
+                target = 5 + 2.2 * CGFloat(a) + 1.2 * CGFloat(b)
             } else {
-                target = 4 + CGFloat(targets[i]) * 28
+                // Slight expansion curve gives quiet consonants visible motion
+                // while loud vowels still peak near the top of the strip.
+                let shaped = pow(CGFloat(targets[i]), 0.82)
+                target = 4 + shaped * (maxH - 4)
             }
-            let k: CGFloat = target > display[i] ? 0.55 : 0.12
+            // Snappy attack so the bars track speech onsets; a springier decay
+            // lets them fall back with a lively bounce instead of a slow sag.
+            let k: CGFloat = target > display[i] ? 0.6 : 0.22
             display[i] += (target - display[i]) * k
         }
         return display
