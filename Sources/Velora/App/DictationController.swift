@@ -68,6 +68,9 @@ final class DictationController: NSObject {
     /// drifted (e.g. a missed hotkeyUp left us in `.recording`), so a valid
     /// transcription is never silently lost.
     private var cancelledSessionID: String?
+    /// The session whose `final` we already inserted. Guards against a stray or
+    /// duplicate `final` re-inserting text now that the phase guard is loose.
+    private var consumedSessionID: String?
     private var sessionContext: AppContext?
     private var recordingStart: Date?
     private var transcribeStartedAt: Date?
@@ -305,11 +308,15 @@ final class DictationController: NSObject {
             // or a timeout can have reset us to .idle. The only final we refuse
             // is one for a session the user explicitly cancelled. Never silently
             // lose a real transcription.
-            guard session == sessionID, session != cancelledSessionID else {
-                NSLog("Velora: ignoring final for session=%@ (current=%@ cancelled=%@)",
-                      session, sessionID, cancelledSessionID ?? "none")
+            guard session == sessionID,
+                  session != cancelledSessionID,
+                  session != consumedSessionID
+            else {
+                NSLog("Velora: ignoring final for session=%@ (current=%@ cancelled=%@ consumed=%@)",
+                      session, sessionID, cancelledSessionID ?? "none", consumedSessionID ?? "none")
                 return
             }
+            consumedSessionID = session  // one insertion per session; block duplicates
             NSLog("Velora: engine final session=%@ chars=%ld phase=%@", session, text.count, phase.label)
             transcribeTimer?.invalidate()
             transcribeTimer = nil
