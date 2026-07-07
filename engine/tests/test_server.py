@@ -1,0 +1,186 @@
+"""Server integration test over a real unix socket with the fake STT backend
+(VELORA_FAKE_STT=1): start → audio → stop → transcript/final, and cancel."""
+
+import asyncio
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from velora_engine import protocol
+from velora_engine.config import Config
+from velora_engine.server import Engine
+
+
+class Client:
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        self.reader = reader
+        self.writer = writer
+
+    async def send_json(self, obj: dict) -> None:
+        self.writer.write(protocol.encode_json(obj))
+        await self.writer.drain()
+
+    async def send_audio(self, samples: np.ndarray) -> None:
+        self.writer.write(protocol.encode_frame(protocol.FRAME_AUDIO, samples.astype("<f4").tobytes()))
+        await self.writer.drain()
+
+    async def recv(self, timeout: float = 5.0) -> dict:
+        frame_type, payload = await asyncio.wait_for(protocol.read_frame(self.reader), timeout)
+        assert frame_type == protocol.FRAME_JSON
+        return json.loads(payload)
+
+    async def recv_event(self, name: str, timeout: float = 5.0) -> dict:
+        """Read events until `name` arrives (skipping partials etc.)."""
+        while True:
+            evt = await self.recv(timeout)
+            if evt.get("event") == name:
+                return evt
+            if evt.get("event") == "error":
+                raise AssertionError(f"unexpected error event: {evt}")
+
+    def close(self) -> None:
+        self.writer.close()
+
+
+@pytest.fixture
+async def engine(home, fake_stt):
+    config = Config()
+    eng = Engine(config, parent_pid=None)
+    # AF_UNIX paths are length-limited (~104 bytes on macOS); pytest's tmp_path
+    # is too deep, so use a short scratch dir for the socket.
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-t-"))
+    sock = sock_dir / "e.sock"
+    task = asyncio.create_task(eng.serve(sock))
+    for _ in range(100):
+        if sock.exists():
+            break
+        await asyncio.sleep(0.01)
+    yield eng, sock
+    eng.shutdown.set()
+    await asyncio.wait_for(task, 5)
+    shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+async def connect(sock) -> Client:
+    reader, writer = await asyncio.open_unix_connection(str(sock))
+    return Client(reader, writer)
+
+
+AUDIO = (np.sin(np.linspace(0, 100, 1600)) * 0.1).astype(np.float32)  # one 100ms chunk
+
+
+async def test_full_dictation_flow(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    ready = await client.recv()
+    assert ready["event"] == "ready"
+    assert "parakeet" in ready["stt_model"]
+
+    await client.send_json({"cmd": "start", "session": "s1", "context": {"bundle_id": "com.apple.Notes", "app_name": "Notes", "mode": None}})
+    for _ in range(10):  # ~1s of audio
+        await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "s1"})
+
+    transcript = await client.recv_event("transcript")
+    assert transcript["session"] == "s1"
+    assert transcript["raw"] == "hello world this is a fake transcript"
+    assert isinstance(transcript["ms"], int)
+
+    final = await client.recv_event("final")
+    assert final["session"] == "s1"
+    assert final["mode"] == "Note"
+    assert final["raw"] == "hello world this is a fake transcript"
+    # fake mode has no LLM: raw is inserted as-is (never lose the user's words)
+    assert final["cleanup_applied"] is False
+    assert final["text"] == "hello world this is a fake transcript"
+    assert isinstance(final["cleanup_ms"], int)
+    client.close()
+
+
+async def test_partials_emitted(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "s2", "context": {}})
+    await client.send_audio(AUDIO)
+    partial = await client.recv_event("partial")
+    assert partial["session"] == "s2"
+    assert "samples" in partial["text"]
+    await client.send_json({"cmd": "cancel", "session": "s2"})
+    await client.recv_event("cancelled")
+    client.close()
+
+
+async def test_cancel_discards(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "s3", "context": {}})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "cancel", "session": "s3"})
+    cancelled = await client.recv_event("cancelled")
+    assert cancelled["session"] == "s3"
+
+    # no transcript/final should arrive; a ping must be answered next
+    await client.send_json({"cmd": "ping"})
+    evt = await client.recv()
+    assert evt["event"] == "pong"
+
+    # engine is idle again: a fresh session works end to end
+    await client.send_json({"cmd": "start", "session": "s4", "context": {"bundle_id": "com.apple.Terminal"}})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "s4"})
+    final = await client.recv_event("final")
+    assert final["session"] == "s4"
+    assert final["mode"] == "Code"
+    client.close()
+
+
+async def test_malformed_frames_get_error_not_crash(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    # bad JSON payload
+    client.writer.write(protocol.encode_frame(protocol.FRAME_JSON, b"{not json"))
+    await client.writer.drain()
+    evt = await client.recv()
+    assert evt["event"] == "error"
+
+    # unknown frame type
+    client.writer.write(protocol.encode_frame(0x7F, b"\x00\x01"))
+    await client.writer.drain()
+    evt = await client.recv()
+    assert evt["event"] == "error"
+
+    # unknown command
+    await client.send_json({"cmd": "warp_drive"})
+    evt = await client.recv()
+    assert evt["event"] == "error"
+
+    # stop with no session
+    await client.send_json({"cmd": "stop", "session": "nope"})
+    evt = await client.recv()
+    assert evt["event"] == "error"
+
+    # engine still healthy
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv())["event"] == "pong"
+    client.close()
+
+
+async def test_status_and_reload(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "status"})
+    status = await client.recv_event("status")
+    assert status["state"] == "idle"
+    assert any(m["id"] == "mlx-community/parakeet-tdt-0.6b-v2" for m in status["models"])
+    await client.send_json({"cmd": "reload_config"})
+    assert (await client.recv())["event"] == "config_reloaded"
+    client.close()

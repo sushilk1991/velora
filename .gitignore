@@ -25,3 +25,4 @@ spikes/
 # Logs
 *.log
 .yoyo/
+.pytest_cache/
