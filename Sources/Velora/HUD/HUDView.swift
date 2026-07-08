@@ -114,6 +114,8 @@ struct HUDView: View {
             checkmark
             errorContent
                 .opacity(isError ? 1 : 0)
+            learnedContent
+                .opacity(isLearned ? 1 : 0)
         }
     }
 
@@ -295,11 +297,63 @@ struct HUDView: View {
         .frame(width: HUDGeometry.errorWidth)
     }
 
+    // MARK: - Learned content (correction toast)
+
+    private var learnedPair: (wrong: String, right: String) {
+        if case .learned(let wrong, let right) = model.state { return (wrong, right) }
+        return ("", "")
+    }
+
+    /// "✕wrong → right · Learned": the mishearing struck through in red, the
+    /// user's fix in brand violet — the learning loop made visible.
+    private var learnedContent: some View {
+        let pair = learnedPair
+        return HStack(spacing: VeloraSpacing.s) {
+            Image(systemName: "character.book.closed.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(VeloraBrand.violet.color)
+                .symbolEffect(.bounce, value: isLearned)
+            Text(pair.wrong)
+                .font(.system(size: 12, weight: .medium))
+                .strikethrough(true, color: Color(nsColor: .systemRed).opacity(0.85))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Image(systemName: "arrow.right")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(.secondary)
+            Text(pair.right)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .lineLimit(1)
+            Text("· Learned")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: learnedWidth)
+    }
+
+    /// Measured toast width: icon + both words + arrow + caption + gaps,
+    /// clamped so a pathological word can't stretch the pill across the screen.
+    private var learnedWidth: CGFloat {
+        let pair = learnedPair
+        var w = HUDGeometry.contentInsetH * 2 + 14 + 12 + VeloraSpacing.s * 4
+        w += HUDGeometry.textWidth(pair.wrong, font: HUDGeometry.transcriptFont)
+        w += HUDGeometry.textWidth(pair.right, font: HUDGeometry.transcriptFont)
+        w += HUDGeometry.textWidth("· Learned", font: HUDGeometry.transcriptFont)
+        return min(max(w, 190), 380)
+    }
+
     // MARK: - State helpers
 
     private var isListening: Bool { model.state == .listening }
     private var isError: Bool {
         if case .error = model.state { return true }
+        return false
+    }
+    private var isLearned: Bool {
+        if case .learned = model.state { return true }
         return false
     }
 
@@ -408,6 +462,16 @@ struct HUDView: View {
                     width = HUDGeometry.errorWidth
                     showCheck = false
                 }
+            }
+
+        case .learned:
+            // The toast appears from hidden well after the insert pill left;
+            // same gentle entrance as an error, sized to its content.
+            resetInstant(width: learnedWidth)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                opacity = 1
+                scale = 1
+                yOffset = 0
             }
 
         case .hidden(let style):

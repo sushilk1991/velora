@@ -102,6 +102,14 @@ final class DictationController: NSObject {
     /// Long enough for the user to notice and fix a misheard word; short enough
     /// that the field usually still exists when we re-read it.
     private static let learningRecheckDelay: TimeInterval = 45
+    /// Real-time path: an AX value-change watch on the pasted-into field, so an
+    /// edit is learned seconds after the user makes it (the timer above stays
+    /// as the fallback for apps whose fields don't emit value changes).
+    private let editWatcher = EditWatcher()
+    private var editDebounceTimer: Timer?
+    /// Quiet period after the last observed keystroke before diffing — the
+    /// user has likely finished fixing the word.
+    private static let editDebounce: TimeInterval = 2.0
     /// Learning is scoped to compose-box-sized fields: we never diff a large
     /// document (can't isolate our span; would freeze on the hot path).
     private static let learningMaxWords = 60
@@ -207,7 +215,34 @@ final class DictationController: NSObject {
             guard let element = ScreenContext.focusedElement(of: app) else { return }
             self.pendingLearning = (element, inserted, insertedWords)
             self.scheduleLearningRecheck()
+            // Real-time: watch the field itself; edits evaluate a debounce
+            // after the last keystroke instead of waiting for the 45s timer.
+            self.editWatcher.onChange = { [weak self] in self?.scheduleEditEvaluation() }
+            if !self.editWatcher.watch(element) {
+                NSLog("Velora: learning — AX watch unavailable, timer fallback only")
+            }
         }
+    }
+
+    /// Debounces watcher events: evaluate ~2s after the LAST value change.
+    private func scheduleEditEvaluation() {
+        guard pendingLearning != nil else { return }
+        editDebounceTimer?.invalidate()
+        editDebounceTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.editDebounce, repeats: false
+        ) { [weak self] _ in
+            self?.evaluatePendingLearning(consume: false)
+        }
+    }
+
+    /// Clears the baseline and every trigger watching it (one consume, ever).
+    private func consumePendingLearning() {
+        pendingLearning = nil
+        learningRecheckTimer?.invalidate()
+        learningRecheckTimer = nil
+        editDebounceTimer?.invalidate()
+        editDebounceTimer = nil
+        editWatcher.stop()
     }
 
     /// Arms the one-shot deferred re-check (~45 s after insert). Main thread,
@@ -222,17 +257,25 @@ final class DictationController: NSObject {
         }
     }
 
+    /// Consume-now entry point (next dictation start / 45s fallback timer).
+    private func checkPendingLearning() {
+        evaluatePendingLearning(consume: true)
+    }
+
     /// Diffs what we inserted against the (possibly-edited) field and learns any
     /// word-for-word corrections. The AX read + diff run OFF the main thread so a
     /// wedged app can't stall the hotkey; only the store update touches main.
-    private func checkPendingLearning() {
-        // Whether triggered by the next dictation's start or by the deferred
-        // timer, the baseline is consumed exactly once — kill the timer so a
-        // late fire can't race (the nil guard would make it harmless anyway).
-        learningRecheckTimer?.invalidate()
-        learningRecheckTimer = nil
-        guard config.learnFromEdits, let pending = pendingLearning else { return }
-        pendingLearning = nil
+    ///
+    /// `consume: false` (real-time watcher path) keeps the baseline alive while
+    /// the edit yields no corrections — the user may just be typing MORE text —
+    /// and consumes it on the first actual observation (re-observing the same
+    /// pair per keystroke would double-count toward the 2-sighting threshold).
+    private func evaluatePendingLearning(consume: Bool) {
+        guard config.learnFromEdits, let pending = pendingLearning else {
+            if consume { consumePendingLearning() }
+            return
+        }
+        if consume { consumePendingLearning() }
         contextQueue.async { [weak self] in
             guard let self,
                   let edited = ScreenContext.stringValue(of: pending.element),
@@ -248,11 +291,32 @@ final class DictationController: NSObject {
                 .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
             guard !corrections.isEmpty else { return }
             DispatchQueue.main.async {
+                if !consume {
+                    // A later trigger may have consumed the baseline while we
+                    // were reading — never observe the same edit twice.
+                    guard self.pendingLearning != nil else { return }
+                    self.consumePendingLearning()
+                }
                 let committed = self.learning.observe(corrections.map { ($0.wrong, $0.right) })
-                NSLog("Velora: learning — %ld correction(s) observed, committed=%@",
-                      corrections.count, committed ? "yes" : "no")
-                if committed { self.supervisor.send(["cmd": "reload_config"]) }
+                NSLog("Velora: learning — %ld correction(s) observed, %ld committed",
+                      corrections.count, committed.count)
+                if let first = committed.first {
+                    self.supervisor.send(["cmd": "reload_config"])
+                    self.showLearnedToast(first)
+                }
             }
+        }
+    }
+
+    /// Wispr-style feedback: the pill returns briefly with the mishearing
+    /// struck through and the fix next to it. Only when nothing else is using
+    /// the HUD — a toast must never stomp an active dictation.
+    private func showLearnedToast(_ pair: (wrong: String, right: String)) {
+        guard phase == .idle, hud.model.state.isHidden else { return }
+        hud.transition(to: .learned(wrong: pair.wrong, right: pair.right))
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
+            guard let self, case .learned = self.hud.model.state else { return }
+            self.hud.transition(to: .hidden(.success))
         }
     }
 

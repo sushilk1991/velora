@@ -62,14 +62,25 @@ final class LearningStore {
         }
     }
 
-    /// Records observed corrections (wrong → right). A pair is committed only on
-    /// its 2nd matching sighting; common words are refused; a committed rule is
-    /// never flipped by a single conflicting one-off. Returns true if anything
-    /// was committed (caller reloads the engine).
+    /// True for a word that reads as a name/identifier ("Shubham", "Velora",
+    /// "authCheck") rather than an ordinary word. CorrectionDiff only passes
+    /// all-letter tokens, so in practice this means "has an uppercase letter".
+    static func isNameLike(_ word: String) -> Bool {
+        word.contains(where: { $0.isUppercase || $0.isNumber }) || word.contains("_")
+    }
+
+    /// Records observed corrections (wrong → right) and returns the pairs that
+    /// were COMMITTED by this call (caller reloads the engine + shows the HUD
+    /// toast). Name-like corrections commit on FIRST sighting — the edit came
+    /// from text Velora just inserted, and a misheard name is exactly what the
+    /// user wants fixed everywhere (Wispr parity). Ordinary words keep the
+    /// 2-sighting bar so a one-off content edit ("cat"→"car") can't become a
+    /// global rewrite; common homophones are refused outright; a committed
+    /// rule is never flipped by a single conflicting one-off.
     @discardableResult
-    func observe(_ corrections: [(wrong: String, right: String)]) -> Bool {
+    func observe(_ corrections: [(wrong: String, right: String)]) -> [(wrong: String, right: String)] {
         load()  // pick up any external change (e.g. a Settings "Clear") first
-        var committed = false
+        var committed: [(wrong: String, right: String)] = []
         for correction in corrections {
             let wrong = correction.wrong.lowercased()
             guard !Self.stopwords.contains(wrong) else { continue }
@@ -78,12 +89,13 @@ final class LearningStore {
             // ride an earlier count over the threshold.
             let pairKey = "\(wrong)\u{2192}\(correction.right)"
             learned.counts[pairKey, default: 0] += 1
-            if (learned.counts[pairKey] ?? 0) >= Self.confirmThreshold {
+            let threshold = Self.isNameLike(correction.right) ? 1 : Self.confirmThreshold
+            if (learned.counts[pairKey] ?? 0) >= threshold {
                 learned.replacements[wrong] = correction.right
                 if !learned.vocabulary.contains(correction.right) {
                     learned.vocabulary.append(correction.right)
                 }
-                committed = true
+                committed.append((correction.wrong, correction.right))
             }
         }
         // A committed pair no longer needs its count; drop it so `counts` can't

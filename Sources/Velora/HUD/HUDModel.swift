@@ -18,6 +18,10 @@ enum HUDState: Equatable {
     case transcribing
     case inserted
     case error(String)
+    /// Learned-a-correction toast (Wispr-style): the misheard word struck
+    /// through, the user's fix next to it. Shown briefly after Velora catches
+    /// an edit to just-inserted text; auto-hidden by the controller.
+    case learned(wrong: String, right: String)
 
     var isHidden: Bool {
         if case .hidden = self { return true }
