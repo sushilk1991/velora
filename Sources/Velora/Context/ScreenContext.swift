@@ -152,7 +152,14 @@ enum ScreenContext {
 
     // MARK: - AX helpers
 
+    /// Per-element messaging timeout. `AXUIElementSetMessagingTimeout` does NOT
+    /// propagate to elements returned from a queried element, so it must be set
+    /// on every element we touch — otherwise a beachballing target app blocks us
+    /// for the ~6 s system default per call.
+    private static let axTimeout: Float = 0.25
+
     private static func axElement(_ element: AXUIElement, _ attr: String) -> AXUIElement? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
               let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
@@ -160,6 +167,7 @@ enum ScreenContext {
     }
 
     private static func axString(_ element: AXUIElement, _ attr: String) -> String? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
               let s = ref as? String else { return nil }
@@ -168,6 +176,7 @@ enum ScreenContext {
     }
 
     private static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
               let array = ref as? [AXUIElement] else { return nil }

@@ -55,6 +55,22 @@ final class SettingsModel: ObservableObject {
     private let config = AppConfig.shared
     private weak var supervisor: EngineSupervisor?
     private var statusObserver: NSObjectProtocol?
+    /// File-backed; `observe` reloads before writing, so clearing here is
+    /// respected by the DictationController's own instance.
+    private let learning = LearningStore()
+
+    /// How many spelling corrections Velora has learned (for the undo affordance).
+    @Published var learnedCount = 0
+
+    /// Forgets every learned correction and reloads the engine.
+    func clearLearnedCorrections() {
+        learning.clear()
+        learnedCount = 0
+        supervisor?.send(["cmd": "reload_config"])
+    }
+
+    /// Refreshes the learned count from disk (call when the view appears).
+    func refreshLearnedCount() { learnedCount = LearningStore().count }
 
     /// Models advertised by the running engine (from the `status` reply). Empty
     /// until the first reply arrives; the UI falls back to the static catalog.
@@ -80,6 +96,7 @@ final class SettingsModel: ObservableObject {
         learnFromEdits = config.learnFromEdits
         sttModel = config.sttModel
         saveAudio = config.saveAudio
+        learnedCount = learning.count
 
         statusObserver = NotificationCenter.default.addObserver(
             forName: .veloraEngineStatus, object: nil, queue: .main

@@ -17,8 +17,24 @@ final class LearningStore {
 
     private(set) var learned = Learned()
     private let url: URL
-    /// A correction is committed once seen this many times.
+    /// The SAME (wrong → right) pair must be seen this many times before it's
+    /// committed — so one-off edits and conflicting one-offs never stick.
     private static let confirmThreshold = 2
+    /// Cap on learned replacements so the file (and the cleanup prompt) can't
+    /// grow without bound; oldest are evicted first.
+    private static let maxReplacements = 250
+
+    /// Common high-frequency / homophone words we refuse to learn as global
+    /// rewrites — two context-specific fixes must never make Velora rewrite
+    /// every future "their" as "there".
+    private static let stopwords: Set<String> = [
+        "their", "there", "theyre", "they're", "then", "than", "form", "from", "your", "youre",
+        "you're", "its", "it's", "were", "where", "we're", "our", "hour", "here", "hear", "for",
+        "four", "fore", "to", "too", "two", "of", "off", "no", "know", "now", "one", "won",
+        "right", "write", "by", "buy", "bye", "see", "sea", "son", "sun", "new", "knew", "would",
+        "wood", "week", "weak", "made", "maid", "meet", "meat", "wait", "weight", "way", "weigh",
+        "accept", "except", "affect", "effect", "loose", "lose", "quiet", "quite", "cant", "can't",
+    ]
 
     init() {
         url = FileManager.default.homeDirectoryForCurrentUser
@@ -33,34 +49,61 @@ final class LearningStore {
     }
 
     private func save() {
-        guard let data = try? JSONEncoder().encode(learned) else { return }
-        try? data.write(to: url, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        // The app can race the engine on first run; ensure ~/.velora exists.
+        try? FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            let data = try JSONEncoder().encode(learned)
+            try data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        } catch {
+            NSLog("Velora: failed to persist learned.json: \(error)")
+        }
     }
 
-    /// Records observed corrections (wrong → right). Returns true if anything
-    /// crossed the confirmation threshold (caller should reload the engine).
-    /// A correction is committed on its 2nd sighting so a one-off edit doesn't
-    /// pollute the dictionary.
+    /// Records observed corrections (wrong → right). A pair is committed only on
+    /// its 2nd matching sighting; common words are refused; a committed rule is
+    /// never flipped by a single conflicting one-off. Returns true if anything
+    /// was committed (caller reloads the engine).
     @discardableResult
     func observe(_ corrections: [(wrong: String, right: String)]) -> Bool {
+        load()  // pick up any external change (e.g. a Settings "Clear") first
         var committed = false
         for correction in corrections {
-            let key = correction.wrong.lowercased()
-            // Already learned (and unchanged) — nothing to do.
-            if learned.replacements[key] == correction.right { continue }
-            learned.counts[key, default: 0] += 1
-            if learned.counts[key] ?? 0 >= Self.confirmThreshold {
-                learned.replacements[key] = correction.right
+            let wrong = correction.wrong.lowercased()
+            guard !Self.stopwords.contains(wrong) else { continue }
+            if learned.replacements[wrong] == correction.right { continue }  // already learned
+            // Key the count by the exact PAIR so a conflicting right value can't
+            // ride an earlier count over the threshold.
+            let pairKey = "\(wrong)\u{2192}\(correction.right)"
+            learned.counts[pairKey, default: 0] += 1
+            if (learned.counts[pairKey] ?? 0) >= Self.confirmThreshold {
+                learned.replacements[wrong] = correction.right
                 if !learned.vocabulary.contains(correction.right) {
                     learned.vocabulary.append(correction.right)
                 }
                 committed = true
             }
         }
+        if committed { prune() }
         save()
         return committed
     }
+
+    /// Bound the store: keep the newest `maxReplacements`, trim vocab/counts to
+    /// match so nothing accumulates forever.
+    private func prune() {
+        guard learned.replacements.count > Self.maxReplacements else { return }
+        let overflow = learned.replacements.count - Self.maxReplacements
+        for key in learned.replacements.keys.prefix(overflow) {
+            learned.replacements.removeValue(forKey: key)
+        }
+        let kept = Set(learned.replacements.values)
+        learned.vocabulary = learned.vocabulary.filter { kept.contains($0) }
+    }
+
+    /// How many corrections are currently learned (for the Settings UI).
+    var count: Int { learned.replacements.count }
 
     func clear() {
         learned = Learned()

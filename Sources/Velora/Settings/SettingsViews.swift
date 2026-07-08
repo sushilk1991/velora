@@ -121,7 +121,18 @@ struct DictationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                if model.learnedCount > 0 {
+                    HStack {
+                        Text("\(model.learnedCount) learned correction\(model.learnedCount == 1 ? "" : "s")")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("Clear", role: .destructive) { model.clearLearnedCorrections() }
+                            .controlSize(.small)
+                    }
+                }
             }
+            .onAppear { model.refreshLearnedCount() }
             Section {
                 Toggle(isOn: $model.saveAudio) {
                     VStack(alignment: .leading, spacing: 2) {

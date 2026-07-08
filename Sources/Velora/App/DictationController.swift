@@ -94,7 +94,10 @@ final class DictationController: NSObject {
     /// Learning loop: what we last inserted, so a later edit can be diffed into
     /// a learned correction.
     private let learning = LearningStore()
-    private var pendingLearning: (element: AXUIElement, baseline: String, insertedWords: Set<String>)?
+    private var pendingLearning: (element: AXUIElement, inserted: String, insertedWords: Set<String>)?
+    /// Learning is scoped to compose-box-sized fields: we never diff a large
+    /// document (can't isolate our span; would freeze on the hot path).
+    private static let learningMaxWords = 60
 
     init(
         supervisor: EngineSupervisor,
@@ -178,43 +181,53 @@ final class DictationController: NSObject {
 
     // MARK: - Learning loop (learn corrections from post-dictation edits)
 
-    /// Snapshots the field a beat after insertion so a later edit can be diffed.
+    /// Remembers the focused field + exactly what we inserted, so a later edit
+    /// can be diffed. Only for compose-box-sized insertions — we never learn
+    /// from a big document (can't isolate our span and would freeze).
     private func captureLearningBaseline(text: String, bundleID: String?) {
         guard config.learnFromEdits else { return }
+        let inserted = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let insertedWords = Set(
-            text.lowercased().split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init))
-        guard insertedWords.count >= 1 else { return }
-        // Let the ⌘V paste settle before reading the field's baseline value.
+            inserted.lowercased().split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init))
+        guard insertedWords.count >= 1, insertedWords.count <= Self.learningMaxWords else { return }
+        // Let the ⌘V paste settle, then grab the focused element (main thread —
+        // just a couple of timeout-capped AX calls).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self else { return }
             let app = bundleID.flatMap {
                 NSRunningApplication.runningApplications(withBundleIdentifier: $0).first
             } ?? NSWorkspace.shared.frontmostApplication
-            guard let element = ScreenContext.focusedElement(of: app),
-                  let baseline = ScreenContext.stringValue(of: element),
-                  baseline.contains(text.trimmingCharacters(in: .whitespacesAndNewlines))
-            else { return }  // can't read the field, or our text isn't there — skip
-            self.pendingLearning = (element, baseline, insertedWords)
+            guard let element = ScreenContext.focusedElement(of: app) else { return }
+            self.pendingLearning = (element, inserted, insertedWords)
         }
     }
 
-    /// Re-reads the previously-inserted-into field, diffs it, and learns any
-    /// word-for-word corrections the user made to Velora's output.
+    /// Diffs what we inserted against the (possibly-edited) field and learns any
+    /// word-for-word corrections. The AX read + diff run OFF the main thread so a
+    /// wedged app can't stall the hotkey; only the store update touches main.
     private func checkPendingLearning() {
         guard config.learnFromEdits, let pending = pendingLearning else { return }
         pendingLearning = nil
-        guard let edited = ScreenContext.stringValue(of: pending.element),
-              edited != pending.baseline else { return }
-        let corrections = CorrectionDiff.corrections(baseline: pending.baseline, edited: edited)
-            // Only learn where the mis-transcribed word was one WE produced.
-            .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
-        guard !corrections.isEmpty else { return }
-        let committed = learning.observe(corrections.map { ($0.wrong, $0.right) })
-        NSLog("Velora: learning — observed %ld correction(s), committed=%@",
-              corrections.count, committed ? "yes" : "no")
-        if committed {
-            // Push the new vocab/replacements to the running engine.
-            supervisor.send(["cmd": "reload_config"])
+        contextQueue.async { [weak self] in
+            guard let self,
+                  let edited = ScreenContext.stringValue(of: pending.element),
+                  edited != pending.inserted else { return }
+            // Scope: only when the field is close in size to what we inserted —
+            // i.e. a compose box, not a document with other content. Bail early
+            // (before the O(n·m) diff) so a big field can never freeze us.
+            let editedWords = edited.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
+            let insertedCount = pending.insertedWords.count
+            guard editedWords <= insertedCount + max(8, insertedCount) else { return }
+
+            let corrections = CorrectionDiff.corrections(baseline: pending.inserted, edited: edited)
+                .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
+            guard !corrections.isEmpty else { return }
+            DispatchQueue.main.async {
+                let committed = self.learning.observe(corrections.map { ($0.wrong, $0.right) })
+                NSLog("Velora: learning — %ld correction(s) observed, committed=%@",
+                      corrections.count, committed ? "yes" : "no")
+                if committed { self.supervisor.send(["cmd": "reload_config"]) }
+            }
         }
     }
 

@@ -429,8 +429,12 @@ class Engine:
         # gathered in the background while speaking) to `stop`; merge them so
         # cleanup sees on-screen names it couldn't get from the title alone.
         stop_entities = msg.get("entities")
-        if isinstance(stop_entities, list) and stop_entities:
-            session.context["entities"] = stop_entities
+        if isinstance(stop_entities, list):
+            # Keep only well-formed dict items so a malformed client frame can't
+            # crash finalize (which would drop the transcript).
+            clean = [e for e in stop_entities if isinstance(e, dict)]
+            if clean:
+                session.context["entities"] = clean
         self.session = None
         await self._finalize_session(session)
 

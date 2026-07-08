@@ -13,10 +13,14 @@ enum CorrectionDiff {
 
     /// Returns the substitutions to learn. Empty when the edit isn't a clean
     /// word-for-word correction (added sentences, deletions, big rewrites).
+    /// Hard cap: never diff more than this many tokens (backstop against a
+    /// pathological field slipping past the caller's size guard).
+    private static let maxTokens = 200
+
     static func corrections(baseline: String, edited: String) -> [Correction] {
         let a = tokenize(baseline)
         let b = tokenize(edited)
-        guard !a.isEmpty, !b.isEmpty else { return [] }
+        guard !a.isEmpty, !b.isEmpty, a.count <= maxTokens, b.count <= maxTokens else { return [] }
         // Ignore edits that changed the length a lot — that's rewriting, not a
         // spelling fix, and word alignment gets unreliable.
         if abs(a.count - b.count) > max(2, a.count / 5) { return [] }
@@ -29,8 +33,8 @@ enum CorrectionDiff {
             // insert of a single word each.
             if case .delete(let wrong) = ops[i], i + 1 < ops.count,
                case .insert(let right) = ops[i + 1] {
-                if isCorrection(wrong: wrong, right: right) {
-                    result.append(Correction(wrong: wrong, right: right))
+                if let pair = correctionPair(wrong: wrong, right: right) {
+                    result.append(Correction(wrong: pair.wrong, right: pair.right))
                 }
                 i += 2
             } else {
@@ -42,17 +46,21 @@ enum CorrectionDiff {
 
     // MARK: - Heuristics
 
-    /// A pair reads as a spelling/homophone correction: both alphabetic, of
-    /// meaningful length, close in edit distance, and actually different.
-    private static func isCorrection(wrong: String, right: String) -> Bool {
+    /// Returns the PUNCTUATION-TRIMMED (wrong, right) pair when the edit reads as
+    /// a spelling/homophone correction (both alphabetic, meaningful length,
+    /// close edit distance, actually different), else nil. Trimming here means
+    /// the learned entry is "wrold"→"world", not "wrold,"→"world," — so it fixes
+    /// the word regardless of trailing punctuation next time.
+    private static func correctionPair(wrong: String, right: String) -> (wrong: String, right: String)? {
         let w = wrong.trimmingCharacters(in: .punctuationCharacters)
         let r = right.trimmingCharacters(in: .punctuationCharacters)
-        guard w.count >= 3, r.count >= 2, w.lowercased() != r.lowercased() else { return false }
-        guard w.allSatisfy({ $0.isLetter }), r.allSatisfy({ $0.isLetter }) else { return false }
+        guard w.count >= 3, r.count >= 2, w.lowercased() != r.lowercased() else { return nil }
+        guard w.allSatisfy({ $0.isLetter }), r.allSatisfy({ $0.isLetter }) else { return nil }
         let distance = editDistance(w.lowercased(), r.lowercased())
         // Similar enough to be a correction of the same intended word (not a
         // wholly different word swapped in).
-        return distance <= max(1, min(w.count, r.count) / 2)
+        guard distance <= max(1, min(w.count, r.count) / 2) else { return nil }
+        return (w, r)
     }
 
     private static func tokenize(_ text: String) -> [String] {
