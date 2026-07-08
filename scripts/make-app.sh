@@ -25,6 +25,23 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CONFIG="${1:-release}"
+# Second arg = version bump level for this build (default patch). A new build
+# never reuses a version: patch for rebuilds/fixes, minor for feature rounds,
+# major for big releases, none to leave VERSION untouched (throwaway dev builds).
+BUMP="${2:-patch}"
+
+VERSION="$(./scripts/bump-version.sh "$BUMP")"
+# Monotonic build number for CFBundleVersion (commit count; always increases).
+BUILD_NUM="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+echo "Building Velora $VERSION (build $BUILD_NUM)"
+
+# Keep the source Info.plist in sync BEFORE swift build so the binary's embedded
+# __info_plist section (bare-binary runs) reports the same version as the bundle.
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" Resources/Info.plist 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" Resources/Info.plist
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" Resources/Info.plist 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" Resources/Info.plist
+
 swift build -c "$CONFIG"
 
 BIN=".build/$CONFIG/Velora"
@@ -49,11 +66,14 @@ ENGINE_DIR="$(pwd)/engine"
 /usr/libexec/PlistBuddy -c "Delete :VeloraEngineDir" "$APP/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :VeloraEngineDir string $ENGINE_DIR" "$APP/Contents/Info.plist"
 
-# Version keys (make-dmg.sh names the image after CFBundleShortVersionString).
-/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist" >/dev/null 2>&1 \
-  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.0.0" "$APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$APP/Contents/Info.plist" >/dev/null 2>&1 \
-  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1" "$APP/Contents/Info.plist"
+# Version keys, from the VERSION source of truth (make-dmg.sh names the image
+# after CFBundleShortVersionString). The bundle plist was just copied from
+# Resources/Info.plist, which we already stamped above — set explicitly anyway
+# so the bundle is correct even if the copy source drifts.
+/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string $VERSION" "$APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" "$APP/Contents/Info.plist" 2>/dev/null \
+  || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" "$APP/Contents/Info.plist"
 
 # Bundle the engine project (sources + lockfile; no venv/tests/caches) so the
 # .app is self-contained. ResourceLocator syncs this to Application Support
@@ -102,4 +122,4 @@ codesign --force --deep --sign "$IDENTITY" --identifier com.velora.app "$APP"
 codesign --verify --verbose=2 "$APP"
 [[ "$IDENTITY" == "-" ]] && echo "WARNING: ad-hoc signed — TCC grants will reset on next rebuild (run scripts/make-signing-cert.sh once to fix)"
 
-echo "OK: $APP"
+echo "OK: $APP (v$VERSION, build $BUILD_NUM)"
