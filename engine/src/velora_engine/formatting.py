@@ -230,8 +230,14 @@ STATIC_SYSTEM_PROMPT = (
     "\"Let's keep the offsite but make it virtual.\"\n"
     "6. The spoken words 'new line' mean a line break and 'new paragraph' mean "
     "a paragraph break — replace them with the actual break.\n"
-    "7. Use a list ONLY when the speech explicitly enumerates items; otherwise "
-    "keep prose. Never restructure short utterances.\n"
+    "7. Lists: use one ONLY when the speech explicitly enumerates items or asks "
+    "for a list; otherwise keep prose. Put each item on its OWN line. Use a "
+    "NUMBERED list ('1.', '2.', '3.') when the speaker says 'numbered list' or "
+    "counts items off with 'first/second/third'; use '-' BULLETS when they say "
+    "'bullet list' / 'bulleted' or just list items with no ordinal. Drop the "
+    "meta-instruction itself ('put this in a numbered list') from the output. Do "
+    "NOT listify ordinary counting ('count from one to ten' stays inline prose) "
+    "or short utterances.\n"
     "8. Chat messages: casual tone, no trailing period on a single short sentence.\n"
 )
 
