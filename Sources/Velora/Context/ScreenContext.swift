@@ -33,6 +33,27 @@ enum ScreenContext {
         return parse(title: title, category: category, appName: app.localizedName)
     }
 
+    /// Rich context = title entities PLUS short text near the text cursor read
+    /// from the Accessibility tree (the "Message <Name>" header on LinkedIn, a
+    /// field label, the recipient chip). This is what lets the cleanup LLM spell
+    /// a name it never heard clearly. Heavier than `entities` (walks a bounded
+    /// slice of the AX tree), so callers run it OFF the hot path (a background
+    /// queue at session start, ready by the time recording stops).
+    static func richEntities(for app: NSRunningApplication?, category: ModeCategory?) -> [ContextEntity] {
+        var result = entities(for: app, category: category)
+        guard let app, app.processIdentifier > 0 else { return result }
+        let nearby = nearbyText(pid: app.processIdentifier)
+        // Cap total nearby chars so the prompt stays lean and private.
+        var budget = 600
+        for text in nearby {
+            guard budget > 0 else { break }
+            let clipped = String(text.prefix(min(text.count, budget, 80)))
+            result.append(ContextEntity(type: "nearby", value: clipped))
+            budget -= clipped.count
+        }
+        return result
+    }
+
     // MARK: - AX read
 
     private static func focusedWindowTitle(pid: pid_t) -> String? {
@@ -55,6 +76,85 @@ enum ScreenContext {
             let title = titleRef as? String else { return nil }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    // MARK: - Nearby-text read (rich context)
+
+    /// Short text strings near the focused element: the field's own
+    /// placeholder/title/description, then a bounded sweep of static text under
+    /// a few ancestor levels (headers, labels, the person you're replying to).
+    private static func nearbyText(pid: pid_t) -> [String] {
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        guard let focused = axElement(appElement, kAXFocusedUIElementAttribute) else { return [] }
+
+        var out: [String] = []
+        // The focused field's own hints often name the recipient
+        // ("Message Priya Sharma", "Reply to …", "To:").
+        for attr in [kAXPlaceholderValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+            if let s = axString(focused, attr) { out.append(s) }
+        }
+        // Climb a few levels to a container, then sweep its static text.
+        var container = focused
+        for _ in 0..<3 {
+            guard let parent = axElement(container, kAXParentAttribute) else { break }
+            container = parent
+        }
+        var budget = 30  // max elements visited (hard bound on cost)
+        collectStaticText(container, into: &out, budget: &budget, depth: 0)
+
+        // Dedup, keep short human-readable strings, cap count.
+        var seen = Set<String>()
+        return out.compactMap { raw -> String? in
+            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard s.count >= 2, s.count <= 80, !seen.contains(s) else { return nil }
+            seen.insert(s)
+            return s
+        }.prefix(12).map { $0 }
+    }
+
+    /// Depth- and count-bounded sweep collecting `AXStaticText`/`AXHeading`
+    /// values (and a few titles) from an element's subtree.
+    private static func collectStaticText(
+        _ element: AXUIElement, into out: inout [String], budget: inout Int, depth: Int
+    ) {
+        guard budget > 0, depth <= 5 else { return }
+        budget -= 1
+        let role = axString(element, kAXRoleAttribute) ?? ""
+        if role == kAXStaticTextRole || role == "AXHeading" {
+            if let v = axString(element, kAXValueAttribute) ?? axString(element, kAXTitleAttribute) {
+                out.append(v)
+            }
+        }
+        guard let children = axChildren(element) else { return }
+        for child in children.prefix(12) {
+            if budget <= 0 { break }
+            collectStaticText(child, into: &out, budget: &budget, depth: depth + 1)
+        }
+    }
+
+    // MARK: - AX helpers
+
+    private static func axElement(_ element: AXUIElement, _ attr: String) -> AXUIElement? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXUIElementGetTypeID() else { return nil }
+        return (ref as! AXUIElement)  // checked
+    }
+
+    private static func axString(_ element: AXUIElement, _ attr: String) -> String? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+              let s = ref as? String else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    private static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
+              let array = ref as? [AXUIElement] else { return nil }
+        return array
     }
 
     // MARK: - Title parsing

@@ -83,6 +83,14 @@ final class DictationController: NSObject {
     /// A menubar "Reformat Last as…" round-trip in flight: the history row and
     /// the app to paste the re-formatted result back into.
     private var pendingReformat: (id: Int64, bundleID: String?)?
+    /// Rich screen-context entities (title + nearby AX text) gathered in the
+    /// background while the user speaks, attached to the `stop` command so the
+    /// LLM cleanup can spell on-screen names right — with zero hot-path cost.
+    private var richEntities: [ContextEntity] = []
+    /// Increments per session so a slow background gather from a prior session
+    /// can't clobber the current one.
+    private var contextGatherGeneration = 0
+    private let contextQueue = DispatchQueue(label: "com.velora.context", qos: .userInitiated)
 
     init(
         supervisor: EngineSupervisor,
@@ -246,6 +254,24 @@ final class DictationController: NSObject {
             "context": sessionContext?.payload ?? [:],
         ])
 
+        // Background pass: read richer nearby AX text (the person you're
+        // replying to, field labels) while the user speaks. It's heavier than
+        // the title read, so it runs off the main thread and is attached to the
+        // `stop` command — ready by the time the user finishes talking, adding
+        // nothing to the release→insert latency.
+        contextGatherGeneration += 1
+        let generation = contextGatherGeneration
+        let gatherApp = targetApp
+        let gatherCategory = ModeCategory.category(forBundleID: enriched.bundleID)
+        richEntities = []
+        contextQueue.async { [weak self] in
+            let rich = ScreenContext.richEntities(for: gatherApp, category: gatherCategory)
+            DispatchQueue.main.async {
+                guard let self, self.contextGatherGeneration == generation else { return }
+                self.richEntities = rich
+            }
+        }
+
         hud.model.levels.reset()
         hud.model.recordingStart = recordingStart
         hud.transition(to: .listening)
@@ -271,7 +297,14 @@ final class DictationController: NSObject {
         capture.stop()
         sounds.play(.stop)
         NSLog("Velora: engine stop session=%@", sessionID)
-        supervisor.send(["cmd": "stop", "session": sessionID])
+        // Attach the background-gathered rich context (if it finished) so the
+        // engine's cleanup sees the on-screen names. Falls back to the basic
+        // title entities already sent with `start`.
+        var stopCmd: [String: Any] = ["cmd": "stop", "session": sessionID]
+        if !richEntities.isEmpty {
+            stopCmd["entities"] = richEntities.map { $0.payload }
+        }
+        supervisor.send(stopCmd)
         hud.transition(to: .transcribing)
         phase = .transcribing
         armTranscribeTimeout()

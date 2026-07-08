@@ -425,6 +425,12 @@ class Engine:
         if session is None:
             await self._error("stop: no active session", msg.get("session"))
             return
+        # The app attaches richer screen-context entities (nearby AX text,
+        # gathered in the background while speaking) to `stop`; merge them so
+        # cleanup sees on-screen names it couldn't get from the title alone.
+        stop_entities = msg.get("entities")
+        if isinstance(stop_entities, list) and stop_entities:
+            session.context["entities"] = stop_entities
         self.session = None
         await self._finalize_session(session)
 

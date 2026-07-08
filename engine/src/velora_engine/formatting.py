@@ -280,23 +280,31 @@ def _format_entities(entities: list[dict[str, str]] | None) -> str | None:
     }
     seen: set[str] = set()
     items: list[str] = []
+    nearby: list[str] = []
     for e in entities:
         value = str(e.get("value", "")).strip()
         etype = str(e.get("type", "title"))
         if not value or value in seen:
             continue
         seen.add(value)
-        items.append(f"{label.get(etype, 'on screen')}: “{value}”")
-    if not items:
+        if etype == "nearby":
+            nearby.append(value)
+        else:
+            items.append(f"{label.get(etype, 'on screen')}: “{value}”")
+    if not items and not nearby:
         return None
-    return (
+    parts = [
         "Screen context — what the user is looking at right now. Use these EXACT "
-        "names/spellings when the speech clearly refers to them (e.g. 'the auth "
-        "file' → the current file's name; a first name → the person being "
-        "messaged). Never insert them unless the speech refers to them: "
-        + "; ".join(items)
-        + "."
-    )
+        "names/spellings when the speech clearly refers to them (a name the user "
+        "says is likely one of these, even if transcribed imperfectly — prefer "
+        "the on-screen spelling). Never insert them unless the speech refers to them."
+    ]
+    if items:
+        parts.append("Named: " + "; ".join(items) + ".")
+    if nearby:
+        # Free text read from around the cursor (recipient headers, labels).
+        parts.append("Nearby on-screen text: " + " | ".join(nearby[:12]) + ".")
+    return " ".join(parts)
 
 
 def build_system_prompt(

@@ -384,3 +384,11 @@ def test_browser_site_respects_user_binding(config):
     config.modes["note"].apps.append("com.google.Chrome")
     g = run_gate("...", config, "com.google.Chrome", "Chrome", None, [{"type": "site", "value": "gmail"}])
     assert g.mode.name == "Note"
+
+
+def test_nearby_text_enters_prompt(config):
+    from velora_engine.config import Mode
+    from velora_engine.formatting import build_system_prompt
+    ents = [{"type": "nearby", "value": "Message Priya Sharma"}]
+    p = build_system_prompt(Mode(name="Default"), config, "Chrome", "browser", ents)
+    assert "Nearby on-screen text" in p and "Priya Sharma" in p
