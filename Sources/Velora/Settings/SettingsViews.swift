@@ -113,6 +113,14 @@ struct DictationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: $model.learnFromEdits) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Learn from my edits")
+                        Text("When you fix a misheard word in the text Velora typed, it remembers the correction (stored locally) so it gets that word right next time.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
             Section {
                 Toggle(isOn: $model.saveAudio) {

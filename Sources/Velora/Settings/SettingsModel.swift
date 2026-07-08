@@ -77,6 +77,7 @@ final class SettingsModel: ObservableObject {
         language = config.language
         autoPunctuation = config.autoPunctuation
         romanizeOutput = config.romanizeOutput
+        learnFromEdits = config.learnFromEdits
         sttModel = config.sttModel
         saveAudio = config.saveAudio
 
@@ -175,6 +176,10 @@ final class SettingsModel: ObservableObject {
             config.romanizeOutput = romanizeOutput
             supervisor?.send(["cmd": "reload_config"])
         }
+    }
+
+    @Published var learnFromEdits: Bool {
+        didSet { config.learnFromEdits = learnFromEdits }
     }
 
     @Published var soundsEnabled: Bool {

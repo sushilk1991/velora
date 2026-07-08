@@ -120,6 +120,7 @@ final class AppConfig {
         static let sttModel = "velora.sttModel"
         static let saveAudio = "velora.saveAudio"
         static let romanizeOutput = "velora.romanizeOutput"
+        static let learnFromEdits = "velora.learnFromEdits"
         static let typingFallbackApps = "velora.typingFallbackApps"
     }
 
@@ -135,6 +136,7 @@ final class AppConfig {
             Key.sttModel: STTModel.all[0].id,
             Key.saveAudio: true,
             Key.romanizeOutput: false,
+            Key.learnFromEdits: true,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -223,6 +225,14 @@ final class AppConfig {
 
     /// Romanize non-English output — write Hindi/other non-Latin speech in the
     /// Latin alphabet (natural Hinglish) instead of the native script.
+    /// When on, Velora learns spelling corrections from edits you make to its
+    /// output (local only). No engine config write — the learning store is a
+    /// separate file the engine merges.
+    var learnFromEdits: Bool {
+        get { defaults.bool(forKey: Key.learnFromEdits) }
+        set { defaults.set(newValue, forKey: Key.learnFromEdits) }
+    }
+
     var romanizeOutput: Bool {
         get { defaults.bool(forKey: Key.romanizeOutput) }
         set { defaults.set(newValue, forKey: Key.romanizeOutput); writeEngineConfig() }

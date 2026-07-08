@@ -91,6 +91,10 @@ final class DictationController: NSObject {
     /// can't clobber the current one.
     private var contextGatherGeneration = 0
     private let contextQueue = DispatchQueue(label: "com.velora.context", qos: .userInitiated)
+    /// Learning loop: what we last inserted, so a later edit can be diffed into
+    /// a learned correction.
+    private let learning = LearningStore()
+    private var pendingLearning: (element: AXUIElement, baseline: String, insertedWords: Set<String>)?
 
     init(
         supervisor: EngineSupervisor,
@@ -172,6 +176,48 @@ final class DictationController: NSObject {
         }
     }
 
+    // MARK: - Learning loop (learn corrections from post-dictation edits)
+
+    /// Snapshots the field a beat after insertion so a later edit can be diffed.
+    private func captureLearningBaseline(text: String, bundleID: String?) {
+        guard config.learnFromEdits else { return }
+        let insertedWords = Set(
+            text.lowercased().split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init))
+        guard insertedWords.count >= 1 else { return }
+        // Let the ⌘V paste settle before reading the field's baseline value.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
+            guard let self else { return }
+            let app = bundleID.flatMap {
+                NSRunningApplication.runningApplications(withBundleIdentifier: $0).first
+            } ?? NSWorkspace.shared.frontmostApplication
+            guard let element = ScreenContext.focusedElement(of: app),
+                  let baseline = ScreenContext.stringValue(of: element),
+                  baseline.contains(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            else { return }  // can't read the field, or our text isn't there — skip
+            self.pendingLearning = (element, baseline, insertedWords)
+        }
+    }
+
+    /// Re-reads the previously-inserted-into field, diffs it, and learns any
+    /// word-for-word corrections the user made to Velora's output.
+    private func checkPendingLearning() {
+        guard config.learnFromEdits, let pending = pendingLearning else { return }
+        pendingLearning = nil
+        guard let edited = ScreenContext.stringValue(of: pending.element),
+              edited != pending.baseline else { return }
+        let corrections = CorrectionDiff.corrections(baseline: pending.baseline, edited: edited)
+            // Only learn where the mis-transcribed word was one WE produced.
+            .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
+        guard !corrections.isEmpty else { return }
+        let committed = learning.observe(corrections.map { ($0.wrong, $0.right) })
+        NSLog("Velora: learning — observed %ld correction(s), committed=%@",
+              corrections.count, committed ? "yes" : "no")
+        if committed {
+            // Push the new vocab/replacements to the running engine.
+            supervisor.send(["cmd": "reload_config"])
+        }
+    }
+
     // MARK: - Error retry
 
     private func retryFromError() {
@@ -217,6 +263,10 @@ final class DictationController: NSObject {
             showError("Speech engine is starting…")
             return
         }
+
+        // Learn from any edits the user made to the previous dictation before
+        // starting a new one (they've clearly finished with it).
+        checkPendingLearning()
 
         sessionID = UUID().uuidString
         rawTranscript = nil
@@ -533,6 +583,7 @@ final class DictationController: NSObject {
             inserter.insert(text, targetBundleID: context?.bundleID)
             hud.transition(to: .inserted)
             phase = .idle
+            captureLearningBaseline(text: text, bundleID: context?.bundleID)
         }
 
         recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs, audio: audio)

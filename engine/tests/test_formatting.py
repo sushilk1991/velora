@@ -392,3 +392,17 @@ def test_nearby_text_enters_prompt(config):
     ents = [{"type": "nearby", "value": "Message Priya Sharma"}]
     p = build_system_prompt(Mode(name="Default"), config, "Chrome", "browser", ents)
     assert "Nearby on-screen text" in p and "Priya Sharma" in p
+
+
+def test_learned_corrections_merge(tmp_path):
+    import json
+    from velora_engine.config import Config
+    (tmp_path / "learned.json").write_text(json.dumps(
+        {"replacements": {"preeya": "Priya"}, "vocabulary": ["Velora"]}))
+    c = Config(home=tmp_path)
+    assert c.global_replacements.get("preeya") == "Priya"
+    assert "Velora" in c.global_vocabulary
+    # user config overrides a learned replacement
+    (tmp_path / "config.json").write_text(json.dumps({"replacements": {"preeya": "Preeya"}}))
+    c.reload()
+    assert c.global_replacements.get("preeya") == "Preeya"

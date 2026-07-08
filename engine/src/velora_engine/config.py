@@ -87,6 +87,8 @@ class Config:
         self.home = home or velora_home()
         self.data: dict[str, Any] = dict(DEFAULT_CONFIG)
         self.modes: dict[str, Mode] = {}
+        self._learned_vocab: list[str] = []
+        self._learned_replacements: dict[str, str] = {}
         self.reload()
 
     # ---- paths ----
@@ -168,11 +170,22 @@ class Config:
 
     @property
     def global_vocabulary(self) -> list[str]:
-        return [str(v) for v in self.data.get("vocabulary", []) or []]
+        # User-configured vocab + terms the app learned from corrections.
+        base = [str(v) for v in self.data.get("vocabulary", []) or []]
+        seen: set[str] = set()
+        out: list[str] = []
+        for v in base + self._learned_vocab:
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out
 
     @property
     def global_replacements(self) -> dict[str, str]:
-        return {str(k): str(v) for k, v in (self.data.get("replacements") or {}).items()}
+        # Learned corrections first, then user config on top (user always wins).
+        merged = dict(self._learned_replacements)
+        merged.update({str(k): str(v) for k, v in (self.data.get("replacements") or {}).items()})
+        return merged
 
     # ---- lifecycle ----
     def reload(self) -> None:
@@ -184,8 +197,28 @@ class Config:
         except OSError as exc:  # pragma: no cover — permissions best-effort
             log.warning("could not chmod %s to 0700: %s", self.home, exc)
         self._load_or_create_config()
+        self._load_learned()
         self._ensure_builtin_modes()
         self._load_modes()
+
+    def _load_learned(self) -> None:
+        """Load ~/.velora/learned.json — vocab/replacements the app taught the
+        engine from the user's post-dictation edits. Kept separate from
+        config.json so the app's config writes never clobber it and it survives
+        a corrupt user config."""
+        self._learned_vocab: list[str] = []
+        self._learned_replacements: dict[str, str] = {}
+        path = self.home / "learned.json"
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            self._learned_vocab = [str(v) for v in data.get("vocabulary", []) or []]
+            self._learned_replacements = {
+                str(k): str(v) for k, v in (data.get("replacements") or {}).items()
+            }
+        except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
+            log.warning("learned.json unreadable (%s); ignoring", exc)
 
     def save(self) -> None:
         self.config_path.write_text(json.dumps(self.data, indent=2) + "\n")

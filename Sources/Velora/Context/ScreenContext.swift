@@ -78,6 +78,23 @@ enum ScreenContext {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    // MARK: - Focused element (for the learning loop)
+
+    /// The app's currently focused UI element (usually the text field being
+    /// dictated into), or nil. Held by the learning loop to re-read its value
+    /// after the user edits, so corrections can be diffed.
+    static func focusedElement(of app: NSRunningApplication?) -> AXUIElement? {
+        guard let app, app.processIdentifier > 0 else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        return axElement(appElement, kAXFocusedUIElementAttribute)
+    }
+
+    /// The text value of an element (best effort; nil for non-text elements).
+    static func stringValue(of element: AXUIElement) -> String? {
+        axString(element, kAXValueAttribute)
+    }
+
     // MARK: - Nearby-text read (rich context)
 
     /// Short text strings near the focused element: the field's own
