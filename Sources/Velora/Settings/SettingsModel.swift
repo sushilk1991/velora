@@ -58,11 +58,17 @@ final class SettingsModel: ObservableObject {
     /// File-backed; `observe` reloads before writing, so clearing here is
     /// respected by the DictationController's own instance.
     private let learning = LearningStore()
+    /// File-backed like `learning`, but the engine's idle miner owns the file —
+    /// this store only lists terms and records deletions/bans.
+    private let autoVocab = AutoVocabStore()
 
     /// How many spelling corrections Velora has learned (for the undo affordance).
     @Published var learnedCount = 0
     /// The learned corrections themselves, for the manageable list.
     @Published var learnedEntries: [LearningStore.Entry] = []
+    /// Auto-learned vocabulary the engine mined from dictation history, for the
+    /// manageable list (empty until the miner's first pass).
+    @Published var autoVocabTerms: [String] = []
 
     /// Forgets every learned correction and reloads the engine.
     func clearLearnedCorrections() {
@@ -83,6 +89,27 @@ final class SettingsModel: ObservableObject {
     func refreshLearnedCount() {
         learnedEntries = learning.entries()
         learnedCount = learnedEntries.count
+    }
+
+    /// Refreshes the auto-learned vocab list from disk (call when the view
+    /// appears — the engine's miner may have added terms since last look).
+    func refreshAutoVocab() {
+        autoVocabTerms = autoVocab.terms()
+    }
+
+    /// Deletes one auto-learned term (banned from re-learning) and reloads the
+    /// engine so its vocabulary drops the term immediately.
+    func removeAutoVocabTerm(_ term: String) {
+        autoVocab.remove(term)
+        refreshAutoVocab()
+        supervisor?.send(["cmd": "reload_config"])
+    }
+
+    /// Forgets every auto-learned term (all banned) and reloads the engine.
+    func clearAutoVocab() {
+        autoVocab.clear()
+        autoVocabTerms = []
+        supervisor?.send(["cmd": "reload_config"])
     }
 
     /// Models advertised by the running engine (from the `status` reply). Empty
@@ -131,6 +158,8 @@ final class SettingsModel: ObservableObject {
         autoPunctuation = config.autoPunctuation
         romanizeOutput = config.romanizeOutput
         learnFromEdits = config.learnFromEdits
+        vocabMining = config.vocabMining
+        smartTerminal = config.smartTerminal
         sttModel = config.sttModel
         saveAudio = config.saveAudio
         learnedCount = learning.count
@@ -242,6 +271,22 @@ final class SettingsModel: ObservableObject {
 
     @Published var learnFromEdits: Bool {
         didSet { config.learnFromEdits = learnFromEdits }
+    }
+
+    @Published var vocabMining: Bool {
+        didSet {
+            guard vocabMining != oldValue else { return }
+            config.vocabMining = vocabMining
+            supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+
+    @Published var smartTerminal: Bool {
+        didSet {
+            guard smartTerminal != oldValue else { return }
+            config.smartTerminal = smartTerminal
+            supervisor?.send(["cmd": "reload_config"])
+        }
     }
 
     @Published var soundsEnabled: Bool {

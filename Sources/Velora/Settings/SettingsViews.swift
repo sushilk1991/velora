@@ -32,7 +32,7 @@ enum SettingsTab: CaseIterable {
     var preferredHeight: CGFloat {
         switch self {
         case .general: return 270
-        case .dictation: return 430
+        case .dictation: return 540
         case .model: return 480
         case .modes: return 600
         case .history: return 560
@@ -119,6 +119,14 @@ struct DictationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: $model.smartTerminal) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Smart cleanup in terminals")
+                        Text("Clean up long prose dictated into a terminal (AI chats); short commands stay verbatim.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Toggle(isOn: $model.learnFromEdits) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Learn from my edits")
@@ -159,8 +167,46 @@ struct DictationSettingsView: View {
                             .font(.callout.weight(.medium))
                     }
                 }
+                Toggle(isOn: $model.vocabMining) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Learn new words automatically")
+                        Text("While idle, Velora spots names and jargon you dictate often and adds them to its vocabulary — all on this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if !model.autoVocabTerms.isEmpty {
+                    DisclosureGroup {
+                        ForEach(model.autoVocabTerms, id: \.self) { term in
+                            HStack(spacing: VeloraSpacing.s) {
+                                Text(term)
+                                Spacer()
+                                Button {
+                                    model.removeAutoVocabTerm(term)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Forget this word — it won't be re-learned")
+                            }
+                            .font(.callout)
+                            .padding(.vertical, 1)
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Forget all", role: .destructive) { model.clearAutoVocab() }
+                                .controlSize(.small)
+                        }
+                    } label: {
+                        Text("Auto-learned words (\(model.autoVocabTerms.count))")
+                            .font(.callout.weight(.medium))
+                    }
+                }
             }
-            .onAppear { model.refreshLearnedCount() }
+            .onAppear {
+                model.refreshLearnedCount()
+                model.refreshAutoVocab()
+            }
             Section {
                 Toggle(isOn: $model.saveAudio) {
                     VStack(alignment: .leading, spacing: 2) {

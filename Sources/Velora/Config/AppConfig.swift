@@ -130,6 +130,8 @@ final class AppConfig {
         static let saveAudio = "velora.saveAudio"
         static let romanizeOutput = "velora.romanizeOutput"
         static let learnFromEdits = "velora.learnFromEdits"
+        static let vocabMining = "velora.vocabMining"
+        static let smartTerminal = "velora.smartTerminal"
         static let typingFallbackApps = "velora.typingFallbackApps"
     }
 
@@ -146,6 +148,8 @@ final class AppConfig {
             Key.saveAudio: true,
             Key.romanizeOutput: false,
             Key.learnFromEdits: true,
+            Key.vocabMining: true,
+            Key.smartTerminal: true,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -266,6 +270,22 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: Key.romanizeOutput); writeEngineConfig() }
     }
 
+    /// Idle vocabulary mining: while nothing is happening, the engine's cleanup
+    /// LLM extracts recurring names/jargon from recent dictations into an
+    /// auto-learned vocabulary (all local). Mirrored as `vocab_mining`.
+    var vocabMining: Bool {
+        get { defaults.bool(forKey: Key.vocabMining) }
+        set { defaults.set(newValue, forKey: Key.vocabMining); writeEngineConfig() }
+    }
+
+    /// Smart Terminal gate: long prose dictated into a terminal (AI chats like
+    /// Claude Code) gets LLM cleanup; short command-like utterances stay
+    /// verbatim. Mirrored as `smart_terminal`.
+    var smartTerminal: Bool {
+        get { defaults.bool(forKey: Key.smartTerminal) }
+        set { defaults.set(newValue, forKey: Key.smartTerminal); writeEngineConfig() }
+    }
+
     /// Bundle ids that should use CGEvent unicode typing instead of ⌘V paste
     /// (terminals and other paste-hostile apps). User-extendable.
     var typingFallbackApps: [String] {
@@ -305,9 +325,9 @@ final class AppConfig {
     }
 
     /// Read-modify-writes the engine-facing config file: only the app-owned
-    /// keys (stt_model, language, auto_punctuation, save_audio) are updated;
-    /// engine-owned keys (cleanup model/flags, vocabulary, replacements, …)
-    /// are preserved.
+    /// keys (stt_model, language, auto_punctuation, save_audio,
+    /// romanize_output, vocab_mining, smart_terminal) are updated; engine-owned
+    /// keys (cleanup model/flags, vocabulary, replacements, …) are preserved.
     /// The engine reads this at startup and on `reload_config`.
     func writeEngineConfig() {
         ensureVeloraDirectory()
@@ -321,6 +341,8 @@ final class AppConfig {
         payload["auto_punctuation"] = autoPunctuation
         payload["save_audio"] = saveAudio
         payload["romanize_output"] = romanizeOutput
+        payload["vocab_mining"] = vocabMining
+        payload["smart_terminal"] = smartTerminal
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])

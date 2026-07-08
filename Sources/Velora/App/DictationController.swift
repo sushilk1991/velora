@@ -95,6 +95,13 @@ final class DictationController: NSObject {
     /// a learned correction.
     private let learning = LearningStore()
     private var pendingLearning: (element: AXUIElement, inserted: String, insertedWords: Set<String>)?
+    /// Deferred re-check: `checkPendingLearning` normally runs when the NEXT
+    /// dictation starts, so an edit made after the *last* dictation of a sitting
+    /// would never be learned. This one-shot timer closes that gap.
+    private var learningRecheckTimer: Timer?
+    /// Long enough for the user to notice and fix a misheard word; short enough
+    /// that the field usually still exists when we re-read it.
+    private static let learningRecheckDelay: TimeInterval = 45
     /// Learning is scoped to compose-box-sized fields: we never diff a large
     /// document (can't isolate our span; would freeze on the hot path).
     private static let learningMaxWords = 60
@@ -199,6 +206,19 @@ final class DictationController: NSObject {
             } ?? NSWorkspace.shared.frontmostApplication
             guard let element = ScreenContext.focusedElement(of: app) else { return }
             self.pendingLearning = (element, inserted, insertedWords)
+            self.scheduleLearningRecheck()
+        }
+    }
+
+    /// Arms the one-shot deferred re-check (~45 s after insert). Main thread,
+    /// like the rest of this class; superseding a previous timer keeps at most
+    /// one re-check pending — always for the newest baseline.
+    private func scheduleLearningRecheck() {
+        learningRecheckTimer?.invalidate()
+        learningRecheckTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.learningRecheckDelay, repeats: false
+        ) { [weak self] _ in
+            self?.checkPendingLearning()
         }
     }
 
@@ -206,6 +226,11 @@ final class DictationController: NSObject {
     /// word-for-word corrections. The AX read + diff run OFF the main thread so a
     /// wedged app can't stall the hotkey; only the store update touches main.
     private func checkPendingLearning() {
+        // Whether triggered by the next dictation's start or by the deferred
+        // timer, the baseline is consumed exactly once — kill the timer so a
+        // late fire can't race (the nil guard would make it harmless anyway).
+        learningRecheckTimer?.invalidate()
+        learningRecheckTimer = nil
         guard config.learnFromEdits, let pending = pendingLearning else { return }
         pendingLearning = nil
         contextQueue.async { [weak self] in
