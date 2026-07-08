@@ -8,6 +8,10 @@ extension Notification.Name {
     static let veloraEngineStatus = Notification.Name("VeloraEngineStatus")
     /// A `reprocessed` reply arrived. `object` is the `EngineEvent.reprocessed`.
     static let veloraEngineReprocessed = Notification.Name("VeloraEngineReprocessed")
+    /// First-run setup progress changed. `userInfo["status"]` is the display
+    /// string ("Downloading the speech model (1.6 GB) — 42%"), absent when
+    /// setup finished. Drives the onboarding card and the menubar line.
+    static let veloraEngineLoading = Notification.Name("VeloraEngineLoading")
 }
 
 /// Observes supervisor health for UI (menubar state) and dictation gating.
@@ -54,6 +58,27 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
 
     var isReady: Bool { state == .ready }
+
+    /// Human-readable first-run setup status ("Downloading the speech model
+    /// (1.6 GB) — 42%"), nil when nothing is loading. Also set app-side for
+    /// the pre-socket venv bootstrap, then owned by engine `loading` events.
+    private(set) var loadingStatus: String? {
+        didSet {
+            guard loadingStatus != oldValue else { return }
+            let status = loadingStatus
+            Self.lastLoadingStatus = status
+            DispatchQueue.main.async {
+                var info: [String: Any] = [:]
+                if let status { info["status"] = status }
+                NotificationCenter.default.post(
+                    name: .veloraEngineLoading, object: nil, userInfo: info)
+            }
+        }
+    }
+
+    /// Latest setup status for late-constructed observers (the onboarding
+    /// window seeds from this — notifications only fire on change).
+    private(set) static var lastLoadingStatus: String?
 
     private var process: Process?
     private var connectTimer: Timer?
@@ -152,6 +177,9 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         }
         if firstBootstrap {
             NSLog("Velora: first-run engine bootstrap — venv creation may take several minutes")
+            // Pre-socket phase: the engine can't report progress yet, so the
+            // app owns the message until the first `loading`/`ready` event.
+            loadingStatus = "Setting up the speech engine (one-time, a few minutes)…"
         }
 
         proc.terminationHandler = { [weak self] p in
@@ -173,6 +201,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private func handleProcessExit(status: Int32) {
         process = nil
         guard !isQuitting else { return }
+        // A crash mid-download must not leave a stale "Downloading…" line
+        // in the menubar next to the degraded message; the respawned engine
+        // re-reports its own progress.
+        loadingStatus = nil
         client.disconnect(notify: false)
         restartAttempts += 1
         let delay = min(30.0, pow(2.0, Double(min(restartAttempts, 5))))
@@ -241,6 +273,21 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             if state != .ready {
                 restartAttempts = 0
                 state = .ready
+            }
+            // Ready ends the pre-dictation setup phases; the post-ready
+            // writing-model download re-sets the status via .loading events.
+            if case .ready = event, loadingStatus != nil { loadingStatus = nil }
+        case .loading(let phase, let fraction):
+            if let phase {
+                if let fraction {
+                    // Cap the display at 99% — the fraction is a cache-size
+                    // estimate; only the phase change proves completion.
+                    loadingStatus = "\(phase) — \(min(99, Int((fraction * 100).rounded())))%"
+                } else {
+                    loadingStatus = phase
+                }
+            } else {
+                loadingStatus = nil
             }
         case .status(let payload):
             NotificationCenter.default.post(

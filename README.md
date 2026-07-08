@@ -55,7 +55,7 @@ make app          # builds build/Velora.app (SwiftPM release + hand-rolled bundl
 open build/Velora.app
 ```
 
-`make app` compiles the Swift app and bundles the Python engine; the engine's dependencies are fetched by `uv` on first launch. First launch then walks you through onboarding: microphone permission, accessibility permission (live-detected as you grant it), hotkey choice, and a try-it playground — you finish with a real dictation. The engine downloads the default models from Hugging Face on first run (~4 GB, a few minutes); after that, everything is offline.
+`make app` compiles the Swift app and bundles the Python engine; the engine's dependencies are fetched by `uv` on first launch. First launch then walks you through onboarding: microphone permission, accessibility permission (live-detected as you grant it), hotkey choice, and a try-it playground — you finish with a real dictation. The engine downloads the default models from Hugging Face on first run (~6 GB; live progress shows in the onboarding window, the menubar menu, and the HUD if you try dictating early — speech recognition unlocks first, AI cleanup a few minutes later). After that, everything is offline.
 
 Prefer not to build? Grab the notarization-pending `Velora-x.y.z.dmg` from [Releases](https://github.com/sushilk1991/velora/releases), drag Velora to Applications, and open it. Because it isn't notarized by Apple yet, the first open needs **right-click → Open** (or *System Settings → Privacy & Security → Open Anyway*).
 

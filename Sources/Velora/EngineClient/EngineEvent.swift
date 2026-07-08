@@ -6,6 +6,10 @@ enum EngineEvent {
     /// Engine finished startup (STT model preloaded) and is ready for `start`.
     case ready
 
+    /// First-run setup progress ("Downloading the speech model (1.6 GB)",
+    /// fraction 0…1 when measurable). `phase == nil` clears the status.
+    case loading(phase: String?, fraction: Double?)
+
     /// Streaming partial transcript (P1 HUD display; parsed but unused in P0 UI).
     case partial(session: String, text: String)
 
@@ -61,6 +65,10 @@ enum EngineEvent {
         switch name {
         case "ready":
             return .ready
+        case "loading":
+            return .loading(
+                phase: (object["phase"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                fraction: (object["fraction"] as? NSNumber)?.doubleValue)
         case "partial":
             return .partial(
                 session: object["session"] as? String ?? "",

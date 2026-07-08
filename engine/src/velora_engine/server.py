@@ -187,6 +187,10 @@ class Engine:
         self._starting = False
         self.audio = AudioStore(config.audio_dir)
         self.stt_ready = asyncio.Event()
+        # First-run setup progress ({"phase": str, "fraction": float|None}),
+        # broadcast to the app so model downloads have visible UI. None when
+        # nothing is loading.
+        self.loading: dict[str, Any] | None = None
         self.cleanup: CleanupEngine | None = None
         self.session: Session | None = None
         self.writer: asyncio.StreamWriter | None = None
@@ -210,13 +214,47 @@ class Engine:
 
     # ---------------- model loading ----------------
 
+    async def _set_loading(self, phase: str | None, fraction: float | None = None) -> None:
+        """Update + broadcast first-run progress. Phase None clears it (the
+        cleared event is sent too — the app must drop a stale phase after the
+        post-`ready` writing-model download finishes)."""
+        self.loading = None if phase is None else {"phase": phase, "fraction": fraction}
+        await self._send({"event": "loading", "phase": phase, "fraction": fraction})
+
+    async def _download_with_progress(self, model_id: str, what: str) -> None:
+        """Run ensure_downloaded off-loop while broadcasting cache-growth
+        progress every second ("Downloading speech model (1.6 GB) — 42%")."""
+        info = models.lookup(model_id)
+        size_note = f" ({info.size})" if info and info.size else ""
+        phase = f"Downloading the {what} model{size_note}"
+        expected = models.expected_bytes(model_id)
+        task = asyncio.create_task(asyncio.to_thread(models.ensure_downloaded, model_id))
+        best = 0.0  # hub renames finished blobs, so raw cache size can dip —
+        while not task.done():  # a progress bar must never move backwards
+            fraction = None
+            if expected:
+                done = await asyncio.to_thread(models.cached_bytes, model_id)
+                best = max(best, min(0.999, done / expected))
+                fraction = best
+            await self._set_loading(phase, fraction)
+            await asyncio.wait([task], timeout=1.0)
+        await task  # propagate download errors
+
     async def _load_models(self) -> None:
         try:
             t0 = time.perf_counter()
+            if not fake_stt_enabled() and not await asyncio.to_thread(
+                models.is_cached, self.stt.model_id
+            ):
+                await self._download_with_progress(self.stt.model_id, "speech")
+            await self._set_loading("Loading the speech model…")
             await self._stt_call(self.stt.load)
+            await self._set_loading(None)
             log.info("stt ready (%s) in %.2fs", self.stt.model_id, time.perf_counter() - t0)
         except Exception:
             log.exception("FATAL: STT model failed to load")
+            with contextlib.suppress(Exception):
+                await self._set_loading(None)  # never strand a stale phase
             self.shutdown.set()
             return
         self.stt_ready.set()
@@ -230,7 +268,14 @@ class Engine:
         if self.config.cleanup_enabled and not fake_stt_enabled():
             engine = CleanupEngine(self.config.cleanup_model)
             try:
+                # Dictation is already available (raw text) — but the first-run
+                # download of the cleanup LLM is multi-GB, so keep the progress
+                # UI alive for it too.
+                if not await asyncio.to_thread(models.is_cached, self.config.cleanup_model):
+                    await self._download_with_progress(self.config.cleanup_model, "writing")
+                    await self._set_loading("Preparing the writing model…")
                 await engine.load_async(STATIC_SYSTEM_PROMPT)
+                await self._set_loading(None)
                 # A set_model during this warm-up may already have installed a
                 # newer cleanup engine; don't clobber it (that would leak the new
                 # one and silently run the old model). Only adopt this engine if
@@ -241,6 +286,8 @@ class Engine:
                     engine.close()
             except Exception:
                 log.exception("cleanup LLM failed to load; dictations will return raw text")
+                with contextlib.suppress(Exception):
+                    await self._set_loading(None)  # never leave a stale phase up
         # First mining pass a while after startup — the loop itself re-checks
         # every skip condition (busy, LLM missing, disabled) before doing work.
         self._schedule_mining(delay=MINE_STARTUP_DELAY_S)
@@ -312,6 +359,12 @@ class Engine:
                     "version": __version__,
                 }
             )
+            # Current setup phase AFTER ready: the app clears its status on
+            # `ready`, so sending before would erase a post-ready writing-model
+            # phase for a client that connects mid-download (review finding).
+            # Pre-ready download phases tick every second anyway.
+            if self.loading is not None:
+                await self._send({"event": "loading", **self.loading})
             while True:
                 try:
                     frame_type, payload = await protocol.read_frame(reader)

@@ -413,7 +413,9 @@ final class DictationController: NSObject {
         }
         guard supervisor.isReady else {
             NSLog("Velora: recording refused — engine not ready")
-            showError("Speech engine is starting…")
+            // First run: say WHAT is happening ("Downloading the speech model
+            // (1.6 GB) — 42%") instead of a vague "starting…".
+            showError(supervisor.loadingStatus ?? "Speech engine is starting…")
             return
         }
 

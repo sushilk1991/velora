@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 log = logging.getLogger("velora.models")
 
@@ -171,3 +173,46 @@ def ensure_downloaded(model_id: str) -> str:
     path = snapshot_download(repo_id=model_id)
     log.info("model %s ready at %s (%.1fs)", model_id, path, time.perf_counter() - t0)
     return path
+
+
+def is_cached(model_id: str) -> bool:
+    """True when a complete snapshot exists locally (no network touched)."""
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        snapshot_download(repo_id=model_id, local_files_only=True)
+        return True
+    except LocalEntryNotFoundError:
+        return False
+    except Exception:  # noqa: BLE001 — probe must never raise
+        return False
+
+
+def expected_bytes(model_id: str) -> int | None:
+    """Approximate download size from the registry ("1.6 GB" → bytes)."""
+    info = lookup(model_id)
+    if info is None:
+        return None
+    m = re.match(r"([\d.]+)\s*GB", info.size or "")
+    return int(float(m.group(1)) * 1024**3) if m else None
+
+
+def cached_bytes(model_id: str) -> int:
+    """Bytes currently on disk in the hub cache for this repo — includes
+    in-flight `.incomplete` blobs, so it grows during a download and drives
+    the first-run progress UI."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except ImportError:  # pragma: no cover — constant moved
+        return 0
+    repo_dir = Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
+    total = 0
+    if repo_dir.is_dir():
+        for p in repo_dir.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:  # pragma: no cover — racing the downloader
+                pass
+    return total

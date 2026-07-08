@@ -37,6 +37,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// menu shows progress + cancel instead of the transcribe action.
     var transcriptionProgress: String?
 
+    /// First-run setup status ("Downloading the speech model (1.6 GB) — 42%");
+    /// shown as a disabled menu line + button tooltip while models download.
+    var setupStatus: String? {
+        didSet {
+            guard setupStatus != oldValue else { return }
+            statusItem?.button?.toolTip = setupStatus ?? "Velora"
+            // Menus only rebuild on open — tick the row live if it's showing
+            // (a first-run user plausibly sits watching this exact line).
+            if let setupMenuItem, let setupStatus {
+                setupMenuItem.title = setupStatus
+            }
+        }
+    }
+
+    /// The live progress row, while the menu is open (weak: menus rebuild).
+    private weak var setupMenuItem: NSMenuItem?
+
     init(history: HistoryStore) {
         self.history = history
         super.init()
@@ -117,6 +134,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             string: startTitle,
             attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
         menu.addItem(start)
+
+        // First-run setup: models are downloading — say so instead of letting
+        // a dead "Start Dictation" mystify a brand-new user.
+        if let setupStatus {
+            let item = NSMenuItem(title: setupStatus, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            setupMenuItem = item
+        }
 
         let recents = history.recent(limit: 3)
         if !recents.isEmpty {

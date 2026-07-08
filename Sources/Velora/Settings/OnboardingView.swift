@@ -16,6 +16,10 @@ final class OnboardingModel: ObservableObject {
     @Published var inputMonitoringGranted = Permissions.inputMonitoringGranted
     @Published var accessibilityGranted = Permissions.accessibilityGranted
     @Published var dictationSucceeded = false
+    /// First-run setup status ("Downloading the speech model (1.6 GB) — 42%").
+    /// The try-it step shows a progress card instead of a dead text field
+    /// while models download.
+    @Published var setupStatus: String? = EngineSupervisor.lastLoadingStatus
     @Published var hotkey = AppConfig.shared.hotkey {
         didSet {
             guard hotkey != oldValue else { return }
@@ -29,6 +33,7 @@ final class OnboardingModel: ObservableObject {
 
     private var pollTimer: AnyCancellable?
     private var insertedObserver: NSObjectProtocol?
+    private var loadingObserver: NSObjectProtocol?
 
     init() {
         // 1 s live-poll: cards flip to granted with no "I did it" button.
@@ -41,11 +46,20 @@ final class OnboardingModel: ObservableObject {
         ) { [weak self] _ in
             self?.dictationSucceeded = true
         }
+
+        loadingObserver = NotificationCenter.default.addObserver(
+            forName: .veloraEngineLoading, object: nil, queue: .main
+        ) { [weak self] note in
+            self?.setupStatus = note.userInfo?["status"] as? String
+        }
     }
 
     deinit {
         if let insertedObserver {
             NotificationCenter.default.removeObserver(insertedObserver)
+        }
+        if let loadingObserver {
+            NotificationCenter.default.removeObserver(loadingObserver)
         }
     }
 
@@ -265,13 +279,32 @@ struct OnboardingView: View {
 
     private var tryItStep: some View {
         stepLayout(title: "Try it") {
-            Text("Click into the text field, hold \(model.hotkey.displayName), and speak.")
-                .font(.body)
-                .foregroundStyle(.secondary)
+            // First run: models are still downloading — show what's happening
+            // instead of a text field that mysteriously does nothing.
+            if let status = model.setupStatus {
+                VStack(spacing: VeloraSpacing.xs) {
+                    HStack(spacing: VeloraSpacing.s) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(status)
+                            .font(.callout.weight(.medium))
+                    }
+                    Text("One-time setup — everything stays on this Mac. Dictation unlocks the moment it finishes.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
                 .multilineTextAlignment(.center)
+                .transition(.opacity)
+            } else {
+                Text("Click into the text field, hold \(model.hotkey.displayName), and speak.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
 
             TryItEditor()
                 .frame(width: 480, height: 160)
+                .opacity(model.setupStatus == nil ? 1 : 0.45)
 
             // Fixed-height slot so the success label never shifts the layout.
             Group {

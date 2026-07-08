@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingController: OnboardingWindowController?
     private var hotkeyObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
+    private var loadingObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
@@ -78,6 +79,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.hotkeyMonitor.hotkey = self.config.hotkey
         }
 
+        // First-run setup progress (venv bootstrap, model downloads) →
+        // menubar line + tooltip, so a fresh install is never a silent wait.
+        loadingObserver = NotificationCenter.default.addObserver(
+            forName: .veloraEngineLoading, object: nil, queue: .main
+        ) { [weak self] note in
+            self?.statusController.setupStatus = note.userInfo?["status"] as? String
+        }
+
         // Accessibility just flipped to granted (onboarding live-poll): an
         // event tap created before the grant is dead — reinstall immediately
         // so the hotkey works without an app relaunch.
@@ -110,6 +119,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let accessibilityObserver {
             NotificationCenter.default.removeObserver(accessibilityObserver)
+        }
+        if let loadingObserver {
+            NotificationCenter.default.removeObserver(loadingObserver)
         }
     }
 
