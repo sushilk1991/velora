@@ -305,3 +305,45 @@ def test_strip_prompt_echo_keeps_dictated_word_glossary():
     # The word "glossary" in ordinary prose (no colon, no term run) survives.
     text = "add a glossary section to the doc"
     assert strip_prompt_echo(text, PROMPT) == text
+
+
+def test_strip_prompt_echo_keeps_glossary_word_deep_in_text():
+    # Review finding: "glossary" beyond the first words is dictation, never an
+    # echo — even when followed by a real glossary term.
+    text = "please add that to the glossary Velora is capitalized"
+    assert strip_prompt_echo(text, PROMPT) == text
+
+
+def test_strip_prompt_echo_requires_prompt_order():
+    # Review finding: a genuine dictation reusing glossary words in a DIFFERENT
+    # order must survive — only an in-prompt-order run reads as an echo.
+    text = "authCheck broke Velora again this morning"
+    assert strip_prompt_echo(text, PROMPT) == text
+
+
+# ---- empty-decode speech protection (review finding) ----------------------------
+
+
+def test_empty_speech_decode_keeps_audio_pending(whisper):
+    # A span that HAD speech but decoded to "" must stay un-consumed: marking
+    # it decoded would drop those words from the stitched final.
+    backend, fake = whisper(["", "recovered text"])
+    feed_seconds(backend, MIN_SEGMENT_S)
+    feed_seconds(backend, SEGMENT_SILENCE_S, chunk=quiet())
+    assert len(fake.calls) == 1  # decode happened, returned ""
+    assert backend._decoded_samples == 0  # noqa: SLF001 — audio NOT consumed
+    assert backend.take_new_segments() == []
+    # after the ~3s backoff, the retry decodes the WHOLE span again (larger)
+    feed_seconds(backend, 3.5)
+    feed_seconds(backend, SEGMENT_SILENCE_S, chunk=quiet())
+    assert len(fake.calls) == 2
+    assert fake.calls[1][0] > fake.calls[0][0]  # span grew — nothing lost
+    assert backend.take_new_segments() == ["recovered text"]
+
+
+def test_true_silence_span_is_consumed(whisper):
+    # An all-silence span decoding to "" is consumed (no retry loop).
+    backend, fake = whisper([""])
+    feed_seconds(backend, MIN_SEGMENT_S + 1, chunk=quiet())
+    assert len(fake.calls) == 1
+    assert backend._decoded_samples > 0  # noqa: SLF001 — silence consumed

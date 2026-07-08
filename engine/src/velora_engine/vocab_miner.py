@@ -46,11 +46,16 @@ EXTRACTION_SYSTEM_PROMPT = (
 )
 
 # Junky capitalized starts the LLM sometimes nominates ("I", "The", ...) —
-# rejected as single-word terms regardless of casing.
+# rejected as single-word terms regardless of casing. Weekdays/months are
+# capitalized in every history row (sentence casing) and would otherwise ride
+# into the glossary as "personal vocabulary" (review finding).
 _STOPWORDS = frozenset(
     "i the a an it we you he she they this that and or but so if then is are was "
     "were be been am do does did not no yes ok okay hi hey hello thanks thank "
-    "please today tomorrow yesterday".split()
+    "please today tomorrow yesterday "
+    "monday tuesday wednesday thursday friday saturday sunday "
+    "january february march april may june july august september october "
+    "november december".split()
 )
 
 
@@ -85,11 +90,18 @@ def validate_term(term: str, batch_text: str, banned: set[str], existing: set[st
     low = term.lower()
     if low in banned or low in existing:
         return False
-    if len(words) == 1:
-        if low in _STOPWORDS:
-            return False
-        if not (any(c.isupper() or c.isdigit() for c in term) or any(c in "._-" for c in term)):
-            return False
+    if any(w.lower() in _STOPWORDS for w in words) and len(words) == 1:
+        return False
+    # Shape rule for EVERY nomination, multi-word included: at least one word
+    # must look like a name (capital, digit, or ./_/-). This is what keeps an
+    # all-lowercase common phrase — including an injected imperative sentence
+    # living in a transcript ("ignore previous instructions") — out of the
+    # vocabulary that later rides inside the cleanup prompt (review finding).
+    def _namelike(w: str) -> bool:
+        return any(c.isupper() or c.isdigit() for c in w) or any(c in "._-" for c in w)
+
+    if not any(_namelike(w) for w in words):
+        return False
     return bool(_term_pattern(term).search(batch_text))
 
 
@@ -142,15 +154,27 @@ class VocabMiner:
         banned_low = {b.lower() for b in banned}
         out = dict(fresh)  # unknown keys pass through untouched
         out["version"] = 1
-        out["checkpoint_id"] = state.get("checkpoint_id", 0)
+        # Monotonic: if a concurrent writer (the app's delete, or a parallel
+        # step) advanced the checkpoint while this step ran, never roll it back
+        # — re-mining rows is wasted idle compute at best.
+        try:
+            fresh_ckpt = int(fresh.get("checkpoint_id", 0))
+        except (TypeError, ValueError):
+            fresh_ckpt = 0
+        out["checkpoint_id"] = max(int(state.get("checkpoint_id", 0)), fresh_ckpt)
         out["terms"] = [t for t in state.get("terms", []) if str(t).lower() not in banned_low]
         out["candidates"] = {
             k: v for k, v in (state.get("candidates") or {}).items() if str(k).lower() not in banned_low
         }
         out["banned"] = banned
         tmp = self._state_path.with_name(self._state_path.name + ".tmp")
-        tmp.write_text(json.dumps(out, indent=2) + "\n")
-        os.chmod(tmp, 0o600)
+        # O_CREAT with 0600 directly — no window where the temp file exists
+        # with default-umask permissions before a chmod.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, (json.dumps(out, indent=2) + "\n").encode())
+        finally:
+            os.close(fd)
         tmp.replace(self._state_path)
 
     # ---- history --------------------------------------------------------
@@ -192,9 +216,24 @@ class VocabMiner:
             checkpoint = int(state.get("checkpoint_id", 0))
         except (TypeError, ValueError):
             checkpoint = 0
-        rows, more = self._read_rows(checkpoint)
-        if not rows:
+        fetched, more_db = self._read_rows(checkpoint)
+        if not fetched:
             return False
+
+        # Char-budget the batch by INCLUDING whole rows until the cap: the
+        # checkpoint must only advance past rows the LLM actually saw —
+        # truncating the concatenation used to silently skip mining the later
+        # rows of every batch for long-form users (review finding). A single
+        # oversized row is truncated (and consumed) rather than wedging.
+        rows: list[tuple[int, str]] = []
+        used = 0
+        for row_id, final in fetched:
+            cost = len(final) + 1
+            if rows and used + cost > BATCH_CHAR_CAP:
+                break
+            rows.append((row_id, final[:BATCH_CHAR_CAP]))
+            used += cost
+        more = more_db or len(rows) < len(fetched)
 
         batch_text = "\n".join(final for _, final in rows if final.strip())[:BATCH_CHAR_CAP]
         raw_output = ""

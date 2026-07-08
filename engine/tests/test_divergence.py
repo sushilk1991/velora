@@ -65,6 +65,34 @@ def test_novel_content_rejected():
     assert reason is not None and reason.startswith("novel_content")
 
 
+def test_bare_actually_does_not_relax_floor():
+    # "actually" / "I mean" are everyday fillers; treating them as retraction
+    # markers switched the over-deletion backstop off for ordinary dictation
+    # (review finding). A deep shrink with only a bare "actually" → rejected.
+    raw = (
+        "the roadmap actually looks solid for the third quarter and we should "
+        "also think about hiring two more engineers before the launch window"
+    )
+    reason = check_divergence(raw, "The roadmap looks solid.")
+    assert reason is not None and reason.startswith("ratio_low")
+
+
+def test_strike_that_relaxes_floor():
+    raw = (
+        "so i drafted a long summary of the quarterly numbers and the hiring "
+        "plan strike that just tell him i will call back"
+    )
+    assert check_divergence(raw, "Just tell him I will call back.") is None
+
+
+def test_number_normalization_not_novel():
+    # "three thirty" → "3:30", "june fifth" → "June 5th": digit forms of
+    # spoken numbers are normalization, not hallucination (review finding).
+    raw = "meet at three thirty on june fifth with the twenty five designs"
+    out = "Meet at 3:30 on June 5th with the 25 designs."
+    assert check_divergence(raw, out) is None
+
+
 def test_small_grammar_fix_not_novel():
     # A legitimate agreement fix introduces one novel token — must pass.
     raw = "it don't work when the user click the button twice"

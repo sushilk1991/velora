@@ -256,7 +256,7 @@ async def test_engine_mines_when_idle_and_reloads_config(home, fake_stt):
         loaded = True
         model_id = "fake"
 
-        async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True):
+        async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True, cancel_event=None):
             from velora_engine.cleanup import CleanupResult
 
             return CleanupResult("Velora", True, 3)
@@ -279,7 +279,7 @@ async def test_engine_mining_skips_when_busy_or_disabled(home, fake_stt):
         loaded = True
         model_id = "fake"
 
-        async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True):
+        async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True, cancel_event=None):
             called.append(raw)
             from velora_engine.cleanup import CleanupResult
 

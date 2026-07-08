@@ -62,20 +62,28 @@ class SilenceTracker:
         self._speech_ema = self._EMA_START
         self._trailing_silence_samples = 0
 
-    def feed(self, chunk: np.ndarray) -> None:
+    def feed(self, chunk: np.ndarray) -> bool:
+        """Track one chunk; returns True when the chunk carried speech."""
         if chunk.size == 0:
-            return
+            return False
         rms = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
         threshold = max(self._MIN_THRESHOLD, 0.15 * self._speech_ema)
         if rms < threshold:
             self._trailing_silence_samples += len(chunk)
-        else:
-            self._trailing_silence_samples = 0
-            self._speech_ema += self._EMA_ALPHA * (rms - self._speech_ema)
+            return False
+        self._trailing_silence_samples = 0
+        self._speech_ema += self._EMA_ALPHA * (rms - self._speech_ema)
+        return True
 
     @property
     def trailing_silence_s(self) -> float:
         return self._trailing_silence_samples / SAMPLE_RATE
+
+    def consume_pause(self) -> None:
+        """Zero the trailing-silence run (a segment consumed this pause) while
+        KEEPING the adapted speech level — a full reset per segment would throw
+        away the mic/speaker calibration for no reason (review finding)."""
+        self._trailing_silence_samples = 0
 
     def reset(self) -> None:
         self._speech_ema = self._EMA_START
@@ -171,35 +179,37 @@ def strip_prompt_echo(text: str, prompt: str | None) -> str:
     """Remove a leaked initial_prompt from decoded text (known whisper failure:
     the glossary is echoed into the transcript, especially over silence).
 
-    Two shapes are handled: the literal "Glossary:" preamble anywhere in the
-    text, and text that STARTS with a fuzzy-normalized prefix of the glossary
-    string (whisper sometimes drops the preamble word). The strip is
-    conservative — a run must match ≥3 consecutive prompt tokens from the
-    prompt's start before prefix-stripping fires, so a dictation that genuinely
-    opens with one or two vocabulary terms is left alone.
+    Conservative on purpose (review-hardened): an echo LEADS a decode, so both
+    cases are anchored to the very start of the text (the preamble word must be
+    one of the first three words), and a matched term run must follow the
+    PROMPT'S ORDER — real dictation that happens to reuse glossary words in a
+    different order is left alone. Mid-transcript echoes without the preamble
+    are out of scope (guard_whisper_result's heuristics are the net there).
     """
     if not text or not prompt:
         return text
     ptokens = [t for t in (_echo_norm(w) for w in prompt.split()) if t]
     if not ptokens:
         return text
-    pset = set(ptokens)
 
     def run_end(words: list[re.Match[str]], idx: int) -> tuple[int | None, int]:
-        """From word `idx`, consume words whose normalized form appears in the
-        prompt; returns (end char offset of the run, matched-word count)."""
+        """From word `idx`, consume words that match prompt tokens IN PROMPT
+        ORDER (subsequence); returns (end char offset, matched-word count)."""
         end: int | None = None
         matched = 0
+        ppos = 0
         while idx < len(words):
             norm = _echo_norm(words[idx].group(0))
-            if norm and norm in pset:
-                matched += 1
-                end = words[idx].end()
+            if not norm:  # bare punctuation token — part of the echoed list
                 idx += 1
-            elif not norm:  # bare punctuation token — part of the echoed list
-                idx += 1
-            else:
+                continue
+            try:
+                ppos = ptokens.index(norm, ppos) + 1
+            except ValueError:
                 break
+            matched += 1
+            end = words[idx].end()
+            idx += 1
         return end, matched
 
     # Bounded loop: whisper occasionally echoes the prompt more than once.
@@ -208,14 +218,15 @@ def strip_prompt_echo(text: str, prompt: str | None) -> str:
         if not words:
             break
         stripped = False
-        # Case 1: literal preamble anywhere → strip it and the term run. To
-        # protect a genuinely dictated "glossary" ("add a glossary section"),
-        # the word must either carry the echoed colon ("Glossary:") or be
-        # followed by at least one actual glossary term.
-        for i, w in enumerate(words):
+        # Case 1: the literal preamble word within the first three words →
+        # strip it and the in-order term run. To protect genuinely dictated
+        # uses ("add a glossary section" is not start-anchored; "glossary
+        # Kubernetes" mid-text is never touched), the word must carry the
+        # echoed colon ("Glossary:") or be followed by ≥2 in-order terms.
+        for i, w in enumerate(words[:3]):
             if _echo_norm(w.group(0)) != "glossary":
                 continue
-            end, matched = run_end(words, i)
+            end, matched = run_end(words, i + 1)
             if matched < 2 and not w.group(0).rstrip(".").endswith(":"):
                 continue  # bare prose use of the word — not an echo
             end = end if end is not None else w.end()
@@ -226,7 +237,8 @@ def strip_prompt_echo(text: str, prompt: str | None) -> str:
             text = re.sub(r"\s{2,}", " ", text)
             continue
         # Case 2: fuzzy prefix of the glossary at the very start (allow the
-        # preamble word itself to have been dropped by the decoder).
+        # preamble word itself to have been dropped by the decoder). Requires
+        # ≥3 prompt tokens matched in order from the first word.
         first = _echo_norm(words[0].group(0))
         if first and first in (ptokens[0], ptokens[1] if len(ptokens) > 1 else ptokens[0]):
             end, matched = run_end(words, 0)
@@ -400,6 +412,8 @@ class WhisperBackend:
         self._segments: list[str] = []
         self._new_segments: list[str] = []
         self._silence = SilenceTracker()
+        self._span_had_speech = False  # speech seen since the last decode point
+        self._retry_at_samples = 0  # backoff cursor after an empty speech-span decode
         # Sticky per-session kill switch: one failed segment decode degrades
         # the whole session to today's batch path (never raise into the feed).
         self._segment_decode_failed = False
@@ -446,9 +460,12 @@ class WhisperBackend:
     def feed_chunk(self, chunk: np.ndarray) -> str | None:
         self._chunks.append(chunk)
         self._samples += len(chunk)
-        self._silence.feed(chunk)
+        if self._silence.feed(chunk):
+            self._span_had_speech = True
         if not self._loaded or not self.segmenting_enabled or self._segment_decode_failed:
             return None
+        if self._samples < self._retry_at_samples:
+            return None  # backing off after an empty decode of a speech span
         undecoded_s = (self._samples - self._decoded_samples) / SAMPLE_RATE
         pause_close = undecoded_s >= MIN_SEGMENT_S and self._silence.trailing_silence_s >= SEGMENT_SILENCE_S
         if not pause_close and undecoded_s < HARD_SEGMENT_S:
@@ -462,10 +479,19 @@ class WhisperBackend:
             log.exception("segment decode failed — falling back to batch decode at stop")
             self._segment_decode_failed = True
             return None
+        if not text and self._span_had_speech:
+            # Empty decode for a span that HAD speech (guard misfire): marking
+            # it decoded would drop those words from the stitched final
+            # (review finding). Leave the audio pending — the next attempt or
+            # the tail decode at stop re-covers it with more context — and
+            # back off ~3s so a standing pause doesn't retry every frame.
+            self._retry_at_samples = self._samples + int(3 * SAMPLE_RATE)
+            return None
         self._decoded_samples = self._samples
-        self._silence.reset()  # the pause that closed this segment is consumed
+        self._silence.consume_pause()  # the pause that closed this segment is consumed
+        self._span_had_speech = False
         if not text:
-            return None  # silence-only span (or guard dropped it) — no segment
+            return None  # true silence-only span — consumed, nothing to say
         self._segments.append(text)
         self._new_segments.append(text)
         return " ".join(self._segments)
@@ -515,6 +541,8 @@ class WhisperBackend:
         self._new_segments = []
         self._silence.reset()
         self._segment_decode_failed = False
+        self._span_had_speech = False
+        self._retry_at_samples = 0
         # NOTE: initial_prompt / segments_used_for_final / final_tail survive a
         # reset on purpose — the server sets the prompt per session and reads
         # the finalize flags right after finalize() has reset the audio state.

@@ -644,11 +644,13 @@ def run_gate(
         # is prose for an AI chat living in the terminal (Claude Code, codex) —
         # verbatim mode would insert it with no punctuation at all. Route it to
         # the LLM with a terminal-aware prompt instead. Scoped to the built-in
-        # Terminal mode only, so a user's custom formatting-off mode (or Raw)
-        # is never second-guessed.
+        # Terminal mode only, and only while its prompt is still EMPTY — a user
+        # who wrote their own Terminal prompt (or uses Raw / a custom
+        # formatting-off mode) is never second-guessed.
         if (
             getattr(config, "smart_terminal", True)
             and mode.name.lower() == "terminal"
+            and not mode.prompt.strip()
             and len(text.split()) >= SMART_TERMINAL_MIN_WORDS
         ):
             smart_mode = Mode(

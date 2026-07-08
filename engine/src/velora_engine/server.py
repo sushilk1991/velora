@@ -21,6 +21,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -79,10 +80,12 @@ RETRACTION_HEAD_WORDS = 4
 
 @dataclass
 class _ChunkResult:
-    """Cleaned text for one raw segment (ms = LLM time, 0 for deterministic)."""
+    """Cleaned text for one raw segment (ms = LLM time, 0 for deterministic;
+    applied = the LLM actually cleaned it, False for deterministic fallback)."""
 
     text: str
     ms: int
+    applied: bool = False
 
 
 def _join_chunks(parts: list[str]) -> str:
@@ -139,6 +142,12 @@ class Session:
         # segment) the segments stay preview-only and finalize takes the
         # classic whole-text path.
         self.streaming_disabled = False
+        # ONE system prompt for every chunk of this session, computed from the
+        # first segment's gate. Per-chunk run_gate applied end-of-utterance
+        # transforms (short-utterance period, per-chunk replacements/tag/strip)
+        # at every seam — one gate, one final postprocess matches the
+        # whole-text semantics (review finding).
+        self.stream_prompt: str | None = None
         # Entities snapshotted at start: during-speech chunks must use these —
         # `stop` merges richer entities into `context` later, and a chunk task
         # reading context lazily must not see them (they belong to the final
@@ -172,9 +181,13 @@ class Engine:
         # dedicated thread (the cleanup LLM likewise owns its own thread).
         self._stt_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
         # Idle vocabulary miner (created lazily; runs only when nothing else
-        # is using the machine — see _mine_when_idle).
+        # is using the machine — see _mine_when_idle). The event preempts an
+        # in-flight mining GENERATION the moment a session starts: cancelling
+        # the asyncio task alone leaves the executor thread generating, and a
+        # dictation's cleanup would queue behind it on the model lock.
         self._miner: VocabMiner | None = None
         self._miner_task: asyncio.Task[None] | None = None
+        self._mine_cancel = threading.Event()
 
     async def _stt_call(self, fn: Callable[..., T], *args: Any) -> T:
         return await asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
@@ -387,9 +400,12 @@ class Engine:
         if self.session is not None:
             log.warning("start while session %s active — discarding it", self.session.id)
             await self._abort_session("superseded by new start")
-        # A dictation owns the machine: stop any pending idle mining right now.
+        # A dictation owns the machine: stop any pending idle mining right now,
+        # AND preempt an in-flight mining generation on the cleanup thread
+        # (task cancellation alone can't reach the executor).
         if self._miner_task is not None:
             self._miner_task.cancel()
+        self._mine_cancel.set()
         session_id = str(msg.get("session") or uuid.uuid4())
         context = msg.get("context") or {}
         if not isinstance(context, dict):
@@ -510,6 +526,10 @@ class Engine:
         await self._drain_feeder(session)
         await self._stt_call(self.stt.reset)
         log.info("session %s discarded (%s)", session.id, why)
+        # The engine is idle again after an abort too — without this, a
+        # cancelled dictation left mining dead until the next FINALIZED one
+        # (review finding).
+        self._schedule_mining()
 
     @staticmethod
     def _cancel_chunk_tasks(session: Session) -> None:
@@ -634,6 +654,27 @@ class Engine:
             session.streaming_disabled = True
             self._cancel_chunk_tasks(session)
             return
+        # One gate per SESSION, from the first segment: streaming cleanup is
+        # for the LLM path only. A non-LLM gate (Raw mode, formatting off with
+        # short text) keeps segments preview-only — running deterministic
+        # gates per chunk applied end-of-utterance transforms mid-text at
+        # every seam (review finding), so those sessions take the classic
+        # whole-text path at stop instead.
+        if session.stream_prompt is None:
+            ctx = session.context
+            gate = formatting.run_gate(
+                seg_raw,
+                self.config,
+                bundle_id=ctx.get("bundle_id"),
+                app_name=ctx.get("app_name"),
+                explicit_mode=ctx.get("mode"),
+                entities=session.start_entities,
+            )
+            if not gate.use_llm:
+                session.streaming_disabled = True
+                self._cancel_chunk_tasks(session)
+                return
+            session.stream_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
         # Cross-boundary self-correction: a segment that BEGINS with a
         # retraction marker ("no wait…", "scratch that…") refers back across
         # the boundary — never clean it alone. Merge with the previous raw
@@ -665,24 +706,16 @@ class Engine:
         return await self._clean_chunk_text(session, seg_raw, prev_text)
 
     async def _clean_chunk_text(self, session: Session, seg_raw: str, prev_text: str | None) -> _ChunkResult:
-        """Clean ONE raw chunk (segment or tail). Never raises: any failure
-        degrades to the deterministic cleanup for this chunk only."""
+        """Clean ONE raw chunk (segment or tail) under the session's single
+        stream prompt. Never raises: any failure degrades to the deterministic
+        cleanup for this chunk only. Replacements/tags/category rules run ONCE
+        over the assembled text in `_streaming_result`'s postprocess — never
+        per chunk (mid-text chunks are not utterances)."""
         try:
-            ctx = session.context
-            # Per-segment gate with the session's START context (stop-time
-            # entities only apply to the final whole-text postprocess).
-            gate = formatting.run_gate(
-                seg_raw,
-                self.config,
-                bundle_id=ctx.get("bundle_id"),
-                app_name=ctx.get("app_name"),
-                explicit_mode=ctx.get("mode"),
-                entities=session.start_entities,
-            )
-            if not gate.use_llm:
-                # e.g. Raw mode: the deterministic gate text IS the result.
-                return _ChunkResult(gate.text, 0)
-            system_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
+            system_prompt = session.stream_prompt
+            cleanup = self.cleanup
+            if system_prompt is None or cleanup is None:
+                return _ChunkResult(self._deterministic_cleanup(seg_raw), 0)
             if prev_text:
                 # Seam context: previous cleaned tail, fenced as context-only.
                 # Appended AFTER the static prompt so the KV prefix still hits.
@@ -690,12 +723,9 @@ class Engine:
                 system_prompt += (
                     "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»"
                 )
-            cleanup = self.cleanup
-            if cleanup is None:
-                return _ChunkResult(self._deterministic_cleanup(seg_raw), 0)
             result = await cleanup.cleanup(seg_raw, system_prompt)
             if result.applied:
-                return _ChunkResult(result.text, result.ms)
+                return _ChunkResult(result.text, result.ms, applied=True)
             return _ChunkResult(self._deterministic_cleanup(seg_raw), result.ms)
         except Exception:  # noqa: BLE001 — one bad chunk must not sink the session
             log.exception("chunk cleanup failed — deterministic fallback for this chunk")
@@ -730,11 +760,28 @@ class Engine:
             log.warning("streaming chunk task did not complete — falling back")
             return None
         cleaned = [r.text for r in results]
+        applied_any = any(r.applied for r in results)
         tail_ms = 0
         if tail:
-            tail_result = await self._clean_chunk_text(session, tail, cleaned[-1] if cleaned else None)
-            cleaned.append(tail_result.text)
-            tail_ms = tail_result.ms
+            tail_head = " ".join(tail.split()[:RETRACTION_HEAD_WORDS])
+            if session.chunk_raws and _RETRACTION_RE.search(tail_head):
+                # A retraction spoken in the final seconds refers back across
+                # the LAST seam — the most common place for corrections
+                # (review finding). Same merge rule the live segments use:
+                # re-clean (last raw chunk + tail) as ONE chunk now, replacing
+                # the last cleaned chunk. Costs one generation at stop; the
+                # LLM does the edit, the marker only picked the scope.
+                merged = session.chunk_raws[-1] + " " + tail
+                prev_text = cleaned[-2] if len(cleaned) >= 2 else None
+                merged_result = await self._clean_chunk_text(session, merged, prev_text)
+                cleaned[-1] = merged_result.text
+                tail_ms = merged_result.ms
+                applied_any = applied_any or merged_result.applied
+            else:
+                tail_result = await self._clean_chunk_text(session, tail, cleaned[-1] if cleaned else None)
+                cleaned.append(tail_result.text)
+                tail_ms = tail_result.ms
+                applied_any = applied_any or tail_result.applied
         assembled = _join_chunks(cleaned)
         if not assembled.strip():
             return None
@@ -751,7 +798,10 @@ class Engine:
             entities=ctx.get("entities"),
         )
         text = formatting.postprocess(assembled, gate)
-        return text, gate.mode.name, tail_ms, True, "streaming"
+        # applied reflects whether the LLM actually cleaned ANY chunk — a
+        # session where every chunk fell back deterministic must not report
+        # itself as LLM-cleaned to the app/history (review finding).
+        return text, gate.mode.name, tail_ms, applied_any, "streaming"
 
     async def _apply_formatting(
         self,
@@ -862,11 +912,19 @@ class Engine:
         """Generation hook for the miner: reuse the cleanup engine with a short
         budget. check_ratio=False because extraction is not a cleanup (the
         miner validates every line deterministically anyway); a not-applied
-        result returns "" so echoed input is never parsed as terms."""
+        result returns "" so echoed input is never parsed as terms.
+
+        Preemption: `_cmd_start` sets `_mine_cancel`, and the generation loop
+        yields within one token — a dictation's cleanup never waits multiple
+        seconds behind background mining (review finding)."""
         engine = self.cleanup
         if engine is None or not engine.loaded:
             return ""
-        result = await engine.cleanup(user_text, system_prompt, timeout_ms=4000, check_ratio=False)
+        self._mine_cancel.clear()
+        result = await engine.cleanup(
+            user_text, system_prompt, timeout_ms=4000, check_ratio=False,
+            cancel_event=self._mine_cancel,
+        )
         return result.text if result.applied else ""
 
     async def _archive_audio(self, session: Session) -> str | None:

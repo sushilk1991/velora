@@ -83,6 +83,15 @@ def test_custom_raw_mode_never_smart_cleaned(config):
     assert gate.reason == "formatting_off"
 
 
+def test_customized_terminal_prompt_opts_out_of_smart(config):
+    # A user who wrote their OWN Terminal prompt keeps their exact setup —
+    # smart terminal must not replace it (review finding).
+    config.modes["terminal"].prompt = "my custom terminal instructions"
+    gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
+    assert gate.use_llm is False
+    assert gate.reason == "formatting_off"
+
+
 def test_first_launch_autofills_cleanup_model(home):
     # The app writes config.json with its own keys but no cleanup_model; the
     # engine must fill in the RAM-based recommendation on first load.

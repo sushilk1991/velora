@@ -51,13 +51,38 @@ OUTPUT_TOKEN_FACTOR = 1.8
 # Spoken retraction / self-repair markers. Deliberately NOT used to rewrite
 # text (the owner's steer: semantics live in the LLM prompt, not regex) — the
 # only thing a marker does is relax the guard's shrink floor so the model's
-# correct, much-shorter output isn't vetoed.
+# correct, much-shorter output isn't vetoed. Only UNAMBIGUOUS forms belong
+# here: bare "actually" / "I mean" are everyday fillers, and listing them
+# would switch the over-deletion backstop off for a huge share of normal
+# dictation (review finding) — they only count when paired with "no".
 _RETRACTION_RE = re.compile(
-    r"\b(?:no+[,.]? no+|no,? wait|wait,? no|actually|scratch (?:that|all)|"
-    r"delete (?:that|this)|i meant?|correction|forget (?:that|it)|"
-    r"let me rephrase|start over)\b",
+    r"\b(?:no+[,.]? no+|no,? wait|wait,? no|actually,? no|no,? actually|"
+    r"scratch (?:that|all)|strike (?:that|all)|delete (?:that|this)|"
+    r"correction|forget (?:that|it)|let me rephrase|start over)\b",
     re.IGNORECASE,
 )
+
+# Spoken number → digit equivalences for the containment check: the model
+# legitimately writes "3:30" for "three thirty" and "5th" for "fifth"; those
+# digit tokens must not count as hallucinated. Tens+units compositions
+# ("twenty five" → "25") are added pairwise from adjacent raw tokens.
+_NUMBER_WORDS: dict[str, tuple[str, ...]] = {
+    "zero": ("0",), "one": ("1",), "two": ("2",), "three": ("3",), "four": ("4",),
+    "five": ("5",), "six": ("6",), "seven": ("7",), "eight": ("8",), "nine": ("9",),
+    "ten": ("10",), "eleven": ("11",), "twelve": ("12",), "thirteen": ("13",),
+    "fourteen": ("14",), "fifteen": ("15",), "sixteen": ("16",), "seventeen": ("17",),
+    "eighteen": ("18",), "nineteen": ("19",), "twenty": ("20",), "thirty": ("30",),
+    "forty": ("40",), "fifty": ("50",), "sixty": ("60",), "seventy": ("70",),
+    "eighty": ("80",), "ninety": ("90",), "hundred": ("100",), "thousand": ("1000",),
+    "first": ("1st", "1"), "second": ("2nd", "2"), "third": ("3rd", "3"),
+    "fourth": ("4th", "4"), "fifth": ("5th", "5"), "sixth": ("6th", "6"),
+    "seventh": ("7th", "7"), "eighth": ("8th", "8"), "ninth": ("9th", "9"),
+    "tenth": ("10th", "10"), "eleventh": ("11th", "11"), "twelfth": ("12th", "12"),
+}
+_TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
+         "seventy": 70, "eighty": 80, "ninety": 90}
+_UNITS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+          "seven": 7, "eight": 8, "nine": 9}
 
 
 def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
@@ -102,9 +127,25 @@ def check_divergence(raw: str, output: str) -> str | None:
         for n in (2, 3):
             for i in range(len(raw_tokens) - n + 1):
                 allowed.add("".join(raw_tokens[i : i + n]))
+        for i, tok in enumerate(raw_tokens):
+            for digits in _NUMBER_WORDS.get(tok, ()):
+                allowed.add(digits)
+            # "twenty five" → "25" (and "25th" via the ordinal unit form)
+            if tok in _TENS and i + 1 < len(raw_tokens):
+                nxt = raw_tokens[i + 1]
+                if nxt in _UNITS:
+                    allowed.add(str(_TENS[tok] + _UNITS[nxt]))
+                for digits in _NUMBER_WORDS.get(nxt, ()):
+                    if digits.endswith(("st", "nd", "rd", "th")):
+                        allowed.add(str(_TENS[tok] + int(digits[:-2])) + digits[-2:])
         novel = [t for t in out_tokens if t not in allowed]
         if len(novel) >= NOVEL_MIN_TOKENS and len(novel) / len(out_tokens) > NOVEL_FRACTION_MAX:
             return f"novel_content({len(novel)}/{len(out_tokens)})"
+    # KNOWN RESIDUAL (accepted): an answer assembled purely from input words
+    # ("should we ship friday or monday" → "we should ship friday") passes
+    # containment — no length/token guard can tell that from transcription.
+    # The defense is prompt rule 1 (TRANSCRIBE, don't answer) at temperature 0;
+    # this guard exists to catch the loud failure modes, not to be an oracle.
     floor = RATIO_FLOOR_RETRACTION if _RETRACTION_RE.search(raw) else RATIO_FLOOR_DEFAULT
     if ratio < floor:
         return f"ratio_low({ratio:.2f})"
@@ -190,7 +231,14 @@ class CleanupEngine:
 
     # ---- generation with common-prefix KV cache -------------------------
 
-    def _generate_locked(self, system_prompt: str, user_text: str, max_tokens: int, deadline: float) -> tuple[str, bool]:
+    def _generate_locked(
+        self,
+        system_prompt: str,
+        user_text: str,
+        max_tokens: int,
+        deadline: float,
+        cancel_event: threading.Event | None = None,
+    ) -> tuple[str, bool]:
         """Returns (text, timed_out). Caller must hold self._lock."""
         from mlx_lm import stream_generate
         from mlx_lm.models import cache as kv
@@ -232,7 +280,10 @@ class CleanupEngine:
         ):
             out_text.append(resp.text)
             gen_tokens.append(resp.token)
-            if time.perf_counter() > deadline:
+            # cancel_event: cooperative preemption for BACKGROUND generations
+            # (vocab mining) — a dictation starting must never wait behind one,
+            # so the owner sets the event and this loop yields within a token.
+            if time.perf_counter() > deadline or (cancel_event is not None and cancel_event.is_set()):
                 timed_out = True
                 break
         # KV cache now holds prompt + generated tokens (last sampled token is
@@ -240,7 +291,14 @@ class CleanupEngine:
         self._cache_tokens = tokens + gen_tokens
         return "".join(out_text), timed_out
 
-    def _run(self, raw: str, system_prompt: str, timeout_ms: int, check_ratio: bool = True) -> CleanupResult:
+    def _run(
+        self,
+        raw: str,
+        system_prompt: str,
+        timeout_ms: int,
+        check_ratio: bool = True,
+        cancel_event: threading.Event | None = None,
+    ) -> CleanupResult:
         t0 = time.perf_counter()
         deadline = t0 + timeout_ms / 1000.0
         with self._lock:
@@ -249,7 +307,7 @@ class CleanupEngine:
             # generator more headroom than the usual 1.8x cleanup budget.
             factor = OUTPUT_TOKEN_FACTOR if check_ratio else 3.0
             max_tokens = max(MIN_MAX_TOKENS, int(input_tokens * factor))
-            text, timed_out = self._generate_locked(system_prompt, raw, max_tokens, deadline)
+            text, timed_out = self._generate_locked(system_prompt, raw, max_tokens, deadline, cancel_event)
         ms = int((time.perf_counter() - t0) * 1000)
         if timed_out:
             log.warning("cleanup timeout after %dms — returning raw", ms)
@@ -266,12 +324,19 @@ class CleanupEngine:
         return CleanupResult(text.strip(), True, ms)
 
     async def cleanup(
-        self, raw: str, system_prompt: str, timeout_ms: int | None = None, check_ratio: bool = True
+        self,
+        raw: str,
+        system_prompt: str,
+        timeout_ms: int | None = None,
+        check_ratio: bool = True,
+        cancel_event: threading.Event | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
         `timeout_ms` defaults to a length-adaptive budget (see
-        `adaptive_timeout_ms`); pass an explicit value to override."""
+        `adaptive_timeout_ms`); pass an explicit value to override.
+        `cancel_event` lets a BACKGROUND caller (vocab mining) be preempted
+        mid-generation the moment a dictation needs the model."""
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
         if not self.loaded:
@@ -282,7 +347,9 @@ class CleanupEngine:
             # the lock serializes any next request behind it).
             loop = asyncio.get_running_loop()
             return await asyncio.wait_for(
-                loop.run_in_executor(self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio),
+                loop.run_in_executor(
+                    self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio, cancel_event
+                ),
                 timeout=timeout_ms / 1000.0 + 3.0,
             )
         except asyncio.TimeoutError:
