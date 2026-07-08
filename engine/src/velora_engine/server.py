@@ -135,7 +135,14 @@ class Engine:
             engine = CleanupEngine(self.config.cleanup_model)
             try:
                 await engine.load_async(STATIC_SYSTEM_PROMPT)
-                self.cleanup = engine
+                # A set_model during this warm-up may already have installed a
+                # newer cleanup engine; don't clobber it (that would leak the new
+                # one and silently run the old model). Only adopt this engine if
+                # nothing newer took its place.
+                if self.cleanup is None and self.config.cleanup_model == engine.model_id:
+                    self.cleanup = engine
+                else:
+                    engine.close()
             except Exception:
                 log.exception("cleanup LLM failed to load; dictations will return raw text")
 
@@ -525,12 +532,23 @@ class Engine:
             if result.applied:
                 text = formatting.postprocess(result.text, gate)
             else:
-                text = formatting.postprocess(formatting.apply_spoken_commands(raw), gate)
+                text = formatting.postprocess(self._deterministic_cleanup(raw), gate)
             return text, gate.mode.name, result.ms, result.applied, result.reason or "llm"
         if gate.use_llm:
-            text = formatting.postprocess(formatting.apply_spoken_commands(raw), gate)
+            # Cleanup LLM not ready (still warming after launch) or disabled: run
+            # the same deterministic fallback so spoken punctuation ("full stop")
+            # never leaks as literal text while the model loads.
+            text = formatting.postprocess(self._deterministic_cleanup(raw), gate)
             return text, gate.mode.name, 0, False, "cleanup_unavailable"
         return gate.text, gate.mode.name, 0, False, gate.reason
+
+    @staticmethod
+    def _deterministic_cleanup(raw: str) -> str:
+        """Best-effort no-LLM cleanup shared by every fallback path: scrub
+        fillers, apply spoken newline commands, and normalize dictated
+        punctuation (guarded against noun usage)."""
+        return formatting.normalize_spoken_punctuation(
+            formatting.apply_spoken_commands(formatting.scrub_fillers(raw)))
 
     async def _archive_audio(self, session: Session) -> str | None:
         """Persist the session's PCM as a clip and prune the archive. Off-thread;
@@ -565,6 +583,7 @@ class Engine:
                 "state": "recording" if self.session is not None else "idle",
                 "stt_model": self.stt.model_id,
                 "cleanup_model": self.config.cleanup_model,
+                "recommended_cleanup_model": models.recommended_cleanup_model(),
                 "cleanup_enabled": self.config.cleanup_enabled,
                 "cleanup_loaded": bool(self.cleanup and self.cleanup.loaded),
                 "save_audio": self.config.save_audio,
@@ -581,8 +600,8 @@ class Engine:
         if not model_id or not isinstance(model_id, str):
             await self._error("set_model: missing 'model'")
             return
-        if self.session is not None:
-            await self._error("set_model: busy (dictation in progress)")
+        if self.session is not None or self._reprocessing:
+            await self._error("set_model: busy (dictation or reprocess in progress)")
             return
         info = models.lookup(model_id)
         kind = msg.get("kind") or (info.kind if info else "stt")
@@ -597,11 +616,23 @@ class Engine:
             self.stt = backend
             self.config.data["stt_model"] = model_id
         else:
+            # Load-then-swap: build and fully load the replacement FIRST, then
+            # retire the old one. A failed load (bad download, OOM) therefore
+            # leaves the working engine intact instead of leaving no cleanup at
+            # all. Peak memory holds both only for the load window (rare,
+            # user-initiated); close() frees the old thread + model right after.
             engine = CleanupEngine(model_id)
             if not fake_stt_enabled():
-                await engine.load_async(STATIC_SYSTEM_PROMPT)
+                try:
+                    await engine.load_async(STATIC_SYSTEM_PROMPT)
+                except Exception:
+                    engine.close()
+                    raise  # keep self.cleanup pointing at the old, working engine
+            old = self.cleanup
             self.cleanup = engine
             self.config.data["cleanup_model"] = model_id
+            if old is not None:
+                old.close()
         self.config.save()
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)

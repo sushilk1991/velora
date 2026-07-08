@@ -17,7 +17,7 @@ LONG = "so I think we should probably move the quarterly planning meeting to nex
 
 
 def test_builtin_modes_installed(config):
-    assert {"raw", "default", "message", "email", "note", "code"} <= set(config.modes)
+    assert {"raw", "default", "message", "email", "note", "code", "terminal"} <= set(config.modes)
 
 
 def test_resolve_explicit_beats_bundle(config):
@@ -45,17 +45,118 @@ def test_resolve_unknown_explicit_falls_through(config):
 # ---- code category → formatting off ----
 
 
-def test_code_category_formatting_off(config):
-    for bid in ("com.microsoft.VSCode", "com.apple.Terminal", "com.mitchellh.ghostty", "dev.zed.Zed"):
+def test_terminal_mode_formatting_off(config):
+    # Terminals stay verbatim (formatting off) — a command must not be reshaped.
+    for bid in ("com.apple.Terminal", "com.mitchellh.ghostty", "com.googlecode.iterm2"):
         gate = run_gate("git rebase dash dash interactive head tilde three " + LONG, config, bundle_id=bid)
-        assert gate.mode.name == "Code"
+        assert gate.mode.name == "Terminal"
         assert gate.use_llm is False
         assert gate.reason == "formatting_off"
     assert formatting.category_for_bundle("com.googlecode.iterm2") == "code"
     assert formatting.category_for_bundle("com.google.Chrome") == "browser"
 
 
-def test_code_mode_applies_spoken_newlines_without_llm(config):
+def test_first_launch_autofills_cleanup_model(home):
+    # The app writes config.json with its own keys but no cleanup_model; the
+    # engine must fill in the RAM-based recommendation on first load.
+    import json as _json
+
+    from velora_engine.config import Config
+    from velora_engine import models
+
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text(_json.dumps({
+        "stt_model": "mlx-community/whisper-large-v3-turbo", "language": "auto",
+    }))
+    cfg = Config()
+    assert cfg.cleanup_model == models.recommended_cleanup_model()
+    # persisted, so it's stable across reloads
+    assert _json.loads((home / "config.json").read_text())["cleanup_model"] == cfg.cleanup_model
+
+
+def test_explicit_cleanup_model_not_overridden(home):
+    import json as _json
+
+    from velora_engine.config import Config
+
+    home.mkdir(parents=True, exist_ok=True)
+    chosen = "mlx-community/Qwen3-1.7B-8bit"
+    (home / "config.json").write_text(_json.dumps({"cleanup_model": chosen}))
+    assert Config().cleanup_model == chosen
+
+
+_OLD_CODE_APPS = [
+    "com.microsoft.VSCode", "com.todesktop.230313mzl4w4u92", "com.apple.Terminal",
+    "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "dev.zed.Zed",
+]
+
+
+def _seed_old_code(home, **overrides):
+    """Write a pre-upgrade code.json into an un-migrated home, then return a
+    fresh Config (which runs the migration on first load)."""
+    import json as _json
+
+    from velora_engine.config import Config
+
+    (home / "modes").mkdir(parents=True, exist_ok=True)
+    payload = {
+        "name": "Code", "prompt": "", "formatting": "off",
+        "apps": list(_OLD_CODE_APPS), "vocabulary": [], "replacements": {},
+    }
+    payload.update(overrides)
+    (home / "modes" / "code.json").write_text(_json.dumps(payload))
+    return Config()
+
+
+def test_stale_code_json_migrated_on_first_load(home):
+    # Upgraded install whose code.json is still the old default → migrated.
+    cfg = _seed_old_code(home)
+    code = cfg.mode_by_name("Code")
+    assert code.formatting == "light"
+    assert code.prompt  # got the AI instruction
+    assert "com.apple.Terminal" not in code.apps  # terminals moved out
+    assert resolve_mode(cfg, "com.apple.Terminal", None).name == "Terminal"
+
+
+def test_user_customized_code_json_not_migrated(home):
+    # A user who edited Code mode (added a prompt) must be left alone.
+    cfg = _seed_old_code(home, prompt="my custom rules")
+    assert cfg.mode_by_name("Code").prompt == "my custom rules"
+    assert cfg.mode_by_name("Code").formatting == "off"
+
+
+def test_code_json_with_vocab_not_migrated(home):
+    # Only vocabulary customized (blank prompt, off, old apps) — must NOT be wiped.
+    cfg = _seed_old_code(home, vocabulary=["kubectl"])
+    assert cfg.mode_by_name("Code").vocabulary == ["kubectl"]
+    assert cfg.mode_by_name("Code").formatting == "off"
+
+
+def test_migration_runs_once_no_revert_loop(home):
+    import json as _json
+
+    cfg = _seed_old_code(home)  # migrates → light, sets marker
+    assert cfg.mode_by_name("Code").formatting == "light"
+    # user deliberately restores the old shape
+    (home / "modes" / "code.json").write_text(_json.dumps({
+        "name": "Code", "prompt": "", "formatting": "off",
+        "apps": list(_OLD_CODE_APPS), "vocabulary": [], "replacements": {},
+    }))
+    cfg.reload()  # marker set → no revert
+    assert cfg.mode_by_name("Code").formatting == "off"
+
+
+def test_code_editor_uses_llm(config):
+    # Code editors now get a real AI instruction (light formatting → LLM).
+    for bid in ("com.microsoft.VSCode", "dev.zed.Zed", "com.todesktop.230313mzl4w4u92"):
+        gate = run_gate(LONG, config, bundle_id=bid)
+        assert gate.mode.name == "Code"
+        assert gate.use_llm is True
+        assert gate.mode.prompt  # non-empty AI instruction
+        assert gate.mode.formatting == "light"
+
+
+def test_terminal_mode_applies_spoken_newlines_without_llm(config):
     gate = run_gate("first line new line second line", config, bundle_id="com.apple.Terminal")
     assert gate.use_llm is False
     assert gate.text == "first line\nsecond line"
@@ -206,14 +307,137 @@ def test_auto_punctuation_on_no_extra_prompt_line(config):
 # ---- code mode trailing period ----
 
 
-def test_code_mode_strips_trailing_period(config):
+def test_terminal_mode_strips_trailing_period(config):
     gate = run_gate("git status.", config, bundle_id="com.apple.Terminal")
     assert gate.text == "git status"
 
 
-def test_code_mode_keeps_ellipsis(config):
+def test_terminal_mode_keeps_ellipsis(config):
     gate = run_gate("wait...", config, bundle_id="com.apple.Terminal")
     assert gate.text == "wait..."
+
+
+# ---- spoken punctuation (deterministic, non-LLM paths) ----
+
+
+def test_normalize_spoken_punctuation():
+    from velora_engine.formatting import normalize_spoken_punctuation as n
+
+    assert n("how are you full stop") == "how are you."
+    assert n("send it question mark") == "send it?"
+    assert n("wow exclamation mark") == "wow!"
+    assert n("wow exclamation point") == "wow!"
+    # multiple in one
+    assert n("wait full stop really question mark") == "wait. really?"
+
+
+def test_normalize_spoken_punctuation_preserves_noun_usage():
+    from velora_engine.formatting import normalize_spoken_punctuation as n
+
+    # A determiner within the last 3 words (through adjectives) → noun, not command.
+    assert n("the car came to a full stop") == "the car came to a full stop"
+    assert n("the car came to a sudden full stop") == "the car came to a sudden full stop"
+    assert n("that needs an exclamation point") == "that needs an exclamation point"
+    assert n("there is no question mark here") == "there is no question mark here"
+    # Plurals are never commands — you dictate one mark at a time.
+    assert n("avoid exclamation marks") == "avoid exclamation marks"
+    assert n("sentences end in full stops") == "sentences end in full stops"
+
+
+def test_normalize_lone_command_survives():
+    from velora_engine.formatting import normalize_spoken_punctuation as n
+
+    # A lone dictated "full stop" must yield "." (append to prior insertion),
+    # not get eaten by the leading-orphan strip.
+    assert n("full stop") == "."
+    assert n("question mark") == "?"
+
+
+def test_strip_leaked_punct_preserves_noun_usage():
+    from velora_engine.formatting import strip_leaked_punct_commands as s
+
+    # Sentence-final noun usage must survive the safety net (the review's bug).
+    assert s("The car came to a full stop.") == "The car came to a full stop."
+    assert s("The car came to a sudden full stop.") == "The car came to a sudden full stop."
+    assert s("Don't end with an exclamation point!") == "Don't end with an exclamation point!"
+    assert s("Is that a question mark?") == "Is that a question mark?"
+    # Bare plural noun, no determiner — must not be stripped.
+    assert s("Sentences end in full stops.") == "Sentences end in full stops."
+    # A real leak (no determiner, command-shaped) still gets cleaned.
+    assert s("we should ship full stop.") == "we should ship."
+    # Mismatched mark → an instruction, not a leak: "use a question mark." (period)
+    # must NOT lose the words.
+    assert s("Use a question mark.") == "Use a question mark."
+    assert s("End it with an exclamation mark.") == "End it with an exclamation mark."
+
+
+def test_normalize_no_doubled_terminator():
+    from velora_engine.formatting import normalize_spoken_punctuation as n
+
+    # STT already wrote a period before the spoken command → no "..".
+    assert n("we should ship full stop.") == "we should ship."
+    assert n("is it ready question mark?") == "is it ready?"
+
+
+def test_short_utterance_converts_spoken_punctuation(config):
+    # The core bug report: "full stop" must not survive as literal text.
+    gate = run_gate("how are you full stop", config)
+    assert gate.use_llm is False
+    assert "full stop" not in gate.text
+    assert gate.text == "How are you."
+
+
+def test_short_utterance_question_mark(config):
+    gate = run_gate("did it ship question mark", config)
+    assert "question mark" not in gate.text
+    assert gate.text.endswith("?")
+
+
+def test_strip_leaked_punct_commands():
+    from velora_engine.formatting import strip_leaked_punct_commands as s
+
+    # LLM kept the word AND added the symbol → drop the word (no determiner near
+    # the phrase, so it reads as a command).
+    assert s("we should ship full stop.") == "we should ship."
+    assert s("really question mark?") == "really?"
+    assert s("wow exclamation mark!") == "wow!"
+    # legitimate prose (no glued punctuation) is untouched
+    assert s("we waited a full stop then moved") == "we waited a full stop then moved"
+    assert s("a period of time.") == "a period of time."
+
+
+def test_postprocess_strips_leaked_command(config):
+    gate = run_gate(LONG, config)
+    # A command word glued to the punctuation it produced is dropped.
+    assert formatting.postprocess("we should ship full stop.", gate) == "we should ship."
+    # A real trailing word "period" is preserved (not in the strip set).
+    assert formatting.postprocess("that ends the trial period.", gate) == "that ends the trial period."
+
+
+# ---- adaptive cleanup timeout ----
+
+
+def test_adaptive_timeout_scales_with_length():
+    from velora_engine.cleanup import adaptive_timeout_ms, TIMEOUT_MS, TIMEOUT_CEILING_MS
+
+    assert adaptive_timeout_ms("just a few words") == TIMEOUT_MS
+    long_para = " ".join(["word"] * 120)
+    assert adaptive_timeout_ms(long_para) > TIMEOUT_MS
+    assert adaptive_timeout_ms(" ".join(["word"] * 1000)) == TIMEOUT_CEILING_MS
+
+
+# ---- hardware-based cleanup model recommendation ----
+
+
+def test_recommended_cleanup_model_by_ram():
+    from velora_engine.models import recommended_cleanup_model, lookup
+
+    small = recommended_cleanup_model(ram_gb=8)
+    big = recommended_cleanup_model(ram_gb=64)
+    assert lookup(small) is not None and lookup(small).kind == "cleanup"
+    assert lookup(big) is not None and lookup(big).kind == "cleanup"
+    # more RAM → a bigger (or equal) tier, never smaller
+    assert small != big
 
 
 # ---- non-Latin script routing (skip English-tuned cleanup LLM) ----

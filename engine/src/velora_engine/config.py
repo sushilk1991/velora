@@ -89,6 +89,7 @@ class Config:
         self.modes: dict[str, Mode] = {}
         self._learned_vocab: list[str] = []
         self._learned_replacements: dict[str, str] = {}
+        self._config_corrupt = False
         self.reload()
 
     # ---- paths ----
@@ -199,6 +200,7 @@ class Config:
         self._load_or_create_config()
         self._load_learned()
         self._ensure_builtin_modes()
+        self._migrate_stale_builtins()
         self._load_modes()
 
     def _load_learned(self) -> None:
@@ -221,23 +223,50 @@ class Config:
             log.warning("learned.json unreadable (%s); ignoring", exc)
 
     def save(self) -> None:
-        self.config_path.write_text(json.dumps(self.data, indent=2) + "\n")
+        # Atomic: write a sibling temp then rename, so a crash mid-write can't
+        # truncate config.json and we don't race the app's atomic writer.
+        tmp = self.config_path.with_name(self.config_path.name + ".tmp")
+        tmp.write_text(json.dumps(self.data, indent=2) + "\n")
+        tmp.replace(self.config_path)
 
     def _load_or_create_config(self) -> None:
+        self._config_corrupt = False
         if self.config_path.exists():
             try:
                 on_disk = json.loads(self.config_path.read_text())
                 if not isinstance(on_disk, dict):
                     raise ValueError("config.json is not an object")
                 self.data = {**DEFAULT_CONFIG, **on_disk}
+                # The app writes config.json (its own keys: stt_model, language,
+                # …) BEFORE the engine's first start, so "first run" almost always
+                # hits this branch with no cleanup_model yet. Apply the RAM-based
+                # recommendation here too, once, when the app hasn't chosen one.
+                if "cleanup_model" not in on_disk:
+                    self.data["cleanup_model"] = self._auto_cleanup_model()
+                    self.save()
                 return
             except Exception as exc:  # noqa: BLE001 — corrupt config must not kill the engine
-                log.warning("config.json unreadable (%s); using defaults", exc)
+                log.warning("config.json unreadable (%s); using defaults in memory", exc)
                 self.data = dict(DEFAULT_CONFIG)
+                # Leave the on-disk file untouched so the user can recover it —
+                # flag so the mode migration below doesn't save over it.
+                self._config_corrupt = True
                 return
         self.data = dict(DEFAULT_CONFIG)
+        self.data["cleanup_model"] = self._auto_cleanup_model()
         self.save()
-        log.info("wrote default config to %s", self.config_path)
+        log.info("wrote default config to %s (cleanup=%s)", self.config_path, self.data["cleanup_model"])
+
+    def _auto_cleanup_model(self) -> str:
+        """RAM-fitted cleanup model, falling back to the static default if
+        hardware detection ever fails — never block startup on it."""
+        try:
+            from .models import recommended_cleanup_model
+
+            return recommended_cleanup_model()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cleanup-model auto-select failed (%s); using default", exc)
+            return DEFAULT_CLEANUP_MODEL
 
     def _ensure_builtin_modes(self) -> None:
         """Write built-in mode files on first run (never overwrite user edits)."""
@@ -250,6 +279,53 @@ class Config:
             if not dest.exists():
                 dest.write_text(res.read_text())
                 log.info("installed built-in mode %s", dest.name)
+
+    # The exact `apps` list the old default Code mode shipped with. Migration
+    # only fires when the on-disk file matches this set (plus empty prompt/vocab/
+    # replacements) — so any user customization, even just an edited app list,
+    # blocks the rewrite.
+    _OLD_CODE_APPS = frozenset({
+        "com.microsoft.VSCode", "com.todesktop.230313mzl4w4u92", "com.apple.Terminal",
+        "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "dev.zed.Zed",
+    })
+
+    def _migrate_stale_builtins(self) -> None:
+        """One-time upgrade fixup: earlier versions shipped Code mode as
+        `formatting:"off"` with an empty prompt and the terminal bundle ids
+        folded in. That file is never overwritten by `_ensure_builtin_modes`, so
+        upgraders keep a Code mode with no AI instruction that also steals
+        terminals from the new Terminal mode. Rewrite it to the current built-in —
+        but ONLY when it's still the exact old default (name, off, blank prompt,
+        empty vocab/replacements, and the old app set), so ANY user edit is
+        preserved. Runs once (guarded by a config marker) so a user who
+        deliberately restores the old shape isn't reverted on every start."""
+        # Never write over a config we couldn't parse (marker save would clobber
+        # the user's hand-recoverable file); also skip if already migrated.
+        if self._config_corrupt or self.data.get("builtin_split_migrated"):
+            return
+        code_path = self.modes_dir / "code.json"
+        if code_path.exists():
+            try:
+                data = json.loads(code_path.read_text())
+            except Exception:  # noqa: BLE001 — a bad file is handled by _load_modes
+                data = None
+            if isinstance(data, dict) and self._is_old_default_code(data):
+                pkg = importlib.resources.files("velora_engine") / "modes_builtin" / "code.json"
+                code_path.write_text(pkg.read_text())
+                log.info("migrated stale built-in code.json to the Code/Terminal split")
+        self.data["builtin_split_migrated"] = True
+        self.save()
+
+    @classmethod
+    def _is_old_default_code(cls, data: dict[str, Any]) -> bool:
+        return (
+            str(data.get("name", "")).lower() == "code"
+            and data.get("formatting") == "off"
+            and not str(data.get("prompt", "")).strip()
+            and not (data.get("vocabulary") or [])
+            and not (data.get("replacements") or {})
+            and set(data.get("apps") or []) == cls._OLD_CODE_APPS
+        )
 
     def _load_modes(self) -> None:
         self.modes = {}

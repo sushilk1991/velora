@@ -22,11 +22,26 @@ from typing import Any
 
 log = logging.getLogger("velora.cleanup")
 
-TIMEOUT_MS = 1500
+TIMEOUT_MS = 1500  # base budget, for a short/normal sentence
+TIMEOUT_CEILING_MS = 6000  # hard ceiling however long the dictation
+MS_PER_WORD = 45  # generation grows ~linearly with length past the base
+BASE_WORDS = 25  # words covered by the base budget before scaling kicks in
 RATIO_MIN = 0.55
 RATIO_MAX = 1.6
 MIN_MAX_TOKENS = 96
 OUTPUT_TOKEN_FACTOR = 1.8
+
+
+def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
+    """Scale the cleanup budget with input length.
+
+    A fixed 1500ms silently dropped long paragraphs to raw (uncleaned) text —
+    measured cleanup is ~0.5s for a sentence but ~0.75s already at 37 words and
+    climbs from there. Give longer dictation proportionally more headroom, up to
+    a ceiling so a truly wedged generation still bails."""
+    words = len(raw.split())
+    extra = max(0, words - BASE_WORDS) * MS_PER_WORD
+    return min(base + extra, TIMEOUT_CEILING_MS)
 
 
 def check_divergence(raw: str, output: str) -> str | None:
@@ -68,6 +83,17 @@ class CleanupEngine:
 
     async def load_async(self, warm_system_prompt: str | None = None) -> None:
         await asyncio.get_running_loop().run_in_executor(self._executor, self.load, warm_system_prompt)
+
+    def close(self) -> None:
+        """Retire this engine before dropping the reference to it. Marks it
+        unloaded (so no new cleanup starts) and shuts the worker thread once any
+        in-flight generation finishes. Deliberately does NOT null the model
+        fields — a generation may still be reading them under the lock, and MLX
+        objects are freed by GC when the last reference goes anyway."""
+        self.loaded = False
+        # wait=False: don't block the event loop; the thread exits after its
+        # current task. The model is released when this object is GC'd.
+        self._executor.shutdown(wait=False)
 
     # ---- loading -------------------------------------------------------
 
@@ -187,9 +213,14 @@ class CleanupEngine:
         return CleanupResult(text.strip(), True, ms)
 
     async def cleanup(
-        self, raw: str, system_prompt: str, timeout_ms: int = TIMEOUT_MS, check_ratio: bool = True
+        self, raw: str, system_prompt: str, timeout_ms: int | None = None, check_ratio: bool = True
     ) -> CleanupResult:
-        """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure."""
+        """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
+
+        `timeout_ms` defaults to a length-adaptive budget (see
+        `adaptive_timeout_ms`); pass an explicit value to override."""
+        if timeout_ms is None:
+            timeout_ms = adaptive_timeout_ms(raw)
         if not self.loaded:
             return CleanupResult(raw, False, 0, "llm_not_loaded")
         try:

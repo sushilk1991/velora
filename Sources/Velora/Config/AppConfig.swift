@@ -12,11 +12,18 @@ enum HotkeyMode: String, CaseIterable, Identifiable {
     var displayName: String { self == .hold ? "Hold to talk" : "Press to toggle" }
 }
 
-/// Where the HUD capsule sits on screen.
+/// Where the HUD capsule sits on screen. `custom` is set when the user drags
+/// the HUD; its origin is stored separately in `AppConfig.hudCustomOrigin`.
 enum HUDPosition: String, CaseIterable, Identifiable {
-    case bottomCenter, topCenter
+    case bottomCenter, topCenter, custom
     var id: String { rawValue }
-    var displayName: String { self == .bottomCenter ? "Bottom center" : "Top center" }
+    var displayName: String {
+        switch self {
+        case .bottomCenter: return "Bottom center"
+        case .topCenter: return "Top center"
+        case .custom: return "Custom (dragged)"
+        }
+    }
 }
 
 /// A speech-to-text model the engine can run. The engine owns downloads;
@@ -114,6 +121,8 @@ final class AppConfig {
         static let soundsEnabled = "velora.soundsEnabled"
         static let soundVolume = "velora.soundVolume"
         static let hudPosition = "velora.hudPosition"
+        static let hudCustomOriginX = "velora.hudCustomOriginX"
+        static let hudCustomOriginY = "velora.hudCustomOriginY"
         static let appearance = "velora.appearance"
         static let language = "velora.language"
         static let autoPunctuation = "velora.autoPunctuation"
@@ -193,6 +202,25 @@ final class AppConfig {
         set { defaults.set(newValue.rawValue, forKey: Key.hudPosition) }
     }
 
+    /// Persisted custom HUD origin as a fraction (0…1) of the screen's visible
+    /// frame, so it survives resolution/monitor changes. `nil` until first drag.
+    var hudCustomOrigin: CGPoint? {
+        get {
+            guard defaults.object(forKey: Key.hudCustomOriginX) != nil else { return nil }
+            return CGPoint(x: defaults.double(forKey: Key.hudCustomOriginX),
+                           y: defaults.double(forKey: Key.hudCustomOriginY))
+        }
+        set {
+            if let p = newValue {
+                defaults.set(p.x, forKey: Key.hudCustomOriginX)
+                defaults.set(p.y, forKey: Key.hudCustomOriginY)
+            } else {
+                defaults.removeObject(forKey: Key.hudCustomOriginX)
+                defaults.removeObject(forKey: Key.hudCustomOriginY)
+            }
+        }
+    }
+
     /// "system" | "light" | "dark"
     var appearance: String {
         get { defaults.string(forKey: Key.appearance) ?? "system" }
@@ -250,7 +278,7 @@ final class AppConfig {
     static let defaultTypingFallbackApps = [
         "com.apple.Terminal",
         "com.googlecode.iterm2",
-        "dev.warp.Warp",
+        "dev.warp.Warp-Stable",
         "com.mitchellh.ghostty",
         "org.alacritty",
         "net.kovidgoyal.kitty",

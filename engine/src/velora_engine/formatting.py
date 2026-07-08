@@ -37,7 +37,9 @@ CATEGORY_BY_BUNDLE: dict[str, str] = {
     "notion.id": "notes",
     "net.shinyfrog.bear": "notes",
     "com.lukilabs.lukiapp": "notes",
-    # code editors / terminals → mode Code, formatting off
+    # code editors → Code mode (light LLM cleanup); terminals → Terminal mode
+    # (formatting off / verbatim). Both share the "code" category so the
+    # shell-safety trailing-period strip applies to either.
     "com.microsoft.VSCode": "code",
     "com.todesktop.230313mzl4w4u92": "code",  # Cursor
     "com.apple.Terminal": "code",
@@ -45,6 +47,8 @@ CATEGORY_BY_BUNDLE: dict[str, str] = {
     "com.mitchellh.ghostty": "code",
     "dev.warp.Warp-Stable": "code",
     "dev.zed.Zed": "code",
+    "org.alacritty": "code",
+    "net.kovidgoyal.kitty": "code",
     "com.cmuxterm.app": "code",  # cmux
     # browsers → default
     "com.apple.Safari": "browser",
@@ -60,6 +64,10 @@ CATEGORY_DESCRIPTIONS = {
     "browser": "a web browser",
 }
 
+# A short phrase skips the cleanup LLM and takes the deterministic path. That
+# path now also normalizes dictated punctuation ("how are you full stop" →
+# "How are you."), so the "full stop leaks as text" bug is fixed here without
+# paying LLM latency on every quick phrase. Longer utterances still get the LLM.
 SHORT_UTTERANCE_WORDS = 6  # < 6 words → punctuation-only, never restructured
 
 
@@ -99,6 +107,75 @@ def apply_spoken_commands(text: str) -> str:
     text = _NEW_PARAGRAPH_RE.sub("\n\n", text)
     text = _NEW_LINE_RE.sub("\n", text)
     return text
+
+
+# Determiners that mark a following spoken-punctuation phrase as a NOUN ("a full
+# stop", "the exclamation point", "no question mark") rather than a dictated
+# command. Closed, enumerable set — unlike adjectives, which is why we scan back
+# for one of THESE (through any intervening adjectives) instead of whitelisting
+# adjectives. A determiner within the last few words → noun → never rewritten.
+_PUNCT_DETERMINERS = frozenset(
+    "a an the this that these those my your his her its our their no some any "
+    "each every another either neither both several many few "
+    "one two three four five six seven eight nine ten".split()
+)
+
+
+def _noun_leadin(text: str, before_end: int) -> bool:
+    """True when any of the 3 words before the spoken-punctuation phrase is a
+    determiner — a strong signal it's a noun ("came to a sudden full stop"), not
+    a command. Deliberately errs toward preserving words: a determiner in an
+    unrelated role ("that is it full stop") also suppresses conversion, which
+    leaves the literal words rather than risk mangling real prose. The LLM path
+    handles those correctly with full sentence context; this guard only affects
+    the deterministic short/fallback paths."""
+    prev_words = re.findall(r"[A-Za-z']+", text[:before_end])[-3:]
+    return any(w.lower() in _PUNCT_DETERMINERS for w in prev_words)
+
+
+# Spoken punctuation phrase → symbol, for the deterministic (non-LLM) paths (short
+# utterances, formatting-off, LLM-failure fallback) that never reach the cleanup
+# model — without this "how are you question mark" keeps the literal words. Only
+# SINGULAR forms: nobody dictates a plural as a command ("insert two full stops"
+# is prose), and matching plurals wrecked exactly that prose. Single ambiguous
+# words ('period', 'comma') are excluded and left to the LLM's context.
+_SPOKEN_PUNCT_MAP: dict[str, str] = {
+    "full stop": ".",
+    "question mark": "?",
+    "exclamation mark": "!",
+    "exclamation point": "!",
+    "open paren": " (", "open parenthesis": " (",
+    "close paren": ")", "close parenthesis": ")",
+}
+_SPOKEN_PUNCT_RE = re.compile(
+    r"\b(full stop|question mark|exclamation (?:mark|point)|(?:open|close) paren(?:thesis)?)\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_spoken_punctuation(text: str) -> str:
+    """Convert clearly-dictated punctuation words to symbols (non-LLM paths).
+
+    Guards against noun usage: "how are you full stop" → "how are you." but
+    "came to a sudden full stop" is left alone (a determiner precedes it). Only
+    singular command phrases are matched. Tidies the spacing left behind."""
+    def repl(m: "re.Match[str]") -> str:
+        sym = _SPOKEN_PUNCT_MAP.get(m.group(1).lower())
+        if sym is None or _noun_leadin(text, m.start()):
+            return m.group(0)
+        return sym
+
+    text = _SPOKEN_PUNCT_RE.sub(repl, text)
+    text = re.sub(r"\s+([.!?,;:)])", r"\1", text)  # "word ." → "word."
+    text = re.sub(r"\(\s+", "(", text)  # "( word" → "(word"
+    # Collapse a doubled terminator when STT already wrote one before the spoken
+    # command ("ship full stop." → "ship.." → "ship."; "ready question mark?" →
+    # "ready??" → "ready?").
+    text = re.sub(r"([.!?])[.!?,]+", r"\1", text)
+    # Strip a leading orphan ONLY when real content follows — a lone dictated
+    # "full stop" (→ ".") must survive so it appends to the prior insertion.
+    text = re.sub(r"^[\s.!?,;:]+(?=\S)", "", text)
+    return text.strip()
 
 
 def apply_replacements(text: str, replacements: dict[str, str]) -> str:
@@ -228,8 +305,19 @@ STATIC_SYSTEM_PROMPT = (
     "correction phrase itself. Example: 'we should cancel the offsite actually "
     "no scratch that let's keep the offsite but make it virtual' becomes "
     "\"Let's keep the offsite but make it virtual.\"\n"
-    "6. The spoken words 'new line' mean a line break and 'new paragraph' mean "
-    "a paragraph break — replace them with the actual break.\n"
+    "6. Spoken punctuation: the speaker often DICTATES punctuation by name. "
+    "Convert the spoken word to the symbol and DELETE the spoken word — never "
+    "leave both. 'full stop' or 'period' → '.', 'comma' → ',', 'question mark' → "
+    "'?', 'exclamation mark'/'exclamation point' → '!', 'colon' → ':', 'semicolon' "
+    "→ ';', 'open quote'/'close quote' → '\"', 'open paren'/'close paren' → '(' ')', "
+    "'dash'/'hyphen' → '-'. Example: 'ship it by friday full stop we are late' → "
+    "'Ship it by Friday. We are late.' (the words 'full stop' are gone). ONLY "
+    "convert when the word is clearly a dictation command, NOT part of the "
+    "sentence — 'a period of time', 'the comma-separated list', 'the car came to a "
+    "full stop' keep the words. When in doubt, treat it as a command if it sits "
+    "where punctuation would naturally go.\n"
+    "6b. The spoken words 'new line' mean a line break and 'new paragraph' mean a "
+    "paragraph break — replace them with the actual break, and remove the words.\n"
     "7. Lists: use one ONLY when the speech explicitly enumerates items or asks "
     "for a list; otherwise keep prose. Put each item on its OWN line. Use a "
     "NUMBERED list ('1.', '2.', '3.') when the speaker says 'numbered list' or "
@@ -545,23 +633,69 @@ def run_gate(
         return GateResult(mode, category, False, "non_latin_script", out, None, replacements, entities=entities or [])
 
     if len(text.split()) < SHORT_UTTERANCE_WORDS:
-        out = scrub_fillers(apply_spoken_commands(text))
+        out = normalize_spoken_punctuation(scrub_fillers(apply_spoken_commands(text)))
         out = _punctuation_only(out, chat_style, config.auto_punctuation)
         out = apply_replacements(out, replacements)
         out = apply_tags(out, entities, category)
         return GateResult(mode, category, False, "short_utterance", out, None, replacements, entities=entities or [])
 
+    # Structural spoken commands ('new line'/'new paragraph') are converted
+    # deterministically even for the LLM path: the small model handles the
+    # literal words poorly (it turns "new line thanks" into ". Thanks"), whereas
+    # a real break it's told to preserve survives cleanly. Spoken punctuation
+    # ('full stop', etc.) is left for the LLM — it needs sentence context to
+    # tell a command from a word.
     system_prompt = build_system_prompt(mode, config, app_name, category, entities)
     return GateResult(
-        mode, category, True, "llm", _tidy_whitespace(scrub_fillers(text)),
+        mode, category, True, "llm",
+        _tidy_whitespace(apply_spoken_commands(scrub_fillers(text))),
         system_prompt, replacements, entities=entities or [])
+
+
+# Safety net for the LLM path: even with the prompt rule, the small model
+# sometimes keeps the spoken word AND adds the symbol ("the project full stop."
+# instead of "the project."). Strip the command word ONLY when (a) it sits
+# directly in front of the exact punctuation it names AND (b) it is NOT a noun
+# ("came to a full stop." keeps the words — see _PUNCT_NOUN_LEADINS). Restricted
+# to the unambiguous multi-word phrases; 'period'/'comma' are excluded (a
+# sentence can legitimately end in the word "period").
+# Singular forms only (see _SPOKEN_PUNCT_MAP) so plural nouns ("sentences end in
+# full stops.") aren't touched; the phrase must be glued to the punctuation it
+# names.
+_LEAKED_PUNCT_RE = re.compile(
+    r"(\s*)\b(full stop|question mark|exclamation (?:mark|point))\b\s*([.!?])",
+    re.IGNORECASE,
+)
+# The symbol each command phrase produces, so we only strip when the glued
+# punctuation actually MATCHES the phrase ("full stop." yes; "question mark."
+# no — that's an instruction "use a question mark." ending in a period).
+_LEAKED_SYMBOL = {
+    "full stop": ".", "question mark": "?", "exclamation mark": "!", "exclamation point": "!",
+}
+
+
+def strip_leaked_punct_commands(text: str) -> str:
+    def repl(m: "re.Match[str]") -> str:
+        phrase, punct = m.group(2).lower(), m.group(3)
+        if _LEAKED_SYMBOL.get(phrase) != punct:
+            return m.group(0)  # mismatched mark → not a leak, leave it
+        if _noun_leadin(text, m.start()):
+            return m.group(0)  # "came to a sudden full stop." — real noun
+        return punct  # drop the leading space + phrase, keep just the mark
+
+    return _LEAKED_PUNCT_RE.sub(repl, text)
 
 
 def postprocess(text: str, gate: GateResult) -> str:
     """Deterministic pass over LLM output: replacements + tagging + chat period."""
-    out = _tidy_whitespace(text)
+    out = strip_leaked_punct_commands(_tidy_whitespace(text))
     out = apply_replacements(out, gate.replacements)
     out = apply_tags(out, gate.entities, gate.category)
+    if gate.mode.name.lower() == "code" or gate.category == "code":
+        # Code mode now runs the LLM (light), so the shell-safety strip that used
+        # to live only in the formatting-off branch must apply here too: a
+        # trailing period breaks a dictated command.
+        out = re.sub(r"(?<!\.)\.$", "", out)
     if _is_chat(gate.mode, gate.category):
         out = strip_chat_trailing_period(out)
     return out

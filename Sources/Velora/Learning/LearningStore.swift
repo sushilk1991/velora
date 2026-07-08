@@ -21,7 +21,8 @@ final class LearningStore {
     /// committed — so one-off edits and conflicting one-offs never stick.
     private static let confirmThreshold = 2
     /// Cap on learned replacements so the file (and the cleanup prompt) can't
-    /// grow without bound; oldest are evicted first.
+    /// grow without bound. At the cap, entries are evicted in a stable
+    /// (alphabetical) order — deterministic, not the random dictionary order.
     private static let maxReplacements = 250
 
     /// Common high-frequency / homophone words we refuse to learn as global
@@ -85,25 +86,75 @@ final class LearningStore {
                 committed = true
             }
         }
-        if committed { prune() }
+        // A committed pair no longer needs its count; drop it so `counts` can't
+        // grow one entry per unique typo forever.
+        for correction in corrections {
+            let wrong = correction.wrong.lowercased()
+            if learned.replacements[wrong] == correction.right {
+                learned.counts.removeValue(forKey: "\(wrong)\u{2192}\(correction.right)")
+            }
+        }
+        prune()
         save()
         return committed
     }
 
-    /// Bound the store: keep the newest `maxReplacements`, trim vocab/counts to
-    /// match so nothing accumulates forever.
+    /// Cap on how many pending (unconfirmed) pair counts we retain, so a stream
+    /// of one-off typos can't grow learned.json without bound.
+    private static let maxCounts = 500
+
+    /// Bound the store deterministically: keep the alphabetically-first
+    /// `maxReplacements` (stable, not the random dictionary order), trim vocab to
+    /// match, and cap the pending-counts map.
     private func prune() {
-        guard learned.replacements.count > Self.maxReplacements else { return }
-        let overflow = learned.replacements.count - Self.maxReplacements
-        for key in learned.replacements.keys.prefix(overflow) {
-            learned.replacements.removeValue(forKey: key)
+        if learned.replacements.count > Self.maxReplacements {
+            let overflow = learned.replacements.count - Self.maxReplacements
+            for key in learned.replacements.keys.sorted().suffix(overflow) {
+                learned.replacements.removeValue(forKey: key)
+            }
         }
         let kept = Set(learned.replacements.values)
         learned.vocabulary = learned.vocabulary.filter { kept.contains($0) }
+        if learned.counts.count > Self.maxCounts {
+            let overflow = learned.counts.count - Self.maxCounts
+            for key in learned.counts.keys.sorted().suffix(overflow) {
+                learned.counts.removeValue(forKey: key)
+            }
+        }
     }
 
     /// How many corrections are currently learned (for the Settings UI).
     var count: Int { learned.replacements.count }
+
+    /// One learned correction, for display/management in Settings.
+    struct Entry: Identifiable, Equatable {
+        var id: String { wrong }
+        let wrong: String
+        let right: String
+    }
+
+    /// Learned corrections, alphabetized (reads fresh from disk each call so the
+    /// Settings list reflects edits made by the running DictationController).
+    func entries() -> [Entry] {
+        load()
+        return learned.replacements
+            .map { Entry(wrong: $0.key, right: $0.value) }
+            .sorted { $0.wrong.localizedCaseInsensitiveCompare($1.wrong) == .orderedAscending }
+    }
+
+    /// Forgets a single learned correction (and any pending counts toward it).
+    func remove(wrong: String) {
+        load()
+        let key = wrong.lowercased()
+        guard let removedRight = learned.replacements.removeValue(forKey: key) else { return }
+        // Preserve vocabulary order; only drop the removed value if nothing else
+        // maps to it.
+        if !learned.replacements.values.contains(removedRight) {
+            learned.vocabulary.removeAll { $0 == removedRight }
+        }
+        learned.counts = learned.counts.filter { !$0.key.hasPrefix("\(key)\u{2192}") }
+        save()
+    }
 
     func clear() {
         learned = Learned()

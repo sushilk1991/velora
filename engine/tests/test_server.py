@@ -143,7 +143,7 @@ async def test_cancel_discards(engine):
     await client.send_json({"cmd": "stop", "session": "s4"})
     final = await client.recv_event("final")
     assert final["session"] == "s4"
-    assert final["mode"] == "Code"
+    assert final["mode"] == "Terminal"
     client.close()
 
 

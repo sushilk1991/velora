@@ -31,9 +31,9 @@ enum SettingsTab: CaseIterable {
 
     var preferredHeight: CGFloat {
         switch self {
-        case .general: return 230
+        case .general: return 270
         case .dictation: return 430
-        case .model: return 400
+        case .model: return 480
         case .modes: return 600
         case .history: return 560
         case .shortcuts: return 320
@@ -54,8 +54,10 @@ struct GeneralSettingsView: View {
             }
             Section {
                 Picker("HUD position", selection: $model.hudPosition) {
-                    ForEach(HUDPosition.allCases) { position in
-                        Text(position.displayName).tag(position)
+                    Text("Bottom center").tag(HUDPosition.bottomCenter)
+                    Text("Top center").tag(HUDPosition.topCenter)
+                    if model.hudPosition == .custom {
+                        Text("Custom (dragged)").tag(HUDPosition.custom)
                     }
                 }
                 Picker("Appearance", selection: $model.appearance) {
@@ -63,6 +65,10 @@ struct GeneralSettingsView: View {
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
                 }
+            } footer: {
+                Text("Tip: while the HUD is on screen, drag the pill to place it anywhere — that switches it to Custom.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -122,13 +128,35 @@ struct DictationSettingsView: View {
                     }
                 }
                 if model.learnedCount > 0 {
-                    HStack {
-                        Text("\(model.learnedCount) learned correction\(model.learnedCount == 1 ? "" : "s")")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Button("Clear", role: .destructive) { model.clearLearnedCorrections() }
-                            .controlSize(.small)
+                    DisclosureGroup {
+                        ForEach(model.learnedEntries) { entry in
+                            HStack(spacing: VeloraSpacing.s) {
+                                Text(entry.wrong)
+                                    .foregroundStyle(.secondary)
+                                Image(systemName: "arrow.right")
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                Text(entry.right)
+                                Spacer()
+                                Button {
+                                    model.removeLearnedCorrection(entry.wrong)
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .help("Forget this correction")
+                            }
+                            .font(.callout)
+                            .padding(.vertical, 1)
+                        }
+                        HStack {
+                            Spacer()
+                            Button("Forget all", role: .destructive) { model.clearLearnedCorrections() }
+                                .controlSize(.small)
+                        }
+                    } label: {
+                        Text("Learned corrections (\(model.learnedCount))")
+                            .font(.callout.weight(.medium))
                     }
                 }
             }
@@ -188,6 +216,8 @@ struct DictationSettingsView: View {
 struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = "…"
+    @State private var cachedModels: [ModelStorage.CachedModel] = []
+    @State private var pendingDelete: ModelStorage.CachedModel?
 
     /// One row in the picker / catalog. Prefers the engine's advertised models
     /// (so newly-shipped models appear without an app update); falls back to the
@@ -212,11 +242,12 @@ struct ModelSettingsView: View {
         }
     }
 
-    /// The cleanup model the engine advertises, if any (falls back to the
-    /// shipped default label).
-    private var cleanupModelName: String {
-        model.engineModels.first { $0.kind == "cleanup" }?.displayName
-            ?? "Qwen3-4B Instruct (4-bit)"
+    /// Cleanup models the engine advertises (smallest first).
+    private var cleanupChoices: [EngineModel] { model.cleanupEngineModels }
+
+    /// The set of currently-active model ids (never offered for deletion).
+    private var activeModelIDs: Set<String> {
+        [model.sttModel, model.cleanupModel].filter { !$0.isEmpty }.reduce(into: Set()) { $0.insert($1) }
     }
 
     var body: some View {
@@ -227,12 +258,19 @@ struct ModelSettingsView: View {
                         Text(choice.name).tag(choice.id)
                     }
                 }
+                if !cleanupChoices.isEmpty {
+                    Picker("Cleanup model", selection: cleanupBinding) {
+                        ForEach(cleanupChoices) { m in
+                            Text(cleanupLabel(m)).tag(m.id)
+                        }
+                    }
+                }
             } footer: {
-                Text("Models download on first use and run entirely on this Mac.")
+                Text(cleanupFooter)
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
-            Section("Available models") {
+            Section("Available speech models") {
                 ForEach(choices) { choice in
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 2) {
@@ -252,32 +290,99 @@ struct ModelSettingsView: View {
                     .padding(.vertical, VeloraSpacing.xs)
                 }
             }
-            Section {
-                LabeledContent("Cleanup model", value: cleanupModelName)
-                LabeledContent("Model storage", value: storageUsed)
-            }
+            storageSection
         }
         .formStyle(.grouped)
         .frame(width: 580, height: SettingsTab.model.preferredHeight)
-        .task { storageUsed = await Self.modelStorageDescription() }
+        .task { await refreshStorage() }
         .onAppear { model.requestStatus() }
+        .alert(item: $pendingDelete) { target in
+            Alert(
+                title: Text("Remove “\(shortName(target.id))”?"),
+                message: Text("Frees \(target.sizeLabel) from the on-device model cache. Velora re-downloads it automatically if you select it again."),
+                primaryButton: .destructive(Text("Remove")) {
+                    Task { await ModelStorage.delete(target); await refreshStorage() }
+                },
+                secondaryButton: .cancel())
+        }
     }
 
-    /// Sums the HuggingFace hub cache size off the main thread.
-    private static func modelStorageDescription() async -> String {
-        let path = NSHomeDirectory() + "/.cache/huggingface/hub"
-        return await Task.detached(priority: .utility) { () -> String in
-            let fm = FileManager.default
-            guard fm.fileExists(atPath: path),
-                  let files = fm.enumerator(atPath: path)
-            else { return "No models downloaded" }
-            var total: Int64 = 0
-            while let file = files.nextObject() as? String {
-                let attrs = try? fm.attributesOfItem(atPath: path + "/" + file)
-                total += (attrs?[.size] as? Int64) ?? 0
+    // MARK: Cleanup model picker
+
+    private var cleanupBinding: Binding<String> {
+        Binding(get: { model.cleanupModel }, set: { model.setCleanupModel($0) })
+    }
+
+    private func cleanupLabel(_ m: EngineModel) -> String {
+        m.id == model.recommendedCleanupModel ? "\(m.displayName)  ·  Recommended" : m.displayName
+    }
+
+    private var cleanupFooter: String {
+        let base = "Models download on first use and run entirely on this Mac."
+        guard !model.recommendedCleanupModel.isEmpty,
+              let rec = cleanupChoices.first(where: { $0.id == model.recommendedCleanupModel })
+        else { return base }
+        return base + " “\(rec.displayName)” is recommended for your Mac's memory."
+    }
+
+    // MARK: Storage section
+
+    @ViewBuilder
+    private var storageSection: some View {
+        Section {
+            LabeledContent("Total on disk", value: storageUsed)
+            ForEach(cachedModels) { m in
+                HStack(alignment: .firstTextBaseline, spacing: VeloraSpacing.s) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(shortName(m.id))
+                        if activeModelIDs.contains(m.id) {
+                            Text("In use")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(VeloraBrand.violet.color)
+                        }
+                    }
+                    Spacer()
+                    Text(m.sizeLabel)
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    if activeModelIDs.contains(m.id) {
+                        Image(systemName: "lock.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 22)
+                    } else {
+                        Button {
+                            pendingDelete = m
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove this cached model to reclaim space")
+                        .frame(width: 22)
+                    }
+                }
+                .padding(.vertical, 1)
             }
-            return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
-        }.value
+        } header: {
+            Text("Model storage")
+        } footer: {
+            Text("Reclaim space by removing models you no longer use. The two in-use models can't be removed.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func shortName(_ id: String) -> String {
+        id.split(separator: "/").last.map(String.init) ?? id
+    }
+
+    private func refreshStorage() async {
+        let scanned = await ModelStorage.scan()
+        cachedModels = scanned
+        let total = scanned.reduce(Int64(0)) { $0 + $1.bytes }
+        storageUsed = scanned.isEmpty
+            ? "No models downloaded"
+            : ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
     }
 }
 
