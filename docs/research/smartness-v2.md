@@ -179,6 +179,27 @@ hard word 3×, save misheard variants"), local HTTP API for agent workflows.
   positive self-repair cases, retraction commands, and negative cases
   (emphasis "no no no", content "no").
 
+## Verified end-to-end (2026-07-08, real models over the socket)
+
+- Self-correction eval: **11/11** (spikes/engine/bench_selfcorrect.py), ~360-560ms
+  per case, including retraction commands and the negative (emphasis/content
+  "no") cases.
+- 75.2s synthetic dictation (say-generated, embedded pauses, mid-text
+  "3 p.m no no 6 p.m"): stop→transcript **315ms** (tail-only decode),
+  stop→final **1.57s**, `reason=streaming`, fully punctuated, self-correction
+  resolved to "Let's meet at 6 p.m.". Live partials streamed during recording
+  (whisper's first-ever HUD partials). Short regression (jfk.wav 11s):
+  classic path, byte-equivalent behavior, stop→final 1.24s.
+- Glossary biasing: with `vocabulary=["Velora","Wispr Flow",...]`, the same
+  clip transcribes "**Velora**" (was "Valora") and "**Wispr Flow**" (was
+  "Whisperflow") — corrected at STT time, visible in the first live partial.
+- Miner on a copy of the real 39-row history with real Qwen3.5: promoted
+  "super whisper", "LLM" (≥2 dictations); candidates include real people
+  names and product terms; checkpoint advanced 8→39; junk stayed below the
+  promotion threshold. Known behavior: a CONSISTENTLY misheard name can be
+  mined — the edit-learning loop and the Settings delete/ban UI are the
+  corrective forces.
+
 ## What stays untouched
 
 Hot path budget: no new work between hotkey-release and insert except the
