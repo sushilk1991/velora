@@ -43,7 +43,9 @@ Types:
 Control flow for one dictation:
 ```
 app → engine  {"cmd":"start","session":"uuid","context":{"bundle_id":"com.tinyspeck.slackmacgap",
-               "app_name":"Slack","mode":null}}           # mode:null = auto-resolve
+               "app_name":"Slack","mode":null,             # mode:null = auto-resolve
+               "entities":[{"type":"file","value":"authCheck.ts"},   # screen context (AX)
+                           {"type":"person","value":"Priya"},{"type":"site","value":"gmail"}]}}
 app → engine  AUDIO frames (streamed live during recording, ~100ms chunks)
 app → engine  {"cmd":"stop","session":"uuid"}             # user released hotkey
 engine → app  {"event":"partial","session":"...","text":"..."}       # optional, P1 HUD display
@@ -52,6 +54,8 @@ engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode"
                "cleanup_ms":389,"cleanup_applied":true,"audio":"uuid.flac"}   # audio present when archived
 ```
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
+
+**Smart context (hybrid).** At session start the app reads the frontmost app's focused-window title via the Accessibility API (already-granted; no Screen Recording, ~5ms, capped at 0.25s) and extracts `entities` — current file (editors), person/channel (chat), subject (mail), site (browser: Gmail/Docs/Notion/Linear…). The engine (`formatting.py`) uses them to: (1) feed exact names/spellings into the cleanup prompt; (2) turn spoken **@-tags** into tokens ("tag authCheck" → `@authCheck.ts`, "mention Priya" → `@Priya`, conservative to avoid tagging ordinary prose); (3) refine a browser's mode by site. A small on-device VLM screen-read for thin-AX Electron editors is the planned second half of the hybrid.
 
 **Audio archive + reprocess.** When `save_audio` is on (default), each session's
 raw PCM is written to `~/.velora/audio/<session>.flac` (FLAC via libsndfile,
