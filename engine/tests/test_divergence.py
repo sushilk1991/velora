@@ -135,3 +135,12 @@ def test_allowed_terms_not_novel():
     out = "Open Velora and beat Wispr Flow, then catch the Airlearn or not with it."
     assert check_divergence(raw, out) is not None  # without terms: 3 novel tokens
     assert check_divergence(raw, out, ["Velora", "Wispr Flow", "Airlearn"]) is None
+
+
+def test_vocab_injection_rejected():
+    # Review finding: vocab terms may only SUBSTITUTE for removed words —
+    # an output sprinkled with unrelated known terms must still be rejected.
+    raw = "send it to the team after lunch please"
+    out = "Send it to the Velora Airlearn Wispr Flow team after lunch."
+    reason = check_divergence(raw, out, ["Velora", "Airlearn", "Wispr Flow"])
+    assert reason is not None and reason.startswith("vocab_injection")

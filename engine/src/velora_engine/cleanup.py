@@ -126,9 +126,24 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
         allowed = set(raw_tokens)
         # Vocabulary/learned terms are legitimate spellings the model is TOLD
         # to produce ("whisper flow" → "Wispr Flow", a learned soft correction
-        # to "Airlearn") — never count them as hallucinated content.
+        # to "Airlearn") — but only as SUBSTITUTIONS for words that left the
+        # text. An unconditional allowlist would wave through an output
+        # sprinkled with unrelated vocab terms (review finding), so vocab
+        # tokens are budgeted against the count of raw words that disappeared.
+        # (If the model over-applies a soft hint to a genuine word, this bounds
+        # the damage to a 1:1 swap — the residual risk of context-gating being
+        # the LLM's call; the keep-by-default prompt is the first defense.)
+        vocab_tokens: set[str] = set()
         for term in allowed_terms or []:
-            allowed.update(_guard_tokens(term))
+            vocab_tokens.update(_guard_tokens(term))
+        vocab_tokens -= allowed
+        if vocab_tokens:
+            out_set = set(out_tokens)
+            removed = sum(1 for t in set(raw_tokens) if t not in out_set)
+            vocab_novel = [t for t in set(out_tokens) if t in vocab_tokens]
+            if len(vocab_novel) > removed + 1:
+                return f"vocab_injection({len(vocab_novel)}>{removed})"
+            allowed |= vocab_tokens
         for n in (2, 3):
             for i in range(len(raw_tokens) - n + 1):
                 allowed.add("".join(raw_tokens[i : i + n]))

@@ -67,6 +67,26 @@ def velora_home() -> Path:
     return Path(os.environ.get("VELORA_HOME", str(Path.home() / ".velora")))
 
 
+_DICT_WORDS: frozenset[str] | None = None
+
+
+def _is_dictionary_word(word: str) -> bool:
+    """True when `word` is a real English word per the system word list
+    (/usr/share/dict/words, present on every macOS). Used to demote legacy
+    hard replacements whose wrong side is a real word — those must never be
+    deterministic rewrites. Missing word list (CI/Linux) → False: the Swift
+    app's spellchecker-based migration is the primary line anyway."""
+    global _DICT_WORDS
+    if _DICT_WORDS is None:
+        try:
+            _DICT_WORDS = frozenset(
+                Path("/usr/share/dict/words").read_text().lower().split()
+            )
+        except OSError:
+            _DICT_WORDS = frozenset()
+    return word.lower() in _DICT_WORDS
+
+
 @dataclass
 class Mode:
     name: str
@@ -278,6 +298,16 @@ class Config:
             self._learned_soft = {
                 str(k): str(v) for k, v in (data.get("soft_replacements") or {}).items()
             }
+            # Defense in depth (review finding): the Swift app demotes
+            # real-word wrongs to soft on ITS load, but a standalone engine or
+            # a restored pre-0.3.4 learned.json could still carry
+            # {"lung": "Airlearn"} as a hard rule — which would deterministically
+            # corrupt every genuine "lung". Demote such keys here too.
+            risky = [k for k in self._learned_replacements if _is_dictionary_word(k)]
+            for key in risky:
+                self._learned_soft.setdefault(key, self._learned_replacements.pop(key))
+            if risky:
+                log.info("demoted %d real-word learned replacement(s) to context-gated", len(risky))
         except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
             log.warning("learned.json unreadable (%s); ignoring", exc)
 

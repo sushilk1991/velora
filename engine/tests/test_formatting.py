@@ -705,3 +705,19 @@ def test_soft_corrections_in_prompt_not_replacements(config, home):
     prompt = formatting.build_system_prompt(mode, config, None, None)
     assert "'lung' (sometimes actually Airlearn)" in prompt
     assert "KEEP THE WORD EXACTLY AS TRANSCRIBED" in prompt
+
+
+def test_legacy_realword_hard_replacement_demoted(config, home):
+    # Review finding: a pre-0.3.4 learned.json (or one restored from backup)
+    # can carry a real-word HARD replacement; the engine must demote it to a
+    # context-gated soft correction on load, never apply it deterministically.
+    import json as _json
+
+    (home / "learned.json").write_text(_json.dumps({
+        "replacements": {"lung": "Airlearn", "wrold": "world"},
+        "vocabulary": ["Airlearn"],
+    }))
+    config.reload()
+    assert "lung" not in config.global_replacements  # demoted
+    assert config.soft_corrections.get("lung") == "Airlearn"
+    assert config.global_replacements.get("wrold") == "world"  # gibberish stays hard
