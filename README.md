@@ -17,16 +17,20 @@ Dictation tools like Superwhisper and Wispr Flow proved the product: invisible, 
 
 - **Hold-to-talk and toggle dictation** — hold Right-Option (default) to record, release to insert; or double-tap / click the menubar icon to toggle. Esc always cancels cleanly. Hotkey behavior is configurable.
 - **Capsule HUD** — a small floating capsule with a live 24-bar waveform from your mic. It never steals focus, and morphs through listening → transcribing → inserted/error states. Start/stop sounds included (toggleable).
+- **Multilingual** — the default `whisper-large-v3-turbo` model handles English, Indian English, Hindi, and dozens more languages with automatic language detection. Non-Latin transcripts (Devanagari, CJK, Arabic) skip the English-tuned cleanup so they stay faithful.
+- **Optional romanized output** — a Dictation-settings toggle transliterates non-Latin speech into Latin letters (Hindi → natural Hinglish, e.g. "नमस्ते आज मौसम" → "Namaste aaj mausam"), keeping English words English. Off by default.
 - **App-aware smart formatting** — Velora detects the frontmost app and picks a mode automatically:
   - *Slack / Messages / Discord / Telegram / WhatsApp* → terse, casual, no trailing period on a single short sentence
   - *Mail* → professional structure and tone
   - *Notes / Obsidian / Notion / Bear* → markdown allowed, lists when you enumerate
   - *VS Code / Cursor / Terminal / iTerm / Ghostty / Warp / Zed* → **raw mode, no AI rewriting**
   - everything else → clean, well-punctuated default
-- **On-device STT + LLM** — streaming transcription with `parakeet-tdt-0.6b-v2` (mlx-whisper `large-v3-turbo` as fallback backend) and cleanup/formatting with `Qwen3-4B-Instruct-2507-4bit`. Cleanup removes fillers, applies self-corrections ("no wait, I meant Tuesday"), punctuates, and honors spoken "new line" / "new paragraph".
-- **Custom modes, vocabulary, and replacements** — every mode is a JSON file in `~/.velora/modes/`. Drop in a file to create your own (see [Customization](#customization)).
-- **History** — every dictation (raw + final text, app, mode, duration) is stored in a local SQLite database; the menubar menu shows your last three (click to copy).
-- **Model picker** — choose your STT model in Settings, with managed downloads.
+- **On-device STT + LLM** — transcription with `whisper-large-v3-turbo` (multilingual; `parakeet-tdt-0.6b-v2` available for streaming English, plus a Hindi/Hinglish specialist) and cleanup/formatting with `Qwen3-4B-Instruct-2507-4bit`. Cleanup removes fillers, applies self-corrections ("no wait, I meant Tuesday"), punctuates, and honors spoken "new line" / "new paragraph".
+- **History browser** — every dictation (raw + final text, app, mode, duration) is stored in a local SQLite database. Browse, search, copy, or paste-again from the History tab; the menubar menu shows your last three (click to copy).
+- **Audio archive + reprocess** — clips are saved as compact FLAC under `~/.velora/audio` (configurable retention, default 6 months / 4 GB cap) so you can re-transcribe any past dictation with a better model straight from the History tab.
+- **Custom modes editor** — every mode is a JSON file in `~/.velora/modes/`, editable from the Modes tab: per-mode LLM prompt (the Superwhisper-style feature), formatting level, app bindings, vocabulary, and replacements. Drop in a file to create your own (see [Customization](#customization)).
+- **Model picker** — choose your STT model in Settings from the engine's registry, with managed downloads.
+- **Live spectrum waveform** — the HUD's 24-bar waveform is driven by a real FFT of your mic, so bars react to both loudness and pitch.
 - **Safe insertion** — clipboard is snapshotted and restored around the synthesized ⌘V, with a keystroke-typing fallback for apps that block paste. Secure input fields (passwords) are detected and insertion is suppressed.
 
 ## Requirements
@@ -40,26 +44,36 @@ Dictation tools like Superwhisper and Wispr Flow proved the product: invisible, 
 ## Install & build
 
 ```sh
-git clone https://github.com/<you>/velora
+# 1. Prerequisites (one-time)
+xcode-select --install                    # Swift toolchain (Command Line Tools)
+curl -LsSf https://astral.sh/uv/install.sh | sh   # uv, for the Python engine
+
+# 2. Build & run
+git clone https://github.com/sushilk1991/velora
 cd velora
-make app          # builds build/Velora.app (SwiftPM release + hand-rolled bundle, ad-hoc signed)
+make app          # builds build/Velora.app (SwiftPM release + hand-rolled bundle, self-signed)
 open build/Velora.app
 ```
 
-First launch walks you through onboarding: microphone permission, accessibility permission (live-detected as you grant it), hotkey choice, and a try-it playground — you finish with a real dictation. The engine downloads the default models from Hugging Face on first run; after that, everything is offline.
+`make app` compiles the Swift app and bundles the Python engine; the engine's dependencies are fetched by `uv` on first launch. First launch then walks you through onboarding: microphone permission, accessibility permission (live-detected as you grant it), hotkey choice, and a try-it playground — you finish with a real dictation. The engine downloads the default models from Hugging Face on first run (~4 GB, a few minutes); after that, everything is offline.
+
+Prefer not to build? Grab the notarization-pending `Velora-x.y.z.dmg` from [Releases](https://github.com/sushilk1991/velora/releases), drag Velora to Applications, and open it. Because it isn't notarized by Apple yet, the first open needs **right-click → Open** (or *System Settings → Privacy & Security → Open Anyway*).
 
 > Run the `.app` bundle, not the bare binary — macOS permission grants (mic, accessibility) attach to the signed bundle identity.
+>
+> **Engine tests:** `make test` runs the Python engine suite (`cd engine && uv run pytest -q`).
 
 ## Performance
 
-Measured on Apple Silicon with the default models (`parakeet-tdt-0.6b-v2` + `Qwen3-4B-Instruct-2507-4bit`):
+Measured on Apple Silicon M-series with `Qwen3-4B-Instruct-2507-4bit` cleanup:
 
 | Metric | Measured |
 |---|---|
-| STT throughput | ~184× realtime |
-| Key release → final text (11 s utterance, incl. LLM cleanup) | 533 ms |
+| Streaming STT throughput (`parakeet-tdt-0.6b-v2`) | ~184× realtime |
+| Multilingual transcription (`whisper-large-v3-turbo`, default) | ~0.3 s per clip |
+| LLM cleanup, warm | ~0.8 s per paragraph |
 
-Transcription streams during speech, so on release only the audio tail needs flushing. If cleanup would blow its budget, Velora inserts the raw transcript immediately instead of making you wait — the cleaned version is never the bottleneck.
+The default multilingual model is batch (transcribes on release rather than streaming), a deliberate quality tradeoff for accurate Hindi/Indian-English. For streaming English with live HUD partials, pick `parakeet-tdt-0.6b-v2` in Settings. If cleanup would blow its budget, Velora inserts the raw transcript immediately instead of making you wait — the cleaned version is never the bottleneck.
 
 ## Architecture
 
@@ -113,13 +127,13 @@ Edits are picked up via the engine's config reload — no restart dance required
 
 ## Project status
 
-Velora is at **v1**: the core dictation loop (capture → streaming STT → app-aware cleanup → insertion → history) is complete and tested (41 engine tests plus an end-to-end socket smoke harness).
+Velora is at **v1**: the full dictation loop (capture → multilingual STT → app-aware cleanup → insertion → searchable history → audio archive → reprocess) is complete and tested (70 engine tests plus an end-to-end socket harness).
 
 Known limitations:
 
-- **English-first** — the default `parakeet-tdt-0.6b-v2` model is English; multilingual dictation (Whisper multilingual models, auto language detection) is planned.
+- **Not notarized yet** — the app is self-signed, so on machines other than the build machine Gatekeeper shows a warning on first open (right-click → Open to bypass). Apple notarization is planned.
 - **The `.app` bundle is required for real use** — microphone and accessibility (TCC) grants attach to the signed bundle, so hotkeys and insertion won't work from a bare `swift run` binary.
-- History browser window, mode editor GUI, and streaming partial text in the HUD are planned (the storage and protocol support already exist).
+- **Batch default** — the multilingual default model transcribes on release, not live; switch to `parakeet-tdt-0.6b-v2` for streaming HUD partials (English only).
 
 ## Contributing & license
 

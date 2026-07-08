@@ -27,5 +27,10 @@ spikes/
 .yoyo/
 .pytest_cache/
 
+# Editor / tool local state
+.claude/
+.vscode/
+.idea/
+
 # Built app bundle and DMG
 build/
