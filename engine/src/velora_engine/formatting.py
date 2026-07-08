@@ -355,7 +355,11 @@ SMART_TERMINAL_PROMPT = (
     "self-corrections. BUT any fragment that is a shell command, code "
     "identifier, flag, or file path must stay VERBATIM: exact casing and "
     "symbols, never capitalize identifiers or commands, and never add a "
-    "trailing period after a command."
+    "trailing period after a command. Spoken symbols inside a command convert "
+    "one-to-one, preserving word order ('dash dash rm dash it' → '--rm -it', "
+    "'server dot py' → 'server.py'); NEVER insert shell operators (&&, |, ;, >) "
+    "the speaker did not spell out, and when unsure leave the spoken words "
+    "unchanged rather than guess."
 )
 
 # Romanization prompt (opt-in `romanize_output`): transliterate non-Latin
