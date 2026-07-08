@@ -288,13 +288,13 @@ final class DictationController: NSObject {
                 return
             }
             guard edited != pending.inserted else { return }  // untouched — nothing to learn yet
-            // Scope: only when the field is close in size to what we inserted —
-            // i.e. a compose box, not a document with other content. Bail early
-            // (before the O(n·m) diff) so a big field can never freeze us.
+            // Size cap only (a real document never diffs; would freeze/mislead).
+            // Fields BIGGER than the insertion are fine below the cap:
+            // CorrectionDiff isolates the best-matching window itself, so a
+            // TextEdit/Notes doc accumulating several dictations still learns.
             let editedWords = edited.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
-            let insertedCount = pending.insertedWords.count
-            guard editedWords <= insertedCount + max(8, insertedCount) else {
-                veloraLog("Velora: learning — field too large to diff (\(editedWords) vs \(insertedCount) words)")
+            guard editedWords <= 400 else {
+                veloraLog("Velora: learning — field too large to diff (\(editedWords) words)")
                 return
             }
 

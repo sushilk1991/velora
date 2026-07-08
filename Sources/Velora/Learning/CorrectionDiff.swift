@@ -17,15 +17,36 @@ enum CorrectionDiff {
     /// pathological field slipping past the caller's size guard).
     private static let maxTokens = 200
 
+    /// A field bigger than this is never scanned (a real document; the window
+    /// search would be meaningless and the diff misleading).
+    private static let maxScanTokens = 400
+
     static func corrections(baseline: String, edited: String) -> [Correction] {
         let a = tokenize(baseline)
-        let b = tokenize(edited)
-        guard !a.isEmpty, !b.isEmpty, a.count <= maxTokens, b.count <= maxTokens else { return [] }
+        var b = tokenize(edited)
+        guard !a.isEmpty, !b.isEmpty, a.count <= maxTokens else { return [] }
+        // The field may hold MORE than we inserted — a document accumulating
+        // several dictations (TextEdit, Notes). Isolate the window that best
+        // matches the inserted text and diff against that, instead of bailing.
+        if b.count > a.count + max(2, a.count / 5) {
+            guard let window = bestWindow(for: a, in: b) else { return [] }
+            b = window
+        }
+        guard b.count <= maxTokens else { return [] }
         // Ignore edits that changed the length a lot — that's rewriting, not a
         // spelling fix, and word alignment gets unreliable.
         if abs(a.count - b.count) > max(2, a.count / 5) { return [] }
 
         let ops = diff(a, b)
+        // Anchor: a genuine spelling fix leaves the sentence mostly intact.
+        // Without this, diffing two UNRELATED texts (window match gone wrong,
+        // or the user replaced the content wholesale) can cough up a spurious
+        // 1:1 pair — and the name-fix rule would happily learn it.
+        let keeps = ops.reduce(0) { count, op in
+            if case .keep = op { return count + 1 }
+            return count
+        }
+        guard keeps * 10 >= max(a.count, b.count) * 7 else { return [] }
         var result: [Correction] = []
         var i = 0
         while i < ops.count {
@@ -56,14 +77,15 @@ enum CorrectionDiff {
         let r = right.trimmingCharacters(in: .punctuationCharacters)
         guard w.count >= 3, r.count >= 2, w.lowercased() != r.lowercased() else { return nil }
         guard w.allSatisfy({ $0.isLetter }), r.allSatisfy({ $0.isLetter }) else { return nil }
-        // A misheard NAME is usually a *different-sounding* name — "Shubhi" →
-        // "Shivangi" is edit distance 5 — so the typo-shaped distance gate
-        // must not apply when both sides read as names (capitalized). The
-        // deliberate act of replacing one capitalized word with another inside
-        // text the user JUST dictated is itself the correction signal;
-        // LearningStore's stopwords still veto common capitalized words.
-        let bothNames = w.first?.isUppercase == true && r.first?.isUppercase == true
-        if !bothNames {
+        // A misheard NAME is usually a *different-sounding* word — "Shubhi" →
+        // "Shivangi" is edit distance 5, and STT typically hears a name as a
+        // lowercase common word ("airline" for "Airlearn") — so the
+        // typo-shaped distance gate must not apply when the REPLACEMENT the
+        // user deliberately typed reads as a name (capitalized). That typing
+        // act is itself the correction signal; LearningStore's stopwords
+        // still veto common capitalized words ("Hello", "Okay", …).
+        let nameFix = r.first?.isUppercase == true
+        if !nameFix {
             let distance = editDistance(w.lowercased(), r.lowercased())
             // Similar enough to be a correction of the same intended word (not
             // a wholly different word swapped in).
@@ -74,6 +96,33 @@ enum CorrectionDiff {
 
     private static func tokenize(_ text: String) -> [String] {
         text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init)
+    }
+
+    /// Finds the contiguous token window in `b` that best matches the inserted
+    /// tokens `a` (±2 length slack), requiring ≥70% of `a`'s tokens present.
+    /// Cheap (offsets a running score instead of rescoring each window) and
+    /// bounded by `maxScanTokens`, and it runs off the main thread.
+    private static func bestWindow(for a: [String], in b: [String]) -> [String]? {
+        guard b.count <= maxScanTokens else { return nil }
+        let aSet = Set(a.map { $0.lowercased() })
+        let hits = b.map { aSet.contains($0.lowercased()) ? 1 : 0 }
+        var best: (score: Int, range: Range<Int>)?
+        for delta in -2...2 {
+            let len = a.count + delta
+            guard len >= 1, len <= b.count else { continue }
+            var score = hits[0..<len].reduce(0, +)
+            var start = 0
+            while true {
+                if best == nil || score > best!.score {
+                    best = (score, start..<(start + len))
+                }
+                if start + len >= b.count { break }
+                score += hits[start + len] - hits[start]
+                start += 1
+            }
+        }
+        guard let found = best, found.score * 10 >= a.count * 7 else { return nil }
+        return Array(b[found.range])
     }
 
     // MARK: - Word-level diff (LCS backtrack)
