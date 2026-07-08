@@ -353,3 +353,30 @@ async def test_reload_config_propagates_language(engine, home):
 
 def test_velora_home_created_private(config):
     assert (config.home.stat().st_mode & 0o777) == 0o700
+
+
+async def test_screen_context_entities_tag_end_to_end(engine, monkeypatch):
+    """Full socket path: entities in the start context reach cleanup and a
+    spoken 'tag' phrase becomes an @-mention (Cursor/code, Raw mode, no LLM)."""
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "please fix the bug in tag authCheck now")
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv()  # ready
+
+    await client.send_json({
+        "cmd": "start", "session": "sc1",
+        "context": {
+            "bundle_id": "com.todesktop.230313mzl4w4u92",  # Cursor → code/Raw
+            "app_name": "Cursor", "mode": None,
+            "entities": [{"type": "file", "value": "authCheck.ts"}],
+        },
+    })
+    for _ in range(6):
+        await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "sc1"})
+
+    final = await client.recv_event("final")
+    assert final["session"] == "sc1"
+    assert "@authCheck.ts" in final["text"], final["text"]
+    assert "tag authCheck" not in final["text"]
+    client.close()
