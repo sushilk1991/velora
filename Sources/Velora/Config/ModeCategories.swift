@@ -62,4 +62,10 @@ enum ModeCategory: String {
         guard let bundleID, let category = byBundleID[bundleID] else { return "Text" }
         return category.displayName
     }
+
+    /// The category for a bundle id, or nil for unknown apps.
+    static func category(forBundleID bundleID: String?) -> ModeCategory? {
+        guard let bundleID else { return nil }
+        return byBundleID[bundleID]
+    }
 }

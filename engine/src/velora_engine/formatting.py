@@ -265,7 +265,46 @@ _STRENGTH_INSTRUCTIONS = {
 }
 
 
-def build_system_prompt(mode: Mode, config: Config, app_name: str | None, category: str | None) -> str:
+def _format_entities(entities: list[dict[str, str]] | None) -> str | None:
+    """Render screen-context entities into a prompt hint, or None if empty."""
+    if not entities:
+        return None
+    label = {
+        "file": "current file",
+        "person": "messaging",
+        "channel": "channel",
+        "subject": "email subject",
+        "page": "page",
+        "title": "on screen",
+    }
+    seen: set[str] = set()
+    items: list[str] = []
+    for e in entities:
+        value = str(e.get("value", "")).strip()
+        etype = str(e.get("type", "title"))
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        items.append(f"{label.get(etype, 'on screen')}: “{value}”")
+    if not items:
+        return None
+    return (
+        "Screen context — what the user is looking at right now. Use these EXACT "
+        "names/spellings when the speech clearly refers to them (e.g. 'the auth "
+        "file' → the current file's name; a first name → the person being "
+        "messaged). Never insert them unless the speech refers to them: "
+        + "; ".join(items)
+        + "."
+    )
+
+
+def build_system_prompt(
+    mode: Mode,
+    config: Config,
+    app_name: str | None,
+    category: str | None,
+    entities: list[dict[str, str]] | None = None,
+) -> str:
     parts = [STATIC_SYSTEM_PROMPT]
     parts.append(_STRENGTH_INSTRUCTIONS.get(mode.formatting, _STRENGTH_INSTRUCTIONS["full"]))
     if not config.auto_punctuation:
@@ -275,6 +314,9 @@ def build_system_prompt(mode: Mode, config: Config, app_name: str | None, catego
     if app_name:
         desc = CATEGORY_DESCRIPTIONS.get(category or "", "an application")
         parts.append(f"Context: the user is dictating into {app_name} — {desc}.")
+    entity_hint = _format_entities(entities)
+    if entity_hint:
+        parts.append(entity_hint)
     vocab = list(dict.fromkeys(config.global_vocabulary + mode.vocabulary))
     if vocab:
         parts.append(
@@ -306,6 +348,7 @@ def run_gate(
     bundle_id: str | None = None,
     app_name: str | None = None,
     explicit_mode: str | None = None,
+    entities: list[dict[str, str]] | None = None,
 ) -> GateResult:
     """Stage 1: decide if and how much AI touches the text."""
     mode = resolve_mode(config, bundle_id, explicit_mode)
@@ -345,7 +388,7 @@ def run_gate(
         out = apply_replacements(out, replacements)
         return GateResult(mode, category, False, "short_utterance", out, None, replacements)
 
-    system_prompt = build_system_prompt(mode, config, app_name, category)
+    system_prompt = build_system_prompt(mode, config, app_name, category, entities)
     return GateResult(mode, category, True, "llm", _tidy_whitespace(scrub_fillers(text)), system_prompt, replacements)
 
 

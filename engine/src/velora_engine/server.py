@@ -448,6 +448,7 @@ class Engine:
             bundle_id=ctx.get("bundle_id"),
             app_name=ctx.get("app_name"),
             explicit_mode=ctx.get("mode"),
+            entities=ctx.get("entities"),
         )
 
         # Stage 3: archive the audio clip (off the event loop) so it can be
@@ -488,6 +489,7 @@ class Engine:
         bundle_id: str | None,
         app_name: str | None,
         explicit_mode: str | None,
+        entities: list[dict[str, str]] | None = None,
     ) -> tuple[str, str, int, bool, str]:
         """Run the gate + optional LLM cleanup. Returns
         (text, mode_name, cleanup_ms, cleanup_applied, reason). Shared by live
@@ -498,6 +500,7 @@ class Engine:
             bundle_id=bundle_id,
             app_name=app_name,
             explicit_mode=explicit_mode,
+            entities=entities,
         )
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"

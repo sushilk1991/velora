@@ -272,3 +272,30 @@ def test_romanize_ignores_latin_text(config):
     config.data["romanize_output"] = True
     gate = run_gate("please schedule the meeting for tomorrow at three pm", config)
     assert gate.romanize is False
+
+
+# ---- screen-context entities feed the cleanup prompt ----
+
+
+def test_entities_injected_into_llm_prompt(config):
+    # A Slack (chat, LLM) dictation with screen entities embeds the exact names.
+    entities = [{"type": "person", "value": "Priya Sharma"}, {"type": "file", "value": "auth.ts"}]
+    gate = run_gate(
+        LONG, config, bundle_id="com.tinyspeck.slackmacgap", app_name="Slack", entities=entities
+    )
+    assert gate.use_llm and gate.system_prompt is not None
+    assert "Priya Sharma" in gate.system_prompt
+    assert "auth.ts" in gate.system_prompt
+    assert "Screen context" in gate.system_prompt
+
+
+def test_no_entities_no_screen_context_section(config):
+    gate = run_gate(LONG, config, bundle_id="com.tinyspeck.slackmacgap", app_name="Slack")
+    assert gate.system_prompt is not None
+    assert "Screen context" not in gate.system_prompt
+
+
+def test_entities_dedup_and_blank_skipped(config):
+    entities = [{"type": "person", "value": "Alex"}, {"type": "person", "value": "Alex"}, {"type": "file", "value": ""}]
+    gate = run_gate(LONG, config, bundle_id="com.apple.mail", app_name="Mail", entities=entities)
+    assert gate.system_prompt.count("Alex") == 1

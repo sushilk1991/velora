@@ -6,6 +6,9 @@ import Foundation
 struct AppContext {
     let bundleID: String?
     let appName: String?
+    /// Screen-context entities (current file, person, channel, …) extracted at
+    /// session start; empty when none are available. See `ScreenContext`.
+    var entities: [ContextEntity] = []
 
     /// JSON shape for the wire protocol `context` field.
     var payload: [String: Any] {
@@ -13,6 +16,7 @@ struct AppContext {
             "bundle_id": bundleID as Any? ?? NSNull(),
             "app_name": appName as Any? ?? NSNull(),
             "mode": NSNull(),  // null = engine auto-resolves from mode files
+            "entities": entities.map { $0.payload },
         ]
     }
 }

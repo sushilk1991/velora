@@ -163,13 +163,25 @@ final class DictationController: NSObject {
         }
 
         sessionID = UUID().uuidString
-        sessionContext = contextTracker.current
         rawTranscript = nil
         recordingStart = Date()
 
         // Context chip: the target app's actual icon + the client-side
         // detected mode label (ModeCategory mirrors the engine's map).
         let targetApp = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+
+        // Enrich the app context with on-screen entities (current file, the
+        // person/channel you're messaging, …) via the Accessibility API, so the
+        // engine can spell them right and, later, tag them. Cheap AX title read;
+        // never blocks capture.
+        var enriched = contextTracker.current
+        enriched.entities = ScreenContext.entities(
+            for: targetApp, category: ModeCategory.category(forBundleID: enriched.bundleID))
+        sessionContext = enriched
+        if !enriched.entities.isEmpty {
+            NSLog("Velora: screen context — %@",
+                  enriched.entities.map { "\($0.type)=\($0.value)" }.joined(separator: ", "))
+        }
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
             modeName: ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
