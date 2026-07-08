@@ -116,6 +116,8 @@ struct HUDView: View {
                 .opacity(isError ? 1 : 0)
             learnedContent
                 .opacity(isLearned ? 1 : 0)
+            noticeContent
+                .opacity(isNotice ? 1 : 0)
         }
     }
 
@@ -345,6 +347,36 @@ struct HUDView: View {
         return min(max(w, 190), 380)
     }
 
+    // MARK: - Notice content (general toast)
+
+    private var noticeParts: (symbol: String, message: String) {
+        if case .notice(let symbol, let message) = model.state { return (symbol, message) }
+        return ("", "")
+    }
+
+    private var noticeContent: some View {
+        let parts = noticeParts
+        return HStack(spacing: VeloraSpacing.s) {
+            Image(systemName: parts.symbol.isEmpty ? "checkmark.circle.fill" : parts.symbol)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(VeloraBrand.violet.color)
+                .symbolEffect(.bounce, value: isNotice)
+            Text(parts.message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: noticeWidth)
+    }
+
+    private var noticeWidth: CGFloat {
+        var w = HUDGeometry.contentInsetH * 2 + 14 + VeloraSpacing.s
+        w += HUDGeometry.textWidth(noticeParts.message, font: HUDGeometry.transcriptFont)
+        return min(max(w, 160), 420)
+    }
+
     // MARK: - State helpers
 
     private var isListening: Bool { model.state == .listening }
@@ -354,6 +386,10 @@ struct HUDView: View {
     }
     private var isLearned: Bool {
         if case .learned = model.state { return true }
+        return false
+    }
+    private var isNotice: Bool {
+        if case .notice = model.state { return true }
         return false
     }
 
@@ -468,6 +504,14 @@ struct HUDView: View {
             // The toast appears from hidden well after the insert pill left;
             // same gentle entrance as an error, sized to its content.
             resetInstant(width: learnedWidth)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                opacity = 1
+                scale = 1
+                yOffset = 0
+            }
+
+        case .notice:
+            resetInstant(width: noticeWidth)
             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1

@@ -132,6 +132,7 @@ final class AppConfig {
         static let learnFromEdits = "velora.learnFromEdits"
         static let vocabMining = "velora.vocabMining"
         static let smartTerminal = "velora.smartTerminal"
+        static let voiceCommands = "velora.voiceCommands"
         static let typingFallbackApps = "velora.typingFallbackApps"
     }
 
@@ -150,6 +151,7 @@ final class AppConfig {
             Key.learnFromEdits: true,
             Key.vocabMining: true,
             Key.smartTerminal: true,
+            Key.voiceCommands: true,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -263,6 +265,13 @@ final class AppConfig {
     var learnFromEdits: Bool {
         get { defaults.bool(forKey: Key.learnFromEdits) }
         set { defaults.set(newValue, forKey: Key.learnFromEdits) }
+    }
+
+    /// Voice commands: an utterance that IS a command ("scratch that",
+    /// "new line") executes instead of being pasted as text. App-side only.
+    var voiceCommands: Bool {
+        get { defaults.bool(forKey: Key.voiceCommands) }
+        set { defaults.set(newValue, forKey: Key.voiceCommands) }
     }
 
     var romanizeOutput: Bool {

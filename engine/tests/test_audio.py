@@ -122,14 +122,23 @@ async def _dictate(client: Client, session: str) -> dict:
     return await client.recv_event("final")
 
 
+async def _wait_for_clip(path) -> None:
+    """The archive write is intentionally backgrounded (final must not wait on
+    disk I/O) — poll briefly for the file."""
+    for _ in range(100):
+        if path.exists():
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"clip never appeared: {path}")
+
+
 async def test_final_includes_saved_audio(engine):
     eng, sock, config = engine
     client = await connect(sock)
     await client.recv_event("ready")
     final = await _dictate(client, "s1")
     assert "audio" in final, "final event should carry the archived clip name"
-    clip = config.audio_dir / final["audio"]
-    assert clip.exists()
+    await _wait_for_clip(config.audio_dir / final["audio"])
     client.close()
 
 
@@ -139,6 +148,7 @@ async def test_reprocess_roundtrip(engine):
     await client.recv_event("ready")
     final = await _dictate(client, "s2")
     name = final["audio"]
+    await _wait_for_clip(config.audio_dir / name)
 
     await client.send_json({"cmd": "reprocess", "audio": name, "id": 42})
     evt = await client.recv_event("reprocessed")
@@ -154,6 +164,7 @@ async def test_reprocess_restores_live_language(engine):
     client = await connect(sock)
     await client.recv_event("ready")
     final = await _dictate(client, "s-lang")
+    await _wait_for_clip(config.audio_dir / final["audio"])
     original = eng.stt.language  # "auto"
     # Reprocess with a language override that borrows the live backend.
     await client.send_json({"cmd": "reprocess", "audio": final["audio"], "language": "hi"})

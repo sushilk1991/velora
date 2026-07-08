@@ -78,6 +78,12 @@ final class LearningStore {
         load()
     }
 
+    /// Test hook: point the store at an arbitrary file.
+    init(url: URL) {
+        self.url = url
+        load()
+    }
+
     /// True when macOS's spellchecker considers `word` a correctly-spelled
     /// real word — such a wrong side must never become a deterministic global
     /// rewrite (a real "lung" would be corrupted forever).
@@ -123,14 +129,53 @@ final class LearningStore {
         word.contains(where: { $0.isUppercase || $0.isNumber }) || word.contains("_")
     }
 
+    /// True when `wrong` plausibly IS `right` misheard: the strings share most
+    /// of their shape ("shubhi"→"Shivangi", "aircirclearn"→"Airlearn"). A pair
+    /// like "vercel"→"Netlify" (distance ≈ length) is the user changing their
+    /// MIND, not fixing recognition.
+    static func likelyMishearing(_ wrong: String, _ right: String) -> Bool {
+        let a = wrong.lowercased(), b = right.lowercased()
+        let longest = max(a.count, b.count)
+        // Tiny words: any 1-char difference is half the word — that's a
+        // content swap ("js"→"TS"), not a mishearing. Only case/spelling
+        // -identical pairs qualify (review finding).
+        if longest <= 3 { return a == b }
+        let bound = max(3, (longest * 2) / 3)
+        return editDistance(a, b) <= bound
+    }
+
+    /// Plain Levenshtein — inputs are single short words.
+    static func editDistance(_ a: String, _ b: String) -> Int {
+        let x = Array(a), y = Array(b)
+        if x.isEmpty { return y.count }
+        if y.isEmpty { return x.count }
+        var prev = Array(0...y.count)
+        var cur = [Int](repeating: 0, count: y.count + 1)
+        for i in 1...x.count {
+            cur[0] = i
+            for j in 1...y.count {
+                cur[j] = min(
+                    prev[j] + 1,
+                    cur[j - 1] + 1,
+                    prev[j - 1] + (x[i - 1] == y[j - 1] ? 0 : 1))
+            }
+            swap(&prev, &cur)
+        }
+        return prev[y.count]
+    }
+
     /// Records observed corrections (wrong → right) and returns the pairs that
     /// were COMMITTED by this call (caller reloads the engine + shows the HUD
     /// toast). Name-like corrections commit on FIRST sighting — the edit came
     /// from text Velora just inserted, and a misheard name is exactly what the
-    /// user wants fixed everywhere (Wispr parity). Ordinary words keep the
-    /// 2-sighting bar so a one-off content edit ("cat"→"car") can't become a
-    /// global rewrite; common homophones are refused outright; a committed
-    /// rule is never flipped by a single conflicting one-off.
+    /// user wants fixed everywhere (Wispr parity) — but only when the pair is
+    /// SAFE to commit instantly: context-gated (soft tier) or edit-distance
+    /// close (a mishearing's shape). A far-distance pair headed for a
+    /// deterministic rewrite ("vercel"→"Netlify") is a content edit, not a
+    /// mishearing — it keeps the 2-sighting bar (review finding). Ordinary
+    /// words always keep the 2-sighting bar; common homophones are refused
+    /// outright; a committed rule is never flipped by a single conflicting
+    /// one-off.
     @discardableResult
     func observe(_ corrections: [(wrong: String, right: String)]) -> [(wrong: String, right: String)] {
         load()  // pick up any external change (e.g. a Settings "Clear") first
@@ -144,7 +189,10 @@ final class LearningStore {
             // ride an earlier count over the threshold.
             let pairKey = "\(wrong)\u{2192}\(correction.right)"
             learned.counts[pairKey, default: 0] += 1
-            let threshold = Self.isNameLike(correction.right) ? 1 : Self.confirmThreshold
+            let instantSafe = Self.isRealWord(wrong)  // soft tier: LLM-gated
+                || Self.likelyMishearing(wrong, correction.right)
+            let threshold = (Self.isNameLike(correction.right) && instantSafe)
+                ? 1 : Self.confirmThreshold
             if (learned.counts[pairKey] ?? 0) >= threshold {
                 // Real-word wrongs are context-gated (LLM hint), never a
                 // deterministic global rewrite — "lung" must stay a lung in a
@@ -179,6 +227,8 @@ final class LearningStore {
     /// Cap on how many pending (unconfirmed) pair counts we retain, so a stream
     /// of one-off typos can't grow learned.json without bound.
     private static let maxCounts = 500
+    /// Cap on vocabulary terms NOT backed by a correction (imported lists).
+    private static let maxStandaloneVocabulary = 300
 
     /// Bound the store deterministically: keep the alphabetically-first
     /// `maxReplacements` (stable, not the random dictionary order), trim vocab to
@@ -192,8 +242,22 @@ final class LearningStore {
                 }
             }
         }
+        // Vocabulary: terms backed by a live correction are always kept.
+        // STANDALONE terms (hand-curated imports) are legitimate too — the
+        // old unconditional filter silently deleted them right after import
+        // (review finding) — but capped, evicting oldest-first.
         let kept = Set(learned.replacements.values).union(learned.softReplacements.values)
-        learned.vocabulary = learned.vocabulary.filter { kept.contains($0) }
+        var standalone = 0
+        var survivors: [String] = []
+        for term in learned.vocabulary.reversed() {  // newest first
+            if kept.contains(term) {
+                survivors.append(term)
+            } else if standalone < Self.maxStandaloneVocabulary {
+                standalone += 1
+                survivors.append(term)
+            }
+        }
+        learned.vocabulary = survivors.reversed()
         if learned.counts.count > Self.maxCounts {
             let overflow = learned.counts.count - Self.maxCounts
             for key in learned.counts.keys.sorted().suffix(overflow) {
@@ -242,5 +306,54 @@ final class LearningStore {
     func clear() {
         learned = Learned()
         save()
+    }
+
+    // MARK: - Import / export (portable personal dictionary)
+
+    /// The raw dictionary file: both correction tiers + vocabulary.
+    func exportData() -> Data? {
+        load()
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? encoder.encode(learned)
+    }
+
+    /// Merges a previously exported dictionary (existing entries win; imported
+    /// real-word wrongs are demoted to the context-gated soft tier no matter
+    /// which tier they were exported from). Returns (corrections, vocabulary)
+    /// counts actually added, or nil for an unreadable file.
+    func importData(_ data: Data) -> (corrections: Int, vocabulary: Int)? {
+        guard let incoming = try? JSONDecoder().decode(Learned.self, from: data) else { return nil }
+        // The tolerant decoder accepts ANY JSON object; an empty result means
+        // this wasn't a dictionary file — report that, not "imported 0".
+        guard !incoming.replacements.isEmpty || !incoming.softReplacements.isEmpty
+            || !incoming.vocabulary.isEmpty
+        else { return nil }
+        load()
+        var corrections = 0
+        let pairs = incoming.replacements.merging(incoming.softReplacements) { hard, _ in hard }
+        for (wrong, right) in pairs {
+            let key = wrong.lowercased()
+            guard !key.isEmpty, !right.isEmpty,
+                  learned.replacements[key] == nil, learned.softReplacements[key] == nil,
+                  !Self.stopwords.contains(key)
+            else { continue }
+            if Self.isRealWord(key) {
+                learned.softReplacements[key] = right
+            } else {
+                learned.replacements[key] = right
+            }
+            if !learned.vocabulary.contains(right) { learned.vocabulary.append(right) }
+            corrections += 1
+        }
+        var vocabulary = 0
+        for term in incoming.vocabulary
+        where !term.isEmpty && !learned.vocabulary.contains(term) {
+            learned.vocabulary.append(term)
+            vocabulary += 1
+        }
+        prune()
+        save()
+        return (corrections, vocabulary)
     }
 }

@@ -33,6 +33,7 @@ somewhat-bigger feature rounds, **major** for a genuinely better/rewritten build
 
 ```bash
 swift build -c release                       # compile (fast iteration)
+.build/release/Velora --selftest             # Swift pure-logic tests (no XCTest under CLT)
 ./scripts/make-app.sh release [level]        # package build/Velora.app (bumps VERSION)
 cp -R build/Velora.app /Applications/         # install (quit the running app first)
 ./scripts/make-dmg.sh                         # optional: build/Velora-<version>.dmg

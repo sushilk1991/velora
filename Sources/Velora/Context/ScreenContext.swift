@@ -70,6 +70,10 @@ enum ScreenContext {
             // CFType; verify before the cast so a bad app can't crash Velora.
             CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
         let window = windowRef as! AXUIElement  // checked above
+        // Timeouts do NOT propagate to returned elements (see axTimeout note):
+        // without this, the title read below runs at the ~6s system default on
+        // the hotkey hot path — a beachballing app would freeze dictation start.
+        AXUIElementSetMessagingTimeout(window, 0.25)
         var titleRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             window, kAXTitleAttribute as CFString, &titleRef) == .success,

@@ -127,6 +127,14 @@ struct DictationSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Toggle(isOn: $model.voiceCommands) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Voice commands")
+                        Text("Say just \u{201C}scratch that\u{201D} to undo the last dictation, or \u{201C}new line\u{201D} to press Return.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Toggle(isOn: $model.learnFromEdits) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Learn from my edits")
@@ -167,6 +175,21 @@ struct DictationSettingsView: View {
                             .font(.callout.weight(.medium))
                     }
                 }
+                HStack(spacing: VeloraSpacing.s) {
+                    Text("Personal dictionary")
+                    Spacer()
+                    if let result = model.dictionaryTransferResult {
+                        Text(result)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("Import…") { model.importDictionary() }
+                        .controlSize(.small)
+                    Button("Export…") { model.exportDictionary() }
+                        .controlSize(.small)
+                        .disabled(model.learnedCount == 0)
+                }
+                .help("Move your learned corrections and vocabulary between Macs as a JSON file.")
                 Toggle(isOn: $model.vocabMining) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Learn new words automatically")

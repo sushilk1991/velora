@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var history: HistoryStore!
     private var dictation: DictationController!
+    private var transcriber: FileTranscriber!
     private var statusController: StatusItemController!
     private var settingsController: SettingsWindowController?
     private var onboardingController: OnboardingWindowController?
@@ -40,6 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             history: history,
             sounds: sounds)
         statusController = StatusItemController(history: history)
+        transcriber = FileTranscriber(
+            supervisor: supervisor, hud: hud,
+            hudIsFree: { [weak self] in
+                guard let self else { return false }
+                return self.dictation.phase == .idle && self.hud.model.state.isHidden
+            })
+        transcriber.onStateChange = { [weak self] in
+            guard let self else { return }
+            self.statusController.transcriptionProgress = self.transcriber.progressLabel
+        }
 
         supervisor.delegate = self
         dictation.delegate = self
@@ -153,11 +164,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: EngineSupervisorDelegate {
     func engineSupervisor(_ supervisor: EngineSupervisor, didChangeState state: EngineSupervisor.State) {
         dictation.handleEngineStateChange(state)
+        transcriber.handleEngineStateChange(state)
         refreshDegradedState()
     }
 
     func engineSupervisor(_ supervisor: EngineSupervisor, didReceive event: EngineEvent) {
         dictation.handleEngineEvent(event)
+        transcriber.handle(event)
     }
 }
 
@@ -185,6 +198,14 @@ extension AppDelegate: StatusItemControllerDelegate {
 
     func statusItemReformatLast(mode: String) {
         dictation.reformatLast(mode: mode)
+    }
+
+    func statusItemTranscribeFile() {
+        transcriber.pickAndTranscribe()
+    }
+
+    func statusItemCancelTranscription() {
+        transcriber.cancel()
     }
 
     func statusItemOpenSettings() {

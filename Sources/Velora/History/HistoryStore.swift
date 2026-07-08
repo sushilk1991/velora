@@ -34,6 +34,11 @@ final class HistoryStore {
         var handle: OpaquePointer?
         if sqlite3_open(url.path, &handle) == SQLITE_OK {
             db = handle
+            // The engine's idle vocab miner reads this DB concurrently; without
+            // a busy timeout an INSERT that collides with its SELECT fails
+            // SQLITE_BUSY instantly and the dictation silently vanishes from
+            // history (review finding).
+            sqlite3_busy_timeout(handle, 2000)
             createTableIfNeeded()
             // Transcript store is owner-only (default umask would be 0644).
             try? FileManager.default.setAttributes(
@@ -262,6 +267,96 @@ final class HistoryStore {
             sqlite3_bind_int(stmt, next, Int32(offset))
             return decodeRows(stmt)
         }
+    }
+
+    /// Aggregate usage numbers for the History header (words ≈ space-separated
+    /// tokens of the final text; computed in SQL so a big history never loads
+    /// into memory).
+    struct Stats: Equatable {
+        var totalWords = 0
+        var totalCount = 0
+        var totalSpokenMs = 0
+        var todayWords = 0
+        var todayCount = 0
+        /// Consecutive calendar days (ending today or yesterday) with at
+        /// least one dictation.
+        var streakDays = 0
+
+        /// Minutes saved vs typing the same words at ~40 wpm.
+        var minutesSaved: Int {
+            max(0, totalWords / 40 - totalSpokenMs / 60_000)
+        }
+    }
+
+    /// `final` with newlines/tabs folded to spaces so the word estimate
+    /// counts multiline notes correctly (review finding).
+    private static let flatFinal =
+        "REPLACE(REPLACE(final, char(10), ' '), char(9), ' ')"
+    private static let wordsExpr =
+        "COALESCE(SUM(LENGTH(TRIM(\(flatFinal))) - LENGTH(REPLACE(TRIM(\(flatFinal)), ' ', '')) + 1), 0)"
+    private static let nonEmpty = "TRIM(\(flatFinal)) != ''"
+
+    func stats() -> Stats {
+        queue.sync { [self] in
+            guard db != nil else { return Stats() }
+            var s = Stats()
+            var stmt: OpaquePointer?
+            let all = "SELECT COUNT(*), \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0) " +
+                "FROM dictations WHERE \(Self.nonEmpty);"
+            if sqlite3_prepare_v2(db, all, -1, &stmt, nil) == SQLITE_OK,
+               sqlite3_step(stmt) == SQLITE_ROW {
+                s.totalCount = Int(sqlite3_column_int64(stmt, 0))
+                s.totalWords = Int(sqlite3_column_int64(stmt, 1))
+                s.totalSpokenMs = Int(sqlite3_column_int64(stmt, 2))
+            }
+            sqlite3_finalize(stmt); stmt = nil
+
+            let today = "SELECT COUNT(*), \(Self.wordsExpr) FROM dictations " +
+                "WHERE \(Self.nonEmpty) AND date(ts, 'unixepoch', 'localtime') = date('now', 'localtime');"
+            if sqlite3_prepare_v2(db, today, -1, &stmt, nil) == SQLITE_OK,
+               sqlite3_step(stmt) == SQLITE_ROW {
+                s.todayCount = Int(sqlite3_column_int64(stmt, 0))
+                s.todayWords = Int(sqlite3_column_int64(stmt, 1))
+            }
+            sqlite3_finalize(stmt); stmt = nil
+
+            let days = "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') FROM dictations " +
+                "ORDER BY 1 DESC LIMIT 400;"
+            var dayStrings: [String] = []
+            if sqlite3_prepare_v2(db, days, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    if let c = sqlite3_column_text(stmt, 0) { dayStrings.append(String(cString: c)) }
+                }
+            }
+            sqlite3_finalize(stmt)
+            s.streakDays = Self.streak(days: dayStrings)
+            return s
+        }
+    }
+
+    /// Counts consecutive days from `days` (yyyy-MM-dd, newest first). The
+    /// streak is alive if it includes today OR yesterday (today's first
+    /// dictation may simply not have happened yet).
+    static func streak(days: [String]) -> Int {
+        guard !days.isEmpty else { return 0 }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = .current
+        let calendar = Calendar.current
+        guard let newest = formatter.date(from: days[0]) else { return 0 }
+        let daysAgo = calendar.dateComponents(
+            [.day], from: newest, to: calendar.startOfDay(for: Date())).day ?? 0
+        guard daysAgo <= 1 else { return 0 }
+        var streak = 1
+        var previous = newest
+        for dayString in days.dropFirst() {
+            guard let day = formatter.date(from: dayString),
+                  calendar.dateComponents([.day], from: day, to: previous).day == 1
+            else { break }
+            streak += 1
+            previous = day
+        }
+        return streak
     }
 
     /// Total row count, honoring the same optional search filter as `page`.

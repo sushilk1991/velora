@@ -27,6 +27,22 @@ enum EngineEvent {
         id: Int64?, audio: String, raw: String, text: String, mode: String?,
         sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool)
 
+    /// File-transcription command reached the engine (sent before decoding —
+    /// distinguishes "working" from "command dropped while disconnected").
+    case transcribeAccepted(id: String?)
+
+    /// File-transcription job accepted: decoded duration and chunk count.
+    case transcribeStarted(id: String?, durationS: Double, chunks: Int)
+
+    /// File-transcription progress, 0…1.
+    case transcribeProgress(id: String?, fraction: Double)
+
+    /// File-transcription result.
+    case transcribed(id: String?, path: String, text: String, sttMs: Int)
+
+    /// File-transcription failed (includes user-initiated cancel).
+    case transcribeFailed(id: String?, error: String)
+
     /// Engine-reported error, optionally scoped to a session.
     case error(session: String?, message: String)
 
@@ -74,6 +90,27 @@ enum EngineEvent {
                 sttMs: object["stt_ms"] as? Int ?? 0,
                 cleanupMs: object["cleanup_ms"] as? Int ?? 0,
                 cleanupApplied: object["cleanup_applied"] as? Bool ?? false)
+        case "transcribe_accepted":
+            return .transcribeAccepted(id: object["id"] as? String)
+        case "transcribe_started":
+            return .transcribeStarted(
+                id: object["id"] as? String,
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
+                chunks: object["chunks"] as? Int ?? 1)
+        case "transcribe_progress":
+            return .transcribeProgress(
+                id: object["id"] as? String,
+                fraction: (object["fraction"] as? NSNumber)?.doubleValue ?? 0)
+        case "transcribed":
+            return .transcribed(
+                id: object["id"] as? String,
+                path: object["path"] as? String ?? "",
+                text: object["text"] as? String ?? "",
+                sttMs: object["stt_ms"] as? Int ?? 0)
+        case "transcribe_failed":
+            return .transcribeFailed(
+                id: object["id"] as? String,
+                error: object["error"] as? String ?? "transcription failed")
         case "error":
             return .error(
                 session: object["session"] as? String,

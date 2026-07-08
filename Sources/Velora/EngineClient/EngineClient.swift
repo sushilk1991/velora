@@ -79,8 +79,15 @@ final class EngineClient {
 
     /// Closes the connection. `notify` controls whether the delegate hears
     /// about it (external disconnects notify; internal reconnects don't).
-    func disconnect(notify: Bool = true) {
+    /// `ifGeneration` makes the close conditional: a stale queued write
+    /// failing after a reconnect must not tear down the NEW healthy
+    /// connection (review finding).
+    func disconnect(notify: Bool = true, ifGeneration expected: Int? = nil) {
         stateLock.lock()
+        if let expected, expected != generation {
+            stateLock.unlock()
+            return
+        }
         let sock = fd
         fd = -1
         generation += 1  // invalidate any running read loop
@@ -121,6 +128,7 @@ final class EngineClient {
             guard let self else { return }
             self.stateLock.lock()
             let sock = self.fd
+            let gen = self.generation
             self.stateLock.unlock()
             guard sock >= 0 else { return }
 
@@ -142,7 +150,7 @@ final class EngineClient {
                 }
                 return false
             }
-            if failed { self.disconnect() }
+            if failed { self.disconnect(ifGeneration: gen) }
         }
     }
 

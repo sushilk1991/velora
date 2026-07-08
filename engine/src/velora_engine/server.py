@@ -36,6 +36,7 @@ from .audio_store import AudioStore
 from .cleanup import _RETRACTION_RE, CleanupEngine
 from .config import Config
 from .formatting import STATIC_SYSTEM_PROMPT
+from .media import load_media, split_for_batch
 from .stt import (
     SAMPLE_RATE,
     STTBackend,
@@ -169,6 +170,21 @@ class Engine:
         # Reprocess runs off the dispatch loop; this flag blocks a live session
         # from starting mid-reprocess (they'd race on the shared STT backend).
         self._reprocessing = False
+        # File transcription (background job). Unlike reprocess it does NOT
+        # block dictation: the job yields between chunks whenever a live
+        # session is active, so the hotkey always wins.
+        self._transcribing = False
+        self._transcribe_cancel = False
+        # True while a session's finalize is reading accumulated backend state.
+        # `self.session` is already None then — the transcribe-file job must
+        # ALSO wait on this, or its transcribe_clip() could reset the backend
+        # between session-clear and finalize (transcript loss).
+        self._finalizing = False
+        # Mirror-image guard for START: `self.session` is published only after
+        # the (possibly queued) start_session call returns, and a transcribe
+        # chunk submitted in that window would destroy the fresh live stream
+        # (review P0). Set synchronously at the top of _cmd_start.
+        self._starting = False
         self.audio = AudioStore(config.audio_dir)
         self.stt_ready = asyncio.Event()
         self.cleanup: CleanupEngine | None = None
@@ -383,6 +399,10 @@ class Engine:
                 await self._cmd_set_model(msg)
             elif cmd == "reprocess":
                 await self._cmd_reprocess(msg)
+            elif cmd == "transcribe_file":
+                await self._cmd_transcribe_file(msg)
+            elif cmd == "transcribe_cancel":
+                self._transcribe_cancel = True
             else:
                 await self._error(f"unknown command: {cmd!r}")
         except Exception as exc:  # noqa: BLE001 — commands must never crash the engine
@@ -397,27 +417,36 @@ class Engine:
             # now would corrupt its stream state. Ask the app to retry.
             await self._error("busy reprocessing a clip — try again in a moment")
             return
-        if self.session is not None:
-            log.warning("start while session %s active — discarding it", self.session.id)
-            await self._abort_session("superseded by new start")
-        # A dictation owns the machine: stop any pending idle mining right now,
-        # AND preempt an in-flight mining generation on the cleanup thread
-        # (task cancellation alone can't reach the executor).
-        if self._miner_task is not None:
-            self._miner_task.cancel()
-        self._mine_cancel.set()
-        session_id = str(msg.get("session") or uuid.uuid4())
-        context = msg.get("context") or {}
-        if not isinstance(context, dict):
-            context = {}
-        session = Session(session_id, context, owner=self.writer)
-        # STT contextual biasing: bias whisper toward the user's vocabulary and
-        # the NAMES on screen right now (person/file/channel/subject entities
-        # only — nearby free text is cleanup-prompt material, not glossary).
-        self.stt.initial_prompt = self._glossary(session.start_entities)
-        await self._stt_call(self.stt.start_session)
-        session.feeder = asyncio.create_task(self._feed_loop(session))
-        self.session = session
+        # Fence the transcribe-file job out for the WHOLE start sequence:
+        # start_session below queues behind any in-flight file chunk on the
+        # single STT executor, and self.session isn't published until it
+        # returns — without this flag the job would slip its next chunk in
+        # between and wipe the just-started live stream (review P0).
+        self._starting = True
+        try:
+            if self.session is not None:
+                log.warning("start while session %s active — discarding it", self.session.id)
+                await self._abort_session("superseded by new start")
+            # A dictation owns the machine: stop any pending idle mining right now,
+            # AND preempt an in-flight mining generation on the cleanup thread
+            # (task cancellation alone can't reach the executor).
+            if self._miner_task is not None:
+                self._miner_task.cancel()
+            self._mine_cancel.set()
+            session_id = str(msg.get("session") or uuid.uuid4())
+            context = msg.get("context") or {}
+            if not isinstance(context, dict):
+                context = {}
+            session = Session(session_id, context, owner=self.writer)
+            # STT contextual biasing: bias whisper toward the user's vocabulary and
+            # the NAMES on screen right now (person/file/channel/subject entities
+            # only — nearby free text is cleanup-prompt material, not glossary).
+            self.stt.initial_prompt = self._glossary(session.start_entities)
+            await self._stt_call(self.stt.start_session)
+            session.feeder = asyncio.create_task(self._feed_loop(session))
+            self.session = session
+        finally:
+            self._starting = False
         log.info(
             "session %s started (bundle_id=%s app=%s mode=%s)",
             session_id,
@@ -563,6 +592,16 @@ class Engine:
         await self._finalize_session(session)
 
     async def _finalize_session(self, session: Session, auto_stopped: bool = False) -> None:
+        # Set synchronously (no await since the caller cleared self.session):
+        # closes the window where a background transcribe-file chunk could
+        # grab the backend before our finalize() drains it.
+        self._finalizing = True
+        try:
+            await self._finalize_session_inner(session, auto_stopped)
+        finally:
+            self._finalizing = False
+
+    async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
         t_stop = time.perf_counter()
         await self._drain_feeder(session)
         try:
@@ -600,9 +639,10 @@ class Engine:
             )
         text, mode_name, cleanup_ms, cleanup_applied, reason = result
 
-        # Stage 3: archive the audio clip (off the event loop) so it can be
-        # reprocessed later. Failure never affects the dictation result.
-        audio_name = await self._archive_audio(session)
+        # Stage 3: archive the audio clip in the BACKGROUND — the clip name is
+        # deterministic, so `final` never waits on FLAC encode + disk I/O
+        # (review finding: archive writes sat on the stop→final path).
+        audio_name = self._archive_audio_bg(session)
 
         total_ms = int((time.perf_counter() - t_stop) * 1000)
         final_evt: dict[str, Any] = {
@@ -896,6 +936,7 @@ class Engine:
                 if (
                     self.session is not None
                     or self._reprocessing
+                    or self._transcribing
                     or not (self.cleanup is not None and self.cleanup.loaded)
                     or not self.config.vocab_mining
                 ):
@@ -932,23 +973,29 @@ class Engine:
         )
         return result.text if result.applied else ""
 
-    async def _archive_audio(self, session: Session) -> str | None:
-        """Persist the session's PCM as a clip and prune the archive. Off-thread;
-        never raises into the caller."""
+    def _archive_audio_bg(self, session: Session) -> str | None:
+        """Kick off archiving the session's PCM without blocking the caller.
+        Returns the deterministic clip name the write will produce (None when
+        archiving is off/empty). A failed write leaves a dangling name in
+        history — rare (disk full), and the app treats missing clips as
+        expired anyway."""
         if not self.config.save_audio or not session.pcm_chunks:
             return None
         chunks = session.pcm_chunks
         session.pcm_chunks = []
-        try:
-            pcm = np.concatenate(chunks)
-        except ValueError:
-            return None
-        name = await asyncio.to_thread(self.audio.save, session.id, pcm)
-        if name:
-            # Prune is an O(clips) stat sweep — keep it OFF the stop→final path;
-            # fire-and-forget so it never adds latency to the user's result.
-            asyncio.create_task(self._prune_audio_bg())
-        return name
+
+        async def _write() -> None:
+            try:
+                pcm = np.concatenate(chunks)
+            except ValueError:
+                return
+            saved = await asyncio.to_thread(self.audio.save, session.id, pcm)
+            if saved:
+                # Prune is an O(clips) stat sweep — also off the hot path.
+                await self._prune_audio_bg()
+
+        asyncio.create_task(_write())
+        return self.audio.name_for(session.id)
 
     async def _prune_audio_bg(self) -> None:
         with contextlib.suppress(Exception):
@@ -982,8 +1029,8 @@ class Engine:
         if not model_id or not isinstance(model_id, str):
             await self._error("set_model: missing 'model'")
             return
-        if self.session is not None or self._reprocessing:
-            await self._error("set_model: busy (dictation or reprocess in progress)")
+        if self.session is not None or self._reprocessing or self._transcribing:
+            await self._error("set_model: busy (dictation, reprocess, or file transcription in progress)")
             return
         info = models.lookup(model_id)
         kind = msg.get("kind") or (info.kind if info else "stt")
@@ -992,6 +1039,11 @@ class Engine:
             return
         if not fake_stt_enabled():
             await asyncio.to_thread(models.ensure_downloaded, model_id)
+        # The download/load above can take minutes; the app may have rewritten
+        # config.json (language, save_audio, …) meanwhile. Re-read before the
+        # mutate+save below so we never clobber newer settings with stale
+        # in-memory state (review finding).
+        self.config.reload()
         if kind == "stt":
             backend = create_backend(model_id, self.config.language)
             await self._stt_call(backend.load)
@@ -1046,8 +1098,8 @@ class Engine:
         if self.session is not None:
             await self._error("reprocess: busy (dictation in progress)")
             return
-        if self._reprocessing:
-            await self._error("reprocess: busy (another reprocess in progress)")
+        if self._reprocessing or self._transcribing:
+            await self._error("reprocess: busy (another job in progress)")
             return
         name = msg.get("audio")
         if not name or not isinstance(name, str):
@@ -1105,6 +1157,107 @@ class Engine:
             if saved_language is not None and hasattr(self.stt, "language"):
                 self.stt.language = saved_language
             self._reprocessing = False
+            # Idle again — without this, a reprocess that landed during the
+            # mining delay window left mining dead until the next dictation
+            # (review finding).
+            self._schedule_mining()
+
+    # ---------------- file transcription ----------------
+
+    async def _cmd_transcribe_file(self, msg: dict[str, Any]) -> None:
+        """Transcribe an audio file (voice memo, meeting recording) in the
+        background. Decodes in ~60s silence-aligned chunks with progress
+        events; a live dictation always wins — the job pauses between chunks
+        whenever a session is active."""
+        path = msg.get("path")
+        if not path or not isinstance(path, str):
+            await self._error("transcribe_file: missing 'path'")
+            return
+        if self._reprocessing or self._transcribing:
+            await self._send({"event": "transcribe_failed", "id": msg.get("id"),
+                              "error": "another transcription is already running"})
+            return
+        self._transcribing = True
+        self._transcribe_cancel = False
+        asyncio.create_task(self._run_transcribe_file(dict(msg)))
+        # Immediate ack so the app can distinguish "job accepted, decoding"
+        # from "command was dropped" (engine restarting) and un-stick its UI.
+        await self._send({"event": "transcribe_accepted", "id": msg.get("id")})
+
+    async def _run_transcribe_file(self, msg: dict[str, Any]) -> None:
+        path = str(msg.get("path"))
+        job_id = msg.get("id")
+
+        async def fail(error: str) -> None:
+            await self._send({"event": "transcribe_failed", "id": job_id, "error": error})
+
+        try:
+            try:
+                pcm = await asyncio.to_thread(load_media, path)
+            except ValueError as exc:
+                await fail(str(exc))
+                return
+            if self._transcribe_cancel:  # cancelled during a slow decode
+                await fail("cancelled")
+                return
+            duration_s = len(pcm) / SAMPLE_RATE
+            if duration_s < 0.2:
+                await fail("no audio in file")
+                return
+            chunks = split_for_batch(pcm)
+            await self._send({
+                "event": "transcribe_started", "id": job_id,
+                "duration_s": round(duration_s, 1), "chunks": len(chunks),
+            })
+            t0 = time.perf_counter()
+            texts: list[str] = []
+            for i, chunk in enumerate(chunks):
+                # Dictation priority: never touch the shared STT backend while
+                # a live session owns it. (Within a chunk, _stt_call serializes
+                # on the one executor thread, so a decode already in flight
+                # just delays the session's first decode by a few seconds.)
+                while (
+                    self.session is not None or self._finalizing or self._starting
+                ) and not self._transcribe_cancel:
+                    if self.shutdown.is_set():
+                        return
+                    await asyncio.sleep(0.5)
+                if self._transcribe_cancel:
+                    await fail("cancelled")
+                    return
+                # Re-set per chunk: a dictation in between overwrites the prompt.
+                self.stt.initial_prompt = self._glossary()
+                piece = await self._stt_call(transcribe_clip, self.stt, chunk)
+                # A cancel that landed while the chunk was decoding must win:
+                # the user said stop — never emit a result after that (review
+                # finding; the decode itself is seconds, not worth preempting).
+                if self._transcribe_cancel:
+                    await fail("cancelled")
+                    return
+                if piece and piece.strip():
+                    texts.append(piece.strip())
+                await self._send({
+                    "event": "transcribe_progress", "id": job_id,
+                    "fraction": round((i + 1) / len(chunks), 3),
+                })
+            text = " ".join(texts).strip()
+            await self._send({
+                "event": "transcribed", "id": job_id, "path": path, "text": text,
+                "duration_s": round(duration_s, 1),
+                "stt_ms": int((time.perf_counter() - t0) * 1000),
+                "stt_model": self.stt.model_id,
+            })
+            log.info(
+                "transcribe_file done: %.0fs audio, %d chunks, %dms",
+                duration_s, len(chunks), int((time.perf_counter() - t0) * 1000),
+            )
+        except Exception as exc:  # noqa: BLE001 — job must never crash the engine
+            log.exception("transcribe_file failed")
+            await fail(f"transcription failed: {exc}")
+        finally:
+            self._transcribing = False
+            self._transcribe_cancel = False
+            self._schedule_mining()
 
 
 # ---------------- entrypoint ----------------

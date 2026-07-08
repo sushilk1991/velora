@@ -22,6 +22,9 @@ enum HUDState: Equatable {
     /// through, the user's fix next to it. Shown briefly after Velora catches
     /// an edit to just-inserted text; auto-hidden by the controller.
     case learned(wrong: String, right: String)
+    /// General transient toast: an SF Symbol + one line of text (file
+    /// transcription done, etc.). Auto-hidden by whoever shows it.
+    case notice(symbol: String, message: String)
 
     var isHidden: Bool {
         if case .hidden = self { return true }

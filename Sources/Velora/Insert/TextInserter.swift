@@ -17,7 +17,12 @@ final class TextInserter {
     /// enough for the target app to service the synthetic ⌘V; restore is
     /// additionally guarded by a `changeCount` check so a late paste (or a
     /// user copy in the window) is never clobbered.
-    private static let restoreDelay: TimeInterval = 0.3
+    /// How long the dictated text stays on the pasteboard before the user's
+    /// original clipboard is restored. Heavy Electron apps can service the
+    /// synthetic ⌘V after 300 ms — they'd paste the RESTORED clipboard instead
+    /// of the transcript (review finding). 800 ms is still well under a human
+    /// copy-paste cycle, and the changeCount guard protects user copies.
+    private static let restoreDelay: TimeInterval = 0.8
     /// CGEvent unicode string limit per event.
     private static let typingChunk = 20
 
@@ -141,14 +146,27 @@ final class TextInserter {
     }
 
     private func postCommandV() {
+        pressKey(9, flags: .maskCommand, character: "v")  // kVK_ANSI_V
+    }
+
+    /// Posts one key press (down+up) with the given modifiers. Keycodes are
+    /// POSITIONAL — on AZERTY keycode 6 types "w", so ⌘Z posted by position
+    /// becomes ⌘W (closes the window!). `character` stamps the event's
+    /// unicode payload so key-equivalent matching sees the intended letter on
+    /// every layout (review finding).
+    func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags = [], character: Character? = nil) {
         let source = CGEventSource(stateID: .combinedSessionState)
-        let vKey: CGKeyCode = 9  // kVK_ANSI_V
         guard
-            let down = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: true),
-            let up = CGEvent(keyboardEventSource: source, virtualKey: vKey, keyDown: false)
+            let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+            let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
         else { return }
-        down.flags = .maskCommand
-        up.flags = .maskCommand
+        down.flags = flags
+        up.flags = flags
+        if let character {
+            var units = Array(String(character).utf16)
+            down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+            up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
+        }
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
     }

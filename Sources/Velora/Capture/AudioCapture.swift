@@ -29,6 +29,12 @@ final class AudioCapture {
 
     private var engine: AVAudioEngine?
     private(set) var isRunning = false
+    private var configObserver: NSObjectProtocol?
+
+    /// Called (main queue) when capture could not be re-established after an
+    /// audio-device change mid-recording (e.g. the only mic unplugged).
+    /// Successful recovery is silent — the recording just continues.
+    var onDeviceLost: ((String) -> Void)?
 
     /// All pending-buffer state below is confined to `bufferQueue`: the tap
     /// callback (audio thread) hops onto it to accumulate/emit, and `stop()`
@@ -112,6 +118,48 @@ final class AudioCapture {
         }
         self.engine = engine
         isRunning = true
+
+        // The default input can change mid-recording (AirPods connect, mic
+        // unplugged): AVAudioEngine stops and the tap/converter stay bound to
+        // the dead format — without this the HUD keeps "listening" while no
+        // audio flows. Rebuild the chain so the recording just continues.
+        configObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
+        ) { [weak self] _ in
+            self?.recoverFromConfigChange()
+        }
+    }
+
+    private func removeConfigObserver() {
+        if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
+        configObserver = nil
+    }
+
+    /// Tears down the dead engine and restarts capture with the same handlers
+    /// (new device, new format, new converter). At most ~100 ms of buffered
+    /// audio is lost across the switch.
+    private func recoverFromConfigChange() {
+        guard isRunning, let engine else { return }
+        removeConfigObserver()
+        engine.inputNode.removeTap(onBus: 0)
+        engine.stop()
+        self.engine = nil
+        isRunning = false
+
+        var onChunk: ((Data) -> Void)?
+        var onLevel: (([Float]) -> Void)?
+        bufferQueue.sync {
+            onChunk = chunkHandler
+            onLevel = levelHandler
+        }
+        guard let onChunk, let onLevel else { return }
+        do {
+            try start(onChunk: onChunk, onLevel: onLevel)
+            veloraLog("Velora: capture re-established after audio device change")
+        } catch {
+            veloraLog("Velora: capture lost after device change: \(error.localizedDescription)")
+            onDeviceLost?(error.localizedDescription)
+        }
     }
 
     /// Stops capture and tears down the tap. Safe to call when not running.
@@ -121,6 +169,7 @@ final class AudioCapture {
     /// chunk handler as-is — so the last syllable reaches the engine before
     /// the caller sends `stop`.
     func stop() {
+        removeConfigObserver()
         guard isRunning, let engine else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()

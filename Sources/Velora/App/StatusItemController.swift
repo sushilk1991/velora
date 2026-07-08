@@ -5,6 +5,8 @@ import Foundation
 protocol StatusItemControllerDelegate: AnyObject {
     func statusItemToggleDictation()
     func statusItemReformatLast(mode: String)
+    func statusItemTranscribeFile()
+    func statusItemCancelTranscription()
     func statusItemOpenSettings()
     func statusItemOpenHistory()
     func statusItemOpenSetupAssistant()
@@ -30,6 +32,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var degradedReason: String? {
         didSet { updateIcon() }
     }
+
+    /// Non-nil while a file transcription runs ("Transcribing… 45%"); the
+    /// menu shows progress + cancel instead of the transcribe action.
+    var transcriptionProgress: String?
 
     init(history: HistoryStore) {
         self.history = history
@@ -129,8 +135,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         // "Reformat Last as…" — re-run the most recent dictation's cleanup in a
-        // different mode and paste it back. Only when an archived clip exists.
-        if recents.first?.audioPath != nil {
+        // different mode and paste it back. Only when the archived clip STILL
+        // exists — retention pruning deletes old clips but history keeps the
+        // row, and offering a reformat that can only fail is worse than not
+        // offering it (review finding).
+        if let clip = recents.first?.audioPath,
+           FileManager.default.fileExists(
+               atPath: AppConfig.audioDirectory.appendingPathComponent(clip).path) {
             let reformat = NSMenuItem(title: "Reformat Last as", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             for mode in DictationController.reformatModes {
@@ -142,6 +153,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
             reformat.submenu = submenu
             menu.addItem(reformat)
+        }
+
+        if let progress = transcriptionProgress {
+            let item = NSMenuItem(
+                title: "\(progress) — Cancel", action: #selector(cancelTranscription),
+                keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
+        } else {
+            let item = NSMenuItem(
+                title: "Transcribe Audio File…", action: #selector(transcribeFile),
+                keyEquivalent: "")
+            item.target = self
+            menu.addItem(item)
         }
 
         menu.addItem(.separator())
@@ -188,6 +213,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func reformatLast(_ sender: NSMenuItem) {
         guard let mode = sender.representedObject as? String else { return }
         delegate?.statusItemReformatLast(mode: mode)
+    }
+
+    @objc private func transcribeFile() {
+        delegate?.statusItemTranscribeFile()
+    }
+
+    @objc private func cancelTranscription() {
+        delegate?.statusItemCancelTranscription()
     }
 
     @objc private func copyRecent(_ sender: NSMenuItem) {

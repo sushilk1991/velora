@@ -53,10 +53,20 @@ final class HistoryViewModel: ObservableObject {
 
     // MARK: - Loading
 
+    /// Aggregate usage stats for the header card (refreshed with each reload).
+    @Published var stats = HistoryStore.Stats()
+
     /// Reloads the first page for the current search term.
     func reload() {
         let term = searchText
         records = history.page(limit: Self.pageSize, offset: 0, search: term)
+        // Stats are full-table aggregate scans — compute off the main thread
+        // so a years-deep history can't hitch the tab (review finding).
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
+            let fresh = self.history.stats()
+            DispatchQueue.main.async { self.stats = fresh }
+        }
         hasMore = records.count == Self.pageSize
         isEmpty = records.isEmpty
     }
@@ -216,12 +226,67 @@ struct HistorySettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
+            if vm.stats.totalCount > 0 {
+                statsBar
+            }
             Divider()
             content
         }
         .frame(width: 580, height: SettingsTab.history.preferredHeight)
         .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear { model.requestStatus() }
+        .onAppear {
+            model.requestStatus()
+            vm.reload()  // stats + fresh rows every time the tab appears
+        }
+    }
+
+    // MARK: Stats
+
+    /// FluidVoice-class usage header: words today, all-time, time saved vs
+    /// typing (~40 wpm), and the daily streak.
+    private var statsBar: some View {
+        HStack(spacing: 0) {
+            statCell(Self.compact(vm.stats.todayWords), "words today")
+            cellDivider
+            statCell(Self.compact(vm.stats.totalWords), "words all-time")
+            cellDivider
+            statCell(Self.duration(minutes: vm.stats.minutesSaved), "saved vs typing")
+            if vm.stats.streakDays > 1 {
+                cellDivider
+                statCell("\(vm.stats.streakDays)-day", "streak 🔥")
+            }
+        }
+        .padding(.vertical, VeloraSpacing.s)
+        .padding(.horizontal, VeloraSpacing.m)
+        .frame(maxWidth: .infinity)
+        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.6))
+    }
+
+    private var cellDivider: some View {
+        Rectangle()
+            .fill(Color(.separatorColor))
+            .frame(width: 1, height: 26)
+    }
+
+    private func statCell(_ value: String, _ label: String) -> some View {
+        VStack(spacing: 1) {
+            Text(value)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// 12 → "12", 12 345 → "12.3k".
+    private static func compact(_ n: Int) -> String {
+        n >= 10_000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
+    }
+
+    private static func duration(minutes: Int) -> String {
+        minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
     }
 
     // MARK: Toolbar

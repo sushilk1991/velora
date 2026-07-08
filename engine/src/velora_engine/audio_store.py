@@ -62,15 +62,19 @@ class AudioStore:
 
     # ---- write ----
 
+    def name_for(self, session_id: str) -> str:
+        """The clip basename `save` will produce for this session — lets the
+        caller report the name without waiting for the disk write."""
+        stem = re.sub(r"[^A-Za-z0-9_-]", "-", session_id) or "clip"
+        return f"{stem}.{self.ext}"
+
     def save(self, session_id: str, pcm: np.ndarray) -> str | None:
         """Persist one session's PCM (float32, 16kHz mono). Returns the clip
         basename, or None if saving failed or there was nothing to save."""
         if pcm is None or pcm.size == 0:
             return None
         self._ensure_dir()
-        # Sanitize the id into a safe stem so path_for accepts it later.
-        stem = re.sub(r"[^A-Za-z0-9_-]", "-", session_id) or "clip"
-        name = f"{stem}.{self.ext}"
+        name = self.name_for(session_id)
         path = self.dir / name
         try:
             samples = np.asarray(pcm, dtype=np.float32)

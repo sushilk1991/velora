@@ -91,6 +91,50 @@ final class SettingsModel: ObservableObject {
         learnedCount = learnedEntries.count
     }
 
+    /// One-line outcome of the last dictionary import/export, shown inline.
+    @Published var dictionaryTransferResult: String?
+
+    /// Exports the personal dictionary (corrections + vocabulary) to a JSON
+    /// file the user picks — Superwhisper can't move vocab between Macs;
+    /// Velora can.
+    func exportDictionary() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "velora-dictionary.json"
+        panel.title = "Export Dictionary"
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let url = panel.url,
+                  let data = self.learning.exportData() else { return }
+            do {
+                try data.write(to: url)
+                self.dictionaryTransferResult = "Exported \(self.learnedCount) corrections"
+            } catch {
+                self.dictionaryTransferResult = "Export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    /// Imports a previously exported dictionary and merges it (existing
+    /// entries win), then reloads the engine so it takes effect immediately.
+    func importDictionary() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.title = "Import Dictionary"
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            guard let data = try? Data(contentsOf: url),
+                  let added = self.learning.importData(data) else {
+                self.dictionaryTransferResult = "Import failed: not a Velora dictionary"
+                return
+            }
+            self.refreshLearnedCount()
+            self.supervisor?.send(["cmd": "reload_config"])
+            self.dictionaryTransferResult =
+                "Imported \(added.corrections) corrections, \(added.vocabulary) words"
+        }
+    }
+
     /// Refreshes the auto-learned vocab list from disk (call when the view
     /// appears — the engine's miner may have added terms since last look).
     func refreshAutoVocab() {
@@ -158,6 +202,7 @@ final class SettingsModel: ObservableObject {
         autoPunctuation = config.autoPunctuation
         romanizeOutput = config.romanizeOutput
         learnFromEdits = config.learnFromEdits
+        voiceCommands = config.voiceCommands
         vocabMining = config.vocabMining
         smartTerminal = config.smartTerminal
         sttModel = config.sttModel
@@ -197,13 +242,30 @@ final class SettingsModel: ObservableObject {
         if let rec = payload["recommended_cleanup_model"] as? String {
             recommendedCleanupModel = rec
         }
+        // The engine is the authority on the ACTIVE STT model: a set_model it
+        // refused (busy dictating/reprocessing) must not leave the picker and
+        // config claiming a switch that never happened (review finding). The
+        // sync path skips the engine send but reconciles config.json too.
+        if let stt = payload["stt_model"] as? String, !stt.isEmpty, stt != sttModel {
+            syncingFromEngine = true
+            sttModel = stt
+            syncingFromEngine = false
+        }
     }
+
+    /// True while adopting engine-reported state — property observers must
+    /// not echo a `set_model` back for it.
+    private var syncingFromEngine = false
 
     // MARK: - General
 
+    /// Guards the silent revert below: without it a failing revert re-enters
+    /// didSet and ping-pongs register/unregister until stack overflow.
+    private var revertingLaunchAtLogin = false
+
     @Published var launchAtLogin: Bool {
         didSet {
-            guard launchAtLogin != oldValue else { return }
+            guard launchAtLogin != oldValue, !revertingLaunchAtLogin else { return }
             do {
                 if launchAtLogin {
                     try SMAppService.mainApp.register()
@@ -213,7 +275,9 @@ final class SettingsModel: ObservableObject {
             } catch {
                 NSLog("Velora: launch-at-login toggle failed: \(error)")
                 // Revert silently (fails for non-bundled dev binaries).
+                revertingLaunchAtLogin = true
                 launchAtLogin = oldValue
+                revertingLaunchAtLogin = false
             }
         }
     }
@@ -273,6 +337,10 @@ final class SettingsModel: ObservableObject {
         didSet { config.learnFromEdits = learnFromEdits }
     }
 
+    @Published var voiceCommands: Bool {
+        didSet { config.voiceCommands = voiceCommands }
+    }
+
     @Published var vocabMining: Bool {
         didSet {
             guard vocabMining != oldValue else { return }
@@ -303,7 +371,15 @@ final class SettingsModel: ObservableObject {
         didSet {
             guard sttModel != oldValue else { return }
             config.sttModel = sttModel
+            guard !syncingFromEngine else { return }
             supervisor?.send(["cmd": "set_model", "model": sttModel])
+            // Re-read the authoritative state: if the engine refused (busy),
+            // the status reply reverts the picker instead of drifting. A slow
+            // model download queues the status reply behind it, so this can't
+            // race an in-progress accepted switch.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.requestStatus()
+            }
         }
     }
 
