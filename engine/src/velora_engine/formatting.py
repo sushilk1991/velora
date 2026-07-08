@@ -360,6 +360,26 @@ _TAG_TRIGGER = re.compile(
 # Categories where @-tagging is meaningful (Cursor/editors, chat @-mentions).
 _TAGGABLE = {"code", "chat"}
 
+# Browser web-app site slug (from ScreenContext) → category, then category →
+# built-in mode name (lowercased mode-file key).
+_SITE_CATEGORY = {
+    "gmail": "email", "outlook": "email", "proton": "email",
+    "gdocs": "notes", "notion": "notes", "obsidian": "notes", "linear": "notes",
+    "github": "code", "gitlab": "code",
+    "slack": "chat", "discord": "chat", "whatsapp": "chat", "messenger": "chat",
+}
+_CATEGORY_MODE = {"chat": "message", "email": "email", "notes": "note", "code": "code"}
+
+
+def _site_mode(config: Config, entities: list[dict[str, str]] | None) -> tuple[Mode, str] | None:
+    """Resolve (mode, category) from a detected browser site, or None."""
+    site = next((str(e.get("value", "")).lower() for e in (entities or []) if e.get("type") == "site"), "")
+    category = _SITE_CATEGORY.get(site)
+    if not category:
+        return None
+    mode = config.modes.get(_CATEGORY_MODE.get(category, ""))
+    return (mode, category) if mode else None
+
 
 def apply_tags(text: str, entities: list[dict[str, str]] | None, category: str | None) -> str:
     """Turn spoken tag phrases into '@name' tokens the app understands.
@@ -423,6 +443,13 @@ def run_gate(
     """Stage 1: decide if and how much AI touches the text."""
     mode = resolve_mode(config, bundle_id, explicit_mode)
     category = category_for_bundle(bundle_id)
+    # Browser web-app refinement: a browser is one bundle id but many apps.
+    # When no mode was explicitly chosen, use the detected site (Gmail, Docs,
+    # Linear…) to pick a better category/mode than the generic default.
+    if explicit_mode is None and category == "browser":
+        refined = _site_mode(config, entities)
+        if refined is not None:
+            mode, category = refined
     replacements = {**config.global_replacements, **mode.replacements}
     chat_style = _is_chat(mode, category)
 

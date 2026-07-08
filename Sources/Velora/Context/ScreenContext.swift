@@ -86,11 +86,38 @@ enum ScreenContext {
         case .email:
             entities = [ContextEntity(type: "subject", value: head)]
         case .browser:
-            entities = [ContextEntity(type: "page", value: head)]
+            // The site (Gmail, Docs, Linear, GitHub…) usually appears as the
+            // trailing title segment; surface it so the engine can pick a mode
+            // (a browser is otherwise one undifferentiated bucket).
+            var browserEntities = [ContextEntity(type: "page", value: head)]
+            if let site = site(in: segments) {
+                browserEntities.insert(ContextEntity(type: "site", value: site), at: 0)
+            }
+            entities = browserEntities
         case .notes, .none:
             entities = [ContextEntity(type: "title", value: head)]
         }
         return Array(entities.prefix(maxEntities))
+    }
+
+    /// Known web apps keyed by a case-insensitive substring of the window
+    /// title's trailing segment. Value is a stable slug the engine maps to a
+    /// category/mode.
+    private static let siteKeywords: [(needle: String, slug: String)] = [
+        ("gmail", "gmail"), ("outlook", "outlook"), ("proton", "proton"),
+        ("google docs", "gdocs"), ("notion", "notion"), ("obsidian", "obsidian"),
+        ("linear", "linear"), ("github", "github"), ("gitlab", "gitlab"),
+        ("slack", "slack"), ("discord", "discord"), ("whatsapp", "whatsapp"),
+        ("messenger", "messenger"),
+    ]
+
+    /// Detects a known site from any title segment (usually the last one).
+    private static func site(in segments: [String]) -> String? {
+        let hay = segments.joined(separator: " ").lowercased()
+        for entry in siteKeywords where hay.contains(entry.needle) {
+            return entry.slug
+        }
+        return nil
     }
 
     /// Pulls a filename token out of an editor title segment.

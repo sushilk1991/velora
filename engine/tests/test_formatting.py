@@ -334,3 +334,20 @@ def test_tag_only_in_taggable_categories():
     from velora_engine.formatting import apply_tags
     files = [{"type": "file", "value": "main.py"}]
     assert apply_tags("tag main.py here", files, "email") == "tag main.py here"
+
+
+# ---- browser site → mode refinement ----
+
+
+def test_browser_site_refines_mode(config):
+    chrome = "com.google.Chrome"
+    assert run_gate("...", config, chrome, "Chrome", None, [{"type": "site", "value": "gmail"}]).mode.name == "Email"
+    assert run_gate("...", config, chrome, "Chrome", None, [{"type": "site", "value": "github"}]).mode.name == "Code"
+    # unknown / no site → browser stays default
+    assert run_gate("...", config, chrome, "Chrome", None, []).category == "browser"
+
+
+def test_browser_site_yields_to_explicit_mode(config):
+    chrome = "com.google.Chrome"
+    g = run_gate("...", config, chrome, "Chrome", "Note", [{"type": "site", "value": "gmail"}])
+    assert g.mode.name == "Note"
