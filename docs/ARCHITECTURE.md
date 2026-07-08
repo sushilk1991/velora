@@ -84,6 +84,8 @@ divergence guard is disabled for that pass since transliteration changes length.
 
 **Latency budget:** with a parakeet model, STT streams during speech (`transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms) and live partials feed the HUD. With the default whisper model, decode is batch on `stop` (a few hundred ms for typical clips on Apple Silicon; no live partials — the quality/multilingual tradeoff). Cleanup hard timeout 1500ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
 
+**Streaming segment pipeline (whisper, smartness-v2):** during recording, the whisper backend closes a segment when ≥10s of un-decoded audio meets a ≥0.7s pause (energy VAD; hard cap 25s) and decodes it immediately — segments give whisper live HUD partials, and the server starts each segment's LLM cleanup concurrently while the user is still speaking (seam context = the previous cleaned tail; a segment that *opens* with a retraction marker is merged with the previous raw segment and re-cleaned as one chunk). On `stop`: dictations ≤45s re-decode the whole clip and clean once (identical to the classic path); longer ones stitch the already-cleaned segments and only decode+clean the tail, so stop→final stays ~1s at any length. Any failure anywhere falls back to the whole-text path — a transcript is never lost to the fast path. Config: `streaming_cleanup` (default true).
+
 ## Smart formatting policy (the "smart as Wispr Flow" part)
 
 Two stages, both local:

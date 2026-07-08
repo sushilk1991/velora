@@ -4,6 +4,10 @@
   recording so stop→transcript only flushes the tail.
 - WhisperBackend: mlx-whisper — accumulates PCM, batch-transcribes on stop,
   with hallucination guard (compression/repetition checks, repeated-tail trim).
+  Long recordings are additionally decoded in pause-aligned SEGMENTS during
+  recording (smartness-v2 §2): live partials for the HUD, and past
+  LONG_DICTATION_S the final text is stitched from those segments so the
+  stop→final latency stays flat instead of growing with the dictation.
 - FakeBackend: for tests (VELORA_FAKE_STT=1), no model downloads.
 
 All heavy imports are lazy (inside load()) so tests never touch MLX.
@@ -28,11 +32,74 @@ SAMPLE_RATE = 16_000
 # so per-100ms-frame calls would waste compute for no latency win.
 _PARAKEET_FEED_SAMPLES = SAMPLE_RATE // 2
 
+# --- in-session segmenting (whisper only) -------------------------------------
+# Whisper decodes ~97x realtime but the cleanup LLM does not; segments decoded
+# DURING recording let the server clean them concurrently, so at stop only the
+# tail remains (flat stop→final latency at any dictation length).
+MIN_SEGMENT_S = 10.0  # min un-decoded audio before a pause may close a segment
+SEGMENT_SILENCE_S = 0.7  # trailing-pause length that closes a segment
+HARD_SEGMENT_S = 25.0  # close even mid-speech past this much un-decoded audio
+# Below this total duration, finalize re-decodes the WHOLE clip exactly like the
+# pre-segmenting code (segments were preview-only) so short/medium quality is
+# unchanged; above it, the stitched segments become the final text (those
+# dictations previously blew the cleanup budget and fell back to raw anyway).
+LONG_DICTATION_S = 45.0
+
+
+class SilenceTracker:
+    """Trailing-silence duration from per-chunk RMS at 16 kHz (energy VAD).
+
+    The silence threshold adapts to the speaker/mic level: an EMA of RMS over
+    non-silent chunks, floored so a dead-quiet room can't push the threshold
+    to zero. No new deps — this only needs numpy.
+    """
+
+    _EMA_ALPHA = 0.1
+    _EMA_START = 0.02
+    _MIN_THRESHOLD = 0.003
+
+    def __init__(self) -> None:
+        self._speech_ema = self._EMA_START
+        self._trailing_silence_samples = 0
+
+    def feed(self, chunk: np.ndarray) -> None:
+        if chunk.size == 0:
+            return
+        rms = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
+        threshold = max(self._MIN_THRESHOLD, 0.15 * self._speech_ema)
+        if rms < threshold:
+            self._trailing_silence_samples += len(chunk)
+        else:
+            self._trailing_silence_samples = 0
+            self._speech_ema += self._EMA_ALPHA * (rms - self._speech_ema)
+
+    @property
+    def trailing_silence_s(self) -> float:
+        return self._trailing_silence_samples / SAMPLE_RATE
+
+    def reset(self) -> None:
+        self._speech_ema = self._EMA_START
+        self._trailing_silence_samples = 0
+
 
 class STTBackend(Protocol):
-    """Interface: load, feed_chunk, finalize, reset."""
+    """Interface: load, feed_chunk, finalize, reset (+ optional segmenting).
+
+    Segmenting surface (only WhisperBackend implements it for real; parakeet
+    and fake keep no-op defaults so the server can call these unconditionally):
+    - `initial_prompt`: glossary text biasing recognition (whisper only).
+    - `take_new_segments()`: raw segment texts finalized since the last call —
+      the server kicks off per-segment cleanup from these.
+    - After `finalize()`, `segments_used_for_final` says whether the returned
+      text was stitched from the in-session segments (long dictation) or is a
+      fresh whole-clip decode; `final_tail` is the tail text decoded at stop
+      when stitched (the only part the server still has to clean).
+    """
 
     model_id: str
+    initial_prompt: str | None
+    segments_used_for_final: bool
+    final_tail: str
 
     def load(self) -> None: ...
 
@@ -40,6 +107,10 @@ class STTBackend(Protocol):
 
     def feed_chunk(self, chunk: np.ndarray) -> str | None:
         """Feed Float32 PCM; may return an updated partial transcript."""
+        ...
+
+    def take_new_segments(self) -> list[str]:
+        """Raw segment texts finalized since the last call (may be empty)."""
         ...
 
     def finalize(self) -> str:
@@ -51,6 +122,122 @@ class STTBackend(Protocol):
         ...
 
 
+# --- STT contextual biasing (whisper initial_prompt) ---------------------------
+
+
+def build_glossary_prompt(
+    user_vocab: list[str],
+    learned_vocab: list[str],
+    auto_vocab: list[str],
+    entity_names: list[str],
+    cap: int = 24,
+) -> str | None:
+    """Render vocab sources into a whisper `initial_prompt` glossary, or None.
+
+    Whisper attends most to the END of the prompt, so terms are ordered least
+    important first / most important LAST: auto-mined, learned, user-configured,
+    then on-screen entity names (what the user is looking at right now). Dedup
+    is case-insensitive keeping the LAST (most important) occurrence, and the
+    cap keeps the tail — well under whisper's 224-token prompt budget.
+    """
+    ordered: list[str] = []
+    for source in (auto_vocab, learned_vocab, user_vocab, entity_names):
+        for term in source or []:
+            term = str(term).strip()
+            if term:
+                ordered.append(term)
+    seen: set[str] = set()
+    kept_rev: list[str] = []
+    for term in reversed(ordered):  # keep the most-important (last) occurrence
+        key = term.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        kept_rev.append(term)
+    terms = list(reversed(kept_rev))[-cap:]
+    if not terms:
+        return None
+    return "Glossary: " + ", ".join(terms) + "."
+
+
+_ECHO_WORD_RE = re.compile(r"\S+")
+
+
+def _echo_norm(word: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", word.lower())
+
+
+def strip_prompt_echo(text: str, prompt: str | None) -> str:
+    """Remove a leaked initial_prompt from decoded text (known whisper failure:
+    the glossary is echoed into the transcript, especially over silence).
+
+    Two shapes are handled: the literal "Glossary:" preamble anywhere in the
+    text, and text that STARTS with a fuzzy-normalized prefix of the glossary
+    string (whisper sometimes drops the preamble word). The strip is
+    conservative — a run must match ≥3 consecutive prompt tokens from the
+    prompt's start before prefix-stripping fires, so a dictation that genuinely
+    opens with one or two vocabulary terms is left alone.
+    """
+    if not text or not prompt:
+        return text
+    ptokens = [t for t in (_echo_norm(w) for w in prompt.split()) if t]
+    if not ptokens:
+        return text
+    pset = set(ptokens)
+
+    def run_end(words: list[re.Match[str]], idx: int) -> tuple[int | None, int]:
+        """From word `idx`, consume words whose normalized form appears in the
+        prompt; returns (end char offset of the run, matched-word count)."""
+        end: int | None = None
+        matched = 0
+        while idx < len(words):
+            norm = _echo_norm(words[idx].group(0))
+            if norm and norm in pset:
+                matched += 1
+                end = words[idx].end()
+                idx += 1
+            elif not norm:  # bare punctuation token — part of the echoed list
+                idx += 1
+            else:
+                break
+        return end, matched
+
+    # Bounded loop: whisper occasionally echoes the prompt more than once.
+    for _ in range(3):
+        words = list(_ECHO_WORD_RE.finditer(text))
+        if not words:
+            break
+        stripped = False
+        # Case 1: literal preamble anywhere → strip it and the term run. To
+        # protect a genuinely dictated "glossary" ("add a glossary section"),
+        # the word must either carry the echoed colon ("Glossary:") or be
+        # followed by at least one actual glossary term.
+        for i, w in enumerate(words):
+            if _echo_norm(w.group(0)) != "glossary":
+                continue
+            end, matched = run_end(words, i)
+            if matched < 2 and not w.group(0).rstrip(".").endswith(":"):
+                continue  # bare prose use of the word — not an echo
+            end = end if end is not None else w.end()
+            text = (text[: w.start()] + " " + text[end:]).strip()
+            stripped = True
+            break
+        if stripped:
+            text = re.sub(r"\s{2,}", " ", text)
+            continue
+        # Case 2: fuzzy prefix of the glossary at the very start (allow the
+        # preamble word itself to have been dropped by the decoder).
+        first = _echo_norm(words[0].group(0))
+        if first and first in (ptokens[0], ptokens[1] if len(ptokens) > 1 else ptokens[0]):
+            end, matched = run_end(words, 0)
+            if end is not None and matched >= min(3, len(ptokens)):
+                text = text[end:].strip()
+                text = re.sub(r"\s{2,}", " ", text)
+                continue
+        break
+    return text.strip()
+
+
 class ParakeetBackend:
     """Streaming STT via parakeet-mlx (default)."""
 
@@ -60,6 +247,14 @@ class ParakeetBackend:
         self._stream: Any = None
         self._pending: list[np.ndarray] = []
         self._pending_samples = 0
+        # Segmenting surface (see STTBackend): parakeet already streams, so it
+        # never produces cleanup segments and ignores the whisper glossary.
+        self.initial_prompt: str | None = None
+        self.segments_used_for_final = False
+        self.final_tail = ""
+
+    def take_new_segments(self) -> list[str]:
+        return []
 
     def load(self) -> None:
         from parakeet_mlx import from_pretrained
@@ -183,7 +378,9 @@ def whisper_language(language: str | None) -> str | None:
 
 
 class WhisperBackend:
-    """Fallback batch STT via mlx-whisper, with hallucination guard."""
+    """Batch STT via mlx-whisper, with hallucination guard and in-session
+    segmenting: pause-aligned spans are decoded DURING recording so the server
+    can clean them concurrently (and the HUD finally gets whisper partials)."""
 
     def __init__(self, model_id: str, language: str = "auto") -> None:
         self.model_id = model_id
@@ -191,6 +388,24 @@ class WhisperBackend:
         self._model_path = model_id  # resolved to a local path in load()
         self._chunks: list[np.ndarray] = []
         self._loaded = False
+        # Glossary biasing (set by the server per session; smartness-v2 §4).
+        self.initial_prompt: str | None = None
+        # In-session segmenting exists for LIVE latency; transcribe_clip
+        # (reprocess) turns it off so an archived clip stays one batch decode.
+        self.segmenting_enabled = True
+        # Segmenting state. ALL pcm is kept in _chunks even after a segment is
+        # decoded — the whole-clip re-decode at finalize must stay possible.
+        self._samples = 0
+        self._decoded_samples = 0  # offset of the first un-decoded sample
+        self._segments: list[str] = []
+        self._new_segments: list[str] = []
+        self._silence = SilenceTracker()
+        # Sticky per-session kill switch: one failed segment decode degrades
+        # the whole session to today's batch path (never raise into the feed).
+        self._segment_decode_failed = False
+        # Read by the server right after finalize() (see STTBackend Protocol).
+        self.segments_used_for_final = False
+        self.final_tail = ""
 
     def load(self) -> None:
         import mlx.core as mx
@@ -207,36 +422,102 @@ class WhisperBackend:
         log.info("whisper weights warmed %s in %.2fs", self.model_id, time.perf_counter() - t0)
 
     def start_session(self) -> None:
-        self._chunks = []
+        self.reset()
+        self.segments_used_for_final = False
+        self.final_tail = ""
 
-    def feed_chunk(self, chunk: np.ndarray) -> str | None:
-        self._chunks.append(chunk)
-        return None
-
-    def finalize(self) -> str:
+    def _decode(self, audio: np.ndarray) -> str:
+        """One guarded mlx-whisper decode (segment, tail, or whole clip)."""
         import mlx_whisper
 
-        if not self._chunks:
-            return ""
-        audio = np.concatenate(self._chunks)
-        self._chunks = []
-        # Whole-recording batch decode. The accumulated PCM is bounded by the
-        # server's max_recording_s cap (default 300s ≈ 18 MB Float32), so this
-        # can't grow without limit — but long batches are still slow.
-        duration_s = len(audio) / SAMPLE_RATE
-        if duration_s > 60:
-            log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
         result = mlx_whisper.transcribe(
             audio,
             path_or_hf_repo=self._model_path,
             condition_on_previous_text=False,
             language=whisper_language(self.language),
             fp16=True,
+            initial_prompt=self.initial_prompt,
         )
-        return guard_whisper_result(result)
+        text = guard_whisper_result(result)
+        # Known initial_prompt failure mode: the glossary leaks into the
+        # transcript (especially over silence) — strip it on every decode.
+        return strip_prompt_echo(text, self.initial_prompt)
+
+    def feed_chunk(self, chunk: np.ndarray) -> str | None:
+        self._chunks.append(chunk)
+        self._samples += len(chunk)
+        self._silence.feed(chunk)
+        if not self._loaded or not self.segmenting_enabled or self._segment_decode_failed:
+            return None
+        undecoded_s = (self._samples - self._decoded_samples) / SAMPLE_RATE
+        pause_close = undecoded_s >= MIN_SEGMENT_S and self._silence.trailing_silence_s >= SEGMENT_SILENCE_S
+        if not pause_close and undecoded_s < HARD_SEGMENT_S:
+            return None
+        try:
+            span = np.concatenate(self._chunks)[self._decoded_samples : self._samples]
+            text = self._decode(span)
+        except Exception:  # noqa: BLE001 — a failed decode must not kill the feed loop
+            # Degrade to the batch path for the rest of the session; the audio
+            # is still all in _chunks, so finalize recovers everything.
+            log.exception("segment decode failed — falling back to batch decode at stop")
+            self._segment_decode_failed = True
+            return None
+        self._decoded_samples = self._samples
+        self._silence.reset()  # the pause that closed this segment is consumed
+        if not text:
+            return None  # silence-only span (or guard dropped it) — no segment
+        self._segments.append(text)
+        self._new_segments.append(text)
+        return " ".join(self._segments)
+
+    def take_new_segments(self) -> list[str]:
+        out = self._new_segments
+        self._new_segments = []
+        return out
+
+    def finalize(self) -> str:
+        self.segments_used_for_final = False
+        self.final_tail = ""
+        if not self._chunks:
+            self.reset()
+            return ""
+        audio = np.concatenate(self._chunks)
+        duration_s = len(audio) / SAMPLE_RATE
+        # Long dictation with usable segments: decode only the un-decoded tail
+        # and stitch — stop→final stays flat however long the user spoke. Short
+        # and medium clips re-decode WHOLE, exactly like the pre-segmenting
+        # code, so their quality is unchanged (segments were preview-only).
+        if duration_s > LONG_DICTATION_S and self._segments and not self._segment_decode_failed:
+            try:
+                tail = self._decode(audio[self._decoded_samples :]) if self._decoded_samples < len(audio) else ""
+            except Exception:  # noqa: BLE001 — fall through to the whole-clip decode
+                log.exception("tail decode failed — re-decoding the whole clip")
+            else:
+                parts = self._segments + ([tail] if tail else [])
+                text = " ".join(parts).strip()
+                self.reset()
+                self.segments_used_for_final = True
+                self.final_tail = tail
+                return text
+        if duration_s > 60:
+            log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
+        try:
+            text = self._decode(audio)
+        finally:
+            self.reset()
+        return text
 
     def reset(self) -> None:
         self._chunks = []
+        self._samples = 0
+        self._decoded_samples = 0
+        self._segments = []
+        self._new_segments = []
+        self._silence.reset()
+        self._segment_decode_failed = False
+        # NOTE: initial_prompt / segments_used_for_final / final_tail survive a
+        # reset on purpose — the server sets the prompt per session and reads
+        # the finalize flags right after finalize() has reset the audio state.
 
 
 class FakeBackend:
@@ -245,15 +526,29 @@ class FakeBackend:
     Selected when VELORA_FAKE_STT=1. Transcript comes from VELORA_FAKE_STT_TEXT
     (default below); finalize also reports the number of samples received so
     integration tests can assert audio actually flowed.
+
+    Segmenting mode: VELORA_FAKE_STT_SEGMENTS="seg one|seg two" makes the
+    backend emit one raw segment per SEGMENT_SAMPLES of audio (mimicking the
+    whisper in-session segment pipeline), with finalize returning the stitched
+    join plus VELORA_FAKE_STT_TEXT as the tail when set. Default behavior
+    (env var unset) is exactly the historical one.
     """
 
     DEFAULT_TEXT = "hello world this is a fake transcript"
+    SEGMENT_SAMPLES = 3200  # one fake segment per 0.2s of audio
 
     def __init__(self, model_id: str = "fake", language: str = "auto") -> None:
         self.model_id = model_id
         self.language = language
         self.samples = 0
         self.sessions = 0
+        self.initial_prompt: str | None = None
+        self.segments_used_for_final = False
+        self.final_tail = ""
+        self._pending_segments: list[str] = []
+        self._emitted_segments: list[str] = []
+        self._new_segments: list[str] = []
+        self._samples_since_segment = 0
 
     def load(self) -> None:
         pass
@@ -261,18 +556,52 @@ class FakeBackend:
     def start_session(self) -> None:
         self.samples = 0
         self.sessions += 1
+        spec = os.environ.get("VELORA_FAKE_STT_SEGMENTS", "")
+        self._pending_segments = [s.strip() for s in spec.split("|") if s.strip()]
+        self._emitted_segments = []
+        self._new_segments = []
+        self._samples_since_segment = 0
+        self.segments_used_for_final = False
+        self.final_tail = ""
 
     def feed_chunk(self, chunk: np.ndarray) -> str | None:
         self.samples += len(chunk)
-        return f"partial after {self.samples} samples"
+        if not (self._pending_segments or self._emitted_segments):
+            return f"partial after {self.samples} samples"
+        # Segment mode: like whisper, partials only appear when a segment closes.
+        self._samples_since_segment += len(chunk)
+        if self._samples_since_segment < self.SEGMENT_SAMPLES or not self._pending_segments:
+            return None
+        self._samples_since_segment = 0
+        seg = self._pending_segments.pop(0)
+        self._emitted_segments.append(seg)
+        self._new_segments.append(seg)
+        return " ".join(self._emitted_segments)
+
+    def take_new_segments(self) -> list[str]:
+        out = self._new_segments
+        self._new_segments = []
+        return out
 
     def finalize(self) -> str:
+        if self._emitted_segments:
+            tail = os.environ.get("VELORA_FAKE_STT_TEXT", "")
+            parts = self._emitted_segments + ([tail] if tail else [])
+            text = " ".join(parts)
+            self.reset()
+            self.segments_used_for_final = True
+            self.final_tail = tail
+            return text
         text = os.environ.get("VELORA_FAKE_STT_TEXT", self.DEFAULT_TEXT)
-        self.samples = 0
+        self.reset()
         return text
 
     def reset(self) -> None:
         self.samples = 0
+        self._pending_segments = []
+        self._emitted_segments = []
+        self._new_segments = []
+        self._samples_since_segment = 0
 
 
 def fake_stt_enabled() -> bool:
@@ -298,11 +627,20 @@ def transcribe_clip(backend: STTBackend, pcm: np.ndarray, chunk_samples: int = S
     Drives the same start/feed/finalize path a live session uses, so streaming
     (parakeet) and batch (whisper) backends both work. Runs on the caller's
     thread — MLX is thread-affine, so call this on the STT executor.
+    In-session segmenting is disabled for the duration: it exists for LIVE
+    latency; a reprocessed clip should stay one whole-clip decode.
     """
-    backend.start_session()
-    for i in range(0, len(pcm), chunk_samples):
-        backend.feed_chunk(pcm[i : i + chunk_samples])
-    return backend.finalize()
+    segmenting = getattr(backend, "segmenting_enabled", None)
+    if segmenting is not None:
+        backend.segmenting_enabled = False  # type: ignore[attr-defined]
+    try:
+        backend.start_session()
+        for i in range(0, len(pcm), chunk_samples):
+            backend.feed_chunk(pcm[i : i + chunk_samples])
+        return backend.finalize()
+    finally:
+        if segmenting is not None:
+            backend.segmenting_enabled = segmenting  # type: ignore[attr-defined]
 
 
 def pcm_from_payload(payload: bytes) -> np.ndarray:

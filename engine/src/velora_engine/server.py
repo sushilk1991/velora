@@ -24,6 +24,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
@@ -31,17 +32,19 @@ import numpy as np
 
 from . import __version__, formatting, models, protocol
 from .audio_store import AudioStore
-from .cleanup import CleanupEngine
+from .cleanup import _RETRACTION_RE, CleanupEngine
 from .config import Config
 from .formatting import STATIC_SYSTEM_PROMPT
 from .stt import (
     SAMPLE_RATE,
     STTBackend,
+    build_glossary_prompt,
     create_backend,
     fake_stt_enabled,
     pcm_from_payload,
     transcribe_clip,
 )
+from .vocab_miner import VocabMiner
 
 T = TypeVar("T")
 
@@ -54,6 +57,50 @@ PARENT_POLL_S = 2.0
 # the session is aborted with an error event (fail loudly instead of OOM).
 QUEUE_MAX_FRAMES = 600
 MAX_DROPPED_FRAMES = 50
+
+# Streaming-cleanup finalize: chunk cleanups run DURING recording and are
+# nearly always done at stop; this bound only catches a wedged task (each has
+# its own internal timeouts) before we give up and fall back to the whole-text
+# pipeline.
+STREAM_GATHER_TIMEOUT_S = 15.0
+
+# Idle gap before (and between) vocab-mining steps — mining must only ever use
+# compute nobody is waiting on, and yields the moment a session starts.
+MINE_IDLE_S = 20.0
+MINE_STARTUP_DELAY_S = 60.0
+
+# Seam context for per-segment cleanup: the tail of the previous cleaned chunk
+# rides along in the system prompt so seams punctuate/capitalize correctly.
+CHUNK_CONTEXT_WORDS = 15
+# A retraction marker within a segment's first few words refers back across
+# the segment boundary — merge with the previous segment and re-clean.
+RETRACTION_HEAD_WORDS = 4
+
+
+@dataclass
+class _ChunkResult:
+    """Cleaned text for one raw segment (ms = LLM time, 0 for deterministic)."""
+
+    text: str
+    ms: int
+
+
+def _join_chunks(parts: list[str]) -> str:
+    """Join cleaned chunks with a single space — unless a chunk already ends
+    with a line/paragraph break (spoken 'new paragraph'), which is kept as the
+    separator instead of gluing a space after it."""
+    out = ""
+    for part in parts:
+        cleaned = part.strip("\r ")
+        if not cleaned.strip():
+            continue
+        if not out:
+            out = cleaned
+        elif out.endswith("\n"):
+            out += cleaned.lstrip("\n")
+        else:
+            out += " " + cleaned
+    return out.strip()
 
 
 def _pid_alive(pid: int) -> bool:
@@ -83,6 +130,22 @@ class Session:
         # dropped-for-latency frames are still archived). Bounded by
         # max_recording_s; cleared on finalize/abort.
         self.pcm_chunks: list[np.ndarray] = []
+        # Streaming-cleanup state (smartness-v2 §2): raw segment texts taken
+        # from the backend during recording, and the cleanup task per chunk
+        # (chunk_tasks[i] cleans chunk_raws[i]).
+        self.chunk_raws: list[str] = []
+        self.chunk_tasks: list[asyncio.Task[_ChunkResult]] = []
+        # Sticky: once any streaming gate fails (config off, no LLM, non-Latin
+        # segment) the segments stay preview-only and finalize takes the
+        # classic whole-text path.
+        self.streaming_disabled = False
+        # Entities snapshotted at start: during-speech chunks must use these —
+        # `stop` merges richer entities into `context` later, and a chunk task
+        # reading context lazily must not see them (they belong to the final
+        # whole-text postprocess only).
+        self.start_entities: list[dict[str, Any]] = [
+            e for e in (self.context.get("entities") or []) if isinstance(e, dict)
+        ]
 
 
 class Engine:
@@ -108,6 +171,10 @@ class Engine:
         # MLX streams are thread-affine: all STT model work must run on ONE
         # dedicated thread (the cleanup LLM likewise owns its own thread).
         self._stt_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
+        # Idle vocabulary miner (created lazily; runs only when nothing else
+        # is using the machine — see _mine_when_idle).
+        self._miner: VocabMiner | None = None
+        self._miner_task: asyncio.Task[None] | None = None
 
     async def _stt_call(self, fn: Callable[..., T], *args: Any) -> T:
         return await asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
@@ -145,6 +212,9 @@ class Engine:
                     engine.close()
             except Exception:
                 log.exception("cleanup LLM failed to load; dictations will return raw text")
+        # First mining pass a while after startup — the loop itself re-checks
+        # every skip condition (busy, LLM missing, disabled) before doing work.
+        self._schedule_mining(delay=MINE_STARTUP_DELAY_S)
 
     # ---------------- serving ----------------
 
@@ -169,6 +239,10 @@ class Engine:
         finally:
             watchdog.cancel()
             loader.cancel()
+            if self._miner_task is not None:
+                self._miner_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._miner_task
             self._server.close()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._server.wait_closed()
@@ -313,11 +387,18 @@ class Engine:
         if self.session is not None:
             log.warning("start while session %s active — discarding it", self.session.id)
             await self._abort_session("superseded by new start")
+        # A dictation owns the machine: stop any pending idle mining right now.
+        if self._miner_task is not None:
+            self._miner_task.cancel()
         session_id = str(msg.get("session") or uuid.uuid4())
         context = msg.get("context") or {}
         if not isinstance(context, dict):
             context = {}
         session = Session(session_id, context, owner=self.writer)
+        # STT contextual biasing: bias whisper toward the user's vocabulary and
+        # the NAMES on screen right now (person/file/channel/subject entities
+        # only — nearby free text is cleanup-prompt material, not glossary).
+        self.stt.initial_prompt = self._glossary(session.start_entities)
         await self._stt_call(self.stt.start_session)
         session.feeder = asyncio.create_task(self._feed_loop(session))
         self.session = session
@@ -351,6 +432,16 @@ class Engine:
             ):
                 last_partial = partial
                 await self._send({"event": "partial", "session": session.id, "text": partial.strip()})
+            # Segment streaming: clean freshly-decoded segments WHILE the user
+            # is still speaking (the cleanup thread is idle during recording).
+            # Any failure here only costs the streaming fast path — finalize
+            # falls back to whole-text cleanup.
+            try:
+                for seg in self.stt.take_new_segments():
+                    self._on_new_segment(session, seg)
+            except Exception:
+                log.exception("segment scheduling failed")
+                session.streaming_disabled = True
 
     async def _on_audio(self, payload: bytes) -> None:
         session = self.session
@@ -415,9 +506,15 @@ class Engine:
         self.session = None
         session.cancelled = True
         session.pcm_chunks = []  # discard archived audio for a cancelled session
+        self._cancel_chunk_tasks(session)
         await self._drain_feeder(session)
         await self._stt_call(self.stt.reset)
         log.info("session %s discarded (%s)", session.id, why)
+
+    @staticmethod
+    def _cancel_chunk_tasks(session: Session) -> None:
+        for task in session.chunk_tasks:
+            task.cancel()
 
     async def _cmd_cancel(self, msg: dict[str, Any]) -> None:
         session = self.session
@@ -452,21 +549,36 @@ class Engine:
             raw = await self._stt_call(self.stt.finalize)
         except Exception as exc:
             log.exception("finalize failed")
+            self._cancel_chunk_tasks(session)
             await self._stt_call(self.stt.reset)
             await self._error(f"transcription failed: {exc}", session.id)
             return
         stt_ms = int((time.perf_counter() - t_stop) * 1000)
         await self._send({"event": "transcript", "session": session.id, "raw": raw, "ms": stt_ms})
 
-        # Stage 2: formatting pipeline.
+        # Stage 2: formatting pipeline. Long whisper dictations whose segments
+        # were already cleaned during recording assemble from those chunks
+        # (only the tail is cleaned now → flat stop→final latency); anything
+        # else — and ANY streaming failure — runs the classic whole-text path,
+        # so a transcript is never lost to the new pipeline.
         ctx = session.context
-        text, mode_name, cleanup_ms, cleanup_applied, reason = await self._apply_formatting(
-            raw,
-            bundle_id=ctx.get("bundle_id"),
-            app_name=ctx.get("app_name"),
-            explicit_mode=ctx.get("mode"),
-            entities=ctx.get("entities"),
-        )
+        result: tuple[str, str, int, bool, str] | None = None
+        if session.chunk_tasks:
+            try:
+                result = await self._streaming_result(session, raw)
+            except Exception:  # noqa: BLE001 — the fallback below always runs
+                log.exception("streaming finalize failed — falling back to whole-text cleanup")
+                result = None
+        if result is None:
+            self._cancel_chunk_tasks(session)
+            result = await self._apply_formatting(
+                raw,
+                bundle_id=ctx.get("bundle_id"),
+                app_name=ctx.get("app_name"),
+                explicit_mode=ctx.get("mode"),
+                entities=ctx.get("entities"),
+            )
+        text, mode_name, cleanup_ms, cleanup_applied, reason = result
 
         # Stage 3: archive the audio clip (off the event loop) so it can be
         # reprocessed later. Failure never affects the dictation result.
@@ -499,6 +611,147 @@ class Engine:
             session.samples,
             audio_name or "-",
         )
+        # The engine is idle again — (re)arm the idle vocabulary miner.
+        self._schedule_mining()
+
+    # ---------------- streaming segment cleanup (smartness-v2 §2) ----------------
+
+    def _on_new_segment(self, session: Session, seg_raw: str) -> None:
+        """Schedule cleanup for one freshly-decoded raw segment (or merge it
+        into the previous chunk when it opens with a retraction)."""
+        seg_raw = seg_raw.strip()
+        if not seg_raw or session.cancelled or session.streaming_disabled:
+            return
+        # Session-level gates: if any fails, segments stay preview-only (HUD
+        # partials) and finalize runs the whole-text pipeline unchanged.
+        if not (
+            self.config.streaming_cleanup
+            and self.cleanup is not None
+            and self.cleanup.loaded
+            and not self.config.romanize_output
+            and not formatting.is_mostly_non_latin(seg_raw)
+        ):
+            session.streaming_disabled = True
+            self._cancel_chunk_tasks(session)
+            return
+        # Cross-boundary self-correction: a segment that BEGINS with a
+        # retraction marker ("no wait…", "scratch that…") refers back across
+        # the boundary — never clean it alone. Merge with the previous raw
+        # segment and re-clean the pair as ONE chunk, replacing the previous
+        # result. The marker decides SCOPE only; the LLM does the edit.
+        head = " ".join(seg_raw.split()[:RETRACTION_HEAD_WORDS])
+        if session.chunk_raws and _RETRACTION_RE.search(head):
+            session.chunk_tasks[-1].cancel()
+            merged = session.chunk_raws[-1] + " " + seg_raw
+            session.chunk_raws[-1] = merged
+            prev = session.chunk_tasks[-2] if len(session.chunk_tasks) >= 2 else None
+            session.chunk_tasks[-1] = asyncio.create_task(self._clean_chunk_task(session, merged, prev))
+            return
+        prev = session.chunk_tasks[-1] if session.chunk_tasks else None
+        session.chunk_raws.append(seg_raw)
+        session.chunk_tasks.append(asyncio.create_task(self._clean_chunk_task(session, seg_raw, prev)))
+
+    async def _clean_chunk_task(
+        self, session: Session, seg_raw: str, prev_task: asyncio.Task[_ChunkResult] | None
+    ) -> _ChunkResult:
+        """Chunk cleanup that first waits for its predecessor (for the seam
+        context). Waits via asyncio.wait so a cancelled/failed predecessor only
+        costs us the context line, while OUR own cancellation still propagates."""
+        prev_text: str | None = None
+        if prev_task is not None:
+            await asyncio.wait([prev_task])
+            if not prev_task.cancelled() and prev_task.exception() is None:
+                prev_text = prev_task.result().text
+        return await self._clean_chunk_text(session, seg_raw, prev_text)
+
+    async def _clean_chunk_text(self, session: Session, seg_raw: str, prev_text: str | None) -> _ChunkResult:
+        """Clean ONE raw chunk (segment or tail). Never raises: any failure
+        degrades to the deterministic cleanup for this chunk only."""
+        try:
+            ctx = session.context
+            # Per-segment gate with the session's START context (stop-time
+            # entities only apply to the final whole-text postprocess).
+            gate = formatting.run_gate(
+                seg_raw,
+                self.config,
+                bundle_id=ctx.get("bundle_id"),
+                app_name=ctx.get("app_name"),
+                explicit_mode=ctx.get("mode"),
+                entities=session.start_entities,
+            )
+            if not gate.use_llm:
+                # e.g. Raw mode: the deterministic gate text IS the result.
+                return _ChunkResult(gate.text, 0)
+            system_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
+            if prev_text:
+                # Seam context: previous cleaned tail, fenced as context-only.
+                # Appended AFTER the static prompt so the KV prefix still hits.
+                tail_words = " ".join(prev_text.split()[-CHUNK_CONTEXT_WORDS:])
+                system_prompt += (
+                    "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»"
+                )
+            cleanup = self.cleanup
+            if cleanup is None:
+                return _ChunkResult(self._deterministic_cleanup(seg_raw), 0)
+            result = await cleanup.cleanup(seg_raw, system_prompt)
+            if result.applied:
+                return _ChunkResult(result.text, result.ms)
+            return _ChunkResult(self._deterministic_cleanup(seg_raw), result.ms)
+        except Exception:  # noqa: BLE001 — one bad chunk must not sink the session
+            log.exception("chunk cleanup failed — deterministic fallback for this chunk")
+            return _ChunkResult(self._deterministic_cleanup(seg_raw), 0)
+
+    async def _streaming_result(self, session: Session, raw: str) -> tuple[str, str, int, bool, str] | None:
+        """Assemble the final text from the per-segment cleanups. Returns the
+        `_apply_formatting`-shaped tuple, or None → caller falls back to the
+        whole-text pipeline (never lose a transcript to the fast path)."""
+        backend = self.stt
+        if not getattr(backend, "segments_used_for_final", False):
+            return None  # finalize re-decoded the whole clip; chunks were preview-only
+        if session.streaming_disabled or not session.chunk_tasks:
+            return None
+        if len(session.chunk_tasks) != len(session.chunk_raws):
+            return None
+        tail = str(getattr(backend, "final_tail", "") or "").strip()
+        # Integrity check: the chunks we cleaned plus the tail must reconstruct
+        # the stitched raw exactly, or the assembly would drop/duplicate words.
+        expected = " ".join(session.chunk_raws + ([tail] if tail else []))
+        if expected != raw.strip():
+            log.warning("streaming stitch mismatch — falling back to whole-text cleanup")
+            return None
+        # The chunk cleanups ran during recording; this is normally instant.
+        # return_exceptions: a cancelled/failed task must surface as a value
+        # (→ fallback below), not raise CancelledError through finalize.
+        results = await asyncio.wait_for(
+            asyncio.gather(*session.chunk_tasks, return_exceptions=True),
+            timeout=STREAM_GATHER_TIMEOUT_S,
+        )
+        if any(not isinstance(r, _ChunkResult) for r in results):
+            log.warning("streaming chunk task did not complete — falling back")
+            return None
+        cleaned = [r.text for r in results]
+        tail_ms = 0
+        if tail:
+            tail_result = await self._clean_chunk_text(session, tail, cleaned[-1] if cleaned else None)
+            cleaned.append(tail_result.text)
+            tail_ms = tail_result.ms
+        assembled = _join_chunks(cleaned)
+        if not assembled.strip():
+            return None
+        ctx = session.context
+        # Gate over the FULL raw text — for its GateResult fields only
+        # (replacements/tags/category/chat rules, now with stop-time entities).
+        # Its use_llm is deliberately ignored: no second LLM pass here.
+        gate = formatting.run_gate(
+            raw,
+            self.config,
+            bundle_id=ctx.get("bundle_id"),
+            app_name=ctx.get("app_name"),
+            explicit_mode=ctx.get("mode"),
+            entities=ctx.get("entities"),
+        )
+        text = formatting.postprocess(assembled, gate)
+        return text, gate.mode.name, tail_ms, True, "streaming"
 
     async def _apply_formatting(
         self,
@@ -549,6 +802,72 @@ class Engine:
         punctuation (guarded against noun usage)."""
         return formatting.normalize_spoken_punctuation(
             formatting.apply_spoken_commands(formatting.scrub_fillers(raw)))
+
+    # ---------------- STT glossary + idle vocab mining (smartness-v2 §4) ----------------
+
+    def _glossary(self, entities: list[dict[str, Any]] | None = None) -> str | None:
+        """The whisper initial_prompt for the current config + screen context.
+        Only NAME-like entity types feed it — nearby free text stays out."""
+        entity_names = [
+            str(e.get("value", "")).strip()
+            for e in (entities or [])
+            if isinstance(e, dict)
+            and e.get("type") in ("person", "file", "channel", "subject")
+            and str(e.get("value", "")).strip()
+        ]
+        return build_glossary_prompt(
+            self.config.user_vocabulary,
+            self.config.learned_vocabulary,
+            self.config.auto_vocabulary,
+            entity_names,
+        )
+
+    def _schedule_mining(self, delay: float = MINE_IDLE_S) -> None:
+        """(Re)arm the idle miner: cancel any pending run and wait again from
+        now. Called after every final and once after startup model load."""
+        if self._miner_task is not None and not self._miner_task.done():
+            self._miner_task.cancel()
+        self._miner_task = asyncio.create_task(self._mine_when_idle(delay))
+
+    async def _mine_when_idle(self, delay: float) -> None:
+        """Run mining steps across idle windows. Every iteration re-checks that
+        the engine is truly idle; a starting session cancels this task outright
+        (see _cmd_start). Failures are logged and dropped — background work
+        must never affect dictation."""
+        try:
+            while True:
+                await asyncio.sleep(delay)
+                delay = MINE_IDLE_S
+                if (
+                    self.session is not None
+                    or self._reprocessing
+                    or not (self.cleanup is not None and self.cleanup.loaded)
+                    or not self.config.vocab_mining
+                ):
+                    return
+                if self._miner is None:
+                    self._miner = VocabMiner(self.config.home, self._mine_generate)
+                more = await self._miner.step()
+                if self._miner.last_step_new_terms:
+                    # Make the new terms live (cleanup vocab + next glossary).
+                    # Counts only — never term values — in the log.
+                    self.config.reload()
+                    log.info("vocab mining added %d terms", self._miner.last_step_new_terms)
+                if not more:
+                    return
+        except Exception:  # noqa: BLE001 — idle work must never break the engine
+            log.exception("vocab mining failed")
+
+    async def _mine_generate(self, system_prompt: str, user_text: str) -> str:
+        """Generation hook for the miner: reuse the cleanup engine with a short
+        budget. check_ratio=False because extraction is not a cleanup (the
+        miner validates every line deterministically anyway); a not-applied
+        result returns "" so echoed input is never parsed as terms."""
+        engine = self.cleanup
+        if engine is None or not engine.loaded:
+            return ""
+        result = await engine.cleanup(user_text, system_prompt, timeout_ms=4000, check_ratio=False)
+        return result.text if result.applied else ""
 
     async def _archive_audio(self, session: Session) -> str | None:
         """Persist the session's PCM as a clip and prune the archive. Off-thread;
@@ -689,6 +1008,9 @@ class Engine:
             t0 = time.perf_counter()
             try:
                 backend = await self._stt_for_reprocess(model_id, language)
+                # Reprocess biases from the LIVE config vocab, same as a fresh
+                # session (there is no screen context for an archived clip).
+                backend.initial_prompt = self._glossary()
                 raw = await self._stt_call(transcribe_clip, backend, pcm)
             except Exception as exc:  # noqa: BLE001
                 log.exception("reprocess transcription failed")

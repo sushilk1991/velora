@@ -40,6 +40,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # Long prose dictated into a terminal (Claude Code, codex chats) gets LLM
     # cleanup instead of verbatim passthrough; short commands stay verbatim.
     "smart_terminal": True,
+    # Clean whisper segments with the LLM DURING recording (smartness-v2 §2) so
+    # long dictations stop blowing the cleanup budget; off → segments are
+    # HUD-preview-only and finalize runs the whole-text cleanup as before.
+    "streaming_cleanup": True,
+    # Idle vocabulary miner: the cleanup LLM extracts proper nouns/jargon from
+    # recent dictation history while nothing else is happening, growing
+    # ~/.velora/auto_learned.json (all local; smartness-v2 §4).
+    "vocab_mining": True,
     "max_recording_s": 300,
     # Audio archive: keep a clip of each dictation so it can be re-transcribed
     # later with a better model (history → reprocess). On by default (a core
@@ -92,6 +100,7 @@ class Config:
         self.modes: dict[str, Mode] = {}
         self._learned_vocab: list[str] = []
         self._learned_replacements: dict[str, str] = {}
+        self._auto_vocab: list[str] = []
         self._config_corrupt = False
         self.reload()
 
@@ -149,6 +158,16 @@ class Config:
         return bool(self.data.get("smart_terminal", True))
 
     @property
+    def streaming_cleanup(self) -> bool:
+        """Clean whisper segments concurrently during recording."""
+        return bool(self.data.get("streaming_cleanup", True))
+
+    @property
+    def vocab_mining(self) -> bool:
+        """Mine proper nouns/jargon from history while the engine is idle."""
+        return bool(self.data.get("vocab_mining", True))
+
+    @property
     def max_recording_s(self) -> float:
         """Max recording duration before the engine auto-finalizes a session."""
         try:
@@ -178,12 +197,29 @@ class Config:
         return int(mb * 1024 * 1024) if mb > 0 else 0
 
     @property
+    def user_vocabulary(self) -> list[str]:
+        """Vocabulary the user configured explicitly (config.json)."""
+        return [str(v) for v in self.data.get("vocabulary", []) or []]
+
+    @property
+    def learned_vocabulary(self) -> list[str]:
+        """Vocabulary the app learned from the user's edits (learned.json)."""
+        return list(self._learned_vocab)
+
+    @property
+    def auto_vocabulary(self) -> list[str]:
+        """Terms the idle miner extracted (auto_learned.json, minus banned)."""
+        return list(self._auto_vocab)
+
+    @property
     def global_vocabulary(self) -> list[str]:
-        # User-configured vocab + terms the app learned from corrections.
-        base = [str(v) for v in self.data.get("vocabulary", []) or []]
+        # User-configured vocab + terms the app learned from corrections +
+        # idle-mined terms. Dedup keeps the first (user wins over learned wins
+        # over auto-mined).
+        base = self.user_vocabulary
         seen: set[str] = set()
         out: list[str] = []
-        for v in base + self._learned_vocab:
+        for v in base + self._learned_vocab + self._auto_vocab:
             if v and v not in seen:
                 seen.add(v)
                 out.append(v)
@@ -207,6 +243,7 @@ class Config:
             log.warning("could not chmod %s to 0700: %s", self.home, exc)
         self._load_or_create_config()
         self._load_learned()
+        self._load_auto_vocab()
         self._ensure_builtin_modes()
         self._migrate_stale_builtins()
         self._load_modes()
@@ -229,6 +266,24 @@ class Config:
             }
         except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
             log.warning("learned.json unreadable (%s); ignoring", exc)
+
+    def _load_auto_vocab(self) -> None:
+        """Load ~/.velora/auto_learned.json — terms the ENGINE's idle miner
+        extracted from dictation history (vocab_miner.py owns the writes; the
+        app deletes terms by moving them to `banned`). Banned terms are dropped
+        here too so a mid-cycle app deletion takes effect on the next reload."""
+        self._auto_vocab = []
+        path = self.home / "auto_learned.json"
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            banned = {str(b).lower() for b in data.get("banned", []) or []}
+            self._auto_vocab = [
+                str(t) for t in data.get("terms", []) or [] if str(t).lower() not in banned
+            ]
+        except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
+            log.warning("auto_learned.json unreadable (%s); ignoring", exc)
 
     def save(self) -> None:
         # Atomic: write a sibling temp then rename, so a crash mid-write can't
