@@ -37,6 +37,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # e.g. Hindi speech → natural Hinglish in English letters, not Devanagari.
     # Off by default; opt-in. Uses the multilingual cleanup LLM.
     "romanize_output": False,
+    # Long prose dictated into a terminal (Claude Code, codex chats) gets LLM
+    # cleanup instead of verbatim passthrough; short commands stay verbatim.
+    "smart_terminal": True,
     "max_recording_s": 300,
     # Audio archive: keep a clip of each dictation so it can be re-transcribed
     # later with a better model (history → reprocess). On by default (a core
@@ -139,6 +142,11 @@ class Config:
     def romanize_output(self) -> bool:
         """Write non-Latin output in the Latin alphabet (Hindi → Hinglish)."""
         return bool(self.data.get("romanize_output", False))
+
+    @property
+    def smart_terminal(self) -> bool:
+        """LLM-clean long prose dictated into a terminal (AI-chat aware)."""
+        return bool(self.data.get("smart_terminal", True))
 
     @property
     def max_recording_s(self) -> float:

@@ -70,6 +70,13 @@ CATEGORY_DESCRIPTIONS = {
 # paying LLM latency on every quick phrase. Longer utterances still get the LLM.
 SHORT_UTTERANCE_WORDS = 6  # < 6 words → punctuation-only, never restructured
 
+# Terminals host both shells and AI chats (Claude Code, codex): a dictation
+# this long into a terminal is almost never a shell command — it's prose for
+# an assistant, and leaving it verbatim (the 0.2.0 behavior) means no
+# punctuation at all. At or past this length, Terminal mode routes to the LLM
+# with a terminal-aware prompt; below it, verbatim as before.
+SMART_TERMINAL_MIN_WORDS = 12
+
 
 def category_for_bundle(bundle_id: str | None) -> str | None:
     if not bundle_id:
@@ -299,12 +306,22 @@ STATIC_SYSTEM_PROMPT = (
     "accidental word repetitions — conservatively. Fillers count in ANY casing "
     "or position, including when transcribed as their own sentence ('UM.', "
     "'Hi UM.' → 'Hi.').\n"
-    "5. Apply self-corrections: when the speaker revises themselves "
-    "('no wait, I meant Tuesday', 'actually no, scratch that, ...'), keep ONLY "
-    "the final corrected version — delete the retracted statement and the "
-    "correction phrase itself. Example: 'we should cancel the offsite actually "
-    "no scratch that let's keep the offsite but make it virtual' becomes "
-    "\"Let's keep the offsite but make it virtual.\"\n"
+    "5. Self-corrections and retractions (speech repair): when the speaker "
+    "revises themselves, keep ONLY the final corrected version — delete the "
+    "retracted words AND the correction phrase itself ('no no', 'no wait', "
+    "'actually', 'I mean', 'correction'). Spoken retraction commands work the "
+    "same way: 'scratch that', 'delete that', 'delete this line', 'forget "
+    "that' remove the statement they refer to, plus the command words. "
+    "Everything AFTER the correction phrase must be kept EXACTLY as spoken — "
+    "never shorten, reword, or summarize it. Examples:\n"
+    "   'let's meet at 3 p.m no no let's meet at 6 p.m' → \"Let's meet at 6 p.m.\"\n"
+    "   'the budget looks fine actually scratch that the budget needs another "
+    "pass' → \"The budget needs another pass.\"\n"
+    "   'that was my thinking on pricing scratch all of that just tell him "
+    "i'll call back' → \"Just tell him I'll call back.\"\n"
+    "   A revision must actually replace something. 'No' that is real content "
+    "stays: 'i told him no twice' keeps the 'no'; deliberate repetition stays: "
+    "'she said no no no emphatically' → \"She said no, no, no emphatically.\"\n"
     "6. Spoken punctuation: the speaker often DICTATES punctuation by name. "
     "Convert the spoken word to the symbol and DELETE the spoken word — never "
     "leave both. 'full stop' or 'period' → '.', 'comma' → ',', 'question mark' → "
@@ -327,6 +344,18 @@ STATIC_SYSTEM_PROMPT = (
     "NOT listify ordinary counting ('count from one to ten' stays inline prose) "
     "or short utterances.\n"
     "8. Chat messages: casual tone, no trailing period on a single short sentence.\n"
+)
+
+# Smart-terminal instructions: long prose in a terminal gets cleaned like
+# prose, but anything command-shaped must survive character-for-character.
+SMART_TERMINAL_PROMPT = (
+    "The user is dictating into a terminal. A dictation this long is usually a "
+    "message to an AI coding assistant (Claude Code, codex) running there — "
+    "clean it like normal prose: punctuation, capitalization, fillers, "
+    "self-corrections. BUT any fragment that is a shell command, code "
+    "identifier, flag, or file path must stay VERBATIM: exact casing and "
+    "symbols, never capitalize identifiers or commands, and never add a "
+    "trailing period after a command."
 )
 
 # Romanization prompt (opt-in `romanize_output`): transliterate non-Latin
@@ -428,9 +457,9 @@ def build_system_prompt(
     vocab = list(dict.fromkeys(config.global_vocabulary + mode.vocabulary))
     if vocab:
         parts.append(
-            "Vocabulary — proper nouns and jargon the user commonly says; prefer "
-            "these exact spellings when the transcript sounds like them: "
-            + ", ".join(vocab)
+            "Vocabulary — proper nouns and jargon the user commonly says. A "
+            "transcript word that sounds like one of these is almost certainly "
+            "that term — use this exact spelling: " + ", ".join(vocab)
         )
     return "\n\n".join(parts)
 
@@ -607,6 +636,29 @@ def run_gate(
     text = raw.strip()
 
     if mode.formatting == "off":
+        # Smart terminal: past a length no shell command reaches, the dictation
+        # is prose for an AI chat living in the terminal (Claude Code, codex) —
+        # verbatim mode would insert it with no punctuation at all. Route it to
+        # the LLM with a terminal-aware prompt instead. Scoped to the built-in
+        # Terminal mode only, so a user's custom formatting-off mode (or Raw)
+        # is never second-guessed.
+        if (
+            getattr(config, "smart_terminal", True)
+            and mode.name.lower() == "terminal"
+            and len(text.split()) >= SMART_TERMINAL_MIN_WORDS
+        ):
+            smart_mode = Mode(
+                name=mode.name,
+                prompt=SMART_TERMINAL_PROMPT,
+                formatting="light",
+                vocabulary=mode.vocabulary,
+                replacements=mode.replacements,
+            )
+            system_prompt = build_system_prompt(smart_mode, config, app_name, category, entities)
+            return GateResult(
+                mode, category, True, "smart_terminal",
+                _tidy_whitespace(apply_spoken_commands(scrub_fillers(text))),
+                system_prompt, replacements, entities=entities or [])
         # Regex-level tidy only: spacing + spoken newline commands + replacements.
         out = _tidy_whitespace(apply_spoken_commands(text))
         out = apply_replacements(out, replacements)

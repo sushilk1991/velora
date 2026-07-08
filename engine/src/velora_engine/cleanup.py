@@ -3,8 +3,12 @@
 - Load once; the static system-prompt prefix is prompt-cached (common-prefix
   KV cache reuse, warmed at load time).
 - Generation: temperature 0, max_tokens = max(96, int(input_tokens * 1.8)).
-- Divergence guard: output/input length ratio outside [0.55, 1.6] or empty
-  output → return raw (cleanup_applied False, reason logged).
+- Divergence guard v2 (containment-based): cleanup may DELETE words (spoken
+  self-corrections legitimately shrink the text a lot) but may never INVENT
+  them — >15% novel output tokens → reject. Length is only a backstop: a
+  hard 1.6x growth cap, plus a shrink floor that relaxes when the raw text
+  contains a retraction marker ("no no", "scratch that", …). The old flat
+  0.55 ratio floor vetoed exactly the self-corrections the model got right.
 - Hard timeout 1500ms: generation runs in a worker thread that checks its
   deadline per token; the async caller also enforces an outer bound. On
   breach, raw is returned.
@@ -14,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -26,10 +31,28 @@ TIMEOUT_MS = 1500  # base budget, for a short/normal sentence
 TIMEOUT_CEILING_MS = 6000  # hard ceiling however long the dictation
 MS_PER_WORD = 45  # generation grows ~linearly with length past the base
 BASE_WORDS = 25  # words covered by the base budget before scaling kicks in
-RATIO_MIN = 0.55
 RATIO_MAX = 1.6
+# Shrink floors (output/input length). Applying a self-correction deletes the
+# retracted words AND the correction phrase, so when the raw text carries a
+# retraction marker the output may legitimately be a small fraction of the
+# input ("…scratch all of that just tell him i'll call back" → 5 words).
+RATIO_FLOOR_DEFAULT = 0.35
+RATIO_FLOOR_RETRACTION = 0.12
+# Novel-token budget: cleanup output should be built from the input's words.
+NOVEL_FRACTION_MAX = 0.15
 MIN_MAX_TOKENS = 96
 OUTPUT_TOKEN_FACTOR = 1.8
+
+# Spoken retraction / self-repair markers. Deliberately NOT used to rewrite
+# text (the owner's steer: semantics live in the LLM prompt, not regex) — the
+# only thing a marker does is relax the guard's shrink floor so the model's
+# correct, much-shorter output isn't vetoed.
+_RETRACTION_RE = re.compile(
+    r"\b(?:no+[,.]? no+|no,? wait|wait,? no|actually|scratch (?:that|all)|"
+    r"delete (?:that|this)|i meant?|correction|forget (?:that|it)|"
+    r"let me rephrase|start over)\b",
+    re.IGNORECASE,
+)
 
 
 def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
@@ -44,17 +67,42 @@ def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
     return min(base + extra, TIMEOUT_CEILING_MS)
 
 
+def _guard_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9']+", text.lower())
+
+
 def check_divergence(raw: str, output: str) -> str | None:
-    """Anti-over-editing guard. Returns a rejection reason, or None if OK."""
+    """Anti-over-editing guard v2. Returns a rejection reason, or None if OK.
+
+    Containment first: every output token should come from the input (cleanup
+    deletes and re-punctuates; it never writes new words). Merges of up to
+    three adjacent input tokens are allowed ("6 p m" → "6pm", "auth check" →
+    "authCheck"), and small outputs get slack (≥2 novel tokens required). The
+    length ratio is only a backstop — growth capped hard, shrinkage floored
+    loosely, and floored barely at all when the raw text contains a spoken
+    retraction ("no no", "scratch that"): deleting the retracted words is the
+    correct behavior, and the old flat floor was throwing those results away.
+    """
     out = output.strip()
     if not out:
         return "empty_output"
     raw_len = max(1, len(raw.strip()))
     ratio = len(out) / raw_len
-    if ratio < RATIO_MIN:
-        return f"ratio_low({ratio:.2f})"
     if ratio > RATIO_MAX:
         return f"ratio_high({ratio:.2f})"
+    raw_tokens = _guard_tokens(raw)
+    out_tokens = _guard_tokens(out)
+    if raw_tokens and out_tokens:
+        allowed = set(raw_tokens)
+        for n in (2, 3):
+            for i in range(len(raw_tokens) - n + 1):
+                allowed.add("".join(raw_tokens[i : i + n]))
+        novel = [t for t in out_tokens if t not in allowed]
+        if len(novel) >= 2 and len(novel) / len(out_tokens) > NOVEL_FRACTION_MAX:
+            return f"novel_content({len(novel)}/{len(out_tokens)})"
+    floor = RATIO_FLOOR_RETRACTION if _RETRACTION_RE.search(raw) else RATIO_FLOOR_DEFAULT
+    if ratio < floor:
+        return f"ratio_low({ratio:.2f})"
     return None
 
 

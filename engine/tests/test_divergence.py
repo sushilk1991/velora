@@ -33,6 +33,44 @@ def test_boundary_identity_passes():
     assert check_divergence(RAW, RAW) is None
 
 
+# ---- guard v2: self-corrections may shrink, hallucinations may not ----
+
+
+def test_retraction_shrink_accepted():
+    # Applying a spoken self-correction legitimately deletes most of the text;
+    # the marker-relaxed floor must let the (correct) short output through.
+    raw = "let's meet at 3 p.m no no let's meet at 6 p.m"
+    assert check_divergence(raw, "Let's meet at 6 p.m.") is None
+
+
+def test_scratch_that_deep_shrink_accepted():
+    raw = (
+        "so i was thinking about the quarterly numbers and the hiring plan "
+        "scratch all of that just tell him i'll call back"
+    )
+    assert check_divergence(raw, "Just tell him I'll call back.") is None
+
+
+def test_deep_shrink_without_marker_rejected():
+    # No retraction anywhere → a tiny output is over-deletion, not a repair.
+    reason = check_divergence(RAW, "Meeting moved.")
+    assert reason is not None and reason.startswith("ratio_low")
+
+
+def test_novel_content_rejected():
+    # The model answering/summarizing instead of transcribing introduces words
+    # that never occurred in the input — reject even at a plausible length.
+    out = "Here is a quick summary of your dictated message for review purposes today"
+    reason = check_divergence(RAW, out)
+    assert reason is not None and reason.startswith("novel_content")
+
+
+def test_token_merges_not_novel():
+    # "6 p m" → "6pm" style merges are normal cleanup, not hallucination.
+    raw = "meet at 6 p m tomorrow and ping the auth check module afterwards"
+    assert check_divergence(raw, "Meet at 6pm tomorrow and ping the authCheck module afterwards.") is None
+
+
 # ---- whisper hallucination guard ----
 
 

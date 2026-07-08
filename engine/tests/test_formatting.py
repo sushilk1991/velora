@@ -45,15 +45,42 @@ def test_resolve_unknown_explicit_falls_through(config):
 # ---- code category → formatting off ----
 
 
-def test_terminal_mode_formatting_off(config):
-    # Terminals stay verbatim (formatting off) — a command must not be reshaped.
+def test_terminal_short_command_stays_verbatim(config):
+    # Short dictations into terminals stay verbatim — a command must not be
+    # reshaped (smart-terminal only engages past SMART_TERMINAL_MIN_WORDS).
     for bid in ("com.apple.Terminal", "com.mitchellh.ghostty", "com.googlecode.iterm2"):
-        gate = run_gate("git rebase dash dash interactive head tilde three " + LONG, config, bundle_id=bid)
+        gate = run_gate("git rebase dash dash interactive head tilde three", config, bundle_id=bid)
         assert gate.mode.name == "Terminal"
         assert gate.use_llm is False
         assert gate.reason == "formatting_off"
     assert formatting.category_for_bundle("com.googlecode.iterm2") == "code"
     assert formatting.category_for_bundle("com.google.Chrome") == "browser"
+
+
+def test_terminal_long_prose_uses_smart_llm(config):
+    # Terminals host AI chats (Claude Code): long prose there gets LLM cleanup
+    # with the terminal-aware prompt instead of landing unpunctuated.
+    gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
+    assert gate.mode.name == "Terminal"
+    assert gate.use_llm is True
+    assert gate.reason == "smart_terminal"
+    assert "terminal" in (gate.system_prompt or "").lower()
+    assert "VERBATIM" in (gate.system_prompt or "")
+
+
+def test_terminal_smart_disabled_stays_verbatim(config):
+    config.data["smart_terminal"] = False
+    gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
+    assert gate.use_llm is False
+    assert gate.reason == "formatting_off"
+
+
+def test_custom_raw_mode_never_smart_cleaned(config):
+    # Only the built-in Terminal mode opts into smart cleanup; a user's
+    # explicit Raw / formatting-off mode is never second-guessed.
+    gate = run_gate(LONG, config, explicit_mode="Raw")
+    assert gate.use_llm is False
+    assert gate.reason == "formatting_off"
 
 
 def test_first_launch_autofills_cleanup_model(home):
