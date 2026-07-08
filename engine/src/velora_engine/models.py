@@ -74,11 +74,11 @@ REGISTRY: list[ModelInfo] = [
         description="Smallest multilingual. 4-bit turbo — least disk/RAM, roughest quality.",
     ),
     ModelInfo(
-        id="mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        id="mlx-community/Qwen3.5-4B-MLX-8bit",
         kind="cleanup",
         backend="mlx-lm",
-        size="2.1 GB",
-        description="Default cleanup/formatting LLM (4-bit instruct).",
+        size="4.3 GB",
+        description="Default cleanup/formatting LLM (Qwen3.5-4B, 8-bit).",
     ),
 ]
 

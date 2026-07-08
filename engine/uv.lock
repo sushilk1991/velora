@@ -1812,6 +1812,7 @@ dependencies = [
     { name = "mlx-whisper" },
     { name = "numpy" },
     { name = "parakeet-mlx" },
+    { name = "soundfile" },
     { name = "transformers" },
 ]
 
@@ -1828,6 +1829,7 @@ requires-dist = [
     { name = "mlx-whisper", specifier = ">=0.4.3" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "parakeet-mlx", specifier = ">=0.5.2" },
+    { name = "soundfile", specifier = ">=0.12" },
     { name = "transformers", specifier = ">=5.0,<5.4" },
 ]
 

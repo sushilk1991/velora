@@ -19,7 +19,10 @@ from typing import Any
 log = logging.getLogger("velora.config")
 
 DEFAULT_STT_MODEL = "mlx-community/whisper-large-v3-turbo"
-DEFAULT_CLEANUP_MODEL = "mlx-community/Qwen3-4B-Instruct-2507-4bit"
+# Qwen3.5-4B (8-bit MLX): newer generation than Qwen3-4B, higher precision than
+# the old 4-bit build. Verified to load via stock mlx-lm and clean well
+# (~0.3-0.5s/paragraph); ~4.3 GB / more RAM is the accepted tradeoff.
+DEFAULT_CLEANUP_MODEL = "mlx-community/Qwen3.5-4B-MLX-8bit"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "stt_model": DEFAULT_STT_MODEL,
