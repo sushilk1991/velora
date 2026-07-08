@@ -204,7 +204,10 @@ final class DictationController: NSObject {
         let inserted = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let insertedWords = Set(
             inserted.lowercased().split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init))
-        guard insertedWords.count >= 1, insertedWords.count <= Self.learningMaxWords else { return }
+        guard insertedWords.count >= 1, insertedWords.count <= Self.learningMaxWords else {
+            veloraLog("Velora: learning — baseline skipped (\(insertedWords.count) words)")
+            return
+        }
         // Let the ⌘V paste settle, then grab the focused element (main thread —
         // just a couple of timeout-capped AX calls).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -212,15 +215,17 @@ final class DictationController: NSObject {
             let app = bundleID.flatMap {
                 NSRunningApplication.runningApplications(withBundleIdentifier: $0).first
             } ?? NSWorkspace.shared.frontmostApplication
-            guard let element = ScreenContext.focusedElement(of: app) else { return }
+            guard let element = ScreenContext.focusedElement(of: app) else {
+                veloraLog("Velora: learning — no focused AX element (app=\(app?.bundleIdentifier ?? "nil")), cannot watch edits")
+                return
+            }
             self.pendingLearning = (element, inserted, insertedWords)
             self.scheduleLearningRecheck()
             // Real-time: watch the field itself; edits evaluate a debounce
             // after the last keystroke instead of waiting for the 45s timer.
             self.editWatcher.onChange = { [weak self] in self?.scheduleEditEvaluation() }
-            if !self.editWatcher.watch(element) {
-                NSLog("Velora: learning — AX watch unavailable, timer fallback only")
-            }
+            let watching = self.editWatcher.watch(element)
+            veloraLog("Velora: learning — baseline set (\(insertedWords.count) words, watch=\(watching ? "live" : "timer-only"))")
         }
     }
 
@@ -277,19 +282,28 @@ final class DictationController: NSObject {
         }
         if consume { consumePendingLearning() }
         contextQueue.async { [weak self] in
-            guard let self,
-                  let edited = ScreenContext.stringValue(of: pending.element),
-                  edited != pending.inserted else { return }
+            guard let self else { return }
+            guard let edited = ScreenContext.stringValue(of: pending.element) else {
+                veloraLog("Velora: learning — field unreadable at evaluate (consume=\(consume))")
+                return
+            }
+            guard edited != pending.inserted else { return }  // untouched — nothing to learn yet
             // Scope: only when the field is close in size to what we inserted —
             // i.e. a compose box, not a document with other content. Bail early
             // (before the O(n·m) diff) so a big field can never freeze us.
             let editedWords = edited.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
             let insertedCount = pending.insertedWords.count
-            guard editedWords <= insertedCount + max(8, insertedCount) else { return }
+            guard editedWords <= insertedCount + max(8, insertedCount) else {
+                veloraLog("Velora: learning — field too large to diff (\(editedWords) vs \(insertedCount) words)")
+                return
+            }
 
             let corrections = CorrectionDiff.corrections(baseline: pending.inserted, edited: edited)
                 .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
-            guard !corrections.isEmpty else { return }
+            guard !corrections.isEmpty else {
+                veloraLog("Velora: learning — edit seen, no learnable 1:1 correction (consume=\(consume))")
+                return
+            }
             DispatchQueue.main.async {
                 if !consume {
                     // A later trigger may have consumed the baseline while we
@@ -298,8 +312,7 @@ final class DictationController: NSObject {
                     self.consumePendingLearning()
                 }
                 let committed = self.learning.observe(corrections.map { ($0.wrong, $0.right) })
-                NSLog("Velora: learning — %ld correction(s) observed, %ld committed",
-                      corrections.count, committed.count)
+                veloraLog("Velora: learning — \(corrections.count) correction(s) observed, \(committed.count) committed")
                 if let first = committed.first {
                     self.supervisor.send(["cmd": "reload_config"])
                     self.showLearnedToast(first)

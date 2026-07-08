@@ -56,10 +56,19 @@ enum CorrectionDiff {
         let r = right.trimmingCharacters(in: .punctuationCharacters)
         guard w.count >= 3, r.count >= 2, w.lowercased() != r.lowercased() else { return nil }
         guard w.allSatisfy({ $0.isLetter }), r.allSatisfy({ $0.isLetter }) else { return nil }
-        let distance = editDistance(w.lowercased(), r.lowercased())
-        // Similar enough to be a correction of the same intended word (not a
-        // wholly different word swapped in).
-        guard distance <= max(1, min(w.count, r.count) / 2) else { return nil }
+        // A misheard NAME is usually a *different-sounding* name — "Shubhi" →
+        // "Shivangi" is edit distance 5 — so the typo-shaped distance gate
+        // must not apply when both sides read as names (capitalized). The
+        // deliberate act of replacing one capitalized word with another inside
+        // text the user JUST dictated is itself the correction signal;
+        // LearningStore's stopwords still veto common capitalized words.
+        let bothNames = w.first?.isUppercase == true && r.first?.isUppercase == true
+        if !bothNames {
+            let distance = editDistance(w.lowercased(), r.lowercased())
+            // Similar enough to be a correction of the same intended word (not
+            // a wholly different word swapped in).
+            guard distance <= max(1, min(w.count, r.count) / 2) else { return nil }
+        }
         return (w, r)
     }
 

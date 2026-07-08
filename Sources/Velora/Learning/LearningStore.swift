@@ -35,6 +35,10 @@ final class LearningStore {
         "right", "write", "by", "buy", "bye", "see", "sea", "son", "sun", "new", "knew", "would",
         "wood", "week", "weak", "made", "maid", "meet", "meat", "wait", "weight", "way", "weigh",
         "accept", "except", "affect", "effect", "loose", "lose", "quiet", "quite", "cant", "can't",
+        // Sentence-starters that are always capitalized: with the name-pair
+        // distance gate relaxed, "Hello" → "Howdy" must not become a rule.
+        "hello", "hi", "hey", "okay", "ok", "yeah", "yes", "dear", "thanks", "thank", "the",
+        "this", "that", "please", "sorry",
     ]
 
     init() {
