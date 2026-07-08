@@ -220,6 +220,7 @@ struct HistorySettingsView: View {
             content
         }
         .frame(width: 580, height: SettingsTab.history.preferredHeight)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear { model.requestStatus() }
     }
 
@@ -243,8 +244,8 @@ struct HistorySettingsView: View {
             }
             .padding(.horizontal, VeloraSpacing.s)
             .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 7).fill(Color(.textBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Color(.separatorColor)))
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(.textBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separatorColor)))
 
             Button(role: .destructive) {
                 showClearConfirm = true
@@ -273,28 +274,100 @@ struct HistorySettingsView: View {
             emptyState
         } else {
             ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(vm.records, id: \.id) { record in
-                        HistoryRow(
-                            record: record,
-                            isPlaying: vm.playing == record.audioPath,
-                            isReprocessing: vm.inFlight.contains(record.id),
-                            reprocessFailed: vm.failed.contains(record.id),
-                            sttModels: model.sttEngineModels,
-                            onCopy: { vm.copy(record) },
-                            onPaste: { vm.pasteAgain(record) },
-                            onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
-                            onPlay: vm.canPlay(record) ? { vm.togglePlayback(record) } : nil,
-                            onDelete: { vm.delete(record) })
-                        .onAppear {
-                            if record.id == vm.records.last?.id { vm.loadMore() }
+                LazyVStack(alignment: .leading, spacing: VeloraSpacing.l, pinnedViews: [.sectionHeaders]) {
+                    ForEach(sections, id: \.title) { section in
+                        Section {
+                            ForEach(section.records, id: \.id) { record in
+                                HistoryCard(
+                                    record: record,
+                                    isPlaying: vm.playing == record.audioPath,
+                                    isReprocessing: vm.inFlight.contains(record.id),
+                                    reprocessFailed: vm.failed.contains(record.id),
+                                    sttModels: model.sttEngineModels,
+                                    onCopy: { vm.copy(record) },
+                                    onPaste: { vm.pasteAgain(record) },
+                                    onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
+                                    onPlay: vm.canPlay(record) ? { vm.togglePlayback(record) } : nil,
+                                    onDelete: { vm.delete(record) })
+                                .onAppear {
+                                    if record.id == vm.records.last?.id { vm.loadMore() }
+                                }
+                            }
+                        } header: {
+                            sectionHeader(section.title, count: section.records.count)
                         }
-                        Divider().padding(.leading, VeloraSpacing.m)
+                    }
+                    if vm.hasMore {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, VeloraSpacing.s)
                     }
                 }
+                .padding(.horizontal, VeloraSpacing.m)
+                .padding(.vertical, VeloraSpacing.m)
             }
         }
     }
+
+    private func sectionHeader(_ title: String, count: Int) -> some View {
+        HStack(spacing: VeloraSpacing.xs) {
+            Text(title.uppercased())
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.secondary)
+                .tracking(0.6)
+            Text("\(count)")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .padding(.horizontal, 5).padding(.vertical, 1)
+                .background(Capsule().fill(Color(.separatorColor).opacity(0.4)))
+            Spacer()
+        }
+        .padding(.vertical, VeloraSpacing.xs)
+        .padding(.horizontal, VeloraSpacing.xs)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+    }
+
+    /// Groups the loaded records (already newest-first) into date buckets,
+    /// preserving order.
+    private var sections: [DateSection] {
+        var result: [DateSection] = []
+        var index: [String: Int] = [:]
+        for record in vm.records {
+            let title = Self.bucket(for: record.timestamp)
+            if let i = index[title] {
+                result[i].records.append(record)
+            } else {
+                index[title] = result.count
+                result.append(DateSection(title: title, records: [record]))
+            }
+        }
+        return result
+    }
+
+    private struct DateSection {
+        let title: String
+        var records: [DictationRecord]
+    }
+
+    private static func bucket(for date: Date) -> String {
+        let cal = Calendar.current
+        if cal.isDateInToday(date) { return "Today" }
+        if cal.isDateInYesterday(date) { return "Yesterday" }
+        if let days = cal.dateComponents([.day], from: date, to: Date()).day, days < 7 {
+            return "Previous 7 Days"
+        }
+        if let days = cal.dateComponents([.day], from: date, to: Date()).day, days < 30 {
+            return "Previous 30 Days"
+        }
+        return Self.monthFormatter.string(from: date)
+    }
+
+    private static let monthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MMMM yyyy"
+        return f
+    }()
 
     private var emptyState: some View {
         VStack(spacing: VeloraSpacing.m) {
@@ -317,9 +390,9 @@ struct HistorySettingsView: View {
     }
 }
 
-// MARK: - Row
+// MARK: - Card
 
-private struct HistoryRow: View {
+private struct HistoryCard: View {
     let record: DictationRecord
     let isPlaying: Bool
     let isReprocessing: Bool
@@ -333,6 +406,7 @@ private struct HistoryRow: View {
 
     @State private var expanded = false
     @State private var hovering = false
+    @State private var copied = false
 
     /// Built-in modes offered in the reprocess menu (mirrors the Modes editor).
     private static let builtInModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
@@ -340,41 +414,52 @@ private struct HistoryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.s) {
             header
-            Text(record.final)
-                .font(.body)
-                .textSelection(.enabled)
-                .lineLimit(expanded ? nil : 3)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .onTapGesture { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } }
+            transcript
             if reprocessFailed {
-                Label("Reprocess failed — try again", systemImage: "exclamationmark.triangle")
+                Label("Reprocess failed — try again", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
+            Divider().opacity(hovering ? 0.5 : 0.25)
             actions
-                .opacity(hovering || isReprocessing || isPlaying || reprocessFailed ? 1 : 0.55)
         }
         .padding(VeloraSpacing.m)
-        .background(hovering ? Color(.selectedContentBackgroundColor).opacity(0.08) : .clear)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(
+                    hovering ? VeloraBrand.violet.color.opacity(0.45) : Color(.separatorColor).opacity(0.7),
+                    lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(hovering ? 0.18 : 0.06),
+                radius: hovering ? 8 : 3, x: 0, y: hovering ? 3 : 1)
+        .animation(.easeOut(duration: 0.15), value: hovering)
         .onHover { hovering = $0 }
     }
 
+    // MARK: Header
+
     private var header: some View {
         HStack(spacing: VeloraSpacing.s) {
-            if let icon = Self.appIcon(record.bundleID) {
-                Image(nsImage: icon)
-                    .resizable().frame(width: 16, height: 16)
-                    .clipShape(RoundedRectangle(cornerRadius: 3))
-            }
-            Text(record.appName ?? "Unknown app")
-                .font(.callout.weight(.medium))
-            if let mode = record.mode, !mode.isEmpty {
-                Text(mode.capitalized)
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Capsule().fill(VeloraBrand.violet.color.opacity(0.15)))
-                    .foregroundStyle(VeloraBrand.violet.color)
+            appIconTile
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: VeloraSpacing.xs) {
+                    Text(record.appName ?? "Unknown app")
+                        .font(.callout.weight(.semibold))
+                    if let mode = record.mode, !mode.isEmpty {
+                        Text(mode.capitalized)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 6).padding(.vertical, 2)
+                            .background(Capsule().fill(VeloraBrand.violet.color.opacity(0.16)))
+                            .foregroundStyle(VeloraBrand.violet.color)
+                    }
+                }
+                Text(Self.metaLine(record))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
             Spacer()
             Text(Self.relative(record.timestamp))
@@ -383,61 +468,153 @@ private struct HistoryRow: View {
         }
     }
 
-    private var actions: some View {
-        HStack(spacing: VeloraSpacing.m) {
-            iconButton("doc.on.doc", "Copy", action: onCopy)
-            iconButton("arrow.uturn.left", "Paste again", action: onPaste)
-
-            Menu {
-                Section("Speech model") {
-                    if sttModels.isEmpty {
-                        Button("Reprocess with current model") { onReprocess(nil, nil) }
-                    } else {
-                        ForEach(sttModels) { m in
-                            Button(m.displayName) { onReprocess(m.id, nil) }
-                        }
-                    }
-                }
-                Section("Mode") {
-                    ForEach(Self.builtInModes, id: \.self) { mode in
-                        Button(mode) { onReprocess(nil, mode) }
-                    }
-                }
-            } label: {
-                if isReprocessing {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Label("Reprocess", systemImage: "arrow.triangle.2.circlepath")
-                }
+    private var appIconTile: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(Color(.separatorColor).opacity(0.25))
+                .frame(width: 30, height: 30)
+            if let icon = Self.appIcon(record.bundleID) {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 20, height: 20)
+            } else {
+                Image(systemName: "waveform")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(VeloraBrand.violet.color)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(record.audioPath == nil || isReprocessing)
-            .help(record.audioPath == nil ? "No audio archived for this dictation" : "Re-run with a different model or mode")
-
-            if let onPlay {
-                iconButton(isPlaying ? "stop.fill" : "play.fill",
-                           isPlaying ? "Stop" : "Play audio", action: onPlay)
-            }
-            Spacer()
-            iconButton("trash", "Delete", role: .destructive, action: onDelete)
         }
-        .font(.callout)
     }
 
-    private func iconButton(
+    // MARK: Transcript
+
+    private var transcript: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(record.final)
+                .font(.body)
+                .textSelection(.enabled)
+                .lineLimit(expanded ? nil : 3)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if Self.isLong(record.final) {
+                Button(expanded ? "Show less" : "Show more") {
+                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(VeloraBrand.violet.color)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture {
+            guard Self.isLong(record.final) else { return }
+            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+        }
+    }
+
+    // MARK: Actions
+
+    private var actions: some View {
+        HStack(spacing: VeloraSpacing.s) {
+            actionButton(
+                copied ? "checkmark" : "doc.on.doc",
+                copied ? "Copied" : "Copy",
+                tint: copied ? Color(nsColor: .systemGreen) : nil
+            ) {
+                onCopy()
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+            }
+
+            actionButton("arrow.uturn.left", "Paste again", action: onPaste)
+
+            reprocessMenu
+
+            if let onPlay {
+                actionButton(isPlaying ? "stop.fill" : "play.fill",
+                             isPlaying ? "Stop" : "Play audio",
+                             tint: isPlaying ? VeloraBrand.violet.color : nil,
+                             action: onPlay)
+            }
+
+            Spacer()
+
+            actionButton("trash", "Delete", tint: .secondary, hoverTint: .red, action: onDelete)
+        }
+    }
+
+    private var reprocessMenu: some View {
+        Menu {
+            Section("Speech model") {
+                if sttModels.isEmpty {
+                    Button("Reprocess with current model") { onReprocess(nil, nil) }
+                } else {
+                    ForEach(sttModels) { m in
+                        Button(m.displayName) { onReprocess(m.id, nil) }
+                    }
+                }
+            }
+            Section("Mode") {
+                ForEach(Self.builtInModes, id: \.self) { mode in
+                    Button(mode) { onReprocess(nil, mode) }
+                }
+            }
+        } label: {
+            if isReprocessing {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(record.audioPath == nil ? Color.secondary.opacity(0.5) : .secondary)
+            }
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .frame(width: 22)
+        .disabled(record.audioPath == nil || isReprocessing)
+        .help(record.audioPath == nil
+              ? "No audio archived for this dictation"
+              : "Re-run with a different model or mode")
+    }
+
+    @State private var hoveredButton: String?
+
+    private func actionButton(
         _ symbol: String, _ help: String,
-        role: ButtonRole? = nil, action: @escaping () -> Void
+        tint: Color? = nil, hoverTint: Color? = nil,
+        action: @escaping () -> Void
     ) -> some View {
-        Button(role: role, action: action) {
+        let isHovered = hoveredButton == help
+        let color = isHovered ? (hoverTint ?? tint ?? .primary) : (tint ?? .secondary)
+        return Button(action: action) {
             Image(systemName: symbol)
-                .foregroundStyle(role == .destructive ? Color.red : Color.accentColor)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(color)
+                .frame(width: 22, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isHovered ? Color(.separatorColor).opacity(0.35) : .clear))
         }
         .buttonStyle(.plain)
         .help(help)
+        .onHover { hoveredButton = $0 ? help : (hoveredButton == help ? nil : hoveredButton) }
     }
 
     // MARK: Helpers
+
+    private static func isLong(_ text: String) -> Bool {
+        text.count > 140 || text.contains("\n")
+    }
+
+    private static func metaLine(_ record: DictationRecord) -> String {
+        var parts: [String] = []
+        let words = record.final.split(whereSeparator: { $0 == " " || $0 == "\n" }).count
+        parts.append("\(words) word\(words == 1 ? "" : "s")")
+        if record.durationMs > 0 {
+            parts.append(String(format: "%.1fs", Double(record.durationMs) / 1000))
+        }
+        return parts.joined(separator: " · ")
+    }
 
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()

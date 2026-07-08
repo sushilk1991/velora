@@ -34,6 +34,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 hosting = NSHostingController(rootView: AboutSettingsView())
             }
             hosting.preferredContentSize = NSSize(width: 580, height: tab.preferredHeight)
+            // A toolbar-style NSTabViewController propagates the *selected*
+            // child VC's title to the window; without one AppKit shows
+            // "Untitled". Give every tab the app name so the window title is
+            // always "Velora" regardless of the active tab.
+            hosting.title = "Velora"
 
             let item = NSTabViewItem(viewController: hosting)
             item.label = tab.title
