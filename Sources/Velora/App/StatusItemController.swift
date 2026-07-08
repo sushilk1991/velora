@@ -4,6 +4,7 @@ import Foundation
 /// Actions the menubar can trigger; implemented by the AppDelegate.
 protocol StatusItemControllerDelegate: AnyObject {
     func statusItemToggleDictation()
+    func statusItemReformatLast(mode: String)
     func statusItemOpenSettings()
     func statusItemOpenHistory()
     func statusItemOpenSetupAssistant()
@@ -127,6 +128,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
         }
 
+        // "Reformat Last as…" — re-run the most recent dictation's cleanup in a
+        // different mode and paste it back. Only when an archived clip exists.
+        if recents.first?.audioPath != nil {
+            let reformat = NSMenuItem(title: "Reformat Last as", action: nil, keyEquivalent: "")
+            let submenu = NSMenu()
+            for mode in DictationController.reformatModes {
+                let modeItem = NSMenuItem(
+                    title: mode, action: #selector(reformatLast(_:)), keyEquivalent: "")
+                modeItem.target = self
+                modeItem.representedObject = mode
+                submenu.addItem(modeItem)
+            }
+            reformat.submenu = submenu
+            menu.addItem(reformat)
+        }
+
         menu.addItem(.separator())
 
         let historyItem = NSMenuItem(
@@ -166,6 +183,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func toggleDictation() {
         delegate?.statusItemToggleDictation()
+    }
+
+    @objc private func reformatLast(_ sender: NSMenuItem) {
+        guard let mode = sender.representedObject as? String else { return }
+        delegate?.statusItemReformatLast(mode: mode)
     }
 
     @objc private func copyRecent(_ sender: NSMenuItem) {

@@ -80,6 +80,9 @@ final class DictationController: NSObject {
     /// When set, the error HUD's action button runs this instead of retrying
     /// dictation (e.g. "Open Settings" for a missing Accessibility grant).
     private var errorRetryAction: (() -> Void)?
+    /// A menubar "Reformat Last as…" round-trip in flight: the history row and
+    /// the app to paste the re-formatted result back into.
+    private var pendingReformat: (id: Int64, bundleID: String?)?
 
     init(
         supervisor: EngineSupervisor,
@@ -113,6 +116,51 @@ final class DictationController: NSObject {
             stopAndTranscribe()
         case .transcribing:
             break
+        }
+    }
+
+    // MARK: - Reformat last (menubar quick-override, off the hot path)
+
+    /// Built-in modes offered in the "Reformat Last as…" menu.
+    static let reformatModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
+
+    /// True when there's a recent dictation with archived audio to re-run.
+    var canReformatLast: Bool {
+        history.recent(limit: 1).first?.audioPath != nil
+    }
+
+    /// Re-runs the most recent dictation's cleanup under a different mode and
+    /// pastes the result back into the app it came from. Reuses the History
+    /// reprocess round-trip — never touches the live dictation hot path, so it
+    /// costs nothing per dictation (addresses the "override must stay fast"
+    /// requirement: the mode choice happens after the fact, not before cleanup).
+    func reformatLast(mode: String) {
+        guard let record = history.recent(limit: 1).first, let audio = record.audioPath else {
+            showError("No recent dictation to reformat")
+            return
+        }
+        pendingReformat = (record.id, record.bundleID)
+        var cmd: [String: Any] = ["cmd": "reprocess", "audio": audio, "id": record.id, "mode": mode]
+        if let bundleID = record.bundleID { cmd["bundle_id"] = bundleID }
+        if let appName = record.appName { cmd["app_name"] = appName }
+        supervisor.send(cmd)
+        NSLog("Velora: reformat last id=%lld as %@", record.id, mode)
+    }
+
+    /// Pastes a completed "Reformat Last as…" result back into its origin app.
+    private func applyReformat(id: Int64, raw: String, text: String, mode: String?) {
+        guard let pending = pendingReformat, pending.id == id else { return }
+        pendingReformat = nil
+        history.updateAfterReprocess(id: id, raw: raw, final: text, mode: mode)
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        inserter.copyToClipboard(text)
+        if let bundleID = pending.bundleID,
+           let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            app.activate(options: [.activateAllWindows])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.inserter.insert(text, targetBundleID: bundleID)
+            }
         }
     }
 
@@ -338,6 +386,13 @@ final class DictationController: NSObject {
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
                 mode: mode, cleanupMs: cleanupMs, audio: audio)
+
+        case .reprocessed(let id, _, let raw, let text, let mode, _, _, _, _):
+            // Only the menubar "Reformat Last as…" path is handled here; the
+            // History tab consumes its own reprocess replies via notification.
+            if let id, pendingReformat?.id == id {
+                applyReformat(id: id, raw: raw, text: text, mode: mode)
+            }
 
         case .error(let session, let message):
             // Only errors scoped to the active session may end the dictation;

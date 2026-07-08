@@ -183,6 +183,10 @@ extension AppDelegate: StatusItemControllerDelegate {
         dictation.toggleFromMenu()
     }
 
+    func statusItemReformatLast(mode: String) {
+        dictation.reformatLast(mode: mode)
+    }
+
     func statusItemOpenSettings() {
         showSettings()
     }
