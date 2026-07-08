@@ -7,12 +7,13 @@ import SwiftUI
 /// try-it completion.
 final class OnboardingModel: ObservableObject {
     enum Step: Int, CaseIterable {
-        case welcome, microphone, accessibility, hotkey, tryIt
+        case welcome, microphone, inputMonitoring, accessibility, hotkey, tryIt
     }
 
     @Published var step: Step = .welcome
     @Published var microphoneGranted = Permissions.microphoneGranted
     @Published var microphoneDenied = Permissions.microphoneDenied
+    @Published var inputMonitoringGranted = Permissions.inputMonitoringGranted
     @Published var accessibilityGranted = Permissions.accessibilityGranted
     @Published var dictationSucceeded = false
     @Published var hotkey = AppConfig.shared.hotkey {
@@ -51,11 +52,21 @@ final class OnboardingModel: ObservableObject {
     func refreshPermissions() {
         microphoneGranted = Permissions.microphoneGranted
         microphoneDenied = Permissions.microphoneDenied
+
+        let inputMonitoringNow = Permissions.inputMonitoringGranted
+        if inputMonitoringNow, !inputMonitoringGranted {
+            // The hotkey tap is starved until this grant lands; reinstall it
+            // the instant the user flips the switch, no relaunch needed.
+            veloraLog("Velora: input monitoring granted during onboarding — reinstalling hotkey")
+            NotificationCenter.default.post(name: .veloraAccessibilityGranted, object: nil)
+        }
+        inputMonitoringGranted = inputMonitoringNow
+
         let accessibilityNow = Permissions.accessibilityGranted
         if accessibilityNow, !accessibilityGranted {
             // Event taps created before the grant stay dead; tell the app to
             // reinstall the hotkey monitor immediately.
-            NSLog("Velora: accessibility granted during onboarding")
+            veloraLog("Velora: accessibility granted during onboarding")
             NotificationCenter.default.post(name: .veloraAccessibilityGranted, object: nil)
         }
         accessibilityGranted = accessibilityNow
@@ -78,6 +89,13 @@ final class OnboardingModel: ObservableObject {
         }
     }
 
+    func requestInputMonitoring() {
+        // Prompt (registers Velora in the list) then open the pane so the user
+        // can flip the switch even if the prompt was previously dismissed.
+        Permissions.requestInputMonitoring()
+        Permissions.openInputMonitoringSettings()
+    }
+
     func requestAccessibility() {
         Permissions.promptAccessibility()
         Permissions.openAccessibilitySettings()
@@ -93,9 +111,9 @@ private enum OnboardingLayout {
     static let sideMargin: CGFloat = 24
 }
 
-/// Five-step onboarding flow (design brief §4.2): welcome → microphone →
-/// accessibility → hotkey → try it. 640×520, dot page indicator, push
-/// transitions, Skip paths on every step after welcome.
+/// Six-step onboarding flow (design brief §4.2): welcome → microphone →
+/// input monitoring → accessibility → hotkey → try it. 640×520, dot page
+/// indicator, push transitions, Skip paths on every step after welcome.
 struct OnboardingView: View {
     @ObservedObject var model: OnboardingModel
 
@@ -105,6 +123,7 @@ struct OnboardingView: View {
                 switch model.step {
                 case .welcome: welcomeStep.transition(.push(from: .trailing))
                 case .microphone: microphoneStep.transition(.push(from: .trailing))
+                case .inputMonitoring: inputMonitoringStep.transition(.push(from: .trailing))
                 case .accessibility: accessibilityStep.transition(.push(from: .trailing))
                 case .hotkey: hotkeyStep.transition(.push(from: .trailing))
                 case .tryIt: tryItStep.transition(.push(from: .trailing))
@@ -180,13 +199,32 @@ struct OnboardingView: View {
             continueEnabled: model.microphoneGranted)
     }
 
+    private var inputMonitoringStep: some View {
+        permissionStep(
+            title: "Let Velora hear your hotkey",
+            card: PermissionCard(
+                symbol: "keyboard",
+                title: "Input Monitoring",
+                explanation: "Your dictation key works anywhere only if Velora may watch for key presses. Without this the hotkey stays silent — even though everything else looks fine.",
+                granted: model.inputMonitoringGranted,
+                buttonTitle: "Open Settings",
+                action: { model.requestInputMonitoring() }),
+            continueEnabled: model.inputMonitoringGranted)
+            // Fire the native "Velora would like to monitor input" prompt as
+            // soon as the step appears — this also registers Velora in the
+            // Input Monitoring list so the toggle exists when the pane opens.
+            .onAppear {
+                if !model.inputMonitoringGranted { Permissions.requestInputMonitoring() }
+            }
+    }
+
     private var accessibilityStep: some View {
         permissionStep(
             title: "Let Velora type for you",
             card: PermissionCard(
                 symbol: "accessibility",
                 title: "Accessibility",
-                explanation: "Velora types for you and listens for your hotkey — that requires the Accessibility permission.",
+                explanation: "Velora pastes the finished text into the app you're using — that requires the Accessibility permission.",
                 granted: model.accessibilityGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestAccessibility() }),

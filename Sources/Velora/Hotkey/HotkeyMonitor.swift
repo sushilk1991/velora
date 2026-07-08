@@ -165,7 +165,14 @@ final class HotkeyMonitor {
         eventTap = tap
         runLoopSource = source
         usingEventTap = true
-        NSLog("Velora: hotkey CGEvent tap installed")
+        // A listen-only keyboard tap is created successfully even WITHOUT
+        // Input Monitoring — but then receives no events (silent-dead hotkey).
+        // The NSEvent fallback needs the very same grant, so switching paths
+        // wouldn't help; instead log the grant loudly so the cause is obvious.
+        let granted = Permissions.inputMonitoringGranted
+        veloraLog(
+            "Velora: hotkey CGEvent tap installed (inputMonitoring="
+            + (granted ? "granted)" : "MISSING — hotkey stays dead until granted)"))
         return true
     }
 
@@ -269,9 +276,7 @@ final class HotkeyMonitor {
     }
 
     private func emitHotkey(down: Bool) {
-        NSLog(
-            "Velora: hotkey %@ (source=%@)",
-            down ? "down" : "up", usingEventTap ? "tap" : "nsevent")
+        veloraLog("Velora: hotkey \(down ? "down" : "up") (source=\(usingEventTap ? "tap" : "nsevent"))")
         emit(down ? { $0.hotkeyDown() } : { $0.hotkeyUp() })
     }
 

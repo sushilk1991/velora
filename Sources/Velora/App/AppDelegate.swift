@@ -46,9 +46,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.delegate = dictation
         statusController.delegate = self
 
+        veloraLog(String(
+            format: "Velora: launch — permissions mic=%@ inputMonitoring=%@ accessibility=%@; hotkey=%@ mode=%@",
+            Permissions.microphoneGranted ? "yes" : "no",
+            Permissions.inputMonitoringGranted ? "yes" : "no",
+            Permissions.accessibilityGranted ? "yes" : "no",
+            config.hotkey.displayLabel,
+            config.hotkeyMode == .toggle ? "toggle" : "hold"))
+
         statusController.install()
         contextTracker.start()
         hotkeyMonitor.start()
+        veloraLog("Velora: hotkey monitor started (usingEventTap=\(hotkeyMonitor.usingEventTap))")
         supervisor.start()
 
         hotkeyObserver = NotificationCenter.default.addObserver(
@@ -75,10 +84,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !config.onboardingComplete {
             showOnboarding()
         } else if Permissions.anyMissing {
-            NSLog(
-                "Velora: permissions missing at launch (mic=%@ accessibility=%@) — reopening setup assistant",
-                Permissions.microphoneGranted ? "yes" : "no",
-                Permissions.accessibilityGranted ? "yes" : "no")
+            veloraLog("Velora: permissions missing at launch — reopening setup assistant")
             showOnboarding(startingAt: firstMissingPermissionStep)
         }
     }
@@ -124,6 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// welcome when everything is granted.
     private var firstMissingPermissionStep: OnboardingModel.Step {
         if !Permissions.microphoneGranted { return .microphone }
+        if !Permissions.inputMonitoringGranted { return .inputMonitoring }
         if !Permissions.accessibilityGranted { return .accessibility }
         return .welcome
     }
@@ -189,7 +196,6 @@ extension AppDelegate: StatusItemControllerDelegate {
     }
 
     func statusItemCheckPermissions() {
-        let step: OnboardingModel.Step = !Permissions.microphoneGranted ? .microphone : .accessibility
-        showOnboarding(startingAt: step)
+        showOnboarding(startingAt: firstMissingPermissionStep)
     }
 }
