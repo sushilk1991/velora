@@ -340,6 +340,76 @@ class GateResult:
     system_prompt: str | None = None
     replacements: dict[str, str] = field(default_factory=dict)
     romanize: bool = False  # LLM pass is a script transliteration, not cleanup
+    entities: list[dict[str, str]] = field(default_factory=list)  # screen context
+
+
+# --- voice @-tagging (Cursor/Windsurf file tags, Slack @-mentions) ----------
+
+# "main dot py" → "main.py" (spoken extension). Bounded ext length avoids
+# eating ordinary "... dot com ..." unless it's clearly a file/handle.
+_SPOKEN_DOT = re.compile(r"\b([A-Za-z0-9_]+)\s+dot\s+([A-Za-z0-9]{1,4})\b", re.IGNORECASE)
+
+# Trigger phrases: "tag"/"tagged"/"mention" always fire; "at" is treated as a
+# trigger only when the target is filename-like or matches a known entity, so
+# ordinary speech ("look at this") is never mangled.
+_TAG_TRIGGER = re.compile(
+    r"(?<![\w@])(tag(?:ged)?|mention|at)\s+@?([A-Za-z0-9][\w./-]*)",
+    re.IGNORECASE,
+)
+
+# Categories where @-tagging is meaningful (Cursor/editors, chat @-mentions).
+_TAGGABLE = {"code", "chat"}
+
+
+def apply_tags(text: str, entities: list[dict[str, str]] | None, category: str | None) -> str:
+    """Turn spoken tag phrases into '@name' tokens the app understands.
+
+    Mirrors Wispr Flow: "tag/tagged/mention/at <name>" → "@<name>", filenames
+    resolved against the on-screen candidates (longest match first) so "at auth"
+    becomes "@authCheck.ts" when that file is open. Only runs in taggable
+    contexts (editors, chat) to avoid touching ordinary prose.
+    """
+    if category not in _TAGGABLE or not text:
+        return text
+    # Normalize spoken extensions first ("main dot py" → "main.py").
+    text = _SPOKEN_DOT.sub(r"\1.\2", text)
+
+    candidates = [
+        str(e.get("value", ""))
+        for e in (entities or [])
+        if e.get("type") in {"file", "person", "channel"} and e.get("value")
+    ]
+    # Longest candidate first so "authCheck.ts" beats a bare "auth".
+    candidates.sort(key=len, reverse=True)
+
+    def resolve(name: str) -> str:
+        low = name.lower().lstrip("@")
+        for cand in candidates:
+            cl = cand.lower()
+            if cl == low or cl.startswith(low) or low in cl:
+                return cand
+        return name.lstrip("@")
+
+    def identifier_like(s: str) -> bool:
+        # camelCase / has a digit / underscore — reads as code, not prose.
+        return any(c.isupper() or c.isdigit() or c == "_" for c in s)
+
+    def replace(match: re.Match[str]) -> str:
+        trigger, target = match.group(1), match.group(2)
+        # "at" is common in prose, so only treat it as a tag trigger when the
+        # target is unambiguously a name: has an extension, looks like code, or
+        # matches an identifier-like open file. "tag"/"mention" always fire.
+        if trigger.lower() == "at":
+            strong = (
+                "." in target
+                or identifier_like(target)
+                or any(c.lower().startswith(target.lower()) and identifier_like(c) for c in candidates)
+            )
+            if not strong:
+                return match.group(0)
+        return "@" + resolve(target)
+
+    return _TAG_TRIGGER.sub(replace, text)
 
 
 def run_gate(
@@ -362,10 +432,11 @@ def run_gate(
         # Regex-level tidy only: spacing + spoken newline commands + replacements.
         out = _tidy_whitespace(apply_spoken_commands(text))
         out = apply_replacements(out, replacements)
+        out = apply_tags(out, entities, category)
         if mode.name.lower() == "code" or category == "code":
             # A trailing period breaks shell commands; STT adds one reflexively.
             out = re.sub(r"(?<!\.)\.$", "", out)
-        return GateResult(mode, category, False, "formatting_off", out, None, replacements)
+        return GateResult(mode, category, False, "formatting_off", out, None, replacements, entities=entities or [])
 
     if is_mostly_non_latin(text):
         cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
@@ -386,16 +457,20 @@ def run_gate(
         out = scrub_fillers(apply_spoken_commands(text))
         out = _punctuation_only(out, chat_style, config.auto_punctuation)
         out = apply_replacements(out, replacements)
-        return GateResult(mode, category, False, "short_utterance", out, None, replacements)
+        out = apply_tags(out, entities, category)
+        return GateResult(mode, category, False, "short_utterance", out, None, replacements, entities=entities or [])
 
     system_prompt = build_system_prompt(mode, config, app_name, category, entities)
-    return GateResult(mode, category, True, "llm", _tidy_whitespace(scrub_fillers(text)), system_prompt, replacements)
+    return GateResult(
+        mode, category, True, "llm", _tidy_whitespace(scrub_fillers(text)),
+        system_prompt, replacements, entities=entities or [])
 
 
 def postprocess(text: str, gate: GateResult) -> str:
-    """Deterministic pass over LLM output: replacements + chat trailing period."""
+    """Deterministic pass over LLM output: replacements + tagging + chat period."""
     out = _tidy_whitespace(text)
     out = apply_replacements(out, gate.replacements)
+    out = apply_tags(out, gate.entities, gate.category)
     if _is_chat(gate.mode, gate.category):
         out = strip_chat_trailing_period(out)
     return out

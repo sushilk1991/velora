@@ -299,3 +299,38 @@ def test_entities_dedup_and_blank_skipped(config):
     entities = [{"type": "person", "value": "Alex"}, {"type": "person", "value": "Alex"}, {"type": "file", "value": ""}]
     gate = run_gate(LONG, config, bundle_id="com.apple.mail", app_name="Mail", entities=entities)
     assert gate.system_prompt.count("Alex") == 1
+
+
+# ---- voice @-tagging ----
+
+
+def test_tag_trigger_resolves_open_file():
+    from velora_engine.formatting import apply_tags
+    files = [{"type": "file", "value": "authCheck.ts"}]
+    assert apply_tags("fix the bug in tag authCheck", files, "code") == "fix the bug in @authCheck.ts"
+
+
+def test_tag_spoken_dot_extension():
+    from velora_engine.formatting import apply_tags
+    assert apply_tags("open main dot py now", [], "code") == "open main.py now"
+
+
+def test_tag_at_needs_strong_target():
+    from velora_engine.formatting import apply_tags
+    files = [{"type": "file", "value": "main.py"}]
+    # ordinary "at" prose is untouched
+    assert apply_tags("meet me at main street", files, "code") == "meet me at main street"
+    # identifier-like / dotted target tags
+    assert apply_tags("edit at main.py please", files, "code") == "edit @main.py please"
+
+
+def test_tag_mention_person_in_chat():
+    from velora_engine.formatting import apply_tags
+    people = [{"type": "person", "value": "Priya Sharma"}]
+    assert "@Priya Sharma" in apply_tags("mention Priya about this", people, "chat")
+
+
+def test_tag_only_in_taggable_categories():
+    from velora_engine.formatting import apply_tags
+    files = [{"type": "file", "value": "main.py"}]
+    assert apply_tags("tag main.py here", files, "email") == "tag main.py here"
