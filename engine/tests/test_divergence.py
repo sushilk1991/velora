@@ -65,6 +65,13 @@ def test_novel_content_rejected():
     assert reason is not None and reason.startswith("novel_content")
 
 
+def test_small_grammar_fix_not_novel():
+    # A legitimate agreement fix introduces one novel token — must pass.
+    raw = "it don't work when the user click the button twice"
+    out = "It doesn't work when the user clicks the button twice."
+    assert check_divergence(raw, out) is None
+
+
 def test_token_merges_not_novel():
     # "6 p m" → "6pm" style merges are normal cleanup, not hallucination.
     raw = "meet at 6 p m tomorrow and ping the auth check module afterwards"

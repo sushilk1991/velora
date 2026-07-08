@@ -39,7 +39,12 @@ RATIO_MAX = 1.6
 RATIO_FLOOR_DEFAULT = 0.35
 RATIO_FLOOR_RETRACTION = 0.12
 # Novel-token budget: cleanup output should be built from the input's words.
-NOVEL_FRACTION_MAX = 0.15
+# Real hallucination (answering, greeting, summarizing) introduces MANY novel
+# tokens; a small grammar/number fix ("don't"→"doesn't", "three"→"3")
+# introduces one or two. Require both a count and a fraction so short outputs
+# with a legitimate fix or two never trip.
+NOVEL_FRACTION_MAX = 0.20
+NOVEL_MIN_TOKENS = 3
 MIN_MAX_TOKENS = 96
 OUTPUT_TOKEN_FACTOR = 1.8
 
@@ -98,7 +103,7 @@ def check_divergence(raw: str, output: str) -> str | None:
             for i in range(len(raw_tokens) - n + 1):
                 allowed.add("".join(raw_tokens[i : i + n]))
         novel = [t for t in out_tokens if t not in allowed]
-        if len(novel) >= 2 and len(novel) / len(out_tokens) > NOVEL_FRACTION_MAX:
+        if len(novel) >= NOVEL_MIN_TOKENS and len(novel) / len(out_tokens) > NOVEL_FRACTION_MAX:
             return f"novel_content({len(novel)}/{len(out_tokens)})"
     floor = RATIO_FLOOR_RETRACTION if _RETRACTION_RE.search(raw) else RATIO_FLOOR_DEFAULT
     if ratio < floor:
