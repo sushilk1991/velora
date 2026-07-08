@@ -37,13 +37,18 @@ enum ScreenContext {
 
     private static func focusedWindowTitle(pid: pid_t) -> String? {
         let appElement = AXUIElementCreateApplication(pid)
+        // Bound the AX IPC: the default messaging timeout is ~6 s per call, so a
+        // beachballing target app (Xcode indexing, Electron GC) could otherwise
+        // stall dictation start. Cap both calls hard.
+        AXUIElementSetMessagingTimeout(appElement, 0.25)
         var windowRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
-            let windowRef else { return nil }
-        // Force-cast is safe: a successful copy of the focused-window attribute
-        // always yields an AXUIElement.
-        let window = windowRef as! AXUIElement  // swiftlint:disable:this force_cast
+            let windowRef,
+            // A buggy third-party AX server can return .success with a non-window
+            // CFType; verify before the cast so a bad app can't crash Velora.
+            CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
+        let window = windowRef as! AXUIElement  // checked above
         var titleRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             window, kAXTitleAttribute as CFString, &titleRef) == .success,
@@ -63,12 +68,12 @@ enum ScreenContext {
             .flatMap { $0.components(separatedBy: " - ") }
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-        guard let lead = segments.first, lead.count <= 80 else { return [] }
-        // Drop a trailing app-name segment ("… - Slack") from consideration.
-        let head = appName.map { name in
-            lead.caseInsensitiveCompare(name) == .orderedSame ? "" : lead
-        } ?? lead
-        guard !head.isEmpty else { return [] }
+        // Drop app-name segments ("Slack | #general" → keep "#general") and take
+        // the first meaningful one as the head.
+        let meaningful = segments.filter { seg in
+            appName.map { seg.caseInsensitiveCompare($0) != .orderedSame } ?? true
+        }
+        guard let head = meaningful.first, head.count <= 80 else { return [] }
 
         let entities: [ContextEntity]
         switch category {
@@ -106,15 +111,17 @@ enum ScreenContext {
     private static let siteKeywords: [(needle: String, slug: String)] = [
         ("gmail", "gmail"), ("outlook", "outlook"), ("proton", "proton"),
         ("google docs", "gdocs"), ("notion", "notion"), ("obsidian", "obsidian"),
-        ("linear", "linear"), ("github", "github"), ("gitlab", "gitlab"),
+        ("linear", "linear"),
         ("slack", "slack"), ("discord", "discord"), ("whatsapp", "whatsapp"),
         ("messenger", "messenger"),
     ]
 
-    /// Detects a known site from any title segment (usually the last one).
+    /// Detects a known site from the LAST title segment only — that's where the
+    /// web-app identifier lives ("Inbox - Gmail"). Scanning every segment let
+    /// page-content words hijack the mode ("GitHub … - YouTube").
     private static func site(in segments: [String]) -> String? {
-        let hay = segments.joined(separator: " ").lowercased()
-        for entry in siteKeywords where hay.contains(entry.needle) {
+        guard let last = segments.last?.lowercased() else { return nil }
+        for entry in siteKeywords where last.contains(entry.needle) {
             return entry.slug
         }
         return nil

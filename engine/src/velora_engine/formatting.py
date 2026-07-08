@@ -275,6 +275,7 @@ def _format_entities(entities: list[dict[str, str]] | None) -> str | None:
         "channel": "channel",
         "subject": "email subject",
         "page": "page",
+        "site": "site",
         "title": "on screen",
     }
     seen: set[str] = set()
@@ -345,15 +346,27 @@ class GateResult:
 
 # --- voice @-tagging (Cursor/Windsurf file tags, Slack @-mentions) ----------
 
-# "main dot py" → "main.py" (spoken extension). Bounded ext length avoids
-# eating ordinary "... dot com ..." unless it's clearly a file/handle.
-_SPOKEN_DOT = re.compile(r"\b([A-Za-z0-9_]+)\s+dot\s+([A-Za-z0-9]{1,4})\b", re.IGNORECASE)
+# Source-file extensions we recognize for tagging. Kept to real code/doc types
+# so "back in the dot com days" or "polka dot top" are NOT rewritten (only a
+# spoken extension in this set converts).
+_CODE_EXTS = frozenset(
+    "py ts tsx js jsx mjs cjs go rs rb java kt kts c cc cpp h hpp cs php swift m mm "
+    "md mdx json yaml yml toml txt sh bash zsh sql css scss html vue svelte xml "
+    "gradle lock cfg ini env proto graphql".split()
+)
 
-# Trigger phrases: "tag"/"tagged"/"mention" always fire; "at" is treated as a
-# trigger only when the target is filename-like or matches a known entity, so
-# ordinary speech ("look at this") is never mangled.
+# "main dot py" → "main.py", but ONLY when the extension is a known code/doc
+# type (so ordinary "... dot com ..." prose is untouched).
+_SPOKEN_DOT = re.compile(
+    r"\b([A-Za-z0-9_-]+)\s+dot\s+(" + "|".join(sorted(_CODE_EXTS)) + r")\b",
+    re.IGNORECASE,
+)
+
+# Trigger phrases. The captured target excludes trailing punctuation. Whether a
+# match actually becomes a tag is decided in `_tag_replacer` — the regex only
+# finds candidates, it never commits.
 _TAG_TRIGGER = re.compile(
-    r"(?<![\w@])(tag(?:ged)?|mention|at)\s+@?([A-Za-z0-9][\w./-]*)",
+    r"(?<![\w@])(tag(?:ged)?|mention|at)\s+@?([A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]|[A-Za-z0-9])",
     re.IGNORECASE,
 )
 
@@ -362,10 +375,12 @@ _TAGGABLE = {"code", "chat"}
 
 # Browser web-app site slug (from ScreenContext) → category, then category →
 # built-in mode name (lowercased mode-file key).
+# github/gitlab omitted on purpose: their surfaces are mostly prose (issues,
+# PR comments) — mapping them to the raw Code mode would strip cleanup. They
+# fall through to the default mode.
 _SITE_CATEGORY = {
     "gmail": "email", "outlook": "email", "proton": "email",
     "gdocs": "notes", "notion": "notes", "obsidian": "notes", "linear": "notes",
-    "github": "code", "gitlab": "code",
     "slack": "chat", "discord": "chat", "whatsapp": "chat", "messenger": "chat",
 }
 _CATEGORY_MODE = {"chat": "message", "email": "email", "notes": "note", "code": "code"}
@@ -381,17 +396,38 @@ def _site_mode(config: Config, entities: list[dict[str, str]] | None) -> tuple[M
     return (mode, category) if mode else None
 
 
+def _filename_like(target: str) -> bool:
+    """True when the token clearly names a file: a known code/doc extension.
+    Excludes times/numbers ("5.30") — the extension must be alphabetic."""
+    if "." not in target:
+        return False
+    ext = target.rsplit(".", 1)[1].lower()
+    return ext in _CODE_EXTS
+
+
+def _identifier_like(target: str) -> bool:
+    """camelCase / snake_case identifier — reads as a name, not prose. Requires
+    a letter (so pure numbers/times like '3pm', '5' never qualify) plus an
+    uppercase letter or underscore."""
+    return any(c.isalpha() for c in target) and (
+        any(c.isupper() for c in target) or "_" in target
+    )
+
+
 def apply_tags(text: str, entities: list[dict[str, str]] | None, category: str | None) -> str:
     """Turn spoken tag phrases into '@name' tokens the app understands.
 
     Mirrors Wispr Flow: "tag/tagged/mention/at <name>" → "@<name>", filenames
-    resolved against the on-screen candidates (longest match first) so "at auth"
-    becomes "@authCheck.ts" when that file is open. Only runs in taggable
-    contexts (editors, chat) to avoid touching ordinary prose.
+    resolved against the on-screen candidates (longest match first) so "tag auth"
+    becomes "@authCheck.ts" when that file is open. Conservative by design — a
+    match only becomes a tag when the target resolves to a known entity or is
+    unmistakably a filename/identifier, so ordinary prose ("don't mention it",
+    "meet at 3pm", "in the dot com days") is left untouched.
     """
     if category not in _TAGGABLE or not text:
         return text
-    # Normalize spoken extensions first ("main dot py" → "main.py").
+    # Convert spoken code extensions anywhere ("main dot py" → "main.py"); the
+    # extension whitelist keeps this off ordinary "dot com/net/org" prose.
     text = _SPOKEN_DOT.sub(r"\1.\2", text)
 
     candidates = [
@@ -399,35 +435,36 @@ def apply_tags(text: str, entities: list[dict[str, str]] | None, category: str |
         for e in (entities or [])
         if e.get("type") in {"file", "person", "channel"} and e.get("value")
     ]
-    # Longest candidate first so "authCheck.ts" beats a bare "auth".
-    candidates.sort(key=len, reverse=True)
+    candidates.sort(key=len, reverse=True)  # longest first: "authCheck.ts" > "auth"
 
-    def resolve(name: str) -> str:
-        low = name.lower().lstrip("@")
+    def resolve(target: str) -> str | None:
+        """Exact / basename / prefix match against a known candidate. No bare
+        substring matching (that turned 'it' into '@Keith')."""
+        low = target.lower().lstrip("@")
+        if len(low) < 2:
+            return None
         for cand in candidates:
             cl = cand.lower()
-            if cl == low or cl.startswith(low) or low in cl:
+            base = cl.rsplit(".", 1)[0]
+            if low in (cl, base) or (len(low) >= 3 and cl.startswith(low)):
                 return cand
-        return name.lstrip("@")
-
-    def identifier_like(s: str) -> bool:
-        # camelCase / has a digit / underscore — reads as code, not prose.
-        return any(c.isupper() or c.isdigit() or c == "_" for c in s)
+        return None
 
     def replace(match: re.Match[str]) -> str:
-        trigger, target = match.group(1), match.group(2)
-        # "at" is common in prose, so only treat it as a tag trigger when the
-        # target is unambiguously a name: has an extension, looks like code, or
-        # matches an identifier-like open file. "tag"/"mention" always fire.
-        if trigger.lower() == "at":
-            strong = (
-                "." in target
-                or identifier_like(target)
-                or any(c.lower().startswith(target.lower()) and identifier_like(c) for c in candidates)
-            )
-            if not strong:
+        trigger, target = match.group(1).lower(), match.group(2).lstrip("@")
+        resolved = resolve(target)
+        if resolved is not None:
+            # A prefix match under bare "at" is too weak (turns "at test" into a
+            # file); "at" needs an exact/basename hit or an unambiguous token.
+            if trigger == "at" and resolved.lower() not in (
+                target.lower(), resolved.lower().rsplit(".", 1)[0]
+            ) and not (_filename_like(target) or _identifier_like(target)):
                 return match.group(0)
-        return "@" + resolve(target)
+            return "@" + resolved
+        # No known candidate: only commit when the token is unmistakably a name.
+        if _filename_like(target) or _identifier_like(target):
+            return "@" + target
+        return match.group(0)
 
     return _TAG_TRIGGER.sub(replace, text)
 
@@ -444,9 +481,11 @@ def run_gate(
     mode = resolve_mode(config, bundle_id, explicit_mode)
     category = category_for_bundle(bundle_id)
     # Browser web-app refinement: a browser is one bundle id but many apps.
-    # When no mode was explicitly chosen, use the detected site (Gmail, Docs,
-    # Linear…) to pick a better category/mode than the generic default.
-    if explicit_mode is None and category == "browser":
+    # Only when the resolved mode is still the DEFAULT (no explicit choice and
+    # no user per-app binding) do we let the detected site (Gmail, Docs, Linear…)
+    # pick a better mode — never override an explicit or user-bound mode.
+    default_name = str(config.data.get("default_mode", "Default")).lower()
+    if explicit_mode is None and category == "browser" and mode.name.lower() == default_name:
         refined = _site_mode(config, entities)
         if refined is not None:
             mode, category = refined
@@ -472,13 +511,14 @@ def run_gate(
             # (Hindi → natural Hinglish). Deterministic transliteration reads
             # badly (no schwa deletion); the multilingual LLM does it well.
             return GateResult(
-                mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT, replacements, romanize=True
+                mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT,
+                replacements, romanize=True, entities=entities or [],
             )
         # Otherwise keep the native script and skip the English-tuned cleanup
         # LLM. Checked BEFORE the short-utterance path so an unspaced CJK
         # sentence doesn't get a Latin period appended.
         out = apply_replacements(cleaned, replacements)
-        return GateResult(mode, category, False, "non_latin_script", out, None, replacements)
+        return GateResult(mode, category, False, "non_latin_script", out, None, replacements, entities=entities or [])
 
     if len(text.split()) < SHORT_UTTERANCE_WORDS:
         out = scrub_fillers(apply_spoken_commands(text))

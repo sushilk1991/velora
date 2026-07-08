@@ -227,8 +227,11 @@ final class DictationController: NSObject {
             for: targetApp, category: ModeCategory.category(forBundleID: enriched.bundleID))
         sessionContext = enriched
         if !enriched.entities.isEmpty {
-            NSLog("Velora: screen context — %@",
-                  enriched.entities.map { "\($0.type)=\($0.value)" }.joined(separator: ", "))
+            // Log only types/count — never the values (subject lines, names,
+            // page titles are private and would persist in the unified log).
+            NSLog("Velora: screen context — %ld entities [%@]",
+                  enriched.entities.count,
+                  enriched.entities.map { $0.type }.joined(separator: ", "))
         }
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,

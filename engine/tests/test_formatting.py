@@ -342,7 +342,7 @@ def test_tag_only_in_taggable_categories():
 def test_browser_site_refines_mode(config):
     chrome = "com.google.Chrome"
     assert run_gate("...", config, chrome, "Chrome", None, [{"type": "site", "value": "gmail"}]).mode.name == "Email"
-    assert run_gate("...", config, chrome, "Chrome", None, [{"type": "site", "value": "github"}]).mode.name == "Code"
+    assert run_gate("...", config, chrome, "Chrome", None, [{"type": "site", "value": "github"}]).category == "browser"  # github → prose, no refine
     # unknown / no site → browser stays default
     assert run_gate("...", config, chrome, "Chrome", None, []).category == "browser"
 
@@ -350,4 +350,37 @@ def test_browser_site_refines_mode(config):
 def test_browser_site_yields_to_explicit_mode(config):
     chrome = "com.google.Chrome"
     g = run_gate("...", config, chrome, "Chrome", "Note", [{"type": "site", "value": "gmail"}])
+    assert g.mode.name == "Note"
+
+
+# ---- @-tagging false-positive guards (regression: adversarial review) ----
+
+
+def test_tag_no_false_positive_on_prose():
+    from velora_engine.formatting import apply_tags
+    files = [{"type": "file", "value": "test_utils.py"}]
+    people = [{"type": "person", "value": "Keith"}]
+    for t, ents, cat in [
+        ("don't mention it to anyone", people, "chat"),
+        ("i tagged him in the photo", people, "chat"),
+        ("let's meet at 3pm today", files, "chat"),
+        ("we wrapped at 5 in the evening", files, "chat"),
+        ("back in the dot com days", files, "chat"),
+        ("polka dot top looks nice", files, "chat"),
+        ("look at test results please", files, "code"),   # test_utils.py open
+        ("call me at 5.30 sharp", files, "chat"),
+    ]:
+        assert apply_tags(t, ents, cat) == t, f"false-positive tag on: {t!r} -> {apply_tags(t, ents, cat)!r}"
+
+
+def test_tag_spoken_dot_only_known_extension():
+    from velora_engine.formatting import apply_tags
+    assert apply_tags("open main dot py", [], "code") == "open main.py"       # known ext
+    assert apply_tags("in the dot com days", [], "chat") == "in the dot com days"  # not an ext
+
+
+def test_browser_site_respects_user_binding(config):
+    # User binds Chrome to the Note mode; a Gmail site must not override it.
+    config.modes["note"].apps.append("com.google.Chrome")
+    g = run_gate("...", config, "com.google.Chrome", "Chrome", None, [{"type": "site", "value": "gmail"}])
     assert g.mode.name == "Note"
