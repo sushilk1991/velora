@@ -477,6 +477,21 @@ def build_system_prompt(
             "transcript word that sounds like one of these is almost certainly "
             "that term — use this exact spelling: " + ", ".join(vocab)
         )
+    soft = getattr(config, "soft_corrections", None) or {}
+    if soft:
+        # Real-word mishearings the user has fixed before. Deliberately NOT a
+        # deterministic replacement (the owner's steer): "lung" in a sentence
+        # about lungs must survive — only the LLM's context call flips it.
+        pairs = "; ".join(f"'{w}' (sometimes actually {r})" for w, r in list(soft.items())[:20])
+        parts.append(
+            "Caution words — speech-to-text has previously mistaken these words "
+            "for a term the user meant: " + pairs + ". THE DEFAULT IS TO KEEP "
+            "THE WORD EXACTLY AS TRANSCRIBED. Substitute the term only when the "
+            "literal word is OUT OF PLACE in its sentence — if the sentence "
+            "reads naturally with the literal word (a real body part, a real "
+            "place), you MUST keep the original word. When unsure, keep the "
+            "original."
+        )
     return "\n\n".join(parts)
 
 

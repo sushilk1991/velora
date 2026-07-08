@@ -101,7 +101,7 @@ def _guard_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower())
 
 
-def check_divergence(raw: str, output: str) -> str | None:
+def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = None) -> str | None:
     """Anti-over-editing guard v2. Returns a rejection reason, or None if OK.
 
     Containment first: every output token should come from the input (cleanup
@@ -124,6 +124,11 @@ def check_divergence(raw: str, output: str) -> str | None:
     out_tokens = _guard_tokens(out)
     if raw_tokens and out_tokens:
         allowed = set(raw_tokens)
+        # Vocabulary/learned terms are legitimate spellings the model is TOLD
+        # to produce ("whisper flow" → "Wispr Flow", a learned soft correction
+        # to "Airlearn") — never count them as hallucinated content.
+        for term in allowed_terms or []:
+            allowed.update(_guard_tokens(term))
         for n in (2, 3):
             for i in range(len(raw_tokens) - n + 1):
                 allowed.add("".join(raw_tokens[i : i + n]))
@@ -298,6 +303,7 @@ class CleanupEngine:
         timeout_ms: int,
         check_ratio: bool = True,
         cancel_event: threading.Event | None = None,
+        allowed_terms: list[str] | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         deadline = t0 + timeout_ms / 1000.0
@@ -315,7 +321,7 @@ class CleanupEngine:
         # The divergence guard is a length-ratio over-editing check; a script
         # transliteration legitimately changes length, so skip it when romanizing.
         if check_ratio:
-            reason = check_divergence(raw, text)
+            reason = check_divergence(raw, text, allowed_terms)
             if reason is not None:
                 log.warning("cleanup divergence guard tripped (%s) — returning raw", reason)
                 return CleanupResult(raw, False, ms, reason)
@@ -330,6 +336,7 @@ class CleanupEngine:
         timeout_ms: int | None = None,
         check_ratio: bool = True,
         cancel_event: threading.Event | None = None,
+        allowed_terms: list[str] | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
@@ -348,7 +355,8 @@ class CleanupEngine:
             loop = asyncio.get_running_loop()
             return await asyncio.wait_for(
                 loop.run_in_executor(
-                    self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio, cancel_event
+                    self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio,
+                    cancel_event, allowed_terms,
                 ),
                 timeout=timeout_ms / 1000.0 + 3.0,
             )

@@ -232,6 +232,12 @@ class Config:
         merged.update({str(k): str(v) for k, v in (self.data.get("replacements") or {}).items()})
         return merged
 
+    @property
+    def soft_corrections(self) -> dict[str, str]:
+        """Context-gated learned corrections (real-word wrongs): surfaced to
+        the cleanup LLM as hints, never applied deterministically."""
+        return dict(self._learned_soft)
+
     # ---- lifecycle ----
     def reload(self) -> None:
         # 0700: ~/.velora holds transcripts (history.sqlite3), config, and the
@@ -252,9 +258,14 @@ class Config:
         """Load ~/.velora/learned.json — vocab/replacements the app taught the
         engine from the user's post-dictation edits. Kept separate from
         config.json so the app's config writes never clobber it and it survives
-        a corrupt user config."""
+        a corrupt user config.
+
+        `soft_replacements` are corrections whose WRONG side is a real word
+        ("lung" misheard for "Airlearn") — never applied deterministically;
+        they ride into the cleanup prompt as context-gated hints instead."""
         self._learned_vocab: list[str] = []
         self._learned_replacements: dict[str, str] = {}
+        self._learned_soft: dict[str, str] = {}
         path = self.home / "learned.json"
         if not path.exists():
             return
@@ -263,6 +274,9 @@ class Config:
             self._learned_vocab = [str(v) for v in data.get("vocabulary", []) or []]
             self._learned_replacements = {
                 str(k): str(v) for k, v in (data.get("replacements") or {}).items()
+            }
+            self._learned_soft = {
+                str(k): str(v) for k, v in (data.get("soft_replacements") or {}).items()
             }
         except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
             log.warning("learned.json unreadable (%s); ignoring", exc)

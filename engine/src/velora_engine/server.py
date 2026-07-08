@@ -723,7 +723,9 @@ class Engine:
                 system_prompt += (
                     "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»"
                 )
-            result = await cleanup.cleanup(seg_raw, system_prompt)
+            result = await cleanup.cleanup(
+                seg_raw, system_prompt, allowed_terms=self.config.global_vocabulary
+            )
             if result.applied:
                 return _ChunkResult(result.text, result.ms, applied=True)
             return _ChunkResult(self._deterministic_cleanup(seg_raw), result.ms)
@@ -831,7 +833,10 @@ class Engine:
                     raw, gate.system_prompt or STATIC_SYSTEM_PROMPT, timeout_ms=4000, check_ratio=False
                 )
             else:
-                result = await self.cleanup.cleanup(raw, gate.system_prompt or STATIC_SYSTEM_PROMPT)
+                result = await self.cleanup.cleanup(
+                    raw, gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    allowed_terms=self.config.global_vocabulary,
+                )
             if result.applied:
                 text = formatting.postprocess(result.text, gate)
             else:

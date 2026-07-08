@@ -682,3 +682,26 @@ def test_run_gate_tolerates_malformed_entities(config):
     g = run_gate("this is a long enough message to be cleaned up by the model now please",
                  config, "com.google.Chrome", "Chrome", None, ents)
     assert g.system_prompt is not None and "Priya" in g.system_prompt
+
+
+# ---- soft (context-gated) learned corrections ----------------------------------
+
+
+def test_soft_corrections_in_prompt_not_replacements(config, home):
+    import json as _json
+
+    (home / "learned.json").write_text(_json.dumps({
+        "replacements": {"wrold": "world"},
+        "soft_replacements": {"lung": "Airlearn"},
+        "vocabulary": ["Airlearn"],
+    }))
+    config.reload()
+    # Hard pair applies deterministically; soft pair must NOT.
+    assert config.global_replacements.get("wrold") == "world"
+    assert "lung" not in config.global_replacements
+    assert config.soft_corrections == {"lung": "Airlearn"}
+    # The soft pair rides into the LLM prompt as a context-gated hint.
+    mode = config.default_mode()
+    prompt = formatting.build_system_prompt(mode, config, None, None)
+    assert "'lung' (sometimes actually Airlearn)" in prompt
+    assert "KEEP THE WORD EXACTLY AS TRANSCRIBED" in prompt

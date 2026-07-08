@@ -25,7 +25,7 @@ class FakeCleanup:
         self.delay = delay
         self.calls: list[tuple[str, str]] = []
 
-    async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True):
+    async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True, allowed_terms=None):
         self.calls.append((raw, system_prompt))
         if self.delay:
             await asyncio.sleep(self.delay)

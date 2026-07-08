@@ -125,3 +125,13 @@ def test_guard_drops_high_compression_segments():
         ],
     }
     assert guard_whisper_result(result) == "Four score and seven years ago."
+
+
+def test_allowed_terms_not_novel():
+    # A learned/vocab spelling the model is TOLD to produce must not count as
+    # hallucinated content ("whisper flow" → "Wispr Flow"; soft correction →
+    # "Airlearn").
+    raw = "open valora and beat whisper flow then catch the lung or not with it"
+    out = "Open Velora and beat Wispr Flow, then catch the Airlearn or not with it."
+    assert check_divergence(raw, out) is not None  # without terms: 3 novel tokens
+    assert check_divergence(raw, out, ["Velora", "Wispr Flow", "Airlearn"]) is None
