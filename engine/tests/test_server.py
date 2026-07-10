@@ -143,6 +143,57 @@ async def test_setup_complete_event_is_after_ready_and_sent_once(home, fake_stt)
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
+async def test_superseded_pre_ready_client_cannot_clobber_setup_owner(home, fake_stt):
+    """Only the newest client may publish ready/setup events after a reconnect."""
+    eng = Engine(Config(), parent_pid=None)
+    allow_ready = asyncio.Event()
+    finish_setup = asyncio.Event()
+
+    async def delayed_model_setup():
+        await allow_ready.wait()
+        eng.stt_ready.set()
+        await finish_setup.wait()
+        eng.setup_complete = True
+        await eng._send_setup_complete_if_ready()
+
+    eng._load_models = delayed_model_setup
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-t-"))
+    sock = sock_dir / "e.sock"
+    task = asyncio.create_task(eng.serve(sock))
+    first = second = None
+    try:
+        for _ in range(100):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+
+        first = await connect(sock)
+        second = await connect(sock)
+        for _ in range(100):
+            if eng._client_gen == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert eng._client_gen == 2
+
+        allow_ready.set()
+        ready = await second.recv()
+        assert ready["event"] == "ready"
+        assert ready["setup_complete"] is False
+
+        finish_setup.set()
+        assert (await second.recv())["event"] == "setup_complete"
+        await second.send_json({"cmd": "ping"})
+        assert (await second.recv())["event"] == "pong"  # no stale ready frame queued
+    finally:
+        if first is not None:
+            first.close()
+        if second is not None:
+            second.close()
+        eng.shutdown.set()
+        await asyncio.wait_for(task, 5)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
 async def test_full_dictation_flow(engine):
     eng, sock = engine
     client = await connect(sock)

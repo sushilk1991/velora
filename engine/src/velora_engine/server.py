@@ -375,6 +375,12 @@ class Engine:
         log.info("client %d connected", gen)
         try:
             await self.stt_ready.wait()
+            # A newer client can replace this one while both handlers are
+            # waiting for the speech model. A superseded handler must not send
+            # its ready frame through the new client's writer or overwrite the
+            # generation that owns the later setup-complete event.
+            if gen != self._client_gen or self.writer is not writer:
+                return
             setup_complete_at_ready = self.setup_complete
             await self._send(
                 {
