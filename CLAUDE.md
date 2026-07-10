@@ -36,15 +36,22 @@ swift build -c release                       # compile (fast iteration)
 .build/release/Velora --selftest             # Swift pure-logic tests (no XCTest under CLT)
 ./scripts/make-app.sh release [level]        # package build/Velora.app (bumps VERSION)
 cp -R build/Velora.app /Applications/         # install (quit the running app first)
-./scripts/make-dmg.sh                         # optional: build/Velora-<version>.dmg
+./scripts/make-dmg.sh                         # Developer ID sign + notarize the DMG
+./scripts/verify-dmg.sh build/Velora-<version>.dmg
 ```
 
 The bundled engine re-syncs to `~/Library/Application Support/Velora/engine` on
 relaunch when the `.velora-build` stamp changes (preserves the `.venv`).
 
-Signing: a self-signed "Velora Dev Signing" identity keeps TCC grants (Mic,
-Accessibility, Input Monitoring) alive across rebuilds. Ad-hoc signing silently
-resets them. See `scripts/make-signing-cert.sh`.
+Development signing: a self-signed "Velora Dev Signing" identity keeps TCC
+grants (Mic, Accessibility, Input Monitoring) alive across rebuilds. Ad-hoc
+signing silently resets them. See `scripts/make-signing-cert.sh`.
+
+Distribution signing: `make-dmg.sh` requires a Developer ID Application
+identity, enables hardened runtime with the audio-input entitlement, signs the
+DMG, submits it using the `velora-notary` keychain profile, staples the ticket,
+and runs `verify-dmg.sh`. It fails closed rather than producing another DMG
+that downloaded users cannot open.
 
 ## Engine
 

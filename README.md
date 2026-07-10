@@ -51,13 +51,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh   # uv, for the Python engine
 # 2. Build & run
 git clone https://github.com/sushilk1991/velora
 cd velora
-make app          # builds build/Velora.app (SwiftPM release + hand-rolled bundle, self-signed)
+make app          # builds build/Velora.app (SwiftPM release + hand-rolled dev bundle)
 open build/Velora.app
 ```
 
 `make app` compiles the Swift app and bundles the Python engine; the engine's dependencies are fetched by `uv` on first launch. First launch then walks you through onboarding: microphone permission, accessibility permission (live-detected as you grant it), hotkey choice, and a try-it playground — you finish with a real dictation. The engine downloads the default models from Hugging Face on first run (~6 GB; live progress shows in the onboarding window, the menubar menu, and the HUD if you try dictating early — speech recognition unlocks first, AI cleanup a few minutes later). After that, everything is offline.
 
-Prefer not to build? Grab the notarization-pending `Velora-x.y.z.dmg` from [Releases](https://github.com/sushilk1991/velora/releases), drag Velora to Applications, and open it. Because it isn't notarized by Apple yet, the first open needs **right-click → Open** (or *System Settings → Privacy & Security → Open Anyway*).
+Prefer not to build? Grab `Velora-x.y.z.dmg` from [Releases](https://github.com/sushilk1991/velora/releases), drag Velora to Applications, and open it. Releases from v0.4.3 onward are Developer ID-signed and notarized by Apple, so they open normally through Gatekeeper. The older v0.4.1 image predates notarization and should be replaced rather than bypassed.
 
 > Run the `.app` bundle, not the bare binary — macOS permission grants (mic, accessibility) attach to the signed bundle identity.
 >
@@ -131,7 +131,6 @@ Velora is at **v1**: the full dictation loop (capture → multilingual STT → a
 
 Known limitations:
 
-- **Not notarized yet** — the app is self-signed, so on machines other than the build machine Gatekeeper shows a warning on first open (right-click → Open to bypass). Apple notarization is planned.
 - **The `.app` bundle is required for real use** — microphone and accessibility (TCC) grants attach to the signed bundle, so hotkeys and insertion won't work from a bare `swift run` binary.
 - **Batch default** — the multilingual default model transcribes on release, not live; switch to `parakeet-tdt-0.6b-v2` for streaming HUD partials (English only).
 

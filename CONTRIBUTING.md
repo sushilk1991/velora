@@ -11,13 +11,31 @@ Prerequisites: Apple Silicon Mac, macOS 14+, Command Line Tools (`xcode-select -
 ```sh
 swift build            # debug build (or: make build)
 make run               # build + run the bare binary (menubar only; no TCC-gated features)
-make app               # release build + hand-rolled, ad-hoc-signed build/Velora.app
+make app               # release build + hand-rolled, locally signed build/Velora.app
 make release           # release binary only
 make sounds            # regenerate UI sounds (start/stop/error.caf)
 make clean             # remove .build/ and build/
 ```
 
 Anything touching microphone, hotkeys, or text insertion must be exercised through `build/Velora.app` — macOS TCC grants attach to the signed bundle identity, not the bare binary.
+
+### Distribution build
+
+`make dmg` requires a Developer ID Application certificate and a one-time
+notarytool keychain profile. Store the credentials without putting the
+app-specific password in shell history:
+
+```sh
+xcrun notarytool store-credentials velora-notary \
+  --apple-id <apple-id> --team-id JZFVKGDPU4
+make dmg
+make verify-dmg DMG=build/Velora-<version>.dmg
+```
+
+The DMG build fails closed if Developer ID signing or notarization is missing
+and only moves the image to its public filename after all verification passes.
+Set `VELORA_NOTARY_PROFILE` only when using a differently named keychain
+profile.
 
 ### Python engine
 

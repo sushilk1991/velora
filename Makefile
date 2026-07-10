@@ -1,6 +1,6 @@
 # Velora — build orchestration (SwiftPM + hand-rolled .app; no Xcode).
 
-.PHONY: build release app dmg run sounds clean test
+.PHONY: build release app dmg verify-dmg run sounds clean test
 
 build:
 	swift build
@@ -13,6 +13,9 @@ app:
 
 dmg:
 	./scripts/make-dmg.sh release
+
+verify-dmg:
+	./scripts/verify-dmg.sh "$(DMG)"
 
 run: build
 	.build/debug/Velora

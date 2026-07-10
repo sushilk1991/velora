@@ -15,12 +15,11 @@
 #   bundle Info.plist as a dev fallback; the bundled engine takes precedence
 #   (set VELORA_ENGINE_DIR to override everything at runtime).
 # - UI sounds (start/stop/error.caf) generated if missing and copied in
-# - Codesigned with the "Velora Dev Signing" identity when present in the
-#   keychain (see scripts/make-signing-cert.sh) so TCC grants (Microphone,
-#   Accessibility) survive rebuilds. Falls back to ad-hoc, where every
-#   rebuild changes the signature and macOS silently stops honoring
-#   previously granted permissions — the entry in System Settings looks ON
-#   but does nothing. If you must stay ad-hoc, re-grant after every build.
+# - Development builds use the local "Velora Dev Signing" identity when
+#   present so TCC grants survive rebuilds. make-dmg.sh sets
+#   VELORA_DISTRIBUTION=1, which requires a Developer ID Application identity
+#   and signs with hardened runtime, a secure timestamp, and the microphone
+#   entitlement required by hardened apps.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,6 +28,26 @@ CONFIG="${1:-release}"
 # never reuses a version: patch for rebuilds/fixes, minor for feature rounds,
 # major for big releases, none to leave VERSION untouched (throwaway dev builds).
 BUMP="${2:-patch}"
+
+# Resolve distribution credentials before bumping the version or doing an
+# expensive build, so a missing certificate cannot leave release metadata in a
+# half-finished state.
+if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  IDENTITY="${DEVELOPER_ID_APPLICATION:-$(
+    security find-identity -v -p codesigning 2>/dev/null \
+      | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' \
+      | head -n 1
+  )}"
+  if [[ -z "$IDENTITY" ]]; then
+    echo "ERROR: distribution builds require a Developer ID Application identity" >&2
+    exit 1
+  fi
+else
+  IDENTITY="-"
+  if security find-identity -v -p codesigning 2>/dev/null | grep -q "Velora Dev Signing"; then
+    IDENTITY="Velora Dev Signing"
+  fi
+fi
 
 VERSION="$(./scripts/bump-version.sh "$BUMP")"
 # Monotonic build number for CFBundleVersion (commit count; always increases).
@@ -42,6 +61,10 @@ echo "Building Velora $VERSION (build $BUILD_NUM)"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUM" Resources/Info.plist 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" Resources/Info.plist
 
+# SwiftPM does not track the plist consumed only through the linker's
+# `-sectcreate` flag. Force one source input fresh so a version-only rebuild
+# relinks the binary instead of retaining stale embedded bundle metadata.
+touch Sources/Velora/App/main.swift
 swift build -c "$CONFIG"
 
 BIN=".build/$CONFIG/Velora"
@@ -105,21 +128,24 @@ fi
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
-# Sign with the stable dev identity when available (TCC grants survive
-# rebuilds); otherwise ad-hoc. The bundle Info.plist takes precedence over
-# the binary's __info_plist section once inside a bundle.
-IDENTITY="-"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "Velora Dev Signing"; then
-  IDENTITY="Velora Dev Signing"
+# Sign inside-out. The bundle Info.plist takes precedence over the binary's
+# __info_plist section once inside a bundle.
+SIGN_ARGS=(--force)
+APP_SIGN_ARGS=()
+if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  SIGN_ARGS+=(--sign "$IDENTITY" --options runtime --timestamp)
+  APP_SIGN_ARGS+=(--entitlements Resources/Velora.entitlements)
+  echo "Distribution signing with: $IDENTITY"
+else
+  SIGN_ARGS+=(--sign "$IDENTITY")
 fi
 # Sign the nested uv binary explicitly (Resources/ binaries are sealed as
-# resources, not nested code, so --deep alone would leave uv's original
-# signature; re-sign it before the outer seal is computed).
+# resources, not nested code; re-sign it before the outer seal is computed).
 if [[ -x "$APP/Contents/Resources/bin/uv" ]]; then
-  codesign --force --sign "$IDENTITY" "$APP/Contents/Resources/bin/uv"
+  codesign "${SIGN_ARGS[@]}" "$APP/Contents/Resources/bin/uv"
 fi
-codesign --force --deep --sign "$IDENTITY" --identifier com.velora.app "$APP"
-codesign --verify --verbose=2 "$APP"
+codesign "${SIGN_ARGS[@]}" "${APP_SIGN_ARGS[@]}" --identifier com.velora.app "$APP"
+codesign --verify --deep --strict --verbose=2 "$APP"
 [[ "$IDENTITY" == "-" ]] && echo "WARNING: ad-hoc signed — TCC grants will reset on next rebuild (run scripts/make-signing-cert.sh once to fix)"
 
 echo "OK: $APP (v$VERSION, build $BUILD_NUM)"
