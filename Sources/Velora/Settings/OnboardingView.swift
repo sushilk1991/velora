@@ -2,6 +2,19 @@ import Combine
 import Foundation
 import SwiftUI
 
+/// User-visible readiness for onboarding's first dictation. The engine can
+/// accept raw dictation before its writing model finishes, but onboarding
+/// waits for the explicit first-run setup completion signal so the guided
+/// attempt never competes with an active model download.
+struct OnboardingSetupState: Equatable {
+    let isComplete: Bool
+    let status: String?
+    let fraction: Double?
+
+    var canTryIt: Bool { isComplete && status == nil }
+    var progressFraction: Double? { fraction.map { min(0.99, max(0, $0)) } }
+}
+
 /// Onboarding state: current step, live permission status (polled — the
 /// self-updating grant flip is the premium moment, design brief §4.2), and
 /// try-it completion.
@@ -20,6 +33,9 @@ final class OnboardingModel: ObservableObject {
     /// The try-it step shows a progress card instead of a dead text field
     /// while models download.
     @Published var setupStatus: String? = EngineSupervisor.lastLoadingStatus
+    @Published var setupFraction: Double? = EngineSupervisor.lastLoadingFraction
+    @Published var setupComplete = EngineSupervisor.lastSetupComplete
+    @Published var tryItText = ""
     @Published var hotkey = AppConfig.shared.hotkey {
         didSet {
             guard hotkey != oldValue else { return }
@@ -34,6 +50,14 @@ final class OnboardingModel: ObservableObject {
     private var pollTimer: AnyCancellable?
     private var insertedObserver: NSObjectProtocol?
     private var loadingObserver: NSObjectProtocol?
+    private var setupObserver: NSObjectProtocol?
+
+    var setupState: OnboardingSetupState {
+        OnboardingSetupState(
+            isComplete: setupComplete,
+            status: setupStatus,
+            fraction: setupFraction)
+    }
 
     init() {
         // 1 s live-poll: cards flip to granted with no "I did it" button.
@@ -51,6 +75,13 @@ final class OnboardingModel: ObservableObject {
             forName: .veloraEngineLoading, object: nil, queue: .main
         ) { [weak self] note in
             self?.setupStatus = note.userInfo?["status"] as? String
+            self?.setupFraction = note.userInfo?["fraction"] as? Double
+        }
+
+        setupObserver = NotificationCenter.default.addObserver(
+            forName: .veloraEngineSetupChanged, object: nil, queue: .main
+        ) { [weak self] note in
+            self?.setupComplete = note.userInfo?["complete"] as? Bool ?? false
         }
     }
 
@@ -60,6 +91,9 @@ final class OnboardingModel: ObservableObject {
         }
         if let loadingObserver {
             NotificationCenter.default.removeObserver(loadingObserver)
+        }
+        if let setupObserver {
+            NotificationCenter.default.removeObserver(setupObserver)
         }
     }
 
@@ -278,50 +312,40 @@ struct OnboardingView: View {
     }
 
     private var tryItStep: some View {
-        stepLayout(title: "Try it") {
-            // First run: models are still downloading — show what's happening
-            // instead of a text field that mysteriously does nothing.
-            if let status = model.setupStatus {
-                VStack(spacing: VeloraSpacing.xs) {
-                    HStack(spacing: VeloraSpacing.s) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text(status)
-                            .font(.callout.weight(.medium))
-                    }
-                    Text("One-time setup — everything stays on this Mac. Dictation unlocks the moment it finishes.")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
-                .multilineTextAlignment(.center)
-                .transition(.opacity)
-            } else {
+        let setup = model.setupState
+        return stepLayout(title: setup.canTryIt ? "Try it" : "Getting Velora ready") {
+            if setup.canTryIt {
                 Text("Click into the text field, hold \(model.hotkey.displayName), and speak.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
-            }
 
-            TryItEditor()
-                .frame(width: 480, height: 160)
-                .opacity(model.setupStatus == nil ? 1 : 0.45)
+                TryItEditor(text: $model.tryItText)
+                    .frame(width: 480, height: 160)
 
-            // Fixed-height slot so the success label never shifts the layout.
-            Group {
-                if model.dictationSucceeded {
-                    Label("That's it — you're ready.", systemImage: "checkmark.circle.fill")
-                        .foregroundStyle(Color(nsColor: .systemGreen))
-                        .font(.callout.weight(.medium))
-                        .transition(.opacity)
+                // Fixed-height slot so the success label never shifts the layout.
+                Group {
+                    if model.dictationSucceeded {
+                        Label("That's it — you're ready.", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(Color(nsColor: .systemGreen))
+                            .font(.callout.weight(.medium))
+                            .transition(.opacity)
+                    }
                 }
+                .frame(height: VeloraSpacing.xl)
+            } else {
+                ModelSetupCard(state: setup)
+                    .transition(.opacity)
             }
-            .frame(height: VeloraSpacing.xl)
         } button: {
-            Button("Finish") { model.onFinish?() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!model.dictationSucceeded)
+            if setup.canTryIt {
+                Button("Finish") { model.onFinish?() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!model.dictationSucceeded)
+            }
         }
+        .animation(.easeInOut(duration: 0.25), value: setup.canTryIt)
     }
 
     // MARK: - Footer (dots + skip)
@@ -355,6 +379,49 @@ struct OnboardingView: View {
         }
         .frame(height: 44)
         .padding(.bottom, VeloraSpacing.s)
+    }
+}
+
+// MARK: - First-run model setup
+
+private struct ModelSetupCard: View {
+    let state: OnboardingSetupState
+
+    var body: some View {
+        VStack(spacing: VeloraSpacing.l) {
+            Image(systemName: "arrow.down.circle.fill")
+                .font(.system(size: 46))
+                .foregroundStyle(Color.accentColor)
+
+            VStack(spacing: VeloraSpacing.s) {
+                Text(state.status ?? "Preparing the model downloads…")
+                    .font(.system(size: 15, weight: .semibold))
+                    .multilineTextAlignment(.center)
+
+                Group {
+                    if let fraction = state.progressFraction {
+                        ProgressView(value: fraction, total: 1)
+                            .progressViewStyle(.linear)
+                    } else {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+                .frame(width: 360)
+            }
+
+            Text("Velora downloads the speech and writing models once and keeps them on this Mac. You can skip for now; setup continues in the background.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(width: 400)
+        }
+        .padding(VeloraSpacing.xl)
+        .frame(width: 480)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .strokeBorder(.quaternary, lineWidth: 1))
     }
 }
 
@@ -433,7 +500,7 @@ struct KeycapView: View {
 // MARK: - Try-it editor
 
 private struct TryItEditor: View {
-    @State private var text = ""
+    @Binding var text: String
 
     var body: some View {
         TextEditor(text: $text)

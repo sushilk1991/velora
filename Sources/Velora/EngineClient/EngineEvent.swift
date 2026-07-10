@@ -3,12 +3,18 @@ import Foundation
 /// Events emitted by velora-engine over the control channel.
 /// See docs/ARCHITECTURE.md "Wire protocol".
 enum EngineEvent {
-    /// Engine finished startup (STT model preloaded) and is ready for `start`.
-    case ready
+    /// Engine finished STT startup and is ready for `start`. `setupComplete`
+    /// snapshots whether the later writing-model setup has also finished.
+    case ready(setupComplete: Bool)
 
     /// First-run setup progress ("Downloading the speech model (1.6 GB)",
     /// fraction 0…1 when measurable). `phase == nil` clears the status.
     case loading(phase: String?, fraction: Double?)
+
+    /// Speech and writing model setup finished. Onboarding uses this stricter
+    /// signal instead of the earlier `ready` event, which intentionally makes
+    /// raw dictation available while the writing model is still downloading.
+    case setupComplete
 
     /// Streaming partial transcript (P1 HUD display; parsed but unused in P0 UI).
     case partial(session: String, text: String)
@@ -64,11 +70,13 @@ enum EngineEvent {
         let name = (object["event"] as? String) ?? (object["reply"] as? String) ?? ""
         switch name {
         case "ready":
-            return .ready
+            return .ready(setupComplete: object["setup_complete"] as? Bool ?? false)
         case "loading":
             return .loading(
                 phase: (object["phase"] as? String).flatMap { $0.isEmpty ? nil : $0 },
                 fraction: (object["fraction"] as? NSNumber)?.doubleValue)
+        case "setup_complete":
+            return .setupComplete
         case "partial":
             return .partial(
                 session: object["session"] as? String ?? "",

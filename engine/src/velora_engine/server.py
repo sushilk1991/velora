@@ -191,12 +191,18 @@ class Engine:
         # broadcast to the app so model downloads have visible UI. None when
         # nothing is loading.
         self.loading: dict[str, Any] | None = None
+        # Onboarding waits for both the speech and writing model setup. This is
+        # deliberately stricter than stt_ready, which unlocks raw dictation as
+        # soon as the speech model is usable.
+        self.setup_complete = False
         self.cleanup: CleanupEngine | None = None
         self.session: Session | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.shutdown = asyncio.Event()
         self._server: asyncio.Server | None = None
         self._client_gen = 0
+        self._ready_client_gen: int | None = None
+        self._setup_complete_sent_gen: int | None = None
         # MLX streams are thread-affine: all STT model work must run on ONE
         # dedicated thread (the cleanup LLM likewise owns its own thread).
         self._stt_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
@@ -220,6 +226,19 @@ class Engine:
         post-`ready` writing-model download finishes)."""
         self.loading = None if phase is None else {"phase": phase, "fraction": fraction}
         await self._send({"event": "loading", "phase": phase, "fraction": fraction})
+
+    async def _send_setup_complete_if_ready(self, gen: int | None = None) -> None:
+        """Send setup completion once per client, and never before `ready`."""
+        gen = self._client_gen if gen is None else gen
+        if (
+            not self.setup_complete
+            or gen != self._client_gen
+            or self._ready_client_gen != gen
+            or self._setup_complete_sent_gen == gen
+        ):
+            return
+        self._setup_complete_sent_gen = gen
+        await self._send({"event": "setup_complete"})
 
     async def _download_with_progress(self, model_id: str, what: str) -> None:
         """Run ensure_downloaded off-loop while broadcasting cache-growth
@@ -288,6 +307,11 @@ class Engine:
                 log.exception("cleanup LLM failed to load; dictations will return raw text")
                 with contextlib.suppress(Exception):
                     await self._set_loading(None)  # never leave a stale phase up
+        # Completion means no startup work remains. The writing model is an
+        # optional enhancement: its terminal failure falls back to raw text
+        # and must not strand onboarding forever after the download stops.
+        self.setup_complete = True
+        await self._send_setup_complete_if_ready()
         # First mining pass a while after startup — the loop itself re-checks
         # every skip condition (busy, LLM missing, disabled) before doing work.
         self._schedule_mining(delay=MINE_STARTUP_DELAY_S)
@@ -351,20 +375,28 @@ class Engine:
         log.info("client %d connected", gen)
         try:
             await self.stt_ready.wait()
+            setup_complete_at_ready = self.setup_complete
             await self._send(
                 {
                     "event": "ready",
                     "stt_model": self.stt.model_id,
                     "cleanup_model": self.config.cleanup_model if self.config.cleanup_enabled else None,
                     "version": __version__,
+                    "setup_complete": setup_complete_at_ready,
                 }
             )
+            self._ready_client_gen = gen
+            if setup_complete_at_ready:
+                # The ready frame already carried the completion snapshot; do
+                # not leave a redundant event queued behind it.
+                self._setup_complete_sent_gen = gen
             # Current setup phase AFTER ready: the app clears its status on
             # `ready`, so sending before would erase a post-ready writing-model
             # phase for a client that connects mid-download (review finding).
             # Pre-ready download phases tick every second anyway.
             if self.loading is not None:
                 await self._send({"event": "loading", **self.loading})
+            await self._send_setup_complete_if_ready(gen)
             while True:
                 try:
                     frame_type, payload = await protocol.read_frame(reader)
@@ -378,6 +410,8 @@ class Engine:
         except Exception:
             log.exception("client handler error")
         finally:
+            if self._ready_client_gen == gen:
+                self._ready_client_gen = None
             await self._client_cleanup(writer)
             log.info("client %d disconnected", gen)
             if self.parent_pid is not None and not _pid_alive(self.parent_pid):

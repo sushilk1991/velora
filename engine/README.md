@@ -61,7 +61,11 @@ type   = 0x01 JSON control | 0x02 raw PCM audio (16kHz mono Float32 LE)
 ```
 
 The engine accepts a single client. On connect it sends
-`{"event":"ready","stt_model":...,"version":...}` once the STT model is loaded.
+`{"event":"ready","stt_model":...,"version":...,"setup_complete":true|false}`
+once the STT model is loaded.
+First-run model work is reported as `{"event":"loading","phase":...,"fraction":...}`;
+when the ready snapshot was false, `{"event":"setup_complete"}` follows after
+both speech and writing model setup.
 
 One dictation:
 

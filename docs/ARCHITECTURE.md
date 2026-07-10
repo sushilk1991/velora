@@ -40,6 +40,13 @@ Types:
 - `0x01 JSON` — control, newline-free JSON object.
 - `0x02 AUDIO` — raw PCM chunk: 16kHz mono Float32 LE.
 
+Startup events are intentionally split: `ready` means the speech model can
+accept dictation and carries a `setup_complete` snapshot, while `loading`
+carries first-run model download phase/fraction. If the snapshot is false, a
+later `setup_complete` event marks both speech and writing model setup done.
+The app uses this completion signal only to unlock onboarding's guided first
+try; normal dictation remains available at `ready`.
+
 Control flow for one dictation:
 ```
 app → engine  {"cmd":"start","session":"uuid","context":{"bundle_id":"com.tinyspeck.slackmacgap",

@@ -26,6 +26,7 @@ enum Selftest {
         testLearningThresholds()
         testCorrectionDiff()
         testEventParsing()
+        testOnboardingSetup()
         testModeCategories()
         testVoiceCommands()
         testStreak()
@@ -33,6 +34,28 @@ enum Selftest {
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    // MARK: - Onboarding setup gate
+
+    private static func testOnboardingSetup() {
+        let downloading = OnboardingSetupState(
+            isComplete: false,
+            status: "Downloading the speech model (1.6 GB) — 42%",
+            fraction: 0.42)
+        expect(!downloading.canTryIt, "model download keeps onboarding try-it locked")
+
+        let staleDownload = OnboardingSetupState(
+            isComplete: true,
+            status: "Preparing the writing model…",
+            fraction: nil)
+        expect(!staleDownload.canTryIt, "visible model work wins over a stale completion signal")
+
+        let ready = OnboardingSetupState(isComplete: true, status: nil, fraction: nil)
+        expect(ready.canTryIt, "explicit setup completion unlocks onboarding try-it")
+
+        let oversized = OnboardingSetupState(isComplete: false, status: "Downloading", fraction: 1.7)
+        expect(oversized.progressFraction == 0.99, "onboarding progress reserves 100% for completion")
     }
 
     // MARK: - LearningStore: distance + mishearing shape
@@ -134,6 +157,13 @@ enum Selftest {
     // MARK: - EngineEvent parsing
 
     private static func testEventParsing() {
+        let ready = EngineEvent.parse(["event": "ready", "setup_complete": true])
+        if case .ready(let setupComplete) = ready {
+            expect(setupComplete, "ready event carries cached setup completion")
+        } else {
+            expect(false, "expected .ready, got \(ready)")
+        }
+
         let final = EngineEvent.parse([
             "event": "final", "session": "s1", "text": "Hello.", "cleanup_applied": true,
         ])
@@ -170,6 +200,23 @@ enum Selftest {
             // fine
         } else {
             expect(false, "unknown events must parse as .unknown")
+        }
+
+        if case .setupComplete = EngineEvent.parse(["event": "setup_complete"]) {
+            // fine
+        } else {
+            expect(false, "setup_complete event must unlock onboarding")
+        }
+
+        let loading = EngineEvent.parse([
+            "event": "loading", "phase": "Downloading the speech model", "fraction": 0.42,
+        ])
+        if case .loading(let phase, let fraction) = loading {
+            expect(
+                phase == "Downloading the speech model" && fraction == 0.42,
+                "model download phase and typed fraction parse")
+        } else {
+            expect(false, "expected .loading, got \(loading)")
         }
     }
 

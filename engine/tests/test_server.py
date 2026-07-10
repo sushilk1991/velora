@@ -75,6 +75,74 @@ async def connect(sock) -> Client:
 AUDIO = (np.sin(np.linspace(0, 100, 1600)) * 0.1).astype(np.float32)  # one 100ms chunk
 
 
+async def test_setup_complete_follows_ready(engine):
+    """Onboarding gets an explicit signal after every first-run model is ready."""
+    eng, sock = engine
+    client = await connect(sock)
+    ready = await client.recv_event("ready")
+    if not ready["setup_complete"]:
+        await client.recv_event("setup_complete")
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv())["event"] == "pong"  # no duplicate completion queued
+    client.close()
+    await client.writer.wait_closed()
+
+    reconnected = await connect(sock)
+    ready = await reconnected.recv_event("ready")
+    if not ready["setup_complete"]:
+        await reconnected.recv_event("setup_complete")
+    await reconnected.send_json({"cmd": "ping"})
+    assert (await reconnected.recv())["event"] == "pong"
+    reconnected.close()
+
+
+async def test_setup_complete_event_is_after_ready_and_sent_once(home, fake_stt):
+    """Exercise the cold path deterministically: ready(false), progress, completion."""
+    eng = Engine(Config(), parent_pid=None)
+    finish_setup = asyncio.Event()
+
+    async def delayed_model_setup():
+        await eng._set_loading("Downloading the writing model (4.8 GB)", 0.42)
+        eng.stt_ready.set()
+        await finish_setup.wait()
+        await eng._set_loading(None)
+        eng.setup_complete = True
+        await eng._send_setup_complete_if_ready()
+
+    eng._load_models = delayed_model_setup
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-t-"))
+    sock = sock_dir / "e.sock"
+    task = asyncio.create_task(eng.serve(sock))
+    try:
+        for _ in range(100):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+
+        client = await connect(sock)
+        ready = await client.recv()
+        assert ready["event"] == "ready"
+        assert ready["setup_complete"] is False
+
+        loading = await client.recv()
+        assert loading == {
+            "event": "loading",
+            "phase": "Downloading the writing model (4.8 GB)",
+            "fraction": 0.42,
+        }
+
+        finish_setup.set()
+        assert (await client.recv())["event"] == "loading"  # explicit phase clear
+        assert (await client.recv())["event"] == "setup_complete"
+        await client.send_json({"cmd": "ping"})
+        assert (await client.recv())["event"] == "pong"  # exactly one completion event
+        client.close()
+    finally:
+        eng.shutdown.set()
+        await asyncio.wait_for(task, 5)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
 async def test_full_dictation_flow(engine):
     eng, sock = engine
     client = await connect(sock)
