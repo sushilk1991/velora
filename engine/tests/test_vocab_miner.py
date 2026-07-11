@@ -284,9 +284,16 @@ async def test_engine_mines_when_idle_and_reloads_config(home, fake_stt):
             return CleanupResult("Velora", True, 3)
 
     eng.cleanup = MinerCleanup()
+    sent = []
+
+    async def capture_event(payload):
+        sent.append(payload)
+
+    eng._send = capture_event  # noqa: SLF001 — wire contract assertion
     await eng._mine_when_idle(0)  # noqa: SLF001
     assert read_state(config.home)["terms"] == ["Velora"]
     assert "Velora" in eng.config.global_vocabulary  # config reloaded live
+    assert sent == [{"event": "vocabulary_promoted", "count": 1}]
 
 
 async def test_engine_mining_skips_when_busy_or_disabled(home, fake_stt):

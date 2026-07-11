@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import ServiceManagement
 
@@ -55,12 +56,9 @@ final class SettingsModel: ObservableObject {
     private let config = AppConfig.shared
     private weak var supervisor: EngineSupervisor?
     private var statusObserver: NSObjectProtocol?
-    /// File-backed; `observe` reloads before writing, so clearing here is
-    /// respected by the DictationController's own instance.
-    private let learning = LearningStore()
-    /// File-backed like `learning`, but the engine's idle miner owns the file —
-    /// this store only lists terms and records deletions/bans.
-    private let autoVocab = AutoVocabStore()
+    let dictionary: DictionaryRepository
+    let dictionarySync: ICloudDictionarySync
+    private var dictionaryRowsObserver: AnyCancellable?
 
     /// How many spelling corrections Velora has learned (for the undo affordance).
     @Published var learnedCount = 0
@@ -72,22 +70,26 @@ final class SettingsModel: ObservableObject {
 
     /// Forgets every learned correction and reloads the engine.
     func clearLearnedCorrections() {
-        learning.clear()
-        learnedCount = 0
-        learnedEntries = []
-        supervisor?.send(["cmd": "reload_config"])
+        dictionary.clear(.learned)
+        refreshLearnedCount()
     }
 
     /// Forgets a single learned correction and reloads the engine.
     func removeLearnedCorrection(_ wrong: String) {
-        learning.remove(wrong: wrong)
+        if let row = dictionary.rows.first(where: {
+            $0.source == .learned && $0.heardAs?.caseInsensitiveCompare(wrong) == .orderedSame
+        }) {
+            dictionary.remove(id: row.id)
+        }
         refreshLearnedCount()
-        supervisor?.send(["cmd": "reload_config"])
     }
 
     /// Refreshes the learned list + count from disk (call when the view appears).
     func refreshLearnedCount() {
-        learnedEntries = learning.entries()
+        learnedEntries = dictionary.rows.compactMap { row in
+            guard row.source == .learned, let wrong = row.heardAs else { return nil }
+            return LearningStore.Entry(wrong: wrong, right: row.writeAs)
+        }
         learnedCount = learnedEntries.count
     }
 
@@ -104,10 +106,10 @@ final class SettingsModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url,
-                  let data = self.learning.exportData() else { return }
+                  let data = try? self.dictionary.exportData() else { return }
             do {
                 try data.write(to: url)
-                self.dictionaryTransferResult = "Exported \(self.learnedCount) corrections"
+                self.dictionaryTransferResult = "Exported \(self.dictionary.rows.count) entries"
             } catch {
                 self.dictionaryTransferResult = "Export failed: \(error.localizedDescription)"
             }
@@ -123,37 +125,36 @@ final class SettingsModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
-            guard let data = try? Data(contentsOf: url),
-                  let added = self.learning.importData(data) else {
+            guard let data = try? Data(contentsOf: url), self.dictionary.importData(data) else {
                 self.dictionaryTransferResult = "Import failed: not a Velora dictionary"
                 return
             }
             self.refreshLearnedCount()
-            self.supervisor?.send(["cmd": "reload_config"])
-            self.dictionaryTransferResult =
-                "Imported \(added.corrections) corrections, \(added.vocabulary) words"
+            self.dictionaryTransferResult = "Imported personal dictionary"
         }
     }
 
     /// Refreshes the auto-learned vocab list from disk (call when the view
     /// appears — the engine's miner may have added terms since last look).
     func refreshAutoVocab() {
-        autoVocabTerms = autoVocab.terms()
+        autoVocabTerms = dictionary.rows.filter { $0.source == .automatic }.map(\.writeAs)
     }
 
     /// Deletes one auto-learned term (banned from re-learning) and reloads the
     /// engine so its vocabulary drops the term immediately.
     func removeAutoVocabTerm(_ term: String) {
-        autoVocab.remove(term)
+        if let row = dictionary.rows.first(where: {
+            $0.source == .automatic && $0.writeAs.caseInsensitiveCompare(term) == .orderedSame
+        }) {
+            dictionary.remove(id: row.id)
+        }
         refreshAutoVocab()
-        supervisor?.send(["cmd": "reload_config"])
     }
 
     /// Forgets every auto-learned term (all banned) and reloads the engine.
     func clearAutoVocab() {
-        autoVocab.clear()
-        autoVocabTerms = []
-        supervisor?.send(["cmd": "reload_config"])
+        dictionary.clear(.auto)
+        refreshAutoVocab()
     }
 
     /// Models advertised by the running engine (from the `status` reply). Empty
@@ -189,8 +190,14 @@ final class SettingsModel: ObservableObject {
         supervisor?.send(["cmd": "set_model", "model": id, "kind": "cleanup"])
     }
 
-    init(supervisor: EngineSupervisor?) {
+    init(
+        supervisor: EngineSupervisor?,
+        dictionary: DictionaryRepository,
+        dictionarySync: ICloudDictionarySync
+    ) {
         self.supervisor = supervisor
+        self.dictionary = dictionary
+        self.dictionarySync = dictionarySync
         launchAtLogin = Self.launchAtLoginEnabled
         hotkey = config.hotkey
         hotkeyMode = config.hotkeyMode
@@ -207,7 +214,7 @@ final class SettingsModel: ObservableObject {
         smartTerminal = config.smartTerminal
         sttModel = config.sttModel
         saveAudio = config.saveAudio
-        learnedCount = learning.count
+        learnedCount = dictionary.rows.filter { $0.source == .learned }.count
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
         // lands (the engine owns this key; status refreshes it).
@@ -217,6 +224,10 @@ final class SettingsModel: ObservableObject {
             forName: .veloraEngineStatus, object: nil, queue: .main
         ) { [weak self] note in
             self?.applyStatus(note.userInfo?["payload"] as? [String: Any])
+        }
+        dictionaryRowsObserver = dictionary.$rows.sink { [weak self] _ in
+            self?.refreshLearnedCount()
+            self?.refreshAutoVocab()
         }
         requestStatus()
     }

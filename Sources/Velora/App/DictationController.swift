@@ -60,6 +60,7 @@ final class DictationController: NSObject {
     private let history: HistoryStore
     private let sounds: SoundPlayer
     private let supervisor: EngineSupervisor
+    private let dictionary: DictionaryRepository
 
     private(set) var phase: Phase = .idle {
         didSet {
@@ -110,7 +111,6 @@ final class DictationController: NSObject {
     private let contextQueue = DispatchQueue(label: "com.velora.context", qos: .userInitiated)
     /// Learning loop: what we last inserted, so a later edit can be diffed into
     /// a learned correction.
-    private let learning = LearningStore()
     private var pendingLearning: (element: AXUIElement, inserted: String, insertedWords: Set<String>)?
     /// Deferred re-check: `checkPendingLearning` normally runs when the NEXT
     /// dictation starts, so an edit made after the *last* dictation of a sitting
@@ -136,13 +136,15 @@ final class DictationController: NSObject {
         contextTracker: AppContextTracker,
         hud: HUDPanel,
         history: HistoryStore,
-        sounds: SoundPlayer
+        sounds: SoundPlayer,
+        dictionary: DictionaryRepository
     ) {
         self.supervisor = supervisor
         self.contextTracker = contextTracker
         self.hud = hud
         self.history = history
         self.sounds = sounds
+        self.dictionary = dictionary
         super.init()
         hud.model.onRetry = { [weak self] in self?.retryFromError() }
         // Successful device-change recovery is silent (capture rebuilds and the
@@ -356,10 +358,10 @@ final class DictationController: NSObject {
                     guard self.pendingLearning?.inserted == pending.inserted else { return }
                     self.consumePendingLearning()
                 }
-                let committed = self.learning.observe(corrections.map { ($0.wrong, $0.right) })
+                let committed = self.dictionary.observeCorrections(
+                    corrections.map { ($0.wrong, $0.right) })
                 veloraLog("Velora: learning — \(corrections.count) correction(s) observed, \(committed.count) committed")
                 if let first = committed.first {
-                    self.supervisor.send(["cmd": "reload_config"])
                     self.showLearnedToast(first)
                 }
             }

@@ -12,6 +12,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let sounds = SoundPlayer()
 
     private var history: HistoryStore!
+    private var dictionary: DictionaryRepository!
+    private var dictionarySync: ICloudDictionarySync!
     private var dictation: DictationController!
     private var transcriber: FileTranscriber!
     private var statusController: StatusItemController!
@@ -31,6 +33,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.writeEngineConfigIfMissing()
 
         history = HistoryStore()
+        dictionary = DictionaryRepository(reload: { [weak self] in
+            self?.supervisor.send(["cmd": "reload_config"])
+        })
+        dictionarySync = ICloudDictionarySync(repository: dictionary)
         // Transcript text is tiny and kept indefinitely; only the audio archive
         // expires (the engine prunes clips). Play just disables when a row's
         // clip has aged out. `pruneOlderThan` stays available for a future
@@ -40,7 +46,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             contextTracker: contextTracker,
             hud: hud,
             history: history,
-            sounds: sounds)
+            sounds: sounds,
+            dictionary: dictionary)
         statusController = StatusItemController(history: history)
         transcriber = FileTranscriber(
             supervisor: supervisor, hud: hud,
@@ -71,6 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.start()
         veloraLog("Velora: hotkey monitor started (usingEventTap=\(hotkeyMonitor.usingEventTap))")
         supervisor.start()
+        dictionarySync.start()
 
         hotkeyObserver = NotificationCenter.default.addObserver(
             forName: .veloraHotkeyChanged, object: nil, queue: .main
@@ -111,6 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         dictation?.cancel()
+        dictionarySync?.stop()
         hotkeyMonitor.stop()
         contextTracker.stop()
         supervisor.stop()
@@ -144,7 +153,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showSettings(selecting tab: SettingsTab? = nil) {
         if settingsController == nil {
-            settingsController = SettingsWindowController(supervisor: supervisor, history: history)
+            settingsController = SettingsWindowController(
+                supervisor: supervisor,
+                history: history,
+                dictionary: dictionary,
+                dictionarySync: dictionarySync)
         }
         settingsController?.show(selecting: tab)
     }
@@ -181,6 +194,9 @@ extension AppDelegate: EngineSupervisorDelegate {
     }
 
     func engineSupervisor(_ supervisor: EngineSupervisor, didReceive event: EngineEvent) {
+        if case .vocabularyPromoted = event {
+            dictionary.captureAutoVocabulary()
+        }
         dictation.handleEngineEvent(event)
         transcriber.handle(event)
     }

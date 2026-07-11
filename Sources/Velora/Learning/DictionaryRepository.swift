@@ -189,6 +189,15 @@ final class DictionaryRepository: ObservableObject {
 
     /// Pull newly committed edit-learning into canonical state. This is called
     /// after DictationController observes an edit and again at launch.
+    @discardableResult
+    func observeCorrections(
+        _ corrections: [(wrong: String, right: String)]
+    ) -> [(wrong: String, right: String)] {
+        let committed = learning.observe(corrections)
+        if !committed.isEmpty { captureLearning() }
+        return committed
+    }
+
     func captureLearning() {
         let snapshot = learning.portableSnapshot()
         var next = document

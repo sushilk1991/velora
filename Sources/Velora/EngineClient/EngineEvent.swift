@@ -16,6 +16,10 @@ enum EngineEvent {
     /// raw dictation available while the writing model is still downloading.
     case setupComplete
 
+    /// The idle miner promoted confirmed vocabulary. Carries a count only;
+    /// Swift reads the allow-listed terms from the local projection file.
+    case vocabularyPromoted(count: Int)
+
     /// Display-only streaming transcript used by the fixed live HUD.
     case partial(session: String, text: String)
 
@@ -77,6 +81,9 @@ enum EngineEvent {
                 fraction: (object["fraction"] as? NSNumber)?.doubleValue)
         case "setup_complete":
             return .setupComplete
+        case "vocabulary_promoted":
+            return .vocabularyPromoted(
+                count: (object["count"] as? NSNumber)?.intValue ?? 0)
         case "partial":
             return .partial(
                 session: object["session"] as? String ?? "",

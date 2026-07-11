@@ -33,6 +33,7 @@ enum Selftest {
         testDictionaryRepositoryMigration()
         testDictionaryRepositoryCRUD()
         testDictionaryRepositoryRemoteMerge()
+        testDictionaryRepositoryCapturesLearning()
         testDictionarySyncAvailabilityAndPublish()
         testDictionarySyncMergeAndCorruption()
         testDictionarySyncAccountBoundary()
@@ -569,6 +570,34 @@ enum Selftest {
         importedFixture.remove()
     }
 
+    private static func testDictionaryRepositoryCapturesLearning() {
+        let fixture = DictionaryRepositoryFixture()
+        var reloads = 0
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "mac-a",
+            now: { Date(timeIntervalSince1970: 100) },
+            reload: { reloads += 1 })
+        let committed = repository.observeCorrections([("velor", "Velora")])
+        expect(committed.count == 1, "repository owns edit-learning observation")
+        expect(repository.rows.contains(where: {
+            $0.writeAs == "Velora" && $0.source == .learned
+        }), "committed edit-learning is captured while Settings is closed")
+        expect(reloads == 1, "captured edit-learning projects before one reload")
+
+        AutoVocabStore(url: fixture.auto).applyPortableSnapshot(
+            .init(terms: ["BackgroundTerm"], banned: []))
+        repository.captureAutoVocabulary()
+        expect(repository.rows.contains(where: {
+            $0.writeAs == "BackgroundTerm" && $0.source == .automatic
+        }), "background miner promotion is captured while Settings is closed")
+        expect(reloads == 2, "captured miner promotion projects before one reload")
+        fixture.remove()
+    }
+
     private final class FakeDictionarySyncTransport: DictionarySyncTransport {
         var identityResult: Result<String, DictionarySyncTransportError> = .success("account-a")
         var versionsResult: Result<[Data], DictionarySyncTransportError> = .success([])
@@ -833,6 +862,14 @@ enum Selftest {
             // fine
         } else {
             expect(false, "setup_complete event must unlock onboarding")
+        }
+
+        if case .vocabularyPromoted(let count) = EngineEvent.parse([
+            "event": "vocabulary_promoted", "count": 3,
+        ]) {
+            expect(count == 3, "vocabulary promotion event carries only a count")
+        } else {
+            expect(false, "vocabulary promotion event must parse")
         }
 
         let loading = EngineEvent.parse([

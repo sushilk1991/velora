@@ -1291,6 +1291,10 @@ class Engine:
                     # Counts only — never term values — in the log.
                     self.config.reload()
                     log.info("vocab mining added %d terms", self._miner.last_step_new_terms)
+                    await self._send({
+                        "event": "vocabulary_promoted",
+                        "count": self._miner.last_step_new_terms,
+                    })
                 if not more:
                     return
         except Exception:  # noqa: BLE001 — idle work must never break the engine

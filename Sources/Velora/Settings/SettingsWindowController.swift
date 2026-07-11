@@ -7,8 +7,16 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
     private let tabController: NSTabViewController
 
-    init(supervisor: EngineSupervisor?, history: HistoryStore) {
-        model = SettingsModel(supervisor: supervisor)
+    init(
+        supervisor: EngineSupervisor?,
+        history: HistoryStore,
+        dictionary: DictionaryRepository,
+        dictionarySync: ICloudDictionarySync
+    ) {
+        model = SettingsModel(
+            supervisor: supervisor,
+            dictionary: dictionary,
+            dictionarySync: dictionarySync)
 
         let tabController = NSTabViewController()
         tabController.tabStyle = .toolbar
