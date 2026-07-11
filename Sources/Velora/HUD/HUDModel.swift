@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// HUD capsule states (design brief §1.2). One capsule morphs between them;
+/// HUD card states. One surface morphs between them;
 /// `hidden` carries an exit style because success and cancel dismiss with
 /// different animations ("success bounces, cancellation doesn't").
 enum HUDState: Equatable {
@@ -113,7 +113,7 @@ final class HUDModel: ObservableObject {
     /// begins; the chip is simply absent then).
     @Published var sessionContext: HUDSessionContext?
     /// Useful whole-word phrase selected from the running partial. Empty until
-    /// the first partial — the HUD never shows placeholder text.
+    /// the first partial, while the view displays its listening placeholder.
     @Published private(set) var transcriptTail = ""
     /// Whole words shared by the previous and newest partial. The HUD renders
     /// this prefix at full contrast so settled words stop visually flickering.
@@ -144,8 +144,8 @@ final class HUDModel: ObservableObject {
 
     /// Feeds a streaming partial transcript into the live-transcript tail.
     ///
-    /// Growth is monotonic from the HUD's perspective: empty partials are
-    /// ignored so the pill never flash-clears between engine updates.
+    /// Empty partials are ignored so the card never flash-clears between
+    /// engine updates.
     func updatePartial(_ text: String) {
         let flattened = text
             .replacingOccurrences(of: "\n", with: " ")
@@ -165,19 +165,15 @@ final class HUDModel: ObservableObject {
     }
 }
 
-/// Ring buffer of recent loudness levels plus per-frame asymmetric smoothing
-/// state (design brief §2), arranged center-out: the newest level renders at
-/// the strip's vertical midline and flows outward toward both edges, so the
-/// 24 visible bars are mirror-symmetric (Siri-like) — 12 unique heights.
+/// Twelve-band spectrum state plus per-frame asymmetric smoothing. The compact
+/// HUD samples these low→high targets into its seven mirrored visible bars.
 ///
 /// `push` happens on the main queue (audio level callback); `displayHeights`
 /// is called from the Canvas draw closure each frame (also main). The lock
 /// guards against any off-main access without imposing structure on callers.
 final class WaveformLevelStore {
-    /// Visible bars (mirrored pairs around the center).
-    static let barCount = 24
-    /// Unique levels: one per mirrored pair.
-    static let halfCount = barCount / 2
+    /// Kept as `halfCount` because AudioCapture uses it as its FFT band count.
+    static let halfCount = 12
 
     private let lock = NSLock()
     /// Index 0 = center bars (LOW frequency) … `halfCount - 1` = outer edge

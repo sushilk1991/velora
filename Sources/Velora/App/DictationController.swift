@@ -856,9 +856,9 @@ final class DictationController: NSObject {
         }
     }
 
-    /// Inserted state holds 600 ms after the 150 ms flash + morph, then hides.
+    /// Keep the compact Copied confirmation readable before it fades.
     private func scheduleInsertedHide() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15 + 0.6) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self] in
             guard let self, self.hud.model.state == .inserted else { return }
             self.hud.model.recordingStart = nil
             self.hud.transition(to: .hidden(.success))

@@ -1,74 +1,56 @@
 import SwiftUI
 
-/// 24-bar live waveform (design brief §2, HUD 2.0 visual language).
-///
-/// Bars are mirrored center-out around the vertical midline (Siri-like):
-/// the newest level renders at the two center bars and flows outward. One
-/// `Canvas` inside `TimelineView(.animation)` — redrawn while active and
-/// paused while hidden, with zero per-bar SwiftUI views. Bars: 3 pt wide,
-/// 2 pt gap (5 pt pitch), corner
-/// radius 1.5 pt, heights 4…32 pt inside a fixed 120×32 pt strip, tinted
-/// with a subtle brand indigo→violet gradient (`VeloraBrand.barColor`).
+/// Seven compact spectrum bars. The single Canvas avoids per-bar SwiftUI
+/// updates, and its timeline is paused whenever the recording HUD is hidden.
 struct WaveformView: View {
     let levels: WaveformLevelStore
-    /// True in the transcribing state: bars settle to 4 pt + shimmer sweep.
+    /// During finalization the bars settle to their quiet floor.
     let settle: Bool
-    /// Success flash: bars tint green for 150 ms before the circle morph.
-    let flashGreen: Bool
-    /// Hidden HUDs keep this view in the SwiftUI tree for smooth transitions;
-    /// pausing the schedule prevents an invisible 60 fps display loop.
+    /// Hidden views stay mounted for state morphs; this stops invisible redraws.
     let active: Bool
 
     @Environment(\.colorScheme) private var colorScheme
 
     static let strip = HUDGeometry.waveformSize
+    private static let barCount = 7
+    private static let barWidth: CGFloat = 2.5
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 24.0, paused: !active)) { timeline in
             Canvas { context, size in
-                let t = timeline.date.timeIntervalSinceReferenceDate
-                let heights = levels.displayHeights(settle: settle, time: t)
+                let time = timeline.date.timeIntervalSinceReferenceDate
+                let heights = levels.displayHeights(settle: settle, time: time)
+                guard !heights.isEmpty else { return }
 
-                // Shimmer: a 60 pt-wide highlight sweeping the strip every
-                // 1.2 s (easeInOut), rendered as a per-bar brightness boost.
-                var shimmerCenter: CGFloat = -1000
-                if settle {
-                    let phase = (t / 1.2).truncatingRemainder(dividingBy: 1.0)
-                    let eased = phase < 0.5
-                        ? 2 * phase * phase
-                        : 1 - pow(-2 * phase + 2, 2) / 2
-                    shimmerCenter = -30 + CGFloat(eased) * (size.width + 60)
-                }
+                let gaps = CGFloat(Self.barCount - 1)
+                let gap = max(0, (size.width - Self.barWidth * CGFloat(Self.barCount)) / gaps)
+                let center = Self.barCount / 2
+                let darkMode = colorScheme == .dark
 
-                let dark = colorScheme == .dark
-                let baseOpacity = dark ? 0.9 : 0.75
-                let barCount = WaveformLevelStore.barCount
+                for index in 0..<Self.barCount {
+                    // The existing store is center→edge (low→high frequency).
+                    // Sample it symmetrically so this compact mark still reads
+                    // as a waveform instead of a tiny one-sided equalizer.
+                    let distance = abs(index - center)
+                    let sourceIndex = min(
+                        heights.count - 1,
+                        distance * max(1, heights.count - 1) / center)
+                    let barHeight = min(max(heights[sourceIndex], 3), size.height)
+                    let x = CGFloat(index) * (Self.barWidth + gap)
+                    let rect = CGRect(
+                        x: x,
+                        y: (size.height - barHeight) / 2,
+                        width: Self.barWidth,
+                        height: barHeight)
 
-                for i in 0..<barCount {
-                    // Mirror around the midline: bars 11 and 12 are the two
-                    // center (newest) bars; the edges carry the oldest levels.
-                    let centerDistance = i < WaveformLevelStore.halfCount
-                        ? (WaveformLevelStore.halfCount - 1 - i)
-                        : (i - WaveformLevelStore.halfCount)
-                    let x = CGFloat(i) * 5
-                    let h = min(max(heights[centerDistance], 2), size.height)
-                    let rect = CGRect(x: x, y: (size.height - h) / 2, width: 3, height: h)
-
-                    var opacity = baseOpacity
-                    if settle {
-                        let barCenter = x + 1.5
-                        let d = (barCenter - shimmerCenter) / 30  // 60 pt window
-                        let boost = exp(-d * d * 2)
-                        opacity = min(1.0, baseOpacity * 0.55 + boost * 0.6)
-                    }
-
-                    let color: Color = flashGreen
-                        ? Color(nsColor: .systemGreen)
+                    let color = settle
+                        ? Color.primary.opacity(darkMode ? 0.30 : 0.24)
                         : VeloraBrand.barColor(
-                            fraction: Double(i) / Double(barCount - 1), darkMode: dark)
+                            fraction: Double(index) / Double(Self.barCount - 1),
+                            darkMode: darkMode).opacity(darkMode ? 0.92 : 0.78)
                     context.fill(
-                        Path(roundedRect: rect, cornerRadius: 1.5),
-                        with: .color(color.opacity(opacity)))
+                        Path(roundedRect: rect, cornerRadius: Self.barWidth / 2),
+                        with: .color(color))
                 }
             }
         }

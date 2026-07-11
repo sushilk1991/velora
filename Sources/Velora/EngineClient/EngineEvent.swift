@@ -16,7 +16,7 @@ enum EngineEvent {
     /// raw dictation available while the writing model is still downloading.
     case setupComplete
 
-    /// Streaming partial transcript (P1 HUD display; parsed but unused in P0 UI).
+    /// Display-only streaming transcript used by the fixed live HUD.
     case partial(session: String, text: String)
 
     /// Raw transcript available (before LLM cleanup).

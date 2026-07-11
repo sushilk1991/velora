@@ -8,9 +8,8 @@ import SwiftUI
 /// Spaces, never takes focus, and ignores mouse events except in the error
 /// state (which shows a Retry button).
 final class HUDPanel {
-    /// Host size: the largest two-row capsule plus room for
-    /// the 20 pt shadow and the ±12 pt entrance offset so nothing clips.
-    static let panelSize = NSSize(width: 480, height: 160)
+    /// Fixed recording card plus room for its soft shadow and entrance offset.
+    static let panelSize = NSSize(width: 408, height: 132)
 
     let model = HUDModel()
 
@@ -106,24 +105,24 @@ final class HUDPanel {
         let visible = screen.visibleFrame
         let centerX = visible.midX - Self.panelSize.width / 2
 
-        // The capsule is vertically centered in the panel.
-        let capsuleInset = (Self.panelSize.height - HUDGeometry.expandedListeningHeight) / 2
+        // The recording card is vertically centered in the panel.
+        let cardInset = (Self.panelSize.height - HUDGeometry.recordingHeight) / 2
         let origin: NSPoint
         switch AppConfig.shared.hudPosition {
         case .bottomCenter:
-            origin = NSPoint(x: centerX, y: visible.minY + VeloraSpacing.xl - capsuleInset)
+            origin = NSPoint(x: centerX, y: visible.minY + VeloraSpacing.xl - cardInset)
         case .topCenter:
             origin = NSPoint(
                 x: centerX,
                 y: visible.maxY - VeloraSpacing.xl
-                    - HUDGeometry.expandedListeningHeight - capsuleInset)
+                    - HUDGeometry.recordingHeight - cardInset)
         case .custom:
             if let frac = AppConfig.shared.hudCustomOrigin {
                 let dx = max(1, visible.width - Self.panelSize.width)
                 let dy = max(1, visible.height - Self.panelSize.height)
                 origin = NSPoint(x: visible.minX + frac.x * dx, y: visible.minY + frac.y * dy)
             } else {  // custom with no stored origin yet → default bottom center
-                origin = NSPoint(x: centerX, y: visible.minY + VeloraSpacing.xl - capsuleInset)
+                origin = NSPoint(x: centerX, y: visible.minY + VeloraSpacing.xl - cardInset)
             }
         }
         // Guard the didMove observer against treating our own placement as a
@@ -135,23 +134,18 @@ final class HUDPanel {
     }
 }
 
-/// Hosting view that is transparent to the mouse everywhere except the capsule.
-/// This keeps the HUD draggable (grab the capsule) while the large empty panel
+/// Hosting view that is transparent to the mouse everywhere except the card.
+/// This keeps the HUD draggable (grab the card) while the empty panel
 /// margins pass clicks straight through to whatever is underneath.
 private final class HUDHostingView<Content: View>: NSHostingView<Content> {
     override func hitTest(_ point: NSPoint) -> NSView? {
-        // Capsule footprint, centered in the panel (see HUDPanel.panelSize).
-        // The capsule width varies by state (280–420); use the widest so the
-        // whole pill stays grabbable, with a little vertical slack for its
-        // shadow/entrance offset.
+        // Fixed recording-card footprint, centered in the host panel.
         let size = HUDPanel.panelSize
-        let w = HUDGeometry.maxListeningWidth
-        let h = HUDGeometry.expandedListeningHeight + 24
-        let capsule = NSRect(
-            x: (size.width - w) / 2,
-            y: (size.height - h) / 2,
-            width: w,
-            height: h)
-        return capsule.contains(point) ? super.hitTest(point) : nil
+        let card = NSRect(
+            x: (size.width - HUDGeometry.recordingWidth) / 2,
+            y: (size.height - HUDGeometry.recordingHeight) / 2,
+            width: HUDGeometry.recordingWidth,
+            height: HUDGeometry.recordingHeight)
+        return card.contains(point) ? super.hitTest(point) : nil
     }
 }
