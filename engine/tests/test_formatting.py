@@ -68,6 +68,14 @@ def test_terminal_long_prose_uses_smart_llm(config):
     assert "VERBATIM" in (gate.system_prompt or "")
 
 
+def test_terminal_long_prose_keeps_sentence_period_after_cleanup(config):
+    gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
+    assert gate.reason == "smart_terminal"
+    assert formatting.postprocess("Please investigate this performance issue.", gate) == (
+        "Please investigate this performance issue."
+    )
+
+
 def test_terminal_smart_disabled_stays_verbatim(config):
     config.data["smart_terminal"] = False
     gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
@@ -338,6 +346,15 @@ def test_auto_punctuation_off_adds_llm_prompt_line(config):
 def test_auto_punctuation_on_no_extra_prompt_line(config):
     gate = run_gate(LONG, config)
     assert "Do not add terminal punctuation" not in gate.system_prompt
+
+
+def test_cleanup_prompt_allows_conservative_grammar_without_paraphrasing(config):
+    gate = run_gate(LONG, config)
+    prompt = gate.system_prompt or ""
+    assert "subject-verb agreement" in prompt
+    assert "verb tense" in prompt
+    assert "Do not paraphrase" in prompt
+    assert "When unsure, leave it as dictated" in prompt
 
 
 # ---- code mode trailing period ----

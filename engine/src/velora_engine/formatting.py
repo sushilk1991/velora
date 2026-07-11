@@ -301,7 +301,9 @@ STATIC_SYSTEM_PROMPT = (
     "2. Never add content. No new words, facts, greetings, sign-offs, "
     "explanations, quotes, or commentary. Output only the cleaned transcript.\n"
     "3. Preserve meaning, wording, and tone. Fix punctuation, capitalization, "
-    "and obvious speech artifacts only. When unsure, leave it as dictated.\n"
+    "obvious speech artifacts, and only clear grammatical errors such as "
+    "subject-verb agreement or verb tense. Do not paraphrase, embellish, or "
+    "restructure wording to make it sound better. When unsure, leave it as dictated.\n"
     "4. Remove filler words (um, uh, 'you know', 'like' as filler) and "
     "accidental word repetitions — conservatively. Fillers count in ANY casing "
     "or position, including when transcribed as their own sentence ('UM.', "
@@ -776,10 +778,11 @@ def postprocess(text: str, gate: GateResult) -> str:
     out = strip_leaked_punct_commands(_tidy_whitespace(text))
     out = apply_replacements(out, gate.replacements)
     out = apply_tags(out, gate.entities, gate.category)
-    if gate.mode.name.lower() == "code" or gate.category == "code":
+    if (gate.mode.name.lower() == "code" or gate.category == "code") and gate.reason != "smart_terminal":
         # Code mode now runs the LLM (light), so the shell-safety strip that used
         # to live only in the formatting-off branch must apply here too: a
-        # trailing period breaks a dictated command.
+        # trailing period breaks a dictated command. Smart-terminal is long
+        # prose, however, so its sentence punctuation must survive.
         out = re.sub(r"(?<!\.)\.$", "", out)
     if _is_chat(gate.mode, gate.category):
         out = strip_chat_trailing_period(out)
