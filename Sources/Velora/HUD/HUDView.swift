@@ -1,87 +1,98 @@
 import SwiftUI
 
-/// A quiet, transcript-first dictation card. The recording shell is fixed so
-/// Whisper revisions never move the user's focal point; only deliberate state
-/// changes (recording, copied, error, toast, hidden) alter its geometry.
+/// One waveform-first capsule that truthfully reflects listening,
+/// transcribing, success, and recovery states. It never displays provisional
+/// transcript text; the target app receives only the authoritative final.
 struct HUDView: View {
     @ObservedObject var model: HUDModel
 
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var width: CGFloat = HUDGeometry.recordingWidth
-    @State private var height: CGFloat = HUDGeometry.recordingHeight
+    @State private var width: CGFloat = HUDGeometry.minListeningWidth
+    @State private var height: CGFloat = HUDGeometry.height
     @State private var opacity: Double = 0
-    @State private var scale: CGFloat = 0.94
-    @State private var yOffset: CGFloat = 8
-    @State private var showSuccess = false
+    @State private var scale: CGFloat = 0.8
+    @State private var yOffset: CGFloat = 12
+    @State private var flashGreen = false
+    @State private var showCheck = false
 
     var body: some View {
-        card
+        capsule
             .frame(width: HUDPanel.panelSize.width, height: HUDPanel.panelSize.height)
             .onChange(of: model.state) { old, new in
                 transition(from: old, to: new)
             }
     }
 
-    // MARK: - Card shell
+    // MARK: - Capsule
 
-    private var card: some View {
+    private var capsule: some View {
         ZStack {
             background
             content
                 .frame(width: width, height: height)
-                .clipShape(cardShape)
+                .clipShape(Capsule())
             border
+            listeningRing
         }
         .frame(width: width, height: height)
         .compositingGroup()
-        .shadow(
-            color: .black.opacity(colorScheme == .dark ? 0.30 : 0.18),
-            radius: 16,
-            x: 0,
-            y: 7)
+        .shadow(color: .black.opacity(0.25), radius: 20, x: 0, y: 6)
         .scaleEffect(scale)
         .offset(y: yOffset)
         .opacity(opacity)
     }
 
-    private var cardShape: RoundedRectangle {
-        RoundedRectangle(
-            cornerRadius: min(HUDGeometry.cornerRadius, height / 2),
-            style: .circular)
-    }
-
-    /// Liquid Glass on macOS 26; a restrained native material on macOS 14–15.
     @ViewBuilder private var background: some View {
         if #available(macOS 26.0, *) {
-            Color.clear.glassEffect(.regular, in: cardShape)
-            cardShape.fill(
+            Color.clear.glassEffect(.regular, in: Capsule())
+            Capsule().fill(
                 colorScheme == .dark
-                    ? Color.black.opacity(0.16)
-                    : Color.white.opacity(0.10))
+                    ? Color.black.opacity(0.18)
+                    : Color.white.opacity(0.12))
         } else {
-            cardShape.fill(.ultraThinMaterial)
-            cardShape.fill(
+            Capsule().fill(.ultraThinMaterial)
+            Capsule().fill(
                 colorScheme == .dark
-                    ? Color.black.opacity(0.28)
-                    : Color.white.opacity(0.24))
+                    ? Color.black.opacity(0.30)
+                    : Color.white.opacity(0.25))
         }
     }
 
     private var border: some View {
-        cardShape.strokeBorder(
+        Capsule().strokeBorder(
             colorScheme == .dark
-                ? Color.white.opacity(0.14)
-                : Color.black.opacity(0.09),
+                ? Color.white.opacity(0.15)
+                : Color.black.opacity(0.08),
             lineWidth: 1)
+    }
+
+    /// A restrained four-second rotation while listening. The timeline pauses
+    /// as soon as listening ends.
+    private var listeningRing: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isListening)) { timeline in
+            let time = timeline.date.timeIntervalSinceReferenceDate
+            let angle = Angle.degrees(time.truncatingRemainder(dividingBy: 4) / 4 * 360)
+            Capsule().strokeBorder(
+                AngularGradient(
+                    gradient: Gradient(colors: [
+                        VeloraBrand.indigo.color,
+                        VeloraBrand.violet.color,
+                        VeloraBrand.indigo.color,
+                    ]),
+                    center: .center,
+                    angle: angle),
+                lineWidth: 1.5)
+        }
+        .opacity(isListening ? 0.25 : 0)
+        .animation(.easeOut(duration: 0.25), value: isListening)
     }
 
     private var content: some View {
         ZStack {
             recordingContent
                 .opacity(recordingContentOpacity)
-            successContent
-                .opacity(showSuccess ? 1 : 0)
+            checkmark
             errorContent
                 .opacity(isError ? 1 : 0)
             learnedContent
@@ -91,111 +102,81 @@ struct HUDView: View {
         }
     }
 
-    // MARK: - Recording
+    // MARK: - Listening and transcribing
 
     private var recordingContent: some View {
         HStack(spacing: HUDGeometry.elementGap) {
-            WaveformView(
-                levels: model.levels,
-                settle: model.state == .transcribing,
-                active: isRecordingActive)
+            contextChip
+            Spacer(minLength: VeloraSpacing.xs)
 
-            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                transcriptLabel
-                    .frame(maxWidth: .infinity, minHeight: 20, maxHeight: 20, alignment: .leading)
-                recordingFooter
-                    .frame(maxWidth: .infinity, minHeight: 14, maxHeight: 14)
-            }
-        }
-        .padding(.horizontal, VeloraSpacing.m)
-        .frame(width: HUDGeometry.recordingWidth, height: HUDGeometry.recordingHeight)
-    }
-
-    @ViewBuilder private var transcriptLabel: some View {
-        if model.transcriptTail.isEmpty {
-            Text("Listening…")
-                .font(.system(size: 14, weight: .medium))
-                .foregroundStyle(primaryTextColor.opacity(0.62))
-                .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            transcriptText
-                .font(.system(size: 14, weight: .medium))
-                .lineLimit(1)
-                .truncationMode(.head)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// One Text tree keeps wrapping stable while settled and provisional words
-    /// use different emphasis. There is intentionally no transcript animation.
-    private var transcriptText: Text {
-        let stable = model.transcriptStablePrefix
-        let provisional = model.transcriptProvisionalSuffix
-        let separator = stable.isEmpty || provisional.isEmpty ? "" : " "
-        return Text(stable)
-            .foregroundColor(primaryTextColor.opacity(0.95))
-            + Text(separator + provisional)
-            .foregroundColor(primaryTextColor.opacity(0.68))
-    }
-
-    private var primaryTextColor: Color {
-        colorScheme == .dark ? .white : .black
-    }
-
-    private var recordingFooter: some View {
-        HStack(spacing: VeloraSpacing.xs) {
-            contextLabel
-            Spacer(minLength: VeloraSpacing.s)
-            trailingStatus
-        }
-    }
-
-    private var contextLabel: some View {
-        HStack(spacing: VeloraSpacing.xs) {
-            if let icon = model.sessionContext?.appIcon {
-                Image(nsImage: icon)
-                    .resizable()
-                    .frame(
-                        width: HUDGeometry.chipIconSide,
-                        height: HUDGeometry.chipIconSide)
-                    .clipShape(RoundedRectangle(
-                        cornerRadius: HUDGeometry.chipIconCornerRadius,
-                        style: .continuous))
-            } else {
-                Image(systemName: "text.cursor")
-                    .font(.system(size: 9.5, weight: .medium))
-                    .frame(
-                        width: HUDGeometry.chipIconSide,
-                        height: HUDGeometry.chipIconSide)
+            HStack(spacing: VeloraSpacing.s) {
+                recordingDot
+                WaveformView(
+                    levels: model.levels,
+                    settle: model.state == .transcribing,
+                    flashGreen: flashGreen,
+                    active: isRecordingActive)
             }
 
-            Text(model.sessionContext?.modeName ?? "Text")
-                .font(.system(size: 10.5, weight: .medium))
-                .lineLimit(1)
+            Spacer(minLength: VeloraSpacing.xs)
+            timerText
+                .opacity(isListening ? 1 : 0)
         }
-        .foregroundStyle(.secondary)
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .animation(.easeOut(duration: 0.2), value: isListening)
     }
 
-    @ViewBuilder private var trailingStatus: some View {
-        if model.state == .transcribing {
-            Text("Polishing")
-                .font(.system(size: 10.5, weight: .medium))
-                .foregroundStyle(VeloraBrand.violet.color.opacity(0.88))
-        } else if isListening {
-            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+    private var recordingDot: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isListening)) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 2) / 2
+            let dotOpacity = 0.55 + 0.45 * (0.5 + 0.5 * cos(phase * 2 * .pi))
+            Circle()
+                .fill(Color(nsColor: .systemRed))
+                .opacity(isListening ? dotOpacity : 0)
+        }
+        .frame(width: HUDGeometry.dotDiameter, height: HUDGeometry.dotDiameter)
+    }
+
+    @ViewBuilder private var contextChip: some View {
+        if let context = model.sessionContext {
+            HStack(spacing: VeloraSpacing.xs) {
+                if let icon = context.appIcon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .frame(
+                            width: HUDGeometry.chipIconSide,
+                            height: HUDGeometry.chipIconSide)
+                        .clipShape(RoundedRectangle(
+                            cornerRadius: HUDGeometry.chipIconCornerRadius,
+                            style: .continuous))
+                }
+                Text(context.modeName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+    }
+
+    @ViewBuilder private var timerText: some View {
+        if isListening {
+            TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
                 timerLabel(at: timeline.date)
             }
+            .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
         } else {
             timerLabel(at: Date())
+                .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
         }
     }
 
     private func timerLabel(at date: Date) -> some View {
         Text(elapsedString(at: date))
-            .font(.system(size: 10.5, weight: .medium).monospacedDigit())
-            .foregroundStyle(.tertiary)
-            .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
+            .font(.system(size: 12, weight: .medium).monospacedDigit())
+            .foregroundStyle(.secondary)
     }
 
     private func elapsedString(at date: Date) -> String {
@@ -206,16 +187,13 @@ struct HUDView: View {
 
     // MARK: - Success
 
-    private var successContent: some View {
-        HStack(spacing: 7) {
-            Image(systemName: "checkmark")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(Color(nsColor: .systemGreen))
-            Text("Copied")
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(primaryTextColor.opacity(0.94))
-        }
-        .frame(width: HUDGeometry.successWidth, height: HUDGeometry.successHeight)
+    private var checkmark: some View {
+        Image(systemName: "checkmark")
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+            .symbolEffect(.bounce, value: showCheck)
+            .opacity(showCheck ? 1 : 0)
+            .scaleEffect(showCheck ? 1 : 0.5)
     }
 
     // MARK: - Error
@@ -228,20 +206,21 @@ struct HUDView: View {
     private var errorContent: some View {
         HStack(spacing: VeloraSpacing.s) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(Color(nsColor: .systemYellow))
             Text(errorMessage)
-                .font(.system(size: 11.5, weight: .medium))
+                .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
-                .foregroundStyle(primaryTextColor.opacity(0.94))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
             Spacer(minLength: 0)
             Button(model.retryTitle) { model.onRetry?() }
                 .buttonStyle(.borderless)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(Color.accentColor)
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
-        .frame(width: HUDGeometry.errorWidth, height: HUDGeometry.successHeight)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: HUDGeometry.errorWidth)
     }
 
     // MARK: - Learned correction
@@ -255,35 +234,37 @@ struct HUDView: View {
         let pair = learnedPair
         return HStack(spacing: VeloraSpacing.s) {
             Image(systemName: "character.book.closed.fill")
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(VeloraBrand.violet.color)
+                .symbolEffect(.bounce, value: isLearned)
             Text(pair.wrong)
-                .font(.system(size: 11.5, weight: .medium))
-                .strikethrough(true, color: Color(nsColor: .systemRed).opacity(0.80))
+                .font(.system(size: 12, weight: .medium))
+                .strikethrough(true, color: Color(nsColor: .systemRed).opacity(0.85))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Image(systemName: "arrow.right")
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 10, weight: .bold))
                 .foregroundStyle(.secondary)
             Text(pair.right)
-                .font(.system(size: 11.5, weight: .semibold))
-                .foregroundStyle(primaryTextColor.opacity(0.94))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .lineLimit(1)
             Text("· Learned")
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
-        .frame(width: learnedWidth, height: HUDGeometry.successHeight)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: learnedWidth)
     }
 
     private var learnedWidth: CGFloat {
         let pair = learnedPair
         var value = HUDGeometry.contentInsetH * 2 + 14 + 12 + VeloraSpacing.s * 4
-        value += HUDGeometry.textWidth(pair.wrong, font: HUDGeometry.transcriptFont)
-        value += HUDGeometry.textWidth(pair.right, font: HUDGeometry.transcriptFont)
-        value += HUDGeometry.textWidth("· Learned", font: HUDGeometry.chipFont)
-        return min(max(value, 190), HUDGeometry.recordingWidth)
+        value += HUDGeometry.textWidth(pair.wrong, font: HUDGeometry.bodyFont)
+        value += HUDGeometry.textWidth(pair.right, font: HUDGeometry.bodyFont)
+        value += HUDGeometry.textWidth("· Learned", font: HUDGeometry.bodyFont)
+        return min(max(value, 190), 380)
     }
 
     // MARK: - Notice
@@ -297,21 +278,23 @@ struct HUDView: View {
         let parts = noticeParts
         return HStack(spacing: VeloraSpacing.s) {
             Image(systemName: parts.symbol.isEmpty ? "checkmark.circle.fill" : parts.symbol)
-                .font(.system(size: 11.5, weight: .semibold))
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(VeloraBrand.violet.color)
+                .symbolEffect(.bounce, value: isNotice)
             Text(parts.message)
-                .font(.system(size: 11.5, weight: .medium))
-                .foregroundStyle(primaryTextColor.opacity(0.94))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
                 .lineLimit(1)
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
-        .frame(width: noticeWidth, height: HUDGeometry.successHeight)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: noticeWidth)
     }
 
     private var noticeWidth: CGFloat {
         var value = HUDGeometry.contentInsetH * 2 + 14 + VeloraSpacing.s
-        value += HUDGeometry.textWidth(noticeParts.message, font: HUDGeometry.transcriptFont)
-        return min(max(value, 160), HUDGeometry.recordingWidth)
+        value += HUDGeometry.textWidth(noticeParts.message, font: HUDGeometry.bodyFont)
+        return min(max(value, 160), HUDGeometry.maxListeningWidth)
     }
 
     // MARK: - State
@@ -320,8 +303,12 @@ struct HUDView: View {
 
     private var isRecordingActive: Bool {
         switch model.state {
-        case .listening, .transcribing: return true
-        default: return false
+        case .listening, .transcribing:
+            return true
+        case .inserted:
+            return !showCheck
+        default:
+            return false
         }
     }
 
@@ -341,61 +328,87 @@ struct HUDView: View {
     }
 
     private var recordingContentOpacity: Double {
-        isRecordingActive && !showSuccess ? 1 : 0
+        switch model.state {
+        case .listening, .transcribing:
+            return 1
+        case .inserted:
+            return showCheck ? 0 : 1
+        default:
+            return 0
+        }
     }
 
-    // MARK: - Deliberate state transitions
+    private var chipWidth: CGFloat {
+        guard let context = model.sessionContext else { return 0 }
+        var value = HUDGeometry.textWidth(context.modeName, font: HUDGeometry.chipFont)
+        if context.appIcon != nil {
+            value += HUDGeometry.chipIconSide + VeloraSpacing.xs
+        }
+        return value
+    }
+
+    private var desiredListeningWidth: CGFloat {
+        min(
+            max(
+                HUDGeometry.controlRowWidth(chipWidth: chipWidth),
+                HUDGeometry.minListeningWidth),
+            HUDGeometry.maxListeningWidth)
+    }
+
+    // MARK: - Transitions
 
     private func transition(from old: HUDState, to new: HUDState) {
         switch new {
         case .listening:
-            resetInstant(
-                width: HUDGeometry.recordingWidth,
-                height: HUDGeometry.recordingHeight)
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1
                 yOffset = 0
             }
 
         case .transcribing:
-            // The fixed card stays put. Only the footer label and bars settle.
+            // The waveform settles and shimmers; dot, timer, and ring fade.
             break
 
         case .inserted:
-            withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
-                width = HUDGeometry.successWidth
-                height = HUDGeometry.successHeight
-                showSuccess = true
+            flashGreen = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                guard case .inserted = model.state else { return }
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    width = HUDGeometry.insertedDiameter
+                    height = HUDGeometry.height
+                    showCheck = true
+                }
             }
 
         case .error:
             if old.isHidden {
-                resetInstant(width: HUDGeometry.errorWidth, height: HUDGeometry.successHeight)
-                withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                resetInstant(width: HUDGeometry.errorWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
                 }
             } else {
-                withAnimation(.spring(response: 0.30, dampingFraction: 0.88)) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     width = HUDGeometry.errorWidth
-                    height = HUDGeometry.successHeight
-                    showSuccess = false
+                    height = HUDGeometry.height
+                    showCheck = false
                 }
             }
 
         case .learned:
-            resetInstant(width: learnedWidth, height: HUDGeometry.successHeight)
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            resetInstant(width: learnedWidth, height: HUDGeometry.height)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1
                 yOffset = 0
             }
 
         case .notice:
-            resetInstant(width: noticeWidth, height: HUDGeometry.successHeight)
-            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+            resetInstant(width: noticeWidth, height: HUDGeometry.height)
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1
                 yOffset = 0
@@ -406,12 +419,12 @@ struct HUDView: View {
             case .success:
                 withAnimation(.easeOut(duration: 0.25)) {
                     opacity = 0
-                    scale = 0.90
+                    scale = 0.85
                 }
             case .cancel:
                 withAnimation(.easeOut(duration: 0.18)) {
                     opacity = 0
-                    scale = 0.92
+                    scale = 0.9
                     yOffset = 8
                 }
             }
@@ -425,9 +438,10 @@ struct HUDView: View {
             width = targetWidth
             height = targetHeight
             opacity = 0
-            scale = 0.94
-            yOffset = 8
-            showSuccess = false
+            scale = 0.8
+            yOffset = 12
+            showCheck = false
+            flashGreen = false
         }
     }
 }

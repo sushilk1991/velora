@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import SwiftUI
 
-/// HUD card states. One surface morphs between them;
+/// HUD capsule states. One surface morphs between them;
 /// `hidden` carries an exit style because success and cancel dismiss with
 /// different animations ("success bounces, cancellation doesn't").
 enum HUDState: Equatable {
@@ -44,66 +44,6 @@ struct HUDSessionContext: Equatable {
     }
 }
 
-struct HUDTranscriptSelection: Equatable {
-    let text: String
-    let truncated: Bool
-}
-
-/// Pure live-partial selection. It favors a just-finished sentence; while the
-/// speaker is mid-sentence it keeps the newest whole words that fit. Character
-/// slicing is deliberately forbidden because it produced fragments such as
-/// "…es below if we can" in the HUD.
-enum HUDTranscript {
-    private static func middleElide(_ token: Substring, maxCharacters: Int) -> String {
-        guard token.count > maxCharacters else { return String(token) }
-        guard maxCharacters > 1 else { return "…" }
-        let visible = maxCharacters - 1
-        let suffixCount = max(1, visible / 2)
-        let prefixCount = visible - suffixCount
-        return String(token.prefix(prefixCount)) + "…" + String(token.suffix(suffixCount))
-    }
-
-    static func select(_ raw: String, maxCharacters: Int) -> HUDTranscriptSelection {
-        let normalized = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        guard !normalized.isEmpty, maxCharacters > 0 else {
-            return HUDTranscriptSelection(text: "", truncated: false)
-        }
-        guard normalized.count > maxCharacters else {
-            return HUDTranscriptSelection(text: normalized, truncated: false)
-        }
-
-        let sentenceMarks: Set<Character> = [".", "?", "!"]
-        if let last = normalized.last, sentenceMarks.contains(last) {
-            let beforeLast = normalized.dropLast()
-            let priorEnd = beforeLast.lastIndex(where: { sentenceMarks.contains($0) })
-            let start = priorEnd.map { normalized.index(after: $0) } ?? normalized.startIndex
-            let sentence = normalized[start...].trimmingCharacters(in: .whitespaces)
-            if !sentence.isEmpty, sentence.count <= maxCharacters {
-                return HUDTranscriptSelection(text: sentence, truncated: true)
-            }
-        }
-
-        var kept: [Substring] = []
-        var count = 0
-        for word in normalized.split(separator: " ").reversed() {
-            let proposed = count + (kept.isEmpty ? 0 : 1) + word.count
-            if proposed > maxCharacters {
-                if kept.isEmpty {
-                    return HUDTranscriptSelection(
-                        text: middleElide(word, maxCharacters: maxCharacters),
-                        truncated: true)
-                }
-                break
-            }
-            kept.append(word)
-            count = proposed
-            if proposed >= maxCharacters { break }
-        }
-        let tail = kept.reversed().joined(separator: " ")
-        return HUDTranscriptSelection(text: tail, truncated: tail != normalized)
-    }
-}
-
 /// Observable state driving the HUD view. Main-actor only.
 final class HUDModel: ObservableObject {
     @Published var state: HUDState = .hidden(.cancel)
@@ -112,17 +52,6 @@ final class HUDModel: ObservableObject {
     /// Context chip contents for the active session (nil until a session
     /// begins; the chip is simply absent then).
     @Published var sessionContext: HUDSessionContext?
-    /// Useful whole-word phrase selected from the running partial. Empty until
-    /// the first partial, while the view displays its listening placeholder.
-    @Published private(set) var transcriptTail = ""
-    /// Whole words shared by the previous and newest partial. The HUD renders
-    /// this prefix at full contrast so settled words stop visually flickering.
-    @Published private(set) var transcriptStablePrefix = ""
-    /// The newest, still-changeable words following `transcriptStablePrefix`.
-    @Published private(set) var transcriptProvisionalSuffix = ""
-    /// True once selection has omitted older transcript text.
-    @Published private(set) var transcriptTruncated = false
-
     /// Waveform levels (not @Published — the Canvas polls it every frame via
     /// TimelineView; publishing per audio buffer would churn SwiftUI).
     let levels = WaveformLevelStore()
@@ -136,44 +65,18 @@ final class HUDModel: ObservableObject {
     /// Resets per-session UI state as a new recording starts.
     func beginSession(context: HUDSessionContext?) {
         sessionContext = context
-        transcriptTail = ""
-        transcriptStablePrefix = ""
-        transcriptProvisionalSuffix = ""
-        transcriptTruncated = false
-    }
-
-    /// Feeds a streaming partial transcript into the live-transcript tail.
-    ///
-    /// Empty partials are ignored so the card never flash-clears between
-    /// engine updates.
-    func updatePartial(_ text: String) {
-        let flattened = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !flattened.isEmpty else { return }
-        let selection = HUDTranscript.select(
-            flattened, maxCharacters: HUDGeometry.transcriptCharacterLimit)
-        let previousWords = transcriptTail.split(separator: " ")
-        let nextWords = selection.text.split(separator: " ")
-        let sharedCount = zip(previousWords, nextWords)
-            .prefix(while: { $0 == $1 })
-            .count
-        transcriptStablePrefix = nextWords.prefix(sharedCount).joined(separator: " ")
-        transcriptProvisionalSuffix = nextWords.dropFirst(sharedCount).joined(separator: " ")
-        transcriptTail = selection.text
-        transcriptTruncated = selection.truncated
     }
 }
 
-/// Twelve-band spectrum state plus per-frame asymmetric smoothing. The compact
-/// HUD samples these low→high targets into its seven mirrored visible bars.
+/// Twelve-band spectrum state plus per-frame asymmetric smoothing, mirrored
+/// center-out into 24 visible bars.
 ///
 /// `push` happens on the main queue (audio level callback); `displayHeights`
 /// is called from the Canvas draw closure each frame (also main). The lock
 /// guards against any off-main access without imposing structure on callers.
 final class WaveformLevelStore {
-    /// Kept as `halfCount` because AudioCapture uses it as its FFT band count.
-    static let halfCount = 12
+    static let barCount = 24
+    static let halfCount = barCount / 2
 
     private let lock = NSLock()
     /// Index 0 = center bars (LOW frequency) … `halfCount - 1` = outer edge

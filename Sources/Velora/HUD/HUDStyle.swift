@@ -61,35 +61,43 @@ enum VeloraBrand {
     }
 }
 
-/// HUD geometry for the fixed live card and compact outcome states.
+/// HUD capsule geometry. Recording stays a single row; only deliberate state
+/// changes (success, error, notice) alter the width.
 enum HUDGeometry {
-    /// Stable live card dimensions. Partial updates never alter this shell,
-    /// which keeps the HUD anchored while Whisper revises provisional words.
-    static let recordingWidth: CGFloat = 312
-    static let recordingHeight: CGFloat = 58
-    static let cornerRadius: CGFloat = 18
-    static let successWidth: CGFloat = 112
-    static let successHeight: CGFloat = 40
+    static let height: CGFloat = 56
+    static let minListeningWidth: CGFloat = 280
+    static let maxListeningWidth: CGFloat = 420
+    static let insertedDiameter: CGFloat = height
 
     /// Error pill width (icon + one-line message + action button).
     static let errorWidth: CGFloat = 320
 
-    /// Compact-state horizontal inset and live-card element gap.
+    /// Capsule content insets and gaps.
     static let contentInsetH: CGFloat = VeloraSpacing.l
-    static let elementGap: CGFloat = VeloraSpacing.s
+    static let contentInsetV: CGFloat = VeloraSpacing.m
+    static let elementGap: CGFloat = VeloraSpacing.m
 
-    /// Compact live waveform strip beside the transcript.
-    static let waveformSize = CGSize(width: 28, height: 20)
+    /// Original 24-bar waveform footprint.
+    static let waveformSize = CGSize(width: 120, height: 32)
+    static let dotDiameter: CGFloat = 8
     static let timerWidth: CGFloat = 36
-    static let chipIconSide: CGFloat = 14
+    static let chipIconSide: CGFloat = 16
     static let chipIconCornerRadius: CGFloat = VeloraSpacing.xs
 
-    /// One-line live transcript tail, selected only on word/sentence
-    /// boundaries. The view head-truncates only if an unusually wide phrase
-    /// still exceeds the fixed row, keeping the newest words visible.
-    static let transcriptCharacterLimit = 34
-    static let transcriptFont = NSFont.systemFont(ofSize: 14, weight: .medium)
-    static let chipFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
+    static let bodyFont = NSFont.systemFont(ofSize: 13, weight: .medium)
+    static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+
+    /// Exact minimum width of the stable control row.
+    static func controlRowWidth(chipWidth: CGFloat) -> CGFloat {
+        let safeChipWidth = max(0, chipWidth)
+        let outerGapCount: CGFloat = safeChipWidth > 0 ? 4 : 3
+        return contentInsetH * 2
+            + safeChipWidth
+            + dotDiameter + VeloraSpacing.s + waveformSize.width
+            + timerWidth
+            + VeloraSpacing.xs * 2
+            + elementGap * outerGapCount
+    }
 
     /// Width of a single-line string in `font`, rounded up to whole points.
     static func textWidth(_ text: String, font: NSFont) -> CGFloat {

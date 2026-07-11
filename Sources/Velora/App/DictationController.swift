@@ -586,20 +586,15 @@ final class DictationController: NSObject {
     /// Routed here by the AppDelegate from the supervisor.
     func handleEngineEvent(_ event: EngineEvent) {
         switch event {
-        case .partial(let session, let text):
-            // Live transcript: stream the running partial into the HUD pill.
+        case .partial(let session, _):
+            // Protocol-compatible progress only. Whisper partials are
+            // provisional and must never compete with the authoritative final
+            // inside the waveform-first HUD.
             guard session == sessionID, phase != .idle else { return }
-            if hud.model.transcriptTail.isEmpty, !text.isEmpty {
-                NSLog("Velora: first partial session=%@ chars=%ld", session, text.count)
-            }
-            hud.model.updatePartial(text)
 
         case .transcript(let session, let raw, _):
             guard session == sessionID else { return }
             rawTranscript = raw
-            // Keep the final recognized text visible under the transcribing
-            // shimmer even if no partial covered the last words.
-            hud.model.updatePartial(raw)
             // Progress signal: the engine has decoded and is now formatting.
             // Refresh the timeout so a slow LLM cleanup after a long batch
             // transcription doesn't trip the stop→final deadline.

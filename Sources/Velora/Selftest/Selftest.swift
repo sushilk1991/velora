@@ -30,7 +30,7 @@ enum Selftest {
         testModeCategories()
         testVoiceCommands()
         testStreak()
-        testHUDTranscript()
+        testHUDGeometry()
         testClipboardStaging()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
@@ -293,62 +293,27 @@ enum Selftest {
         expect(ModeCategory.displayName(forBundleID: nil) == "Text", "nil bundle falls back to Text")
     }
 
-    // MARK: - HUD live transcript
+    // MARK: - HUD waveform-first geometry
 
-    private static func testHUDTranscript() {
-        let flattened = HUDTranscript.select(
-            "  this is\n  a live   phrase  ", maxCharacters: 80)
-        expect(flattened.text == "this is a live phrase", "HUD flattens partial whitespace")
-        expect(!flattened.truncated, "short HUD phrase is not marked truncated")
-
-        let sentence = HUDTranscript.select(
-            "A much earlier sentence with many words that should disappear. Keep this sentence.",
-            maxCharacters: 28)
-        expect(sentence.text == "Keep this sentence.", "HUD prefers the latest complete sentence")
-        expect(sentence.truncated, "sentence selection records omitted earlier text")
-
-        let words = HUDTranscript.select(
-            "zero one two three four five six seven eight nine", maxCharacters: 24)
-        expect(words.text == "six seven eight nine", "HUD keeps the newest whole words")
-        expect(!words.text.hasPrefix("ive"), "HUD never starts inside a word")
-        expect(words.text.count <= 24, "HUD word tail respects its character budget")
-
-        let longToken = String(repeating: "a", count: 60) + ".swift"
-        let elided = HUDTranscript.select(longToken, maxCharacters: 24)
-        expect(elided.text.count <= 24, "HUD long token respects its character budget")
-        expect(elided.text.contains("…"), "HUD long token is intentionally middle-elided")
-        expect(elided.text.hasSuffix(".swift"), "HUD long token keeps its useful suffix")
-
-        let model = HUDModel()
-        model.updatePartial("a useful live phrase")
-        model.updatePartial("  \n ")
-        expect(model.transcriptTail == "a useful live phrase", "empty partial does not clear HUD")
-
-        model.beginSession(context: nil)
-        model.updatePartial("the design is")
-        model.updatePartial("the design is much better")
+    private static func testHUDGeometry() {
+        expect(HUDGeometry.height == 56, "HUD stays a compact 56-point capsule")
+        expect(HUDGeometry.minListeningWidth == 280, "HUD keeps the original minimum width")
+        expect(HUDGeometry.maxListeningWidth == 420, "HUD has a bounded context-label width")
+        expect(HUDGeometry.insertedDiameter == 56, "success morph ends as a circle")
         expect(
-            model.transcriptStablePrefix == "the design is",
-            "HUD preserves the stable whole-word prefix")
+            HUDGeometry.waveformSize == CGSize(width: 120, height: 32),
+            "HUD restores the original waveform footprint")
+        expect(WaveformLevelStore.barCount == 24, "HUD renders 24 mirrored waveform bars")
+        expect(WaveformLevelStore.halfCount == 12, "HUD uses all 12 spectrum bands")
         expect(
-            model.transcriptProvisionalSuffix == "much better",
-            "HUD isolates the changing provisional suffix")
-        expect(HUDGeometry.recordingWidth == 312, "HUD recording card has a compact fixed width")
-        expect(HUDGeometry.recordingHeight == 58, "HUD recording card has a compact fixed height")
+            HUDPanel.panelSize == NSSize(width: 480, height: 160),
+            "HUD host contains every capsule state and its shadow")
         expect(
-            HUDGeometry.transcriptCharacterLimit == 34,
-            "HUD one-line transcript keeps a whole-word-sized rolling tail")
-        expect(HUDGeometry.successWidth == 112, "HUD copied state stays compact")
+            HUDPanel.panelSize.height >= HUDGeometry.height + 40,
+            "HUD host leaves vertical room for motion and shadow")
         expect(
-            HUDGeometry.waveformSize == CGSize(width: 28, height: 20),
-            "HUD waveform uses the compact approved footprint")
-
-        expect(
-            HUDPanel.panelSize == NSSize(width: 372, height: 118),
-            "HUD host is only as large as the fixed card and shadow require")
-        expect(
-            HUDPanel.panelSize.height >= HUDGeometry.recordingHeight + 40,
-            "HUD panel contains the fixed card height and shadow")
+            HUDPanel.panelSize.width >= HUDGeometry.errorWidth + 40,
+            "HUD host leaves horizontal room for the error action")
     }
 
     // MARK: - Final-output clipboard staging
