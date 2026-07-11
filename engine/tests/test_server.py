@@ -218,9 +218,10 @@ async def test_full_dictation_flow(engine):
     assert final["session"] == "s1"
     assert final["mode"] == "Note"
     assert final["raw"] == "hello world this is a fake transcript"
-    # fake mode has no LLM: raw is inserted as-is (never lose the user's words)
+    # Fake mode has no LLM: keep every word and apply the deterministic final
+    # punctuation contract.
     assert final["cleanup_applied"] is False
-    assert final["text"] == "hello world this is a fake transcript"
+    assert final["text"] == "hello world this is a fake transcript."
     assert isinstance(final["cleanup_ms"], int)
     assert "auto_stopped" not in final  # only present on max-duration auto-stop
     # socket must be private to the user
@@ -252,7 +253,7 @@ async def test_hard_wedged_cleanup_sends_raw_final_then_restarts_engine(engine):
     await client.send_json({"cmd": "stop", "session": "poisoned"})
 
     final = await client.recv_event("final")
-    assert final["text"] == final["raw"]
+    assert final["text"] == final["raw"] + "."
     assert final["cleanup_applied"] is False
     assert eng.shutdown.is_set()
     client.close()
@@ -547,7 +548,7 @@ async def test_preview_decode_does_not_block_socket_ingest(engine, monkeypatch):
         assert partial["text"] == "early words"
         await client.send_json({"cmd": "stop", "session": "preview-live"})
         final = await client.recv_event("final")
-        assert final["text"] == "hello world this is a fake transcript"
+        assert final["text"] == "hello world this is a fake transcript."
         assert stats["max_active"] == 1
     finally:
         release_decode.set()
@@ -578,7 +579,7 @@ async def test_stop_discards_inflight_preview_result_before_final(engine, monkey
         names = [event.get("event") for event in events]
         assert "partial" not in names
         assert names.index("transcript") < names.index("final")
-        assert events[-1]["text"] == "hello world this is a fake transcript"
+        assert events[-1]["text"] == "hello world this is a fake transcript."
     finally:
         release_decode.set()
         client.close()
@@ -630,7 +631,7 @@ async def test_auto_stop_at_max_duration(engine):
     final = await client.recv_event("final")
     assert final["session"] == "s-cap"
     assert final["auto_stopped"] is True
-    assert final["text"] == "hello world this is a fake transcript"
+    assert final["text"] == "hello world this is a fake transcript."
     assert eng.session is None
     client.close()
 

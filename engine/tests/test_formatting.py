@@ -96,6 +96,36 @@ def test_terminal_long_prose_keeps_sentence_period_after_cleanup(config):
     )
 
 
+def test_explicit_prose_mode_beats_terminal_category_for_punctuation(config):
+    gate = run_gate(
+        LONG,
+        config,
+        bundle_id="com.apple.Terminal",
+        explicit_mode="Default",
+    )
+    assert gate.mode.name == "Default"
+    assert gate.reason == "llm"
+    assert formatting.postprocess("Please investigate this performance issue.", gate) == (
+        "Please investigate this performance issue."
+    )
+
+
+def test_prose_cleanup_adds_missing_terminal_period(config):
+    gate = run_gate(LONG, config, bundle_id="com.apple.Notes")
+    assert gate.use_llm is True
+    assert formatting.postprocess("Please investigate this performance issue", gate) == (
+        "Please investigate this performance issue."
+    )
+
+
+def test_prose_cleanup_respects_auto_punctuation_off(config):
+    config.data["auto_punctuation"] = False
+    gate = run_gate(LONG, config, bundle_id="com.apple.Notes")
+    assert formatting.postprocess("please investigate this performance issue", gate) == (
+        "please investigate this performance issue"
+    )
+
+
 def test_prefill_candidates_cover_smart_terminal_without_dynamic_context(config):
     candidates = formatting.build_prefill_prompt_candidates(
         config,

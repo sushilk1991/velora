@@ -515,6 +515,7 @@ class GateResult:
     replacements: dict[str, str] = field(default_factory=dict)
     romanize: bool = False  # LLM pass is a script transliteration, not cleanup
     entities: list[dict[str, str]] = field(default_factory=list)  # screen context
+    auto_punctuation: bool = True
 
 
 # --- voice @-tagging (Cursor/Windsurf file tags, Slack @-mentions) ----------
@@ -697,7 +698,8 @@ def run_gate(
             return GateResult(
                 mode, category, True, "smart_terminal",
                 _tidy_whitespace(apply_spoken_commands(scrub_fillers(text))),
-                system_prompt, replacements, entities=entities or [])
+                system_prompt, replacements, entities=entities or [],
+                auto_punctuation=config.auto_punctuation)
         if mode.name.lower() == "terminal":
             # The explicit <12-word contract is model-free and command-safe:
             # no vocabulary replacement, tag injection, or filler deletion may
@@ -708,7 +710,8 @@ def run_gate(
             out = re.sub(r"(?<!\.)\.$", "", out)
             return GateResult(
                 mode, category, False, "formatting_off", out, None,
-                replacements, entities=entities or [])
+                replacements, entities=entities or [],
+                auto_punctuation=config.auto_punctuation)
         # Regex-level tidy only: spacing + spoken newline commands + replacements.
         out = _tidy_whitespace(apply_spoken_commands(text))
         out = apply_replacements(out, replacements)
@@ -716,7 +719,10 @@ def run_gate(
         if mode.name.lower() == "code" or category == "code":
             # A trailing period breaks shell commands; STT adds one reflexively.
             out = re.sub(r"(?<!\.)\.$", "", out)
-        return GateResult(mode, category, False, "formatting_off", out, None, replacements, entities=entities or [])
+        return GateResult(
+            mode, category, False, "formatting_off", out, None,
+            replacements, entities=entities or [],
+            auto_punctuation=config.auto_punctuation)
 
     if is_mostly_non_latin(text):
         cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
@@ -727,19 +733,26 @@ def run_gate(
             return GateResult(
                 mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT,
                 replacements, romanize=True, entities=entities or [],
+                auto_punctuation=config.auto_punctuation,
             )
         # Otherwise keep the native script and skip the English-tuned cleanup
         # LLM. Checked BEFORE the short-utterance path so an unspaced CJK
         # sentence doesn't get a Latin period appended.
         out = apply_replacements(cleaned, replacements)
-        return GateResult(mode, category, False, "non_latin_script", out, None, replacements, entities=entities or [])
+        return GateResult(
+            mode, category, False, "non_latin_script", out, None,
+            replacements, entities=entities or [],
+            auto_punctuation=config.auto_punctuation)
 
     if len(text.split()) < SHORT_UTTERANCE_WORDS:
         out = normalize_spoken_punctuation(scrub_fillers(apply_spoken_commands(text)))
         out = _punctuation_only(out, chat_style, config.auto_punctuation)
         out = apply_replacements(out, replacements)
         out = apply_tags(out, entities, category)
-        return GateResult(mode, category, False, "short_utterance", out, None, replacements, entities=entities or [])
+        return GateResult(
+            mode, category, False, "short_utterance", out, None,
+            replacements, entities=entities or [],
+            auto_punctuation=config.auto_punctuation)
 
     # Structural spoken commands ('new line'/'new paragraph') are converted
     # deterministically even for the LLM path: the small model handles the
@@ -751,7 +764,8 @@ def run_gate(
     return GateResult(
         mode, category, True, "llm",
         _tidy_whitespace(apply_spoken_commands(scrub_fillers(text))),
-        system_prompt, replacements, entities=entities or [])
+        system_prompt, replacements, entities=entities or [],
+        auto_punctuation=config.auto_punctuation)
 
 
 def build_prefill_prompt_candidates(
@@ -833,16 +847,28 @@ def strip_leaked_punct_commands(text: str) -> str:
 
 
 def postprocess(text: str, gate: GateResult) -> str:
-    """Deterministic pass over LLM output: replacements + tagging + chat period."""
+    """Deterministic pass over LLM output and its punctuation contract."""
     out = strip_leaked_punct_commands(_tidy_whitespace(text))
     out = apply_replacements(out, gate.replacements)
     out = apply_tags(out, gate.entities, gate.category)
-    if (gate.mode.name.lower() == "code" or gate.category == "code") and gate.reason != "smart_terminal":
+    mode_name = gate.mode.name.lower()
+    if mode_name == "code":
         # Code mode now runs the LLM (light), so the shell-safety strip that used
         # to live only in the formatting-off branch must apply here too: a
-        # trailing period breaks a dictated command. Smart-terminal is long
-        # prose, however, so its sentence punctuation must survive.
+        # trailing period breaks a dictated command. The resolved mode—not the
+        # target app's broad category—owns this policy, so an explicit prose
+        # mode in a terminal still behaves like prose.
         out = re.sub(r"(?<!\.)\.$", "", out)
-    if _is_chat(gate.mode, gate.category):
+    elif _is_chat(gate.mode, gate.category):
         out = strip_chat_trailing_period(out)
+    elif (
+        gate.auto_punctuation
+        and not gate.romanize
+        and out
+        and not _SENTENCE_END_RE.search(out)
+    ):
+        # Qwen occasionally stops after the last word even though the request
+        # is complete prose. Keep the semantic punctuation decision in the LLM,
+        # but guarantee a conservative declarative fallback at the final edge.
+        out += "."
     return out

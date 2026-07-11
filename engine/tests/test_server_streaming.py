@@ -76,7 +76,7 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     final = await client.recv_event("final")
     assert final["cleanup_applied"] is True
     assert final["cleanup_ms"] == 7  # the tail chunk's ms, not the sum
-    assert final["text"] == f"<{SEG1}> <{SEG2}> <{TAIL}>"
+    assert final["text"] == f"<{SEG1}> <{SEG2}> <{TAIL}>."
     assert final["raw"] == f"{SEG1} {SEG2} {TAIL}"
 
     # three chunk cleanups: seg1, seg2, tail — seg2 and tail carry seam context
@@ -102,7 +102,7 @@ async def test_short_first_segment_does_not_disable_long_session_streaming(engin
     final = await client.recv_event("final")
 
     assert [call[0] for call in cleanup.calls] == [short_first, SEG2, TAIL]
-    assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>"
+    assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>."
     assert final["cleanup_applied"] is True
     client.close()
 
@@ -126,7 +126,7 @@ async def test_short_first_terminal_segment_keeps_long_session_streaming(engine,
     final = await client.recv_event("final")
 
     assert [call[0] for call in cleanup.calls] == [short_first, SEG2, TAIL]
-    assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>"
+    assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>."
     assert final["cleanup_applied"] is True
     client.close()
 
@@ -145,7 +145,7 @@ async def test_retraction_segment_merges_with_previous(engine, monkeypatch):
     final = await client.recv_event("final")
     merged = f"{SEG1} {seg2}"
     # the retraction segment was NOT cleaned alone: one merged chunk
-    assert final["text"] == f"<{merged}>"
+    assert final["text"] == f"<{merged}>."
     assert merged in [c[0] for c in cleanup.calls]
     assert seg2 not in [c[0] for c in cleanup.calls]  # never cleaned in isolation
     assert cleanup.cancel_events[0] is not None
@@ -211,7 +211,7 @@ async def test_streaming_cleanup_off_uses_whole_text_path(engine, segments):
     raw = f"{SEG1} {SEG2} {TAIL}"
     # exactly the legacy path: ONE cleanup over the whole raw text
     assert [c[0] for c in cleanup.calls] == [raw]
-    assert final["text"] == f"<{raw}>"
+    assert final["text"] == f"<{raw}>."
     assert final["cleanup_applied"] is True
     client.close()
 
@@ -229,7 +229,7 @@ async def test_streaming_falls_back_when_cleanup_missing(engine, segments):
     raw = f"{SEG1} {SEG2} {TAIL}"
     assert final["raw"] == raw
     assert final["cleanup_applied"] is False
-    assert final["text"] == raw  # deterministic path leaves plain words alone
+    assert final["text"] == raw + "."  # deterministic path adds final punctuation
     client.close()
 
 
