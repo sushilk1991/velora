@@ -76,6 +76,29 @@ def test_terminal_long_prose_keeps_sentence_period_after_cleanup(config):
     )
 
 
+def test_prefill_candidates_cover_smart_terminal_without_dynamic_context(config):
+    candidates = formatting.build_prefill_prompt_candidates(
+        config,
+        bundle_id="com.apple.Terminal",
+        app_name="Terminal",
+        explicit_mode=None,
+        entities=[{"type": "nearby", "value": "volatile terminal contents"}],
+    )
+    assert len(candidates) == 2
+    stable_system, first_user = candidates[0]
+    dynamic_system, second_user = candidates[1]
+    assert formatting.SMART_TERMINAL_PROMPT in stable_system
+    assert "volatile terminal contents" not in stable_system
+    assert "Screen context —" in dynamic_system
+    assert first_user != second_user
+
+
+def test_prefill_candidates_skip_raw_mode(config):
+    assert formatting.build_prefill_prompt_candidates(
+        config, None, None, "Raw", []
+    ) == []
+
+
 def test_terminal_smart_disabled_stays_verbatim(config):
     config.data["smart_terminal"] = False
     gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")

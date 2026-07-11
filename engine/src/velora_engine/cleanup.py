@@ -29,6 +29,7 @@ log = logging.getLogger("velora.cleanup")
 
 TIMEOUT_MS = 1500  # base budget, for a short/normal sentence
 TIMEOUT_CEILING_MS = 6000  # hard ceiling however long the dictation
+HARD_TIMEOUT_GRACE_S = 3.0  # independent TTFT/prefill wedge allowance
 MS_PER_WORD = 45  # generation grows ~linearly with length past the base
 BASE_WORDS = 25  # words covered by the base budget before scaling kicks in
 RATIO_MAX = 1.6
@@ -178,6 +179,22 @@ class CleanupResult:
     applied: bool
     ms: int
     reason: str | None = None  # set when not applied
+    ttft_ms: int = 0
+    decode_ms: int = 0
+    prefix_tokens: int = 0
+    output_tokens: int = 0
+    cache_hit: bool = False
+
+
+@dataclass(frozen=True)
+class _GenerationResult:
+    text: str
+    status: str
+    ttft_ms: int
+    decode_ms: int
+    prefix_tokens: int
+    output_tokens: int
+    cache_hit: bool
 
 
 @dataclass(frozen=True)
@@ -428,20 +445,24 @@ class CleanupEngine:
         system_prompt: str,
         user_text: str,
         max_tokens: int,
-        deadline: float,
+        output_timeout_s: float,
         cancel_event: threading.Event | None = None,
-    ) -> tuple[str, bool]:
-        """Returns (text, timed_out). Caller must hold self._lock."""
+    ) -> _GenerationResult:
+        """Generate with a quality budget that begins at first output token."""
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
 
+        started = time.perf_counter()
+        if cancel_event is not None and cancel_event.is_set():
+            return _GenerationResult("", "cancelled", 0, 0, 0, 0, False)
         tokens = self._prompt_tokens(system_prompt, user_text)
         cache, common, cache_hit = self._cache_for_tokens(tokens)
 
         suffix = tokens[common:]
         out_text: list[str] = []
         gen_tokens: list[int] = []
-        timed_out = False
+        first_token_at: float | None = None
+        status = "ok"
         sampler = make_sampler(temp=0.0)
         for resp in stream_generate(
             self._model,
@@ -451,13 +472,23 @@ class CleanupEngine:
             sampler=sampler,
             prompt_cache=cache,
         ):
+            now = time.perf_counter()
+            if cancel_event is not None and cancel_event.is_set():
+                status = "cancelled"
+                break
+            if first_token_at is None:
+                first_token_at = now
             out_text.append(resp.text)
-            gen_tokens.append(resp.token)
-            # cancel_event: cooperative preemption for BACKGROUND generations
-            # (vocab mining) — a dictation starting must never wait behind one,
-            # so the owner sets the event and this loop yields within a token.
-            if time.perf_counter() > deadline or (cancel_event is not None and cancel_event.is_set()):
-                timed_out = True
+            generation_tokens = getattr(resp, "generation_tokens", None)
+            if generation_tokens is None:
+                gen_tokens.append(resp.token)
+            elif generation_tokens > len(gen_tokens):
+                gen_tokens.extend([resp.token] * (generation_tokens - len(gen_tokens)))
+            # Prompt prefill/TTFT is deliberately outside the soft quality
+            # budget. Once output begins, however, slow or runaway decoding is
+            # still bounded between tokens.
+            if now - first_token_at > output_timeout_s:
+                status = "timeout"
                 break
         # The working cache is intentionally not reused: Qwen's hybrid cache
         # contains non-trimmable recurrent state. The immutable prepared
@@ -471,7 +502,18 @@ class CleanupEngine:
             len(tokens),
             len(gen_tokens),
         )
-        return "".join(out_text), timed_out
+        finished = time.perf_counter()
+        ttft_ms = int(((first_token_at or finished) - started) * 1000)
+        decode_ms = int((finished - first_token_at) * 1000) if first_token_at else 0
+        return _GenerationResult(
+            "".join(out_text),
+            status,
+            ttft_ms,
+            decode_ms,
+            common,
+            len(gen_tokens),
+            cache_hit,
+        )
 
     def _run(
         self,
@@ -483,28 +525,55 @@ class CleanupEngine:
         allowed_terms: list[str] | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
-        deadline = t0 + timeout_ms / 1000.0
         with self._lock:
             input_tokens = len(self._tokenizer.encode(raw))
             # Romanization (check_ratio off) expands length, so give the
             # generator more headroom than the usual 1.8x cleanup budget.
             factor = OUTPUT_TOKEN_FACTOR if check_ratio else 3.0
             max_tokens = max(MIN_MAX_TOKENS, int(input_tokens * factor))
-            text, timed_out = self._generate_locked(system_prompt, raw, max_tokens, deadline, cancel_event)
+            generated = self._generate_locked(
+                system_prompt,
+                raw,
+                max_tokens,
+                timeout_ms / 1000.0,
+                cancel_event,
+            )
         ms = int((time.perf_counter() - t0) * 1000)
-        if timed_out:
+        log.info(
+            "cleanup inference total_ms=%d ttft_ms=%d decode_ms=%d prefix_tokens=%d "
+            "output_tokens=%d prepared_hit=%s status=%s",
+            ms,
+            generated.ttft_ms,
+            generated.decode_ms,
+            generated.prefix_tokens,
+            generated.output_tokens,
+            generated.cache_hit,
+            generated.status,
+        )
+        metrics = {
+            "ttft_ms": generated.ttft_ms,
+            "decode_ms": generated.decode_ms,
+            "prefix_tokens": generated.prefix_tokens,
+            "output_tokens": generated.output_tokens,
+            "cache_hit": generated.cache_hit,
+        }
+        if generated.status == "cancelled":
+            log.info("cleanup cooperatively cancelled after %dms", ms)
+            return CleanupResult(raw, False, ms, "cancelled", **metrics)
+        if generated.status == "timeout":
             log.warning("cleanup timeout after %dms — returning raw", ms)
-            return CleanupResult(raw, False, ms, "timeout")
+            return CleanupResult(raw, False, ms, "timeout", **metrics)
+        text = generated.text
         # The divergence guard is a length-ratio over-editing check; a script
         # transliteration legitimately changes length, so skip it when romanizing.
         if check_ratio:
             reason = check_divergence(raw, text, allowed_terms)
             if reason is not None:
                 log.warning("cleanup divergence guard tripped (%s) — returning raw", reason)
-                return CleanupResult(raw, False, ms, reason)
+                return CleanupResult(raw, False, ms, reason, **metrics)
         elif not text.strip():
-            return CleanupResult(raw, False, ms, "empty_output")
-        return CleanupResult(text.strip(), True, ms)
+            return CleanupResult(raw, False, ms, "empty_output", **metrics)
+        return CleanupResult(text.strip(), True, ms, **metrics)
 
     async def cleanup(
         self,
@@ -535,7 +604,7 @@ class CleanupEngine:
                     self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio,
                     cancel_event, allowed_terms,
                 ),
-                timeout=timeout_ms / 1000.0 + 3.0,
+                timeout=timeout_ms / 1000.0 + HARD_TIMEOUT_GRACE_S,
             )
         except asyncio.TimeoutError:
             log.error("cleanup hard-wedged past %dms — returning raw", timeout_ms)

@@ -139,6 +139,7 @@ class Session:
         # (chunk_tasks[i] cleans chunk_raws[i]).
         self.chunk_raws: list[str] = []
         self.chunk_tasks: list[asyncio.Task[_ChunkResult]] = []
+        self.chunk_cancel_events: dict[asyncio.Task[_ChunkResult], threading.Event] = {}
         # Sticky: once any streaming gate fails (config off, no LLM, non-Latin
         # segment) the segments stay preview-only and finalize takes the
         # classic whole-text path.
@@ -156,6 +157,11 @@ class Session:
         self.start_entities: list[dict[str, Any]] = [
             e for e in (self.context.get("entities") or []) if isinstance(e, dict)
         ]
+        # Session prompt preparation runs on the cleanup model's owner thread
+        # while audio is captured. The event reaches that thread even when the
+        # asyncio wrapper is cancelled.
+        self.prefix_task: asyncio.Task[Any] | None = None
+        self.prefix_cancel = threading.Event()
 
 
 class Engine:
@@ -538,6 +544,11 @@ class Engine:
             await self._stt_call(self.stt.start_session)
             session.feeder = asyncio.create_task(self._feed_loop(session))
             self.session = session
+            self._start_prefix_preparation(session)
+            # Let the preparation coroutine submit its executor job before a
+            # very short dictation can enqueue final cleanup. This never waits
+            # for model work, so audio acceptance remains immediate.
+            await asyncio.sleep(0)
         finally:
             self._starting = False
         log.info(
@@ -547,6 +558,38 @@ class Engine:
             context.get("app_name"),
             context.get("mode"),
         )
+
+    def _start_prefix_preparation(self, session: Session) -> None:
+        cleanup = self.cleanup
+        prepare = getattr(cleanup, "prepare_prefix", None)
+        if cleanup is None or not cleanup.loaded or not callable(prepare):
+            return
+        ctx = session.context
+        candidates = formatting.build_prefill_prompt_candidates(
+            self.config,
+            bundle_id=ctx.get("bundle_id"),
+            app_name=ctx.get("app_name"),
+            explicit_mode=ctx.get("mode"),
+            entities=session.start_entities,
+        )
+        if not candidates:
+            return
+
+        async def run() -> None:
+            try:
+                await prepare(candidates, cancel_event=session.prefix_cancel)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — prefill is an optimization
+                log.exception("session %s cleanup prefix preparation failed", session.id)
+
+        session.prefix_task = asyncio.create_task(run())
+
+    @staticmethod
+    def _cancel_prefix_preparation(session: Session) -> None:
+        session.prefix_cancel.set()
+        if session.prefix_task is not None and not session.prefix_task.done():
+            session.prefix_task.cancel()
 
     async def _feed_loop(self, session: Session) -> None:
         last_partial = ""
@@ -644,6 +687,7 @@ class Engine:
         self.session = None
         session.cancelled = True
         session.pcm_chunks = []  # discard archived audio for a cancelled session
+        self._cancel_prefix_preparation(session)
         self._cancel_chunk_tasks(session)
         await self._drain_feeder(session)
         await self._stt_call(self.stt.reset)
@@ -656,7 +700,14 @@ class Engine:
     @staticmethod
     def _cancel_chunk_tasks(session: Session) -> None:
         for task in session.chunk_tasks:
-            task.cancel()
+            Engine._cancel_chunk_task(session, task)
+
+    @staticmethod
+    def _cancel_chunk_task(session: Session, task: asyncio.Task[_ChunkResult]) -> None:
+        event = session.chunk_cancel_events.get(task)
+        if event is not None:
+            event.set()
+        task.cancel()
 
     async def _cmd_cancel(self, msg: dict[str, Any]) -> None:
         session = self.session
@@ -692,6 +743,7 @@ class Engine:
         try:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
+            self._cancel_prefix_preparation(session)
             self._finalizing = False
 
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
@@ -815,18 +867,35 @@ class Engine:
         # result. The marker decides SCOPE only; the LLM does the edit.
         head = " ".join(seg_raw.split()[:RETRACTION_HEAD_WORDS])
         if session.chunk_raws and _RETRACTION_RE.search(head):
-            session.chunk_tasks[-1].cancel()
+            self._cancel_chunk_task(session, session.chunk_tasks[-1])
             merged = session.chunk_raws[-1] + " " + seg_raw
             session.chunk_raws[-1] = merged
             prev = session.chunk_tasks[-2] if len(session.chunk_tasks) >= 2 else None
-            session.chunk_tasks[-1] = asyncio.create_task(self._clean_chunk_task(session, merged, prev))
+            session.chunk_tasks[-1] = self._new_chunk_task(session, merged, prev)
             return
         prev = session.chunk_tasks[-1] if session.chunk_tasks else None
         session.chunk_raws.append(seg_raw)
-        session.chunk_tasks.append(asyncio.create_task(self._clean_chunk_task(session, seg_raw, prev)))
+        session.chunk_tasks.append(self._new_chunk_task(session, seg_raw, prev))
+
+    def _new_chunk_task(
+        self,
+        session: Session,
+        seg_raw: str,
+        prev_task: asyncio.Task[_ChunkResult] | None,
+    ) -> asyncio.Task[_ChunkResult]:
+        cancel_event = threading.Event()
+        task = asyncio.create_task(
+            self._clean_chunk_task(session, seg_raw, prev_task, cancel_event)
+        )
+        session.chunk_cancel_events[task] = cancel_event
+        return task
 
     async def _clean_chunk_task(
-        self, session: Session, seg_raw: str, prev_task: asyncio.Task[_ChunkResult] | None
+        self,
+        session: Session,
+        seg_raw: str,
+        prev_task: asyncio.Task[_ChunkResult] | None,
+        cancel_event: threading.Event,
     ) -> _ChunkResult:
         """Chunk cleanup that first waits for its predecessor (for the seam
         context). Waits via asyncio.wait so a cancelled/failed predecessor only
@@ -836,9 +905,15 @@ class Engine:
             await asyncio.wait([prev_task])
             if not prev_task.cancelled() and prev_task.exception() is None:
                 prev_text = prev_task.result().text
-        return await self._clean_chunk_text(session, seg_raw, prev_text)
+        return await self._clean_chunk_text(session, seg_raw, prev_text, cancel_event)
 
-    async def _clean_chunk_text(self, session: Session, seg_raw: str, prev_text: str | None) -> _ChunkResult:
+    async def _clean_chunk_text(
+        self,
+        session: Session,
+        seg_raw: str,
+        prev_text: str | None,
+        cancel_event: threading.Event | None = None,
+    ) -> _ChunkResult:
         """Clean ONE raw chunk (segment or tail) under the session's single
         stream prompt. Never raises: any failure degrades to the deterministic
         cleanup for this chunk only. Replacements/tags/category rules run ONCE
@@ -857,7 +932,10 @@ class Engine:
                     "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»"
                 )
             result = await cleanup.cleanup(
-                seg_raw, system_prompt, allowed_terms=self.config.global_vocabulary
+                seg_raw,
+                system_prompt,
+                cancel_event=cancel_event,
+                allowed_terms=self.config.global_vocabulary,
             )
             if result.applied:
                 return _ChunkResult(result.text, result.ms, applied=True)

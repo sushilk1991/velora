@@ -241,6 +241,56 @@ async def test_partials_emitted(engine):
     client.close()
 
 
+async def test_start_prepares_cleanup_prefix_without_blocking_audio(engine):
+    eng, sock = engine
+
+    class BlockingPrefixCleanup:
+        loaded = True
+        model_id = "fake-prefix"
+
+        def __init__(self):
+            self.calls = []
+            self.release = asyncio.Event()
+
+        async def prepare_prefix(self, candidates, cancel_event=None):
+            self.calls.append((candidates, cancel_event))
+            await self.release.wait()
+
+    cleanup = BlockingPrefixCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start",
+        "session": "prefill-1",
+        "context": {
+            "bundle_id": "com.apple.Notes",
+            "app_name": "Notes",
+            "entities": [{"type": "nearby", "value": "cursor text"}],
+        },
+    })
+
+    for _ in range(100):
+        if cleanup.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert len(cleanup.calls) == 1
+    candidates, cancel_event = cleanup.calls[0]
+    assert len(candidates) == 2
+    assert cancel_event is not None and not cancel_event.is_set()
+
+    # Prefix inference remains blocked, but the recording feeder is live.
+    await client.send_audio(AUDIO)
+    partial = await client.recv_event("partial")
+    assert partial["session"] == "prefill-1"
+
+    await client.send_json({"cmd": "cancel", "session": "prefill-1"})
+    await client.recv_event("cancelled")
+    assert cancel_event.is_set()
+    cleanup.release.set()
+    client.close()
+
+
 async def test_cancel_discards(engine):
     eng, sock = engine
     client = await connect(sock)

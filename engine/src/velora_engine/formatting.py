@@ -76,6 +76,7 @@ SHORT_UTTERANCE_WORDS = 6  # < 6 words → punctuation-only, never restructured
 # punctuation at all. At or past this length, Terminal mode routes to the LLM
 # with a terminal-aware prompt; below it, verbatim as before.
 SMART_TERMINAL_MIN_WORDS = 12
+_PREFILL_PROBE = "one two three four five six seven eight nine ten eleven twelve"
 
 
 def category_for_bundle(bundle_id: str | None) -> str | None:
@@ -740,6 +741,50 @@ def run_gate(
         mode, category, True, "llm",
         _tidy_whitespace(apply_spoken_commands(scrub_fillers(text))),
         system_prompt, replacements, entities=entities or [])
+
+
+def build_prefill_prompt_candidates(
+    config: Config,
+    bundle_id: str | None,
+    app_name: str | None,
+    explicit_mode: str | None,
+    entities: list[dict[str, str]] | None = None,
+) -> list[tuple[str, str]]:
+    """Return two prompts whose token LCP is safe for any session transcript.
+
+    The probe is long enough to enter every normal LLM path, including smart
+    Terminal. Actual start entities are used only to resolve browser/site mode;
+    volatile entity text is deliberately replaced by a sentinel and placed
+    after all stable prompt material by `build_system_prompt`.
+    """
+    gate = run_gate(
+        _PREFILL_PROBE,
+        config,
+        bundle_id=bundle_id,
+        app_name=app_name,
+        explicit_mode=explicit_mode,
+        entities=entities,
+    )
+    if not gate.use_llm or gate.romanize:
+        return []
+    effective_mode = gate.mode
+    if gate.reason == "smart_terminal":
+        effective_mode = Mode(
+            name=gate.mode.name,
+            prompt=SMART_TERMINAL_PROMPT,
+            formatting="light",
+            vocabulary=gate.mode.vocabulary,
+            replacements=gate.mode.replacements,
+        )
+    stable = build_system_prompt(effective_mode, config, app_name, gate.category, None)
+    dynamic = build_system_prompt(
+        effective_mode,
+        config,
+        app_name,
+        gate.category,
+        [{"type": "nearby", "value": "velora dynamic context sentinel"}],
+    )
+    return [(stable, "alpha"), (dynamic, "zulu")]
 
 
 # Safety net for the LLM path: even with the prompt rule, the small model

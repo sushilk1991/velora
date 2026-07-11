@@ -24,9 +24,14 @@ class FakeCleanup:
         self.model_id = "fake-cleanup"
         self.delay = delay
         self.calls: list[tuple[str, str]] = []
+        self.cancel_events = []
 
-    async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True, allowed_terms=None):
+    async def cleanup(
+        self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+        cancel_event=None, allowed_terms=None,
+    ):
         self.calls.append((raw, system_prompt))
+        self.cancel_events.append(cancel_event)
         if self.delay:
             await asyncio.sleep(self.delay)
         return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
@@ -100,6 +105,10 @@ async def test_retraction_segment_merges_with_previous(engine, monkeypatch):
     assert final["text"] == f"<{merged}>"
     assert merged in [c[0] for c in cleanup.calls]
     assert seg2 not in [c[0] for c in cleanup.calls]  # never cleaned in isolation
+    assert cleanup.cancel_events[0] is not None
+    assert cleanup.cancel_events[0].is_set()  # replaced worker was cooperatively stopped
+    assert cleanup.cancel_events[-1] is not None
+    assert not cleanup.cancel_events[-1].is_set()
     client.close()
 
 
@@ -123,6 +132,8 @@ async def test_cancel_cancels_chunk_tasks(engine, segments):
     await asyncio.sleep(0.05)  # let cancellation propagate
     assert all(t.cancelled() for t in tasks)
     assert eng.session is None
+    assert eng.cleanup.cancel_events
+    assert all(event is not None and event.is_set() for event in eng.cleanup.cancel_events)
 
     # engine healthy: a fresh (non-streaming) dictation completes
     eng.cleanup.delay = 0.0

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 from typing import Any
+import asyncio
+import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -141,5 +145,136 @@ def test_prepared_prefix_mismatch_uses_fresh_cache():
         assert hit is False
         assert engine.cache_creations == 1
         assert cache[0].state == []
+    finally:
+        engine.close()
+
+
+def test_soft_deadline_starts_after_first_output_token(monkeypatch):
+    engine = RecordingCleanup()
+    engine._cache_for_tokens = lambda _tokens: ([FakeCache()], 7, True)
+
+    def slow_prefill_then_fast_output(*_args, **_kwargs):
+        time.sleep(0.03)  # longer than the 10ms output budget
+        yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", slow_prefill_then_fast_output)
+    try:
+        result = engine._run("raw", "system", timeout_ms=10, check_ratio=False)
+        assert result.applied is True
+        assert result.text == "fixed"
+        assert result.reason is None
+        assert result.ttft_ms >= 20
+    finally:
+        engine.close()
+
+
+def test_soft_deadline_still_bounds_slow_output(monkeypatch):
+    engine = RecordingCleanup()
+    engine._cache_for_tokens = lambda _tokens: ([FakeCache()], 0, False)
+
+    def slow_output(*_args, **_kwargs):
+        yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+        time.sleep(0.03)
+        yield SimpleNamespace(text=" too late", token=2, generation_tokens=2)
+
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", slow_output)
+    try:
+        result = engine._run("raw", "system", timeout_ms=10, check_ratio=False)
+        assert result.applied is False
+        assert result.text == "raw"
+        assert result.reason == "timeout"
+    finally:
+        engine.close()
+
+
+def test_cooperative_cancel_is_not_reported_as_quality_timeout(monkeypatch):
+    engine = RecordingCleanup()
+    event = threading.Event()
+    event.set()
+
+    def should_not_generate(*_args, **_kwargs):
+        raise AssertionError("cancelled cleanup should not enter generation")
+        yield
+
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", should_not_generate)
+    try:
+        result = engine._run(
+            "raw", "system", timeout_ms=10, check_ratio=False, cancel_event=event
+        )
+        assert result.applied is False
+        assert result.reason == "cancelled"
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_worker_releases_single_executor_for_final_cleanup(monkeypatch):
+    engine = RecordingCleanup()
+    started = threading.Event()
+    cancel = threading.Event()
+    call_lock = threading.Lock()
+    call_count = 0
+
+    def streaming(*_args, **_kwargs):
+        nonlocal call_count
+        with call_lock:
+            index = call_count
+            call_count += 1
+        if index == 0:
+            started.set()
+            while True:
+                time.sleep(0.01)
+                yield SimpleNamespace(text="", token=1, generation_tokens=1)
+        else:
+            yield SimpleNamespace(text="fixed", token=2, generation_tokens=1)
+
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", streaming)
+    try:
+        obsolete = asyncio.create_task(engine.cleanup(
+            "obsolete", "system", timeout_ms=500, check_ratio=False,
+            cancel_event=cancel,
+        ))
+        assert await asyncio.to_thread(started.wait, 0.5)
+        cancel.set()
+        cancelled = await asyncio.wait_for(obsolete, 0.5)
+        assert cancelled.reason == "cancelled"
+
+        final = await asyncio.wait_for(
+            engine.cleanup("raw", "system", timeout_ms=100, check_ratio=False),
+            0.5,
+        )
+        assert final.applied is True
+        assert final.text == "fixed"
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_outer_hard_watchdog_still_bounds_a_wedged_generation(monkeypatch):
+    import velora_engine.cleanup as cleanup_mod
+
+    engine = RecordingCleanup()
+
+    def wedged(*_args, **_kwargs):
+        time.sleep(0.2)
+        raise AssertionError("watchdog should return before this finishes")
+
+    monkeypatch.setattr(cleanup_mod, "HARD_TIMEOUT_GRACE_S", 0.02)
+    monkeypatch.setattr(engine, "_run", wedged)
+    try:
+        started = time.perf_counter()
+        result = await engine.cleanup(
+            "raw", "system", timeout_ms=10, check_ratio=False
+        )
+        assert time.perf_counter() - started < 0.15
+        assert result.reason == "timeout_hard"
     finally:
         engine.close()
