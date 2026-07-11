@@ -12,8 +12,8 @@ Two processes, one product:
                 │ Unix domain socket  ~/.velora/engine.sock
                 │ Framed protocol: JSON control + raw PCM audio frames
 ┌───────────────┴──────────────── velora-engine (Python 3.12, uv) ───────────────────┐
-│ STT: parakeet-mlx (parakeet-tdt-0.6b-v2, streaming) │ fallback mlx-whisper turbo   │
-│ Cleanup/format: mlx-lm (Qwen3-4B-Instruct-2507-4bit) with prompt cache             │
+│ STT: mlx-community/whisper-large-v3-turbo (preview + final decode)                 │
+│ Cleanup: mlx-community/Qwen3.5-4B-MLX-8bit with prepared prefix snapshots          │
 │ Smart-format policy: mode resolution (app bundle id → mode file) + prompt builder  │
 │ Model manager: HuggingFace download, warm/unload lifecycle                         │
 └────────────────────────────────────────────────────────────────────────────────────┘
@@ -27,7 +27,7 @@ Two processes, one product:
 
 ## Process lifecycle
 
-1. App launch → engine supervisor starts `uv run velora-engine` (working dir `engine/`), waits for `ready` handshake on the socket (engine preloads STT model; LLM lazy-loads on first use, then stays warm).
+1. App launch → engine supervisor starts `uv run velora-engine` (working dir `engine/`), waits for the `ready` handshake (engine preloads the STT model, then warms the cleanup model and a generic immutable prompt prefix in the background).
 2. Crash/hang → supervisor restarts engine with backoff; HUD shows error state if a dictation was in flight; app remains usable (menubar shows degraded state while restarting).
 3. App quit → engine terminated (it also self-exits if socket closes / parent pid dies).
 4. Idle unload (optional setting): engine drops LLM weights after N min idle to free memory.
@@ -89,9 +89,9 @@ routes non-Latin text through the multilingual LLM to transliterate it into the 
 alphabet (Hindi → natural Hinglish; the words are kept, not translated). The length-ratio
 divergence guard is disabled for that pass since transliteration changes length.
 
-**Latency budget:** with a parakeet model, STT streams during speech (`transcribe_stream`), so on `stop` only the tail needs flushing (target < 300ms) and live partials feed the HUD. With the default whisper model, decode is batch on `stop` (a few hundred ms for typical clips on Apple Silicon; no live partials — the quality/multilingual tradeoff). Cleanup hard timeout 1500ms: `max_tokens` capped relative to input length, prompt cache warm. If cleanup exceeds its budget or fails, engine emits `final` with `cleanup_applied:false` carrying raw transcript — the app inserts raw rather than making the user wait. Raw is always in history either way.
+**Latency budget:** the default Whisper model emits non-committing preview decodes after a pause or bounded interval so the HUD can show readable partial text before release. On `stop`, its authoritative final decode still covers every audio sample. Cleanup prepares the exact stable prompt prefix during recording, snapshots that immutable cache, and forks it for preview/chunk/final generation. The adaptive soft deadline begins at the first output token; a separate outer watchdog bounds stalled prefill or generation. If cleanup exceeds its budget, is cancelled, or fails, the engine emits `final` with `cleanup_applied:false` carrying the raw transcript. Raw is always retained in history.
 
-**Streaming segment pipeline (whisper, smartness-v2):** during recording, the whisper backend closes a segment when ≥10s of un-decoded audio meets a ≥0.7s pause (energy VAD; hard cap 25s) and decodes it immediately — segments give whisper live HUD partials, and the server starts each segment's LLM cleanup concurrently while the user is still speaking (seam context = the previous cleaned tail; a segment that *opens* with a retraction marker is merged with the previous raw segment and re-cleaned as one chunk). On `stop`: dictations ≤45s re-decode the whole clip and clean once (identical to the classic path); longer ones stitch the already-cleaned segments and only decode+clean the tail, so stop→final stays ~1s at any length. Any failure anywhere falls back to the whole-text path — a transcript is never lost to the fast path. Config: `streaming_cleanup` (default true).
+**Streaming segment pipeline (whisper, smartness-v2):** preview-only decoding begins at 4s after ≥0.4s silence (or at an 8s hard preview interval) and requires ≥3s of new audio before another preview. Preview decoding never advances committed sample offsets or mutates final segment state. The backend commits a segment when ≥10s of un-decoded audio meets a ≥0.7s pause (energy VAD; hard cap 25s), and the server starts that segment's LLM cleanup while the user is speaking. Superseded chunk work receives cooperative cancellation. On `stop`, dictations ≤45s re-decode the whole clip and clean once; longer ones stitch committed segments and decode/clean the tail. Any failure falls back to the whole-text path, so the fast path cannot lose transcript content. Config: `streaming_cleanup` (default true).
 
 ## Smart formatting policy (the "smart as Wispr Flow" part)
 
@@ -101,7 +101,7 @@ Two stages, both local:
    - mode resolution: explicit user mode > per-app rule from mode files > default.
    - `formatting: off` modes (Code/Raw) → regex-level tidy only (spacing, spoken "new line").
    - very short utterances (< ~6 words) → punctuation-only, never restructured.
-2. **LLM pass (Qwen3-4B):** single system prompt assembled from: mode prompt + formatting strength + vocabulary hints + app context ("The user is dictating into Slack — casual chat message"). Strict rules baked in: *transcribe-don't-answer* (never respond to questions in the dictation), preserve meaning, no added content, apply self-corrections, structure lists only when speech enumerates. Output = text only.
+2. **LLM pass (Qwen3.5-4B MLX 8-bit by default on quality-tier Macs):** one prompt assembled from mode instructions, formatting strength, vocabulary hints, and app context. Stable instructions and vocabulary precede volatile entities so the engine can prefill and snapshot the shared prefix. Strict rules are baked in: *transcribe-don't-answer*, preserve meaning, add no content, fix clear agreement/tense/speech artifacts, punctuate complete thoughts, apply self-corrections, and structure lists only when speech enumerates. Output is text only. Terminal input under 12 words remains verbatim; longer Terminal prose uses this conservative pass.
    - Anti-over-editing guard: if LLM output diverges too far from raw (length-ratio/similarity heuristic), fall back to raw. Principle #4 of the spec.
 
 Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|full, apps: [bundle ids], vocabulary: [...], replacements: {...}}`. Built-ins copied on first run; user-editable.
@@ -129,7 +129,7 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 |---|---|
 | `server.py` | asyncio unix-socket server, framing, session state machine |
 | `stt.py` | parakeet-mlx streaming wrapper; mlx-whisper fallback backend behind one interface |
-| `cleanup.py` | mlx-lm load/generate, prompt cache, output cap, divergence guard |
+| `cleanup.py` | mlx-lm load/generate, immutable prefix snapshot/fork, cancellation, TTFT-aware deadline, divergence guard |
 | `formatting.py` | deterministic gate, mode resolution, prompt assembly, replacements |
 | `models.py` | HF download/verify, model registry (user-selectable) |
 | `config.py` | modes/vocab loading shared with app via ~/.velora/ |

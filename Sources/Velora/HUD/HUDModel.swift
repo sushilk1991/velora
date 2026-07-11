@@ -99,7 +99,7 @@ final class HUDModel: ObservableObject {
     /// Useful whole-word phrase selected from the running partial. Empty until
     /// the first partial — the HUD never shows placeholder text.
     @Published private(set) var transcriptTail = ""
-    /// True once the tail has dropped its head (drives the leading fade).
+    /// True once selection has omitted older transcript text.
     @Published private(set) var transcriptTruncated = false
 
     /// Waveform levels (not @Published — the Canvas polls it every frame via

@@ -9,9 +9,10 @@
   hard 1.6x growth cap, plus a shrink floor that relaxes when the raw text
   contains a retraction marker ("no no", "scratch that", …). The old flat
   0.55 ratio floor vetoed exactly the self-corrections the model got right.
-- Hard timeout 1500ms: generation runs in a worker thread that checks its
-  deadline per token; the async caller also enforces an outer bound. On
-  breach, raw is returned.
+- The adaptive soft deadline starts at the first output token, so prompt
+  tokenization/prefill cannot consume the generation budget. A separate outer
+  watchdog still bounds wedged prefill or generation. On breach, raw is
+  returned.
 """
 
 from __future__ import annotations

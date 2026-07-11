@@ -23,7 +23,7 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 
 ### Transcription & intelligence
 - On-device STT via MLX (model per ARCHITECTURE.md; user-selectable in settings with size/speed table and download manager).
-- On-device LLM cleanup via mlx-lm (small instruct model, 4-bit):
+- On-device LLM cleanup via mlx-lm (quality-tier Qwen model):
   - remove filler words (um, uh, "you know") — conservative,
   - apply self-corrections ("no wait, I meant Tuesday" → "Tuesday"),
   - punctuation, capitalization, paragraph breaks,
@@ -32,13 +32,13 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
   - chat apps (Slack, Messages, Discord) → casual, no trailing period on single sentences, keep it terse,
   - email (Mail, Gmail in browser) → greeting/paragraph structure, professional tone,
   - notes/docs (Notes, Obsidian, Notion) → markdown allowed, lists when speech enumerates,
-  - code editors/terminals (VS Code, Cursor, Terminal, Ghostty) → **raw mode, no AI rewriting**, technical vocabulary bias,
+  - code editors → raw mode with technical vocabulary bias; terminals keep short commands (< 12 words) verbatim, while longer dictated prose gets conservative punctuation and grammar cleanup without changing meaning,
   - everything else → default mode.
 - Formatting decides *whether* to format, not just how: short fragments and commands pass through nearly untouched; long multi-sentence speech gets structure (lists when the user enumerates, paragraphs on topic shifts).
 - Secure-input fields (passwords): detected → insertion suppressed with error HUD state.
 
 ### Modes (Superwhisper-style, config-file-first)
-- Built-in: **Raw** (no AI), **Default**, **Message**, **Email**, **Note**, **Code**.
+- Built-in: **Raw** (no AI), **Default**, **Message**, **Email**, **Note**, **Code**, **Terminal**.
 - Every mode = a JSON file in `~/.velora/modes/`: system prompt, formatting strength (off/light/full), vocabulary hints, app-activation rules (bundle ids). Custom modes = drop in a file. GUI editing is P1; the format is the API.
 - Global vocabulary list (proper nouns, jargon) injected into STT prompt + cleanup prompt. Text replacements (e.g. "vs code" → "VS Code") applied post-cleanup.
 
@@ -56,14 +56,13 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 
 ### Performance targets (M-series, measured in CI-able bench script)
 - End of speech → text inserted: **< 1.5s** for ≤ 15s utterances (STT streaming/chunked so most transcription happens during speech).
-- Cleanup adds **< 1.5s** (hard timeout) or is skipped (raw inserted, cleanup result available in history).
+- Cleanup adds **< 1.5s** for a typical utterance or is skipped (raw inserted, cleanup result available in history). Its adaptive generation deadline starts at the first output token, with a separate hard watchdog for stalled prefill or generation.
 - Idle: < 400MB RSS for app + engine with models unloaded-after-idle option; < 1% CPU idle.
 - Cold start to ready: < 4s with default models cached.
 
 ## P1
 - History browser window with search, re-copy, re-process.
 - Mode editor GUI; per-mode hotkeys.
-- Streaming partial-transcript display in HUD.
 - Browser URL awareness (Gmail vs Docs in Chrome) via Accessibility.
 - Selected-text context ("rewrite this") — transformation mode.
 - Multilingual dictation (Whisper multilingual models; auto language detect).
