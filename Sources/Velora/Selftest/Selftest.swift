@@ -24,6 +24,9 @@ enum Selftest {
         testEditDistance()
         testMishearingShapes()
         testLearningThresholds()
+        testDictionaryValues()
+        testDictionaryMerge()
+        testDictionarySerializationBoundary()
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
@@ -153,6 +156,122 @@ enum Selftest {
             store.remove(wrong: "lung")
             expect(store.count == 0, "remove forgets the entry")
             expect(tiers(url).soft["lung"] == nil, "remove clears soft tier on disk")
+        }
+    }
+
+    // MARK: - Portable personal dictionary
+
+    private static func testDictionaryValues() {
+        let spaced = try? DictionaryValue("  Sushil   Kumar  ")
+        expect(spaced?.text == "Sushil Kumar", "dictionary collapses surrounding whitespace")
+        expect(spaced?.normalized == "sushil kumar", "dictionary keys are case-insensitive")
+
+        for technical in ["C++", "node.js", "auth_check", "Mary-Jane", "O'Connor"] {
+            expect((try? DictionaryValue(technical))?.text == technical,
+                   "dictionary preserves technical spelling: \(technical)")
+        }
+
+        for invalid in ["", "   ", "two\nlines", "bad\u{0007}value", String(repeating: "x", count: 61)] {
+            do {
+                _ = try DictionaryValue(invalid)
+                expect(false, "dictionary rejects invalid value: \(invalid.debugDescription)")
+            } catch {
+                expect(true, "dictionary rejects invalid value: \(invalid.debugDescription)")
+            }
+        }
+
+        let term = try? DictionaryEntry.manual(
+            writeAs: "Airlearn", deviceID: "mac-a", at: Date(timeIntervalSince1970: 10))
+        let replacement = try? DictionaryEntry.manual(
+            writeAs: "Airlearn", heardAs: "air learn", deviceID: "mac-a",
+            at: Date(timeIntervalSince1970: 10))
+        expect(term?.kind == .manualTerm && term?.heardAs == nil,
+               "write-as alone creates a vocabulary term")
+        expect(replacement?.kind == .manualReplacement && replacement?.heardAs == "air learn",
+               "optional heard-as creates an explicit replacement")
+        expect(
+            term?.logicalKey == (try? DictionaryEntry.manual(
+                writeAs: "  airLEARN  ", deviceID: "mac-b",
+                at: Date(timeIntervalSince1970: 20)))?.logicalKey,
+            "manual term logical keys ignore case and repeated whitespace")
+    }
+
+    private static func testDictionaryMerge() {
+        let t0 = Date(timeIntervalSince1970: 100)
+        let t1 = Date(timeIntervalSince1970: 200)
+        let alpha = try! DictionaryEntry.manual(writeAs: "Alpha", deviceID: "mac-a", at: t0)
+        let beta = try! DictionaryEntry.manual(writeAs: "Beta", deviceID: "mac-b", at: t0)
+        let addAdd = DictionaryDocument(entries: [alpha]).merged(
+            with: DictionaryDocument(entries: [beta]))
+        expect(addAdd.activeEntries.count == 2, "independent additions merge as a union")
+
+        let old = try! DictionaryEntry.manual(
+            writeAs: "Velora", heardAs: "valora", deviceID: "mac-a", at: t0,
+            revision: 1)
+        let revised = try! DictionaryEntry.manual(
+            writeAs: "Velora AI", heardAs: "valora", deviceID: "mac-b", at: t1,
+            revision: 2)
+        let updateWinner = DictionaryDocument(entries: [old]).merged(
+            with: DictionaryDocument(entries: [revised]))
+        expect(updateWinner.activeEntries.first?.writeAs == "Velora AI",
+               "higher revision deterministically wins an update conflict")
+
+        let deleted = old.deleting(deviceID: "mac-b", at: t1)
+        let deleteWinner = DictionaryDocument(entries: [revised]).merged(
+            with: DictionaryDocument(entries: [deleted]))
+        expect(deleteWinner.activeEntries.isEmpty,
+               "deletion wins over a concurrent same-epoch update")
+
+        let readded = try! deleted.readding(writeAs: "Velora", deviceID: "mac-a", at: t1)
+        let readdWinner = DictionaryDocument(entries: [deleted]).merged(
+            with: DictionaryDocument(entries: [readded]))
+        expect(readdWinner.activeEntries.count == 1 && readdWinner.activeEntries[0].writeAs == "Velora",
+               "explicit re-add advances the epoch and survives an older tombstone")
+
+        let learned = try! DictionaryEntry.learned(
+            wrong: "valora", right: "Velora", soft: false,
+            deviceID: "mac-a", at: t0)
+        let manual = try! DictionaryEntry.manual(
+            writeAs: "Velora Pro", heardAs: "valora", deviceID: "mac-b", at: t1)
+        let precedence = DictionaryDocument(entries: [learned, manual]).effectiveProjection
+        expect(precedence.replacements["valora"] == "Velora Pro",
+               "manual replacement outranks learned correction")
+
+        let cleared = DictionaryDocument(entries: [learned]).clearing(
+            .learned, deviceID: "mac-b", at: t1)
+        let longOfflineMerge = cleared.merged(with: DictionaryDocument(entries: [learned]))
+        expect(longOfflineMerge.activeEntries.allSatisfy { $0.namespace != .learned },
+               "clear generation blocks a long-offline learned entry from returning")
+    }
+
+    private static func testDictionarySerializationBoundary() {
+        let entry = try! DictionaryEntry.manual(
+            writeAs: "node.js", heardAs: "node js", deviceID: "mac-a",
+            at: Date(timeIntervalSince1970: 100))
+        let document = DictionaryDocument(entries: [entry])
+        let data = try! document.encoded()
+        let json = String(decoding: data, as: UTF8.self)
+        for forbidden in [
+            "transcript", "audio_path", "history", "counts", "candidates",
+            "checkpoint_id", "model", "screen_context", "SECRET_TRANSCRIPT_SENTINEL",
+        ] {
+            expect(!json.contains(forbidden), "cloud dictionary excludes \(forbidden)")
+        }
+        expect((try? DictionaryDocument.decode(data))?.activeEntries.count == 1,
+               "valid portable dictionary round-trips")
+
+        let newer = json.replacingOccurrences(of: "\"schema_version\":1", with: "\"schema_version\":999")
+        do {
+            _ = try DictionaryDocument.decode(Data(newer.utf8))
+            expect(false, "newer dictionary schema is rejected")
+        } catch {
+            expect(true, "newer dictionary schema is rejected")
+        }
+        do {
+            _ = try DictionaryDocument.decode(Data("not json".utf8))
+            expect(false, "corrupt dictionary payload is rejected")
+        } catch {
+            expect(true, "corrupt dictionary payload is rejected")
         }
     }
 
