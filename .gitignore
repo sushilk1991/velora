@@ -34,3 +34,6 @@ spikes/
 
 # Built app bundle and DMG
 build/
+
+# Isolated Codex worktrees
+.worktrees/
