@@ -65,6 +65,14 @@ enum VeloraBrand {
 /// transcript pill). One capsule morphs between states; the corner radius is
 /// always `height / 2` so the morph never shows a radius pop.
 enum HUDGeometry {
+    /// Stable live card dimensions. Partial updates never alter this shell,
+    /// which keeps the HUD anchored while Whisper revises provisional words.
+    static let recordingWidth: CGFloat = 348
+    static let recordingHeight: CGFloat = 72
+    static let cornerRadius: CGFloat = 20
+    static let successWidth: CGFloat = 112
+    static let successHeight: CGFloat = 40
+
     /// Compact capsule height. The inserted state is `height`×`height`; live
     /// transcript listening expands vertically to the value below.
     static let height: CGFloat = 56
@@ -86,18 +94,18 @@ enum HUDGeometry {
     /// Gap between major row elements (chip↔waveform, waveform↔timer, …).
     static let elementGap: CGFloat = VeloraSpacing.m
 
-    /// Live waveform strip (24 bars × 5 pt pitch, mirrored center-out).
-    static let waveformSize = CGSize(width: 120, height: 32)
+    /// Compact live waveform strip beside the transcript.
+    static let waveformSize = CGSize(width: 32, height: 24)
     static let dotDiameter: CGFloat = 8
     static let timerWidth: CGFloat = 36
-    static let chipIconSide: CGFloat = 16
+    static let chipIconSide: CGFloat = 14
     static let chipIconCornerRadius: CGFloat = VeloraSpacing.xs
 
     /// Live transcript phrase: enough for two useful lines, selected only on
     /// word/sentence boundaries.
     static let transcriptCharacterLimit = 96
-    static let transcriptFont = NSFont.systemFont(ofSize: 13, weight: .medium)
-    static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+    static let transcriptFont = NSFont.systemFont(ofSize: 14, weight: .medium)
+    static let chipFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
 
     /// Exact minimum width of the bottom control row. The outer HStack has
     /// two explicit 4 pt spacers and either three or four 12 pt inter-item

@@ -304,15 +304,24 @@ enum Selftest {
         model.updatePartial("  \n ")
         expect(model.transcriptTail == "a useful live phrase", "empty partial does not clear HUD")
 
+        model.beginSession(context: nil)
+        model.updatePartial("the design is")
+        model.updatePartial("the design is much better")
         expect(
-            HUDPanel.panelSize.width >= HUDGeometry.maxListeningWidth + 40,
-            "HUD panel contains maximum listening width and shadow")
+            model.transcriptStablePrefix == "the design is",
+            "HUD preserves the stable whole-word prefix")
         expect(
-            HUDPanel.panelSize.height >= HUDGeometry.expandedListeningHeight + 40,
-            "HUD panel contains expanded transcript height and shadow")
+            model.transcriptProvisionalSuffix == "much better",
+            "HUD isolates the changing provisional suffix")
+        expect(HUDGeometry.recordingWidth == 348, "HUD recording card has a fixed width")
+        expect(HUDGeometry.recordingHeight == 72, "HUD recording card has a fixed height")
+
         expect(
-            HUDGeometry.controlRowWidth(chipWidth: 0) == 248,
-            "HUD control-row geometry includes every gap and spacer")
+            HUDPanel.panelSize.width >= HUDGeometry.recordingWidth + 40,
+            "HUD panel contains the recording card and shadow")
+        expect(
+            HUDPanel.panelSize.height >= HUDGeometry.recordingHeight + 40,
+            "HUD panel contains the fixed card height and shadow")
     }
 
     // MARK: - Final-output clipboard staging

@@ -115,6 +115,11 @@ final class HUDModel: ObservableObject {
     /// Useful whole-word phrase selected from the running partial. Empty until
     /// the first partial — the HUD never shows placeholder text.
     @Published private(set) var transcriptTail = ""
+    /// Whole words shared by the previous and newest partial. The HUD renders
+    /// this prefix at full contrast so settled words stop visually flickering.
+    @Published private(set) var transcriptStablePrefix = ""
+    /// The newest, still-changeable words following `transcriptStablePrefix`.
+    @Published private(set) var transcriptProvisionalSuffix = ""
     /// True once selection has omitted older transcript text.
     @Published private(set) var transcriptTruncated = false
 
@@ -132,6 +137,8 @@ final class HUDModel: ObservableObject {
     func beginSession(context: HUDSessionContext?) {
         sessionContext = context
         transcriptTail = ""
+        transcriptStablePrefix = ""
+        transcriptProvisionalSuffix = ""
         transcriptTruncated = false
     }
 
@@ -146,6 +153,13 @@ final class HUDModel: ObservableObject {
         guard !flattened.isEmpty else { return }
         let selection = HUDTranscript.select(
             flattened, maxCharacters: HUDGeometry.transcriptCharacterLimit)
+        let previousWords = transcriptTail.split(separator: " ")
+        let nextWords = selection.text.split(separator: " ")
+        let sharedCount = zip(previousWords, nextWords)
+            .prefix(while: { $0 == $1 })
+            .count
+        transcriptStablePrefix = nextWords.prefix(sharedCount).joined(separator: " ")
+        transcriptProvisionalSuffix = nextWords.dropFirst(sharedCount).joined(separator: " ")
         transcriptTail = selection.text
         transcriptTruncated = selection.truncated
     }
