@@ -440,6 +440,9 @@ struct DictionaryDocument: Codable, Equatable {
     }
 
     func encoded() throws -> Data {
+        guard entries.count <= Self.maximumEntries else {
+            throw DictionaryValidationError.tooManyEntries
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601

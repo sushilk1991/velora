@@ -373,6 +373,14 @@ enum Selftest {
                "maximum-size dictionary projects every active entry")
         expect(launchDuration < 5 && mutationDuration < 5,
                "maximum-size migration and mutation remain bounded")
+        do {
+            _ = try maximumRepository.add(writeAs: "OverflowTerm")
+            expect(false, "repository refuses to persist a dictionary it cannot reload")
+        } catch {
+            expect(true, "repository refuses to persist a dictionary it cannot reload")
+        }
+        expect(maximumRepository.rows.count == DictionaryDocument.maximumEntries,
+               "oversized mutation leaves the last valid dictionary active")
         maximumFixture.remove()
     }
 
