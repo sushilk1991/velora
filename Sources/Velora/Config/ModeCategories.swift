@@ -9,7 +9,7 @@ import Foundation
 /// This duplication is deliberate; keep the bundle ids in sync with the
 /// engine when adding apps.
 enum ModeCategory: String {
-    case chat, email, notes, code, browser
+    case chat, email, notes, code, terminal, browser
 
     /// Human label shown in the HUD context chip.
     var displayName: String {
@@ -18,6 +18,7 @@ enum ModeCategory: String {
         case .email: return "Email"
         case .notes: return "Notes"
         case .code: return "Code"
+        case .terminal: return "Terminal"
         case .browser: return "Browser"
         }
     }
@@ -41,15 +42,18 @@ enum ModeCategory: String {
         "notion.id": .notes,
         "net.shinyfrog.bear": .notes,
         "com.lukilabs.lukiapp": .notes,
-        // code editors / terminals
+        // code editors
         "com.microsoft.VSCode": .code,
         "com.todesktop.230313mzl4w4u92": .code,  // Cursor
-        "com.apple.Terminal": .code,
-        "com.googlecode.iterm2": .code,
-        "com.mitchellh.ghostty": .code,
-        "dev.warp.Warp-Stable": .code,
         "dev.zed.Zed": .code,
-        "com.cmuxterm.app": .code,  // cmux
+        // terminals
+        "com.apple.Terminal": .terminal,
+        "com.googlecode.iterm2": .terminal,
+        "com.mitchellh.ghostty": .terminal,
+        "dev.warp.Warp-Stable": .terminal,
+        "org.alacritty": .terminal,
+        "net.kovidgoyal.kitty": .terminal,
+        "com.cmuxterm.app": .terminal,  // cmux
         // browsers
         "com.apple.Safari": .browser,
         "com.google.Chrome": .browser,

@@ -207,7 +207,7 @@ enum ScreenContext {
 
         let entities: [ContextEntity]
         switch category {
-        case .code:
+        case .code, .terminal:
             // "auth.ts", "auth.ts (Working Tree)", "● main.py" → the filename.
             if let file = filename(in: head) {
                 entities = [ContextEntity(type: "file", value: file)]

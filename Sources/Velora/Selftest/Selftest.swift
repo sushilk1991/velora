@@ -266,8 +266,28 @@ enum Selftest {
     private static func testModeCategories() {
         expect(ModeCategory.displayName(forBundleID: "com.tinyspeck.slackmacgap") == "Message",
                "Slack maps to Message")
-        expect(ModeCategory.displayName(forBundleID: "com.apple.Terminal") == "Code",
-               "Terminal maps to Code")
+        let terminals = [
+            "com.apple.Terminal",
+            "com.googlecode.iterm2",
+            "com.mitchellh.ghostty",
+            "dev.warp.Warp-Stable",
+            "org.alacritty",
+            "net.kovidgoyal.kitty",
+            "com.cmuxterm.app",
+        ]
+        for bundleID in terminals {
+            expect(ModeCategory.displayName(forBundleID: bundleID) == "Terminal",
+                   "\(bundleID) maps to Terminal")
+        }
+        let editors = [
+            "com.microsoft.VSCode",
+            "com.todesktop.230313mzl4w4u92",
+            "dev.zed.Zed",
+        ]
+        for bundleID in editors {
+            expect(ModeCategory.displayName(forBundleID: bundleID) == "Code",
+                   "\(bundleID) maps to Code")
+        }
         expect(ModeCategory.displayName(forBundleID: "com.example.unknown") == "Text",
                "unknown app falls back to Text")
         expect(ModeCategory.displayName(forBundleID: nil) == "Text", "nil bundle falls back to Text")
