@@ -80,6 +80,9 @@ def test_terminal_shell_commands_remain_byte_for_byte_verbatim(config):
         "rm -rf build",
         "npm run build",
         "docker compose up",
+        "who am i",
+        "where python",
+        "what README.md",
     )
     for raw in commands:
         gate = run_gate(raw, config, bundle_id="com.mitchellh.ghostty")

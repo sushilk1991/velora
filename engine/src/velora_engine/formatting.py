@@ -91,11 +91,22 @@ _TERMINAL_SHELL_SYNTAX_RE = re.compile(
     r"|(?:^|\s)\S*/\S*"
     r"|(?:^|\s)\S*[*\[]\S*"
 )
+_TERMINAL_SHORT_COMMAND_RE = re.compile(
+    # Real macOS/zsh commands whose English-looking first word otherwise
+    # collides with the prose prefixes below. Keep this deliberately narrow:
+    # longer questions such as "what this section does" still need cleanup.
+    r"^(?:who\s+am\s+i|(?:where|what)\s+\S+)$",
+    re.IGNORECASE,
+)
 
 
 def _short_terminal_is_prose(text: str) -> bool:
     """Return true only for unmistakably prose-shaped short Terminal input."""
-    if len(text.split()) < 2 or _TERMINAL_SHELL_SYNTAX_RE.search(text):
+    if (
+        len(text.split()) < 2
+        or _TERMINAL_SHELL_SYNTAX_RE.search(text)
+        or _TERMINAL_SHORT_COMMAND_RE.match(text.strip())
+    ):
         return False
     return _TERMINAL_PROSE_PREFIX_RE.match(text.lstrip()) is not None
 
