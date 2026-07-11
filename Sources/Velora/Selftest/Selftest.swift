@@ -20,6 +20,18 @@ enum Selftest {
         }
     }
 
+    @discardableResult
+    private static func waitUntil(
+        timeout: TimeInterval = 2,
+        _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        return condition()
+    }
+
     static func run() -> Int32 {
         testEditDistance()
         testMishearingShapes()
@@ -36,10 +48,15 @@ enum Selftest {
         testDictionaryRepositoryCRUD()
         testDictionaryRepositoryRemoteMerge()
         testDictionaryRepositoryCapturesLearning()
+        testDictionaryRepositoryRelearnAfterClear()
+        testDictionaryRepositoryProjectionFailure()
+        testDictionaryAccountIdentityComparison()
         testDictionarySyncAvailabilityAndPublish()
         testDictionarySyncMergeAndCorruption()
         testDictionarySyncAccountBoundary()
         testDictionarySyncDebouncesChanges()
+        testDictionarySyncSkipsSelfTriggeredRewrite()
+        testDictionarySyncRequiresIdentityMarker()
         testDictionarySettingsLogic()
         testCorrectionDiff()
         testEventParsing()
@@ -256,6 +273,24 @@ enum Selftest {
         let longOfflineMerge = cleared.merged(with: DictionaryDocument(entries: [learned]))
         expect(longOfflineMerge.activeEntries.allSatisfy { $0.namespace != .learned },
                "clear generation blocks a long-offline learned entry from returning")
+
+        let clearedAt = Date(timeIntervalSince1970: 300)
+        let manualBeforeClear = try! DictionaryEntry.manual(
+            writeAs: "BeforeClear", deviceID: "mac-a",
+            at: Date(timeIntervalSince1970: 250))
+        let manualAfterClear = try! DictionaryEntry.manual(
+            writeAs: "OfflineAfterClear", deviceID: "mac-b",
+            at: Date(timeIntervalSince1970: 350))
+        let manualClear = DictionaryDocument(entries: [manualBeforeClear]).clearing(
+            .manual, deviceID: "mac-a", at: clearedAt)
+        let offlineIntentMerge = manualClear.merged(
+            with: DictionaryDocument(entries: [manualBeforeClear, manualAfterClear]))
+        expect(!offlineIntentMerge.activeEntries.contains(where: {
+            $0.writeAs == "BeforeClear"
+        }), "clear timestamp keeps the pre-clear offline snapshot deleted")
+        expect(offlineIntentMerge.activeEntries.contains(where: {
+            $0.writeAs == "OfflineAfterClear"
+        }), "an explicit offline add made after clear survives reconciliation")
     }
 
     private static func testDictionarySerializationBoundary() {
@@ -330,7 +365,9 @@ enum Selftest {
             expect(!json.contains(sentinel), "cloud payload excludes local sentinel \(sentinel)")
         }
         let root = try! JSONSerialization.jsonObject(with: exported) as! [String: Any]
-        expect(Set(root.keys) == ["schema_version", "entries", "clear_generations"],
+        expect(Set(root.keys) == [
+            "schema_version", "entries", "clear_generations", "clear_modified_at",
+        ],
                "cloud payload root is an explicit allow-list")
         let allowedEntryKeys: Set<String> = [
             "logical_key", "kind", "write_as", "heard_as", "epoch", "revision",
@@ -477,6 +514,15 @@ enum Selftest {
                "dictionary import rejects malformed prompt-active strings")
         expect(!String(decoding: store.exportData()!, as: UTF8.self).contains("Injected"),
                "malformed imported correction never reaches the prompt store")
+
+        let blockedParent = dir.appendingPathComponent("blocked-learned")
+        try! Data("not a directory".utf8).write(to: blockedParent)
+        let blockedStore = LearningStore(url: blockedParent.appendingPathComponent("learned.json"))
+        expect(!blockedStore.applyPortableSnapshot(.init(
+            replacements: ["veloraa": "Velora"],
+            softReplacements: [:],
+            standaloneVocabulary: [])),
+            "learning projection reports a persistence failure")
         try? FileManager.default.removeItem(at: dir)
     }
 
@@ -507,6 +553,14 @@ enum Selftest {
                "auto apply preserves unknown engine keys")
         expect(Set(root["terms"] as? [String] ?? []) == ["Velora", "RemoteTerm"],
                "auto apply unions promoted terms without dropping a concurrent miner term")
+
+        let blockedParent = dir.appendingPathComponent("blocked-auto")
+        try! Data("not a directory".utf8).write(to: blockedParent)
+        let blockedStore = AutoVocabStore(
+            url: blockedParent.appendingPathComponent("auto_learned.json"))
+        expect(!blockedStore.applyPortableSnapshot(.init(
+            terms: ["ShouldNotPersist"], banned: [])),
+            "auto-vocabulary projection reports a lock or persistence failure")
         try? FileManager.default.removeItem(at: dir)
     }
 
@@ -671,6 +725,11 @@ enum Selftest {
         let persisted = try! DictionaryDocument.decode(Data(contentsOf: fixture.state))
         expect(persisted.entries.contains(where: { $0.logicalKey == replacement.id && $0.deleted }),
                "deleting an entry persists a tombstone")
+        let userExport = try! repository.exportData()
+        expect(!String(decoding: userExport, as: UTF8.self).contains("Airlearn AI"),
+               "user export excludes deleted terms and corrections")
+        expect(try! DictionaryDocument.decode(userExport).entries.allSatisfy { !$0.deleted },
+               "user export contains active dictionary entries only")
 
         _ = try! repository.add(writeAs: "node.js")
         let firstTerm = try! repository.add(writeAs: "FirstTerm")
@@ -765,6 +824,51 @@ enum Selftest {
         expect(Set(imported.rows.map(\.writeAs)).isSuperset(of: [
             "KeepLocalOnImport", "LocalTerm", "RemoteTerm", "AfterRemoteClear",
         ]), "imported clear generations never erase existing local entries")
+
+        let offlineFixture = DictionaryRepositoryFixture()
+        let offlineAfterClear = try! DictionaryEntry.manual(
+            writeAs: "OfflineAfterClear",
+            deviceID: "offline-mac",
+            at: Date(timeIntervalSince1970: 350))
+        let offlineDocument = DictionaryDocument().clearing(
+            .manual,
+            deviceID: "online-mac",
+            at: Date(timeIntervalSince1970: 300))
+            .upserting(offlineAfterClear)
+        try! offlineDocument.encoded().write(to: offlineFixture.state)
+        let offlineRepository = DictionaryRepository(
+            stateURL: offlineFixture.state,
+            configURL: offlineFixture.config,
+            learnedURL: offlineFixture.learned,
+            autoURL: offlineFixture.auto,
+            deviceID: "online-mac",
+            now: { Date(timeIntervalSince1970: 400) })
+        expect(offlineRepository.rows.map(\.writeAs) == ["OfflineAfterClear"],
+               "post-clear offline entry is manageable in repository UI")
+        do {
+            try offlineRepository.remove(id: offlineAfterClear.logicalKey)
+            expect(offlineRepository.rows.isEmpty,
+                   "post-clear offline entry can be removed normally")
+        } catch {
+            expect(false, "post-clear offline entry can be removed normally")
+        }
+        offlineFixture.remove()
+
+        let legacyExport = try! JSONSerialization.data(withJSONObject: [
+            "replacements": ["legacy heard": "LegacyName"],
+            "soft_replacements": ["cloud": "iCloud++"],
+            "vocabulary": ["LegacyStandalone"],
+        ])
+        do {
+            let legacyResult = try imported.importData(legacyExport)
+            expect(legacyResult.added == 3,
+                   "pre-Personal-Dictionary exports remain importable")
+            expect(Set(imported.rows.map(\.writeAs)).isSuperset(of: [
+                "LegacyName", "iCloud++", "LegacyStandalone",
+            ]), "legacy corrections and standalone vocabulary survive import")
+        } catch {
+            expect(false, "pre-Personal-Dictionary exports remain importable")
+        }
         fixture.remove()
         importedFixture.remove()
     }
@@ -805,18 +909,121 @@ enum Selftest {
         fixture.remove()
     }
 
+    private static func testDictionaryRepositoryRelearnAfterClear() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        expect(repository.observeCorrections([("velor", "Velora")]).count == 1,
+               "fixture correction is learned")
+        try! repository.clear(.learned)
+        expect(!repository.rows.contains(where: { $0.source == .learned }),
+               "forget all hides prior learned corrections")
+        expect(repository.observeCorrections([("velor", "Velora")]).count == 1,
+               "the same correction can be learned again after forget all")
+        expect(repository.rows.contains(where: {
+            $0.writeAs == "Velora" && $0.source == .learned
+        }), "re-learned correction advances past the clear generation")
+        let reloaded = makeSyncRepository(fixture, deviceID: "mac-reloaded")
+        expect(reloaded.rows.contains(where: {
+            $0.writeAs == "Velora" && $0.source == .learned
+        }), "re-learned correction survives projection and relaunch")
+        fixture.remove()
+    }
+
+    private static func testDictionaryRepositoryProjectionFailure() {
+        let fixture = DictionaryRepositoryFixture()
+        let blockedParent = fixture.directory.appendingPathComponent("blocked-config")
+        try! Data("not a directory".utf8).write(to: blockedParent)
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: blockedParent.appendingPathComponent("config.json"),
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "projection-failure")
+        do {
+            _ = try repository.add(writeAs: "SavedDespiteProjectionFailure")
+            expect(false, "projection failure is surfaced to the caller")
+        } catch {
+            expect(error.localizedDescription.contains("speech engine"),
+                   "projection failure explains that canonical state was saved")
+        }
+        expect(repository.rows.contains(where: { $0.writeAs == "SavedDespiteProjectionFailure" }),
+               "UI state follows the canonical document after projection failure")
+        let persisted = try! DictionaryDocument.decode(Data(contentsOf: fixture.state))
+        expect(persisted.activeEntries.contains(where: {
+            $0.writeAs == "SavedDespiteProjectionFailure"
+        }), "projection failure keeps a valid canonical document on disk")
+        fixture.remove()
+
+        let syncFixture = DictionaryRepositoryFixture()
+        let blockedSyncParent = syncFixture.directory.appendingPathComponent("blocked-config")
+        try! Data("not a directory".utf8).write(to: blockedSyncParent)
+        let syncRepository = DictionaryRepository(
+            stateURL: syncFixture.state,
+            configURL: blockedSyncParent.appendingPathComponent("config.json"),
+            learnedURL: syncFixture.learned,
+            autoURL: syncFixture.auto,
+            deviceID: "sync-projection-failure")
+        let remoteEntry = try! DictionaryEntry.manual(
+            writeAs: "CloudTermSavedLocally",
+            deviceID: "remote",
+            at: Date(timeIntervalSince1970: 200))
+        let transport = FakeDictionarySyncTransport()
+        transport.versionsResult = .success([
+            try! DictionaryDocument(entries: [remoteEntry]).encoded(),
+        ])
+        let sync = ICloudDictionarySync(
+            repository: syncRepository,
+            transport: transport,
+            identityURL: syncFixture.directory.appendingPathComponent("identity"))
+        sync.start()
+        _ = waitUntil {
+            if case .error = sync.status { return true }
+            return false
+        }
+        if case .error(let message) = sync.status {
+            expect(message.contains("speech engine") && !message.contains("unreadable"),
+                   "sync reports projection failure instead of blaming valid cloud data")
+        } else {
+            expect(false, "sync surfaces a projection failure")
+        }
+        let syncedState = try! DictionaryDocument.decode(Data(contentsOf: syncFixture.state))
+        expect(syncedState.activeEntries.contains(where: {
+            $0.writeAs == "CloudTermSavedLocally"
+        }), "sync projection failure still preserves the merged canonical state")
+        expect(transport.writes.isEmpty,
+               "sync does not publish until the local speech-engine projection succeeds")
+
+        try! FileManager.default.removeItem(at: blockedSyncParent)
+        try! FileManager.default.createDirectory(
+            at: blockedSyncParent, withIntermediateDirectories: true)
+        sync.syncNow()
+        _ = waitUntil { sync.status == .synced }
+        let projected = AppConfig.manualDictionarySnapshot(
+            at: blockedSyncParent.appendingPathComponent("config.json"))
+        expect(sync.status == .synced && projected.vocabulary.contains("CloudTermSavedLocally"),
+               "retry reprojects durable canonical state before reporting synced")
+        sync.stop()
+        syncFixture.remove()
+    }
+
     private final class FakeDictionarySyncTransport: DictionarySyncTransport {
-        var identityResult: Result<String, DictionarySyncTransportError> = .success("account-a")
+        var identityResult: Result<DictionaryAccountIdentity, DictionarySyncTransportError> =
+            .success(DictionaryAccountIdentity.fixture("account-a"))
         var versionsResult: Result<[Data], DictionarySyncTransportError> = .success([])
         var writes: [Data] = []
         var reads = 0
         var resolvedConflicts = 0
         var observer: (() -> Void)?
         var deferIdentity = false
-        var pendingIdentityCompletion: ((Result<String, DictionarySyncTransportError>) -> Void)?
+        var pendingIdentityCompletion:
+            ((Result<DictionaryAccountIdentity, DictionarySyncTransportError>) -> Void)?
+        var persistWritesAsVersion = false
+        var notifyAfterWrite = false
 
         func fetchAccountIdentity(
-            completion: @escaping (Result<String, DictionarySyncTransportError>) -> Void
+            completion: @escaping (
+                Result<DictionaryAccountIdentity, DictionarySyncTransportError>
+            ) -> Void
         ) {
             if deferIdentity {
                 pendingIdentityCompletion = completion
@@ -839,12 +1046,29 @@ enum Selftest {
         ) {
             writes.append(data)
             if resolvingConflicts { resolvedConflicts += 1 }
+            if persistWritesAsVersion { versionsResult = .success([data]) }
             completion(.success(()))
+            if notifyAfterWrite { observer?() }
         }
 
         func startObserving(_ onChange: @escaping () -> Void) { observer = onChange }
         func stopObserving() { observer = nil }
         var folderURL: URL? { nil }
+    }
+
+    private static func testDictionaryAccountIdentityComparison() {
+        let binary = DictionaryAccountIdentity.fixture("same-account", format: .binary)
+        let xml = DictionaryAccountIdentity.fixture("same-account", format: .xml)
+        expect(binary.archivedToken != xml.archivedToken,
+               "identity fixture proves archive bytes can differ for the same account token")
+        expect(binary.matches(storedData: xml.archivedToken),
+               "iCloud identity compares unarchived tokens rather than archive bytes")
+        let legacyBase64 = Data(xml.archivedToken.base64EncodedString().utf8)
+        expect(binary.matches(storedData: legacyBase64),
+               "existing base64 identity markers migrate without a false account change")
+        let other = DictionaryAccountIdentity.fixture("different-account")
+        expect(!binary.matches(storedData: other.archivedToken),
+               "different iCloud identity tokens remain isolated")
     }
 
     private static func makeSyncRepository(
@@ -881,12 +1105,17 @@ enum Selftest {
         let sync = ICloudDictionarySync(
             repository: repository, transport: available, identityURL: identityURL)
         sync.start()
+        _ = waitUntil { available.writes.count == 1 && sync.status == .synced }
         expect(sync.status == .synced, "empty iCloud publishes the local dictionary")
         expect(available.writes.count == 1,
                "initial empty cloud receives exactly one canonical document")
-        let published = try! DictionaryDocument.decode(available.writes[0])
-        expect(published.activeEntries.contains(where: { $0.writeAs == "LocalTerm" }),
-               "published cloud document contains confirmed local entry")
+        if let payload = available.writes.first {
+            let published = try! DictionaryDocument.decode(payload)
+            expect(published.activeEntries.contains(where: { $0.writeAs == "LocalTerm" }),
+                   "published cloud document contains confirmed local entry")
+        } else {
+            expect(false, "published cloud document contains confirmed local entry")
+        }
         sync.stop()
 
         let waiting = FakeDictionarySyncTransport()
@@ -920,6 +1149,7 @@ enum Selftest {
             transport: transport,
             identityURL: fixture.directory.appendingPathComponent("identity"))
         sync.start()
+        _ = waitUntil { transport.resolvedConflicts == 1 && sync.status == .synced }
         expect(Set(repository.rows.map(\.writeAs)) == ["LocalTerm", "RemoteA", "RemoteB"],
                "all current and conflict versions merge with local additions")
         expect(transport.resolvedConflicts == 1,
@@ -936,6 +1166,10 @@ enum Selftest {
             transport: corrupt,
             identityURL: corruptFixture.directory.appendingPathComponent("identity"))
         corruptSync.start()
+        _ = waitUntil {
+            if case .error = corruptSync.status { return true }
+            return false
+        }
         if case .error = corruptSync.status {
             expect(true, "corrupt cloud document surfaces an actionable error")
         } else {
@@ -950,12 +1184,22 @@ enum Selftest {
 
     private static func testDictionarySyncAccountBoundary() {
         let fixture = DictionaryRepositoryFixture()
+        try! JSONSerialization.data(withJSONObject: [
+            "counts": ["old pending→Old Pending": 1],
+        ]).write(to: fixture.learned)
+        try! JSONSerialization.data(withJSONObject: [
+            "version": 1,
+            "checkpoint_id": 7,
+            "terms": ["OldAccountAutoTerm"],
+            "candidates": ["OldAccountCandidate": ["count": 1]],
+        ]).write(to: fixture.auto)
         let repository = makeSyncRepository(fixture)
         _ = try! repository.add(writeAs: "OldAccountLocal")
         let identityURL = fixture.directory.appendingPathComponent("identity")
-        try! Data("account-old".utf8).write(to: identityURL)
+        try! DictionaryAccountIdentity.fixture("account-old").archivedToken.write(to: identityURL)
         let cloud = FakeDictionarySyncTransport()
-        cloud.identityResult = .success("account-new")
+        let newIdentity = DictionaryAccountIdentity.fixture("account-new")
+        cloud.identityResult = .success(newIdentity)
         let remote = try! DictionaryDocument(entries: [
             try! DictionaryEntry.manual(
                 writeAs: "NewAccountCloud", deviceID: "mac-new",
@@ -977,10 +1221,113 @@ enum Selftest {
         expect(sync.status == .accountChanged,
                "cloud notifications cannot displace a pending account decision")
         sync.resolveAccountChange(.useCloud)
+        _ = waitUntil { sync.status == .synced }
         expect(repository.rows.map(\.writeAs) == ["NewAccountCloud"],
                "use-cloud decision explicitly replaces old-account local names")
-        expect(String(decoding: try! Data(contentsOf: identityURL), as: UTF8.self) == "account-new",
+        let learnedRoot = try! JSONSerialization.jsonObject(
+            with: Data(contentsOf: fixture.learned)) as! [String: Any]
+        expect((learnedRoot["counts"] as? [String: Int])?.isEmpty == true,
+               "account replacement clears old-account pending corrections")
+        let autoRoot = try! JSONSerialization.jsonObject(
+            with: Data(contentsOf: fixture.auto)) as! [String: Any]
+        expect((autoRoot["terms"] as? [String])?.contains("OldAccountAutoTerm") == false,
+               "account replacement removes old-account auto vocabulary")
+        expect((autoRoot["candidates"] as? [String: Any])?.isEmpty == true,
+               "account replacement clears old-account miner candidates")
+        expect(newIdentity.matches(storedData: try! Data(contentsOf: identityURL)),
                "resolved account decision advances the stored identity")
+        sync.stop()
+        fixture.remove()
+
+        let failureFixture = DictionaryRepositoryFixture()
+        let learnedParent = failureFixture.directory.appendingPathComponent("account-learning")
+        let learnedURL = learnedParent.appendingPathComponent("learned.json")
+        try! FileManager.default.createDirectory(
+            at: learnedParent, withIntermediateDirectories: true)
+        try! JSONSerialization.data(withJSONObject: [
+            "counts": ["prior pending→Prior Pending": 1],
+        ]).write(to: learnedURL)
+        let failureRepository = DictionaryRepository(
+            stateURL: failureFixture.state,
+            configURL: failureFixture.config,
+            learnedURL: learnedURL,
+            autoURL: failureFixture.auto,
+            deviceID: "account-write-failure")
+        let failureIdentityURL = failureFixture.directory.appendingPathComponent("identity")
+        let oldIdentity = DictionaryAccountIdentity.fixture("failure-account-old")
+        try! oldIdentity.archivedToken.write(to: failureIdentityURL)
+        let failureCloud = FakeDictionarySyncTransport()
+        failureCloud.identityResult = .success(
+            DictionaryAccountIdentity.fixture("failure-account-new"))
+        failureCloud.versionsResult = .success([remote])
+        let failureSync = ICloudDictionarySync(
+            repository: failureRepository,
+            transport: failureCloud,
+            identityURL: failureIdentityURL)
+        failureSync.start()
+        expect(failureSync.status == .accountChanged,
+               "account cleanup failure fixture reaches the explicit boundary")
+        try! FileManager.default.removeItem(at: learnedParent)
+        try! Data("not a directory".utf8).write(to: learnedParent)
+        failureSync.resolveAccountChange(.useCloud)
+        _ = waitUntil {
+            if case .error = failureSync.status { return true }
+            return failureSync.status == .synced
+        }
+        if case .error(let message) = failureSync.status {
+            expect(message.contains("pending learning"),
+                   "account switch explains why prior-account state could not be cleared")
+        } else {
+            expect(false, "account switch pauses when prior-account state is not durable")
+        }
+        expect(failureCloud.reads == 0 && failureCloud.writes.isEmpty,
+               "failed prior-account cleanup prevents all new-account dictionary I/O")
+        expect(oldIdentity.matches(storedData: try! Data(contentsOf: failureIdentityURL)),
+               "failed prior-account cleanup does not advance the account marker")
+        failureSync.stop()
+        failureFixture.remove()
+    }
+
+    private static func testDictionarySyncSkipsSelfTriggeredRewrite() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        _ = try! repository.add(writeAs: "LoopSafeTerm")
+        let transport = FakeDictionarySyncTransport()
+        transport.persistWritesAsVersion = true
+        transport.notifyAfterWrite = true
+        let sync = ICloudDictionarySync(
+            repository: repository,
+            transport: transport,
+            identityURL: fixture.directory.appendingPathComponent("identity"),
+            debounceDelay: 0.01)
+        sync.start()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.12))
+        expect(transport.writes.count == 1,
+               "metadata notification from Velora's own write does not rewrite forever (writes: \(transport.writes.count))")
+        expect(sync.status == .synced, "self-notification settles back to synced")
+        sync.stop()
+        fixture.remove()
+    }
+
+    private static func testDictionarySyncRequiresIdentityMarker() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        _ = try! repository.add(writeAs: "LocalOnlyUntilIdentityIsSafe")
+        let blockedParent = fixture.directory.appendingPathComponent("blocked-identity")
+        try! Data("not a directory".utf8).write(to: blockedParent)
+        let transport = FakeDictionarySyncTransport()
+        let sync = ICloudDictionarySync(
+            repository: repository,
+            transport: transport,
+            identityURL: blockedParent.appendingPathComponent("identity"))
+        sync.start()
+        if case .error = sync.status {
+            expect(true, "unwritable identity marker pauses iCloud sync")
+        } else {
+            expect(false, "unwritable identity marker pauses iCloud sync")
+        }
+        expect(transport.reads == 0 && transport.writes.isEmpty,
+               "iCloud is untouched until the account boundary is durable")
         sync.stop()
         fixture.remove()
     }
@@ -995,15 +1342,13 @@ enum Selftest {
             identityURL: fixture.directory.appendingPathComponent("identity"),
             debounceDelay: 0.02)
         sync.start()
+        _ = waitUntil { sync.status == .synced && transport.writes.count == 1 }
         transport.reads = 0
         transport.writes = []
         transport.observer?()
         transport.observer?()
         transport.observer?()
-        let deadline = Date().addingTimeInterval(0.15)
-        while Date() < deadline && transport.reads == 0 {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
-        }
+        _ = waitUntil { transport.reads == 1 && transport.writes.count == 1 }
         expect(transport.reads == 1 && transport.writes.count == 1,
                "bursty cloud notifications coalesce into one reconciliation")
         sync.stop()

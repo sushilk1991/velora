@@ -61,6 +61,7 @@ final class DictionaryRepository: ObservableObject {
     private let deviceID: String
     private let now: () -> Date
     private let reload: () -> Void
+    private var projectionIsCurrent = false
 
     static var defaultStateURL: URL {
         AppConfig.veloraDirectory.appendingPathComponent("dictionary_sync.json")
@@ -99,7 +100,8 @@ final class DictionaryRepository: ObservableObject {
         if !persist(document) {
             lastError = DictionaryRepositoryError.couldNotPersist.localizedDescription
         }
-        if !project(document) {
+        projectionIsCurrent = project(document)
+        if !projectionIsCurrent {
             lastError = DictionaryRepositoryError.couldNotProject.localizedDescription
         }
         refreshRows()
@@ -304,17 +306,39 @@ final class DictionaryRepository: ObservableObject {
     /// Explicit account-boundary action: unlike normal remote sync/import,
     /// this replaces local portable state instead of merging it.
     func replace(with replacement: DictionaryDocument) throws {
-        try commit(replacement)
+        try commit(replacement, preservingDeviceLearning: false)
     }
 
-    func exportData() throws -> Data { try document.encoded() }
+    /// A user export is a portable snapshot, not synchronization history.
+    /// Tombstones and clear generations stay in the private sync document so a
+    /// deleted name cannot leak into a file the user intentionally shares.
+    func exportData() throws -> Data {
+        try DictionaryDocument(entries: document.activeEntries).encoded()
+    }
+
+    /// iCloud reconciliation needs tombstones and clear generations to prevent
+    /// deleted entries from returning on another Mac.
+    func syncData() throws -> Data { try document.encoded() }
+
+    /// An Apple Account decision moves only confirmed canonical entries. Local
+    /// pending corrections and miner candidates must not cross the boundary.
+    func resetDeviceLearningState() throws {
+        projectionIsCurrent = false
+        guard project(document, preservingDeviceLearning: false) else {
+            lastError = DictionaryRepositoryError.couldNotProject.localizedDescription
+            throw DictionaryRepositoryError.couldNotProject
+        }
+        projectionIsCurrent = true
+        lastError = nil
+        reload()
+    }
 
     /// Explicit file import is additive. Unlike cloud reconciliation, imported
     /// clear generations and tombstones never delete local entries; the user is
     /// choosing terms to add, not replacing this Mac's synchronization history.
     @discardableResult
     func importData(_ data: Data) throws -> DictionaryImportResult {
-        let incoming = try DictionaryDocument.decode(data)
+        let incoming = try decodeImport(data)
         var next = document
         var added = 0
         var keptExisting = 0
@@ -345,8 +369,7 @@ final class DictionaryRepository: ObservableObject {
     func applyRemote(_ data: Data) -> Bool {
         do {
             let incoming = try DictionaryDocument.decode(data)
-            let merged = document.merged(with: incoming)
-            if merged != document { try commit(merged) }
+            try mergeRemote(incoming)
             return true
         } catch {
             lastError = error.localizedDescription
@@ -354,8 +377,42 @@ final class DictionaryRepository: ObservableObject {
         }
     }
 
+    @discardableResult
+    func applyRemote(_ incoming: DictionaryDocument) -> Bool {
+        do {
+            try mergeRemote(incoming)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    /// Throwing form used by iCloud sync so transport/decode failures are not
+    /// conflated with a valid document that could not be persisted or
+    /// projected into the live speech engine.
+    func mergeRemote(_ incoming: DictionaryDocument) throws {
+        let merged = document.merged(with: incoming)
+        if merged != document {
+            try commit(merged)
+        } else {
+            try ensureProjectionCurrent()
+        }
+    }
+
+    func ensureProjectionCurrent() throws {
+        guard !projectionIsCurrent else { return }
+        guard project(document) else {
+            lastError = DictionaryRepositoryError.couldNotProject.localizedDescription
+            throw DictionaryRepositoryError.couldNotProject
+        }
+        projectionIsCurrent = true
+        lastError = nil
+        reload()
+    }
+
     private func isActive(_ entry: DictionaryEntry) -> Bool {
-        !entry.deleted && entry.generation >= document.generation(for: entry.namespace)
+        document.isActive(entry)
     }
 
     private func collisionError(
@@ -370,11 +427,20 @@ final class DictionaryRepository: ObservableObject {
             existingWriteAs: existing.writeAs)
     }
 
-    private func commit(_ next: DictionaryDocument) throws {
+    private func commit(
+        _ next: DictionaryDocument,
+        preservingDeviceLearning: Bool = true
+    ) throws {
         guard persist(next) else { throw DictionaryRepositoryError.couldNotPersist }
-        guard project(next) else { throw DictionaryRepositoryError.couldNotProject }
         document = next
         refreshRows()
+        projectionIsCurrent = false
+        guard project(next, preservingDeviceLearning: preservingDeviceLearning) else {
+            lastError = DictionaryRepositoryError.couldNotProject.localizedDescription
+            NotificationCenter.default.post(name: .veloraDictionaryDidChange, object: self)
+            throw DictionaryRepositoryError.couldNotProject
+        }
+        projectionIsCurrent = true
         lastError = nil
         reload()
         NotificationCenter.default.post(name: .veloraDictionaryDidChange, object: self)
@@ -395,7 +461,10 @@ final class DictionaryRepository: ObservableObject {
         }
     }
 
-    private func project(_ document: DictionaryDocument) -> Bool {
+    private func project(
+        _ document: DictionaryDocument,
+        preservingDeviceLearning: Bool = true
+    ) -> Bool {
         let active = document.activeEntries
         let manual = active.filter { $0.namespace == .manual }
         let manualVocabulary = Self.deduplicated(manual.map(\.writeAs))
@@ -419,14 +488,20 @@ final class DictionaryRepository: ObservableObject {
                 hard[Self.normalized(heard)] = entry.writeAs
             }
         }
-        learning.applyPortableSnapshot(.init(
-            replacements: hard,
-            softReplacements: soft,
-            standaloneVocabulary: []))
+        guard learning.applyPortableSnapshot(
+            .init(
+                replacements: hard,
+                softReplacements: soft,
+                standaloneVocabulary: []),
+            preservingPendingCounts: preservingDeviceLearning)
+        else { return false }
 
         let autoTerms = active.filter { $0.kind == .autoTerm }.map(\.writeAs)
         let autoBans = active.filter { $0.kind == .autoBan }.map(\.writeAs)
-        autoVocab.applyPortableSnapshot(.init(terms: autoTerms, banned: autoBans))
+        guard autoVocab.applyPortableSnapshot(
+            .init(terms: autoTerms, banned: autoBans),
+            preservingDeviceState: preservingDeviceLearning)
+        else { return false }
         return true
     }
 
@@ -469,11 +544,34 @@ final class DictionaryRepository: ObservableObject {
         guard let existing = document.entry(id: captured.logicalKey) else {
             return document.upserting(captured)
         }
-        if !existing.deleted && existing.writeAs == captured.writeAs { return document }
+        if isActive(existing) && existing.writeAs == captured.writeAs { return document }
         let next = existing.deleted
             ? try? existing.readding(writeAs: captured.writeAs, deviceID: deviceID, at: date)
             : try? existing.revising(writeAs: captured.writeAs, deviceID: deviceID, at: date)
         return next.map { document.upserting($0.withGeneration(captured.generation)) } ?? document
+    }
+
+    private func decodeImport(_ data: Data) throws -> DictionaryDocument {
+        if let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           root["schema_version"] == nil {
+            let legacy = try JSONDecoder().decode(LearningStore.PortableSnapshot.self, from: data)
+            let date = now()
+            var entries = legacy.replacements.compactMap { wrong, right in
+                try? DictionaryEntry.learned(
+                    wrong: wrong, right: right, soft: false,
+                    deviceID: deviceID, at: date)
+            }
+            entries += legacy.softReplacements.compactMap { wrong, right in
+                try? DictionaryEntry.learned(
+                    wrong: wrong, right: right, soft: true,
+                    deviceID: deviceID, at: date)
+            }
+            entries += legacy.standaloneVocabulary.compactMap { term in
+                try? DictionaryEntry.manual(writeAs: term, deviceID: deviceID, at: date)
+            }
+            return DictionaryDocument(entries: entries)
+        }
+        return try DictionaryDocument.decode(data)
     }
 
     private static func migrate(

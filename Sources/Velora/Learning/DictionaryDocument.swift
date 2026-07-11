@@ -323,26 +323,36 @@ struct DictionaryDocument: Codable, Equatable {
     let schemaVersion: Int
     private(set) var entries: [DictionaryEntry]
     private(set) var clearGenerations: [DictionaryNamespace: Int]
+    private(set) var clearModifiedAt: [DictionaryNamespace: Date]
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
         case entries
         case clearGenerations = "clear_generations"
+        case clearModifiedAt = "clear_modified_at"
     }
 
     init(
         entries: [DictionaryEntry] = [],
-        clearGenerations: [DictionaryNamespace: Int] = [:]
+        clearGenerations: [DictionaryNamespace: Int] = [:],
+        clearModifiedAt: [DictionaryNamespace: Date] = [:]
     ) {
         schemaVersion = Self.currentSchemaVersion
         self.clearGenerations = clearGenerations
+        self.clearModifiedAt = clearModifiedAt
         self.entries = Self.collapsed(entries)
     }
 
     var activeEntries: [DictionaryEntry] {
-        entries.filter { entry in
-            !entry.deleted && entry.generation >= (clearGenerations[entry.namespace] ?? 0)
-        }.sorted { $0.logicalKey < $1.logicalKey }
+        entries.filter(isActive).sorted { $0.logicalKey < $1.logicalKey }
+    }
+
+    func isActive(_ entry: DictionaryEntry) -> Bool {
+        guard !entry.deleted else { return false }
+        let generation = clearGenerations[entry.namespace] ?? 0
+        if entry.generation >= generation { return true }
+        guard let clearedAt = clearModifiedAt[entry.namespace] else { return false }
+        return entry.modifiedAt > clearedAt
     }
 
     func entry(id: String) -> DictionaryEntry? {
@@ -354,7 +364,10 @@ struct DictionaryDocument: Codable, Equatable {
     }
 
     func upserting(_ entry: DictionaryEntry) -> DictionaryDocument {
-        DictionaryDocument(entries: entries + [entry], clearGenerations: clearGenerations)
+        DictionaryDocument(
+            entries: entries + [entry],
+            clearGenerations: clearGenerations,
+            clearModifiedAt: clearModifiedAt)
     }
 
     var effectiveProjection: DictionaryProjection {
@@ -419,24 +432,40 @@ struct DictionaryDocument: Codable, Equatable {
     }
 
     func merged(with other: DictionaryDocument) -> DictionaryDocument {
-        var generations = clearGenerations
+        var generations: [DictionaryNamespace: Int] = [:]
+        var modifiedAt: [DictionaryNamespace: Date] = [:]
         for namespace in DictionaryNamespace.allCases {
-            generations[namespace] = max(generations[namespace] ?? 0,
-                                         other.clearGenerations[namespace] ?? 0)
+            let leftGeneration = clearGenerations[namespace] ?? 0
+            let rightGeneration = other.clearGenerations[namespace] ?? 0
+            let generation = max(leftGeneration, rightGeneration)
+            if generation > 0 {
+                generations[namespace] = generation
+                let dates = [
+                    leftGeneration == generation ? clearModifiedAt[namespace] : nil,
+                    rightGeneration == generation ? other.clearModifiedAt[namespace] : nil,
+                ].compactMap { $0 }
+                if let latest = dates.max() { modifiedAt[namespace] = latest }
+            }
         }
         return DictionaryDocument(
             entries: entries + other.entries,
-            clearGenerations: generations)
+            clearGenerations: generations,
+            clearModifiedAt: modifiedAt)
     }
 
     func clearing(
         _ namespace: DictionaryNamespace,
         deviceID _: String,
-        at _: Date
+        at date: Date
     ) -> DictionaryDocument {
         var generations = clearGenerations
+        var modifiedAt = clearModifiedAt
         generations[namespace, default: 0] += 1
-        return DictionaryDocument(entries: entries, clearGenerations: generations)
+        modifiedAt[namespace] = date
+        return DictionaryDocument(
+            entries: entries,
+            clearGenerations: generations,
+            clearModifiedAt: modifiedAt)
     }
 
     func encoded() throws -> Data {
@@ -468,8 +497,17 @@ struct DictionaryDocument: Codable, Equatable {
         entries = Self.collapsed(try values.decode([DictionaryEntry].self, forKey: .entries))
         let wireGenerations = try values.decodeIfPresent(
             [String: Int].self, forKey: .clearGenerations) ?? [:]
-        clearGenerations = Dictionary(uniqueKeysWithValues: wireGenerations.compactMap { key, value in
+        let decodedGenerations: [DictionaryNamespace: Int] = Dictionary(
+            uniqueKeysWithValues: wireGenerations.compactMap { key, value in
             guard let namespace = DictionaryNamespace(rawValue: key), value >= 0 else { return nil }
+            return (namespace, value)
+        })
+        clearGenerations = decodedGenerations
+        let wireDates = try values.decodeIfPresent(
+            [String: Date].self, forKey: .clearModifiedAt) ?? [:]
+        clearModifiedAt = Dictionary(uniqueKeysWithValues: wireDates.compactMap { key, value in
+            guard let namespace = DictionaryNamespace(rawValue: key),
+                  (decodedGenerations[namespace] ?? 0) > 0 else { return nil }
             return (namespace, value)
         })
     }
@@ -481,6 +519,9 @@ struct DictionaryDocument: Codable, Equatable {
         try values.encode(Dictionary(uniqueKeysWithValues: clearGenerations.map {
             ($0.key.rawValue, $0.value)
         }), forKey: .clearGenerations)
+        try values.encode(Dictionary(uniqueKeysWithValues: clearModifiedAt.map {
+            ($0.key.rawValue, $0.value)
+        }), forKey: .clearModifiedAt)
     }
 
     private static func collapsed(_ entries: [DictionaryEntry]) -> [DictionaryEntry] {

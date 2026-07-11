@@ -57,15 +57,25 @@ final class AutoVocabStore {
 
     /// Merge confirmed state from another device. Bans win, while a term the
     /// miner promoted concurrently is unioned rather than overwritten.
-    func applyPortableSnapshot(_ snapshot: PortableSnapshot) {
+    @discardableResult
+    func applyPortableSnapshot(
+        _ snapshot: PortableSnapshot,
+        preservingDeviceState: Bool = true
+    ) -> Bool {
         mutate { root in
-            let banned = self.appendingBanned(Self.validatedTerms(snapshot.banned), in: root)
+            let validatedBans = Self.validatedTerms(snapshot.banned)
+            let banned = preservingDeviceState
+                ? self.appendingBanned(validatedBans, in: root)
+                : self.appendingBanned(validatedBans, in: ["banned": [String]()])
             let bannedKeys = Set(banned.map(Self.normalized))
-            let existing = (root["terms"] as? [String]) ?? []
-            root["terms"] = Self.deduplicatedTerms(existing + Self.validatedTerms(snapshot.terms))
+            let existing = preservingDeviceState ? ((root["terms"] as? [String]) ?? []) : []
+            root["terms"] = Self.deduplicatedTerms(
+                existing + Self.validatedTerms(snapshot.terms))
                 .filter { !bannedKeys.contains(Self.normalized($0)) }
             root["banned"] = banned
-            if var candidates = root["candidates"] as? [String: Any] {
+            if !preservingDeviceState {
+                root["candidates"] = [String: Any]()
+            } else if var candidates = root["candidates"] as? [String: Any] {
                 candidates = candidates.filter { !bannedKeys.contains(Self.normalized($0.key)) }
                 root["candidates"] = candidates
             }
@@ -123,7 +133,8 @@ final class AutoVocabStore {
         return banned
     }
 
-    private func write(_ root: [String: Any]) {
+    @discardableResult
+    private func write(_ root: [String: Any]) -> Bool {
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
@@ -131,39 +142,49 @@ final class AutoVocabStore {
             let data = try JSONSerialization.data(
                 withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes(
+            try FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
         } catch {
             NSLog("Velora: failed to persist auto_learned.json: \(error)")
+            return false
         }
     }
 
     /// Cross-process lock shared with the Python miner. The critical section
     /// includes the fresh read, mutation, and atomic replace, so neither writer
     /// can publish a stale whole-file view over the other.
+    @discardableResult
     private func mutate(
         createIfMissing: Bool = true,
         _ body: (inout [String: Any]) -> Void
-    ) {
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700])
+    ) -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+        } catch {
+            NSLog("Velora: failed to create auto-vocabulary directory: \(error)")
+            return false
+        }
         let lockURL = url.appendingPathExtension("lock")
         let descriptor = Darwin.open(lockURL.path, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR)
         guard descriptor >= 0 else {
             NSLog("Velora: failed to open auto-vocabulary lock")
-            return
+            return false
         }
         defer { Darwin.close(descriptor) }
         guard flock(descriptor, LOCK_EX) == 0 else {
             NSLog("Velora: failed to lock auto-vocabulary state")
-            return
+            return false
         }
         defer { flock(descriptor, LOCK_UN) }
-        guard createIfMissing || FileManager.default.fileExists(atPath: url.path) else { return }
+        guard createIfMissing || FileManager.default.fileExists(atPath: url.path) else {
+            return true
+        }
         var root = read() ?? ["version": 1]
         body(&root)
-        write(root)
+        return write(root)
     }
 
     private static func validatedTerms(_ terms: [String]) -> [String] {

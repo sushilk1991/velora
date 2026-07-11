@@ -816,6 +816,24 @@ def test_manual_dictionary_wins_and_applies_to_short_utterance(tmp_path):
     assert "Airlearn" in prompt
 
 
+def test_manual_dictionary_wins_over_conflicting_mode_replacement(config):
+    config.data["replacements"] = {"air learn": "Airlearn"}
+    for mode_name in ("default", "raw"):
+        config.modes[mode_name].replacements["air learn"] = "ModeWrong"
+
+    short = run_gate("air learn", config, explicit_mode="Default")
+    assert short.text == "Airlearn."
+
+    formatting_off = run_gate("air learn", config, explicit_mode="Raw")
+    assert formatting_off.text == "Airlearn"
+
+    long_gate = run_gate(LONG + " air learn", config, explicit_mode="Default")
+    assert long_gate.replacements["air learn"] == "Airlearn"
+    assert formatting.postprocess("Please ask air learn about this", long_gate) == (
+        "Please ask Airlearn about this."
+    )
+
+
 def test_nearby_text_is_fenced_as_data(config):
     from velora_engine.config import Mode
     from velora_engine.formatting import build_system_prompt

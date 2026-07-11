@@ -700,7 +700,9 @@ def run_gate(
         refined = _site_mode(config, entities)
         if refined is not None:
             mode, category = refined
-    replacements = {**config.global_replacements, **mode.replacements}
+    # Personal Dictionary rules are global explicit user intent, so they win
+    # over a conflicting per-mode rule on every deterministic formatting path.
+    replacements = {**mode.replacements, **config.global_replacements}
     chat_style = _is_chat(mode, category)
 
     text = raw.strip()

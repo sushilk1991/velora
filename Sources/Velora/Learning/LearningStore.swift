@@ -143,16 +143,20 @@ final class LearningStore {
         }
     }
 
-    private func save() {
-        // The app can race the engine on first run; ensure ~/.velora exists.
-        try? FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    @discardableResult
+    private func save() -> Bool {
         do {
+            // The app can race the engine on first run; ensure ~/.velora exists.
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let data = try JSONEncoder().encode(learned)
             try data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
         } catch {
             NSLog("Velora: failed to persist learned.json: \(error)")
+            return false
         }
     }
 
@@ -374,9 +378,14 @@ final class LearningStore {
 
     /// Replace confirmed learning from a merged portable document while
     /// retaining this Mac's pending confirmation counts.
-    func applyPortableSnapshot(_ snapshot: PortableSnapshot) {
+    @discardableResult
+    func applyPortableSnapshot(
+        _ snapshot: PortableSnapshot,
+        preservingPendingCounts: Bool = true
+    ) -> Bool {
         load()
-        let counts = learned.counts
+        let previous = learned
+        let counts = preservingPendingCounts ? learned.counts : [:]
         let hard = Self.validatedPairs(snapshot.replacements)
         let soft = Self.validatedPairs(snapshot.softReplacements)
             .filter { hard[$0.key] == nil }
@@ -387,7 +396,11 @@ final class LearningStore {
         learned.vocabulary = Self.deduplicatedTerms(
             Array(hard.values) + Array(soft.values) + standalone)
         prune()
-        save()
+        guard save() else {
+            learned = previous
+            return false
+        }
+        return true
     }
 
     @discardableResult

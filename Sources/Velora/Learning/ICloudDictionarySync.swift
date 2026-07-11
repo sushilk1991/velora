@@ -7,9 +7,52 @@ enum DictionarySyncTransportError: Error, Equatable {
     case io(String)
 }
 
+/// An archived `FileManager.ubiquityIdentityToken`. Archive bytes are not an
+/// account identifier: the same token can have different keyed-archive
+/// representations. Account boundaries must compare the unarchived objects.
+struct DictionaryAccountIdentity {
+    let archivedToken: Data
+
+    func matches(storedData: Data) -> Bool {
+        guard let current = Self.unarchive(archivedToken) else { return false }
+
+        if let stored = Self.unarchive(storedData), current.isEqual(stored) {
+            return true
+        }
+
+        // Velora 0.4 stored the archive as base64 text. Accept it once so an
+        // upgrade does not look like an Apple Account change; the next
+        // successful sync rewrites the marker in the canonical binary form.
+        guard
+            let encoded = String(data: storedData, encoding: .utf8),
+            let legacyArchive = Data(base64Encoded: encoded),
+            let stored = Self.unarchive(legacyArchive)
+        else { return false }
+        return current.isEqual(stored)
+    }
+
+    static func fixture(
+        _ value: String,
+        format: PropertyListSerialization.PropertyListFormat = .binary
+    ) -> DictionaryAccountIdentity {
+        let archiver = NSKeyedArchiver(requiringSecureCoding: false)
+        archiver.outputFormat = format
+        archiver.encode(value as NSString, forKey: NSKeyedArchiveRootObjectKey)
+        archiver.finishEncoding()
+        return DictionaryAccountIdentity(archivedToken: archiver.encodedData)
+    }
+
+    private static func unarchive(_ data: Data) -> NSObject? {
+        guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: data) else { return nil }
+        unarchiver.requiresSecureCoding = false
+        defer { unarchiver.finishDecoding() }
+        return unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) as? NSObject
+    }
+}
+
 protocol DictionarySyncTransport: AnyObject {
     func fetchAccountIdentity(
-        completion: @escaping (Result<String, DictionarySyncTransportError>) -> Void)
+        completion: @escaping (Result<DictionaryAccountIdentity, DictionarySyncTransportError>) -> Void)
     func readVersions(
         completion: @escaping (Result<[Data], DictionarySyncTransportError>) -> Void)
     func write(
@@ -52,25 +95,29 @@ final class ICloudDictionarySync: ObservableObject {
     private let transport: DictionarySyncTransport
     private let identityURL: URL
     private let debounceDelay: TimeInterval
+    private let reconciliationQueue: DispatchQueue
     private var notificationToken: NSObjectProtocol?
     private var debounceWork: DispatchWorkItem?
     private var started = false
     private var inFlight = false
     private var syncAgain = false
     private var applyingRemote = false
-    private var pendingIdentity: String?
+    private var pendingIdentity: DictionaryAccountIdentity?
 
     init(
         repository: DictionaryRepository,
         transport: DictionarySyncTransport = ICloudDocumentsDictionaryTransport(),
         identityURL: URL = AppConfig.veloraDirectory
             .appendingPathComponent("dictionary_icloud_identity"),
-        debounceDelay: TimeInterval = 0.5
+        debounceDelay: TimeInterval = 0.5,
+        reconciliationQueue: DispatchQueue = DispatchQueue(
+            label: "com.velora.dictionary.reconcile", qos: .utility)
     ) {
         self.repository = repository
         self.transport = transport
         self.identityURL = identityURL
         self.debounceDelay = debounceDelay
+        self.reconciliationQueue = reconciliationQueue
     }
 
     deinit { stop() }
@@ -135,13 +182,18 @@ final class ICloudDictionarySync: ObservableObject {
                 self.handle(error)
             case .success(let identity):
                 let stored = self.storedIdentity()
-                if let stored, stored != identity {
+                if let stored, !identity.matches(storedData: stored) {
                     self.pendingIdentity = identity
                     self.status = .accountChanged
                     self.finish(allowQueuedSync: false)
                     return
                 }
-                if stored == nil { self.persistIdentity(identity) }
+                if stored == nil, !self.persistIdentity(identity) {
+                    self.status = .error(
+                        "Velora could not secure the iCloud account boundary. Sync is paused.")
+                    self.finish(allowQueuedSync: false)
+                    return
+                }
                 self.reconcile(identity: identity, strategy: .merge)
             }
         }
@@ -154,6 +206,14 @@ final class ICloudDictionarySync: ObservableObject {
         syncAgain = false
         inFlight = true
         status = .syncing
+        do {
+            try repository.resetDeviceLearningState()
+        } catch {
+            status = .error(
+                "Velora could not clear pending learning from the previous Apple Account. Sync is paused.")
+            finish(allowQueuedSync: false)
+            return
+        }
         switch decision {
         case .keepLocal:
             publishCurrent(identity: identity, resolvingConflicts: true)
@@ -164,38 +224,85 @@ final class ICloudDictionarySync: ObservableObject {
         }
     }
 
-    private func reconcile(identity: String, strategy: ReconcileStrategy) {
+    private func reconcile(identity: DictionaryAccountIdentity, strategy: ReconcileStrategy) {
         transport.readVersions { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
                 self.handle(error)
             case .success(let payloads):
-                do {
-                    let remote = try self.mergedRemote(payloads)
-                    self.applyingRemote = true
-                    defer { self.applyingRemote = false }
-                    switch strategy {
-                    case .merge:
-                        if let remote {
-                            guard self.repository.applyRemote(try remote.encoded()) else {
-                                throw DictionaryValidationError.invalidEntry
-                            }
+                self.reconciliationQueue.async { [weak self] in
+                    dispatchPrecondition(condition: .notOnQueue(.main))
+                    guard let self else { return }
+                    do {
+                        let remote = try self.mergedRemote(payloads)
+                        let canonical = try remote?.encoded()
+                        DispatchQueue.main.async { [weak self] in
+                            self?.applyReconciliation(
+                                remote: remote,
+                                remoteCanonical: canonical,
+                                payloadCount: payloads.count,
+                                identity: identity,
+                                strategy: strategy)
                         }
-                    case .useCloud:
-                        try self.repository.replace(with: remote ?? DictionaryDocument())
+                    } catch {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.handleReconciliationFailure(error)
+                        }
                     }
-                    self.publishCurrent(
-                        identity: identity,
-                        resolvingConflicts: payloads.count > 1)
-                } catch {
-                    NSLog("Velora: iCloud dictionary decode/merge failed: \(error)")
-                    self.status = .error(
-                        "The iCloud dictionary is unreadable or from a newer Velora version. Your local dictionary was kept.")
-                    self.finish()
                 }
             }
         }
+    }
+
+    private func applyReconciliation(
+        remote: DictionaryDocument?,
+        remoteCanonical: Data?,
+        payloadCount: Int,
+        identity: DictionaryAccountIdentity,
+        strategy: ReconcileStrategy
+    ) {
+        guard started else { return }
+        do {
+            applyingRemote = true
+            defer { applyingRemote = false }
+            switch strategy {
+            case .merge:
+                if let remote {
+                    try repository.mergeRemote(remote)
+                }
+            case .useCloud:
+                try repository.replace(with: remote ?? DictionaryDocument())
+            }
+            try repository.ensureProjectionCurrent()
+            let current = try repository.syncData()
+            if payloadCount == 1 && remoteCanonical == current {
+                completeWithoutWrite(identity: identity)
+            } else {
+                publishCurrent(
+                    identity: identity,
+                    resolvingConflicts: payloadCount > 1)
+            }
+        } catch {
+            handleReconciliationFailure(error)
+        }
+    }
+
+    private func handleReconciliationFailure(_ error: Error) {
+        guard started else { return }
+        NSLog("Velora: iCloud dictionary reconciliation failed: \(error)")
+        switch error {
+        case DictionaryRepositoryError.couldNotProject:
+            status = .error(
+                "The Personal Dictionary was saved on this Mac, but the speech engine could not be updated. Restart Velora and try again.")
+        case DictionaryRepositoryError.couldNotPersist:
+            status = .error(
+                "Velora could not save the merged Personal Dictionary on this Mac. iCloud was left unchanged.")
+        default:
+            status = .error(
+                "The iCloud dictionary is unreadable or from a newer Velora version. Your local dictionary was kept.")
+        }
+        finish()
     }
 
     private func mergedRemote(_ payloads: [Data]) throws -> DictionaryDocument? {
@@ -207,17 +314,17 @@ final class ICloudDictionarySync: ObservableObject {
         return merged
     }
 
-    private func publishCurrent(identity: String, resolvingConflicts: Bool) {
+    private func publishCurrent(
+        identity: DictionaryAccountIdentity,
+        resolvingConflicts: Bool
+    ) {
         do {
-            let data = try repository.exportData()
+            let data = try repository.syncData()
             transport.write(data, resolvingConflicts: resolvingConflicts) { [weak self] result in
                 guard let self else { return }
                 switch result {
                 case .success:
-                    self.persistIdentity(identity)
-                    self.pendingIdentity = nil
-                    self.status = .synced
-                    self.finish()
+                    self.completeWithoutWrite(identity: identity)
                 case .failure(let error):
                     self.handle(error)
                 }
@@ -226,6 +333,18 @@ final class ICloudDictionarySync: ObservableObject {
             status = .error("Velora could not prepare the personal dictionary for iCloud.")
             finish()
         }
+    }
+
+    private func completeWithoutWrite(identity: DictionaryAccountIdentity) {
+        guard persistIdentity(identity) else {
+            status = .error(
+                "Velora synced the dictionary but could not secure the Apple Account boundary. Sync is paused.")
+            finish(allowQueuedSync: false)
+            return
+        }
+        pendingIdentity = nil
+        status = .synced
+        finish()
     }
 
     private func handle(_ error: DictionarySyncTransportError) {
@@ -251,22 +370,24 @@ final class ICloudDictionarySync: ObservableObject {
         }
     }
 
-    private func storedIdentity() -> String? {
-        guard let data = try? Data(contentsOf: identityURL) else { return nil }
-        let value = String(decoding: data, as: UTF8.self)
-        return value.isEmpty ? nil : value
+    private func storedIdentity() -> Data? {
+        guard let data = try? Data(contentsOf: identityURL), !data.isEmpty else { return nil }
+        return data
     }
 
-    private func persistIdentity(_ identity: String) {
+    @discardableResult
+    private func persistIdentity(_ identity: DictionaryAccountIdentity) -> Bool {
         do {
             try FileManager.default.createDirectory(
                 at: identityURL.deletingLastPathComponent(), withIntermediateDirectories: true,
                 attributes: [.posixPermissions: 0o700])
-            try Data(identity.utf8).write(to: identityURL, options: .atomic)
+            try identity.archivedToken.write(to: identityURL, options: .atomic)
             try? FileManager.default.setAttributes(
                 [.posixPermissions: 0o600], ofItemAtPath: identityURL.path)
+            return true
         } catch {
             NSLog("Velora: failed to persist iCloud identity boundary: \(error)")
+            return false
         }
     }
 }
@@ -315,11 +436,13 @@ final class ICloudDocumentsDictionaryTransport: NSObject, DictionarySyncTranspor
     }
 
     func fetchAccountIdentity(
-        completion: @escaping (Result<String, DictionarySyncTransportError>) -> Void
+        completion: @escaping (
+            Result<DictionaryAccountIdentity, DictionarySyncTransportError>
+        ) -> Void
     ) {
         workQueue.async { [weak self] in
             guard let self else { return }
-            let result: Result<String, DictionarySyncTransportError>
+            let result: Result<DictionaryAccountIdentity, DictionarySyncTransportError>
             do {
                 guard let token = self.identityTokenProvider() else {
                     result = .failure(.unavailable)
@@ -328,7 +451,7 @@ final class ICloudDocumentsDictionaryTransport: NSObject, DictionarySyncTranspor
                 }
                 let data = try NSKeyedArchiver.archivedData(
                     withRootObject: token, requiringSecureCoding: false)
-                result = .success(data.base64EncodedString())
+                result = .success(DictionaryAccountIdentity(archivedToken: data))
             } catch {
                 result = .failure(.io("identity token: \(error.localizedDescription)"))
             }
