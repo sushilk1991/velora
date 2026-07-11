@@ -15,7 +15,7 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 ## P0 — v1 must-have
 
 ### Capture & flow
-- Menubar app (LSUIElement, no dock icon), SwiftPM-built, hand-rolled .app bundle, ad-hoc signed.
+- Menubar app (LSUIElement, no dock icon), SwiftPM-built, hand-rolled `.app` bundle; stable local signing for development and Developer ID signing/notarization for distribution.
 - **Hold-to-talk** (default: hold Right-Option) and **toggle mode** (default: double-tap Right-Option or menubar click). Hotkey configurable.
 - Floating capsule HUD per design spec (docs/research/design-brief.md): listening → transcribing → inserted/error state morphs, live 24-bar waveform from mic RMS, never takes focus.
 - Esc cancels recording; nothing is inserted.
@@ -32,7 +32,7 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
   - chat apps (Slack, Messages, Discord) → casual, no trailing period on single sentences, keep it terse,
   - email (Mail, Gmail in browser) → greeting/paragraph structure, professional tone,
   - notes/docs (Notes, Obsidian, Notion) → markdown allowed, lists when speech enumerates,
-  - code editors → raw mode with technical vocabulary bias; terminals keep short commands (< 12 words) verbatim, while longer dictated prose gets conservative punctuation and grammar cleanup without changing meaning,
+  - code editors → conservative technical cleanup that preserves identifiers, flags, paths, and command punctuation; terminals keep short commands (< 12 words) model-free and command-safe, while longer dictated prose gets conservative punctuation and grammar cleanup without changing meaning,
   - everything else → default mode.
 - Formatting decides *whether* to format, not just how: short fragments and commands pass through nearly untouched; long multi-sentence speech gets structure (lists when the user enumerates, paragraphs on topic shifts).
 - Secure-input fields (passwords): detected → insertion suppressed with error HUD state.

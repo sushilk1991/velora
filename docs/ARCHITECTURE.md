@@ -23,7 +23,7 @@ Two processes, one product:
 
 - **MLX is required** → Python is where MLX STT/LLM APIs are mature (`parakeet-mlx`, `mlx-whisper`, `mlx-lm`). Pure-Swift MLX STT is not production-ready (swift-parakeet-mlx archived). Research: docs/research/stack-research.md.
 - **Native feel is required** → the user-facing surface (menubar, HUD, hotkeys, insertion, settings) is 100% Swift/AppKit/SwiftUI. Python is an invisible inference server.
-- **No Xcode available** → SwiftPM executable + hand-rolled .app bundle + ad-hoc codesign (proven in spikes/menubar). Stable bundle id `com.velora.app` so TCC grants stick.
+- **No Xcode project required** → SwiftPM executable + hand-rolled `.app` bundle. Development uses a stable local identity; release builds require Developer ID signing, hardened runtime, notarization, and stapling. The stable bundle id is `com.velora.app`.
 
 ## Process lifecycle
 
@@ -99,9 +99,9 @@ Two stages, both local:
 
 1. **Deterministic gate (no LLM):** decides *if* and *how much* AI touches the text.
    - mode resolution: explicit user mode > per-app rule from mode files > default.
-   - `formatting: off` modes (Code/Raw) → regex-level tidy only (spacing, spoken "new line").
+   - Raw stays formatting-off. Terminal input below 12 words stays model-free and command-safe (explicit new-line controls still work).
    - very short utterances (< ~6 words) → punctuation-only, never restructured.
-2. **LLM pass (Qwen3.5-4B MLX 8-bit by default on quality-tier Macs):** one prompt assembled from mode instructions, formatting strength, vocabulary hints, and app context. Stable instructions and vocabulary precede volatile entities so the engine can prefill and snapshot the shared prefix. Strict rules are baked in: *transcribe-don't-answer*, preserve meaning, add no content, fix clear agreement/tense/speech artifacts, punctuate complete thoughts, apply self-corrections, and structure lists only when speech enumerates. Output is text only. Terminal input under 12 words remains verbatim; longer Terminal prose uses this conservative pass.
+2. **LLM pass (Qwen3.5-4B MLX 8-bit on quality-tier Macs):** one prompt assembled from mode instructions, formatting strength, vocabulary hints, and app context. Code mode uses a conservative technical prompt; longer Terminal prose uses its terminal-aware prompt. Stable instructions and vocabulary precede volatile entities so the engine can prefill and snapshot the shared prefix. Strict rules are baked in: *transcribe-don't-answer*, preserve meaning, add no content, fix clear agreement/tense/speech artifacts, punctuate complete thoughts, apply self-corrections, and structure lists only when speech enumerates. Output is text only.
    - Anti-over-editing guard: if LLM output diverges too far from raw (length-ratio/similarity heuristic), fall back to raw. Principle #4 of the spec.
 
 Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|full, apps: [bundle ids], vocabulary: [...], replacements: {...}}`. Built-ins copied on first run; user-editable.
