@@ -44,6 +44,50 @@ struct HUDSessionContext: Equatable {
     }
 }
 
+struct HUDTranscriptSelection: Equatable {
+    let text: String
+    let truncated: Bool
+}
+
+/// Pure live-partial selection. It favors a just-finished sentence; while the
+/// speaker is mid-sentence it keeps the newest whole words that fit. Character
+/// slicing is deliberately forbidden because it produced fragments such as
+/// "…es below if we can" in the HUD.
+enum HUDTranscript {
+    static func select(_ raw: String, maxCharacters: Int) -> HUDTranscriptSelection {
+        let normalized = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        guard !normalized.isEmpty, maxCharacters > 0 else {
+            return HUDTranscriptSelection(text: "", truncated: false)
+        }
+        guard normalized.count > maxCharacters else {
+            return HUDTranscriptSelection(text: normalized, truncated: false)
+        }
+
+        let sentenceMarks: Set<Character> = [".", "?", "!"]
+        if let last = normalized.last, sentenceMarks.contains(last) {
+            let beforeLast = normalized.dropLast()
+            let priorEnd = beforeLast.lastIndex(where: { sentenceMarks.contains($0) })
+            let start = priorEnd.map { normalized.index(after: $0) } ?? normalized.startIndex
+            let sentence = normalized[start...].trimmingCharacters(in: .whitespaces)
+            if !sentence.isEmpty, sentence.count <= maxCharacters {
+                return HUDTranscriptSelection(text: sentence, truncated: true)
+            }
+        }
+
+        var kept: [Substring] = []
+        var count = 0
+        for word in normalized.split(separator: " ").reversed() {
+            let proposed = count + (kept.isEmpty ? 0 : 1) + word.count
+            if proposed > maxCharacters, !kept.isEmpty { break }
+            kept.append(word)
+            count = proposed
+            if proposed >= maxCharacters { break }
+        }
+        let tail = kept.reversed().joined(separator: " ")
+        return HUDTranscriptSelection(text: tail, truncated: tail != normalized)
+    }
+}
+
 /// Observable state driving the HUD view. Main-actor only.
 final class HUDModel: ObservableObject {
     @Published var state: HUDState = .hidden(.cancel)
@@ -52,9 +96,8 @@ final class HUDModel: ObservableObject {
     /// Context chip contents for the active session (nil until a session
     /// begins; the chip is simply absent then).
     @Published var sessionContext: HUDSessionContext?
-    /// Tail of the live transcript (last `HUDGeometry.transcriptTailLimit`
-    /// characters, newlines flattened). Empty until the first partial —
-    /// the HUD never shows placeholder text.
+    /// Useful whole-word phrase selected from the running partial. Empty until
+    /// the first partial — the HUD never shows placeholder text.
     @Published private(set) var transcriptTail = ""
     /// True once the tail has dropped its head (drives the leading fade).
     @Published private(set) var transcriptTruncated = false
@@ -85,8 +128,10 @@ final class HUDModel: ObservableObject {
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !flattened.isEmpty else { return }
-        transcriptTail = String(flattened.suffix(HUDGeometry.transcriptTailLimit))
-        transcriptTruncated = flattened.count > HUDGeometry.transcriptTailLimit
+        let selection = HUDTranscript.select(
+            flattened, maxCharacters: HUDGeometry.transcriptCharacterLimit)
+        transcriptTail = selection.text
+        transcriptTruncated = selection.truncated
     }
 }
 

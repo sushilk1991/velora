@@ -14,13 +14,16 @@ struct WaveformView: View {
     let settle: Bool
     /// Success flash: bars tint green for 150 ms before the circle morph.
     let flashGreen: Bool
+    /// Hidden HUDs keep this view in the SwiftUI tree for smooth transitions;
+    /// pausing the schedule prevents an invisible 60 fps display loop.
+    let active: Bool
 
     @Environment(\.colorScheme) private var colorScheme
 
     static let strip = HUDGeometry.waveformSize
 
     var body: some View {
-        TimelineView(.animation) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !active)) { timeline in
             Canvas { context, size in
                 let t = timeline.date.timeIntervalSinceReferenceDate
                 let heights = levels.displayHeights(settle: settle, time: t)

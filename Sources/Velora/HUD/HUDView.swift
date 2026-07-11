@@ -5,9 +5,9 @@ import SwiftUI
 /// through the five specified transitions plus the waveform and the gentle
 /// live-transcript growth; nothing else animates.
 ///
-/// Listening layout (left → right, gaps `HUDGeometry.elementGap`):
-/// context chip (app icon + mode) · red dot + mirrored waveform ·
-/// live transcript tail (only once a partial exists) · m:ss timer.
+/// Listening layout: a useful live phrase occupies its own top row; the
+/// app/mode chip, recording dot, waveform, and timer stay in a stable control
+/// row below it.
 struct HUDView: View {
     @ObservedObject var model: HUDModel
 
@@ -15,17 +15,15 @@ struct HUDView: View {
 
     // Animatable visual state, driven by `transition(from:to:)`.
     @State private var width: CGFloat = HUDGeometry.minListeningWidth
+    @State private var height: CGFloat = HUDGeometry.height
     @State private var opacity: Double = 0
     @State private var scale: CGFloat = 0.8
     @State private var yOffset: CGFloat = 12
     @State private var flashGreen = false
     @State private var showCheck = false
-    @State private var dotDimmed = false
     /// Widest pill so far this session — width only ever grows while
     /// listening so live-transcript updates never jitter the capsule smaller.
     @State private var sessionMaxWidth: CGFloat = HUDGeometry.minListeningWidth
-
-    private let height = HUDGeometry.height
 
     var body: some View {
         ZStack {
@@ -36,10 +34,10 @@ struct HUDView: View {
             transition(from: old, to: new)
         }
         .onChange(of: model.transcriptTail) { _, _ in
-            updateListeningWidth()
+            updateListeningGeometry()
         }
         .onChange(of: model.sessionContext) { _, _ in
-            updateListeningWidth()
+            updateListeningGeometry()
         }
     }
 
@@ -124,37 +122,44 @@ struct HUDView: View {
     // MARK: - Listening / transcribing content
 
     private var recordingContent: some View {
-        HStack(spacing: HUDGeometry.elementGap) {
-            contextChip
-
-            HStack(spacing: VeloraSpacing.s) {
-                Circle()
-                    .fill(Color(nsColor: .systemRed))
-                    .frame(width: HUDGeometry.dotDiameter, height: HUDGeometry.dotDiameter)
-                    .opacity(dotDimmed ? 0.55 : 1.0)
-                    .opacity(isListening ? 1 : 0)
-
-                WaveformView(
-                    levels: model.levels,
-                    settle: model.state == .transcribing,
-                    flashGreen: flashGreen)
-            }
-
+        VStack(spacing: VeloraSpacing.xs) {
             if !model.transcriptTail.isEmpty {
                 transcript
             }
 
-            timerText
-                .opacity(isListening ? 1 : 0)
-        }
-        .padding(.horizontal, HUDGeometry.contentInsetH)
-        .padding(.vertical, HUDGeometry.contentInsetV)
-        .animation(.easeOut(duration: 0.2), value: isListening)
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                dotDimmed = true
+            HStack(spacing: HUDGeometry.elementGap) {
+                contextChip
+                Spacer(minLength: VeloraSpacing.xs)
+
+                HStack(spacing: VeloraSpacing.s) {
+                    recordingDot
+                    WaveformView(
+                        levels: model.levels,
+                        settle: model.state == .transcribing,
+                        flashGreen: flashGreen,
+                        active: isRecordingActive)
+                }
+
+                Spacer(minLength: VeloraSpacing.xs)
+                timerText
+                    .opacity(isListening ? 1 : 0)
             }
         }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, model.transcriptTail.isEmpty ? HUDGeometry.contentInsetV : 10)
+        .animation(.easeOut(duration: 0.2), value: isListening)
+    }
+
+    private var recordingDot: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isListening)) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate
+                .truncatingRemainder(dividingBy: 2.0) / 2.0
+            let opacity = 0.55 + 0.45 * (0.5 + 0.5 * cos(phase * 2 * .pi))
+            Circle()
+                .fill(Color(nsColor: .systemRed))
+                .opacity(isListening ? opacity : 0)
+        }
+        .frame(width: HUDGeometry.dotDiameter, height: HUDGeometry.dotDiameter)
     }
 
     /// Frontmost-app icon (16 pt, 4 pt rounded) + detected mode name.
@@ -181,22 +186,11 @@ struct HUDView: View {
 
     // MARK: - Live transcript
 
-    /// The transcript tail, head-truncated behind a leading fade gradient.
-    /// Content changes crossfade (opacity, no jitter); during transcribing a
-    /// gentle highlight sweeps the text in step with the waveform shimmer.
+    /// A dedicated two-line phrase row. Selection already happens on whole
+    /// words/sentences in HUDModel, so no head truncation or fade is needed.
     private var transcript: some View {
         transcriptLabel
-            .frame(width: transcriptFrameWidth, alignment: .trailing)
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: model.transcriptTruncated ? .clear : .black, location: 0),
-                        .init(color: .black, location: model.transcriptTruncated ? 0.18 : 0),
-                        .init(color: .black, location: 1),
-                    ],
-                    startPoint: .leading, endPoint: .trailing)
-            )
-            .animation(.easeInOut(duration: 0.2), value: model.transcriptTruncated)
+            .frame(maxWidth: .infinity, minHeight: 18, maxHeight: 34, alignment: .leading)
     }
 
     @ViewBuilder private var transcriptLabel: some View {
@@ -217,8 +211,10 @@ struct HUDView: View {
     private func transcriptText(shimmerCenter: Double?) -> some View {
         Text(model.transcriptTail)
             .font(.system(size: 13, weight: .medium))
-            .lineLimit(1)
-            .truncationMode(.head)
+            .lineLimit(2)
+            .lineSpacing(1)
+            .truncationMode(.tail)
+            .multilineTextAlignment(.leading)
             .foregroundStyle(transcriptShading(shimmerCenter: shimmerCenter))
             .contentTransition(.opacity)
             .animation(.easeInOut(duration: 0.15), value: model.transcriptTail)
@@ -246,13 +242,22 @@ struct HUDView: View {
 
     // MARK: - Timer
 
-    private var timerText: some View {
-        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
-            Text(elapsedString(at: timeline.date))
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
-                .foregroundStyle(.secondary)
+    @ViewBuilder private var timerText: some View {
+        if isListening {
+            TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+                timerLabel(at: timeline.date)
+            }
+            .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
+        } else {
+            timerLabel(at: Date())
+                .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
         }
-        .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
+    }
+
+    private func timerLabel(at date: Date) -> some View {
+        Text(elapsedString(at: date))
+            .font(.system(size: 12, weight: .medium).monospacedDigit())
+            .foregroundStyle(.secondary)
     }
 
     private func elapsedString(at date: Date) -> String {
@@ -380,6 +385,16 @@ struct HUDView: View {
     // MARK: - State helpers
 
     private var isListening: Bool { model.state == .listening }
+    private var isRecordingActive: Bool {
+        switch model.state {
+        case .listening, .transcribing:
+            return true
+        case .inserted:
+            return !showCheck
+        default:
+            return false
+        }
+    }
     private var isError: Bool {
         if case .error = model.state { return true }
         return false
@@ -401,7 +416,7 @@ struct HUDView: View {
         }
     }
 
-    // MARK: - Width computation (live transcript growth)
+    // MARK: - Listening geometry
 
     /// Width of the context chip (icon + 4 pt gap + measured mode text).
     private var chipWidth: CGFloat {
@@ -413,8 +428,7 @@ struct HUDView: View {
         return w
     }
 
-    /// Everything in the listening row except the transcript: insets, chip,
-    /// dot + waveform cluster, timer, and the gaps between them.
+    /// Width required by the stable controls row.
     private var fixedRowWidth: CGFloat {
         var w = HUDGeometry.contentInsetH * 2
         if chipWidth > 0 { w += chipWidth + HUDGeometry.elementGap }
@@ -423,25 +437,32 @@ struct HUDView: View {
         return w
     }
 
-    /// Room the current (possibly clamped) capsule width leaves the text.
-    private var transcriptFrameWidth: CGFloat {
-        max(0, width - fixedRowWidth - HUDGeometry.elementGap)
-    }
-
-    /// Target pill width: fixed row + measured transcript tail, clamped to
-    /// 280…420 pt.
+    /// The transcript owns a separate row, so its width no longer competes
+    /// with the waveform. Short phrases can stay compact; useful prose gets at
+    /// least 360 pt and may grow to 420 pt.
     private func desiredListeningWidth() -> CGFloat {
-        var w = fixedRowWidth
+        guard !model.transcriptTail.isEmpty else {
+            return min(
+                max(fixedRowWidth, HUDGeometry.minListeningWidth),
+                HUDGeometry.maxListeningWidth)
+        }
         let textWidth = HUDGeometry.textWidth(
             model.transcriptTail, font: HUDGeometry.transcriptFont)
-        if textWidth > 0 {
-            w += HUDGeometry.elementGap + textWidth
-        }
-        return min(max(w, HUDGeometry.minListeningWidth), HUDGeometry.maxListeningWidth)
+        let transcriptWidth = textWidth + HUDGeometry.contentInsetH * 2
+        return min(
+            max(fixedRowWidth, transcriptWidth, HUDGeometry.minTranscriptWidth),
+            HUDGeometry.maxListeningWidth)
     }
 
-    /// Grows the pill gently as partials stream in; never shrinks mid-session.
-    private func updateListeningWidth() {
+    private var desiredListeningHeight: CGFloat {
+        model.transcriptTail.isEmpty
+            ? HUDGeometry.height
+            : HUDGeometry.expandedListeningHeight
+    }
+
+    /// Grows the pill gently as partials stream in; it never shrinks within a
+    /// session, avoiding jitter while phrases are replaced.
+    private func updateListeningGeometry() {
         switch model.state {
         case .listening, .transcribing:
             break
@@ -450,9 +471,11 @@ struct HUDView: View {
         }
         let target = max(desiredListeningWidth(), sessionMaxWidth)
         sessionMaxWidth = target
-        guard target != width else { return }
+        let targetHeight = max(height, desiredListeningHeight)
+        guard target != width || targetHeight != height else { return }
         withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
             width = target
+            height = targetHeight
         }
     }
 
@@ -462,7 +485,7 @@ struct HUDView: View {
         switch new {
         case .listening:
             sessionMaxWidth = desiredListeningWidth()
-            resetInstant(width: sessionMaxWidth)
+            resetInstant(width: sessionMaxWidth, height: desiredListeningHeight)
             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1
@@ -481,13 +504,14 @@ struct HUDView: View {
                 guard case .inserted = model.state else { return }
                 withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
                     width = HUDGeometry.insertedDiameter
+                    height = HUDGeometry.height
                     showCheck = true
                 }
             }
 
         case .error:
             if old.isHidden {
-                resetInstant(width: HUDGeometry.errorWidth)
+                resetInstant(width: HUDGeometry.errorWidth, height: HUDGeometry.height)
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                     opacity = 1
                     scale = 1
@@ -496,6 +520,7 @@ struct HUDView: View {
             } else {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     width = HUDGeometry.errorWidth
+                    height = HUDGeometry.height
                     showCheck = false
                 }
             }
@@ -503,7 +528,7 @@ struct HUDView: View {
         case .learned:
             // The toast appears from hidden well after the insert pill left;
             // same gentle entrance as an error, sized to its content.
-            resetInstant(width: learnedWidth)
+            resetInstant(width: learnedWidth, height: HUDGeometry.height)
             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1
@@ -511,7 +536,7 @@ struct HUDView: View {
             }
 
         case .notice:
-            resetInstant(width: noticeWidth)
+            resetInstant(width: noticeWidth, height: HUDGeometry.height)
             withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                 opacity = 1
                 scale = 1
@@ -536,11 +561,12 @@ struct HUDView: View {
     }
 
     /// Snaps visual state to a fresh entrance pose without animating.
-    private func resetInstant(width targetWidth: CGFloat) {
+    private func resetInstant(width targetWidth: CGFloat, height targetHeight: CGFloat) {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) {
             width = targetWidth
+            height = targetHeight
             opacity = 0
             scale = 0.8
             yOffset = 12

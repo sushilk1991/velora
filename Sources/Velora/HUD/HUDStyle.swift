@@ -68,10 +68,13 @@ enum HUDGeometry {
     /// Capsule height in every visible state (the inserted circle is
     /// `height`×`height`, so no vertical morph is ever needed).
     static let height: CGFloat = 56
+    /// Two-row listening capsule once a live phrase is available.
+    static let expandedListeningHeight: CGFloat = 92
     /// Narrowest listening pill (no live transcript yet).
     static let minListeningWidth: CGFloat = 280
     /// Widest listening pill (live transcript fully grown).
     static let maxListeningWidth: CGFloat = 420
+    static let minTranscriptWidth: CGFloat = 360
     /// Checkmark circle diameter (== height: the width morph makes a circle).
     static let insertedDiameter: CGFloat = height
     /// Error pill width (icon + one-line message + action button).
@@ -90,8 +93,9 @@ enum HUDGeometry {
     static let chipIconSide: CGFloat = 16
     static let chipIconCornerRadius: CGFloat = VeloraSpacing.xs
 
-    /// Live transcript tail: last 60 characters, single line, 13 pt medium.
-    static let transcriptTailLimit = 60
+    /// Live transcript phrase: enough for two useful lines, selected only on
+    /// word/sentence boundaries.
+    static let transcriptCharacterLimit = 96
     static let transcriptFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 

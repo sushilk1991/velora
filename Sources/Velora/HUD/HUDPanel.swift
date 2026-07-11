@@ -8,9 +8,9 @@ import SwiftUI
 /// Spaces, never takes focus, and ignores mouse events except in the error
 /// state (which shows a Retry button).
 final class HUDPanel {
-    /// Host size: the largest capsule (420×56 listening pill) plus room for
+    /// Host size: the largest two-row capsule plus room for
     /// the 20 pt shadow and the ±12 pt entrance offset so nothing clips.
-    static let panelSize = NSSize(width: 480, height: 120)
+    static let panelSize = NSSize(width: 480, height: 160)
 
     let model = HUDModel()
 
@@ -107,13 +107,16 @@ final class HUDPanel {
         let centerX = visible.midX - Self.panelSize.width / 2
 
         // The capsule is vertically centered in the panel.
-        let capsuleInset = (Self.panelSize.height - HUDGeometry.height) / 2
+        let capsuleInset = (Self.panelSize.height - HUDGeometry.expandedListeningHeight) / 2
         let origin: NSPoint
         switch AppConfig.shared.hudPosition {
         case .bottomCenter:
             origin = NSPoint(x: centerX, y: visible.minY + VeloraSpacing.xl - capsuleInset)
         case .topCenter:
-            origin = NSPoint(x: centerX, y: visible.maxY - VeloraSpacing.xl - HUDGeometry.height - capsuleInset)
+            origin = NSPoint(
+                x: centerX,
+                y: visible.maxY - VeloraSpacing.xl
+                    - HUDGeometry.expandedListeningHeight - capsuleInset)
         case .custom:
             if let frac = AppConfig.shared.hudCustomOrigin {
                 let dx = max(1, visible.width - Self.panelSize.width)
@@ -143,7 +146,7 @@ private final class HUDHostingView<Content: View>: NSHostingView<Content> {
         // shadow/entrance offset.
         let size = HUDPanel.panelSize
         let w = HUDGeometry.maxListeningWidth
-        let h = HUDGeometry.height + 24
+        let h = HUDGeometry.expandedListeningHeight + 24
         let capsule = NSRect(
             x: (size.width - w) / 2,
             y: (size.height - h) / 2,

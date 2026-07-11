@@ -30,6 +30,7 @@ enum Selftest {
         testModeCategories()
         testVoiceCommands()
         testStreak()
+        testHUDTranscript()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
@@ -269,5 +270,38 @@ enum Selftest {
         expect(ModeCategory.displayName(forBundleID: "com.example.unknown") == "Text",
                "unknown app falls back to Text")
         expect(ModeCategory.displayName(forBundleID: nil) == "Text", "nil bundle falls back to Text")
+    }
+
+    // MARK: - HUD live transcript
+
+    private static func testHUDTranscript() {
+        let flattened = HUDTranscript.select(
+            "  this is\n  a live   phrase  ", maxCharacters: 80)
+        expect(flattened.text == "this is a live phrase", "HUD flattens partial whitespace")
+        expect(!flattened.truncated, "short HUD phrase is not marked truncated")
+
+        let sentence = HUDTranscript.select(
+            "A much earlier sentence with many words that should disappear. Keep this sentence.",
+            maxCharacters: 28)
+        expect(sentence.text == "Keep this sentence.", "HUD prefers the latest complete sentence")
+        expect(sentence.truncated, "sentence selection records omitted earlier text")
+
+        let words = HUDTranscript.select(
+            "zero one two three four five six seven eight nine", maxCharacters: 24)
+        expect(words.text == "six seven eight nine", "HUD keeps the newest whole words")
+        expect(!words.text.hasPrefix("ive"), "HUD never starts inside a word")
+        expect(words.text.count <= 24, "HUD word tail respects its character budget")
+
+        let model = HUDModel()
+        model.updatePartial("a useful live phrase")
+        model.updatePartial("  \n ")
+        expect(model.transcriptTail == "a useful live phrase", "empty partial does not clear HUD")
+
+        expect(
+            HUDPanel.panelSize.width >= HUDGeometry.maxListeningWidth + 40,
+            "HUD panel contains maximum listening width and shadow")
+        expect(
+            HUDPanel.panelSize.height >= HUDGeometry.expandedListeningHeight + 40,
+            "HUD panel contains expanded transcript height and shadow")
     }
 }
