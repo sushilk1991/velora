@@ -15,7 +15,7 @@ The test device is a 14-core Apple M4 Max MacBook Pro with 36 GB unified memory.
 
 ## What changed
 
-- The exact Qwen prompt prefix is prepared while recording. Generation forks an immutable MLX cache snapshot, so preview, chunk, and final jobs cannot consume or corrupt one another's cache state.
+- The exact Qwen prompt prefix is prepared while recording. Generation forks an immutable MLX cache snapshot, so preview, chunk, and final jobs cannot consume or corrupt one another's cache state; the transient working cache is released after each generation instead of being retained as a duplicate.
 - Volatile app/entity context follows stable cleanup instructions, increasing the reusable prefix.
 - Superseded preview/chunk tasks receive cooperative cancellation instead of continuing to occupy the single inference executor.
 - The soft output deadline starts at the first generated token; an independent watchdog still bounds stuck prefill or inference.

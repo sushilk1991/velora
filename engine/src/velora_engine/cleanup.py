@@ -277,8 +277,6 @@ class CleanupEngine:
         self.model_id = model_id
         self._model: Any = None
         self._tokenizer: Any = None
-        self._cache: list[Any] | None = None
-        self._cache_tokens: list[int] = []
         # Immutable session prefix snapshot. Each generation receives a fresh
         # cache object restored from it, so a preview/chunk generation cannot
         # consume or pollute the final-cleanup speedup.
@@ -491,11 +489,10 @@ class CleanupEngine:
             if now - first_token_at > output_timeout_s:
                 status = "timeout"
                 break
-        # The working cache is intentionally not reused: Qwen's hybrid cache
-        # contains non-trimmable recurrent state. The immutable prepared
-        # snapshot above is the only cross-request cache and is forked afresh.
-        self._cache = cache
-        self._cache_tokens = tokens + gen_tokens
+        # The working cache is intentionally neither reused nor retained:
+        # Qwen's hybrid cache contains non-trimmable recurrent state. Keeping
+        # it here would duplicate the prepared prefix's MLX state until the
+        # next request. The immutable snapshot is the only cross-request cache.
         log.debug(
             "cleanup cache prepared_hit=%s prefix_tokens=%d input_tokens=%d output_tokens=%d",
             cache_hit,
