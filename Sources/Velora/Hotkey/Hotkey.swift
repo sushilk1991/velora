@@ -115,6 +115,22 @@ extension Hotkey {
         return "Key \(keyCode)"
     }
 
+    /// Virtual key code that produces `character` in the active keyboard
+    /// layout. Synthesized shortcuts must use this semantic mapping instead of
+    /// attaching a Unicode payload: macOS 26 can drop modified CGEvents that
+    /// carry text while positional ANSI key codes are wrong on layouts such as
+    /// AZERTY and QWERTZ.
+    static func keyCode(for character: Character) -> CGKeyCode? {
+        guard let layoutData = currentKeyboardLayoutData() else { return nil }
+        let target = String(character).uppercased()
+        for keyCode in 0...127 where
+            characterKeyName(for: Int64(keyCode), layoutData: layoutData) == target
+        {
+            return CGKeyCode(keyCode)
+        }
+        return nil
+    }
+
     private static let specialKeyNames: [Int64: String] = [
         36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋", 76: "⌤",
         117: "⌦", 115: "↖", 119: "↘", 116: "⇞", 121: "⇟",
@@ -128,11 +144,19 @@ extension Hotkey {
     /// Translates a character-producing key code via the current keyboard
     /// layout (so "Z" is right on QWERTZ). Returns nil for non-character keys.
     private static func characterKeyName(for keyCode: Int64) -> String? {
-        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
-              let rawLayoutData = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
-        else { return nil }
-        let layoutData = Unmanaged<CFData>.fromOpaque(rawLayoutData).takeUnretainedValue() as Data
+        guard let layoutData = currentKeyboardLayoutData() else { return nil }
+        return characterKeyName(for: keyCode, layoutData: layoutData)
+    }
 
+    private static func currentKeyboardLayoutData() -> Data? {
+        guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
+              let rawLayoutData = TISGetInputSourceProperty(
+                  source, kTISPropertyUnicodeKeyLayoutData)
+        else { return nil }
+        return Unmanaged<CFData>.fromOpaque(rawLayoutData).takeUnretainedValue() as Data
+    }
+
+    private static func characterKeyName(for keyCode: Int64, layoutData: Data) -> String? {
         var deadKeyState: UInt32 = 0
         var length = 0
         var characters = [UniChar](repeating: 0, count: 4)

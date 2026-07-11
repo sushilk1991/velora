@@ -27,15 +27,36 @@ enum Selftest {
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
+        testKeyboardShortcutMapping()
         testModeCategories()
         testVoiceCommands()
         testStreak()
         testHUDGeometry()
+        testInsertionBoundary()
+        testEmptyFinalFeedback()
         testClipboardStaging()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    private static func testKeyboardShortcutMapping() {
+        let vKey = Hotkey.keyCode(for: "v")
+        expect(vKey != nil, "active keyboard layout resolves the Paste shortcut")
+        if let vKey {
+            expect(
+                Hotkey.keyName(for: Int64(vKey)) == "V",
+                "Paste uses the semantic V key in the active keyboard layout")
+        }
+
+        let zKey = Hotkey.keyCode(for: "z")
+        expect(zKey != nil, "active keyboard layout resolves the Undo shortcut")
+        if let zKey {
+            expect(
+                Hotkey.keyName(for: Int64(zKey)) == "Z",
+                "Undo uses the semantic Z key in the active keyboard layout")
+        }
     }
 
     // MARK: - Onboarding setup gate
@@ -317,6 +338,153 @@ enum Selftest {
     }
 
     // MARK: - Final-output clipboard staging
+
+    private static func testInsertionBoundary() {
+        expect(
+            TextInsertionBoundary.adjusted("Next sentence.", previous: ".", next: nil)
+                == " Next sentence.",
+            "dictation after a completed sentence gets one leading space")
+        expect(
+            TextInsertionBoundary.adjusted("Next sentence.", previous: " ", next: nil)
+                == "Next sentence.",
+            "existing whitespace is never doubled")
+        expect(
+            TextInsertionBoundary.adjusted(", however", previous: "d", next: nil)
+                == ", however",
+            "leading punctuation stays attached to prior text")
+        expect(
+            TextInsertionBoundary.adjusted(".", previous: "d", next: nil) == ".",
+            "a dictated full stop stays attached to prior text")
+        expect(
+            TextInsertionBoundary.adjusted("Users", previous: "/", next: nil) == "Users",
+            "path components stay attached after a slash")
+        expect(
+            TextInsertionBoundary.adjusted("handle", previous: "@", next: nil) == "handle",
+            "handles stay attached after an at sign")
+        expect(
+            TextInsertionBoundary.adjusted("tag", previous: "#", next: nil) == "tag",
+            "tags stay attached after a hash")
+        expect(
+            TextInsertionBoundary.adjusted("based", previous: "-", next: nil) == "based",
+            "hyphenated text stays attached")
+        expect(
+            TextInsertionBoundary.adjusted("Users", previous: nil, next: "/") == "Users",
+            "text inserted before a path separator stays attached")
+        expect(
+            TextInsertionBoundary.adjusted("user", previous: nil, next: "@") == "user",
+            "text inserted before an at sign stays attached")
+        expect(
+            TextInsertionBoundary.adjusted("inside", previous: "(", next: ")")
+                == "inside",
+            "text stays tight inside delimiters")
+        expect(
+            TextInsertionBoundary.adjusted("inserted", previous: " ", next: "w")
+                == "inserted ",
+            "dictation before existing prose gets one trailing separator")
+        expect(
+            TextInsertionBoundary.adjusted("standalone", previous: nil, next: nil)
+                == "standalone",
+            "unknown or empty surroundings do not create dangling spaces")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "member",
+                boundary: TextSelectionBoundary(before: "object.", after: ""),
+                mode: "Code") == "member",
+            "code member access stays attached after a period")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "Next sentence.",
+                boundary: TextSelectionBoundary(before: "object.", after: ""),
+                mode: "Code") == " Next sentence.",
+            "prose in Code mode still gets sentence spacing")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "Nested",
+                boundary: TextSelectionBoundary(before: "Type.", after: ""),
+                mode: "Code") == "Nested",
+            "uppercase code member access stays attached after a period")
+        expect(
+            TextInsertionBoundary.adjusted("bar", previous: "_", next: nil) == "bar",
+            "identifier fragments stay attached after underscores")
+        expect(
+            TextInsertionBoundary.adjusted("PATH", previous: "$", next: nil) == "PATH",
+            "environment variables stay attached after dollar signs")
+        expect(
+            TextInsertionBoundary.adjusted("Users", previous: "\\", next: nil) == "Users",
+            "backslash-delimited paths stay attached")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "hello",
+                boundary: TextSelectionBoundary(before: "He said \"", after: "\"."),
+                mode: nil) == "hello",
+            "insertion inside straight quotes does not add inner spaces")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "Next",
+                boundary: TextSelectionBoundary(before: "He said \"hello\"", after: ""),
+                mode: nil) == " Next",
+            "text after a closing straight quote gets a separator")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "requests",
+                boundary: TextSelectionBoundary(before: "Users'", after: ""),
+                mode: nil) == " requests",
+            "text after a possessive apostrophe gets a separator")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "t worry.",
+                boundary: TextSelectionBoundary(before: "don'", after: ""),
+                mode: nil) == "t worry.",
+            "recognized contraction suffix stays attached after an apostrophe")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "世界。",
+                boundary: TextSelectionBoundary(before: "你好", after: ""),
+                mode: nil) == "世界。",
+            "Chinese text is not split by an ASCII space")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "世界",
+                boundary: TextSelectionBoundary(before: "", after: "。次"),
+                mode: nil) == "世界",
+            "full-width punctuation stays attached")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "世界",
+                boundary: TextSelectionBoundary(before: "こんにちは", after: ""),
+                mode: nil) == "世界",
+            "Japanese text is not split by an ASCII space")
+        expect(
+            TextInsertionBoundary.adjusted(
+                "다음 문장입니다.",
+                boundary: TextSelectionBoundary(before: "안녕하세요.", after: ""),
+                mode: nil) == " 다음 문장입니다.",
+            "Korean sentence chunks keep their normal word separator")
+
+        let emojiBoundary = TextSelectionBoundary(
+            text: "A🙂B", utf16Range: NSRange(location: 3, length: 0))
+        expect(
+            emojiBoundary?.previous == "🙂" && emojiBoundary?.next == "B",
+            "AX UTF-16 caret ranges preserve composed characters")
+        expect(
+            TextSelectionBoundary(
+                text: "A🙂B", utf16Range: NSRange(location: 2, length: 0)) == nil,
+            "AX ranges that split a composed character are refused")
+        let replacementBoundary = TextSelectionBoundary(
+            text: "abXcd", utf16Range: NSRange(location: 2, length: 1))
+        expect(
+            replacementBoundary?.previous == "b" && replacementBoundary?.next == "c",
+            "AX replacement ranges inspect text outside the selection")
+    }
+
+    private static func testEmptyFinalFeedback() {
+        expect(
+            DictationOutputFailure.message(for: "  \n") == "Couldn't transcribe that — try again",
+            "an empty final produces actionable feedback")
+        expect(
+            DictationOutputFailure.message(for: "Recognized text.") == nil,
+            "recognized output does not produce an error")
+    }
 
     private static func testClipboardStaging() {
         let name = NSPasteboard.Name("com.velora.selftest.\(UUID().uuidString)")

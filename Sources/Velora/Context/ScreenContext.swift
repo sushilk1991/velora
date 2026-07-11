@@ -99,6 +99,44 @@ enum ScreenContext {
         axString(element, kAXValueAttribute)
     }
 
+    /// Characters immediately around the focused selection/caret. Used only at
+    /// insertion time to prevent two dictations (or a dictation and existing
+    /// prose) from being concatenated without a separator.
+    static func selectionBoundary(of app: NSRunningApplication?) -> TextSelectionBoundary? {
+        guard let focused = focusedElement(of: app) else { return nil }
+        return selectionBoundary(of: focused)
+    }
+
+    /// Boundary read for an already-snapshotted target. Keeping the AX element
+    /// lets the inserter verify that focus did not move to another field in the
+    /// same app while the range calls were in flight.
+    static func selectionBoundary(of focused: AXUIElement) -> TextSelectionBoundary? {
+        guard let range = axRange(focused, kAXSelectedTextRangeAttribute),
+              let characterCount = axInt(focused, kAXNumberOfCharactersAttribute),
+              range.location >= 0,
+              range.length >= 0,
+              range.location <= characterCount,
+              range.length <= characterCount - range.location
+        else { return nil }
+
+        // Never read the element's full value here. A document or terminal can
+        // contain megabytes of private text; only quote classification and the
+        // adjacent characters are needed for insertion spacing.
+        let limit = TextSelectionBoundary.contextLimit
+        let beforeStart = max(0, range.location - limit)
+        let beforeLength = range.location - beforeStart
+        let afterStart = range.location + range.length
+        let afterLength = min(limit, characterCount - afterStart)
+        let before = beforeLength == 0
+            ? ""
+            : axStringForRange(focused, CFRange(location: beforeStart, length: beforeLength))
+        let after = afterLength == 0
+            ? ""
+            : axStringForRange(focused, CFRange(location: afterStart, length: afterLength))
+        guard let before, let after else { return nil }
+        return TextSelectionBoundary(before: before, after: after)
+    }
+
     // MARK: - Nearby-text read (rich context)
 
     /// Short text strings near the focused element: the field's own
@@ -171,12 +209,57 @@ enum ScreenContext {
     }
 
     private static func axString(_ element: AXUIElement, _ attr: String) -> String? {
+        guard let s = axRawString(element, attr) else { return nil }
+        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        return t.isEmpty ? nil : t
+    }
+
+    private static func axRawString(_ element: AXUIElement, _ attr: String) -> String? {
         AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
               let s = ref as? String else { return nil }
-        let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : t
+        return s
+    }
+
+    private static func axRange(_ element: AXUIElement, _ attr: String) -> CFRange? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+              let ref,
+              CFGetTypeID(ref) == AXValueGetTypeID()
+        else { return nil }
+        let value = ref as! AXValue  // type id checked above
+        guard AXValueGetType(value) == .cfRange else { return nil }
+        var range = CFRange()
+        guard AXValueGetValue(value, .cfRange, &range) else { return nil }
+        return range
+    }
+
+    private static func axInt(_ element: AXUIElement, _ attr: String) -> Int? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+              let number = ref as? NSNumber
+        else { return nil }
+        return number.intValue
+    }
+
+    private static func axStringForRange(
+        _ element: AXUIElement, _ range: CFRange
+    ) -> String? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var range = range
+        guard let parameter = AXValueCreate(.cfRange, &range) else { return nil }
+        var ref: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+                  element,
+                  kAXStringForRangeParameterizedAttribute as CFString,
+                  parameter,
+                  &ref) == .success,
+              let string = ref as? String
+        else { return nil }
+        return string
     }
 
     private static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {

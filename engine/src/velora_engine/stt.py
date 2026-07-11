@@ -351,6 +351,32 @@ class ParakeetBackend:
 
 _COMPRESSION_RATIO_THRESHOLD = 2.4
 _LOGPROB_THRESHOLD = -1.2
+_SPEECH_MODULATION_RATIO = 1.6
+_SPEECH_FRAME_SAMPLES = SAMPLE_RATE // 50  # 20 ms
+_SPEECH_ACTIVE_RMS = 0.003
+
+
+def _has_speech_like_modulation(audio: np.ndarray) -> bool:
+    """Independent retry gate that rejects stationary fan/static/noise.
+
+    Energy VAD alone only says a signal is loud enough. Speech has a changing
+    amplitude envelope across 20 ms frames; steady tones and broadband noise do
+    not. This deliberately gates only the optional second decode, never the
+    authoritative first pass, so quiet/atypical speech quality is unchanged.
+    """
+    frame_count = len(audio) // _SPEECH_FRAME_SAMPLES
+    if frame_count < 5:
+        return False
+    framed = np.asarray(
+        audio[: frame_count * _SPEECH_FRAME_SAMPLES], dtype=np.float32
+    ).reshape(frame_count, _SPEECH_FRAME_SAMPLES)
+    rms = np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
+    active = rms[rms >= _SPEECH_ACTIVE_RMS]
+    if active.size < 5:
+        return False
+    low = max(float(np.percentile(active, 20)), _SPEECH_ACTIVE_RMS)
+    high = float(np.percentile(active, 90))
+    return high / low >= _SPEECH_MODULATION_RATIO
 
 
 def _trim_repeated_tail(text: str) -> str:
@@ -437,6 +463,7 @@ class WhisperBackend:
         self._new_segments: list[str] = []
         self._silence = SilenceTracker()
         self._span_had_speech = False  # speech seen since the last decode point
+        self._session_had_speech = False  # speech seen anywhere in the buffered clip
         self._retry_at_samples = 0  # backoff cursor after an empty speech-span decode
         self.preview_enabled = False
         self._last_preview_samples = 0
@@ -470,22 +497,79 @@ class WhisperBackend:
         self.segments_used_for_final = False
         self.final_tail = ""
 
-    def _decode(self, audio: np.ndarray) -> str:
+    def _decode(self, audio: np.ndarray, *, had_speech: bool | None = None) -> str:
         """One guarded mlx-whisper decode (segment, tail, or whole clip)."""
         import mlx_whisper
 
-        result = mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=self._model_path,
-            condition_on_previous_text=False,
-            language=whisper_language(self.language),
-            fp16=True,
-            initial_prompt=self.initial_prompt,
+        if had_speech is None:
+            had_speech = self._span_had_speech
+        # The backend is shared by live and file transcription. Snapshot
+        # session-scoped decode options before model work so another session
+        # cannot change how this result is stripped or retried mid-decode.
+        prompt = self.initial_prompt
+        language = whisper_language(self.language)
+
+        def transcribe(
+            initial_prompt: str | None, *, temperature: float | None = None
+        ) -> dict[str, Any]:
+            options: dict[str, Any] = {}
+            if temperature is not None:
+                options["temperature"] = temperature
+            return mlx_whisper.transcribe(
+                audio,
+                path_or_hf_repo=self._model_path,
+                condition_on_previous_text=False,
+                language=language,
+                fp16=True,
+                initial_prompt=initial_prompt,
+                **options,
+            )
+
+        result = transcribe(prompt)
+        guarded_text = guard_whisper_result(result)
+        text = strip_prompt_echo(guarded_text, prompt)
+
+        segments = result.get("segments") or []
+        prompt_echo_removed = bool(guarded_text) and not text
+        quality_rejected = any(
+            (seg.get("text") or "").strip()
+            and (
+                (seg.get("compression_ratio") is not None
+                 and seg["compression_ratio"] > _COMPRESSION_RATIO_THRESHOLD)
+                or (
+                    seg.get("avg_logprob") is not None
+                    and seg["avg_logprob"] < _LOGPROB_THRESHOLD
+                    and seg.get("compression_ratio") is not None
+                    and seg["compression_ratio"] > 2.0
+                )
+            )
+            for seg in segments
         )
-        text = guard_whisper_result(result)
-        # Known initial_prompt failure mode: the glossary leaks into the
-        # transcript (especially over silence) — strip it on every decode.
-        return strip_prompt_echo(text, self.initial_prompt)
+        likely_speech = not segments or any(
+            (seg.get("text") or "").strip()
+            and (seg.get("no_speech_prob") is None or seg["no_speech_prob"] < 0.6)
+            for seg in segments
+        )
+        retry_prompt_failure = prompt_echo_removed or quality_rejected
+
+        if (
+            not text
+            and prompt
+            and had_speech
+            and likely_speech
+            and retry_prompt_failure
+            and _has_speech_like_modulation(audio)
+        ):
+            # A glossary prompt can trap Whisper in a high-compression prompt
+            # loop or return a clean-looking prompt echo on short/quiet speech.
+            # Retry only those explicit failures; energy alone is too weak and
+            # could turn background noise into invented words.
+            log.warning("glossary-biased whisper decode rejected/empty — retrying without prompt")
+            try:
+                return guard_whisper_result(transcribe(None, temperature=0.0))
+            except Exception:  # noqa: BLE001 — optional recovery must not fail the session
+                log.exception("prompt-free whisper recovery decode failed")
+        return text
 
     def _audio_span(self, start_sample: int, end_sample: int) -> np.ndarray:
         """Materialize only the requested sample range from buffered chunks.
@@ -526,6 +610,7 @@ class WhisperBackend:
         self._samples += len(chunk)
         if self._silence.feed(chunk):
             self._span_had_speech = True
+            self._session_had_speech = True
             self._preview_had_new_speech = True
         if not self._loaded or not self.segmenting_enabled or self._segment_decode_failed:
             return None
@@ -680,7 +765,7 @@ class WhisperBackend:
             log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
         audio = np.concatenate(self._chunks)
         try:
-            text = self._decode(audio)
+            text = self._decode(audio, had_speech=self._session_had_speech)
         finally:
             self.reset()
         return text
@@ -694,6 +779,7 @@ class WhisperBackend:
         self._silence.reset()
         self._segment_decode_failed = False
         self._span_had_speech = False
+        self._session_had_speech = False
         self._retry_at_samples = 0
         self._last_preview_samples = 0
         self._preview_had_new_speech = False

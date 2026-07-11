@@ -82,6 +82,7 @@ final class HistoryViewModel: ObservableObject {
     // MARK: - Row actions
 
     func copy(_ record: DictationRecord) {
+        guard !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(record.final, forType: .string)
@@ -90,6 +91,7 @@ final class HistoryViewModel: ObservableObject {
     /// Puts the text back on the clipboard and pastes it into the app it came
     /// from (best effort — needs Accessibility, degrades to a plain copy).
     func pasteAgain(_ record: DictationRecord) {
+        guard !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let inserter = TextInserter()
         inserter.copyToClipboard(record.final)
         if let bundleID = record.bundleID,
@@ -97,7 +99,8 @@ final class HistoryViewModel: ObservableObject {
             withBundleIdentifier: bundleID).first {
             app.activate(options: [.activateAllWindows])
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                inserter.insert(record.final, targetBundleID: bundleID)
+                inserter.insert(
+                    record.final, targetBundleID: bundleID, mode: record.mode)
             }
         }
     }
@@ -554,8 +557,10 @@ private struct HistoryCard: View {
 
     private var transcript: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(record.final)
+            Text(hasTranscript ? record.final : "No transcript — reprocess the saved audio")
                 .font(.body)
+                .foregroundStyle(hasTranscript ? .primary : .secondary)
+                .italic(!hasTranscript)
                 .textSelection(.enabled)
                 .lineLimit(expanded ? nil : 3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -580,17 +585,19 @@ private struct HistoryCard: View {
 
     private var actions: some View {
         HStack(spacing: VeloraSpacing.s) {
-            actionButton(
-                copied ? "checkmark" : "doc.on.doc",
-                copied ? "Copied" : "Copy",
-                tint: copied ? Color(nsColor: .systemGreen) : nil
-            ) {
-                onCopy()
-                copied = true
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
-            }
+            if hasTranscript {
+                actionButton(
+                    copied ? "checkmark" : "doc.on.doc",
+                    copied ? "Copied" : "Copy",
+                    tint: copied ? Color(nsColor: .systemGreen) : nil
+                ) {
+                    onCopy()
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+                }
 
-            actionButton("arrow.uturn.left", "Paste again", action: onPaste)
+                actionButton("arrow.uturn.left", "Paste again", action: onPaste)
+            }
 
             reprocessMenu
 
@@ -667,11 +674,18 @@ private struct HistoryCard: View {
 
     // MARK: Helpers
 
+    private var hasTranscript: Bool {
+        !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     private static func isLong(_ text: String) -> Bool {
         text.count > 140 || text.contains("\n")
     }
 
     private static func metaLine(_ record: DictationRecord) -> String {
+        if record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Needs reprocessing"
+        }
         var parts: [String] = []
         let words = record.final.split(whereSeparator: { $0 == " " || $0 == "\n" }).count
         parts.append("\(words) word\(words == 1 ? "" : "s")")

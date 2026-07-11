@@ -34,6 +34,13 @@ def loud(amplitude: float = 0.1) -> np.ndarray:
     return np.full(CHUNK, amplitude, dtype=np.float32)
 
 
+def speechy() -> np.ndarray:
+    """Deterministic voiced chunk with speech-like amplitude modulation."""
+    t = np.arange(CHUNK, dtype=np.float32) / SAMPLE_RATE
+    envelope = 0.15 + 0.85 * np.square(np.sin(2 * np.pi * 4 * t))
+    return (0.1 * envelope * np.sin(2 * np.pi * 220 * t)).astype(np.float32)
+
+
 def quiet() -> np.ndarray:
     return np.zeros(CHUNK, dtype=np.float32)
 
@@ -84,19 +91,26 @@ def test_silence_tracker_reset():
 
 
 class FakeWhisper:
-    """Captures transcribe() calls; returns queued texts (last one repeats)."""
+    """Captures transcribe() calls; returns queued texts/results (last repeats)."""
 
     def __init__(self, texts):
         self.texts = list(texts)
         self.calls = []  # (n_samples, kwargs)
         self.fail_next = 0
+        self.on_call = None
 
     def transcribe(self, audio, **kwargs):
         if self.fail_next > 0:
             self.fail_next -= 1
             raise RuntimeError("decode boom")
         self.calls.append((len(audio), kwargs))
+        if self.on_call is not None:
+            self.on_call(len(self.calls), kwargs)
         text = self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+        if isinstance(text, BaseException):
+            raise text
+        if isinstance(text, dict):
+            return text
         return {"text": text, "segments": [{"text": text}]}
 
 
@@ -564,6 +578,183 @@ def test_empty_speech_decode_keeps_audio_pending(whisper):
     assert len(fake.calls) == 2
     assert fake.calls[1][0] > fake.calls[0][0]  # span grew — nothing lost
     assert backend.take_new_segments() == ["recovered text"]
+
+
+def test_prompt_hallucination_retries_speech_without_glossary(whisper):
+    hallucination = {
+        "text": "Glossary. " * 20,
+        "segments": [
+            {
+                "text": "Glossary. " * 20,
+                "compression_ratio": 10.89,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper([hallucination, "recovered speech"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "recovered speech"
+    assert len(fake.calls) == 2
+    assert fake.calls[0][1]["initial_prompt"] == "Glossary: project.md."
+    assert fake.calls[1][1]["initial_prompt"] is None
+    assert fake.calls[1][1]["temperature"] == 0.0
+
+
+def test_prompt_echo_stripped_to_empty_retries_speech_without_glossary(whisper):
+    prompt_echo = {
+        "text": "Glossary: project.md.",
+        "segments": [
+            {
+                "text": "Glossary: project.md.",
+                "compression_ratio": 0.5,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper([prompt_echo, "recovered speech"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "recovered speech"
+    assert len(fake.calls) == 2
+    assert fake.calls[-1][1]["initial_prompt"] is None
+    assert fake.calls[-1][1]["temperature"] == 0.0
+
+
+def test_prompt_hallucination_does_not_retry_silence(whisper):
+    hallucination = {
+        "text": "Glossary. " * 20,
+        "segments": [
+            {
+                "text": "Glossary. " * 20,
+                "compression_ratio": 10.89,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper([hallucination, "invented words"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=quiet())
+
+    assert backend.finalize() == ""
+    assert len(fake.calls) == 1
+
+
+def test_non_prompt_empty_decode_on_noise_does_not_invent_words(whisper):
+    no_speech = {
+        "text": "",
+        "segments": [
+            {
+                "text": "",
+                "compression_ratio": 0.1,
+                "avg_logprob": -2.0,
+                "no_speech_prob": 0.99,
+            }
+        ],
+    }
+    backend, fake = whisper([no_speech, "invented words"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=loud(0.005))
+
+    assert backend.finalize() == ""
+    assert len(fake.calls) == 1
+
+
+def test_prompt_hallucination_on_stationary_noise_does_not_retry(whisper):
+    hallucination = {
+        "text": "Glossary. " * 20,
+        "segments": [
+            {
+                "text": "Glossary. " * 20,
+                "compression_ratio": 10.89,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper([hallucination, "invented words"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=loud(0.02))
+
+    assert backend.finalize() == ""
+    assert len(fake.calls) == 1
+
+
+def test_prompt_free_retry_failure_degrades_to_empty_final(whisper):
+    hallucination = {
+        "text": "Glossary. " * 20,
+        "segments": [
+            {
+                "text": "Glossary. " * 20,
+                "compression_ratio": 10.89,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper([hallucination, RuntimeError("retry decode boom")])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == ""
+    assert len(fake.calls) == 2
+
+
+def test_prompt_retry_uses_session_snapshot_when_prompt_changes_mid_decode(whisper):
+    prompt_echo = {
+        "text": "Glossary: project.md.",
+        "segments": [
+            {
+                "text": "Glossary: project.md.",
+                "compression_ratio": 0.5,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper([prompt_echo, "recovered speech"])
+    backend.initial_prompt = "Glossary: project.md."
+
+    def replace_shared_prompt(call_number, _kwargs):
+        if call_number == 1:
+            backend.initial_prompt = "Glossary: another-session.md."
+
+    fake.on_call = replace_shared_prompt
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "recovered speech"
+    assert len(fake.calls) == 2
+    assert fake.calls[0][1]["initial_prompt"] == "Glossary: project.md."
+    assert fake.calls[1][1]["initial_prompt"] is None
+
+
+def test_prompt_hallucination_retries_whole_clip_after_segment_commit(whisper):
+    hallucination = {
+        "text": "Glossary. " * 20,
+        "segments": [
+            {
+                "text": "Glossary. " * 20,
+                "compression_ratio": 10.89,
+                "avg_logprob": -0.1,
+                "no_speech_prob": 0.0,
+            }
+        ],
+    }
+    backend, fake = whisper(["early segment", hallucination, "recovered whole clip"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, MIN_SEGMENT_S, chunk=speechy())
+    feed_seconds(backend, SEGMENT_SILENCE_S, chunk=quiet())
+
+    assert backend._span_had_speech is False  # noqa: SLF001 — segment was committed
+    assert backend.finalize() == "recovered whole clip"
+    assert len(fake.calls) == 3
+    assert fake.calls[-1][1]["initial_prompt"] is None
+    assert fake.calls[-1][1]["temperature"] == 0.0
 
 
 def test_true_silence_span_is_consumed(whisper):

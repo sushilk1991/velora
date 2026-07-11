@@ -13,6 +13,14 @@ protocol DictationControllerDelegate: AnyObject {
     func dictationController(_ controller: DictationController, didChangePhase phase: DictationController.Phase)
 }
 
+enum DictationOutputFailure {
+    static func message(for text: String) -> String? {
+        text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "Couldn't transcribe that — try again"
+            : nil
+    }
+}
+
 /// The full dictation state machine: hotkey → HUD + audio + engine `start` →
 /// release → `stop` → `final` event → insert → history. Main-thread only.
 ///
@@ -63,9 +71,8 @@ final class DictationController: NSObject {
 
     private var sessionID = ""
     /// When the transcribe watchdog fired and showed "timed out". A late
-    /// `final` is still honored for a GRACE period after (never lose a real
-    /// transcription), but beyond it the user has moved on — pasting a
-    /// minutes-old result into whatever they're doing now is worse than loss.
+    /// `final` is auto-inserted for a grace period; beyond it the result is
+    /// preserved in History + clipboard without a surprise paste.
     private var timeoutErrorAt: Date?
     private static let lateFinalGrace: TimeInterval = 15
     /// The session the user explicitly cancelled (Esc / stuck-transcribe / error).
@@ -223,7 +230,7 @@ final class DictationController: NSObject {
                     NSLog("Velora: reformat paste skipped — target not ready (text on clipboard)")
                     return
                 }
-                self.inserter.insert(text, targetBundleID: bundleID)
+                self.inserter.insert(text, targetBundleID: bundleID, mode: mode)
             }
         }
     }
@@ -614,14 +621,14 @@ final class DictationController: NSObject {
                       session, sessionID, cancelledSessionID ?? "none", consumedSessionID ?? "none")
                 return
             }
-            // Grace-bounded late final: within lateFinalGrace of a timeout
-            // error the result is still wanted; long after it the user has
-            // moved on and a surprise paste would land mid-work.
-            if let timedOut = timeoutErrorAt, -timedOut.timeIntervalSinceNow > Self.lateFinalGrace {
-                NSLog("Velora: dropping final %.0fs after timeout — session=%@",
-                      -timedOut.timeIntervalSinceNow, session)
-                consumedSessionID = session
-                return
+            // Grace-bounded auto-insertion: a much later result must not land
+            // in whatever the user is doing now, but it must not disappear.
+            // Preserve it in History + clipboard and show a compact notice.
+            let arrivedTooLate = timeoutErrorAt.map {
+                -$0.timeIntervalSinceNow > Self.lateFinalGrace
+            } ?? false
+            if arrivedTooLate {
+                NSLog("Velora: preserving late final without auto-paste — session=%@", session)
             }
             timeoutErrorAt = nil
             consumedSessionID = session  // one insertion per session; block duplicates
@@ -633,7 +640,8 @@ final class DictationController: NSObject {
             if isRecording { capture.stop() }
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
-                mode: mode, cleanupMs: cleanupMs, audio: audio)
+                mode: mode, cleanupMs: cleanupMs, audio: audio,
+                allowAutomaticInsertion: !arrivedTooLate)
 
         case .reprocessed(let id, _, let raw, let text, let mode, _, _, _, _):
             // Only the menubar "Reformat Last as…" path is handled here; the
@@ -669,8 +677,35 @@ final class DictationController: NSObject {
         }
     }
 
-    private func finishInsertion(text: String, raw: String, mode: String?, cleanupMs: Int?, audio: String?) {
+    private func finishInsertion(
+        text: String,
+        raw: String,
+        mode: String?,
+        cleanupMs: Int?,
+        audio: String?,
+        allowAutomaticInsertion: Bool = true
+    ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let context = sessionContext
+
+        if !allowAutomaticInsertion {
+            if let message = DictationOutputFailure.message(for: trimmed) {
+                if audio != nil {
+                    recordHistory(
+                        text: "", raw: raw, context: context, mode: mode,
+                        cleanupMs: cleanupMs, audio: audio)
+                }
+                showError(message)
+            } else {
+                inserter.stageFinalOutput(text)
+                recordHistory(
+                    text: text, raw: raw, context: context, mode: mode,
+                    cleanupMs: cleanupMs, audio: audio)
+                phase = .idle
+                showNotice(symbol: "doc.on.clipboard.fill", message: "Finished late — copied")
+            }
+            return
+        }
 
         // Voice commands v1: an utterance that IS a command ("scratch that",
         // "new line") executes instead of pasting. Checked before the
@@ -681,10 +716,16 @@ final class DictationController: NSObject {
             return
         }
 
-        guard !trimmed.isEmpty else {
-            // Nothing recognized — treat as a quiet cancel, not an error.
-            hud.transition(to: .hidden(.cancel))
-            phase = .idle
+        if let message = DictationOutputFailure.message(for: trimmed) {
+            // A real recording that survives to `final` must never disappear
+            // without feedback. The engine already retried recoverable prompt
+            // hallucinations; retain archived audio so History can reprocess it.
+            if audio != nil {
+                recordHistory(
+                    text: "", raw: raw, context: context, mode: mode,
+                    cleanupMs: cleanupMs, audio: audio)
+            }
+            showError(message)
             return
         }
 
@@ -694,8 +735,6 @@ final class DictationController: NSObject {
         // utterance voice commands above remain commands rather than copied
         // prose.
         inserter.stageFinalOutput(text)
-
-        let context = sessionContext
 
         // Own-window insertion (onboarding try-it): the TextEditor lives inside
         // Velora's own window. AppContextTracker deliberately ignores Velora's
@@ -707,7 +746,7 @@ final class DictationController: NSObject {
         // fallback, and still fire the inserted notification.
         let ownBundleID = Bundle.main.bundleIdentifier ?? "com.velora.app"
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == ownBundleID,
-           inserter.insertIntoOwnWindow(text) {
+           inserter.insertIntoOwnWindow(text, mode: mode) {
             NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
             errorRetryAction = nil
             hud.model.retryTitle = "Retry"
@@ -757,20 +796,35 @@ final class DictationController: NSObject {
             sounds.play(.error)
             hud.transition(to: .error(fallbackMessage))
             phase = .idle
-        } else {
-            inserter.insert(text, targetBundleID: context?.bundleID)
-            hud.transition(to: .inserted)
-            phase = .idle
-            lastInsertion = (bundleID: context?.bundleID, at: Date())
-            captureLearningBaseline(text: text, bundleID: context?.bundleID)
+            recordHistory(
+                text: text, raw: raw, context: context, mode: mode,
+                cleanupMs: cleanupMs, audio: audio)
+            return
         }
 
-        recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs, audio: audio)
+        recordHistory(
+            text: text, raw: raw, context: context, mode: mode,
+            cleanupMs: cleanupMs, audio: audio)
 
-        guard fallbackMessage == nil else { return }
-
-        NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
-        scheduleInsertedHide()
+        inserter.insert(
+            text, targetBundleID: context?.bundleID, mode: mode
+        ) { [weak self] inserted in
+            guard let self else { return }
+            guard inserted else {
+                self.phase = .idle
+                self.sounds.play(.error)
+                self.showNotice(
+                    symbol: "doc.on.clipboard.fill",
+                    message: "Insertion interrupted — copied")
+                return
+            }
+            self.hud.transition(to: .inserted)
+            self.phase = .idle
+            self.lastInsertion = (bundleID: context?.bundleID, at: Date())
+            self.captureLearningBaseline(text: text, bundleID: context?.bundleID)
+            NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
+            self.scheduleInsertedHide()
+        }
     }
 
     private func recordHistory(
@@ -814,9 +868,11 @@ final class DictationController: NSObject {
             }
             lastInsertion = nil  // one undo per insertion
             consumePendingLearning()  // never diff-learn from text we removed
-            // `character:` keeps this ⌘Z on every keyboard layout — the raw
-            // positional keycode would be ⌘W on AZERTY (closes the window).
-            inserter.pressKey(6, flags: .maskCommand, character: "z")  // kVK_ANSI_Z
+            // Resolve semantic Z in the active layout — raw positional
+            // keycode 6 would be ⌘W on AZERTY and close the window.
+            inserter.pressKey(
+                Hotkey.keyCode(for: "z") ?? 6,
+                flags: .maskCommand)
             NSLog("Velora: voice command — undid last insertion")
             showNotice(symbol: "arrow.uturn.backward.circle.fill", message: "Undone")
         case .pressReturn, .newParagraph:

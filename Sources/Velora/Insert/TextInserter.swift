@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
@@ -40,15 +41,50 @@ final class TextInserter {
     /// Inserts `text` into the app identified by `bundleID`, choosing the
     /// strategy from per-app configuration. Every attempt is logged so
     /// `log show --predicate 'process == "Velora"'` tells the whole story.
-    func insert(_ text: String, targetBundleID: String?) {
+    func insert(
+        _ text: String,
+        targetBundleID: String?,
+        mode: String? = nil,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        guard Self.deliveryAllowed(targetBundleID: targetBundleID) else {
+            NSLog("Velora: insertion aborted before boundary read — target is not safe")
+            completion?(false)
+            return
+        }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        let targetStillFocused = targetBundleID == nil || frontmost?.bundleIdentifier == targetBundleID
+        let targetElement = targetStillFocused ? ScreenContext.focusedElement(of: frontmost) : nil
+        let boundary = targetElement.flatMap { ScreenContext.selectionBoundary(of: $0) }
+        let deliveryText = TextInsertionBoundary.adjusted(
+            text, boundary: boundary, mode: mode)
+
+        // AX boundary reads are IPC and can take long enough for focus or
+        // secure-input state to change. Revalidate after them, immediately
+        // before choosing a delivery path.
+        guard Self.deliveryAllowed(
+            targetBundleID: targetBundleID, targetElement: targetElement
+        ) else {
+            NSLog("Velora: insertion aborted after boundary read — target no longer safe")
+            completion?(false)
+            return
+        }
         if let bundleID = targetBundleID,
            AppConfig.shared.typingFallbackApps.contains(bundleID) {
             NSLog(
                 "Velora: insert method=type target=%@ trusted=%@ chars=%ld",
-                bundleID, Permissions.accessibilityGranted ? "yes" : "no", text.count)
-            insertViaTyping(text)
+                bundleID, Permissions.accessibilityGranted ? "yes" : "no", deliveryText.count)
+            insertViaTyping(
+                deliveryText,
+                targetBundleID: targetBundleID,
+                targetElement: targetElement,
+                completion: completion)
         } else {
-            insertViaPasteboard(text, targetBundleID: targetBundleID)
+            let inserted = insertViaPasteboard(
+                deliveryText,
+                targetBundleID: targetBundleID,
+                targetElement: targetElement)
+            completion?(inserted)
         }
     }
 
@@ -68,7 +104,7 @@ final class TextInserter {
     /// activations). Returns false when there is no text responder to receive
     /// the insertion, so the caller can fall back.
     @discardableResult
-    func insertIntoOwnWindow(_ text: String) -> Bool {
+    func insertIntoOwnWindow(_ text: String, mode: String? = nil) -> Bool {
         guard let responder = NSApp.keyWindow?.firstResponder else {
             NSLog("Velora: own-window insert — no key window / first responder")
             return false
@@ -76,8 +112,12 @@ final class TextInserter {
         // SwiftUI TextEditor / NSTextField field editors are backed by an
         // NSTextView; insertText(_:replacementRange:) respects the selection.
         if let textView = responder as? NSTextView {
-            textView.insertText(text, replacementRange: textView.selectedRange())
-            NSLog("Velora: own-window insert via NSTextView chars=%ld", text.count)
+            let selectedRange = textView.selectedRange()
+            let boundary = TextSelectionBoundary(text: textView.string, utf16Range: selectedRange)
+            let deliveryText = TextInsertionBoundary.adjusted(
+                text, boundary: boundary, mode: mode)
+            textView.insertText(deliveryText, replacementRange: selectedRange)
+            NSLog("Velora: own-window insert via NSTextView chars=%ld", deliveryText.count)
             return true
         }
         // Any other responder that accepts insertText: (e.g. NSText).
@@ -121,7 +161,18 @@ final class TextInserter {
         return pasteboard.changeCount
     }
 
-    func insertViaPasteboard(_ text: String, targetBundleID: String? = nil) {
+    @discardableResult
+    func insertViaPasteboard(
+        _ text: String,
+        targetBundleID: String? = nil,
+        targetElement: AXUIElement? = nil
+    ) -> Bool {
+        guard Self.deliveryAllowed(
+            targetBundleID: targetBundleID, targetElement: targetElement
+        ) else {
+            NSLog("Velora: paste aborted — target no longer safe")
+            return false
+        }
         let pasteboard = self.pasteboard
         let changeCountBefore = pasteboard.changeCount
 
@@ -143,7 +194,18 @@ final class TextInserter {
             Permissions.accessibilityGranted ? "yes" : "no",
             changeCountBefore, ourChangeCount)
 
-        postCommandV()
+        // Recheck once more after the pasteboard write. If focus moved in this
+        // tiny window, restore the staged/saved clipboard and post no event.
+        guard Self.deliveryAllowed(
+                  targetBundleID: targetBundleID, targetElement: targetElement),
+              postCommandV()
+        else {
+            guard pasteboard.changeCount == ourChangeCount else { return false }
+            pasteboard.clearContents()
+            if !saved.isEmpty { pasteboard.writeObjects(saved) }
+            NSLog("Velora: paste aborted before Command-V — clipboard restored")
+            return false
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreDelay) {
             // Only restore if the pasteboard still holds our write. If the
@@ -155,59 +217,96 @@ final class TextInserter {
                 pasteboard.writeObjects(saved)
             }
         }
+        return true
     }
 
-    private func postCommandV() {
-        pressKey(9, flags: .maskCommand, character: "v")  // kVK_ANSI_V
+    private func postCommandV() -> Bool {
+        pressKey(Hotkey.keyCode(for: "v") ?? 9, flags: .maskCommand)
     }
 
     /// Posts one key press (down+up) with the given modifiers. Keycodes are
-    /// POSITIONAL — on AZERTY keycode 6 types "w", so ⌘Z posted by position
-    /// becomes ⌘W (closes the window!). `character` stamps the event's
-    /// unicode payload so key-equivalent matching sees the intended letter on
-    /// every layout (review finding).
-    func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags = [], character: Character? = nil) {
+    /// positional, so callers sending character shortcuts resolve them through
+    /// `Hotkey.keyCode(for:)` first. Modified CGEvents deliberately carry no
+    /// Unicode payload; macOS 26 can treat those as text input and silently
+    /// discard the shortcut.
+    @discardableResult
+    func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) -> Bool {
         let source = CGEventSource(stateID: .combinedSessionState)
         guard
             let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
             let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false)
-        else { return }
+        else { return false }
         down.flags = flags
         up.flags = flags
-        if let character {
-            var units = Array(String(character).utf16)
-            down.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
-            up.keyboardSetUnicodeString(stringLength: units.count, unicodeString: &units)
-        }
         down.post(tap: .cghidEventTap)
         up.post(tap: .cghidEventTap)
+        return true
     }
 
     // MARK: - Unicode typing fallback
 
     /// Types `text` as synthesized unicode key events. Layout-independent,
     /// handles emoji; paced at 2 ms per chunk so target apps keep up.
-    func insertViaTyping(_ text: String) {
+    func insertViaTyping(
+        _ text: String,
+        targetBundleID: String? = nil,
+        targetElement: AXUIElement? = nil,
+        completion: ((Bool) -> Void)? = nil
+    ) {
         // Typing is slow for long strings; keep it off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
             let source = CGEventSource(stateID: .combinedSessionState)
             let utf16 = Array(text.utf16)
             var index = 0
             while index < utf16.count {
+                // A long terminal dictation spans many events. Stop before each
+                // chunk if the user changes apps or enters a secure field so
+                // the tail cannot spill into an unrelated/password target.
+                guard Self.deliveryAllowed(
+                    targetBundleID: targetBundleID, targetElement: targetElement
+                ) else {
+                    NSLog("Velora: typing aborted at utf16=%ld/%ld — target no longer safe",
+                          index, utf16.count)
+                    DispatchQueue.main.async { completion?(false) }
+                    return
+                }
                 let end = min(index + Self.typingChunk, utf16.count)
                 var chunk = Array(utf16[index..<end])
                 index = end
 
-                if let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                    down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-                    down.post(tap: .cghidEventTap)
+                guard let down = CGEvent(
+                          keyboardEventSource: source, virtualKey: 0, keyDown: true),
+                      let up = CGEvent(
+                          keyboardEventSource: source, virtualKey: 0, keyDown: false)
+                else {
+                    DispatchQueue.main.async { completion?(false) }
+                    return
                 }
-                if let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                    up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
-                    up.post(tap: .cghidEventTap)
-                }
+                down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
+                up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
+                down.post(tap: .cghidEventTap)
+                up.post(tap: .cghidEventTap)
                 usleep(2000)
             }
+            DispatchQueue.main.async { completion?(true) }
         }
+    }
+
+    private static func deliveryAllowed(
+        targetBundleID: String?, targetElement: AXUIElement? = nil
+    ) -> Bool {
+        guard Permissions.accessibilityGranted, canPostEvents, !SecureInput.isActive else {
+            return false
+        }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if let targetBundleID, frontmost?.bundleIdentifier != targetBundleID {
+            return false
+        }
+        if let targetElement {
+            guard let current = ScreenContext.focusedElement(of: frontmost),
+                  CFEqual(current, targetElement)
+            else { return false }
+        }
+        return true
     }
 }
