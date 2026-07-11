@@ -724,6 +724,22 @@ def test_soft_corrections_in_prompt_not_replacements(config, home):
     assert "KEEP THE WORD EXACTLY AS TRANSCRIBED" in prompt
 
 
+def test_volatile_screen_context_follows_stable_vocabulary_hints(config, home):
+    import json as _json
+
+    (home / "learned.json").write_text(_json.dumps({
+        "soft_replacements": {"lung": "Airlearn"},
+        "vocabulary": ["Airlearn"],
+    }))
+    config.reload()
+    prompt = formatting.build_system_prompt(
+        config.default_mode(), config, "Chrome", "browser",
+        [{"type": "nearby", "value": "volatile cursor text"}],
+    )
+    assert prompt.index("Vocabulary —") < prompt.index("Caution words —")
+    assert prompt.index("Caution words —") < prompt.index("Screen context —")
+
+
 def test_legacy_realword_hard_replacement_demoted(config, home):
     # Review finding: a pre-0.3.4 learned.json (or one restored from backup)
     # can carry a real-word HARD replacement; the engine must demote it to a

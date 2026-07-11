@@ -180,6 +180,78 @@ class CleanupResult:
     reason: str | None = None  # set when not applied
 
 
+@dataclass(frozen=True)
+class PrefixPreparation:
+    applied: bool
+    tokens: int
+    ms: int
+    reason: str | None = None
+
+
+def _copy_cache_containers(value: Any) -> Any:
+    """Copy cache state containers while sharing immutable MLX arrays.
+
+    Cache objects mutate their surrounding lists/metadata during generation.
+    MLX arrays themselves are value objects and are intentionally shared; a
+    restored KV cache allocates before extending the exact-length snapshot.
+    """
+    if isinstance(value, list):
+        return [_copy_cache_containers(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_cache_containers(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _copy_cache_containers(item) for key, item in value.items()}
+    return value
+
+
+def _snapshot_prompt_cache(cache: list[Any]) -> list[tuple[type[Any], Any, Any]]:
+    return [
+        (
+            type(item),
+            _copy_cache_containers(item.state),
+            _copy_cache_containers(item.meta_state),
+        )
+        for item in cache
+    ]
+
+
+def _restore_prompt_cache(
+    snapshot: list[tuple[type[Any], Any, Any]],
+) -> list[Any]:
+    return [
+        cache_type.from_state(
+            _copy_cache_containers(state),
+            _copy_cache_containers(meta_state),
+        )
+        for cache_type, state, meta_state in snapshot
+    ]
+
+
+def _longest_common_tokens(sequences: list[list[int]]) -> list[int]:
+    if not sequences:
+        return []
+    common = list(sequences[0])
+    for sequence in sequences[1:]:
+        limit = min(len(common), len(sequence))
+        index = 0
+        while index < limit and common[index] == sequence[index]:
+            index += 1
+        common = common[:index]
+        if not common:
+            break
+    # A future generation must always have at least one uncached token to feed
+    # to MLX. Different candidate suffixes normally guarantee this; retain the
+    # defensive bound for malformed/equal candidate sets.
+    shortest = min(len(sequence) for sequence in sequences)
+    if len(common) >= shortest and common:
+        common = common[:-1]
+    return common
+
+
+class _PrefixCancelled(Exception):
+    pass
+
+
 class CleanupEngine:
     """mlx-lm wrapper. All model access is serialized on one worker lock."""
 
@@ -189,6 +261,11 @@ class CleanupEngine:
         self._tokenizer: Any = None
         self._cache: list[Any] | None = None
         self._cache_tokens: list[int] = []
+        # Immutable session prefix snapshot. Each generation receives a fresh
+        # cache object restored from it, so a preview/chunk generation cannot
+        # consume or pollute the final-cleanup speedup.
+        self._prepared_tokens: list[int] = []
+        self._prepared_cache: list[tuple[type[Any], Any, Any]] | None = None
         self._lock = threading.Lock()
         # MLX streams are thread-affine: load and generation must all happen
         # on this one dedicated thread.
@@ -243,11 +320,106 @@ class CleanupEngine:
     def _warm(self, system_prompt: str) -> None:
         """Prefill the KV cache with the static system prefix.
 
-        Uses a dummy request; subsequent real prompts share the static system
-        prompt prefix, so their common prefix is served from cache.
+        Two deliberately different user suffixes identify the exact shared
+        chat-template prefix. Unlike a one-token dummy generation, this leaves
+        no sampled token in the reusable snapshot.
         """
-        with self._lock:
-            self._generate_locked(system_prompt, "warm up", max_tokens=1, deadline=time.perf_counter() + 30)
+        self._prepare_prefix([
+            (system_prompt, "alpha"),
+            (system_prompt, "zulu"),
+        ])
+
+    def _make_prompt_cache(self) -> list[Any]:
+        from mlx_lm.models import cache as kv
+
+        return kv.make_prompt_cache(self._model)
+
+    def _prefill_tokens_locked(
+        self,
+        tokens: list[int],
+        cancel_event: threading.Event | None = None,
+    ) -> list[Any]:
+        """Process exactly `tokens` into a new cache, generating no token."""
+        import mlx.core as mx
+        from mlx_lm.generate import generate_step
+
+        cache = self._make_prompt_cache()
+
+        def progress(_processed: int, _total: int) -> None:
+            if cancel_event is not None and cancel_event.is_set():
+                raise _PrefixCancelled
+
+        # max_tokens=0 runs the prompt model call but stops before feeding a
+        # sampled token back into the model. Small steps make cancellation
+        # observable between prefill batches without changing logits.
+        for _ in generate_step(
+            mx.array(tokens),
+            self._model,
+            max_tokens=0,
+            prompt_cache=cache,
+            prefill_step_size=256,
+            prompt_progress_callback=progress,
+        ):
+            pass
+        mx.eval([item.state for item in cache])
+        return cache
+
+    def _prepare_prefix(
+        self,
+        candidates: list[tuple[str, str]],
+        cancel_event: threading.Event | None = None,
+    ) -> PrefixPreparation:
+        t0 = time.perf_counter()
+        try:
+            with self._lock:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _PrefixCancelled
+                sequences = [self._prompt_tokens(system, user) for system, user in candidates]
+                prefix = _longest_common_tokens(sequences)
+                if not prefix:
+                    self._prepared_tokens = []
+                    self._prepared_cache = None
+                    return PrefixPreparation(False, 0, int((time.perf_counter() - t0) * 1000), "no_prefix")
+                cache = self._prefill_tokens_locked(prefix, cancel_event)
+                self._prepared_tokens = prefix
+                self._prepared_cache = _snapshot_prompt_cache(cache)
+            ms = int((time.perf_counter() - t0) * 1000)
+            log.info("cleanup prefix prepared tokens=%d prefill_ms=%d", len(prefix), ms)
+            return PrefixPreparation(True, len(prefix), ms)
+        except _PrefixCancelled:
+            self._prepared_tokens = []
+            self._prepared_cache = None
+            ms = int((time.perf_counter() - t0) * 1000)
+            log.info("cleanup prefix preparation cancelled after %dms", ms)
+            return PrefixPreparation(False, 0, ms, "cancelled")
+        except Exception as exc:  # noqa: BLE001 — preparation is an optimization
+            self._prepared_tokens = []
+            self._prepared_cache = None
+            ms = int((time.perf_counter() - t0) * 1000)
+            log.exception("cleanup prefix preparation failed")
+            return PrefixPreparation(False, 0, ms, f"error:{exc}")
+
+    async def prepare_prefix(
+        self,
+        candidates: list[tuple[str, str]],
+        cancel_event: threading.Event | None = None,
+    ) -> PrefixPreparation:
+        """Prepare a reusable exact prompt prefix on the model's owner thread."""
+        if not self.loaded:
+            return PrefixPreparation(False, 0, 0, "llm_not_loaded")
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor, self._prepare_prefix, candidates, cancel_event
+        )
+
+    def _cache_for_tokens(self, tokens: list[int]) -> tuple[list[Any], int, bool]:
+        prepared = self._prepared_tokens
+        if (
+            self._prepared_cache is not None
+            and len(tokens) > len(prepared)
+            and tokens[: len(prepared)] == prepared
+        ):
+            return _restore_prompt_cache(self._prepared_cache), len(prepared), True
+        return self._make_prompt_cache(), 0, False
 
     # ---- generation with common-prefix KV cache -------------------------
 
@@ -261,29 +433,10 @@ class CleanupEngine:
     ) -> tuple[str, bool]:
         """Returns (text, timed_out). Caller must hold self._lock."""
         from mlx_lm import stream_generate
-        from mlx_lm.models import cache as kv
         from mlx_lm.sample_utils import make_sampler
 
         tokens = self._prompt_tokens(system_prompt, user_text)
-
-        if self._cache is None:
-            self._cache = kv.make_prompt_cache(self._model)
-            self._cache_tokens = []
-
-        # Reuse the longest common prefix already in the KV cache.
-        common = 0
-        limit = min(len(self._cache_tokens), len(tokens) - 1)  # always leave ≥1 token to process
-        while common < limit and self._cache_tokens[common] == tokens[common]:
-            common += 1
-        to_trim = len(self._cache_tokens) - common
-        if to_trim > 0:
-            if kv.can_trim_prompt_cache(self._cache):
-                kv.trim_prompt_cache(self._cache, to_trim)
-                self._cache_tokens = self._cache_tokens[:common]
-            else:  # pragma: no cover — KVCache is trimmable; safety net
-                self._cache = kv.make_prompt_cache(self._model)
-                self._cache_tokens = []
-                common = 0
+        cache, common, cache_hit = self._cache_for_tokens(tokens)
 
         suffix = tokens[common:]
         out_text: list[str] = []
@@ -296,7 +449,7 @@ class CleanupEngine:
             prompt=suffix,
             max_tokens=max_tokens,
             sampler=sampler,
-            prompt_cache=self._cache,
+            prompt_cache=cache,
         ):
             out_text.append(resp.text)
             gen_tokens.append(resp.token)
@@ -306,9 +459,18 @@ class CleanupEngine:
             if time.perf_counter() > deadline or (cancel_event is not None and cancel_event.is_set()):
                 timed_out = True
                 break
-        # KV cache now holds prompt + generated tokens (last sampled token is
-        # not yet in the cache, but tracking a superset only costs a trim).
+        # The working cache is intentionally not reused: Qwen's hybrid cache
+        # contains non-trimmable recurrent state. The immutable prepared
+        # snapshot above is the only cross-request cache and is forked afresh.
+        self._cache = cache
         self._cache_tokens = tokens + gen_tokens
+        log.debug(
+            "cleanup cache prepared_hit=%s prefix_tokens=%d input_tokens=%d output_tokens=%d",
+            cache_hit,
+            common,
+            len(tokens),
+            len(gen_tokens),
+        )
         return "".join(out_text), timed_out
 
     def _run(

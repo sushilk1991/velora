@@ -469,9 +469,6 @@ def build_system_prompt(
     if app_name:
         desc = CATEGORY_DESCRIPTIONS.get(category or "", "an application")
         parts.append(f"Context: the user is dictating into {app_name} — {desc}.")
-    entity_hint = _format_entities(entities)
-    if entity_hint:
-        parts.append(entity_hint)
     vocab = list(dict.fromkeys(config.global_vocabulary + mode.vocabulary))
     if vocab:
         parts.append(
@@ -494,6 +491,12 @@ def build_system_prompt(
             "place), you MUST keep the original word. When unsure, keep the "
             "original."
         )
+    # Volatile screen text belongs last. Session-start prompt preparation can
+    # then cache every stable instruction (including vocabulary and learned
+    # corrections) even when richer cursor context arrives with `stop`.
+    entity_hint = _format_entities(entities)
+    if entity_hint:
+        parts.append(entity_hint)
     return "\n\n".join(parts)
 
 
