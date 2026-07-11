@@ -30,6 +30,9 @@ enum Selftest {
         testLearningStoreProjection()
         testAutoVocabProjection()
         testManualConfigProjection()
+        testDictionaryRepositoryMigration()
+        testDictionaryRepositoryCRUD()
+        testDictionaryRepositoryRemoteMerge()
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
@@ -396,6 +399,170 @@ enum Selftest {
         expect((root["vocabulary"] as? [String]) == ["node.js"],
                "manual config projection replaces only manual vocabulary")
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    private struct DictionaryRepositoryFixture {
+        let directory: URL
+        let state: URL
+        let config: URL
+        let learned: URL
+        let auto: URL
+
+        init() {
+            directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("velora-repository-\(UUID().uuidString)")
+            state = directory.appendingPathComponent("dictionary_sync.json")
+            config = directory.appendingPathComponent("config.json")
+            learned = directory.appendingPathComponent("learned.json")
+            auto = directory.appendingPathComponent("auto_learned.json")
+            try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+
+        func remove() { try? FileManager.default.removeItem(at: directory) }
+    }
+
+    private static func testDictionaryRepositoryMigration() {
+        let fixture = DictionaryRepositoryFixture()
+        try! JSONSerialization.data(withJSONObject: [
+            "stt_model": "keep-me",
+            "vocabulary": ["ManualLegacy"],
+            "replacements": ["legacy heard": "LegacyName"],
+        ]).write(to: fixture.config)
+        try! JSONSerialization.data(withJSONObject: [
+            "replacements": ["valoraa": "Velora"],
+            "soft_replacements": ["lung": "Airlearn"],
+            "vocabulary": ["Velora", "Airlearn", "ImportedName"],
+            "counts": ["pending→Pending": 1],
+        ]).write(to: fixture.learned)
+        try! JSONSerialization.data(withJSONObject: [
+            "version": 1,
+            "checkpoint_id": 9,
+            "terms": ["AutoName"],
+            "banned": ["OldAutoName"],
+            "candidates": ["Candidate": ["count": 1]],
+        ]).write(to: fixture.auto)
+
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "mac-a",
+            now: { Date(timeIntervalSince1970: 100) })
+        expect(FileManager.default.fileExists(atPath: fixture.state.path),
+               "first launch persists a canonical dictionary document")
+        expect(Set(repository.rows.map(\.writeAs)).isSuperset(of: [
+            "ManualLegacy", "LegacyName", "Velora", "Airlearn", "ImportedName", "AutoName",
+        ]), "migration preserves manual, learned, imported, and promoted vocabulary")
+        expect(repository.rows.first(where: { $0.writeAs == "ImportedName" })?.source == .added,
+               "standalone imported vocabulary migrates as an explicit added term")
+        expect(repository.rows.first(where: { $0.writeAs == "Velora" })?.source == .learned,
+               "edit-learned correction keeps its learned source")
+        expect(repository.rows.first(where: { $0.writeAs == "AutoName" })?.source == .automatic,
+               "promoted miner vocabulary keeps its automatic source")
+
+        let second = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "mac-a",
+            now: { Date(timeIntervalSince1970: 200) })
+        expect(second.rows.count == repository.rows.count,
+               "migration is idempotent after canonical state exists")
+        let learnedRoot = try! JSONSerialization.jsonObject(
+            with: Data(contentsOf: fixture.learned)) as! [String: Any]
+        expect((learnedRoot["counts"] as? [String: Int])?["pending→Pending"] == 1,
+               "migration projection preserves local pending correction counts")
+        let autoRoot = try! JSONSerialization.jsonObject(
+            with: Data(contentsOf: fixture.auto)) as! [String: Any]
+        expect((autoRoot["checkpoint_id"] as? Int) == 9
+               && (autoRoot["candidates"] as? [String: Any])?["Candidate"] != nil,
+               "migration projection preserves device-local miner state")
+        fixture.remove()
+    }
+
+    private static func testDictionaryRepositoryCRUD() {
+        let fixture = DictionaryRepositoryFixture()
+        var reloads = 0
+        var stateExistedAtReload = false
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "mac-a",
+            now: { Date(timeIntervalSince1970: Double(100 + reloads)) },
+            reload: {
+                reloads += 1
+                stateExistedAtReload = FileManager.default.fileExists(atPath: fixture.state.path)
+            })
+        reloads = 0
+        stateExistedAtReload = false
+
+        let replacement = try! repository.add(writeAs: "Airlearn", heardAs: "air learn")
+        expect(reloads == 1 && stateExistedAtReload,
+               "repository persists and projects before requesting one engine reload")
+        let config = AppConfig.manualDictionarySnapshot(at: fixture.config)
+        expect(config.replacements["air learn"] == "Airlearn"
+               && config.vocabulary.contains("Airlearn"),
+               "heard-as entry immediately projects replacement and glossary term")
+
+        try! repository.update(
+            id: replacement.id, writeAs: "Airlearn AI", heardAs: "air learn")
+        expect(repository.rows.first(where: { $0.id == replacement.id })?.writeAs == "Airlearn AI",
+               "editing a manual rule updates the stable heard-as entry")
+        repository.remove(id: replacement.id)
+        expect(repository.rows.first(where: { $0.id == replacement.id }) == nil,
+               "deleting an entry removes it from the active dictionary")
+        let persisted = try! DictionaryDocument.decode(Data(contentsOf: fixture.state))
+        expect(persisted.entries.contains(where: { $0.logicalKey == replacement.id && $0.deleted }),
+               "deleting an entry persists a tombstone")
+
+        _ = try! repository.add(writeAs: "node.js")
+        let exported = try! repository.exportData()
+        expect(String(decoding: exported, as: UTF8.self).contains("node.js"),
+               "complete repository export includes vocabulary-only entries")
+        fixture.remove()
+    }
+
+    private static func testDictionaryRepositoryRemoteMerge() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "mac-a",
+            now: { Date(timeIntervalSince1970: 100) })
+        _ = try! repository.add(writeAs: "LocalTerm")
+        let beforeCorrupt = try! Data(contentsOf: fixture.state)
+        expect(!repository.applyRemote(Data("not json".utf8)),
+               "corrupt remote document is refused")
+        expect(try! Data(contentsOf: fixture.state) == beforeCorrupt,
+               "corrupt remote document leaves valid local state untouched")
+
+        let remoteEntry = try! DictionaryEntry.manual(
+            writeAs: "RemoteTerm", deviceID: "mac-b", at: Date(timeIntervalSince1970: 200))
+        let remote = try! DictionaryDocument(entries: [remoteEntry]).encoded()
+        expect(repository.applyRemote(remote), "valid remote document merges")
+        expect(Set(repository.rows.map(\.writeAs)) == ["LocalTerm", "RemoteTerm"],
+               "remote merge preserves independent local and remote additions")
+
+        let importedFixture = DictionaryRepositoryFixture()
+        let imported = DictionaryRepository(
+            stateURL: importedFixture.state,
+            configURL: importedFixture.config,
+            learnedURL: importedFixture.learned,
+            autoURL: importedFixture.auto,
+            deviceID: "mac-c",
+            now: { Date(timeIntervalSince1970: 300) })
+        expect(imported.importData(try! repository.exportData()),
+               "complete portable dictionary can be imported")
+        expect(Set(imported.rows.map(\.writeAs)) == ["LocalTerm", "RemoteTerm"],
+               "import restores every portable entry")
+        fixture.remove()
+        importedFixture.remove()
     }
 
     // MARK: - CorrectionDiff

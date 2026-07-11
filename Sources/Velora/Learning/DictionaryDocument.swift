@@ -245,6 +245,24 @@ struct DictionaryEntry: Codable, Equatable, Identifiable {
             deleted: false)
     }
 
+    func revising(writeAs: String, deviceID: String, at date: Date) throws -> DictionaryEntry {
+        let written = try DictionaryValue(writeAs)
+        let expected = Self.makeLogicalKey(
+            kind: kind, writeAs: written, heardAs: try heardAs.map(DictionaryValue.init))
+        guard expected == logicalKey else { throw DictionaryValidationError.logicalKeyChanged }
+        return try DictionaryEntry(
+            logicalKey: logicalKey,
+            kind: kind,
+            writeAs: written.text,
+            heardAs: heardAs,
+            epoch: epoch,
+            revision: revision + 1,
+            generation: generation,
+            modifiedAt: date,
+            deviceID: deviceID,
+            deleted: false)
+    }
+
     func withGeneration(_ generation: Int) -> DictionaryEntry {
         try! DictionaryEntry(
             logicalKey: logicalKey,
@@ -325,6 +343,18 @@ struct DictionaryDocument: Codable, Equatable {
         entries.filter { entry in
             !entry.deleted && entry.generation >= (clearGenerations[entry.namespace] ?? 0)
         }.sorted { $0.logicalKey < $1.logicalKey }
+    }
+
+    func entry(id: String) -> DictionaryEntry? {
+        entries.first { $0.logicalKey == id }
+    }
+
+    func generation(for namespace: DictionaryNamespace) -> Int {
+        clearGenerations[namespace] ?? 0
+    }
+
+    func upserting(_ entry: DictionaryEntry) -> DictionaryDocument {
+        DictionaryDocument(entries: entries + [entry], clearGenerations: clearGenerations)
     }
 
     var effectiveProjection: DictionaryProjection {
