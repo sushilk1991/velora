@@ -8,12 +8,15 @@ import types
 import numpy as np
 import pytest
 
+import velora_engine.stt as stt_mod
 from velora_engine.stt import (
     HARD_SEGMENT_S,
     LONG_DICTATION_S,
     MIN_SEGMENT_S,
-    PREVIEW_MIN_S,
-    PREVIEW_SILENCE_S,
+    PREVIEW_FIRST_S,
+    PREVIEW_MIN_SPAN_S,
+    PREVIEW_PAUSE_S,
+    PREVIEW_WINDOW_S,
     SAMPLE_RATE,
     SEGMENT_SILENCE_S,
     FakeBackend,
@@ -157,6 +160,12 @@ def feed_seconds(backend, seconds, chunk=None):
     return partials
 
 
+def decode_pending_preview(backend):
+    request = backend.take_preview_request()
+    assert request is not None
+    return backend.decode_preview(request), request
+
+
 def test_audio_span_copies_only_requested_chunk_overlap(whisper, monkeypatch):
     backend, _fake = whisper(["unused"])
     backend._chunks = [
@@ -194,25 +203,71 @@ def test_segment_closes_on_pause(whisper):
     assert kwargs["path_or_hf_repo"] == "/fake/model"
 
 
-def test_early_pause_preview_does_not_commit_segment_state(whisper):
+def test_preview_is_requested_early_without_decoding_in_feed(whisper):
     backend, fake = whisper(["early preview"], previews=True)
-    assert feed_seconds(backend, PREVIEW_MIN_S) == []
-    partials = feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+    assert feed_seconds(backend, PREVIEW_FIRST_S) == []
+    assert fake.calls == []
 
-    assert partials == ["early preview"]
+    partial, request = decode_pending_preview(backend)
+
+    assert partial == "early preview"
+    assert len(request.audio) == int(PREVIEW_FIRST_S * SAMPLE_RATE)
     assert backend._decoded_samples == 0
     assert backend._segments == []
     assert backend.take_new_segments() == []
-    assert fake.calls[-1][0] == int((PREVIEW_MIN_S + PREVIEW_SILENCE_S) * SAMPLE_RATE)
+
+
+def test_early_pause_preview_does_not_commit_segment_state(whisper):
+    backend, fake = whisper(["pause preview"], previews=True)
+    assert feed_seconds(backend, PREVIEW_MIN_SPAN_S) == []
+    assert feed_seconds(backend, PREVIEW_PAUSE_S, chunk=quiet()) == []
+
+    partial, request = decode_pending_preview(backend)
+
+    assert partial == "pause preview"
+    assert backend._decoded_samples == 0
+    assert backend._segments == []
+    assert backend.take_new_segments() == []
+    assert len(request.audio) == int((PREVIEW_MIN_SPAN_S + PREVIEW_PAUSE_S) * SAMPLE_RATE)
+
+
+def test_pending_preview_coalesces_to_latest_bounded_window(whisper):
+    backend, fake = whisper(["latest"], previews=True)
+    feed_seconds(backend, PREVIEW_FIRST_S)
+    first = backend.take_preview_request()
+    assert first is not None
+
+    feed_seconds(backend, PREVIEW_WINDOW_S + 2)
+    latest = backend.take_preview_request()
+
+    assert latest is not None
+    assert len(latest.audio) == int(PREVIEW_WINDOW_S * SAMPLE_RATE)
+    assert fake.calls == []
+
+
+def test_preview_decode_duration_adapts_and_reset_restores_cadence(whisper, monkeypatch):
+    backend, _fake = whisper(["adaptive"], previews=True)
+    feed_seconds(backend, PREVIEW_FIRST_S)
+    request = backend.take_preview_request()
+    assert request is not None
+    times = iter([10.0, 12.0])
+    monkeypatch.setattr(stt_mod.time, "perf_counter", lambda: next(times))
+
+    assert backend.decode_preview(request) == "adaptive"
+    assert backend._preview_interval_s == 3.0
+
+    backend.reset()
+    assert backend._preview_interval_s == stt_mod.PREVIEW_BASE_INTERVAL_S
 
 
 def test_committed_decode_still_covers_full_span_after_preview(whisper):
     backend, fake = whisper(
-        ["early preview", "refined preview", "committed segment"], previews=True
+        ["early preview", "committed segment"], previews=True
     )
-    feed_seconds(backend, PREVIEW_MIN_S)
-    feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
-    feed_seconds(backend, MIN_SEGMENT_S - PREVIEW_MIN_S - PREVIEW_SILENCE_S)
+    feed_seconds(backend, PREVIEW_FIRST_S)
+    partial, _request = decode_pending_preview(backend)
+    assert partial == "early preview"
+    feed_seconds(backend, MIN_SEGMENT_S - PREVIEW_FIRST_S)
     partials = feed_seconds(backend, SEGMENT_SILENCE_S, chunk=quiet())
 
     assert partials[-1] == "committed segment"
@@ -223,13 +278,14 @@ def test_committed_decode_still_covers_full_span_after_preview(whisper):
 
 def test_preview_does_not_change_short_whole_clip_final(whisper):
     backend, fake = whisper(["early preview", "whole clip final"], previews=True)
-    feed_seconds(backend, PREVIEW_MIN_S)
-    feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+    feed_seconds(backend, PREVIEW_FIRST_S)
+    partial, _request = decode_pending_preview(backend)
+    assert partial == "early preview"
     feed_seconds(backend, 1)
 
     assert backend.finalize() == "whole clip final"
     assert backend.segments_used_for_final is False
-    assert fake.calls[-1][0] == int((PREVIEW_MIN_S + PREVIEW_SILENCE_S + 1) * SAMPLE_RATE)
+    assert fake.calls[-1][0] == int((PREVIEW_FIRST_S + 1) * SAMPLE_RATE)
 
 
 def test_preview_does_not_change_long_committed_stitch(whisper):
@@ -254,11 +310,14 @@ def test_preview_does_not_change_long_committed_stitch(whisper):
 
 def test_preview_is_not_repeated_during_same_silent_pause(whisper):
     backend, fake = whisper(["early preview"], previews=True)
-    feed_seconds(backend, PREVIEW_MIN_S)
-    feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+    feed_seconds(backend, PREVIEW_MIN_SPAN_S)
+    feed_seconds(backend, PREVIEW_PAUSE_S, chunk=quiet())
+    partial, _request = decode_pending_preview(backend)
+    assert partial == "early preview"
     calls_after_preview = len(fake.calls)
     feed_seconds(backend, 3, chunk=quiet())
     assert len(fake.calls) == calls_after_preview
+    assert backend.take_preview_request() is None
 
 
 def test_segment_closes_at_hard_cap_without_pause(whisper):

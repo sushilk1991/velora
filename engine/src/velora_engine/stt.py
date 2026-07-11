@@ -20,6 +20,7 @@ import math
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 import numpy as np
@@ -39,18 +40,30 @@ _PARAKEET_FEED_SAMPLES = SAMPLE_RATE // 2
 MIN_SEGMENT_S = 10.0  # min un-decoded audio before a pause may close a segment
 SEGMENT_SILENCE_S = 0.7  # trailing-pause length that closes a segment
 HARD_SEGMENT_S = 25.0  # close even mid-speech past this much un-decoded audio
-# HUD-only preview lane. These decodes never move the committed cursor or feed
-# long-form final stitching; they can therefore arrive earlier without changing
-# final transcription quality.
-PREVIEW_MIN_S = 4.0
-PREVIEW_SILENCE_S = 0.4
-PREVIEW_HARD_S = 8.0
-PREVIEW_MIN_NEW_S = 3.0
+# HUD-only preview lane. Request creation is cheap and happens while audio is
+# ingested; the server decodes at most one request at a time on the model's
+# thread. These decodes never move the committed cursor or feed final stitching.
+PREVIEW_FIRST_S = 2.0
+PREVIEW_MIN_SPAN_S = 1.2
+PREVIEW_PAUSE_S = 0.3
+PREVIEW_BASE_INTERVAL_S = 1.5
+PREVIEW_MAX_INTERVAL_S = 4.0
+PREVIEW_MIN_NEW_S = 0.8
+PREVIEW_WINDOW_S = 10.0
+PREVIEW_BACKOFF = 1.5
 # Below this total duration, finalize re-decodes the WHOLE clip exactly like the
 # pre-segmenting code (segments were preview-only) so short/medium quality is
 # unchanged; above it, the stitched segments become the final text (those
 # dictations previously blew the cleanup budget and fell back to raw anyway).
 LONG_DICTATION_S = 45.0
+
+
+@dataclass(frozen=True)
+class WhisperPreviewRequest:
+    """Immutable, display-only audio snapshot for one Whisper HUD preview."""
+
+    audio: np.ndarray
+    committed_segments: tuple[str, ...]
 
 
 class SilenceTracker:
@@ -428,6 +441,8 @@ class WhisperBackend:
         self.preview_enabled = True
         self._last_preview_samples = 0
         self._preview_had_new_speech = False
+        self._preview_interval_s = PREVIEW_BASE_INTERVAL_S
+        self._pending_preview: WhisperPreviewRequest | None = None
         # Sticky per-session kill switch: one failed segment decode degrades
         # the whole session to today's batch path (never raise into the feed).
         self._segment_decode_failed = False
@@ -520,34 +535,12 @@ class WhisperBackend:
         pause_close = undecoded_s >= MIN_SEGMENT_S and self._silence.trailing_silence_s >= SEGMENT_SILENCE_S
         commit_due = pause_close or undecoded_s >= HARD_SEGMENT_S
         if not commit_due:
-            if not self.preview_enabled or not self._preview_had_new_speech:
-                return None
-            new_preview_s = (self._samples - self._last_preview_samples) / SAMPLE_RATE
-            preview_pause = (
-                undecoded_s >= PREVIEW_MIN_S
-                and self._silence.trailing_silence_s >= PREVIEW_SILENCE_S
-            )
-            preview_due = preview_pause or undecoded_s >= PREVIEW_HARD_S
-            if not preview_due or new_preview_s < PREVIEW_MIN_NEW_S:
-                return None
-            try:
-                span = self._audio_span(self._decoded_samples, self._samples)
-                text = self._decode(span)
-            except Exception:  # noqa: BLE001 — optional preview must not affect final STT
-                log.exception("preview decode failed — final transcription remains available")
-                self._last_preview_samples = self._samples
-                self._preview_had_new_speech = False
-                return None
-            self._last_preview_samples = self._samples
-            self._preview_had_new_speech = False
-            if not text:
-                return None
-            log.debug(
-                "whisper preview emitted duration_ms=%d committed_samples=%d",
-                int(undecoded_s * 1000),
-                self._decoded_samples,
-            )
-            return " ".join(self._segments + [text])
+            self._queue_preview_if_due(undecoded_s)
+            return None
+        # A committed decode supersedes any display-only snapshot of the same
+        # uncommitted span. The server may still be finishing an older request;
+        # its current-session guard prevents a stale result after stop/cancel.
+        self._pending_preview = None
         try:
             span = self._audio_span(self._decoded_samples, self._samples)
             text = self._decode(span)
@@ -575,6 +568,79 @@ class WhisperBackend:
         self._segments.append(text)
         self._new_segments.append(text)
         return " ".join(self._segments)
+
+    def _queue_preview_if_due(self, undecoded_s: float) -> None:
+        """Replace the pending HUD snapshot when enough useful audio arrived.
+
+        This method performs no model work. Replacing rather than appending is
+        the coalescing contract: a slow device always decodes the newest view
+        instead of building a backlog of obsolete previews.
+        """
+        if not self.preview_enabled or not self._preview_had_new_speech:
+            return
+        new_preview_s = (self._samples - self._last_preview_samples) / SAMPLE_RATE
+        first_in_span = self._last_preview_samples <= self._decoded_samples
+        first_due = first_in_span and undecoded_s >= PREVIEW_FIRST_S
+        pause_due = (
+            undecoded_s >= PREVIEW_MIN_SPAN_S
+            and self._silence.trailing_silence_s >= PREVIEW_PAUSE_S
+            and new_preview_s >= PREVIEW_MIN_NEW_S
+        )
+        interval_due = not first_in_span and new_preview_s >= self._preview_interval_s
+        if not (first_due or pause_due or interval_due):
+            return
+
+        window_samples = int(PREVIEW_WINDOW_S * SAMPLE_RATE)
+        start = max(self._decoded_samples, self._samples - window_samples)
+        # Always own the snapshot: reset/finalize may release the backend's
+        # chunk list while an already-scheduled preview is still completing.
+        audio = np.array(self._audio_span(start, self._samples), copy=True)
+        if audio.size == 0:
+            return
+        self._pending_preview = WhisperPreviewRequest(
+            audio=audio,
+            committed_segments=tuple(self._segments),
+        )
+        self._last_preview_samples = self._samples
+        self._preview_had_new_speech = False
+        log.debug(
+            "whisper preview queued span_ms=%d window_ms=%d committed_samples=%d",
+            int(undecoded_s * 1000),
+            int(len(audio) / SAMPLE_RATE * 1000),
+            self._decoded_samples,
+        )
+
+    def take_preview_request(self) -> WhisperPreviewRequest | None:
+        request = self._pending_preview
+        self._pending_preview = None
+        return request
+
+    def discard_preview_request(self) -> None:
+        self._pending_preview = None
+
+    def decode_preview(self, request: WhisperPreviewRequest) -> str | None:
+        """Decode one immutable HUD request without touching final STT state."""
+        started = time.perf_counter()
+        try:
+            text = self._decode(request.audio)
+        except Exception:  # noqa: BLE001 — optional preview must not affect final STT
+            log.exception("preview decode failed — final transcription remains available")
+            return None
+        finally:
+            elapsed = time.perf_counter() - started
+            self._preview_interval_s = min(
+                PREVIEW_MAX_INTERVAL_S,
+                max(PREVIEW_BASE_INTERVAL_S, elapsed * PREVIEW_BACKOFF),
+            )
+        if not text:
+            return None
+        log.debug(
+            "whisper preview emitted decode_ms=%d window_ms=%d next_interval_ms=%d",
+            int(elapsed * 1000),
+            int(len(request.audio) / SAMPLE_RATE * 1000),
+            int(self._preview_interval_s * 1000),
+        )
+        return " ".join((*request.committed_segments, text)).strip()
 
     def take_new_segments(self) -> list[str]:
         out = self._new_segments
@@ -631,6 +697,8 @@ class WhisperBackend:
         self._retry_at_samples = 0
         self._last_preview_samples = 0
         self._preview_had_new_speech = False
+        self._preview_interval_s = PREVIEW_BASE_INTERVAL_S
+        self._pending_preview = None
         # NOTE: initial_prompt / segments_used_for_final / final_tail survive a
         # reset on purpose — the server sets the prompt per session and reads
         # the finalize flags right after finalize() has reset the audio state.
