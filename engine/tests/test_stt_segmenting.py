@@ -12,6 +12,8 @@ from velora_engine.stt import (
     HARD_SEGMENT_S,
     LONG_DICTATION_S,
     MIN_SEGMENT_S,
+    PREVIEW_MIN_S,
+    PREVIEW_SILENCE_S,
     SAMPLE_RATE,
     SEGMENT_SILENCE_S,
     FakeBackend,
@@ -97,7 +99,7 @@ class FakeWhisper:
 
 @pytest.fixture
 def whisper(monkeypatch):
-    def make(texts):
+    def make(texts, previews=False):
         fake = FakeWhisper(texts)
         mod = types.ModuleType("mlx_whisper")
         mod.transcribe = fake.transcribe
@@ -105,10 +107,45 @@ def whisper(monkeypatch):
         backend = WhisperBackend("mlx-community/whisper-large-v3-turbo", "auto")
         backend._loaded = True  # noqa: SLF001 — skip load(); decode is faked
         backend._model_path = "/fake/model"  # noqa: SLF001
+        backend.preview_enabled = previews
         backend.start_session()
         return backend, fake
 
     return make
+
+
+def test_whisper_load_populates_transcribe_model_holder(monkeypatch):
+    import mlx.core as mx
+    from velora_engine import models
+
+    evaluated = []
+
+    class FakeModel:
+        @staticmethod
+        def parameters():
+            return "model-parameters"
+
+    class FakeHolder:
+        calls = []
+        model = FakeModel()
+
+        @classmethod
+        def get_model(cls, model_path, dtype):
+            cls.calls.append((model_path, dtype))
+            return cls.model
+
+    transcribe_module = types.ModuleType("mlx_whisper.transcribe")
+    transcribe_module.ModelHolder = FakeHolder
+    monkeypatch.setitem(sys.modules, "mlx_whisper.transcribe", transcribe_module)
+    monkeypatch.setattr(models, "ensure_downloaded", lambda _model_id: "/cached/whisper")
+    monkeypatch.setattr(mx, "eval", lambda value: evaluated.append(value))
+
+    backend = WhisperBackend("mlx-community/whisper-large-v3-turbo", "auto")
+    backend.load()
+
+    assert FakeHolder.calls == [("/cached/whisper", mx.float16)]
+    assert evaluated == ["model-parameters"]
+    assert backend._loaded is True
 
 
 def feed_seconds(backend, seconds, chunk=None):
@@ -133,6 +170,73 @@ def test_segment_closes_on_pause(whisper):
     assert kwargs["condition_on_previous_text"] is False
     assert kwargs["initial_prompt"] is None
     assert kwargs["path_or_hf_repo"] == "/fake/model"
+
+
+def test_early_pause_preview_does_not_commit_segment_state(whisper):
+    backend, fake = whisper(["early preview"], previews=True)
+    assert feed_seconds(backend, PREVIEW_MIN_S) == []
+    partials = feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+
+    assert partials == ["early preview"]
+    assert backend._decoded_samples == 0
+    assert backend._segments == []
+    assert backend.take_new_segments() == []
+    assert fake.calls[-1][0] == int((PREVIEW_MIN_S + PREVIEW_SILENCE_S) * SAMPLE_RATE)
+
+
+def test_committed_decode_still_covers_full_span_after_preview(whisper):
+    backend, fake = whisper(
+        ["early preview", "refined preview", "committed segment"], previews=True
+    )
+    feed_seconds(backend, PREVIEW_MIN_S)
+    feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+    feed_seconds(backend, MIN_SEGMENT_S - PREVIEW_MIN_S - PREVIEW_SILENCE_S)
+    partials = feed_seconds(backend, SEGMENT_SILENCE_S, chunk=quiet())
+
+    assert partials[-1] == "committed segment"
+    assert backend.take_new_segments() == ["committed segment"]
+    assert backend._decoded_samples == int((MIN_SEGMENT_S + SEGMENT_SILENCE_S) * SAMPLE_RATE)
+    assert fake.calls[-1][0] == backend._decoded_samples
+
+
+def test_preview_does_not_change_short_whole_clip_final(whisper):
+    backend, fake = whisper(["early preview", "whole clip final"], previews=True)
+    feed_seconds(backend, PREVIEW_MIN_S)
+    feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+    feed_seconds(backend, 1)
+
+    assert backend.finalize() == "whole clip final"
+    assert backend.segments_used_for_final is False
+    assert fake.calls[-1][0] == int((PREVIEW_MIN_S + PREVIEW_SILENCE_S + 1) * SAMPLE_RATE)
+
+
+def test_preview_does_not_change_long_committed_stitch(whisper):
+    backend, _fake = whisper(["unused"], previews=True)
+
+    def by_span(audio):
+        seconds = len(audio) / SAMPLE_RATE
+        if seconds == pytest.approx(HARD_SEGMENT_S):
+            return "committed segment"
+        if seconds == pytest.approx(21):
+            return "final tail"
+        return "preview only"
+
+    backend._decode = by_span
+    feed_seconds(backend, HARD_SEGMENT_S)
+    feed_seconds(backend, 21)
+
+    assert backend.take_new_segments() == ["committed segment"]
+    assert backend.finalize() == "committed segment final tail"
+    assert backend.segments_used_for_final is True
+
+
+def test_preview_is_not_repeated_during_same_silent_pause(whisper):
+    backend, fake = whisper(["early preview"], previews=True)
+    feed_seconds(backend, PREVIEW_MIN_S)
+    feed_seconds(backend, PREVIEW_SILENCE_S, chunk=quiet())
+    calls_after_preview = len(fake.calls)
+    feed_seconds(backend, 3, chunk=quiet())
+    assert len(fake.calls) == calls_after_preview
 
 
 def test_segment_closes_at_hard_cap_without_pause(whisper):
