@@ -31,6 +31,12 @@ final class TextInserter {
     private static let transientType = NSPasteboard.PasteboardType("org.nspasteboard.TransientType")
     private static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
+    private let pasteboard: NSPasteboard
+
+    init(pasteboard: NSPasteboard = .general) {
+        self.pasteboard = pasteboard
+    }
+
     /// Inserts `text` into the app identified by `bundleID`, choosing the
     /// strategy from per-app configuration. Every attempt is logged so
     /// `log show --predicate 'process == "Velora"'` tells the whole story.
@@ -86,15 +92,21 @@ final class TextInserter {
 
     // MARK: - Pasteboard + ⌘V
 
-    /// Puts `text` on the general pasteboard (marked transient + concealed)
-    /// without synthesizing any input and without a restore. Used when the
-    /// insertion target was lost (focus change, secure field) — the user
-    /// pastes manually.
-    func copyToClipboard(_ text: String) {
-        let changeCount = writeDictation(text, to: NSPasteboard.general)
+    /// Makes a final result available for manual paste before any best-effort
+    /// insertion is attempted. This write is intentionally persistent: the
+    /// synthesized Command-V path snapshots this item and therefore restores
+    /// the final dictation, not the user's older clipboard contents.
+    func stageFinalOutput(_ text: String) {
+        let changeCount = writeDictation(text, to: pasteboard)
         NSLog(
-            "Velora: clipboard fallback chars=%ld changeCount=%ld (no synthetic input)",
+            "Velora: staged final output chars=%ld changeCount=%ld",
             text.count, changeCount)
+    }
+
+    /// Compatibility name used by history/file-transcription actions that put
+    /// text on the clipboard without attempting insertion.
+    func copyToClipboard(_ text: String) {
+        stageFinalOutput(text)
     }
 
     /// Writes the dictated text as a transient + concealed string item so
@@ -110,7 +122,7 @@ final class TextInserter {
     }
 
     func insertViaPasteboard(_ text: String, targetBundleID: String? = nil) {
-        let pasteboard = NSPasteboard.general
+        let pasteboard = self.pasteboard
         let changeCountBefore = pasteboard.changeCount
 
         // Snapshot every item with every representation it carries.

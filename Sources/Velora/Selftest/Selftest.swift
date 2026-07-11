@@ -31,6 +31,7 @@ enum Selftest {
         testVoiceCommands()
         testStreak()
         testHUDTranscript()
+        testClipboardStaging()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
@@ -312,5 +313,19 @@ enum Selftest {
         expect(
             HUDGeometry.controlRowWidth(chipWidth: 0) == 248,
             "HUD control-row geometry includes every gap and spacer")
+    }
+
+    // MARK: - Final-output clipboard staging
+
+    private static func testClipboardStaging() {
+        let name = NSPasteboard.Name("com.velora.selftest.\(UUID().uuidString)")
+        let pasteboard = NSPasteboard(name: name)
+        pasteboard.clearContents()
+        let inserter = TextInserter(pasteboard: pasteboard)
+        inserter.stageFinalOutput("A final sentence.")
+        expect(
+            pasteboard.string(forType: .string) == "A final sentence.",
+            "final output remains available for manual paste")
+        pasteboard.clearContents()
     }
 }

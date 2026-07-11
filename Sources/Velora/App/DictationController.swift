@@ -693,6 +693,13 @@ final class DictationController: NSObject {
             return
         }
 
+        // Clipboard delivery is the invariant; synthetic paste/typing is only
+        // the convenience layer. Staging here covers own-window, paste,
+        // typing, permission, secure-input, and focus-change paths while whole
+        // utterance voice commands above remain commands rather than copied
+        // prose.
+        inserter.stageFinalOutput(text)
+
         let context = sessionContext
 
         // Own-window insertion (onboarding try-it): the TextEditor lives inside
@@ -741,7 +748,6 @@ final class DictationController: NSObject {
 
         if let fallbackMessage {
             NSLog("Velora: insert fallback session=%@ — %@", sessionID, fallbackMessage)
-            inserter.copyToClipboard(text)
             errorRetryAction = nil
             hud.model.retryTitle = "Retry"
             if isPermissionFallback {
