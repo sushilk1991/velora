@@ -577,7 +577,12 @@ class Engine:
     def _start_prefix_preparation(self, session: Session) -> None:
         cleanup = self.cleanup
         prepare = getattr(cleanup, "prepare_prefix", None)
-        if cleanup is None or not cleanup.loaded or not callable(prepare):
+        if (
+            cleanup is None
+            or not cleanup.loaded
+            or getattr(cleanup, "unhealthy", False)
+            or not callable(prepare)
+        ):
             return
         ctx = session.context
         candidates = formatting.build_prefill_prompt_candidates(

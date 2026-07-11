@@ -100,6 +100,20 @@ async def test_prepare_prefix_caches_only_exact_common_prompt_tokens():
 
 
 @pytest.mark.asyncio
+async def test_unhealthy_engine_rejects_prefix_preparation_without_queueing():
+    engine = RecordingCleanup()
+    engine.unhealthy = True
+    try:
+        result = await engine.prepare_prefix([("stable", "transcript")])
+
+        assert result.applied is False
+        assert result.reason == "llm_unhealthy"
+        assert engine.prefilled == []
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
 async def test_prepared_prefix_is_forked_for_every_matching_request():
     engine = RecordingCleanup()
     try:

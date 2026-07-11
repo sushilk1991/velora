@@ -23,22 +23,22 @@ The test device is a 14-core Apple M4 Max MacBook Pro with 36 GB unified memory.
 - Whisper warms the same `ModelHolder` instance used for transcription and adds preview-only decodes that cannot mutate committed/final state. Preview and segment decoding materialize only the overlapping undecoded audio chunks instead of repeatedly concatenating the complete recording.
 - A speech-bearing tail that decodes empty forces an authoritative whole-clip retry, and rejected Whisper segments can no longer re-enter through the aggregate fallback.
 - The HUD stops all perpetual idle animations and displays up to two readable lines using whole-word/sentence selection.
-- Complete prose receives conservative punctuation and clear grammar repairs. Short Terminal commands remain verbatim; Terminal prose at or above 12 words retains sentence-ending punctuation.
+- Complete prose receives conservative punctuation and clear grammar repairs. Terminal input below 12 words stays model-free and command-safe (while explicit spoken line/paragraph controls still work); Terminal prose at or above 12 words receives conservative cleanup and retains sentence-ending punctuation.
 
 ## Exact-model cleanup benchmark
 
-All cases used the exact Qwen model above, temperature zero, and a prepared-prefix cache hit. Prefix preparation took 0.99–1.07 seconds during recording; it is excluded from stop-side generation because that work is deliberately moved off the release path. The committed runner is reproducible with `cd engine && uv run python scripts/benchmark_cleanup_quality.py`; `--list` prints every input and assertion without loading MLX.
+All cases used the exact Qwen model above, temperature zero, and a prepared-prefix cache hit. Prefix preparation took 0.97–1.05 seconds during recording; it is excluded from stop-side generation because that work is deliberately moved off the release path. The committed runner is reproducible with `cd engine && uv run python scripts/benchmark_cleanup_quality.py`; `--list` prints every input and assertion without loading MLX.
 
 | Case | Words | Stop-side cleanup | Result check |
 |---|---:|---:|---|
-| Declarative | 14 | 412 ms | final full stop present |
-| Grammar repair | 18 | 472 ms | agreement/tense repaired conservatively |
-| Question | 16 | 572 ms | question mark present |
-| Terminal prose | 22 | 566 ms | final full stop retained |
-| Names/numbers | 20 | 626 ms | names, Q3, time, and currency retained |
-| Long prose | 45 | 1,033 ms | meaning and details retained |
+| Declarative | 14 | 395 ms | final full stop present |
+| Grammar repair | 18 | 468 ms | agreement/tense repaired conservatively |
+| Question | 16 | 413 ms | question mark present |
+| Terminal prose | 22 | 547 ms | final full stop retained |
+| Names/numbers | 20 | 608 ms | names, Q3, time, and currency retained |
+| Long prose | 45 | 1,015 ms | meaning and details retained |
 
-Observed prior-build cleanup logs on the same Mac were 1.85–2.96 seconds for 12–96 words, including two timeouts. The new stop-side range was 0.41–1.08 seconds for 13–53 words.
+Observed prior-build cleanup logs on the same Mac were 1.85–2.96 seconds for 12–96 words, including two timeouts. The committed six-case benchmark measured a new stop-side range of 0.40–1.02 seconds for 14–45 words.
 
 ## End-to-end engine proof
 
@@ -57,7 +57,7 @@ Before the HUD fix, the installed app was observed at 9.3% CPU while idle. A 12-
 
 ## Automated verification
 
-- Python engine suite: 230 passed
+- Python engine suite: 231 passed
 - Swift release build: passed
 - Swift self-test: 69 checks passed
 

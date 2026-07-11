@@ -427,6 +427,8 @@ class CleanupEngine:
         cancel_event: threading.Event | None = None,
     ) -> PrefixPreparation:
         """Prepare a reusable exact prompt prefix on the model's owner thread."""
+        if self.unhealthy:
+            return PrefixPreparation(False, 0, 0, "llm_unhealthy")
         if not self.loaded:
             return PrefixPreparation(False, 0, 0, "llm_not_loaded")
         return await asyncio.get_running_loop().run_in_executor(
@@ -602,9 +604,10 @@ class CleanupEngine:
             return CleanupResult(raw, False, 0, "llm_not_loaded")
         worker_cancel = cancel_event if cancel_event is not None else threading.Event()
         try:
-            # In-thread deadline enforces the budget between tokens; the outer
-            # wait_for catches a truly wedged generation (thread keeps running,
-            # the lock serializes any next request behind it).
+            # In-thread deadline enforces the budget between tokens. The outer
+            # wait_for catches a truly wedged generation; because that thread
+            # cannot be killed safely, the timeout poisons this engine and the
+            # server restarts the sidecar after returning the raw fallback.
             loop = asyncio.get_running_loop()
             return await asyncio.wait_for(
                 loop.run_in_executor(
