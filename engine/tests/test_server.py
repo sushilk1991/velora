@@ -329,6 +329,59 @@ async def test_start_prepares_cleanup_prefix_without_blocking_audio(engine):
     client.close()
 
 
+async def test_stop_cancels_prefix_before_final_cleanup(engine):
+    eng, sock = engine
+
+    class OrderedCleanup:
+        loaded = True
+        model_id = "fake-ordered"
+        unhealthy = False
+
+        def __init__(self):
+            self.started = asyncio.Event()
+            self.cancel_event = None
+            self.cancelled_before_cleanup = None
+
+        async def prepare_prefix(self, candidates, cancel_event=None):
+            assert candidates
+            self.cancel_event = cancel_event
+            self.started.set()
+            await asyncio.Future()
+
+        async def cleanup(self, raw, _prompt, **_kwargs):
+            assert self.cancel_event is not None
+            self.cancelled_before_cleanup = self.cancel_event.is_set()
+            return CleanupResult(
+                "Hello world, this is a fake transcript.", True, 3
+            )
+
+    cleanup = OrderedCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start",
+        "session": "prefill-priority",
+        "context": {
+            "bundle_id": "com.apple.Notes",
+            "app_name": "Notes",
+        },
+    })
+    await asyncio.wait_for(cleanup.started.wait(), 1)
+
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "prefill-priority"})
+    final = await client.recv_event("final")
+
+    assert final["text"] == "Hello world, this is a fake transcript."
+    assert final["cleanup_applied"] is True
+    assert cleanup.cancel_event is not None and cleanup.cancel_event.is_set()
+    assert cleanup.cancelled_before_cleanup is True
+    assert cleanup.unhealthy is False
+    assert not eng.shutdown.is_set()
+    client.close()
+
+
 async def test_cancel_discards(engine):
     eng, sock = engine
     client = await connect(sock)

@@ -868,10 +868,14 @@ class Engine:
         # closes the window where a background transcribe-file chunk could
         # grab the backend before our finalize() drains it.
         self._finalizing = True
+        # Prefix preparation is optional recording-time work on the same
+        # single-worker cleanup executor as the authoritative final pass. Set
+        # its cooperative cancellation signal before any finalization awaits
+        # so it can release the model thread while Whisper drains.
+        self._cancel_prefix_preparation(session)
         try:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
-            self._cancel_prefix_preparation(session)
             self._finalizing = False
 
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
