@@ -469,7 +469,11 @@ final class ICloudDocumentsDictionaryTransport: NSObject, DictionarySyncTranspor
             ? .forReplacing : []
         coordinator.coordinate(writingItemAt: url, options: options, error: &coordinationError) {
             coordinatedURL in
-            do { try data.write(to: coordinatedURL, options: .atomic) }
+            do {
+                try data.write(to: coordinatedURL, options: .atomic)
+                try fileManager.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: coordinatedURL.path)
+            }
             catch { writeError = error }
         }
         if let coordinationError { throw coordinationError }

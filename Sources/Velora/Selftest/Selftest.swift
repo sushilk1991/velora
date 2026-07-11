@@ -27,6 +27,8 @@ enum Selftest {
         testDictionaryValues()
         testDictionaryMerge()
         testDictionarySerializationBoundary()
+        testDictionaryPrivacyAndPerformanceBoundary()
+        testDictionaryTransportIsolation()
         testLearningStoreProjection()
         testAutoVocabProjection()
         testManualConfigProjection()
@@ -285,6 +287,129 @@ enum Selftest {
         } catch {
             expect(true, "corrupt dictionary payload is rejected")
         }
+    }
+
+    private static func testDictionaryPrivacyAndPerformanceBoundary() {
+        let fixture = DictionaryRepositoryFixture()
+        let sentinels = [
+            "SECRET_TRANSCRIPT_SENTINEL", "SECRET_AUDIO_PATH_SENTINEL",
+            "SECRET_SCREEN_CONTEXT_SENTINEL", "SECRET_PENDING_COUNT_SENTINEL",
+            "SECRET_CANDIDATE_SENTINEL", "SECRET_CHECKPOINT_SENTINEL",
+            "SECRET_MODEL_SENTINEL",
+        ]
+        try! JSONSerialization.data(withJSONObject: [
+            "stt_model": sentinels[6],
+            "transcript": sentinels[0],
+            "audio_path": sentinels[1],
+            "screen_context": sentinels[2],
+            "vocabulary": ["PrivateBoundaryTerm"],
+            "replacements": ["private boundary": "PrivateBoundaryTerm"],
+        ]).write(to: fixture.config)
+        try! JSONSerialization.data(withJSONObject: [
+            "replacements": ["velor": "Velora"],
+            "vocabulary": ["Velora"],
+            "counts": [sentinels[3]: 1],
+        ]).write(to: fixture.learned)
+        try! JSONSerialization.data(withJSONObject: [
+            "version": 1,
+            "checkpoint_id": sentinels[5],
+            "terms": ["ConfirmedAutoTerm"],
+            "candidates": [sentinels[4]: ["count": 1]],
+        ]).write(to: fixture.auto)
+
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "privacy-mac",
+            now: { Date(timeIntervalSince1970: 100) })
+        let exported = try! repository.exportData()
+        let json = String(decoding: exported, as: UTF8.self)
+        for sentinel in sentinels {
+            expect(!json.contains(sentinel), "cloud payload excludes local sentinel \(sentinel)")
+        }
+        let root = try! JSONSerialization.jsonObject(with: exported) as! [String: Any]
+        expect(Set(root.keys) == ["schema_version", "entries", "clear_generations"],
+               "cloud payload root is an explicit allow-list")
+        let allowedEntryKeys: Set<String> = [
+            "logical_key", "kind", "write_as", "heard_as", "epoch", "revision",
+            "generation", "modified_at", "device_id", "deleted",
+        ]
+        let entryKeys = (root["entries"] as? [[String: Any]] ?? [])
+            .reduce(into: Set<String>()) { $0.formUnion($1.keys) }
+        expect(entryKeys.isSubset(of: allowedEntryKeys),
+               "cloud dictionary entries contain only portable merge fields")
+
+        for url in [fixture.state, fixture.config, fixture.learned, fixture.auto] {
+            let attributes = try! FileManager.default.attributesOfItem(atPath: url.path)
+            let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+            expect(permissions == 0o600, "local dictionary file is owner-readable only: \(url.lastPathComponent)")
+        }
+        fixture.remove()
+
+        let maximumFixture = DictionaryRepositoryFixture()
+        let entries = (0..<DictionaryDocument.maximumEntries).map { index in
+            try! DictionaryEntry.manual(
+                writeAs: String(format: "Term%04d", index),
+                deviceID: "benchmark-mac",
+                at: Date(timeIntervalSince1970: Double(index)))
+        }
+        try! DictionaryDocument(entries: entries).encoded().write(to: maximumFixture.state)
+        let launchStart = ProcessInfo.processInfo.systemUptime
+        let maximumRepository = DictionaryRepository(
+            stateURL: maximumFixture.state,
+            configURL: maximumFixture.config,
+            learnedURL: maximumFixture.learned,
+            autoURL: maximumFixture.auto,
+            deviceID: "benchmark-mac")
+        let launchDuration = ProcessInfo.processInfo.systemUptime - launchStart
+        let mutationStart = ProcessInfo.processInfo.systemUptime
+        try! maximumRepository.update(id: entries[0].logicalKey, writeAs: "TERM0000")
+        let mutationDuration = ProcessInfo.processInfo.systemUptime - mutationStart
+        print(String(format: "dictionary benchmark — launch %.3fs, mutation %.3fs (%d entries)",
+                     launchDuration, mutationDuration, DictionaryDocument.maximumEntries))
+        expect(maximumRepository.rows.count == DictionaryDocument.maximumEntries,
+               "maximum-size dictionary projects every active entry")
+        expect(launchDuration < 5 && mutationDuration < 5,
+               "maximum-size migration and mutation remain bounded")
+        maximumFixture.remove()
+    }
+
+    private static func testDictionaryTransportIsolation() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-transport-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var providerRanOnMain = true
+        var callbackRanOnMain = false
+        var completed = false
+        let transport = ICloudDocumentsDictionaryTransport(
+            containerURLProvider: {
+                providerRanOnMain = Thread.isMainThread
+                return directory
+            },
+            identityTokenProvider: { "test-account" })
+        transport.write(Data("portable".utf8), resolvingConflicts: false) { result in
+            if case .failure = result {
+                expect(false, "fixture iCloud transport write succeeds")
+            }
+            callbackRanOnMain = Thread.isMainThread
+            completed = true
+        }
+        let deadline = Date().addingTimeInterval(2)
+        while !completed && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        expect(completed, "iCloud transport completes without blocking the caller")
+        expect(!providerRanOnMain, "iCloud container lookup and file coordination run off-main")
+        expect(callbackRanOnMain, "iCloud transport returns observable state to the main queue")
+        let document = directory
+            .appendingPathComponent("Documents/Personal Dictionary")
+            .appendingPathComponent(ICloudDocumentsDictionaryTransport.fileName)
+        let attributes = try! FileManager.default.attributesOfItem(atPath: document.path)
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        expect(permissions == 0o600, "local iCloud document copy is owner-readable only")
+        try? FileManager.default.removeItem(at: directory)
     }
 
     private static func testLearningStoreProjection() {
