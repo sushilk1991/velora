@@ -468,6 +468,40 @@ class WhisperBackend:
         # transcript (especially over silence) — strip it on every decode.
         return strip_prompt_echo(text, self.initial_prompt)
 
+    def _audio_span(self, start_sample: int, end_sample: int) -> np.ndarray:
+        """Materialize only the requested sample range from buffered chunks.
+
+        Preview and committed-segment decodes need only the uncommitted tail.
+        Concatenating every chunk accumulated in a long recording before
+        slicing that tail caused avoidable O(total recording) copies on each
+        preview. Whole-clip finalize still concatenates once by design.
+        """
+        start = max(0, start_sample)
+        end = min(max(start, end_sample), self._samples)
+        if start >= end or not self._chunks:
+            return np.empty(0, dtype=np.float32)
+
+        pieces: list[np.ndarray] = []
+        cursor = 0
+        for chunk in self._chunks:
+            next_cursor = cursor + len(chunk)
+            if next_cursor <= start:
+                cursor = next_cursor
+                continue
+            if cursor >= end:
+                break
+            local_start = max(0, start - cursor)
+            local_end = min(len(chunk), end - cursor)
+            if local_start < local_end:
+                pieces.append(chunk[local_start:local_end])
+            cursor = next_cursor
+
+        if not pieces:
+            return np.empty(0, dtype=np.float32)
+        if len(pieces) == 1:
+            return pieces[0]
+        return np.concatenate(pieces)
+
     def feed_chunk(self, chunk: np.ndarray) -> str | None:
         self._chunks.append(chunk)
         self._samples += len(chunk)
@@ -493,7 +527,7 @@ class WhisperBackend:
             if not preview_due or new_preview_s < PREVIEW_MIN_NEW_S:
                 return None
             try:
-                span = np.concatenate(self._chunks)[self._decoded_samples : self._samples]
+                span = self._audio_span(self._decoded_samples, self._samples)
                 text = self._decode(span)
             except Exception:  # noqa: BLE001 — optional preview must not affect final STT
                 log.exception("preview decode failed — final transcription remains available")
@@ -511,7 +545,7 @@ class WhisperBackend:
             )
             return " ".join(self._segments + [text])
         try:
-            span = np.concatenate(self._chunks)[self._decoded_samples : self._samples]
+            span = self._audio_span(self._decoded_samples, self._samples)
             text = self._decode(span)
         except Exception:  # noqa: BLE001 — a failed decode must not kill the feed loop
             # Degrade to the batch path for the rest of the session; the audio
@@ -549,15 +583,15 @@ class WhisperBackend:
         if not self._chunks:
             self.reset()
             return ""
-        audio = np.concatenate(self._chunks)
-        duration_s = len(audio) / SAMPLE_RATE
+        duration_s = self._samples / SAMPLE_RATE
         # Long dictation with usable segments: decode only the un-decoded tail
         # and stitch — stop→final stays flat however long the user spoke. Short
         # and medium clips re-decode WHOLE, exactly like the pre-segmenting
         # code, so their quality is unchanged (segments were preview-only).
         if duration_s > LONG_DICTATION_S and self._segments and not self._segment_decode_failed:
             try:
-                tail = self._decode(audio[self._decoded_samples :]) if self._decoded_samples < len(audio) else ""
+                tail_audio = self._audio_span(self._decoded_samples, self._samples)
+                tail = self._decode(tail_audio) if len(tail_audio) else ""
             except Exception:  # noqa: BLE001 — fall through to the whole-clip decode
                 log.exception("tail decode failed — re-decoding the whole clip")
             else:
@@ -569,6 +603,7 @@ class WhisperBackend:
                 return text
         if duration_s > 60:
             log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
+        audio = np.concatenate(self._chunks)
         try:
             text = self._decode(audio)
         finally:

@@ -157,6 +157,28 @@ def feed_seconds(backend, seconds, chunk=None):
     return partials
 
 
+def test_audio_span_copies_only_requested_chunk_overlap(whisper, monkeypatch):
+    backend, _fake = whisper(["unused"])
+    backend._chunks = [
+        np.arange(0, 3, dtype=np.float32),
+        np.arange(3, 7, dtype=np.float32),
+        np.arange(7, 12, dtype=np.float32),
+    ]
+    backend._samples = 12
+    concatenated_lengths = []
+    real_concatenate = np.concatenate
+
+    def recording_concatenate(parts, *args, **kwargs):
+        concatenated_lengths.append([len(part) for part in parts])
+        return real_concatenate(parts, *args, **kwargs)
+
+    monkeypatch.setattr(np, "concatenate", recording_concatenate)
+    span = backend._audio_span(4, 10)
+
+    np.testing.assert_array_equal(span, np.arange(4, 10, dtype=np.float32))
+    assert concatenated_lengths == [[3, 3]]
+
+
 def test_segment_closes_on_pause(whisper):
     backend, fake = whisper(["seg one"])
     partials = feed_seconds(backend, MIN_SEGMENT_S)  # 10s speech: not yet
@@ -273,6 +295,22 @@ def test_long_dictation_finalize_stitches_segments(whisper):
     # state fully reset for the next session
     backend.start_session()
     assert backend.segments_used_for_final is False and backend.final_tail == ""
+
+
+def test_long_segmented_finalize_does_not_join_the_whole_recording(whisper, monkeypatch):
+    backend, fake = whisper(["tail"])
+    total_samples = int((LONG_DICTATION_S + 1) * SAMPLE_RATE)
+    backend._chunks = [np.zeros(total_samples, dtype=np.float32)]
+    backend._samples = total_samples
+    backend._decoded_samples = int(LONG_DICTATION_S * SAMPLE_RATE)
+    backend._segments = ["committed"]
+
+    def reject_whole_join(_parts):
+        raise AssertionError("segmented finalize must materialize only its tail")
+
+    monkeypatch.setattr(np, "concatenate", reject_whole_join)
+    assert backend.finalize() == "committed tail"
+    assert fake.calls[-1][0] == SAMPLE_RATE
 
 
 def test_initial_prompt_passed_to_every_decode(whisper):

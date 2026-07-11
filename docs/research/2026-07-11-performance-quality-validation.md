@@ -19,7 +19,7 @@ The test device is a 14-core Apple M4 Max MacBook Pro with 36 GB unified memory.
 - Volatile app/entity context follows stable cleanup instructions, increasing the reusable prefix.
 - Superseded preview/chunk tasks receive cooperative cancellation instead of continuing to occupy the single inference executor.
 - The soft output deadline starts at the first generated token; an independent watchdog still bounds stuck prefill or inference.
-- Whisper warms the same `ModelHolder` instance used for transcription and adds preview-only decodes that cannot mutate committed/final state.
+- Whisper warms the same `ModelHolder` instance used for transcription and adds preview-only decodes that cannot mutate committed/final state. Preview and segment decoding materialize only the overlapping undecoded audio chunks instead of repeatedly concatenating the complete recording.
 - The HUD stops all perpetual idle animations and displays up to two readable lines using whole-word/sentence selection.
 - Complete prose receives conservative punctuation and clear grammar repairs. Short Terminal commands remain verbatim; Terminal prose at or above 12 words retains sentence-ending punctuation.
 
@@ -55,7 +55,7 @@ Before the HUD fix, the installed app was observed at 9.3% CPU while idle. A 12-
 
 ## Automated verification
 
-- Python engine suite: 220 passed
+- Python engine suite: 222 passed
 - Swift release build: passed
 - Swift self-test: 65 checks passed
 
