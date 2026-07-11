@@ -486,6 +486,104 @@ async def test_reconnect_new_client_flow_survives(engine):
 # ---- bounded audio queue (codex#7 / claude M4) ----
 
 
+def install_blocking_preview(eng, monkeypatch):
+    """Give FakeBackend Whisper's request/decode surface with a held decode."""
+    pending = []
+    decode_started = threading.Event()
+    release_decode = threading.Event()
+    stats = {"active": 0, "max_active": 0, "calls": 0}
+    lock = threading.Lock()
+
+    def feed_chunk(chunk):
+        eng.stt.samples += len(chunk)
+        pending[:] = [f"preview-{eng.stt.samples}"]  # coalesce to latest
+        return None
+
+    def take_preview_request():
+        return pending.pop() if pending else None
+
+    def decode_preview(_request):
+        with lock:
+            stats["active"] += 1
+            stats["calls"] += 1
+            stats["max_active"] = max(stats["max_active"], stats["active"])
+        decode_started.set()
+        release_decode.wait(5)
+        with lock:
+            stats["active"] -= 1
+        return "early words"
+
+    def discard_preview_request():
+        pending.clear()
+
+    monkeypatch.setattr(eng.stt, "feed_chunk", feed_chunk)
+    monkeypatch.setattr(eng.stt, "take_preview_request", take_preview_request, raising=False)
+    monkeypatch.setattr(eng.stt, "decode_preview", decode_preview, raising=False)
+    monkeypatch.setattr(eng.stt, "discard_preview_request", discard_preview_request, raising=False)
+    return decode_started, release_decode, stats
+
+
+async def test_preview_decode_does_not_block_socket_ingest(engine, monkeypatch):
+    eng, sock = engine
+    decode_started, release_decode, stats = install_blocking_preview(eng, monkeypatch)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({"cmd": "start", "session": "preview-live", "context": {}})
+        await client.send_audio(AUDIO)
+        assert await asyncio.to_thread(decode_started.wait, 2)
+
+        # Preview owns the single model thread, but socket dispatch must still
+        # accept the next frame and answer control traffic immediately.
+        await client.send_audio(AUDIO)
+        await client.send_json({"cmd": "ping"})
+        assert (await client.recv_event("pong"))["event"] == "pong"
+        assert eng.session is not None
+        assert eng.session.samples == len(AUDIO) * 2
+        assert eng.stt.samples == len(AUDIO)  # second feed waits, ingest does not
+
+        release_decode.set()
+        partial = await client.recv_event("partial")
+        assert partial["text"] == "early words"
+        await client.send_json({"cmd": "stop", "session": "preview-live"})
+        final = await client.recv_event("final")
+        assert final["text"] == "hello world this is a fake transcript"
+        assert stats["max_active"] == 1
+    finally:
+        release_decode.set()
+        client.close()
+
+
+async def test_stop_discards_inflight_preview_result_before_final(engine, monkeypatch):
+    eng, sock = engine
+    decode_started, release_decode, _stats = install_blocking_preview(eng, monkeypatch)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({"cmd": "start", "session": "preview-stop", "context": {}})
+        await client.send_audio(AUDIO)
+        assert await asyncio.to_thread(decode_started.wait, 2)
+        await client.send_json({"cmd": "stop", "session": "preview-stop"})
+        for _ in range(100):
+            if eng.session is None:
+                break
+            await asyncio.sleep(0.01)
+        assert eng.session is None
+
+        release_decode.set()
+        events = []
+        while not events or events[-1].get("event") != "final":
+            events.append(await client.recv())
+
+        names = [event.get("event") for event in events]
+        assert "partial" not in names
+        assert names.index("transcript") < names.index("final")
+        assert events[-1]["text"] == "hello world this is a fake transcript"
+    finally:
+        release_decode.set()
+        client.close()
+
+
 async def test_queue_overflow_aborts_session(engine, monkeypatch):
     eng, sock = engine
     monkeypatch.setattr(server_mod, "QUEUE_MAX_FRAMES", 3)

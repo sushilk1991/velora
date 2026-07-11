@@ -123,6 +123,8 @@ class Session:
         self.context = context or {}
         self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=QUEUE_MAX_FRAMES)
         self.feeder: asyncio.Task[None] | None = None
+        self.preview_task: asyncio.Task[None] | None = None
+        self.last_partial = ""
         self.cancelled = False
         self.samples = 0
         self.dropped = 0  # frames dropped because the queue was full
@@ -611,38 +613,123 @@ class Engine:
         if session.prefix_task is not None and not session.prefix_task.done():
             session.prefix_task.cancel()
 
+    async def _emit_partial(self, session: Session, partial: str | None) -> None:
+        """Send one current-session partial, shared by stream and preview lanes."""
+        text = (partial or "").strip()
+        if (
+            not text
+            or text == session.last_partial
+            or session.cancelled
+            or self.session is not session
+        ):
+            return
+        # Record before awaiting socket backpressure so two ready producers
+        # cannot emit the same transcript while the first send is suspended.
+        session.last_partial = text
+        await self._send({"event": "partial", "session": session.id, "text": text})
+
+    async def _feed_one(self, session: Session, chunk: np.ndarray) -> None:
+        if session.cancelled:  # aborted: drain frames without touching STT
+            return
+        try:
+            partial = await self._stt_call(self.stt.feed_chunk, chunk)
+        except Exception:
+            log.exception("feed_chunk failed")
+            return
+        await self._emit_partial(session, partial)
+        # Segment streaming: clean freshly-decoded segments WHILE the user
+        # speaks. Any failure only costs the streaming fast path; finalization
+        # falls back to whole-text cleanup.
+        try:
+            for seg in self.stt.take_new_segments():
+                self._on_new_segment(session, seg)
+        except Exception:
+            log.exception("segment scheduling failed")
+            session.streaming_disabled = True
+
     async def _feed_loop(self, session: Session) -> None:
-        last_partial = ""
         while True:
             chunk = await session.queue.get()
             if chunk is None:
                 return
-            if session.cancelled:  # aborted: just drain, don't feed STT
-                continue
-            try:
-                partial = await self._stt_call(self.stt.feed_chunk, chunk)
-            except Exception:
-                log.exception("feed_chunk failed")
-                continue
+            await self._feed_one(session, chunk)
+
+            # A preview can hold the model thread briefly. Once it releases,
+            # catch the backend up to the newest accepted PCM before asking it
+            # for another display snapshot. This prevents an obsolete-preview
+            # queue on slower devices while socket ingestion remains immediate.
+            stop = False
+            while True:
+                try:
+                    queued = session.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if queued is None:
+                    stop = True
+                    break
+                await self._feed_one(session, queued)
+            if stop:
+                return
+            await self._start_preview_if_ready(session)
+
+    async def _start_preview_if_ready(self, session: Session) -> None:
+        if session.cancelled or self.session is not session:
+            return
+        task = session.preview_task
+        if task is not None and not task.done():
+            return
+        take = getattr(self.stt, "take_preview_request", None)
+        decode = getattr(self.stt, "decode_preview", None)
+        if not callable(take) or not callable(decode):
+            return
+        try:
+            request = await self._stt_call(take)
+        except Exception:  # optional preview surface must not affect recording
+            log.exception("taking preview request failed")
+            return
+        if request is None or session.cancelled or self.session is not session:
+            return
+        session.preview_task = asyncio.create_task(
+            self._run_preview(session, decode, request)
+        )
+
+    async def _run_preview(
+        self,
+        session: Session,
+        decode: Callable[[Any], str | None],
+        request: Any,
+    ) -> None:
+        current = asyncio.current_task()
+        try:
+            partial = await self._stt_call(decode, request)
+            await self._emit_partial(session, partial)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — optional preview never kills STT
+            log.exception("preview task failed — final transcription remains available")
+        finally:
+            if session.preview_task is current:
+                session.preview_task = None
+            # A feed queued behind this decode may have coalesced a newer
+            # request. Start it only after the old task fully emitted and only
+            # while the same live session still owns the backend.
             if (
-                partial
-                and partial.strip()
-                and partial != last_partial
-                and not session.cancelled
+                not session.cancelled
                 and self.session is session
+                and session.queue.empty()
             ):
-                last_partial = partial
-                await self._send({"event": "partial", "session": session.id, "text": partial.strip()})
-            # Segment streaming: clean freshly-decoded segments WHILE the user
-            # is still speaking (the cleanup thread is idle during recording).
-            # Any failure here only costs the streaming fast path — finalize
-            # falls back to whole-text cleanup.
-            try:
-                for seg in self.stt.take_new_segments():
-                    self._on_new_segment(session, seg)
-            except Exception:
-                log.exception("segment scheduling failed")
-                session.streaming_disabled = True
+                await self._start_preview_if_ready(session)
+
+    async def _drain_preview(self, session: Session) -> None:
+        task = session.preview_task
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        session.preview_task = None
+        discard = getattr(self.stt, "discard_preview_request", None)
+        if callable(discard):
+            with contextlib.suppress(Exception):
+                await self._stt_call(discard)
 
     async def _on_audio(self, payload: bytes) -> None:
         session = self.session
@@ -710,6 +797,7 @@ class Engine:
         self._cancel_prefix_preparation(session)
         self._cancel_chunk_tasks(session)
         await self._drain_feeder(session)
+        await self._drain_preview(session)
         await self._stt_call(self.stt.reset)
         log.info("session %s discarded (%s)", session.id, why)
         # The engine is idle again after an abort too — without this, a
@@ -773,6 +861,7 @@ class Engine:
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
         t_stop = time.perf_counter()
         await self._drain_feeder(session)
+        await self._drain_preview(session)
         try:
             raw = await self._stt_call(self.stt.finalize)
         except Exception as exc:
