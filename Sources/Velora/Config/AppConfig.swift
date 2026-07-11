@@ -82,7 +82,13 @@ struct STTModel: Identifiable, Equatable {
 final class AppConfig {
     static let shared = AppConfig()
 
+    struct ManualDictionarySnapshot: Codable, Equatable {
+        var vocabulary: [String]
+        var replacements: [String: String]
+    }
+
     private let defaults = UserDefaults.standard
+    private static let engineConfigLock = NSLock()
 
     /// `~/.velora` — shared home for socket, config, modes, history.
     static var veloraDirectory: URL {
@@ -316,6 +322,49 @@ final class AppConfig {
 
     // MARK: - config.json for the engine
 
+    /// Reads only the user-owned manual dictionary keys. Invalid legacy values
+    /// are ignored so they cannot become prompt-active during migration.
+    static func manualDictionarySnapshot(at url: URL = configFileURL) -> ManualDictionarySnapshot {
+        engineConfigLock.lock()
+        defer { engineConfigLock.unlock() }
+        guard let data = try? Data(contentsOf: url),
+              let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return ManualDictionarySnapshot(vocabulary: [], replacements: [:]) }
+        let vocabulary = validatedTerms((payload["vocabulary"] as? [String]) ?? [])
+        var replacements: [String: String] = [:]
+        for (rawHeard, rawWritten) in (payload["replacements"] as? [String: String]) ?? [:] {
+            guard let heard = try? DictionaryValue(rawHeard),
+                  let written = try? DictionaryValue(rawWritten) else { continue }
+            replacements[heard.normalized] = written.text
+        }
+        return ManualDictionarySnapshot(vocabulary: vocabulary, replacements: replacements)
+    }
+
+    /// Atomically replaces only manual vocabulary/replacements, preserving
+    /// every engine/app setting and unknown future key in config.json.
+    @discardableResult
+    static func applyManualDictionary(
+        _ snapshot: ManualDictionarySnapshot,
+        at url: URL = configFileURL
+    ) -> Bool {
+        var vocabulary: [String] = []
+        var seen: Set<String> = []
+        for rawTerm in snapshot.vocabulary {
+            guard let term = try? DictionaryValue(rawTerm) else { return false }
+            if seen.insert(term.normalized).inserted { vocabulary.append(term.text) }
+        }
+        var replacements: [String: String] = [:]
+        for (rawHeard, rawWritten) in snapshot.replacements {
+            guard let heard = try? DictionaryValue(rawHeard),
+                  let written = try? DictionaryValue(rawWritten) else { return false }
+            replacements[heard.normalized] = written.text
+        }
+        return updateEngineConfig(at: url) { payload in
+            payload["vocabulary"] = vocabulary
+            payload["replacements"] = replacements
+        }
+    }
+
     /// Ensures `~/.velora` exists (socket home, config, history) with owner-only
     /// permissions — it holds every transcript and the engine socket.
     @discardableResult
@@ -340,24 +389,14 @@ final class AppConfig {
     /// The engine reads this at startup and on `reload_config`.
     func writeEngineConfig() {
         ensureVeloraDirectory()
-        var payload: [String: Any] = [:]
-        if let data = try? Data(contentsOf: Self.configFileURL),
-           let existing = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            payload = existing  // tolerate missing/corrupt file: start fresh
-        }
-        payload["stt_model"] = sttModel
-        payload["language"] = language
-        payload["auto_punctuation"] = autoPunctuation
-        payload["save_audio"] = saveAudio
-        payload["romanize_output"] = romanizeOutput
-        payload["vocab_mining"] = vocabMining
-        payload["smart_terminal"] = smartTerminal
-        do {
-            let data = try JSONSerialization.data(
-                withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: Self.configFileURL, options: .atomic)
-        } catch {
-            NSLog("Velora: failed to write config.json: \(error)")
+        _ = Self.updateEngineConfig(at: Self.configFileURL) { payload in
+            payload["stt_model"] = self.sttModel
+            payload["language"] = self.language
+            payload["auto_punctuation"] = self.autoPunctuation
+            payload["save_audio"] = self.saveAudio
+            payload["romanize_output"] = self.romanizeOutput
+            payload["vocab_mining"] = self.vocabMining
+            payload["smart_terminal"] = self.smartTerminal
         }
     }
 
@@ -365,5 +404,44 @@ final class AppConfig {
     func writeEngineConfigIfMissing() {
         guard !FileManager.default.fileExists(atPath: Self.configFileURL.path) else { return }
         writeEngineConfig()
+    }
+
+    private static func updateEngineConfig(
+        at url: URL,
+        _ mutation: (inout [String: Any]) -> Void
+    ) -> Bool {
+        engineConfigLock.lock()
+        defer { engineConfigLock.unlock() }
+        var payload: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let existing = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            payload = existing
+        }
+        mutation(&payload)
+        do {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+                attributes: [.posixPermissions: 0o700])
+            let data = try JSONSerialization.data(
+                withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        } catch {
+            NSLog("Velora: failed to write config.json: \(error)")
+            return false
+        }
+    }
+
+    private static func validatedTerms(_ terms: [String]) -> [String] {
+        var seen: Set<String> = []
+        var result: [String] = []
+        for rawTerm in terms {
+            guard let term = try? DictionaryValue(rawTerm),
+                  seen.insert(term.normalized).inserted else { continue }
+            result.append(term.text)
+        }
+        return result
     }
 }

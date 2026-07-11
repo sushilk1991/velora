@@ -27,6 +27,9 @@ enum Selftest {
         testDictionaryValues()
         testDictionaryMerge()
         testDictionarySerializationBoundary()
+        testLearningStoreProjection()
+        testAutoVocabProjection()
+        testManualConfigProjection()
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
@@ -273,6 +276,126 @@ enum Selftest {
         } catch {
             expect(true, "corrupt dictionary payload is rejected")
         }
+    }
+
+    private static func testLearningStoreProjection() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-learned-projection-\(UUID().uuidString)")
+        let url = dir.appendingPathComponent("learned.json")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let seed: [String: Any] = [
+            "replacements": ["valoraa": "Velora"],
+            "soft_replacements": ["lung": "Airlearn"],
+            "vocabulary": ["Velora", "Airlearn", "Standalone++"],
+            "counts": ["pending→Pending": 1],
+        ]
+        try! JSONSerialization.data(withJSONObject: seed).write(to: url)
+        let store = LearningStore(url: url)
+        let portable = store.portableSnapshot()
+        expect(portable.replacements["valoraa"] == "Velora", "learned snapshot keeps hard corrections")
+        expect(portable.softReplacements["lung"] == "Airlearn", "learned snapshot keeps soft corrections")
+        expect(portable.standaloneVocabulary == ["Standalone++"],
+               "learned snapshot separates standalone vocabulary")
+        let portableJSON = String(decoding: try! JSONEncoder().encode(portable), as: UTF8.self)
+        expect(!portableJSON.contains("counts") && !portableJSON.contains("pending"),
+               "portable learned snapshot excludes pending confirmation counts")
+
+        let incoming = LearningStore.PortableSnapshot(
+            replacements: ["velorra": "Velora AI"],
+            softReplacements: ["cloud": "iCloud++"],
+            standaloneVocabulary: ["node.js"])
+        store.applyPortableSnapshot(incoming)
+        let afterApply = try! JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        expect((afterApply["counts"] as? [String: Int])?["pending→Pending"] == 1,
+               "applying portable learning preserves local pending counts")
+        expect(Set(afterApply["vocabulary"] as? [String] ?? []).isSuperset(of: ["Velora AI", "iCloud++", "node.js"]),
+               "applying portable learning rebuilds correction and standalone vocabulary")
+
+        store.clearCorrections()
+        let afterClear = store.portableSnapshot()
+        expect(afterClear.replacements.isEmpty && afterClear.softReplacements.isEmpty,
+               "forget learned corrections clears both correction tiers")
+        expect(afterClear.standaloneVocabulary == ["node.js"],
+               "forget learned corrections preserves standalone vocabulary")
+
+        expect((try? store.addStandaloneVocabulary("C++")) == true,
+               "standalone vocabulary can be added directly")
+        expect(store.exportData().map { String(decoding: $0, as: UTF8.self).contains("C++") } == true,
+               "vocabulary-only dictionaries remain exportable")
+        store.removeStandaloneVocabulary("C++")
+        expect(!store.portableSnapshot().standaloneVocabulary.contains("C++"),
+               "standalone vocabulary can be removed directly")
+
+        let malformed: [String: Any] = [
+            "replacements": ["bad\nkey": "Injected", "valid": String(repeating: "x", count: 61)],
+            "vocabulary": ["also\nbad", String(repeating: "y", count: 61)],
+        ]
+        let result = store.importData(try! JSONSerialization.data(withJSONObject: malformed))
+        expect(result == nil || (result?.corrections == 0 && result?.vocabulary == 0),
+               "dictionary import rejects malformed prompt-active strings")
+        expect(!String(decoding: store.exportData()!, as: UTF8.self).contains("Injected"),
+               "malformed imported correction never reaches the prompt store")
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    private static func testAutoVocabProjection() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-auto-projection-\(UUID().uuidString)")
+        let url = dir.appendingPathComponent("auto_learned.json")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let seed: [String: Any] = [
+            "version": 1,
+            "checkpoint_id": 42,
+            "terms": ["Velora"],
+            "banned": ["OldTerm"],
+            "candidates": ["Candidate": ["count": 1]],
+            "future_engine_key": "preserve-me",
+        ]
+        try! JSONSerialization.data(withJSONObject: seed).write(to: url)
+        let store = AutoVocabStore(url: url)
+        expect(store.portableSnapshot() == AutoVocabStore.PortableSnapshot(
+            terms: ["Velora"], banned: ["OldTerm"]),
+            "auto snapshot contains only promoted terms and bans")
+        store.applyPortableSnapshot(.init(terms: ["RemoteTerm"], banned: ["OldTerm"]))
+        let root = try! JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        expect((root["checkpoint_id"] as? Int) == 42, "auto apply preserves miner checkpoint")
+        expect((root["candidates"] as? [String: Any])?["Candidate"] != nil,
+               "auto apply preserves miner candidates")
+        expect((root["future_engine_key"] as? String) == "preserve-me",
+               "auto apply preserves unknown engine keys")
+        expect(Set(root["terms"] as? [String] ?? []) == ["Velora", "RemoteTerm"],
+               "auto apply unions promoted terms without dropping a concurrent miner term")
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    private static func testManualConfigProjection() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-config-projection-\(UUID().uuidString)")
+        let url = dir.appendingPathComponent("config.json")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let seed: [String: Any] = [
+            "stt_model": "keep-model",
+            "cleanup": false,
+            "vocabulary": ["Old"],
+            "replacements": ["old": "Old"],
+            "future_engine_key": ["nested": true],
+        ]
+        try! JSONSerialization.data(withJSONObject: seed).write(to: url)
+        let initial = AppConfig.manualDictionarySnapshot(at: url)
+        expect(initial.vocabulary == ["Old"] && initial.replacements["old"] == "Old",
+               "manual config snapshot reads only vocabulary and replacements")
+        let applied = AppConfig.applyManualDictionary(
+            .init(vocabulary: ["node.js"], replacements: ["node js": "node.js"]),
+            at: url)
+        expect(applied, "manual config projection writes atomically")
+        let root = try! JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
+        expect((root["stt_model"] as? String) == "keep-model" && (root["cleanup"] as? Bool) == false,
+               "manual config projection preserves current engine settings")
+        expect((root["future_engine_key"] as? [String: Bool])?["nested"] == true,
+               "manual config projection preserves unknown nested keys")
+        expect((root["vocabulary"] as? [String]) == ["node.js"],
+               "manual config projection replaces only manual vocabulary")
+        try? FileManager.default.removeItem(at: dir)
     }
 
     // MARK: - CorrectionDiff

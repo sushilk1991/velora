@@ -189,6 +189,28 @@ async def test_concurrent_app_ban_unioned_at_write(tmp_path):
     assert state["app_key"] is True  # unknown app-side keys pass through
 
 
+async def test_concurrent_app_promotion_unioned_at_write(tmp_path):
+    """A synced term written while mining is in flight must survive the
+    miner's final write; the newly mined term must survive too."""
+    home = tmp_path / "vh"
+    seed_history(home, ["Velora one", "Velora two"])
+    path = home / "auto_learned.json"
+
+    async def generate(system_prompt, user_text):
+        path.write_text(json.dumps({
+            "version": 1,
+            "terms": ["SyncedTerm"],
+            "candidates": {"RemoteCandidate": {"count": 1, "rows": [99]}},
+        }))
+        return "Velora"
+
+    miner = VocabMiner(home, generate)
+    await miner.step()
+    state = read_state(home)
+    assert state["terms"] == ["SyncedTerm", "Velora"]
+    assert "RemoteCandidate" in state["candidates"]
+
+
 async def test_terms_cap_evicts_oldest(tmp_path):
     home = tmp_path / "vh"
     seed_history(home, ["NewTerm alpha", "NewTerm beta"])

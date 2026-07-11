@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import sqlite3
+import fcntl
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -141,41 +142,82 @@ class VocabMiner:
     def _write_state(self, state: dict) -> None:
         """Atomic 0600 write, RE-READING the file first: the app may have
         banned a term while this step was running — its `banned` additions are
-        unioned in and honored, and any app-side keys we don't know about are
-        preserved (format is shared with Swift)."""
-        fresh = self._read_state()
-        banned: list[str] = []
-        for b in list(fresh.get("banned") or []) + list(state.get("banned") or []):
-            b = str(b)
-            if b and b not in banned:
-                banned.append(b)
-        if len(banned) > MAX_BANNED:
-            banned = banned[-MAX_BANNED:]
-        banned_low = {b.lower() for b in banned}
-        out = dict(fresh)  # unknown keys pass through untouched
-        out["version"] = 1
-        # Monotonic: if a concurrent writer (the app's delete, or a parallel
-        # step) advanced the checkpoint while this step ran, never roll it back
-        # — re-mining rows is wasted idle compute at best.
+        unioned in and honored. The lock is shared with AutoVocabStore so the
+        final fresh-read/merge/replace is one cross-process critical section."""
+        lock_path = self._state_path.with_name(self._state_path.name + ".lock")
+        lock_fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            fresh_ckpt = int(fresh.get("checkpoint_id", 0))
-        except (TypeError, ValueError):
-            fresh_ckpt = 0
-        out["checkpoint_id"] = max(int(state.get("checkpoint_id", 0)), fresh_ckpt)
-        out["terms"] = [t for t in state.get("terms", []) if str(t).lower() not in banned_low]
-        out["candidates"] = {
-            k: v for k, v in (state.get("candidates") or {}).items() if str(k).lower() not in banned_low
-        }
-        out["banned"] = banned
-        tmp = self._state_path.with_name(self._state_path.name + ".tmp")
-        # O_CREAT with 0600 directly — no window where the temp file exists
-        # with default-umask permissions before a chmod.
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, (json.dumps(out, indent=2) + "\n").encode())
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            fresh = self._read_state()
+            banned: list[str] = []
+            banned_low: set[str] = set()
+            for value in list(fresh.get("banned") or []) + list(state.get("banned") or []):
+                term = str(value)
+                key = term.lower()
+                if term and key not in banned_low:
+                    banned.append(term)
+                    banned_low.add(key)
+            if len(banned) > MAX_BANNED:
+                banned = banned[-MAX_BANNED:]
+                banned_low = {term.lower() for term in banned}
+
+            out = dict(fresh)  # unknown keys pass through untouched
+            out["version"] = 1
+            try:
+                fresh_ckpt = int(fresh.get("checkpoint_id", 0))
+            except (TypeError, ValueError):
+                fresh_ckpt = 0
+            out["checkpoint_id"] = max(int(state.get("checkpoint_id", 0)), fresh_ckpt)
+
+            # Preserve both a term synced by Swift while generation was in
+            # flight and the terms promoted by this step. State order comes
+            # last so the existing oldest-first cap still evicts correctly.
+            terms: list[str] = []
+            term_keys: set[str] = set()
+            for value in list(fresh.get("terms") or []) + list(state.get("terms") or []):
+                term = str(value)
+                key = term.lower()
+                if term and key not in banned_low and key not in term_keys:
+                    terms.append(term)
+                    term_keys.add(key)
+            out["terms"] = terms[-MAX_TERMS:]
+
+            candidates: dict[str, dict] = {
+                str(k): dict(v)
+                for k, v in (fresh.get("candidates") or {}).items()
+                if isinstance(v, dict)
+            }
+            candidates.update({
+                str(k): dict(v)
+                for k, v in (state.get("candidates") or {}).items()
+                if isinstance(v, dict)
+            })
+            candidates = {
+                key: value for key, value in candidates.items()
+                if key.lower() not in banned_low and key.lower() not in term_keys
+            }
+            if len(candidates) > MAX_CANDIDATES:
+                ranked = sorted(
+                    enumerate(candidates.items()),
+                    key=lambda item: (-int(item[1][1].get("count", 0)), -item[0]),
+                )
+                keep = {key for _, (key, _) in ranked[:MAX_CANDIDATES]}
+                candidates = {key: value for key, value in candidates.items() if key in keep}
+            out["candidates"] = candidates
+            out["banned"] = banned
+
+            tmp = self._state_path.with_name(self._state_path.name + ".tmp")
+            # O_CREAT with 0600 directly — no window where the temp file exists
+            # with default-umask permissions before a chmod.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                os.write(fd, (json.dumps(out, indent=2) + "\n").encode())
+            finally:
+                os.close(fd)
+            tmp.replace(self._state_path)
         finally:
-            os.close(fd)
-        tmp.replace(self._state_path)
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
 
     # ---- history --------------------------------------------------------
 
