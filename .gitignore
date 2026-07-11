@@ -34,6 +34,8 @@ spikes/
 
 # Built app bundle and DMG
 build/
+*.provisionprofile
+*.mobileprovision
 
 # Isolated Codex worktrees
 .worktrees/

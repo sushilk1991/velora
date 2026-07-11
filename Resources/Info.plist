@@ -26,5 +26,17 @@
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Velora uses the microphone to transcribe your speech into text. Audio never leaves this Mac.</string>
+	<key>NSUbiquitousContainers</key>
+	<dict>
+		<key>iCloud.com.velora.app</key>
+		<dict>
+			<key>NSUbiquitousContainerIsDocumentScopePublic</key>
+			<true/>
+			<key>NSUbiquitousContainerName</key>
+			<string>Velora</string>
+			<key>NSUbiquitousContainerSupportedFolderLevels</key>
+			<string>Any</string>
+		</dict>
+	</dict>
 </dict>
 </plist>

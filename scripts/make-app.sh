@@ -18,10 +18,12 @@
 # - Development builds use the local "Velora Dev Signing" identity when
 #   present so TCC grants survive rebuilds. make-dmg.sh sets
 #   VELORA_DISTRIBUTION=1, which requires a Developer ID Application identity
-#   and signs with hardened runtime, a secure timestamp, and the microphone
-#   entitlement required by hardened apps.
+#   and an Apple-issued Developer ID provisioning profile that authorizes the
+#   microphone and iCloud Documents entitlements. Restricted entitlements fail
+#   closed before version stamping or compilation.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source scripts/signing-config.sh
 
 CONFIG="${1:-release}"
 # Second arg = version bump level for this build (default patch). A new build
@@ -29,10 +31,23 @@ CONFIG="${1:-release}"
 # major for big releases, none to leave VERSION untouched (throwaway dev builds).
 BUMP="${2:-patch}"
 
-# Resolve distribution credentials before bumping the version or doing an
-# expensive build, so a missing certificate cannot leave release metadata in a
-# half-finished state.
+# Resolve and validate distribution credentials before bumping the version or
+# doing an expensive build, so missing/mismatched provisioning cannot leave
+# release metadata in a half-finished state.
+PROVISIONING_PROFILE=""
+PROFILE_PLIST=""
+SIGNED_ENTITLEMENTS=""
+trap '[[ -z "${PROFILE_PLIST:-}" ]] || rm -f "$PROFILE_PLIST"; [[ -z "${SIGNED_ENTITLEMENTS:-}" ]] || rm -f "$SIGNED_ENTITLEMENTS"' EXIT
 if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  if [[ -z "${VELORA_PROVISIONING_PROFILE:-}" ]]; then
+    echo "ERROR: distribution builds require VELORA_PROVISIONING_PROFILE" >&2
+    exit 1
+  fi
+  PROVISIONING_PROFILE="${VELORA_PROVISIONING_PROFILE}"
+  PROFILE_PLIST="$(mktemp "${TMPDIR:-/tmp}/velora-profile.XXXXXX")"
+  decode_and_validate_provisioning_profile \
+    "$PROVISIONING_PROFILE" Resources/Velora.entitlements Resources/Info.plist "$PROFILE_PLIST"
+
   IDENTITY="${DEVELOPER_ID_APPLICATION:-$(
     security find-identity -v -p codesigning 2>/dev/null \
       | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' \
@@ -128,6 +143,10 @@ fi
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  embed_provisioning_profile "$PROVISIONING_PROFILE" "$APP"
+fi
+
 # Sign inside-out. The bundle Info.plist takes precedence over the binary's
 # __info_plist section once inside a bundle.
 SIGN_ARGS=(--force)
@@ -146,6 +165,11 @@ if [[ -x "$APP/Contents/Resources/bin/uv" ]]; then
 fi
 codesign "${SIGN_ARGS[@]}" "${APP_SIGN_ARGS[@]}" --identifier com.velora.app "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
+if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
+  SIGNED_ENTITLEMENTS="$(mktemp "${TMPDIR:-/tmp}/velora-signed-entitlements.XXXXXX")"
+  codesign -d --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS" 2>/dev/null
+  validate_signing_plists "$SIGNED_ENTITLEMENTS" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
+fi
 [[ "$IDENTITY" == "-" ]] && echo "WARNING: ad-hoc signed — TCC grants will reset on next rebuild (run scripts/make-signing-cert.sh once to fix)"
 
 echo "OK: $APP (v$VERSION, build $BUILD_NUM)"

@@ -1,6 +1,6 @@
 # Velora
 
-**Local-first dictation for macOS.** Hold a key, speak, release — polished text appears in whatever app you're using. Every step, from speech-to-text to AI cleanup, runs on-device via [MLX](https://github.com/ml-explore/mlx) on Apple Silicon. Nothing you say ever leaves your Mac.
+**Local-first dictation for macOS.** Hold a key, speak, release — polished text appears in whatever app you're using. Every dictation step, from speech-to-text to AI cleanup, runs on-device via [MLX](https://github.com/ml-explore/mlx) on Apple Silicon. Audio, transcripts, and history never leave your Mac; confirmed Personal Dictionary terms can sync privately through your iCloud Drive.
 
 <!-- demo GIF placeholder: hold hotkey → capsule HUD with live waveform → text lands in Slack -->
 
@@ -27,6 +27,7 @@ Dictation tools like Superwhisper and Wispr Flow proved the product: invisible, 
   - everything else → clean, well-punctuated default
 - **On-device STT + LLM** — transcription with `whisper-large-v3-turbo` (multilingual; `parakeet-tdt-0.6b-v2` available for streaming English, plus a Hindi/Hinglish specialist) and cleanup/formatting with `Qwen3-4B-Instruct-2507-4bit`. Cleanup removes fillers, applies self-corrections ("no wait, I meant Tuesday"), punctuates, and honors spoken "new line" / "new paragraph".
 - **History browser** — every dictation (raw + final text, app, mode, duration) is stored in a local SQLite database. Browse, search, copy, or paste-again from the History tab; the menubar menu shows your last three (click to copy).
+- **Personal Dictionary** — teach Velora exact names, product terms, and optional “heard as → write as” corrections. Edit-learned and auto-learned words stay visible and reversible, and only confirmed dictionary entries sync through your app-specific iCloud Drive folder when iCloud is available.
 - **Audio archive + reprocess** — clips are saved as compact FLAC under `~/.velora/audio` (configurable retention, default 6 months / 4 GB cap) so you can re-transcribe any past dictation with a better model straight from the History tab.
 - **Custom modes editor** — every mode is a JSON file in `~/.velora/modes/`, editable from the Modes tab: per-mode LLM prompt (the Superwhisper-style feature), formatting level, app bindings, vocabulary, and replacements. Drop in a file to create your own (see [Customization](#customization)).
 - **Model picker** — choose your STT model in Settings from the engine's registry, with managed downloads.
@@ -120,9 +121,10 @@ Edits are picked up via the engine's config reload — no restart dance required
 
 ## Privacy
 
-- Models are downloaded **once** from Hugging Face. That is the only network activity Velora ever performs.
+- Models are downloaded **once** from Hugging Face. Model downloads and Personal Dictionary iCloud Drive sync are the only network-backed features; Velora has no backend service.
 - At dictation time there are **zero network calls** — audio, transcripts, and cleaned text never leave the machine.
 - History is a local SQLite file under `~/.velora/`. Delete it whenever you like.
+- Personal Dictionary sync uses your standard iCloud Drive protection and contains only confirmed terms and corrections — never audio, transcripts, history, screen context, or model data. It remains fully usable offline and does not use a Velora server.
 - No accounts, no telemetry, no analytics. This is enforced by architecture, not by a settings checkbox.
 
 ## Project status
@@ -135,6 +137,16 @@ Known limitations:
 - **Batch default** — the multilingual default model transcribes on release, not live; switch to `parakeet-tdt-0.6b-v2` for streaming HUD partials (English only).
 
 ## Contributing & license
+
+Developer ID release builds that include Personal Dictionary sync need an explicit `com.velora.app` App ID with iCloud Documents enabled, the `iCloud.com.velora.app` ubiquity container, and an Apple-issued Developer ID provisioning profile. Keep that expiring profile outside Git and pass its path at release time:
+
+```sh
+VELORA_DISTRIBUTION=1 \
+VELORA_PROVISIONING_PROFILE="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/velora.provisionprofile" \
+./scripts/make-dmg.sh release minor
+```
+
+The packaging scripts decode the profile before version stamping, require the exact Team ID, bundle ID, iCloud container, and `CloudDocuments` service, embed it at `Contents/embedded.provisionprofile`, and re-check the signed app during DMG verification. Ordinary local `make app` builds do not require a profile.
 
 Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout, and PR guidelines.
 

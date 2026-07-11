@@ -1,13 +1,16 @@
 #!/bin/zsh
 # Verifies the trust chain a downloaded Velora DMG needs to pass Gatekeeper.
 set -euo pipefail
+CALLER_PWD="$PWD"
+SCRIPT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+source "$SCRIPT_ROOT/scripts/signing-config.sh"
 
 DMG="${1:-}"
 if [[ -z "$DMG" ]]; then
   echo "usage: verify-dmg.sh <path-to-Velora.dmg>" >&2
   exit 2
 fi
-[[ "$DMG" == /* ]] || DMG="$PWD/$DMG"
+[[ "$DMG" == /* ]] || DMG="$CALLER_PWD/$DMG"
 if [[ ! -f "$DMG" ]]; then
   echo "DMG not found: $DMG" >&2
   exit 2
@@ -28,10 +31,11 @@ spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG
 
 MOUNT_POINT="$(mktemp -d "${TMPDIR:-/tmp}/velora-dmg.XXXXXX")"
 ENTITLEMENTS_FILE="$(mktemp "${TMPDIR:-/tmp}/velora-entitlements.XXXXXX")"
+PROFILE_PLIST="$(mktemp "${TMPDIR:-/tmp}/velora-profile.XXXXXX")"
 cleanup() {
   hdiutil detach "$MOUNT_POINT" -quiet 2>/dev/null || true
   rmdir "$MOUNT_POINT" 2>/dev/null || true
-  rm -f "$ENTITLEMENTS_FILE"
+  rm -f "$ENTITLEMENTS_FILE" "$PROFILE_PLIST"
 }
 trap cleanup EXIT
 
@@ -53,8 +57,15 @@ grep -q '^Timestamp=' <<< "$APP_SIGNATURE"
 codesign -d --entitlements - --xml "$APP" > "$ENTITLEMENTS_FILE" 2>/dev/null
 test -s "$ENTITLEMENTS_FILE"
 plutil -lint "$ENTITLEMENTS_FILE" >/dev/null
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' "$ENTITLEMENTS_FILE")" == "true" ]]
+
+EMBEDDED_PROFILE="$APP/Contents/embedded.provisionprofile"
+if [[ ! -f "$EMBEDDED_PROFILE" ]]; then
+  echo "Velora.app is missing Contents/embedded.provisionprofile" >&2
+  exit 1
+fi
+security cms -D -i "$EMBEDDED_PROFILE" > "$PROFILE_PLIST" 2>/dev/null
+validate_signing_plists "$ENTITLEMENTS_FILE" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
 
 spctl --assess --type execute --verbose=2 "$APP"
 
-echo "OK: $DMG is Developer ID-signed, notarized, stapled, and Gatekeeper-approved"
+echo "OK: $DMG is provisioned for iCloud, Developer ID-signed, notarized, stapled, and Gatekeeper-approved"
