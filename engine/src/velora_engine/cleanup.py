@@ -409,8 +409,10 @@ class CleanupEngine:
             log.info("cleanup prefix prepared tokens=%d prefill_ms=%d", len(prefix), ms)
             return PrefixPreparation(True, len(prefix), ms)
         except _PrefixCancelled:
-            self._prepared_tokens = []
-            self._prepared_cache = None
+            # The in-progress cache is local until the successful assignment
+            # above. Preserve the last completed snapshot: exact-token matching
+            # makes it safe, and the authoritative cleanup can still reuse its
+            # static prefix instead of paying full TTFT after preemption.
             ms = int((time.perf_counter() - t0) * 1000)
             log.info("cleanup prefix preparation cancelled after %dms", ms)
             return PrefixPreparation(False, 0, ms, "cancelled")

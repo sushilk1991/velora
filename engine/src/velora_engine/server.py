@@ -1012,6 +1012,10 @@ class Engine:
                 self._cancel_chunk_tasks(session)
                 return
             session.stream_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
+        # A committed segment cleanup can become part of the authoritative
+        # final for a long dictation. Optional prefix preparation must never
+        # sit ahead of that work on the cleanup engine's single executor.
+        self._cancel_prefix_preparation(session)
         # Cross-boundary self-correction: a segment that BEGINS with a
         # retraction marker ("no wait…", "scratch that…") refers back across
         # the boundary — never clean it alone. Merge with the previous raw

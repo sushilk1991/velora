@@ -67,6 +67,8 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
         if evt.get("event") == "partial":
             partials.append(evt["text"])
     assert partials == [SEG1, f"{SEG1} {SEG2}"]
+    assert eng.session is not None
+    assert eng.session.prefix_cancel.is_set(), "committed cleanup preempts optional prefill"
     await client.send_json({"cmd": "stop", "session": "st1"})
 
     # transcript still fires FIRST, with the full raw text

@@ -114,6 +114,26 @@ async def test_unhealthy_engine_rejects_prefix_preparation_without_queueing():
 
 
 @pytest.mark.asyncio
+async def test_cancelled_prefix_preparation_keeps_last_completed_snapshot():
+    engine = RecordingCleanup()
+    engine._prepared_tokens = [1, 2, 3]
+    engine._prepared_cache = _snapshot_prompt_cache([FakeCache([[1, 2, 3]])])
+    cancel = threading.Event()
+    cancel.set()
+    try:
+        result = await engine.prepare_prefix(
+            [("new stable prompt", "transcript")], cancel_event=cancel
+        )
+
+        assert result.applied is False
+        assert result.reason == "cancelled"
+        _cache, common, hit = engine._cache_for_tokens([1, 2, 3, 4])
+        assert (common, hit) == (3, True)
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
 async def test_prepared_prefix_is_forked_for_every_matching_request():
     engine = RecordingCleanup()
     try:
