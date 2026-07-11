@@ -11,6 +11,27 @@ signing_error() {
   return 1
 }
 
+validate_developer_id_identity_name() {
+  local identity="$1"
+  [[ "$identity" == "Developer ID Application: "*" (${VELORA_TEAM_ID})" ]] \
+    || { signing_error "Developer ID identity must belong to Team ${VELORA_TEAM_ID}"; return 1; }
+}
+
+validate_signature_team_value() {
+  local team="$1"
+  [[ "$team" == "$VELORA_TEAM_ID" ]] \
+    || { signing_error "signed artifact TeamIdentifier must be ${VELORA_TEAM_ID}"; return 1; }
+}
+
+validate_signed_app_team() {
+  local app="$1"
+  local details team
+  details="$(codesign -dvvv --verbose=4 "$app" 2>&1)" \
+    || { signing_error "could not inspect the signed app identity"; return 1; }
+  team="$(printf '%s\n' "$details" | sed -n 's/^TeamIdentifier=//p' | head -n 1)"
+  validate_signature_team_value "$team"
+}
+
 plist_value() {
   local file="$1"
   local key="$2"
@@ -71,6 +92,12 @@ validate_signing_plists() {
 
   [[ "$(plist_value "$requested" 'com.apple.security.device.audio-input')" == "true" ]] \
     || { signing_error "requested entitlements must keep microphone access"; return 1; }
+  [[ "$(plist_value "$requested" 'com.apple.application-identifier')" \
+      == "$VELORA_TEAM_ID.$VELORA_BUNDLE_ID" ]] \
+    || { signing_error "requested application identifier must be $VELORA_TEAM_ID.$VELORA_BUNDLE_ID"; return 1; }
+  [[ "$(plist_value "$requested" 'com.apple.developer.team-identifier')" \
+      == "$VELORA_TEAM_ID" ]] \
+    || { signing_error "requested team identifier must be $VELORA_TEAM_ID"; return 1; }
   require_exact_array_value "$requested" \
     'com.apple.developer.icloud-container-identifiers' \
     "$VELORA_ICLOUD_CONTAINER" 'requested iCloud containers' || return 1

@@ -17,6 +17,10 @@ cat > "$REQUESTED" <<'PLIST'
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.application-identifier</key>
+  <string>JZFVKGDPU4.com.velora.app</string>
+  <key>com.apple.developer.team-identifier</key>
+  <string>JZFVKGDPU4</string>
   <key>com.apple.developer.icloud-container-identifiers</key>
   <array><string>iCloud.com.velora.app</string></array>
   <key>com.apple.developer.ubiquity-container-identifiers</key>
@@ -73,6 +77,20 @@ expect_failure() {
 }
 
 validate_signing_plists "$REQUESTED" "$PROFILE" "$INFO"
+validate_developer_id_identity_name \
+  'Developer ID Application: Sushil Kumar (JZFVKGDPU4)'
+validate_signature_team_value 'JZFVKGDPU4'
+expect_failure "wrong Developer ID identity team" \
+  validate_developer_id_identity_name \
+  'Developer ID Application: Another Team (WRONGTEAM)'
+expect_failure "wrong signed-app team" validate_signature_team_value 'WRONGTEAM'
+
+cp "$REQUESTED" "$TMP_DIR/wrong-requested-team.plist"
+/usr/libexec/PlistBuddy -c \
+  'Set :com.apple.developer.team-identifier WRONGTEAM' \
+  "$TMP_DIR/wrong-requested-team.plist"
+expect_failure "mismatched requested team identifier" \
+  validate_signing_plists "$TMP_DIR/wrong-requested-team.plist" "$PROFILE" "$INFO"
 
 cp "$PROFILE" "$TMP_DIR/mismatch.plist"
 /usr/libexec/PlistBuddy -c \
@@ -116,6 +134,8 @@ cmp -s "$TMP_DIR/raw.provisionprofile" \
   "$TMP_DIR/Velora.app/Contents/embedded.provisionprofile"
 
 grep -Fq 'embed_provisioning_profile "$PROVISIONING_PROFILE" "$APP"' scripts/make-app.sh
+grep -Fq 'validate_signed_app_team "$APP"' scripts/make-app.sh
+grep -Fq 'validate_signed_app_team "$APP"' scripts/verify-dmg.sh
 grep -Fq 'validate_signing_plists "$ENTITLEMENTS_FILE" "$PROFILE_PLIST" "$APP/Contents/Info.plist"' \
   scripts/verify-dmg.sh
 

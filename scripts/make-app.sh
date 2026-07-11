@@ -50,6 +50,7 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
 
   IDENTITY="${DEVELOPER_ID_APPLICATION:-$(
     security find-identity -v -p codesigning 2>/dev/null \
+      | grep -F "(${VELORA_TEAM_ID})\"" \
       | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' \
       | head -n 1
   )}"
@@ -57,6 +58,7 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
     echo "ERROR: distribution builds require a Developer ID Application identity" >&2
     exit 1
   fi
+  validate_developer_id_identity_name "$IDENTITY"
 else
   IDENTITY="-"
   if security find-identity -v -p codesigning 2>/dev/null | grep -q "Velora Dev Signing"; then
@@ -169,6 +171,7 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   SIGNED_ENTITLEMENTS="$(mktemp "${TMPDIR:-/tmp}/velora-signed-entitlements.XXXXXX")"
   codesign -d --entitlements - --xml "$APP" > "$SIGNED_ENTITLEMENTS" 2>/dev/null
   validate_signing_plists "$SIGNED_ENTITLEMENTS" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
+  validate_signed_app_team "$APP"
 fi
 [[ "$IDENTITY" == "-" ]] && echo "WARNING: ad-hoc signed — TCC grants will reset on next rebuild (run scripts/make-signing-cert.sh once to fix)"
 

@@ -23,6 +23,7 @@ codesign --verify --strict --verbose=2 "$DMG"
 
 DMG_SIGNATURE="$(codesign -dvvv --verbose=4 "$DMG" 2>&1)"
 grep -q '^Authority=Developer ID Application:' <<< "$DMG_SIGNATURE"
+validate_signature_team_value "$(sed -n 's/^TeamIdentifier=//p' <<< "$DMG_SIGNATURE" | head -n 1)"
 grep -q '^Timestamp=' <<< "$DMG_SIGNATURE"
 
 echo "Verifying notarization ticket and Gatekeeper assessment..."
@@ -50,7 +51,7 @@ echo "Verifying bundled app signature and hardened runtime..."
 codesign --verify --deep --strict --verbose=2 "$APP"
 APP_SIGNATURE="$(codesign -dvvv --verbose=4 "$APP" 2>&1)"
 grep -q '^Authority=Developer ID Application:' <<< "$APP_SIGNATURE"
-grep -q '^TeamIdentifier=' <<< "$APP_SIGNATURE"
+validate_signed_app_team "$APP"
 grep -q 'flags=.*runtime' <<< "$APP_SIGNATURE"
 grep -q '^Timestamp=' <<< "$APP_SIGNATURE"
 
