@@ -43,18 +43,18 @@ Observed prior-build cleanup logs on the same Mac were 1.85–2.96 seconds for 1
 
 ## End-to-end engine proof
 
-`scripts/engine-smoke.py` streamed a synthesized 7.8-second, 16 kHz mono clip through a private production-protocol socket in Terminal context:
+`scripts/engine-smoke.py` streamed a synthesized 7.8-second, 16 kHz mono clip through a private production-protocol socket using the engine synced from the installed 0.4.5 build 72, in Terminal context:
 
-- Whisper transcript: 649 ms after stop
-- Qwen cleanup: 607 ms (`prepared_hit=True`, 1,304 prefix tokens)
-- Final event: 1,259 ms after stop
+- Whisper transcript: 640 ms after stop
+- Qwen cleanup: 656 ms (`prepared_hit=True`, 1,304 prefix tokens)
+- Final event: 1,298 ms after stop
 - Final text: `Please inspect all the performance issues in this branch and fix the grammar and punctuation without changing either model or reducing output quality.`
 
 This proves the complete audio → Whisper → Qwen → punctuated final-text path, rather than only isolated model calls.
 
 ## Idle CPU
 
-Before the HUD fix, the installed app was observed at 9.3% CPU while idle. A 12-sample `top` run on the rebuilt app measured 0.2% idle CPU with 26 MB resident memory and 9 threads. A five-second stack sample found the main thread blocked in the event loop and no waveform, canvas, timeline, or HUD rendering frames. The idle target remains below 1% CPU.
+Before the HUD fix, the installed app was observed at 9.3% CPU while idle. A 12-sample `top` run on the final installed build measured 0.0% in every sample for both the Swift app and loaded model sidecar. The app held 20 MB with 8 threads; the sidecar held 6.45 GB with both exact models loaded. A prior five-second stack sample found the main thread blocked in the event loop and no waveform, canvas, timeline, or HUD rendering frames. The idle target remains below 1% CPU.
 
 ## Automated verification
 
@@ -62,4 +62,13 @@ Before the HUD fix, the installed app was observed at 9.3% CPU while idle. A 12-
 - Swift release build: passed
 - Swift self-test: 69 checks passed
 
-The local development build was ad-hoc signed, which reset its TCC identity. Consequently, the hotkey-driven visible HUD could not be screen-captured in that validation pass. HUD clipping/selection/layout and idle behavior are covered by Swift self-tests and process sampling; the final distribution build must be signed with the stable release identity before installation.
+## Distribution and installed-runtime proof
+
+- `Velora-0.4.5.dmg` build 72 SHA-256: `a5541af5be8570573fc9f416ec167a4a7737da650f578ec25780d78e627c1671`
+- Apple notarization submission `bfb8da84-15f8-45d1-8b41-6eff0669d936`: accepted; ticket stapled and validated
+- Gatekeeper: accepted as `Notarized Developer ID`
+- Installed app: `/Applications/Velora.app`, Developer ID team `JZFVKGDPU4`, hardened runtime enabled
+- Live engine status: idle, cleanup loaded, exact Whisper and Qwen model IDs above
+- Stable signing identity restored the existing microphone, Input Monitoring, and Accessibility grants; the hotkey event tap installed successfully
+
+The HUD's whole-word selection, two-line bounds, control-row width, long-token elision, and paused-idle timelines are covered by the 69 Swift self-checks. The final non-activating HUD panel is not exposed as a normal Accessibility window, so no screenshot claim is made here.
