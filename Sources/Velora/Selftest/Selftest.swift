@@ -38,6 +38,7 @@ enum Selftest {
         testDictionarySyncMergeAndCorruption()
         testDictionarySyncAccountBoundary()
         testDictionarySyncDebouncesChanges()
+        testDictionarySettingsLogic()
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
@@ -517,7 +518,21 @@ enum Selftest {
             id: replacement.id, writeAs: "Airlearn AI", heardAs: "air learn")
         expect(repository.rows.first(where: { $0.id == replacement.id })?.writeAs == "Airlearn AI",
                "editing a manual rule updates the stable heard-as entry")
-        repository.remove(id: replacement.id)
+        do {
+            _ = try repository.add(writeAs: "Airline", heardAs: "air learn")
+            expect(false, "adding a conflicting heard-as rule requires an explicit decision")
+        } catch {
+            expect(error.localizedDescription.contains("Airlearn AI"),
+                   "heard-as collision identifies the existing output")
+        }
+        do {
+            _ = try repository.add(writeAs: "Airlearn AI", heardAs: "air learn")
+            expect(false, "adding an exact duplicate reports that it already exists")
+        } catch {
+            expect(error.localizedDescription.localizedCaseInsensitiveContains("already"),
+                   "exact duplicate has actionable messaging")
+        }
+        try! repository.remove(id: replacement.id)
         expect(repository.rows.first(where: { $0.id == replacement.id }) == nil,
                "deleting an entry removes it from the active dictionary")
         let persisted = try! DictionaryDocument.decode(Data(contentsOf: fixture.state))
@@ -525,10 +540,45 @@ enum Selftest {
                "deleting an entry persists a tombstone")
 
         _ = try! repository.add(writeAs: "node.js")
+        let firstTerm = try! repository.add(writeAs: "FirstTerm")
+        let secondTerm = try! repository.add(writeAs: "SecondTerm")
+        do {
+            try repository.update(id: secondTerm.id, writeAs: "FirstTerm")
+            expect(false, "editing into an existing logical key reports a collision")
+        } catch {
+            expect(error.localizedDescription.localizedCaseInsensitiveContains("already"),
+                   "edit collision identifies the existing dictionary entry")
+        }
+        expect(repository.rows.contains(where: { $0.id == firstTerm.id })
+               && repository.rows.contains(where: { $0.id == secondTerm.id }),
+               "failed edit collision leaves both original entries active")
         let exported = try! repository.exportData()
         expect(String(decoding: exported, as: UTF8.self).contains("node.js"),
                "complete repository export includes vocabulary-only entries")
         fixture.remove()
+
+        let failureFixture = DictionaryRepositoryFixture()
+        let stateDirectory = failureFixture.directory.appendingPathComponent("sync")
+        let failureState = stateDirectory.appendingPathComponent("dictionary.json")
+        let failureRepository = DictionaryRepository(
+            stateURL: failureState,
+            configURL: failureFixture.config,
+            learnedURL: failureFixture.learned,
+            autoURL: failureFixture.auto,
+            deviceID: "mac-failure")
+        let retained = try! failureRepository.add(writeAs: "RetainedAfterFailure")
+        try! FileManager.default.removeItem(at: stateDirectory)
+        try! Data("not a directory".utf8).write(to: stateDirectory)
+        do {
+            try failureRepository.remove(id: retained.id)
+            expect(false, "failed removal reports its persistence error")
+        } catch {
+            expect(error.localizedDescription.contains("could not save"),
+                   "failed removal returns actionable persistence messaging")
+        }
+        expect(failureRepository.rows.contains(where: { $0.id == retained.id }),
+               "failed removal leaves the in-memory entry active")
+        failureFixture.remove()
     }
 
     private static func testDictionaryRepositoryRemoteMerge() {
@@ -562,10 +612,26 @@ enum Selftest {
             autoURL: importedFixture.auto,
             deviceID: "mac-c",
             now: { Date(timeIntervalSince1970: 300) })
-        expect(imported.importData(try! repository.exportData()),
-               "complete portable dictionary can be imported")
-        expect(Set(imported.rows.map(\.writeAs)) == ["LocalTerm", "RemoteTerm"],
-               "import restores every portable entry")
+        _ = try! imported.add(writeAs: "KeepLocalOnImport")
+        let firstImport = try! imported.importData(try! repository.exportData())
+        expect(firstImport == DictionaryImportResult(added: 2, keptExisting: 0),
+               "complete portable dictionary reports imported entry counts")
+        expect(Set(imported.rows.map(\.writeAs)) == [
+            "KeepLocalOnImport", "LocalTerm", "RemoteTerm",
+        ], "import adds portable entries without deleting local entries")
+
+        var clearedRemote = DictionaryDocument().clearing(
+            .manual, deviceID: "remote", at: Date(timeIntervalSince1970: 400))
+        clearedRemote = clearedRemote.upserting(try! DictionaryEntry.manual(
+            writeAs: "AfterRemoteClear", deviceID: "remote",
+            at: Date(timeIntervalSince1970: 401),
+            generation: clearedRemote.generation(for: .manual)))
+        let clearedImport = try! imported.importData(try! clearedRemote.encoded())
+        expect(clearedImport == DictionaryImportResult(added: 1, keptExisting: 0),
+               "explicit import accepts active entries without importing clear generations")
+        expect(Set(imported.rows.map(\.writeAs)).isSuperset(of: [
+            "KeepLocalOnImport", "LocalTerm", "RemoteTerm", "AfterRemoteClear",
+        ]), "imported clear generations never erase existing local entries")
         fixture.remove()
         importedFixture.remove()
     }
@@ -588,13 +654,21 @@ enum Selftest {
         }), "committed edit-learning is captured while Settings is closed")
         expect(reloads == 1, "captured edit-learning projects before one reload")
 
+        let learned = repository.rows.first(where: { $0.source == .learned })!
+        try! repository.promoteLearned(
+            id: learned.id, writeAs: learned.writeAs, heardAs: learned.heardAs!)
+        expect(repository.rows.contains(where: {
+            $0.writeAs == "Velora" && $0.source == .added
+        }) && !repository.rows.contains(where: { $0.source == .learned }),
+        "making a learned correction permanent atomically replaces its source")
+
         AutoVocabStore(url: fixture.auto).applyPortableSnapshot(
             .init(terms: ["BackgroundTerm"], banned: []))
         repository.captureAutoVocabulary()
         expect(repository.rows.contains(where: {
             $0.writeAs == "BackgroundTerm" && $0.source == .automatic
         }), "background miner promotion is captured while Settings is closed")
-        expect(reloads == 2, "captured miner promotion projects before one reload")
+        expect(reloads == 3, "learned promotion and miner capture each request one reload")
         fixture.remove()
     }
 
@@ -605,10 +679,18 @@ enum Selftest {
         var reads = 0
         var resolvedConflicts = 0
         var observer: (() -> Void)?
+        var deferIdentity = false
+        var pendingIdentityCompletion: ((Result<String, DictionarySyncTransportError>) -> Void)?
 
         func fetchAccountIdentity(
             completion: @escaping (Result<String, DictionarySyncTransportError>) -> Void
-        ) { completion(identityResult) }
+        ) {
+            if deferIdentity {
+                pendingIdentityCompletion = completion
+            } else {
+                completion(identityResult)
+            }
+        }
 
         func readVersions(
             completion: @escaping (Result<[Data], DictionarySyncTransportError>) -> Void
@@ -748,13 +830,19 @@ enum Selftest {
         ]).encoded()
         cloud.versionsResult = .success([remote])
         let sync = ICloudDictionarySync(
-            repository: repository, transport: cloud, identityURL: identityURL)
+            repository: repository, transport: cloud, identityURL: identityURL,
+            debounceDelay: 0.01)
         sync.start()
         expect(sync.status == .accountChanged,
                "Apple Account identity change pauses automatic sync")
         expect(cloud.reads == 0 && cloud.writes.isEmpty,
                "account boundary prevents silent read, merge, or upload")
 
+        cloud.deferIdentity = true
+        cloud.observer?()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        expect(sync.status == .accountChanged,
+               "cloud notifications cannot displace a pending account decision")
         sync.resolveAccountChange(.useCloud)
         expect(repository.rows.map(\.writeAs) == ["NewAccountCloud"],
                "use-cloud decision explicitly replaces old-account local names")
@@ -787,6 +875,62 @@ enum Selftest {
                "bursty cloud notifications coalesce into one reconciliation")
         sync.stop()
         fixture.remove()
+    }
+
+    private static func testDictionarySettingsLogic() {
+        let rows = [
+            DictionaryRow(
+                id: "1", writeAs: "Airlearn", heardAs: "air learn",
+                source: .added, isSoftCorrection: false),
+            DictionaryRow(
+                id: "2", writeAs: "Sushil Kumar", heardAs: "social kumar",
+                source: .learned, isSoftCorrection: true),
+            DictionaryRow(
+                id: "3", writeAs: "node.js", heardAs: nil,
+                source: .automatic, isSoftCorrection: false),
+        ]
+        expect(DictionarySettingsLogic.filtered(rows, query: "AIR").map(\.id) == ["1"],
+               "dictionary search matches written and heard forms case-insensitively")
+        expect(DictionarySettingsLogic.filtered(rows, query: "learned").map(\.id) == ["2"],
+               "dictionary search matches source labels")
+        expect(DictionarySettingsLogic.filtered(rows, query: "").count == 3,
+               "empty dictionary search shows every entry")
+
+        let simple = try! DictionaryDraft(writeAs: "  node.js ", heardAs: " ").validated()
+        expect(simple.writeAs == "node.js" && simple.heardAs == nil,
+               "dictionary form keeps heard-as optional")
+        let rule = try! DictionaryDraft(
+            writeAs: "Airlearn", heardAs: " air learn ").validated()
+        expect(rule.heardAs == "air learn", "dictionary form normalizes an explicit heard-as rule")
+        expect(DictionaryDraft(writeAs: "Airlearn", heardAs: "the").riskWarning != nil,
+               "common-word heard forms warn before deterministic replacement")
+        do {
+            _ = try DictionaryDraft(
+                writeAs: String(repeating: "x", count: 61), heardAs: nil).validated()
+            expect(false, "dictionary form enforces prompt-safe length")
+        } catch {
+            expect(true, "dictionary form enforces prompt-safe length")
+        }
+
+        expect(DictionarySyncPresentation(.synced).title == "Synced with iCloud",
+               "synced status has concise truthful copy")
+        expect(DictionarySyncPresentation(.localOnly).title
+               == "Saved on this Mac — iCloud Drive is unavailable",
+               "local-only status makes offline safety clear")
+        expect(DictionarySyncPresentation(.accountChanged).needsAccountDecision,
+               "account-change status exposes an explicit privacy decision")
+        expect(DictionarySyncPresentation(.syncing).isWorking,
+               "syncing status exposes in-progress state")
+        expect(DictionarySyncPresentation(.waitingForDownload).isWorking,
+               "download wait status exposes in-progress state")
+        expect(DictionarySyncPresentation(.error("Cloud failed")).canRetry,
+               "sync errors expose a retry action")
+        expect(DictionarySyncPresentation(.idle).title == "Saved on this Mac",
+               "idle status does not overclaim cloud sync")
+        expect(!DictionarySyncPresentation(.localOnly).privacyDetail.hasPrefix("Synced"),
+               "offline privacy detail does not claim a completed iCloud sync")
+        expect(DictionarySyncPresentation(.accountChanged).privacyDetail.contains("paused"),
+               "account-boundary copy states that cloud sync is paused")
     }
 
     // MARK: - CorrectionDiff

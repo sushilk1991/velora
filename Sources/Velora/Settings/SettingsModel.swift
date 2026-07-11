@@ -59,38 +59,55 @@ final class SettingsModel: ObservableObject {
     let dictionary: DictionaryRepository
     let dictionarySync: ICloudDictionarySync
     private var dictionaryRowsObserver: AnyCancellable?
+    private var dictionarySyncObserver: AnyCancellable?
 
-    /// How many spelling corrections Velora has learned (for the undo affordance).
-    @Published var learnedCount = 0
-    /// The learned corrections themselves, for the manageable list.
-    @Published var learnedEntries: [LearningStore.Entry] = []
-    /// Auto-learned vocabulary the engine mined from dictation history, for the
-    /// manageable list (empty until the miner's first pass).
-    @Published var autoVocabTerms: [String] = []
+    @Published var dictionaryRows: [DictionaryRow] = []
+    @Published var dictionarySyncStatus: DictionarySyncStatus = .idle
 
-    /// Forgets every learned correction and reloads the engine.
-    func clearLearnedCorrections() {
-        dictionary.clear(.learned)
-        refreshLearnedCount()
+    func addDictionaryEntry(writeAs: String, heardAs: String?) throws {
+        _ = try dictionary.add(writeAs: writeAs, heardAs: heardAs)
     }
 
-    /// Forgets a single learned correction and reloads the engine.
-    func removeLearnedCorrection(_ wrong: String) {
-        if let row = dictionary.rows.first(where: {
-            $0.source == .learned && $0.heardAs?.caseInsensitiveCompare(wrong) == .orderedSame
-        }) {
-            dictionary.remove(id: row.id)
-        }
-        refreshLearnedCount()
+    func updateDictionaryEntry(
+        _ row: DictionaryRow,
+        writeAs: String,
+        heardAs: String?
+    ) throws {
+        try dictionary.update(id: row.id, writeAs: writeAs, heardAs: heardAs)
     }
 
-    /// Refreshes the learned list + count from disk (call when the view appears).
-    func refreshLearnedCount() {
-        learnedEntries = dictionary.rows.compactMap { row in
-            guard row.source == .learned, let wrong = row.heardAs else { return nil }
-            return LearningStore.Entry(wrong: wrong, right: row.writeAs)
+    func promoteLearnedEntry(
+        _ row: DictionaryRow,
+        writeAs: String,
+        heardAs: String
+    ) throws {
+        try dictionary.promoteLearned(
+            id: row.id, writeAs: writeAs, heardAs: heardAs)
+    }
+
+    func removeDictionaryEntry(_ row: DictionaryRow) throws {
+        try dictionary.remove(id: row.id)
+    }
+
+    func clearDictionaryEntries(_ source: DictionarySource) throws {
+        switch source {
+        case .added: try dictionary.clear(.manual)
+        case .learned: try dictionary.clear(.learned)
+        case .automatic: try dictionary.clear(.auto)
         }
-        learnedCount = learnedEntries.count
+    }
+
+    func retryDictionarySync() { dictionarySync.syncNow() }
+
+    func resolveDictionaryAccountChange(_ decision: DictionaryAccountDecision) {
+        dictionarySync.resolveAccountChange(decision)
+    }
+
+    var dictionaryFolderIsAvailable: Bool { dictionarySync.folderURL != nil }
+
+    func openDictionaryFolder() {
+        guard let folder = dictionarySync.folderURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([folder])
     }
 
     /// One-line outcome of the last dictionary import/export, shown inline.
@@ -100,61 +117,46 @@ final class SettingsModel: ObservableObject {
     /// file the user picks — Superwhisper can't move vocab between Macs;
     /// Velora can.
     func exportDictionary() {
+        dictionaryTransferResult = nil
         let panel = NSSavePanel()
         panel.nameFieldStringValue = "velora-dictionary.json"
         panel.title = "Export Dictionary"
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
-            guard let self, response == .OK, let url = panel.url,
-                  let data = try? self.dictionary.exportData() else { return }
+            guard let self, response == .OK, let url = panel.url else { return }
             do {
+                let data = try self.dictionary.exportData()
                 try data.write(to: url)
-                self.dictionaryTransferResult = "Exported \(self.dictionary.rows.count) entries"
+                self.dictionaryTransferResult = "Exported \(self.dictionary.rows.count) active entries"
             } catch {
                 self.dictionaryTransferResult = "Export failed: \(error.localizedDescription)"
             }
         }
     }
 
-    /// Imports a previously exported dictionary and merges it (existing
-    /// entries win), then reloads the engine so it takes effect immediately.
+    /// Imports active entries additively. Existing local entries win and an
+    /// imported clear/tombstone can never remove data from this Mac.
     func importDictionary() {
+        dictionaryTransferResult = nil
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
         panel.title = "Import Dictionary"
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
-            guard let data = try? Data(contentsOf: url), self.dictionary.importData(data) else {
-                self.dictionaryTransferResult = "Import failed: not a Velora dictionary"
-                return
+            do {
+                let result = try self.dictionary.importData(Data(contentsOf: url))
+                if result.added == 0 {
+                    self.dictionaryTransferResult = "No new entries — kept \(result.keptExisting) existing"
+                } else if result.keptExisting == 0 {
+                    self.dictionaryTransferResult = "Imported \(result.added) entries"
+                } else {
+                    self.dictionaryTransferResult = "Imported \(result.added), kept \(result.keptExisting) existing"
+                }
+            } catch {
+                self.dictionaryTransferResult = "Import failed: \(error.localizedDescription)"
             }
-            self.refreshLearnedCount()
-            self.dictionaryTransferResult = "Imported personal dictionary"
         }
-    }
-
-    /// Refreshes the auto-learned vocab list from disk (call when the view
-    /// appears — the engine's miner may have added terms since last look).
-    func refreshAutoVocab() {
-        autoVocabTerms = dictionary.rows.filter { $0.source == .automatic }.map(\.writeAs)
-    }
-
-    /// Deletes one auto-learned term (banned from re-learning) and reloads the
-    /// engine so its vocabulary drops the term immediately.
-    func removeAutoVocabTerm(_ term: String) {
-        if let row = dictionary.rows.first(where: {
-            $0.source == .automatic && $0.writeAs.caseInsensitiveCompare(term) == .orderedSame
-        }) {
-            dictionary.remove(id: row.id)
-        }
-        refreshAutoVocab()
-    }
-
-    /// Forgets every auto-learned term (all banned) and reloads the engine.
-    func clearAutoVocab() {
-        dictionary.clear(.auto)
-        refreshAutoVocab()
     }
 
     /// Models advertised by the running engine (from the `status` reply). Empty
@@ -198,6 +200,8 @@ final class SettingsModel: ObservableObject {
         self.supervisor = supervisor
         self.dictionary = dictionary
         self.dictionarySync = dictionarySync
+        dictionaryRows = dictionary.rows
+        dictionarySyncStatus = dictionarySync.status
         launchAtLogin = Self.launchAtLoginEnabled
         hotkey = config.hotkey
         hotkeyMode = config.hotkeyMode
@@ -214,7 +218,6 @@ final class SettingsModel: ObservableObject {
         smartTerminal = config.smartTerminal
         sttModel = config.sttModel
         saveAudio = config.saveAudio
-        learnedCount = dictionary.rows.filter { $0.source == .learned }.count
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
         // lands (the engine owns this key; status refreshes it).
@@ -226,8 +229,10 @@ final class SettingsModel: ObservableObject {
             self?.applyStatus(note.userInfo?["payload"] as? [String: Any])
         }
         dictionaryRowsObserver = dictionary.$rows.sink { [weak self] _ in
-            self?.refreshLearnedCount()
-            self?.refreshAutoVocab()
+            self?.dictionaryRows = dictionary.rows
+        }
+        dictionarySyncObserver = dictionarySync.$status.sink { [weak self] status in
+            self?.dictionarySyncStatus = status
         }
         requestStatus()
     }

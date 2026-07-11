@@ -22,6 +22,8 @@ struct DictionaryRow: Identifiable, Equatable {
 enum DictionaryRepositoryError: Error, LocalizedError {
     case missingEntry
     case notManual
+    case duplicateEntry(String)
+    case conflictingRule(heardAs: String, existingWriteAs: String)
     case couldNotPersist
     case couldNotProject
 
@@ -29,10 +31,19 @@ enum DictionaryRepositoryError: Error, LocalizedError {
         switch self {
         case .missingEntry: return "That dictionary entry no longer exists."
         case .notManual: return "Learned entries must be forgotten rather than edited."
+        case .duplicateEntry(let writeAs):
+            return "“\(writeAs)” is already in your Personal Dictionary."
+        case .conflictingRule(let heardAs, let existingWriteAs):
+            return "When Velora hears “\(heardAs)”, it already writes “\(existingWriteAs)”. Edit that entry instead."
         case .couldNotPersist: return "Velora could not save the dictionary on this Mac."
         case .couldNotProject: return "Velora saved the dictionary but could not update the speech engine."
         }
     }
+}
+
+struct DictionaryImportResult: Equatable {
+    let added: Int
+    let keptExisting: Int
 }
 
 /// Canonical local owner for all portable dictionary state. Engine files are
@@ -105,10 +116,10 @@ final class DictionaryRepository: ObservableObject {
             generation: document.generation(for: .manual))
         let entry: DictionaryEntry
         if let existing = document.entry(id: desired.logicalKey) {
-            entry = existing.deleted
-                ? try existing.readding(writeAs: desired.writeAs, deviceID: deviceID, at: date)
-                    .withGeneration(document.generation(for: .manual))
-                : try existing.revising(writeAs: desired.writeAs, deviceID: deviceID, at: date)
+            if isActive(existing) { throw collisionError(existing: existing, desired: desired) }
+            entry = try existing.readding(
+                writeAs: desired.writeAs, deviceID: deviceID, at: date)
+                .withGeneration(document.generation(for: .manual))
         } else {
             entry = desired
         }
@@ -135,12 +146,12 @@ final class DictionaryRepository: ObservableObject {
         } else {
             next = next.upserting(existing.deleting(deviceID: deviceID, at: date))
             if let collision = next.entry(id: desired.logicalKey) {
-                let replacement = collision.deleted
-                    ? try collision.readding(
-                        writeAs: desired.writeAs, deviceID: deviceID, at: date)
-                        .withGeneration(next.generation(for: .manual))
-                    : try collision.revising(
-                        writeAs: desired.writeAs, deviceID: deviceID, at: date)
+                if isActive(collision) {
+                    throw collisionError(existing: collision, desired: desired)
+                }
+                let replacement = try collision.readding(
+                    writeAs: desired.writeAs, deviceID: deviceID, at: date)
+                    .withGeneration(next.generation(for: .manual))
                 next = next.upserting(replacement)
             } else {
                 next = next.upserting(desired)
@@ -149,8 +160,43 @@ final class DictionaryRepository: ObservableObject {
         try commit(next)
     }
 
-    func remove(id: String) {
-        guard let existing = document.entry(id: id), !existing.deleted else { return }
+    /// Converts a learned correction into an explicit user-owned rule in one
+    /// transaction, so failure cannot leave both or neither entry active.
+    func promoteLearned(
+        id: String,
+        writeAs: String,
+        heardAs: String
+    ) throws {
+        guard let existing = document.entry(id: id), isActive(existing) else {
+            throw DictionaryRepositoryError.missingEntry
+        }
+        guard existing.namespace == .learned else { throw DictionaryRepositoryError.notManual }
+        let date = now()
+        let desired = try DictionaryEntry.manual(
+            writeAs: writeAs,
+            heardAs: heardAs,
+            deviceID: deviceID,
+            at: date,
+            generation: document.generation(for: .manual))
+        var next = document
+        if let collision = document.entry(id: desired.logicalKey) {
+            if isActive(collision) {
+                throw collisionError(existing: collision, desired: desired)
+            }
+            next = next.upserting(try collision.readding(
+                writeAs: desired.writeAs, deviceID: deviceID, at: date)
+                .withGeneration(next.generation(for: .manual)))
+        } else {
+            next = next.upserting(desired)
+        }
+        next = next.upserting(existing.deleting(deviceID: deviceID, at: date))
+        try commit(next)
+    }
+
+    func remove(id: String) throws {
+        guard let existing = document.entry(id: id), isActive(existing) else {
+            throw DictionaryRepositoryError.missingEntry
+        }
         var next = document.upserting(existing.deleting(deviceID: deviceID, at: now()))
         // A removed auto term becomes an explicit ban so the device-local miner
         // cannot immediately nominate it again.
@@ -163,10 +209,10 @@ final class DictionaryRepository: ObservableObject {
                generation: next.generation(for: .auto)) {
             next = next.upserting(ban)
         }
-        do { try commit(next) } catch { lastError = error.localizedDescription }
+        try commit(next)
     }
 
-    func clear(_ namespace: DictionaryNamespace) {
+    func clear(_ namespace: DictionaryNamespace) throws {
         var next = document
         let activeAutoTerms = namespace == .auto
             ? document.activeEntries.filter { $0.kind == .autoTerm }
@@ -184,7 +230,7 @@ final class DictionaryRepository: ObservableObject {
                 }
             }
         }
-        do { try commit(next) } catch { lastError = error.localizedDescription }
+        try commit(next)
     }
 
     /// Pull newly committed edit-learning into canonical state. This is called
@@ -263,8 +309,35 @@ final class DictionaryRepository: ObservableObject {
 
     func exportData() throws -> Data { try document.encoded() }
 
+    /// Explicit file import is additive. Unlike cloud reconciliation, imported
+    /// clear generations and tombstones never delete local entries; the user is
+    /// choosing terms to add, not replacing this Mac's synchronization history.
     @discardableResult
-    func importData(_ data: Data) -> Bool { applyRemote(data) }
+    func importData(_ data: Data) throws -> DictionaryImportResult {
+        let incoming = try DictionaryDocument.decode(data)
+        var next = document
+        var added = 0
+        var keptExisting = 0
+        let date = now()
+        for entry in incoming.activeEntries {
+            if next.activeEntries.contains(where: { $0.logicalKey == entry.logicalKey }) {
+                keptExisting += 1
+                continue
+            }
+            let imported: DictionaryEntry
+            if let inactive = next.entry(id: entry.logicalKey) {
+                imported = try inactive.readding(
+                    writeAs: entry.writeAs, deviceID: deviceID, at: date)
+                    .withGeneration(next.generation(for: entry.namespace))
+            } else {
+                imported = entry.withGeneration(next.generation(for: entry.namespace))
+            }
+            next = next.upserting(imported)
+            added += 1
+        }
+        if next != document { try commit(next) }
+        return DictionaryImportResult(added: added, keptExisting: keptExisting)
+    }
 
     /// Decode completely before touching local state. Corrupt/newer cloud data
     /// cannot replace the last valid local document.
@@ -279,6 +352,22 @@ final class DictionaryRepository: ObservableObject {
             lastError = error.localizedDescription
             return false
         }
+    }
+
+    private func isActive(_ entry: DictionaryEntry) -> Bool {
+        !entry.deleted && entry.generation >= document.generation(for: entry.namespace)
+    }
+
+    private func collisionError(
+        existing: DictionaryEntry,
+        desired: DictionaryEntry
+    ) -> DictionaryRepositoryError {
+        if existing.writeAs.caseInsensitiveCompare(desired.writeAs) == .orderedSame {
+            return .duplicateEntry(existing.writeAs)
+        }
+        return .conflictingRule(
+            heardAs: desired.heardAs ?? desired.writeAs,
+            existingWriteAs: existing.writeAs)
     }
 
     private func commit(_ next: DictionaryDocument) throws {

@@ -3,12 +3,13 @@ import SwiftUI
 /// Settings tabs (design brief §4.1): grouped forms, fixed 580 pt width,
 /// height hugging content. No custom chrome, one accent color.
 enum SettingsTab: CaseIterable {
-    case general, dictation, model, modes, history, shortcuts, about
+    case general, dictation, dictionary, model, modes, history, shortcuts, about
 
     var title: String {
         switch self {
         case .general: return "General"
         case .dictation: return "Dictation"
+        case .dictionary: return "Dictionary"
         case .model: return "Model"
         case .modes: return "Modes"
         case .history: return "History"
@@ -21,6 +22,7 @@ enum SettingsTab: CaseIterable {
         switch self {
         case .general: return "gearshape"
         case .dictation: return "mic"
+        case .dictionary: return "text.book.closed"
         case .model: return "cpu"
         case .modes: return "slider.horizontal.3"
         case .history: return "clock.arrow.circlepath"
@@ -32,7 +34,8 @@ enum SettingsTab: CaseIterable {
     var preferredHeight: CGFloat {
         switch self {
         case .general: return 270
-        case .dictation: return 540
+        case .dictation: return 500
+        case .dictionary: return 440
         case .model: return 480
         case .modes: return 600
         case .history: return 560
@@ -138,97 +141,19 @@ struct DictationSettingsView: View {
                 Toggle(isOn: $model.learnFromEdits) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Learn from my edits")
-                        Text("When you fix a misheard word in the text Velora typed, it remembers the correction (stored locally) so it gets that word right next time.")
+                        Text("When you fix a misheard word, Velora adds the confirmed correction to your Personal Dictionary.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
-                if model.learnedCount > 0 {
-                    DisclosureGroup {
-                        ForEach(model.learnedEntries) { entry in
-                            HStack(spacing: VeloraSpacing.s) {
-                                Text(entry.wrong)
-                                    .foregroundStyle(.secondary)
-                                Image(systemName: "arrow.right")
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                Text(entry.right)
-                                Spacer()
-                                Button {
-                                    model.removeLearnedCorrection(entry.wrong)
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                                .help("Forget this correction")
-                            }
-                            .font(.callout)
-                            .padding(.vertical, 1)
-                        }
-                        HStack {
-                            Spacer()
-                            Button("Forget all", role: .destructive) { model.clearLearnedCorrections() }
-                                .controlSize(.small)
-                        }
-                    } label: {
-                        Text("Learned corrections (\(model.learnedCount))")
-                            .font(.callout.weight(.medium))
-                    }
-                }
-                HStack(spacing: VeloraSpacing.s) {
-                    Text("Personal dictionary")
-                    Spacer()
-                    if let result = model.dictionaryTransferResult {
-                        Text(result)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("Import…") { model.importDictionary() }
-                        .controlSize(.small)
-                    Button("Export…") { model.exportDictionary() }
-                        .controlSize(.small)
-                        .disabled(model.learnedCount == 0)
-                }
-                .help("Move your learned corrections and vocabulary between Macs as a JSON file.")
                 Toggle(isOn: $model.vocabMining) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Learn new words automatically")
-                        Text("While idle, Velora spots names and jargon you dictate often and adds them to its vocabulary — all on this Mac.")
+                        Text("While idle, Velora spots recurring names and jargon and adds confirmed terms to your Personal Dictionary.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
-                if !model.autoVocabTerms.isEmpty {
-                    DisclosureGroup {
-                        ForEach(model.autoVocabTerms, id: \.self) { term in
-                            HStack(spacing: VeloraSpacing.s) {
-                                Text(term)
-                                Spacer()
-                                Button {
-                                    model.removeAutoVocabTerm(term)
-                                } label: {
-                                    Image(systemName: "trash")
-                                }
-                                .buttonStyle(.borderless)
-                                .help("Forget this word — it won't be re-learned")
-                            }
-                            .font(.callout)
-                            .padding(.vertical, 1)
-                        }
-                        HStack {
-                            Spacer()
-                            Button("Forget all", role: .destructive) { model.clearAutoVocab() }
-                                .controlSize(.small)
-                        }
-                    } label: {
-                        Text("Auto-learned words (\(model.autoVocabTerms.count))")
-                            .font(.callout.weight(.medium))
-                    }
-                }
-            }
-            .onAppear {
-                model.refreshLearnedCount()
-                model.refreshAutoVocab()
             }
             Section {
                 Toggle(isOn: $model.saveAudio) {

@@ -29,6 +29,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 hosting = NSHostingController(rootView: GeneralSettingsView(model: model))
             case .dictation:
                 hosting = NSHostingController(rootView: DictationSettingsView(model: model))
+            case .dictionary:
+                hosting = NSHostingController(rootView: DictionarySettingsView(model: model))
             case .model:
                 hosting = NSHostingController(rootView: ModelSettingsView(model: model))
             case .modes:

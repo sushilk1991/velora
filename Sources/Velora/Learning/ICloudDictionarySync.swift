@@ -31,7 +31,7 @@ enum DictionarySyncStatus: Equatable {
     case error(String)
 }
 
-enum DictionaryAccountDecision {
+enum DictionaryAccountDecision: Equatable {
     case keepLocal
     case useCloud
     case merge
@@ -106,6 +106,10 @@ final class ICloudDictionarySync: ObservableObject {
 
     func requestSync() {
         guard started else { return }
+        guard pendingIdentity == nil else {
+            status = .accountChanged
+            return
+        }
         debounceWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.syncNow() }
         debounceWork = work
@@ -114,6 +118,10 @@ final class ICloudDictionarySync: ObservableObject {
 
     func syncNow() {
         guard started else { return }
+        guard pendingIdentity == nil else {
+            status = .accountChanged
+            return
+        }
         if inFlight {
             syncAgain = true
             return
@@ -140,7 +148,10 @@ final class ICloudDictionarySync: ObservableObject {
     }
 
     func resolveAccountChange(_ decision: DictionaryAccountDecision) {
-        guard status == .accountChanged, let identity = pendingIdentity else { return }
+        guard let identity = pendingIdentity else { return }
+        debounceWork?.cancel()
+        debounceWork = nil
+        syncAgain = false
         inFlight = true
         status = .syncing
         switch decision {
