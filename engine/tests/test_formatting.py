@@ -58,6 +58,36 @@ def test_terminal_short_command_stays_verbatim(config):
     assert formatting.category_for_bundle("com.google.Chrome") == "browser"
 
 
+def test_terminal_short_natural_language_uses_smart_cleanup(config):
+    utterances = (
+        "I just tested it is just putting the random text",
+        "what this request section is do we even need it now",
+        "please rerun the tests and show me the failures",
+        "this design is looking really bad",
+    )
+    for raw in utterances:
+        gate = run_gate(raw, config, bundle_id="com.mitchellh.ghostty")
+        assert gate.use_llm is True, raw
+        assert gate.reason == "smart_terminal", raw
+        assert gate.text == raw, raw
+
+
+def test_terminal_shell_commands_remain_byte_for_byte_verbatim(config):
+    commands = (
+        "git status",
+        "git rebase --interactive HEAD~3",
+        "python -m pytest",
+        "rm -rf build",
+        "npm run build",
+        "docker compose up",
+    )
+    for raw in commands:
+        gate = run_gate(raw, config, bundle_id="com.mitchellh.ghostty")
+        assert gate.use_llm is False, raw
+        assert gate.reason == "formatting_off", raw
+        assert gate.text == raw, raw
+
+
 def test_terminal_exact_word_boundary(config):
     eleven = "one two three four five six seven eight nine ten eleven"
     twelve = eleven + " twelve"

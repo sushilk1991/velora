@@ -70,13 +70,34 @@ CATEGORY_DESCRIPTIONS = {
 # paying LLM latency on every quick phrase. Longer utterances still get the LLM.
 SHORT_UTTERANCE_WORDS = 6  # < 6 words → punctuation-only, never restructured
 
-# Terminals host both shells and AI chats (Claude Code, codex): a dictation
-# this long into a terminal is almost never a shell command — it's prose for
-# an assistant, and leaving it verbatim (the 0.2.0 behavior) means no
-# punctuation at all. At or past this length, Terminal mode routes to the LLM
-# with a terminal-aware prompt; below it, verbatim as before.
+# Terminals host both shells and AI chats (Claude Code, codex). Long utterances
+# are prose in practice; shorter utterances need a conservative shape check so
+# natural requests get cleaned without ever rewriting command-shaped input.
 SMART_TERMINAL_MIN_WORDS = 12
 LLM_PATH_PROBE = "one two three four five six seven eight nine ten eleven twelve"
+
+_TERMINAL_PROSE_PREFIX_RE = re.compile(
+    r"^(?:"
+    r"i|we|this|that|it|please|why|what|when|where|who|how|is|are|should"
+    r"|can\s+you|could\s+you|would\s+you|do\s+you|did\s+you"
+    r"|tell\s+me|help\s+me"
+    r")\b",
+    re.IGNORECASE,
+)
+_TERMINAL_SHELL_SYNTAX_RE = re.compile(
+    r"(?:&&|\|\||[|<>;`]|\$\(|\$\{|\$[A-Za-z_])"
+    r"|(?:^|\s)-(?:-|[A-Za-z0-9])"
+    r"|(?:^|\s)[A-Za-z_][A-Za-z0-9_]*="
+    r"|(?:^|\s)\S*/\S*"
+    r"|(?:^|\s)\S*[*\[]\S*"
+)
+
+
+def _short_terminal_is_prose(text: str) -> bool:
+    """Return true only for unmistakably prose-shaped short Terminal input."""
+    if len(text.split()) < 2 or _TERMINAL_SHELL_SYNTAX_RE.search(text):
+        return False
+    return _TERMINAL_PROSE_PREFIX_RE.match(text.lstrip()) is not None
 
 
 def category_for_bundle(bundle_id: str | None) -> str | None:
@@ -674,10 +695,8 @@ def run_gate(
     text = raw.strip()
 
     if mode.formatting == "off":
-        # Smart terminal: past a length no shell command reaches, the dictation
-        # is prose for an AI chat living in the terminal (Claude Code, codex) —
-        # verbatim mode would insert it with no punctuation at all. Route it to
-        # the LLM with a terminal-aware prompt instead. Scoped to the built-in
+        # Smart terminal: route long or unmistakably prose-shaped dictation to
+        # the existing terminal-aware cleanup prompt. Scoped to the built-in
         # Terminal mode only, and only while its prompt is still EMPTY — a user
         # who wrote their own Terminal prompt (or uses Raw / a custom
         # formatting-off mode) is never second-guessed.
@@ -685,7 +704,10 @@ def run_gate(
             getattr(config, "smart_terminal", True)
             and mode.name.lower() == "terminal"
             and not mode.prompt.strip()
-            and len(text.split()) >= SMART_TERMINAL_MIN_WORDS
+            and (
+                len(text.split()) >= SMART_TERMINAL_MIN_WORDS
+                or _short_terminal_is_prose(text)
+            )
         ):
             smart_mode = Mode(
                 name=mode.name,
@@ -701,7 +723,7 @@ def run_gate(
                 system_prompt, replacements, entities=entities or [],
                 auto_punctuation=config.auto_punctuation)
         if mode.name.lower() == "terminal":
-            # The explicit <12-word contract is model-free and command-safe:
+            # The command-shaped short-input contract is model-free and safe:
             # no vocabulary replacement, tag injection, or filler deletion may
             # alter a shell command. Explicit "new line/paragraph" voice
             # controls remain supported. Whisper commonly appends one sentence
