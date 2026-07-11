@@ -48,7 +48,7 @@ struct HUDView: View {
     private var cardShape: RoundedRectangle {
         RoundedRectangle(
             cornerRadius: min(HUDGeometry.cornerRadius, height / 2),
-            style: .continuous)
+            style: .circular)
     }
 
     /// Liquid Glass on macOS 26; a restrained native material on macOS 14–15.
@@ -102,12 +102,12 @@ struct HUDView: View {
 
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 transcriptLabel
-                    .frame(maxWidth: .infinity, minHeight: 32, maxHeight: 32, alignment: .leading)
+                    .frame(maxWidth: .infinity, minHeight: 20, maxHeight: 20, alignment: .leading)
                 recordingFooter
                     .frame(maxWidth: .infinity, minHeight: 14, maxHeight: 14)
             }
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, VeloraSpacing.m)
         .frame(width: HUDGeometry.recordingWidth, height: HUDGeometry.recordingHeight)
     }
 
@@ -120,9 +120,8 @@ struct HUDView: View {
         } else {
             transcriptText
                 .font(.system(size: 14, weight: .medium))
-                .lineLimit(2)
-                .lineSpacing(1)
-                .truncationMode(.tail)
+                .lineLimit(1)
+                .truncationMode(.head)
                 .multilineTextAlignment(.leading)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }

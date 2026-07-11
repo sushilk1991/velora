@@ -65,9 +65,9 @@ enum VeloraBrand {
 enum HUDGeometry {
     /// Stable live card dimensions. Partial updates never alter this shell,
     /// which keeps the HUD anchored while Whisper revises provisional words.
-    static let recordingWidth: CGFloat = 348
-    static let recordingHeight: CGFloat = 72
-    static let cornerRadius: CGFloat = 20
+    static let recordingWidth: CGFloat = 312
+    static let recordingHeight: CGFloat = 58
+    static let cornerRadius: CGFloat = 18
     static let successWidth: CGFloat = 112
     static let successHeight: CGFloat = 40
 
@@ -76,17 +76,18 @@ enum HUDGeometry {
 
     /// Compact-state horizontal inset and live-card element gap.
     static let contentInsetH: CGFloat = VeloraSpacing.l
-    static let elementGap: CGFloat = VeloraSpacing.m
+    static let elementGap: CGFloat = VeloraSpacing.s
 
     /// Compact live waveform strip beside the transcript.
-    static let waveformSize = CGSize(width: 32, height: 24)
+    static let waveformSize = CGSize(width: 28, height: 20)
     static let timerWidth: CGFloat = 36
     static let chipIconSide: CGFloat = 14
     static let chipIconCornerRadius: CGFloat = VeloraSpacing.xs
 
-    /// Live transcript phrase: enough for two useful lines, selected only on
-    /// word/sentence boundaries.
-    static let transcriptCharacterLimit = 96
+    /// One-line live transcript tail, selected only on word/sentence
+    /// boundaries. The view head-truncates only if an unusually wide phrase
+    /// still exceeds the fixed row, keeping the newest words visible.
+    static let transcriptCharacterLimit = 34
     static let transcriptFont = NSFont.systemFont(ofSize: 14, weight: .medium)
     static let chipFont = NSFont.systemFont(ofSize: 10.5, weight: .medium)
 

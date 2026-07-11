@@ -144,8 +144,8 @@ async def test_setup_complete_event_is_after_ready_and_sent_once(home, fake_stt)
         shutil.rmtree(sock_dir, ignore_errors=True)
 
 
-async def test_superseded_pre_ready_client_cannot_clobber_setup_owner(home, fake_stt):
-    """Only the newest client may publish ready/setup events after a reconnect."""
+async def test_second_pre_ready_client_cannot_displace_setup_owner(home, fake_stt):
+    """A diagnostic connection cannot steal startup events from the app."""
     eng = Engine(Config(), parent_pid=None)
     allow_ready = asyncio.Event()
     finish_setup = asyncio.Event()
@@ -170,21 +170,27 @@ async def test_superseded_pre_ready_client_cannot_clobber_setup_owner(home, fake
 
         first = await connect(sock)
         second = await connect(sock)
+        rejected = await second.recv()
+        assert rejected == {
+            "event": "error",
+            "message": "Engine already has an active client",
+            "fatal": True,
+        }
         for _ in range(100):
-            if eng._client_gen == 2:
+            if eng._client_gen == 1:
                 break
             await asyncio.sleep(0.01)
-        assert eng._client_gen == 2
+        assert eng._client_gen == 1
 
         allow_ready.set()
-        ready = await second.recv()
+        ready = await first.recv()
         assert ready["event"] == "ready"
         assert ready["setup_complete"] is False
 
         finish_setup.set()
-        assert (await second.recv())["event"] == "setup_complete"
-        await second.send_json({"cmd": "ping"})
-        assert (await second.recv())["event"] == "pong"  # no stale ready frame queued
+        assert (await first.recv())["event"] == "setup_complete"
+        await first.send_json({"cmd": "ping"})
+        assert (await first.recv())["event"] == "pong"
     finally:
         if first is not None:
             first.close()
@@ -461,8 +467,8 @@ async def test_displaced_client_cleanup_keeps_new_session(home, fake_stt):
     assert eng.session is None
 
 
-async def test_reconnect_new_client_flow_survives(engine):
-    """End-to-end: reconnect mid-dictation; the new client's session completes."""
+async def test_second_client_cannot_displace_active_session(engine):
+    """An extra local client is rejected while the app's dictation completes."""
     eng, sock = engine
     a = await connect(sock)
     await a.recv_event("ready")
@@ -473,13 +479,18 @@ async def test_reconnect_new_client_flow_survives(engine):
             break
         await asyncio.sleep(0.01)
 
-    b = await connect(sock)  # displaces a
-    await b.recv_event("ready")
-    await b.send_json({"cmd": "start", "session": "s2", "context": {}})
-    await b.send_audio(AUDIO)
-    await b.send_json({"cmd": "stop", "session": "s2"})
-    final = await b.recv_event("final")
-    assert final["session"] == "s2"
+    b = await connect(sock)
+    rejected = await b.recv()
+    assert rejected == {
+        "event": "error",
+        "message": "Engine already has an active client",
+        "fatal": True,
+    }
+    assert eng.session is not None and eng.session.id == "s1"
+
+    await a.send_json({"cmd": "stop", "session": "s1"})
+    final = await a.recv_event("final")
+    assert final["session"] == "s1"
     a.close()
     b.close()
 

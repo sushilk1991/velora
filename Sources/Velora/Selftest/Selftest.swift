@@ -313,15 +313,18 @@ enum Selftest {
         expect(
             model.transcriptProvisionalSuffix == "much better",
             "HUD isolates the changing provisional suffix")
-        expect(HUDGeometry.recordingWidth == 348, "HUD recording card has a fixed width")
-        expect(HUDGeometry.recordingHeight == 72, "HUD recording card has a fixed height")
+        expect(HUDGeometry.recordingWidth == 312, "HUD recording card has a compact fixed width")
+        expect(HUDGeometry.recordingHeight == 58, "HUD recording card has a compact fixed height")
+        expect(
+            HUDGeometry.transcriptCharacterLimit == 34,
+            "HUD one-line transcript keeps a whole-word-sized rolling tail")
         expect(HUDGeometry.successWidth == 112, "HUD copied state stays compact")
         expect(
-            HUDGeometry.waveformSize == CGSize(width: 32, height: 24),
+            HUDGeometry.waveformSize == CGSize(width: 28, height: 20),
             "HUD waveform uses the compact approved footprint")
 
         expect(
-            HUDPanel.panelSize == NSSize(width: 408, height: 132),
+            HUDPanel.panelSize == NSSize(width: 372, height: 118),
             "HUD host is only as large as the fixed card and shadow require")
         expect(
             HUDPanel.panelSize.height >= HUDGeometry.recordingHeight + 40,

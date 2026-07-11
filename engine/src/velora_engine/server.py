@@ -386,14 +386,30 @@ class Engine:
                 log.warning("parent pid %d gone; will exit when client disconnects", self.parent_pid)
 
     async def _on_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        # The Swift app owns the single control connection. A diagnostic or
+        # stray same-user client must never evict it mid-dictation: reject the
+        # newcomer and leave the active session untouched. Once the owner
+        # disconnects, its handler clears `self.writer` and normal reconnects
+        # are accepted by the next call.
+        if self.writer is not None:
+            log.warning("additional client rejected; active client retained")
+            try:
+                writer.write(protocol.encode_json({
+                    "event": "error",
+                    "message": "Engine already has an active client",
+                    "fatal": True,
+                }))
+                await writer.drain()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            finally:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+            return
+
         self._client_gen += 1
         gen = self._client_gen
-        if self.writer is not None:
-            log.warning("new client connected; dropping previous client")
-            old = self.writer
-            self.writer = None
-            with contextlib.suppress(Exception):
-                old.close()
         self.writer = writer
         log.info("client %d connected", gen)
         try:

@@ -34,6 +34,11 @@ Two processes, one product:
 
 ## Wire protocol (unix socket, length-prefixed frames)
 
+The Swift app owns the engine's single active control connection. Additional
+local clients receive a fatal protocol error and are closed; they cannot
+displace an in-flight app dictation. A reconnect is accepted after the owner
+disconnects.
+
 Frame = `u32 length (LE) | u8 type | payload`.
 
 Types:

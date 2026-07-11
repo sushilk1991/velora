@@ -19,12 +19,13 @@ unchanged:
 ## Approved visual direction
 
 The recording HUD is a quiet native live card rather than a stretched capsule.
-Its recording footprint is fixed at approximately 348 x 72 points so incoming
-words never resize or re-center the shell.
+After installed-app dogfooding showed excess empty space in the original
+348 x 72 proposal, its recording footprint was tightened to 312 x 58 points.
+Incoming words still never resize or re-center the shell.
 
 The hierarchy is:
 
-1. Live transcript: primary, two lines, leading aligned, stable footprint.
+1. Live transcript: primary, one rolling line, leading aligned, stable footprint.
 2. Audio state: a small live waveform at the leading edge.
 3. Context: the frontmost app icon and detected mode remain visible in a
    restrained secondary footer, as explicitly requested.
@@ -36,7 +37,7 @@ neutral one-point border, a soft shadow, and Velora violet only as a restrained
 waveform accent.
 
 Before the first preview, the transcript area says `Listening...`. Once text
-arrives, the same reserved area displays the newest useful whole-word phrase.
+arrives, the same reserved row displays the newest useful whole-word phrase.
 No width or height changes occur during recording. Text updates do not animate
 the entire sentence; unchanged words remain visually stable while only the
 provisional suffix changes.
@@ -101,7 +102,7 @@ change-count guard. Whole-utterance voice commands are not copied.
 
 Completion requires all of the following:
 
-1. Swift self-tests cover stable HUD geometry, whole-word transcript selection,
+1. Swift self-tests cover compact stable HUD geometry, whole-word transcript selection,
    context visibility, and the `Copied` success state.
 2. Python tests cover non-blocking ingest, single-flight/coalesced previews,
    adaptive cadence, stop/final ordering, and unchanged final output.
@@ -126,4 +127,3 @@ Completion requires all of the following:
   tradeoff; a subsequent user copy always wins and is never restored over.
 - **Context makes the footer noisy:** app icon and mode use secondary styling
   and never compete with the transcript.
-

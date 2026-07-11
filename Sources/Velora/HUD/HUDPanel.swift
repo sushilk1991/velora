@@ -9,7 +9,7 @@ import SwiftUI
 /// state (which shows a Retry button).
 final class HUDPanel {
     /// Fixed recording card plus room for its soft shadow and entrance offset.
-    static let panelSize = NSSize(width: 408, height: 132)
+    static let panelSize = NSSize(width: 372, height: 118)
 
     let model = HUDModel()
 
