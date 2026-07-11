@@ -347,6 +347,29 @@ async def test_cancel_discards(engine):
     client.close()
 
 
+async def test_cancel_sends_confirmation_then_restarts_unhealthy_cleanup(engine):
+    eng, sock = engine
+
+    class UnhealthyCleanup:
+        loaded = True
+        model_id = "fake-unhealthy"
+        unhealthy = False
+
+    cleanup = UnhealthyCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "cancel-poisoned", "context": {}})
+    await client.send_audio(AUDIO)
+    cleanup.unhealthy = True
+    await client.send_json({"cmd": "cancel", "session": "cancel-poisoned"})
+
+    cancelled = await client.recv_event("cancelled")
+    assert cancelled["session"] == "cancel-poisoned"
+    assert eng.shutdown.is_set()
+    client.close()
+
+
 async def test_malformed_frames_get_error_not_crash(engine):
     eng, sock = engine
     client = await connect(sock)

@@ -137,6 +137,10 @@ async def run(selected: set[str] | None) -> int:
                 )
                 output = postprocess(result.text, gate) if result.applied else result.text
                 case_failures = validate(case, output, result.applied)
+                if not prepared.applied:
+                    case_failures.append(f"prefix_not_prepared:{prepared.reason}")
+                if not result.cache_hit:
+                    case_failures.append("prepared_cache_miss")
                 failures += bool(case_failures)
                 print(json.dumps({
                     "case": case.name,

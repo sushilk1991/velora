@@ -736,6 +736,10 @@ class Engine:
             return
         await self._abort_session("cancel")
         await self._send({"event": "cancelled", "session": session.id})
+        # Chunk cleanup may have hit the hard watchdog before the user
+        # cancelled. Confirm cancellation first, then restart instead of
+        # leaving the poisoned single-worker executor for the next dictation.
+        self._restart_if_cleanup_unhealthy()
 
     async def _cmd_stop(self, msg: dict[str, Any]) -> None:
         session = self.session
@@ -876,12 +880,15 @@ class Engine:
                 explicit_mode=ctx.get("mode"),
                 entities=session.start_entities,
             )
-            if not gate.use_llm and gate.reason == "short_utterance":
+            if not gate.use_llm and gate.reason in {"short_utterance", "formatting_off"}:
                 # This is a segment of an already-long recording, not a short
                 # standalone utterance. Probe the session mode's long-text path
-                # so a slow first 10-second segment does not disable streaming
-                # cleanup for the remaining dictation.
-                gate = formatting.run_gate(
+                # so a short first segment does not disable streaming for the
+                # remaining dictation. `formatting_off` matters for the built-in
+                # Terminal mode: its <12-word command-safe path becomes smart
+                # cleanup once the complete utterance reaches 12 words. Raw and
+                # custom formatting-off modes remain off when probed.
+                long_gate = formatting.run_gate(
                     formatting.LLM_PATH_PROBE,
                     self.config,
                     bundle_id=ctx.get("bundle_id"),
@@ -889,6 +896,8 @@ class Engine:
                     explicit_mode=ctx.get("mode"),
                     entities=session.start_entities,
                 )
+                if long_gate.use_llm:
+                    gate = long_gate
             if not gate.use_llm:
                 session.streaming_disabled = True
                 self._cancel_chunk_tasks(session)

@@ -18,8 +18,9 @@ The test device is a 14-core Apple M4 Max MacBook Pro with 36 GB unified memory.
 - The exact Qwen prompt prefix is prepared while recording. Generation forks an immutable MLX cache snapshot, so preview, chunk, and final jobs cannot consume or corrupt one another's cache state; the transient working cache is released after each generation instead of being retained as a duplicate.
 - Volatile app/entity context follows stable cleanup instructions, increasing the reusable prefix.
 - Superseded preview/chunk tasks receive cooperative cancellation instead of continuing to occupy the single inference executor.
+- A short first segment no longer disables streaming cleanup for an otherwise long Terminal dictation; the engine probes the mode's long-text path without applying command transforms at segment seams.
 - The soft output deadline starts at the first generated token; an independent watchdog still bounds stuck prefill or inference.
-- A hard-wedged Python inference thread poisons its cleanup engine: Velora first sends the raw fallback, then restarts the sidecar instead of queueing every later dictation behind an unkillable worker.
+- A hard-wedged Python inference thread poisons its cleanup engine: Velora first sends the raw fallback (or cancellation confirmation), then restarts the sidecar instead of queueing every later dictation behind an unkillable worker.
 - Whisper warms the same `ModelHolder` instance used for transcription and adds preview-only decodes that cannot mutate committed/final state. Preview and segment decoding materialize only the overlapping undecoded audio chunks instead of repeatedly concatenating the complete recording.
 - A speech-bearing tail that decodes empty forces an authoritative whole-clip retry, and rejected Whisper segments can no longer re-enter through the aggregate fallback.
 - The HUD stops all perpetual idle animations and displays up to two readable lines using whole-word/sentence selection.
@@ -31,14 +32,14 @@ All cases used the exact Qwen model above, temperature zero, and a prepared-pref
 
 | Case | Words | Stop-side cleanup | Result check |
 |---|---:|---:|---|
-| Declarative | 14 | 395 ms | final full stop present |
-| Grammar repair | 18 | 468 ms | agreement/tense repaired conservatively |
-| Question | 16 | 413 ms | question mark present |
-| Terminal prose | 22 | 547 ms | final full stop retained |
-| Names/numbers | 20 | 608 ms | names, Q3, time, and currency retained |
-| Long prose | 45 | 1,015 ms | meaning and details retained |
+| Declarative | 14 | 427 ms | final full stop present |
+| Grammar repair | 18 | 466 ms | agreement/tense repaired conservatively |
+| Question | 16 | 489 ms | question mark present |
+| Terminal prose | 22 | 553 ms | final full stop retained |
+| Names/numbers | 20 | 619 ms | names, Q3, time, and currency retained |
+| Long prose | 45 | 1,023 ms | meaning and details retained |
 
-Observed prior-build cleanup logs on the same Mac were 1.85–2.96 seconds for 12–96 words, including two timeouts. The committed six-case benchmark measured a new stop-side range of 0.40–1.02 seconds for 14–45 words.
+Observed prior-build cleanup logs on the same Mac were 1.85–2.96 seconds for 12–96 words, including two timeouts. The committed six-case benchmark measured a new stop-side range of 0.43–1.02 seconds for 14–45 words.
 
 ## End-to-end engine proof
 
@@ -57,7 +58,7 @@ Before the HUD fix, the installed app was observed at 9.3% CPU while idle. A 12-
 
 ## Automated verification
 
-- Python engine suite: 231 passed
+- Python engine suite: 233 passed
 - Swift release build: passed
 - Swift self-test: 69 checks passed
 

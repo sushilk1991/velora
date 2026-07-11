@@ -107,6 +107,30 @@ async def test_short_first_segment_does_not_disable_long_session_streaming(engin
     client.close()
 
 
+async def test_short_first_terminal_segment_keeps_long_session_streaming(engine, monkeypatch):
+    eng, sock = engine
+    short_first = "alpha beta"
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{short_first}|{SEG2}")
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", TAIL)
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await run_dictation(
+        client,
+        "short-first-terminal",
+        chunks=4,
+        context={"bundle_id": "com.apple.Terminal", "app_name": "Terminal"},
+    )
+    final = await client.recv_event("final")
+
+    assert [call[0] for call in cleanup.calls] == [short_first, SEG2, TAIL]
+    assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>"
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
 async def test_retraction_segment_merges_with_previous(engine, monkeypatch):
     eng, sock = engine
     seg2 = "no wait make that six pm on monday"
