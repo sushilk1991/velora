@@ -246,6 +246,12 @@ final class DictionaryRepository: ObservableObject {
 
     func snapshot() -> DictionaryDocument { document }
 
+    /// Explicit account-boundary action: unlike normal remote sync/import,
+    /// this replaces local portable state instead of merging it.
+    func replace(with replacement: DictionaryDocument) throws {
+        try commit(replacement)
+    }
+
     func exportData() throws -> Data { try document.encoded() }
 
     @discardableResult

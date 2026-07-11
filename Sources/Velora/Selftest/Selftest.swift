@@ -33,6 +33,10 @@ enum Selftest {
         testDictionaryRepositoryMigration()
         testDictionaryRepositoryCRUD()
         testDictionaryRepositoryRemoteMerge()
+        testDictionarySyncAvailabilityAndPublish()
+        testDictionarySyncMergeAndCorruption()
+        testDictionarySyncAccountBoundary()
+        testDictionarySyncDebouncesChanges()
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
@@ -563,6 +567,197 @@ enum Selftest {
                "import restores every portable entry")
         fixture.remove()
         importedFixture.remove()
+    }
+
+    private final class FakeDictionarySyncTransport: DictionarySyncTransport {
+        var identityResult: Result<String, DictionarySyncTransportError> = .success("account-a")
+        var versionsResult: Result<[Data], DictionarySyncTransportError> = .success([])
+        var writes: [Data] = []
+        var reads = 0
+        var resolvedConflicts = 0
+        var observer: (() -> Void)?
+
+        func fetchAccountIdentity(
+            completion: @escaping (Result<String, DictionarySyncTransportError>) -> Void
+        ) { completion(identityResult) }
+
+        func readVersions(
+            completion: @escaping (Result<[Data], DictionarySyncTransportError>) -> Void
+        ) {
+            reads += 1
+            completion(versionsResult)
+        }
+
+        func write(
+            _ data: Data,
+            resolvingConflicts: Bool,
+            completion: @escaping (Result<Void, DictionarySyncTransportError>) -> Void
+        ) {
+            writes.append(data)
+            if resolvingConflicts { resolvedConflicts += 1 }
+            completion(.success(()))
+        }
+
+        func startObserving(_ onChange: @escaping () -> Void) { observer = onChange }
+        func stopObserving() { observer = nil }
+        var folderURL: URL? { nil }
+    }
+
+    private static func makeSyncRepository(
+        _ fixture: DictionaryRepositoryFixture,
+        deviceID: String = "mac-a"
+    ) -> DictionaryRepository {
+        DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: deviceID,
+            now: { Date(timeIntervalSince1970: 100) })
+    }
+
+    private static func testDictionarySyncAvailabilityAndPublish() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        _ = try! repository.add(writeAs: "LocalTerm")
+        let identityURL = fixture.directory.appendingPathComponent("icloud_identity")
+
+        let unavailable = FakeDictionarySyncTransport()
+        unavailable.identityResult = .failure(.unavailable)
+        let localOnly = ICloudDictionarySync(
+            repository: repository, transport: unavailable, identityURL: identityURL)
+        localOnly.start()
+        expect(localOnly.status == .localOnly,
+               "iCloud unavailable keeps dictionary local and usable")
+        expect(unavailable.reads == 0 && unavailable.writes.isEmpty,
+               "unavailable iCloud never starts cloud I/O")
+        localOnly.stop()
+
+        let available = FakeDictionarySyncTransport()
+        let sync = ICloudDictionarySync(
+            repository: repository, transport: available, identityURL: identityURL)
+        sync.start()
+        expect(sync.status == .synced, "empty iCloud publishes the local dictionary")
+        expect(available.writes.count == 1,
+               "initial empty cloud receives exactly one canonical document")
+        let published = try! DictionaryDocument.decode(available.writes[0])
+        expect(published.activeEntries.contains(where: { $0.writeAs == "LocalTerm" }),
+               "published cloud document contains confirmed local entry")
+        sync.stop()
+
+        let waiting = FakeDictionarySyncTransport()
+        waiting.versionsResult = .failure(.waitingForDownload)
+        let waitingSync = ICloudDictionarySync(
+            repository: repository, transport: waiting,
+            identityURL: fixture.directory.appendingPathComponent("waiting_identity"))
+        waitingSync.start()
+        expect(waitingSync.status == .waitingForDownload,
+               "partially downloaded iCloud document reports waiting")
+        waitingSync.stop()
+        fixture.remove()
+    }
+
+    private static func testDictionarySyncMergeAndCorruption() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        _ = try! repository.add(writeAs: "LocalTerm")
+        let remoteA = try! DictionaryDocument(entries: [
+            try! DictionaryEntry.manual(
+                writeAs: "RemoteA", deviceID: "mac-b", at: Date(timeIntervalSince1970: 200)),
+        ]).encoded()
+        let remoteB = try! DictionaryDocument(entries: [
+            try! DictionaryEntry.manual(
+                writeAs: "RemoteB", deviceID: "mac-c", at: Date(timeIntervalSince1970: 300)),
+        ]).encoded()
+        let transport = FakeDictionarySyncTransport()
+        transport.versionsResult = .success([remoteA, remoteB])
+        let sync = ICloudDictionarySync(
+            repository: repository,
+            transport: transport,
+            identityURL: fixture.directory.appendingPathComponent("identity"))
+        sync.start()
+        expect(Set(repository.rows.map(\.writeAs)) == ["LocalTerm", "RemoteA", "RemoteB"],
+               "all current and conflict versions merge with local additions")
+        expect(transport.resolvedConflicts == 1,
+               "canonical write resolves stale iCloud conflict versions")
+        sync.stop()
+
+        let corruptFixture = DictionaryRepositoryFixture()
+        let corruptRepository = makeSyncRepository(corruptFixture)
+        _ = try! corruptRepository.add(writeAs: "KeepLocal")
+        let corrupt = FakeDictionarySyncTransport()
+        corrupt.versionsResult = .success([Data("not json".utf8)])
+        let corruptSync = ICloudDictionarySync(
+            repository: corruptRepository,
+            transport: corrupt,
+            identityURL: corruptFixture.directory.appendingPathComponent("identity"))
+        corruptSync.start()
+        if case .error = corruptSync.status {
+            expect(true, "corrupt cloud document surfaces an actionable error")
+        } else {
+            expect(false, "corrupt cloud document surfaces an actionable error")
+        }
+        expect(corruptRepository.rows.map(\.writeAs) == ["KeepLocal"] && corrupt.writes.isEmpty,
+               "corrupt cloud content never replaces or republishes valid local state")
+        corruptSync.stop()
+        fixture.remove()
+        corruptFixture.remove()
+    }
+
+    private static func testDictionarySyncAccountBoundary() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        _ = try! repository.add(writeAs: "OldAccountLocal")
+        let identityURL = fixture.directory.appendingPathComponent("identity")
+        try! Data("account-old".utf8).write(to: identityURL)
+        let cloud = FakeDictionarySyncTransport()
+        cloud.identityResult = .success("account-new")
+        let remote = try! DictionaryDocument(entries: [
+            try! DictionaryEntry.manual(
+                writeAs: "NewAccountCloud", deviceID: "mac-new",
+                at: Date(timeIntervalSince1970: 200)),
+        ]).encoded()
+        cloud.versionsResult = .success([remote])
+        let sync = ICloudDictionarySync(
+            repository: repository, transport: cloud, identityURL: identityURL)
+        sync.start()
+        expect(sync.status == .accountChanged,
+               "Apple Account identity change pauses automatic sync")
+        expect(cloud.reads == 0 && cloud.writes.isEmpty,
+               "account boundary prevents silent read, merge, or upload")
+
+        sync.resolveAccountChange(.useCloud)
+        expect(repository.rows.map(\.writeAs) == ["NewAccountCloud"],
+               "use-cloud decision explicitly replaces old-account local names")
+        expect(String(decoding: try! Data(contentsOf: identityURL), as: UTF8.self) == "account-new",
+               "resolved account decision advances the stored identity")
+        sync.stop()
+        fixture.remove()
+    }
+
+    private static func testDictionarySyncDebouncesChanges() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = makeSyncRepository(fixture)
+        let transport = FakeDictionarySyncTransport()
+        let sync = ICloudDictionarySync(
+            repository: repository,
+            transport: transport,
+            identityURL: fixture.directory.appendingPathComponent("identity"),
+            debounceDelay: 0.02)
+        sync.start()
+        transport.reads = 0
+        transport.writes = []
+        transport.observer?()
+        transport.observer?()
+        transport.observer?()
+        let deadline = Date().addingTimeInterval(0.15)
+        while Date() < deadline && transport.reads == 0 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        expect(transport.reads == 1 && transport.writes.count == 1,
+               "bursty cloud notifications coalesce into one reconciliation")
+        sync.stop()
+        fixture.remove()
     }
 
     // MARK: - CorrectionDiff
