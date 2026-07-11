@@ -152,6 +152,10 @@ class Session:
         # at every seam — one gate, one final postprocess matches the
         # whole-text semantics (review finding).
         self.stream_prompt: str | None = None
+        # Divergence allow-list paired with the sticky prompt: global personal
+        # dictionary plus this session's active mode vocabulary, never terms
+        # from inactive modes.
+        self.stream_allowed_terms: list[str] = []
         # Entities snapshotted at start: during-speech chunks must use these —
         # `stop` merges richer entities into `context` later, and a chunk task
         # reading context lazily must not see them (they belong to the final
@@ -1012,6 +1016,7 @@ class Engine:
                 self._cancel_chunk_tasks(session)
                 return
             session.stream_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
+            session.stream_allowed_terms = self._allowed_terms(gate.mode)
         # A committed segment cleanup can become part of the authoritative
         # final for a long dictation. Optional prefix preparation must never
         # sit ahead of that work on the cleanup engine's single executor.
@@ -1091,7 +1096,7 @@ class Engine:
                 seg_raw,
                 system_prompt,
                 cancel_event=cancel_event,
-                allowed_terms=self.config.global_vocabulary,
+                allowed_terms=session.stream_allowed_terms,
             )
             if result.applied:
                 return _ChunkResult(result.text, result.ms, applied=True)
@@ -1202,7 +1207,7 @@ class Engine:
             else:
                 result = await self.cleanup.cleanup(
                     raw, gate.system_prompt or STATIC_SYSTEM_PROMPT,
-                    allowed_terms=self.config.global_vocabulary,
+                    allowed_terms=self._allowed_terms(gate.mode),
                 )
             if result.applied:
                 text = formatting.postprocess(result.text, gate)
@@ -1224,6 +1229,14 @@ class Engine:
         punctuation (guarded against noun usage)."""
         return formatting.normalize_spoken_punctuation(
             formatting.apply_spoken_commands(formatting.scrub_fillers(raw)))
+
+    def _allowed_terms(self, mode: Any) -> list[str]:
+        """Exact spellings the active cleanup prompt is allowed to introduce.
+
+        Keep this aligned with formatting.build_system_prompt: global personal
+        vocabulary first, then only the resolved mode's vocabulary.
+        """
+        return list(dict.fromkeys(self.config.global_vocabulary + list(mode.vocabulary)))
 
     # ---------------- STT glossary + idle vocab mining (smartness-v2 §4) ----------------
 

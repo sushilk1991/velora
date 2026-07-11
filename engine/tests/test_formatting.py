@@ -791,6 +791,31 @@ def test_learned_corrections_merge(tmp_path):
     assert c.global_replacements.get("preeya") == "Preeya"
 
 
+def test_manual_dictionary_wins_and_applies_to_short_utterance(tmp_path):
+    import json
+    from velora_engine.config import Config
+
+    (tmp_path / "learned.json").write_text(json.dumps({
+        "replacements": {"air learn": "LearnedWrong"},
+        "vocabulary": ["LearnedTerm"],
+    }))
+    (tmp_path / "auto_learned.json").write_text(json.dumps({
+        "terms": ["AutoTerm"],
+    }))
+    (tmp_path / "config.json").write_text(json.dumps({
+        "vocabulary": ["Airlearn"],
+        "replacements": {"air learn": "Airlearn"},
+    }))
+    c = Config(home=tmp_path)
+    assert c.global_replacements["air learn"] == "Airlearn"
+    assert c.global_vocabulary == ["Airlearn", "LearnedTerm", "AutoTerm"]
+    gate = run_gate("air learn", c)
+    assert gate.reason == "short_utterance"
+    assert gate.text == "Airlearn."
+    prompt = formatting.build_system_prompt(c.default_mode(), c, None, None)
+    assert "Airlearn" in prompt
+
+
 def test_nearby_text_is_fenced_as_data(config):
     from velora_engine.config import Mode
     from velora_engine.formatting import build_system_prompt

@@ -25,6 +25,7 @@ class FakeCleanup:
         self.delay = delay
         self.calls: list[tuple[str, str]] = []
         self.cancel_events = []
+        self.allowed_terms_calls: list[list[str] | None] = []
 
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
@@ -32,6 +33,7 @@ class FakeCleanup:
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
+        self.allowed_terms_calls.append(allowed_terms)
         if self.delay:
             await asyncio.sleep(self.delay)
         return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
@@ -130,6 +132,35 @@ async def test_short_first_terminal_segment_keeps_long_session_streaming(engine,
     assert [call[0] for call in cleanup.calls] == [short_first, SEG2, TAIL]
     assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>."
     assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_cleanup_allows_only_global_and_active_mode_vocabulary(engine, segments):
+    eng, sock = engine
+    eng.config.data["vocabulary"] = ["GlobalTerm"]
+    eng.config.modes["code"].vocabulary = ["ModeOnlyTerm"]
+    eng.config.modes["note"].vocabulary = ["InactiveTerm"]
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+
+    await eng._apply_formatting(  # noqa: SLF001 — verify the whole-text boundary
+        "one two three four five six seven", None, None, "Code", [])
+    assert cleanup.allowed_terms_calls[-1] == ["GlobalTerm", "ModeOnlyTerm"]
+
+    await eng._apply_formatting(
+        "one two three four five six seven", None, None, None, [])
+    assert cleanup.allowed_terms_calls[-1] == ["GlobalTerm"]
+    assert "InactiveTerm" not in cleanup.allowed_terms_calls[-1]
+
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await run_dictation(client, "active-mode-vocab", chunks=4, context={"mode": "Code"})
+    await client.recv_event("final")
+    assert cleanup.allowed_terms_calls
+    assert all(
+        terms == ["GlobalTerm", "ModeOnlyTerm"]
+        for terms in cleanup.allowed_terms_calls[-2:]
+    )
     client.close()
 
 
