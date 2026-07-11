@@ -4,8 +4,9 @@ import SwiftUI
 ///
 /// Bars are mirrored center-out around the vertical midline (Siri-like):
 /// the newest level renders at the two center bars and flows outward. One
-/// `Canvas` inside `TimelineView(.animation)` — redrawn every frame, zero
-/// per-bar SwiftUI views. Bars: 3 pt wide, 2 pt gap (5 pt pitch), corner
+/// `Canvas` inside `TimelineView(.animation)` — redrawn while active and
+/// paused while hidden, with zero per-bar SwiftUI views. Bars: 3 pt wide,
+/// 2 pt gap (5 pt pitch), corner
 /// radius 1.5 pt, heights 4…32 pt inside a fixed 120×32 pt strip, tinted
 /// with a subtle brand indigo→violet gradient (`VeloraBrand.barColor`).
 struct WaveformView: View {

@@ -109,7 +109,7 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
     Containment first: every output token should come from the input (cleanup
     deletes and re-punctuates; it never writes new words). Merges of up to
     three adjacent input tokens are allowed ("6 p m" → "6pm", "auth check" →
-    "authCheck"), and small outputs get slack (≥2 novel tokens required). The
+    "authCheck"), and small outputs get slack (≥3 novel tokens required). The
     length ratio is only a backstop — growth capped hard, shrinkage floored
     loosely, and floored barely at all when the raw text contains a spoken
     retraction ("no no", "scratch that"): deleting the retracted words is the
@@ -287,6 +287,11 @@ class CleanupEngine:
         # on this one dedicated thread.
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cleanup")
         self.loaded = False
+        # A Python worker thread cannot be killed safely. If the independent
+        # watchdog fires, retire this engine rather than queue every later
+        # dictation behind a possibly permanent MLX wedge. The server sends the
+        # raw fallback, then restarts the sidecar to obtain a fresh worker.
+        self.unhealthy = False
 
     async def load_async(self, warm_system_prompt: str | None = None) -> None:
         await asyncio.get_running_loop().run_in_executor(self._executor, self.load, warm_system_prompt)
@@ -318,6 +323,7 @@ class CleanupEngine:
             self._warm(warm_system_prompt)
             log.info("cleanup prompt cache warmed in %.2fs", time.perf_counter() - t0)
         self.loaded = True
+        self.unhealthy = False
 
     def _prompt_tokens(self, system_prompt: str, user_text: str) -> list[int]:
         messages = [
@@ -590,8 +596,11 @@ class CleanupEngine:
         mid-generation the moment a dictation needs the model."""
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
+        if self.unhealthy:
+            return CleanupResult(raw, False, 0, "llm_unhealthy")
         if not self.loaded:
             return CleanupResult(raw, False, 0, "llm_not_loaded")
+        worker_cancel = cancel_event if cancel_event is not None else threading.Event()
         try:
             # In-thread deadline enforces the budget between tokens; the outer
             # wait_for catches a truly wedged generation (thread keeps running,
@@ -600,11 +609,13 @@ class CleanupEngine:
             return await asyncio.wait_for(
                 loop.run_in_executor(
                     self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio,
-                    cancel_event, allowed_terms,
+                    worker_cancel, allowed_terms,
                 ),
                 timeout=timeout_ms / 1000.0 + HARD_TIMEOUT_GRACE_S,
             )
         except asyncio.TimeoutError:
+            worker_cancel.set()
+            self.unhealthy = True
             log.error("cleanup hard-wedged past %dms — returning raw", timeout_ms)
             return CleanupResult(raw, False, timeout_ms, "timeout_hard")
         except Exception as exc:  # noqa: BLE001 — cleanup must never break dictation

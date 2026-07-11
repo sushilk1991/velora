@@ -54,6 +54,15 @@ struct HUDTranscriptSelection: Equatable {
 /// slicing is deliberately forbidden because it produced fragments such as
 /// "…es below if we can" in the HUD.
 enum HUDTranscript {
+    private static func middleElide(_ token: Substring, maxCharacters: Int) -> String {
+        guard token.count > maxCharacters else { return String(token) }
+        guard maxCharacters > 1 else { return "…" }
+        let visible = maxCharacters - 1
+        let suffixCount = max(1, visible / 2)
+        let prefixCount = visible - suffixCount
+        return String(token.prefix(prefixCount)) + "…" + String(token.suffix(suffixCount))
+    }
+
     static func select(_ raw: String, maxCharacters: Int) -> HUDTranscriptSelection {
         let normalized = raw.split(whereSeparator: \.isWhitespace).joined(separator: " ")
         guard !normalized.isEmpty, maxCharacters > 0 else {
@@ -78,7 +87,14 @@ enum HUDTranscript {
         var count = 0
         for word in normalized.split(separator: " ").reversed() {
             let proposed = count + (kept.isEmpty ? 0 : 1) + word.count
-            if proposed > maxCharacters, !kept.isEmpty { break }
+            if proposed > maxCharacters {
+                if kept.isEmpty {
+                    return HUDTranscriptSelection(
+                        text: middleElide(word, maxCharacters: maxCharacters),
+                        truncated: true)
+                }
+                break
+            }
             kept.append(word)
             count = proposed
             if proposed >= maxCharacters { break }

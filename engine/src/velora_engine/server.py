@@ -224,6 +224,21 @@ class Engine:
     async def _stt_call(self, fn: Callable[..., T], *args: Any) -> T:
         return await asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
 
+    def _restart_if_cleanup_unhealthy(self) -> bool:
+        """Restart the sidecar after its unkillable cleanup worker wedges.
+
+        The caller must first send the user's raw fallback/result. Reusing the
+        model from a replacement Python thread would violate MLX thread
+        ownership while the old worker may still be inside native code, so a
+        clean process restart is the only safe recovery boundary.
+        """
+        cleanup = self.cleanup
+        if cleanup is None or not getattr(cleanup, "unhealthy", False):
+            return False
+        log.error("cleanup worker is unhealthy — restarting engine after fallback")
+        self.shutdown.set()
+        return True
+
     # ---------------- model loading ----------------
 
     async def _set_loading(self, phase: str | None, fraction: float | None = None) -> None:
@@ -816,6 +831,7 @@ class Engine:
             session.samples,
             audio_name or "-",
         )
+        self._restart_if_cleanup_unhealthy()
         # The engine is idle again — (re)arm the idle vocabulary miner.
         self._schedule_mining()
 
@@ -855,6 +871,19 @@ class Engine:
                 explicit_mode=ctx.get("mode"),
                 entities=session.start_entities,
             )
+            if not gate.use_llm and gate.reason == "short_utterance":
+                # This is a segment of an already-long recording, not a short
+                # standalone utterance. Probe the session mode's long-text path
+                # so a slow first 10-second segment does not disable streaming
+                # cleanup for the remaining dictation.
+                gate = formatting.run_gate(
+                    formatting.LLM_PATH_PROBE,
+                    self.config,
+                    bundle_id=ctx.get("bundle_id"),
+                    app_name=ctx.get("app_name"),
+                    explicit_mode=ctx.get("mode"),
+                    entities=session.start_entities,
+                )
             if not gate.use_llm:
                 session.streaming_disabled = True
                 self._cancel_chunk_tasks(session)
@@ -1091,6 +1120,8 @@ class Engine:
     def _schedule_mining(self, delay: float = MINE_IDLE_S) -> None:
         """(Re)arm the idle miner: cancel any pending run and wait again from
         now. Called after every final and once after startup model load."""
+        if self.shutdown.is_set():
+            return
         if self._miner_task is not None and not self._miner_task.done():
             self._miner_task.cancel()
         self._miner_task = asyncio.create_task(self._mine_when_idle(delay))
@@ -1142,6 +1173,7 @@ class Engine:
             user_text, system_prompt, timeout_ms=4000, check_ratio=False,
             cancel_event=self._mine_cancel,
         )
+        self._restart_if_cleanup_unhealthy()
         return result.text if result.applied else ""
 
     def _archive_audio_bg(self, session: Session) -> str | None:
@@ -1323,6 +1355,7 @@ class Engine:
             if msg.get("id") is not None:
                 evt["id"] = msg.get("id")
             await self._send(evt)
+            self._restart_if_cleanup_unhealthy()
             log.info("reprocess %s with %s: stt_ms=%d mode=%s", name, model_id, stt_ms, mode_name)
         finally:
             if saved_language is not None and hasattr(self.stt, "language"):

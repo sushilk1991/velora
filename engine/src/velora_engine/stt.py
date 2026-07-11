@@ -378,11 +378,15 @@ def guard_whisper_result(result: dict[str, Any]) -> str:
         if lp is not None and lp < _LOGPROB_THRESHOLD and cr is not None and cr > 2.0:
             log.info("whisper guard: dropped segment (logprob=%.2f cr=%.2f, %d chars)", lp, cr, len(seg_text))
             continue
-        # drop non-text junk (e.g. "!!!!" runs)
-        if not re.search(r"[A-Za-z0-9]", seg_text):
+        # Drop non-text junk (e.g. "!!!!" runs) without rejecting valid
+        # Devanagari/CJK/Arabic text from this multilingual model.
+        if not any(char.isalnum() for char in seg_text):
             continue
         kept.append(seg_text)
-    text = " ".join(kept).strip() or (result.get("text") or "").strip()
+    # If Whisper supplied segment metadata, never restore the aggregate after
+    # every segment was explicitly rejected above. The aggregate is only a
+    # compatibility fallback for upstream results with no segments at all.
+    text = " ".join(kept).strip() if segments else (result.get("text") or "").strip()
     return _trim_repeated_tail(text)
 
 
@@ -595,12 +599,17 @@ class WhisperBackend:
             except Exception:  # noqa: BLE001 — fall through to the whole-clip decode
                 log.exception("tail decode failed — re-decoding the whole clip")
             else:
-                parts = self._segments + ([tail] if tail else [])
-                text = " ".join(parts).strip()
-                self.reset()
-                self.segments_used_for_final = True
-                self.final_tail = tail
-                return text
+                if tail or not self._span_had_speech:
+                    parts = self._segments + ([tail] if tail else [])
+                    text = " ".join(parts).strip()
+                    self.reset()
+                    self.segments_used_for_final = True
+                    self.final_tail = tail
+                    return text
+                # Same integrity rule as a live segment: an empty decode over a
+                # speech-bearing span is not evidence that the span was empty.
+                # Re-decode the whole clip instead of silently dropping it.
+                log.warning("empty speech-bearing whisper tail — re-decoding the whole clip")
         if duration_s > 60:
             log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
         audio = np.concatenate(self._chunks)

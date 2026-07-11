@@ -430,11 +430,7 @@ struct HUDView: View {
 
     /// Width required by the stable controls row.
     private var fixedRowWidth: CGFloat {
-        var w = HUDGeometry.contentInsetH * 2
-        if chipWidth > 0 { w += chipWidth + HUDGeometry.elementGap }
-        w += HUDGeometry.dotDiameter + VeloraSpacing.s + HUDGeometry.waveformSize.width
-        w += HUDGeometry.elementGap + HUDGeometry.timerWidth
-        return w
+        HUDGeometry.controlRowWidth(chipWidth: chipWidth)
     }
 
     /// The transcript owns a separate row, so its width no longer competes

@@ -313,6 +313,20 @@ def test_long_segmented_finalize_does_not_join_the_whole_recording(whisper, monk
     assert fake.calls[-1][0] == SAMPLE_RATE
 
 
+def test_empty_speech_tail_forces_whole_clip_redecode(whisper):
+    backend, fake = whisper(["committed prefix", "", "whole clip rescue"])
+    feed_seconds(backend, HARD_SEGMENT_S)
+    assert backend.take_new_segments() == ["committed prefix"]
+    feed_seconds(backend, LONG_DICTATION_S + 1 - HARD_SEGMENT_S)
+
+    assert backend.finalize() == "whole clip rescue"
+    assert backend.segments_used_for_final is False
+    assert [samples for samples, _ in fake.calls[-2:]] == [
+        int((LONG_DICTATION_S + 1 - HARD_SEGMENT_S) * SAMPLE_RATE),
+        int((LONG_DICTATION_S + 1) * SAMPLE_RATE),
+    ]
+
+
 def test_initial_prompt_passed_to_every_decode(whisper):
     backend, fake = whisper(["seg one", "tail"])
     backend.initial_prompt = "Glossary: Velora."

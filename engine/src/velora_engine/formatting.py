@@ -76,7 +76,7 @@ SHORT_UTTERANCE_WORDS = 6  # < 6 words → punctuation-only, never restructured
 # punctuation at all. At or past this length, Terminal mode routes to the LLM
 # with a terminal-aware prompt; below it, verbatim as before.
 SMART_TERMINAL_MIN_WORDS = 12
-_PREFILL_PROBE = "one two three four five six seven eight nine ten eleven twelve"
+LLM_PATH_PROBE = "one two three four five six seven eight nine ten eleven twelve"
 
 
 def category_for_bundle(bundle_id: str | None) -> str | None:
@@ -698,6 +698,17 @@ def run_gate(
                 mode, category, True, "smart_terminal",
                 _tidy_whitespace(apply_spoken_commands(scrub_fillers(text))),
                 system_prompt, replacements, entities=entities or [])
+        if mode.name.lower() == "terminal":
+            # The explicit <12-word contract is model-free and command-safe:
+            # no vocabulary replacement, tag injection, or filler deletion may
+            # alter a shell command. Explicit "new line/paragraph" voice
+            # controls remain supported. Whisper commonly appends one sentence
+            # period, so retain the established shell-safety strip.
+            out = _tidy_whitespace(apply_spoken_commands(text))
+            out = re.sub(r"(?<!\.)\.$", "", out)
+            return GateResult(
+                mode, category, False, "formatting_off", out, None,
+                replacements, entities=entities or [])
         # Regex-level tidy only: spacing + spoken newline commands + replacements.
         out = _tidy_whitespace(apply_spoken_commands(text))
         out = apply_replacements(out, replacements)
@@ -758,7 +769,7 @@ def build_prefill_prompt_candidates(
     after all stable prompt material by `build_system_prompt`.
     """
     gate = run_gate(
-        _PREFILL_PROBE,
+        LLM_PATH_PROBE,
         config,
         bundle_id=bundle_id,
         app_name=app_name,

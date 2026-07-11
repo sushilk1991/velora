@@ -53,8 +53,28 @@ def test_terminal_short_command_stays_verbatim(config):
         assert gate.mode.name == "Terminal"
         assert gate.use_llm is False
         assert gate.reason == "formatting_off"
+        assert gate.text == "git rebase dash dash interactive head tilde three"
     assert formatting.category_for_bundle("com.googlecode.iterm2") == "code"
     assert formatting.category_for_bundle("com.google.Chrome") == "browser"
+
+
+def test_terminal_exact_word_boundary(config):
+    eleven = "one two three four five six seven eight nine ten eleven"
+    twelve = eleven + " twelve"
+    below = run_gate(eleven, config, bundle_id="com.apple.Terminal")
+    boundary = run_gate(twelve, config, bundle_id="com.apple.Terminal")
+    assert below.use_llm is False and below.text == eleven
+    assert boundary.use_llm is True and boundary.reason == "smart_terminal"
+
+
+def test_short_terminal_does_not_apply_replacements_or_tags(config):
+    config.data["replacements"] = {"git": "GIT"}
+    entities = [{"type": "file", "value": "status.ts"}]
+    raw = "git status.ts"
+    gate = run_gate(
+        raw, config, bundle_id="com.apple.Terminal", entities=entities
+    )
+    assert gate.text == raw
 
 
 def test_terminal_long_prose_uses_smart_llm(config):

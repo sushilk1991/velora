@@ -276,5 +276,35 @@ async def test_outer_hard_watchdog_still_bounds_a_wedged_generation(monkeypatch)
         )
         assert time.perf_counter() - started < 0.15
         assert result.reason == "timeout_hard"
+        assert engine.unhealthy is True
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_hard_watchdog_poison_rejects_followup_instead_of_queueing(monkeypatch):
+    import velora_engine.cleanup as cleanup_mod
+
+    engine = RecordingCleanup()
+    calls = []
+
+    def wedged(raw, *_args, **_kwargs):
+        calls.append(raw)
+        time.sleep(0.2)
+        return None
+
+    monkeypatch.setattr(cleanup_mod, "HARD_TIMEOUT_GRACE_S", 0.02)
+    monkeypatch.setattr(engine, "_run", wedged)
+    try:
+        first = await engine.cleanup("first", "system", timeout_ms=10, check_ratio=False)
+        started = time.perf_counter()
+        followup = await engine.cleanup(
+            "must not queue", "system", timeout_ms=10, check_ratio=False
+        )
+
+        assert first.reason == "timeout_hard"
+        assert followup.reason == "llm_unhealthy"
+        assert time.perf_counter() - started < 0.05
+        assert calls == ["first"]
     finally:
         engine.close()

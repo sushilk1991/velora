@@ -127,6 +127,26 @@ def test_guard_drops_high_compression_segments():
     assert guard_whisper_result(result) == "Four score and seven years ago."
 
 
+def test_guard_does_not_restore_aggregate_when_every_segment_is_rejected():
+    result = {
+        "text": "hallucinated loop",
+        "segments": [
+            {"text": "hallucinated loop", "compression_ratio": 3.2, "avg_logprob": -0.2},
+        ],
+    }
+    assert guard_whisper_result(result) == ""
+
+
+def test_guard_keeps_unicode_letter_segments():
+    result = {
+        "text": "नमस्ते दुनिया",
+        "segments": [
+            {"text": "नमस्ते दुनिया", "compression_ratio": 1.1, "avg_logprob": -0.2},
+        ],
+    }
+    assert guard_whisper_result(result) == "नमस्ते दुनिया"
+
+
 def test_allowed_terms_not_novel():
     # A learned/vocab spelling the model is TOLD to produce must not count as
     # hallucinated content ("whisper flow" → "Wispr Flow"; soft correction →

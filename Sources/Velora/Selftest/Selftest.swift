@@ -292,6 +292,12 @@ enum Selftest {
         expect(!words.text.hasPrefix("ive"), "HUD never starts inside a word")
         expect(words.text.count <= 24, "HUD word tail respects its character budget")
 
+        let longToken = String(repeating: "a", count: 60) + ".swift"
+        let elided = HUDTranscript.select(longToken, maxCharacters: 24)
+        expect(elided.text.count <= 24, "HUD long token respects its character budget")
+        expect(elided.text.contains("…"), "HUD long token is intentionally middle-elided")
+        expect(elided.text.hasSuffix(".swift"), "HUD long token keeps its useful suffix")
+
         let model = HUDModel()
         model.updatePartial("a useful live phrase")
         model.updatePartial("  \n ")
@@ -303,5 +309,8 @@ enum Selftest {
         expect(
             HUDPanel.panelSize.height >= HUDGeometry.expandedListeningHeight + 40,
             "HUD panel contains expanded transcript height and shadow")
+        expect(
+            HUDGeometry.controlRowWidth(chipWidth: 0) == 248,
+            "HUD control-row geometry includes every gap and spacer")
     }
 }

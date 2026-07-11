@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 import velora_engine.server as server_mod
+from velora_engine.cleanup import CleanupResult
 from velora_engine import protocol
 from velora_engine.config import Config
 from velora_engine.server import Engine
@@ -224,6 +225,36 @@ async def test_full_dictation_flow(engine):
     assert "auto_stopped" not in final  # only present on max-duration auto-stop
     # socket must be private to the user
     assert (sock.stat().st_mode & 0o777) == 0o600
+    client.close()
+
+
+async def test_hard_wedged_cleanup_sends_raw_final_then_restarts_engine(engine):
+    eng, sock = engine
+
+    class PoisoningCleanup:
+        loaded = True
+        model_id = "fake-poisoned"
+        unhealthy = False
+
+        async def cleanup(self, raw, _prompt, **_kwargs):
+            self.unhealthy = True
+            return CleanupResult(raw, False, 12, "timeout_hard")
+
+    eng.cleanup = PoisoningCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start", "session": "poisoned", "context": {
+            "bundle_id": "com.apple.Notes", "app_name": "Notes",
+        },
+    })
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "poisoned"})
+
+    final = await client.recv_event("final")
+    assert final["text"] == final["raw"]
+    assert final["cleanup_applied"] is False
+    assert eng.shutdown.is_set()
     client.close()
 
 

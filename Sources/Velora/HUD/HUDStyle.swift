@@ -65,8 +65,8 @@ enum VeloraBrand {
 /// transcript pill). One capsule morphs between states; the corner radius is
 /// always `height / 2` so the morph never shows a radius pop.
 enum HUDGeometry {
-    /// Capsule height in every visible state (the inserted circle is
-    /// `height`×`height`, so no vertical morph is ever needed).
+    /// Compact capsule height. The inserted state is `height`×`height`; live
+    /// transcript listening expands vertically to the value below.
     static let height: CGFloat = 56
     /// Two-row listening capsule once a live phrase is available.
     static let expandedListeningHeight: CGFloat = 92
@@ -98,6 +98,20 @@ enum HUDGeometry {
     static let transcriptCharacterLimit = 96
     static let transcriptFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
+
+    /// Exact minimum width of the bottom control row. The outer HStack has
+    /// two explicit 4 pt spacers and either three or four 12 pt inter-item
+    /// gaps depending on whether the context chip is present.
+    static func controlRowWidth(chipWidth: CGFloat) -> CGFloat {
+        let safeChipWidth = max(0, chipWidth)
+        let outerGapCount: CGFloat = safeChipWidth > 0 ? 4 : 3
+        return contentInsetH * 2
+            + safeChipWidth
+            + dotDiameter + VeloraSpacing.s + waveformSize.width
+            + timerWidth
+            + VeloraSpacing.xs * 2
+            + elementGap * outerGapCount
+    }
 
     /// Width of a single-line string in `font`, rounded up to whole points.
     static func textWidth(_ text: String, font: NSFont) -> CGFloat {
