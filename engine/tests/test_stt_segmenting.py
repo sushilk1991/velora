@@ -203,6 +203,16 @@ def test_segment_closes_on_pause(whisper):
     assert kwargs["path_or_hf_repo"] == "/fake/model"
 
 
+def test_production_whisper_does_not_queue_hud_previews_by_default():
+    backend = WhisperBackend("mlx-community/whisper-large-v3-turbo", "auto")
+    backend._loaded = True  # noqa: SLF001 — no decode occurs in this test
+    backend.start_session()
+
+    assert backend.preview_enabled is False
+    assert feed_seconds(backend, PREVIEW_FIRST_S + 1) == []
+    assert backend.take_preview_request() is None
+
+
 def test_preview_is_requested_early_without_decoding_in_feed(whisper):
     backend, fake = whisper(["early preview"], previews=True)
     assert feed_seconds(backend, PREVIEW_FIRST_S) == []

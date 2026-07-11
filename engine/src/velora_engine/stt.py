@@ -40,9 +40,9 @@ _PARAKEET_FEED_SAMPLES = SAMPLE_RATE // 2
 MIN_SEGMENT_S = 10.0  # min un-decoded audio before a pause may close a segment
 SEGMENT_SILENCE_S = 0.7  # trailing-pause length that closes a segment
 HARD_SEGMENT_S = 25.0  # close even mid-speech past this much un-decoded audio
-# HUD-only preview lane. Request creation is cheap and happens while audio is
-# ingested; the server decodes at most one request at a time on the model's
-# thread. These decodes never move the committed cursor or feed final stitching.
+# Optional HUD-only preview lane, retained for diagnostics but disabled in
+# production. Its extra decodes compete with authoritative Whisper and Qwen
+# work on slower Apple Silicon even though they never feed final stitching.
 PREVIEW_FIRST_S = 2.0
 PREVIEW_MIN_SPAN_S = 1.2
 PREVIEW_PAUSE_S = 0.3
@@ -438,7 +438,7 @@ class WhisperBackend:
         self._silence = SilenceTracker()
         self._span_had_speech = False  # speech seen since the last decode point
         self._retry_at_samples = 0  # backoff cursor after an empty speech-span decode
-        self.preview_enabled = True
+        self.preview_enabled = False
         self._last_preview_samples = 0
         self._preview_had_new_speech = False
         self._preview_interval_s = PREVIEW_BASE_INTERVAL_S
