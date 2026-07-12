@@ -17,6 +17,35 @@ validate_developer_id_identity_name() {
     || { signing_error "Developer ID identity must belong to Team ${VELORA_TEAM_ID}"; return 1; }
 }
 
+# A local app that listens for global keyboard input must have a stable code
+# requirement. TCC grants are tied to that requirement, so silently falling
+# back to ad-hoc signing makes System Settings show an old Velora grant while
+# the rebuilt process remains denied. Prefer the dedicated local identity,
+# then this team's Developer ID identity, then any stable Apple Development
+# identity. Callers must fail closed when none exists.
+select_local_signing_identity() {
+  local identities="${1:-$(security find-identity -v -p codesigning 2>/dev/null)}"
+  local identity
+
+  identity="$(printf '%s\n' "$identities" \
+    | sed -n 's/.*"\(Velora Dev Signing\)".*/\1/p' \
+    | head -n 1)"
+  if [[ -z "$identity" ]]; then
+    identity="$(printf '%s\n' "$identities" \
+      | sed -n "s/.*\"\\(Developer ID Application: [^\"]* (${VELORA_TEAM_ID})\\)\".*/\\1/p" \
+      | head -n 1)"
+  fi
+  if [[ -z "$identity" ]]; then
+    identity="$(printf '%s\n' "$identities" \
+      | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' \
+      | head -n 1)"
+  fi
+
+  [[ -n "$identity" ]] \
+    || { signing_error "local builds require a stable signing identity; run scripts/make-signing-cert.sh"; return 1; }
+  printf '%s\n' "$identity"
+}
+
 validate_signature_team_value() {
   local team="$1"
   [[ "$team" == "$VELORA_TEAM_ID" ]] \

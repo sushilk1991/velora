@@ -41,5 +41,5 @@ security add-trusted-cert -p codeSign -k ~/Library/Keychains/login.keychain-db \
   "$DIR/velora.crt" || true
 
 security find-identity -v -p codesigning | grep "$NAME" && echo "OK: '$NAME' created"
-echo "Note: after switching from ad-hoc to this identity, re-grant Microphone"
-echo "and Accessibility once (remove stale Velora entries in System Settings first)."
+echo "Note: after switching from ad-hoc to this identity, re-grant Microphone,"
+echo "Input Monitoring, and Accessibility once (remove stale Velora entries first)."

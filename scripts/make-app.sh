@@ -15,8 +15,8 @@
 #   bundle Info.plist as a dev fallback; the bundled engine takes precedence
 #   (set VELORA_ENGINE_DIR to override everything at runtime).
 # - UI sounds (start/stop/error.caf) generated if missing and copied in
-# - Development builds use the local "Velora Dev Signing" identity when
-#   present so TCC grants survive rebuilds. make-dmg.sh sets
+# - Development builds require a stable signing identity so TCC grants survive
+#   rebuilds. make-dmg.sh sets
 #   VELORA_DISTRIBUTION=1, which requires a Developer ID Application identity
 #   and an Apple-issued Developer ID provisioning profile that authorizes the
 #   microphone and iCloud Documents entitlements. Restricted entitlements fail
@@ -60,10 +60,8 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   fi
   validate_developer_id_identity_name "$IDENTITY"
 else
-  IDENTITY="-"
-  if security find-identity -v -p codesigning 2>/dev/null | grep -q "Velora Dev Signing"; then
-    IDENTITY="Velora Dev Signing"
-  fi
+  IDENTITY="$(select_local_signing_identity)"
+  echo "Local signing with: $IDENTITY"
 fi
 
 VERSION="$(./scripts/bump-version.sh "$BUMP")"
@@ -173,6 +171,4 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   validate_signing_plists "$SIGNED_ENTITLEMENTS" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
   validate_signed_app_team "$APP"
 fi
-[[ "$IDENTITY" == "-" ]] && echo "WARNING: ad-hoc signed — TCC grants will reset on next rebuild (run scripts/make-signing-cert.sh once to fix)"
-
 echo "OK: $APP (v$VERSION, build $BUILD_NUM)"

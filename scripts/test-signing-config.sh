@@ -85,6 +85,18 @@ expect_failure "wrong Developer ID identity team" \
   'Developer ID Application: Another Team (WRONGTEAM)'
 expect_failure "wrong signed-app team" validate_signature_team_value 'WRONGTEAM'
 
+LOCAL_IDENTITIES='  1) AAA "Apple Development: Developer (OTHERTEAM)"
+  2) BBB "Developer ID Application: Sushil Kumar (JZFVKGDPU4)"'
+[[ "$(select_local_signing_identity "$LOCAL_IDENTITIES")" \
+    == 'Developer ID Application: Sushil Kumar (JZFVKGDPU4)' ]]
+[[ "$(select_local_signing_identity \
+    '  1) AAA "Velora Dev Signing"')" == 'Velora Dev Signing' ]]
+[[ "$(select_local_signing_identity \
+    '  1) AAA "Apple Development: Developer (OTHERTEAM)"')" \
+    == 'Apple Development: Developer (OTHERTEAM)' ]]
+expect_failure "local build without a stable identity" \
+  select_local_signing_identity '0 valid identities found'
+
 cp "$REQUESTED" "$TMP_DIR/wrong-requested-team.plist"
 /usr/libexec/PlistBuddy -c \
   'Set :com.apple.developer.team-identifier WRONGTEAM' \
