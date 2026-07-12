@@ -260,7 +260,7 @@ Related fixes included in this feature:
 The current Developer ID build has only the microphone entitlement and no
 embedded Velora provisioning profile. Shipping requires:
 
-1. enabling iCloud Documents for the explicit `com.velora.app` App ID;
+1. enabling iCloud Documents for the explicit `com.sushil.velora` App ID;
 2. creating the Velora iCloud container;
 3. generating a Developer ID provisioning profile that authorizes it;
 4. embedding the profile in `Contents/embedded.provisionprofile`;
@@ -303,4 +303,3 @@ The feature is not complete until all of the following pass:
 - A Velora account or server.
 - App-managed encryption for this initial standard-protection release.
 - Mobile clients.
-

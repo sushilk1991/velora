@@ -9,15 +9,15 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.velora.app</string>
+	<string>com.sushil.velora</string>
 	<key>CFBundleName</key>
 	<string>Velora</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.4.8</string>
+	<string>0.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>94</string>
+	<string>111</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

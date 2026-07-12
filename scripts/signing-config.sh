@@ -2,7 +2,7 @@
 # Shared fail-closed checks for Velora's restricted iCloud entitlements.
 # Source this file from zsh scripts; it intentionally performs no work itself.
 
-VELORA_BUNDLE_ID="com.velora.app"
+VELORA_BUNDLE_ID="com.sushil.velora"
 VELORA_TEAM_ID="JZFVKGDPU4"
 VELORA_ICLOUD_CONTAINER="iCloud.com.velora.app"
 
@@ -136,8 +136,11 @@ validate_signing_plists() {
   require_exact_array_value "$requested" \
     'com.apple.developer.icloud-services' \
     'CloudDocuments' 'requested iCloud services' || return 1
+  [[ "$(plist_value "$requested" 'com.apple.developer.icloud-container-environment')" \
+      == "Production" ]] \
+    || { signing_error "requested iCloud container environment must be Production"; return 1; }
 
-  [[ "$(plist_value "$profile" 'Entitlements:application-identifier')" \
+  [[ "$(plist_value "$profile" 'Entitlements:com.apple.application-identifier')" \
       == "$VELORA_TEAM_ID.$VELORA_BUNDLE_ID" ]] \
     || { signing_error "profile application identifier must be $VELORA_TEAM_ID.$VELORA_BUNDLE_ID"; return 1; }
   [[ "$(plist_value "$profile" 'Entitlements:com.apple.developer.team-identifier')" \
@@ -158,6 +161,9 @@ validate_signing_plists() {
   profile_authorizes_value "$profile" \
     'com.apple.developer.icloud-services' 'CloudDocuments' \
     || { signing_error "profile does not authorize iCloud Documents"; return 1; }
+  [[ "$(plist_value "$profile" 'Entitlements:com.apple.developer.icloud-container-environment')" \
+      == "Production" ]] \
+    || { signing_error "profile must authorize the Production iCloud environment"; return 1; }
 
   local expiry expiry_epoch now_epoch
   expiry="$(plutil -extract ExpirationDate xml1 -o - "$profile" 2>/dev/null \

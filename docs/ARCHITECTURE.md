@@ -23,7 +23,7 @@ Two processes, one product:
 
 - **MLX is required** → Python is where MLX STT/LLM APIs are mature (`parakeet-mlx`, `mlx-whisper`, `mlx-lm`). Pure-Swift MLX STT is not production-ready (swift-parakeet-mlx archived). Research: docs/research/stack-research.md.
 - **Native feel is required** → the user-facing surface (menubar, HUD, hotkeys, insertion, settings) is 100% Swift/AppKit/SwiftUI. Python is an invisible inference server.
-- **No Xcode project required** → SwiftPM executable + hand-rolled `.app` bundle. Development uses a stable local identity; release builds require Developer ID signing, hardened runtime, notarization, and stapling. The stable bundle id is `com.velora.app`.
+- **No Xcode project required** → SwiftPM executable + hand-rolled `.app` bundle. Development uses a stable local identity; release builds require Developer ID signing, hardened runtime, notarization, and stapling. The stable bundle id is `com.sushil.velora`; a one-time migration copies missing `velora.*` preferences from the legacy `com.velora.app` domain.
 
 ## Process lifecycle
 

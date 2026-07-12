@@ -11,6 +11,12 @@ if CommandLine.arguments.contains("--selftest") {
     exit(Selftest.run())
 }
 
+let migratedPreferenceCount = PreferencesDomainMigration.run()
+if migratedPreferenceCount > 0 {
+    NSLog("Velora: migrated %d preferences from the legacy bundle identifier",
+          migratedPreferenceCount)
+}
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate

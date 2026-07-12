@@ -138,7 +138,7 @@ Known limitations:
 
 ## Contributing & license
 
-Developer ID release builds that include Personal Dictionary sync need an explicit `com.velora.app` App ID with iCloud Documents enabled, the `iCloud.com.velora.app` ubiquity container, and an Apple-issued Developer ID provisioning profile. Keep that expiring profile outside Git and pass its path at release time:
+Developer ID release builds that include Personal Dictionary sync need the explicit `com.sushil.velora` App ID with iCloud Documents enabled, the existing `iCloud.com.velora.app` ubiquity container, and an Apple-issued Developer ID provisioning profile. Keep that expiring profile outside Git and pass its path at release time:
 
 ```sh
 VELORA_DISTRIBUTION=1 \

@@ -560,7 +560,7 @@ Skip the commit if the review finds no valid issues.
 
 **Step 1: Verify external Apple capability state**
 
-Before building the distribution artifact, prove the explicit App ID `com.velora.app`, iCloud Documents service, ubiquity container, and Developer ID provisioning profile all agree. Decode the profile locally and compare it to source entitlements.
+Before building the distribution artifact, prove the explicit App ID `com.sushil.velora`, iCloud Documents service, `iCloud.com.velora.app` ubiquity container, and Developer ID provisioning profile all agree. Decode the profile locally and compare it to source entitlements.
 
 **Step 2: Build the feature release**
 

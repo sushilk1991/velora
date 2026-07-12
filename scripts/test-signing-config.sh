@@ -18,7 +18,7 @@ cat > "$REQUESTED" <<'PLIST'
 <plist version="1.0"><dict>
   <key>com.apple.security.device.audio-input</key><true/>
   <key>com.apple.application-identifier</key>
-  <string>JZFVKGDPU4.com.velora.app</string>
+  <string>JZFVKGDPU4.com.sushil.velora</string>
   <key>com.apple.developer.team-identifier</key>
   <string>JZFVKGDPU4</string>
   <key>com.apple.developer.icloud-container-identifiers</key>
@@ -27,6 +27,8 @@ cat > "$REQUESTED" <<'PLIST'
   <array><string>iCloud.com.velora.app</string></array>
   <key>com.apple.developer.icloud-services</key>
   <array><string>CloudDocuments</string></array>
+  <key>com.apple.developer.icloud-container-environment</key>
+  <string>Production</string>
 </dict></plist>
 PLIST
 
@@ -39,7 +41,7 @@ cat > "$PROFILE" <<'PLIST'
   <key>ProvisionsAllDevices</key><true/>
   <key>ExpirationDate</key><date>2035-01-01T00:00:00Z</date>
   <key>Entitlements</key><dict>
-    <key>application-identifier</key><string>JZFVKGDPU4.com.velora.app</string>
+    <key>com.apple.application-identifier</key><string>JZFVKGDPU4.com.sushil.velora</string>
     <key>com.apple.developer.team-identifier</key><string>JZFVKGDPU4</string>
     <key>com.apple.developer.icloud-container-identifiers</key>
     <array><string>iCloud.com.velora.app</string></array>
@@ -47,6 +49,8 @@ cat > "$PROFILE" <<'PLIST'
     <array><string>iCloud.com.velora.app</string></array>
     <key>com.apple.developer.icloud-services</key>
     <array><string>CloudDocuments</string></array>
+    <key>com.apple.developer.icloud-container-environment</key>
+    <string>Production</string>
     <key>get-task-allow</key><false/>
   </dict>
 </dict></plist>
@@ -56,7 +60,7 @@ cat > "$INFO" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleIdentifier</key><string>com.velora.app</string>
+  <key>CFBundleIdentifier</key><string>com.sushil.velora</string>
   <key>NSUbiquitousContainers</key><dict>
     <key>iCloud.com.velora.app</key><dict>
       <key>NSUbiquitousContainerIsDocumentScopePublic</key><true/>
@@ -106,7 +110,7 @@ expect_failure "mismatched requested team identifier" \
 
 cp "$PROFILE" "$TMP_DIR/mismatch.plist"
 /usr/libexec/PlistBuddy -c \
-  'Set :Entitlements:application-identifier WRONG.com.velora.app' \
+  'Set :Entitlements:com.apple.application-identifier WRONG.com.sushil.velora' \
   "$TMP_DIR/mismatch.plist"
 expect_failure "mismatched application identifier" \
   validate_signing_plists "$REQUESTED" "$TMP_DIR/mismatch.plist" "$INFO"
@@ -124,6 +128,43 @@ cp "$PROFILE" "$TMP_DIR/no-service.plist"
   "$TMP_DIR/no-service.plist"
 expect_failure "missing CloudDocuments authorization" \
   validate_signing_plists "$REQUESTED" "$TMP_DIR/no-service.plist" "$INFO"
+
+cp "$PROFILE" "$TMP_DIR/debuggable-profile.plist"
+/usr/libexec/PlistBuddy -c 'Set :Entitlements:get-task-allow true' \
+  "$TMP_DIR/debuggable-profile.plist"
+expect_failure "debuggable distribution profile" \
+  validate_signing_plists "$REQUESTED" "$TMP_DIR/debuggable-profile.plist" "$INFO"
+
+cp "$PROFILE" "$TMP_DIR/ios-profile.plist"
+/usr/libexec/PlistBuddy -c 'Set :Platform:0 iOS' "$TMP_DIR/ios-profile.plist"
+expect_failure "iOS profile for macOS app" \
+  validate_signing_plists "$REQUESTED" "$TMP_DIR/ios-profile.plist" "$INFO"
+
+cp "$PROFILE" "$TMP_DIR/device-profile.plist"
+/usr/libexec/PlistBuddy -c 'Delete :ProvisionsAllDevices' "$TMP_DIR/device-profile.plist"
+expect_failure "device-limited profile" \
+  validate_signing_plists "$REQUESTED" "$TMP_DIR/device-profile.plist" "$INFO"
+
+cp "$PROFILE" "$TMP_DIR/wrong-cloud-container.plist"
+/usr/libexec/PlistBuddy -c \
+  'Set :Entitlements:com.apple.developer.icloud-container-identifiers:0 iCloud.com.example.wrong' \
+  "$TMP_DIR/wrong-cloud-container.plist"
+expect_failure "wrong iCloud container authorization" \
+  validate_signing_plists "$REQUESTED" "$TMP_DIR/wrong-cloud-container.plist" "$INFO"
+
+cp "$REQUESTED" "$TMP_DIR/development-environment.plist"
+/usr/libexec/PlistBuddy -c \
+  'Set :com.apple.developer.icloud-container-environment Development' \
+  "$TMP_DIR/development-environment.plist"
+expect_failure "non-production requested iCloud environment" \
+  validate_signing_plists "$TMP_DIR/development-environment.plist" "$PROFILE" "$INFO"
+
+cp "$PROFILE" "$TMP_DIR/development-profile.plist"
+/usr/libexec/PlistBuddy -c \
+  'Set :Entitlements:com.apple.developer.icloud-container-environment Development' \
+  "$TMP_DIR/development-profile.plist"
+expect_failure "non-production profile iCloud environment" \
+  validate_signing_plists "$REQUESTED" "$TMP_DIR/development-profile.plist" "$INFO"
 
 cp "$PROFILE" "$TMP_DIR/expired.plist"
 plutil -replace ExpirationDate -date '2020-01-01T00:00:00Z' \

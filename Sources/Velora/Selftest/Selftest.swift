@@ -44,6 +44,7 @@ enum Selftest {
         testLearningStoreProjection()
         testAutoVocabProjection()
         testManualConfigProjection()
+        testPreferencesDomainMigration()
         testDictionaryRepositoryMigration()
         testDictionaryRepositoryCRUD()
         testDictionaryRepositoryRemoteMerge()
@@ -73,6 +74,49 @@ enum Selftest {
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    // MARK: - Bundle identifier migration
+
+    private static func testPreferencesDomainMigration() {
+        let suffix = UUID().uuidString
+        let sourceDomain = "com.velora.selftest.legacy.\(suffix)"
+        let destinationDomain = "com.velora.selftest.current.\(suffix)"
+        let coordinatorDomain = "com.velora.selftest.coordinator.\(suffix)"
+        let source = UserDefaults(suiteName: sourceDomain)!
+        let destination = UserDefaults(suiteName: destinationDomain)!
+        let coordinator = UserDefaults(suiteName: coordinatorDomain)!
+        defer {
+            source.removePersistentDomain(forName: sourceDomain)
+            destination.removePersistentDomain(forName: destinationDomain)
+            coordinator.removePersistentDomain(forName: coordinatorDomain)
+        }
+
+        source.set(true, forKey: "velora.onboardingComplete")
+        source.set("legacy-device", forKey: "velora.dictionary.deviceID")
+        source.set("must-not-migrate", forKey: "unrelated.setting")
+        destination.set("current-device", forKey: "velora.dictionary.deviceID")
+
+        let copied = PreferencesDomainMigration.run(
+            sourceDomain: sourceDomain,
+            destinationDomain: destinationDomain,
+            destination: coordinator)
+        expect(copied == 1, "bundle migration copies only missing Velora preferences")
+        expect(destination.bool(forKey: "velora.onboardingComplete"),
+               "bundle migration preserves onboarding completion")
+        expect(destination.string(forKey: "velora.dictionary.deviceID") == "current-device",
+               "bundle migration never overwrites current-domain preferences")
+        expect(destination.object(forKey: "unrelated.setting") == nil,
+               "bundle migration ignores keys outside the Velora namespace")
+
+        source.set("late-change", forKey: "velora.hotkeyMode")
+        expect(PreferencesDomainMigration.run(
+            sourceDomain: sourceDomain,
+            destinationDomain: destinationDomain,
+            destination: coordinator) == 0,
+               "bundle migration runs only once")
+        expect(destination.string(forKey: "velora.hotkeyMode") == nil,
+               "a completed migration does not replay stale legacy settings")
     }
 
     private static func testKeyboardShortcutMapping() {

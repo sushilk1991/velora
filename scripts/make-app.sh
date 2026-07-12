@@ -163,7 +163,7 @@ fi
 if [[ -x "$APP/Contents/Resources/bin/uv" ]]; then
   codesign "${SIGN_ARGS[@]}" "$APP/Contents/Resources/bin/uv"
 fi
-codesign "${SIGN_ARGS[@]}" "${APP_SIGN_ARGS[@]}" --identifier com.velora.app "$APP"
+codesign "${SIGN_ARGS[@]}" "${APP_SIGN_ARGS[@]}" --identifier "$VELORA_BUNDLE_ID" "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
 if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   SIGNED_ENTITLEMENTS="$(mktemp "${TMPDIR:-/tmp}/velora-signed-entitlements.XXXXXX")"

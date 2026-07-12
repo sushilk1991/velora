@@ -746,7 +746,7 @@ final class DictationController: NSObject {
         // ourselves are frontmost, insert straight into our key window's
         // focused text view via the responder chain (zero TCC), skip the
         // fallback, and still fire the inserted notification.
-        let ownBundleID = Bundle.main.bundleIdentifier ?? "com.velora.app"
+        let ownBundleID = Bundle.main.bundleIdentifier ?? "com.sushil.velora"
         if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == ownBundleID,
            inserter.insertIntoOwnWindow(text, mode: mode) {
             NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
