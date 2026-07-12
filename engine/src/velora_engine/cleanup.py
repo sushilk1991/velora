@@ -40,11 +40,10 @@ RATIO_MAX = 1.6
 # input ("…scratch all of that just tell him i'll call back" → 5 words).
 RATIO_FLOOR_DEFAULT = 0.35
 RATIO_FLOOR_RETRACTION = 0.12
-# Novel-token budget: cleanup output should be built from the input's words.
-# Real hallucination (answering, greeting, summarizing) introduces MANY novel
-# tokens; a small grammar/number fix ("don't"→"doesn't", "three"→"3")
-# introduces one or two. Require both a count and a fraction so short outputs
-# with a legitimate fix or two never trip.
+# Novel-token budget: cleanup output should be built from the input's words or
+# conservative grammatical forms of those words. Real hallucination (answering,
+# greeting, summarizing) introduces MANY unrelated tokens. Require both a count
+# and a fraction so a small legitimate fix never trips.
 NOVEL_FRACTION_MAX = 0.20
 NOVEL_MIN_TOKENS = 3
 MIN_MAX_TOKENS = 96
@@ -86,6 +85,20 @@ _TENS = {"twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
 _UNITS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
           "seven": 7, "eight": 8, "nine": 9}
 
+# Only present-agreement auxiliary changes are containment-equivalent. Past,
+# participle, and progressive forms are intentionally absent: admitting them
+# let a cleanup silently change the tense of an otherwise valid sentence.
+_PRESENT_AUXILIARY_FORMS = {
+    "be": frozenset({"am", "is", "are"}),
+    "am": frozenset({"be", "is", "are"}),
+    "is": frozenset({"be", "am", "are"}),
+    "are": frozenset({"be", "am", "is"}),
+    "have": frozenset({"has"}),
+    "has": frozenset({"have"}),
+    "do": frozenset({"does"}),
+    "does": frozenset({"do"}),
+}
+
 
 def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
     """Scale the cleanup budget with input length.
@@ -103,12 +116,35 @@ def _guard_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower())
 
 
+def _grammatical_variants(token: str) -> set[str]:
+    """Conservative output forms that preserve one raw token's identity.
+
+    This is deliberately one-way from the raw transcript to the cleanup: it
+    admits ordinary plural/agreement suffixes plus the present auxiliary forms
+    above. It does not admit tense/aspect changes, stem arbitrary output words,
+    or loosen the unrelated-novel-token budget.
+    """
+    variants = set(_PRESENT_AUXILIARY_FORMS.get(token, ()))
+    if token in _PRESENT_AUXILIARY_FORMS:
+        return variants
+    if len(token) < 3 or not token.isalpha():
+        return variants
+
+    if token.endswith("y") and token[-2] not in "aeiou":
+        variants.add(token[:-1] + "ies")
+    elif token.endswith(("s", "x", "z", "ch", "sh", "o")):
+        variants.add(token + "es")
+    else:
+        variants.add(token + "s")
+    return variants
+
+
 def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = None) -> str | None:
     """Anti-over-editing guard v2. Returns a rejection reason, or None if OK.
 
-    Containment first: every output token should come from the input (cleanup
-    deletes and re-punctuates; it never writes new words). Merges of up to
-    three adjacent input tokens are allowed ("6 p m" → "6pm", "auth check" →
+    Containment first: every output token should come from the input or be a
+    conservative grammatical form of one input token. Merges of up to three
+    adjacent input tokens are allowed ("6 p m" → "6pm", "auth check" →
     "authCheck"), and small outputs get slack (≥3 novel tokens required). The
     length ratio is only a backstop — growth capped hard, shrinkage floored
     loosely, and floored barely at all when the raw text contains a spoken
@@ -126,6 +162,8 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
     out_tokens = _guard_tokens(out)
     if raw_tokens and out_tokens:
         allowed = set(raw_tokens)
+        raw_token_set = set(raw_tokens)
+        grammatical_variants: set[str] = set()
         # Vocabulary/learned terms are legitimate spellings the model is TOLD
         # to produce ("whisper flow" → "Wispr Flow", a learned soft correction
         # to "Airlearn") — but only as SUBSTITUTIONS for words that left the
@@ -150,6 +188,9 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
             for i in range(len(raw_tokens) - n + 1):
                 allowed.add("".join(raw_tokens[i : i + n]))
         for i, tok in enumerate(raw_tokens):
+            variants = _grammatical_variants(tok)
+            grammatical_variants.update(variants)
+            allowed.update(variants)
             for digits in _NUMBER_WORDS.get(tok, ()):
                 allowed.add(digits)
             # "twenty five" → "25" (and "25th" via the ordinal unit form)
@@ -161,8 +202,22 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
                     if digits.endswith(("st", "nd", "rd", "th")):
                         allowed.add(str(_TENS[tok] + int(digits[:-2])) + digits[-2:])
         novel = [t for t in out_tokens if t not in allowed]
-        if len(novel) >= NOVEL_MIN_TOKENS and len(novel) / len(out_tokens) > NOVEL_FRACTION_MAX:
-            return f"novel_content({len(novel)}/{len(out_tokens)})"
+        # An all-inflection result is the exact grammar-repair case this guard
+        # permits. Once unrelated output appears, however, count the inflected
+        # substitutions too: otherwise a couple of allowed plurals can hide a
+        # sentence-wide tense rewrite under the two-token novelty slack.
+        changed = novel
+        if novel:
+            inflected = [
+                t for t in out_tokens
+                if t not in raw_token_set and t in grammatical_variants
+            ]
+            changed = novel + inflected
+        if (
+            len(changed) >= NOVEL_MIN_TOKENS
+            and len(changed) / len(out_tokens) > NOVEL_FRACTION_MAX
+        ):
+            return f"novel_content({len(changed)}/{len(out_tokens)})"
     # KNOWN RESIDUAL (accepted): an answer assembled purely from input words
     # ("should we ship friday or monday" → "we should ship friday") passes
     # containment — no length/token guard can tell that from transcription.

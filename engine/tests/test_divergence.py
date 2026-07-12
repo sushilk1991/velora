@@ -100,6 +100,49 @@ def test_small_grammar_fix_not_novel():
     assert check_divergence(raw, out) is None
 
 
+def test_sentence_wide_grammar_inflections_not_novel():
+    # Live release smoke: three ordinary agreement/number repairs crossed the
+    # global novelty threshold and caused the complete cleanup to be discarded.
+    raw = "this sentence need a full stop and it also have two grammar issue"
+    out = "This sentence needs a full stop, and it also has two grammar issues."
+    assert check_divergence(raw, out) is None
+
+
+def test_sentence_wide_past_tense_rewrite_rejected():
+    raw = "we plan and review and test today"
+    out = "We planned and reviewed and tested today."
+    reason = check_divergence(raw, out)
+    assert reason is not None and reason.startswith("novel_content")
+
+
+def test_plural_inflections_cannot_hide_unrelated_tense_rewrites():
+    raw = "we plan the test and review the change today"
+    out = "We planned the tests and reviewed the changes today."
+    reason = check_divergence(raw, out)
+    assert reason is not None and reason.startswith("novel_content")
+
+
+def test_past_auxiliary_rewrite_rejected():
+    raw = "we have a plan and do the review and are ready"
+    out = "We had a plan and did the review and were ready."
+    reason = check_divergence(raw, out)
+    assert reason is not None and reason.startswith("novel_content")
+
+
+def test_mechanical_nonword_tense_forms_rejected():
+    raw = "we have and do and be careful"
+    out = "We haved and doed and bed careful."
+    reason = check_divergence(raw, out)
+    assert reason is not None and reason.startswith("novel_content")
+
+
+def test_mechanical_nonword_present_forms_rejected():
+    raw = "the box and dish and buzz while we have and are ready"
+    out = "The boxs and dishs and buzzs while we haves and ares ready."
+    reason = check_divergence(raw, out)
+    assert reason is not None and reason.startswith("novel_content")
+
+
 def test_token_merges_not_novel():
     # "6 p m" → "6pm" style merges are normal cleanup, not hallucination.
     raw = "meet at 6 p m tomorrow and ping the auth check module afterwards"
