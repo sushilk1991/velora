@@ -78,7 +78,8 @@ final class HUDPanel: NSObject {
         hosting.menuProvider = { [weak self] in self?.buildContextMenu() }
         panel.contentView = hosting
 
-        model.edge = HUDEdge.edge(for: AppConfig.shared.hudPosition)
+        model.edge = HUDEdge.edge(
+            for: AppConfig.shared.hudPosition, custom: AppConfig.shared.hudCustomEdge)
 
         // A persistent pill never re-shows, so it must re-anchor itself when
         // displays change (undock, resolution switch) — the transient HUD used
@@ -101,30 +102,116 @@ final class HUDPanel: NSObject {
     }
 
     /// Called by the hosting view when a user drag of the capsule finishes
-    /// (`performDrag` returned). Re-anchors to `.center` without moving the
-    /// capsule visually, then persists the spot as the Custom position.
+    /// (`performDrag` returned). Re-anchors the capsule to the screen edge it
+    /// was dropped near — so later width changes grow toward open space, never
+    /// off-screen — and persists the spot (plus its anchor) as Custom.
     private func finalizeUserDrag() {
-        // Re-anchoring changes where the capsule sits inside the fixed-size
-        // panel; shift the panel by the difference so the capsule stays
-        // exactly where the user dropped it.
-        let width = HUDView.capsuleMetrics(for: model.state, context: model.sessionContext)
-            .size.width
-        let shift = Self.capsuleMinX(edge: model.edge, capsuleWidth: width)
-            - Self.capsuleMinX(edge: .center, capsuleWidth: width)
-        if shift != 0 {
-            panel.setFrameOrigin(NSPoint(x: panel.frame.minX + shift, y: panel.frame.minY))
-        }
-        model.edge = .center
-
         guard let screen = panel.screen ?? NSScreen.main else { return }
+        let size = HUDView.capsuleMetrics(for: model.state, context: model.sessionContext).size
+        let capsule = NSRect(
+            x: panel.frame.minX + Self.capsuleMinX(edge: model.edge, capsuleWidth: size.width),
+            y: panel.frame.midY - size.height / 2,
+            width: size.width, height: size.height)
+
         let visible = screen.visibleFrame
-        let dx = max(1, visible.width - Self.panelSize.width)
-        let dy = max(1, visible.height - Self.panelSize.height)
-        let fx = (panel.frame.minX - visible.minX) / dx
-        let fy = (panel.frame.minY - visible.minY) / dy
-        AppConfig.shared.hudCustomOrigin = CGPoint(x: min(max(fx, 0), 1), y: min(max(fy, 0), 1))
+        let anchor = Self.customAnchor(capsule: capsule, visible: visible)
+        panel.setFrameOrigin(anchor.panelOrigin)
+        model.edge = anchor.edge
+
+        AppConfig.shared.hudCustomOrigin = Self.customFraction(
+            panelOrigin: anchor.panelOrigin, edge: anchor.edge, visible: visible)
+        AppConfig.shared.hudCustomEdge = anchor.edge
         AppConfig.shared.hudPosition = .custom
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+    }
+
+    /// The persisted form of a custom spot: the standby pill's CENTER as a
+    /// fraction (0…1) of the visible frame. The pill center is used — not the
+    /// panel origin, which legitimately overhangs the screen by a fixed point
+    /// amount — because a fixed overhang stored as a fraction would scale on a
+    /// different-sized display and push the capsule off-screen (review
+    /// finding). A center fraction restores on-screen on any display.
+    static func customFraction(
+        panelOrigin: NSPoint, edge: HUDEdge, visible: NSRect
+    ) -> CGPoint {
+        let pill = HUDGeometry.standbySize
+        let midX = panelOrigin.x + capsuleMinX(edge: edge, capsuleWidth: pill.width)
+            + pill.width / 2
+        let midY = panelOrigin.y + panelSize.height / 2
+        return CGPoint(
+            x: min(max((midX - visible.minX) / max(1, visible.width), 0), 1),
+            y: min(max((midY - visible.minY) / max(1, visible.height), 0), 1))
+    }
+
+    /// Rebuilds the pill rect a stored fraction describes on `visible`. Feed
+    /// it back through `customAnchor` to place the panel — that re-derives the
+    /// growth anchor and re-clamps for THIS screen, so a spot saved on one
+    /// display can never restore off-screen on another.
+    static func customPillRect(fraction: CGPoint, visible: NSRect) -> NSRect {
+        let pill = HUDGeometry.standbySize
+        return NSRect(
+            x: visible.minX + fraction.x * visible.width - pill.width / 2,
+            y: visible.minY + fraction.y * visible.height - pill.height / 2,
+            width: pill.width, height: pill.height)
+    }
+
+    /// Where a dragged pill settles: the growth anchor and panel origin for a
+    /// capsule dropped at `capsule` (screen coordinates). Pure geometry so the
+    /// selftest can pin it.
+    ///
+    /// The anchor is chosen so the widest session capsule
+    /// (`maxListeningWidth`) can grow from the drop point without leaving the
+    /// visible frame — near the right edge it grows leftward, and vice versa.
+    /// The drop is clamped so the pill itself (and the full-height capsule)
+    /// stays on screen; the capsule does not move otherwise.
+    static func customAnchor(
+        capsule: NSRect, visible: NSRect
+    ) -> (edge: HUDEdge, panelOrigin: NSPoint) {
+        let inset = VeloraSpacing.xl
+        let halfMax = HUDGeometry.maxListeningWidth / 2
+        let roomLeft = capsule.midX - visible.minX
+        let roomRight = visible.maxX - capsule.midX
+
+        let edge: HUDEdge
+        if roomRight < halfMax + inset, roomLeft < halfMax + inset {
+            edge = roomLeft < roomRight ? .leading : .trailing  // tiny screen
+        } else if roomRight < halfMax + inset {
+            edge = .trailing
+        } else if roomLeft < halfMax + inset {
+            edge = .leading
+        } else {
+            edge = .center
+        }
+
+        // Panel x per anchor. Edge anchors keep the capsule's screen-side edge
+        // `panelEdgePadding` from the screen edge at the closest drop, which
+        // puts the panel exactly flush with the visible frame.
+        let panelX: CGFloat
+        switch edge {
+        case .trailing:
+            let maxX = min(
+                max(capsule.maxX, visible.minX + inset + capsule.width),
+                visible.maxX - HUDGeometry.panelEdgePadding)
+            panelX = maxX + HUDGeometry.panelEdgePadding - panelSize.width
+        case .leading:
+            let minX = min(
+                max(capsule.minX, visible.minX + HUDGeometry.panelEdgePadding),
+                visible.maxX - inset - capsule.width)
+            panelX = minX - HUDGeometry.panelEdgePadding
+        case .center:
+            let midX = min(
+                max(capsule.midX, visible.minX + inset + halfMax),
+                visible.maxX - inset - halfMax)
+            panelX = midX - panelSize.width / 2
+        }
+
+        // Vertically the capsule is centered in the panel; clamp so the
+        // full-height (session) capsule stays inside the visible frame.
+        let halfHeight = HUDGeometry.height / 2
+        let midY = min(
+            max(capsule.midY, visible.minY + inset + halfHeight),
+            visible.maxY - inset - halfHeight)
+        return (edge, NSPoint(x: panelX, y: midY - panelSize.height / 2))
     }
 
     /// Leading x of the capsule inside the panel for an edge anchor.
@@ -150,7 +237,8 @@ final class HUDPanel: NSObject {
             return
         }
         needsPrefsReapply = false
-        model.edge = HUDEdge.edge(for: AppConfig.shared.hudPosition)
+        model.edge = HUDEdge.edge(
+            for: AppConfig.shared.hudPosition, custom: AppConfig.shared.hudCustomEdge)
         if AppConfig.shared.hudAlwaysVisible {
             if model.state.isHidden {
                 transition(to: .standby)
@@ -199,7 +287,13 @@ final class HUDPanel: NSObject {
     /// 20 pt inset from the visible frame (above the Dock / below the menubar,
     /// clear of screen corners).
     private func position() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        // A dragged spot belongs to the screen the pill was dropped on, so
+        // custom positions restore against the panel's own screen — restoring
+        // against NSScreen.main teleported the pill to whichever display held
+        // key focus (review finding). Presets keep following the main screen.
+        let isCustom = AppConfig.shared.hudPosition == .custom
+        guard let screen = (isCustom ? panel.screen : nil)
+            ?? NSScreen.main ?? NSScreen.screens.first else { return }
         let visible = screen.visibleFrame
         let inset = VeloraSpacing.xl
         let centerX = visible.midX - Self.panelSize.width / 2
@@ -227,11 +321,15 @@ final class HUDPanel: NSObject {
             origin = NSPoint(x: rightX, y: topY)
         case .custom:
             if let frac = AppConfig.shared.hudCustomOrigin {
-                let dx = max(1, visible.width - Self.panelSize.width)
-                let dy = max(1, visible.height - Self.panelSize.height)
-                origin = NSPoint(x: visible.minX + frac.x * dx, y: visible.minY + frac.y * dy)
+                let anchor = Self.customAnchor(
+                    capsule: Self.customPillRect(fraction: frac, visible: visible),
+                    visible: visible)
+                // The re-derived anchor is authoritative for this screen (the
+                // drop screen may have been a different size or shape).
+                model.edge = anchor.edge
+                AppConfig.shared.hudCustomEdge = anchor.edge
+                origin = anchor.panelOrigin
             } else {  // custom with no stored origin yet → bottom center
-                // (matches the `.center` capsule anchor `.custom` renders with)
                 origin = NSPoint(x: centerX, y: bottomY)
             }
         }

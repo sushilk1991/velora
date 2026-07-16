@@ -174,6 +174,7 @@ final class AppConfig {
         static let hudPosition = "velora.hudPosition"
         static let hudCustomOriginX = "velora.hudCustomOriginX"
         static let hudCustomOriginY = "velora.hudCustomOriginY"
+        static let hudCustomEdge = "velora.hudCustomEdge"
         static let hudAlwaysVisible = "velora.hudAlwaysVisible"
         static let appearance = "velora.appearance"
         static let language = "velora.language"
@@ -281,8 +282,18 @@ final class AppConfig {
         set { defaults.set(newValue, forKey: Key.hudAlwaysVisible) }
     }
 
-    /// Persisted custom HUD origin as a fraction (0…1) of the screen's visible
-    /// frame, so it survives resolution/monitor changes. `nil` until first drag.
+    /// Growth anchor for the dragged (custom) pill position — chosen from
+    /// where the pill was dropped so the capsule always grows toward open
+    /// screen space instead of cropping at a screen edge.
+    var hudCustomEdge: HUDEdge {
+        get { HUDEdge(rawValue: defaults.string(forKey: Key.hudCustomEdge) ?? "") ?? .center }
+        set { defaults.set(newValue.rawValue, forKey: Key.hudCustomEdge) }
+    }
+
+    /// Persisted custom HUD spot: the standby pill's CENTER as a fraction
+    /// (0…1) of the screen's visible frame, so it survives resolution and
+    /// monitor changes and always restores on-screen. `nil` until first drag.
+    /// See `HUDPanel.customFraction` / `customPillRect`.
     var hudCustomOrigin: CGPoint? {
         get {
             guard defaults.object(forKey: Key.hudCustomOriginX) != nil else { return nil }

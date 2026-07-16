@@ -3,9 +3,8 @@ import Combine
 import SwiftUI
 
 /// Sidebar selection shared between the window controller (deep links from
-/// the menubar/HUD) and the SwiftUI shell. Optional because that is the type
-/// `List(selection:)` binds against — a mismatched tag type silently breaks
-/// row selection on macOS.
+/// the menubar/HUD) and the SwiftUI shell. `tab` stays optional for API
+/// stability; `current` resolves nil to General.
 final class SettingsWindowSelection: ObservableObject {
     @Published var tab: SettingsTab? = .general
 
@@ -94,6 +93,7 @@ struct SettingsRootView: View {
     var body: some View {
         NavigationSplitView {
             sidebar
+                .toolbar(removing: .sidebarToggle)  // fixed sidebar, like System Settings
         } detail: {
             detail(for: selection.current)
                 .frame(minWidth: 560, maxWidth: .infinity, maxHeight: .infinity)
@@ -101,48 +101,26 @@ struct SettingsRootView: View {
         .frame(minWidth: 780, minHeight: 560)
     }
 
+    /// Hand-rolled sidebar (System Settings idiom: unlabeled groups separated
+    /// by whitespace, small icon tiles, accent-filled selected row). The rows
+    /// are plain Buttons with an explicit selection background — `List`
+    /// selection rendered no highlight here, and a settings sidebar must never
+    /// hide which pane is open (user-reported failure, twice).
     private var sidebar: some View {
-        List(selection: $selection.tab) {
-            ForEach(Array(SettingsTab.sidebarSections.enumerated()), id: \.offset) { _, group in
-                if let title = group.title {
-                    Section(title) {
-                        ForEach(group.tabs) { row($0) }
-                    }
-                } else {
-                    Section {
-                        ForEach(group.tabs) { row($0) }
+        ScrollView {
+            VStack(alignment: .leading, spacing: VeloraSpacing.l) {
+                ForEach(Array(SettingsTab.sidebarGroups.enumerated()), id: \.offset) { _, group in
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(group) { tab in
+                            SettingsSidebarRow(tab: tab, selection: selection)
+                        }
                     }
                 }
             }
+            .padding(.horizontal, VeloraSpacing.s)
+            .padding(.vertical, VeloraSpacing.m)
         }
-        .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 190, ideal: 205, max: 250)
-    }
-
-    /// One sidebar row: a small colored icon tile + the section name
-    /// (the System Settings idiom).
-    private func row(_ tab: SettingsTab) -> some View {
-        Label {
-            Text(tab.title)
-        } icon: {
-            Image(systemName: tab.symbol)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 22, height: 22)
-                .background(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(tab.tileColor.gradient)
-                        .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contentShape(Rectangle())
-        // Belt and suspenders: List selection drives the pane, and a direct
-        // tap on the row does too — a tag/selection type quirk must never
-        // leave the sidebar dead again (user-reported failure).
-        .simultaneousGesture(TapGesture().onEnded { selection.tab = tab })
-        // Explicit optional cast: the List selection is SettingsTab?, and the
-        // tag type must match it exactly for row selection to bind.
-        .tag(tab as SettingsTab?)
+        .navigationSplitViewColumnWidth(215)
     }
 
     @ViewBuilder
@@ -171,5 +149,42 @@ struct SettingsRootView: View {
         case .about:
             AboutSettingsView()
         }
+    }
+}
+
+/// One sidebar row: 20 pt colored icon tile + pane name, 28 pt tall, selected
+/// row filled with the accent color and white text (the System Settings look).
+/// Internal so `--snapshot` renders the real row, selection state included.
+struct SettingsSidebarRow: View {
+    let tab: SettingsTab
+    @ObservedObject var selection: SettingsWindowSelection
+
+    var body: some View {
+        let selected = selection.current == tab
+        Button {
+            selection.tab = tab
+        } label: {
+            HStack(spacing: 7) {
+                Image(systemName: tab.symbol)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(width: 20, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(tab.tileColor.gradient))
+                Text(tab.title)
+                    .foregroundStyle(selected ? Color.white : Color.primary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 28)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .background(
+            selected ? Color.accentColor : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }

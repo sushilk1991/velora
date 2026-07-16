@@ -55,13 +55,13 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         }
     }
 
-    /// Sidebar layout: grouped like System Settings, every section always
-    /// visible (no overflow chevron).
-    static let sidebarSections: [(title: String?, tabs: [SettingsTab])] = [
-        (nil, [.general, .shortcuts]),
-        ("Dictation", [.dictation, .modes, .dictionary, .model]),
-        ("Activity", [.history, .intelligence, .meetings]),
-        (nil, [.about]),
+    /// Sidebar layout: unlabeled groups separated by whitespace, the System
+    /// Settings idiom — setup, dictation behavior, your activity, about.
+    static let sidebarGroups: [[SettingsTab]] = [
+        [.general, .shortcuts],
+        [.dictation, .modes, .dictionary, .model],
+        [.history, .meetings, .intelligence],
+        [.about],
     ]
 }
 
@@ -83,8 +83,8 @@ struct GeneralSettingsView: View {
             Section {
                 Toggle(isOn: $model.hudAlwaysVisible) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Keep HUD on screen when idle")
-                        Text("A small pill stays visible between dictations. Click it to start or stop; right-click it for recent transcripts and quick actions.")
+                        Text("Show the pill when idle")
+                        Text("Click the pill to start dictating. Right-click it for recent transcripts and quick actions.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -98,16 +98,30 @@ struct GeneralSettingsView: View {
                     }
                 }
             } header: {
-                Text("HUD")
+                Text("Dictation pill")
             } footer: {
-                Text("Bottom Right stays clear of other dictation pills (Wispr Flow parks at bottom center). Drag the pill anywhere to switch to a custom spot.")
+                Text("Drag the pill anywhere on screen to set your own position.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            Section("Sounds") {
+                Toggle("Play sound effects", isOn: $model.soundsEnabled)
+                HStack {
+                    Text("Volume")
+                    Slider(value: $model.soundVolume, in: 0...100)
+                        .disabled(!model.soundsEnabled)
+                    Text("\(Int(model.soundVolume))")
+                        .font(.body.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, alignment: .trailing)
+                }
+            }
             Section {
                 Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
+            } header: {
+                Text("Advanced")
             } footer: {
-                Text("Off by default. When enabled, processes running as your macOS user can read allow-listed local history and aggregate stats through an owner-only Unix socket. No network server is opened.")
+                Text("Lets command-line tools running as your user read dictation history and stats. Everything stays on this Mac — no network server is opened.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -133,18 +147,6 @@ struct DictationSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Hotkey behavior", selection: $model.hotkeyMode) {
-                    ForEach(HotkeyMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-            } footer: {
-                Text("With Hold to talk, a quick tap locks recording on; tap again to finish. Esc always cancels.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            Section {
                 Picker("Language", selection: $model.language) {
                     ForEach(Self.languages, id: \.0) { code, name in
                         Text(name).tag(code)
@@ -162,7 +164,7 @@ struct DictationSettingsView: View {
                 Toggle(isOn: $model.smartTerminal) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Smart cleanup in terminals")
-                        Text("Clean up long prose dictated into a terminal (AI chats); short commands stay verbatim.")
+                        Text("Long prose dictated into a terminal (AI chats) gets cleaned up; short commands are inserted exactly as heard.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -170,23 +172,7 @@ struct DictationSettingsView: View {
                 Toggle(isOn: $model.voiceCommands) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Voice commands")
-                        Text("Say just \u{201C}scratch that\u{201D} to undo the last dictation, or \u{201C}new line\u{201D} to press Return.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Toggle(isOn: $model.learnFromEdits) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Learn from my edits")
-                        Text("When you fix a misheard word, Velora adds the confirmed correction to your Personal Dictionary.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Toggle(isOn: $model.vocabMining) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Learn new words automatically")
-                        Text("While idle, Velora spots recurring names and jargon and adds confirmed terms to your Personal Dictionary.")
+                        Text("Say \u{201C}scratch that\u{201D} to undo the last dictation, or \u{201C}new line\u{201D} to press Return.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -195,27 +181,15 @@ struct DictationSettingsView: View {
             Section {
                 Toggle(isOn: $model.saveAudio) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Save audio for reprocessing")
-                        Text("Clips are stored locally at ~/.velora/audio for \(Int(model.audioRetentionDays / 30)) months and used by History → Reprocess.")
+                        Text("Keep audio recordings")
+                        Text("Replay or re-transcribe past dictations from History. Recordings stay on this Mac and are deleted after \(Int(model.audioRetentionDays / 30)) months.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
-                LabeledContent("Archive size", value: archiveSize)
+                LabeledContent("Storage used", value: archiveSize)
             } header: {
-                Text("Audio archive")
-            }
-            Section {
-                Toggle("Play sounds", isOn: $model.soundsEnabled)
-                HStack {
-                    Text("Volume")
-                    Slider(value: $model.soundVolume, in: 0...100)
-                        .disabled(!model.soundsEnabled)
-                    Text("\(Int(model.soundVolume))")
-                        .font(.body.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, alignment: .trailing)
-                }
+                Text("Recordings")
             }
         }
         .formStyle(.grouped)
@@ -423,16 +397,28 @@ struct ShortcutsSettingsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Dictation hotkey") {
+                LabeledContent("Start dictation") {
                     HotkeyRecorderView(hotkey: $model.hotkey)
                 }
+                LabeledContent("Cancel dictation", value: "Esc")
             } footer: {
-                Text("Click the shortcut, then press any key combo — or press and release a bare modifier like Right Option. Esc cancels recording.")
+                Text("Click the shortcut, then press a new key combo — a bare modifier like Right Option works too.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
             Section {
-                LabeledContent("Cancel recording", value: "Esc")
+                Picker("When pressed", selection: $model.hotkeyMode) {
+                    ForEach(HotkeyMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.radioGroup)
+            } header: {
+                Text("Hotkey behavior")
+            } footer: {
+                Text("With Hold to talk, a quick tap locks recording on; tap again to finish.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

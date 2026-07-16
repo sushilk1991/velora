@@ -52,29 +52,27 @@ enum SnapshotRenderer {
     // MARK: - Sidebar rows
 
     /// The sidebar's vibrancy (NSVisualEffectView) doesn't survive offscreen
-    /// cacheDisplay, so the icon tiles + titles are also rendered in a plain
-    /// context where every pixel is faithful.
+    /// cacheDisplay, so the REAL rows (`SettingsSidebarRow`, selection
+    /// included) are also rendered in a plain context where every pixel is
+    /// faithful — this is the proof the selected state actually draws.
     @MainActor
     private static func renderSidebarRows(into dir: URL) {
-        let rows = VStack(alignment: .leading, spacing: 8) {
-            ForEach(SettingsTab.allCases) { tab in
-                SwiftUI.Label {
-                    Text(tab.title)
-                } icon: {
-                    Image(systemName: tab.symbol)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 22, height: 22)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(tab.tileColor.gradient))
+        let selection = SettingsWindowSelection()
+        selection.tab = .dictation  // mid-list, so one selected row is visible
+        let rows = VStack(alignment: .leading, spacing: VeloraSpacing.l) {
+            ForEach(Array(SettingsTab.sidebarGroups.enumerated()), id: \.offset) { _, group in
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(group) { tab in
+                        SettingsSidebarRow(tab: tab, selection: selection)
+                    }
                 }
             }
         }
-        .padding(20)
+        .padding(VeloraSpacing.m)
+        .frame(width: 215)
         .background(Color(nsColor: .windowBackgroundColor))
         let view = NSHostingView(rootView: rows)
-        snapshot(view, size: NSSize(width: 220, height: 360), name: "settings-sidebar-rows", dir: dir)
+        snapshot(view, size: NSSize(width: 215, height: 420), name: "settings-sidebar-rows", dir: dir)
     }
 
     // MARK: - Settings

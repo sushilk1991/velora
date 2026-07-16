@@ -298,7 +298,7 @@ struct IntelligenceSettingsView: View {
         } header: {
             Text("Accuracy signals — \(window.title.lowercased())")
         } footer: {
-            Text("“Kept without edits” counts only dictations Velora could honestly watch after inserting; coverage shows how many that is. Unobservable dictations are never counted as edit-free.")
+            Text("“Kept without edits” counts only dictations Velora could verify after inserting — “Observation coverage” shows how many that is.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
         }

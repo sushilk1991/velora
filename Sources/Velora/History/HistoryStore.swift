@@ -401,7 +401,7 @@ final class HistoryStore {
         var streakDays = 0
 
         /// Minutes saved vs typing the same words at the user's typing speed
-        /// (Settings → Intelligence; default 40 wpm).
+        /// (Settings → Stats; default 40 wpm).
         func minutesSaved(typingWPM: Int) -> Int {
             HistoryStore.minutesSaved(
                 words: totalWords, spokenMs: totalSpokenMs, typingWPM: typingWPM)

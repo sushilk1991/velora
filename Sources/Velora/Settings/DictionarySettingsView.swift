@@ -155,6 +155,23 @@ struct DictionarySettingsView: View {
 
             Divider()
 
+            // The toggles that grow this dictionary live with it, not in a
+            // different pane (they control what appears in the list below).
+            HStack(spacing: VeloraSpacing.xl) {
+                Toggle("Learn from your edits", isOn: $model.learnFromEdits)
+                    .help("When you correct a misheard word right after Velora inserts it, the fix is saved here.")
+                Toggle("Discover new words while idle", isOn: $model.vocabMining)
+                    .help("Velora spots recurring names and jargon in your dictations and adds confirmed terms here.")
+                Spacer(minLength: 0)
+            }
+            .toggleStyle(.checkbox)
+            .font(.callout)
+            .padding(.horizontal, VeloraSpacing.m)
+            .padding(.vertical, VeloraSpacing.s)
+            .background(.bar)
+
+            Divider()
+
             Group {
                 if model.dictionaryRows.isEmpty {
                     ContentUnavailableView {

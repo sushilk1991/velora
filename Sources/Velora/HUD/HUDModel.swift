@@ -45,15 +45,20 @@ enum HUDState: Equatable {
 
 /// Which panel edge the capsule hugs, derived from `HUDPosition`. Corner
 /// presets anchor the capsule so it grows inward from the screen edge instead
-/// of expanding symmetrically off-screen.
-enum HUDEdge {
+/// of expanding symmetrically off-screen. Raw values persist the anchor for
+/// dragged (custom) positions.
+enum HUDEdge: String {
     case leading, center, trailing
 
-    static func edge(for position: HUDPosition) -> HUDEdge {
+    /// `custom` positions carry their own stored anchor (chosen from where the
+    /// pill was dropped — see `HUDPanel.customAnchor`) so a pill parked near a
+    /// screen edge grows toward open space instead of cropping off-screen.
+    static func edge(for position: HUDPosition, custom: HUDEdge = .center) -> HUDEdge {
         switch position {
         case .bottomLeft, .topLeft: return .leading
         case .bottomRight, .topRight: return .trailing
-        case .bottomCenter, .topCenter, .custom: return .center
+        case .bottomCenter, .topCenter: return .center
+        case .custom: return custom
         }
     }
 }

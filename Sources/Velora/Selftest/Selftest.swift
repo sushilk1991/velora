@@ -89,6 +89,7 @@ enum Selftest {
         testMCPProtocol()
         testLocalControlSocket()
         testHUDGeometry()
+        testSettingsSidebar()
         testInsertionBoundary()
         testEmptyFinalFeedback()
         testClipboardStaging()
@@ -2637,8 +2638,103 @@ enum Selftest {
                 && HUDEdge.edge(for: .custom) == .center,
             "corner presets anchor the capsule to the matching panel edge")
         expect(
+            HUDEdge.edge(for: .custom, custom: .trailing) == .trailing
+                && HUDEdge.edge(for: .bottomCenter, custom: .trailing) == .center,
+            "the stored custom anchor applies to custom positions only")
+        expect(
             !HUDPosition.presets.contains(.custom),
             "custom placement is drag-only, never a menu preset")
+
+        // Dragged placement re-anchors toward the nearest screen edge so the
+        // listening capsule can never grow off-screen (user-reported crop:
+        // pill parked at the right edge, waveform clipped mid-capsule).
+        let visible = NSRect(x: 0, y: 0, width: 1512, height: 950)
+        let pill = HUDGeometry.standbySize
+        func drop(x: CGFloat, y: CGFloat) -> (edge: HUDEdge, panelOrigin: NSPoint) {
+            HUDPanel.customAnchor(
+                capsule: NSRect(origin: CGPoint(x: x, y: y), size: pill), visible: visible)
+        }
+        let right = drop(x: visible.maxX - pill.width - 6, y: 400)
+        expect(right.edge == .trailing, "a drop near the right edge anchors trailing")
+        let left = drop(x: visible.minX + 6, y: 400)
+        expect(left.edge == .leading, "a drop near the left edge anchors leading")
+        let middle = drop(x: visible.midX - pill.width / 2, y: 400)
+        expect(middle.edge == .center, "a drop in open space keeps the center anchor")
+        for anchored in [right, left, middle] {
+            // Reconstruct the widest session capsule at its anchor and assert
+            // it stays fully inside the visible frame.
+            let maxWidth = HUDGeometry.maxListeningWidth
+            let grownMinX = anchored.panelOrigin.x
+                + HUDPanel.capsuleMinX(edge: anchored.edge, capsuleWidth: maxWidth)
+            expect(
+                grownMinX >= visible.minX && grownMinX + maxWidth <= visible.maxX,
+                "the max-width capsule fits on screen from a dragged anchor")
+            let capsuleMidY = anchored.panelOrigin.y + HUDPanel.panelSize.height / 2
+            expect(
+                capsuleMidY - HUDGeometry.height / 2 >= visible.minY
+                    && capsuleMidY + HUDGeometry.height / 2 <= visible.maxY,
+                "the full-height capsule fits vertically from a dragged anchor")
+        }
+        // The pill itself must not move when it re-anchors in open space.
+        let dropX = visible.midX - pill.width / 2
+        expect(
+            abs((middle.panelOrigin.x + HUDPanel.capsuleMinX(
+                edge: .center, capsuleWidth: pill.width)) - dropX) < 0.5,
+            "re-anchoring in open space keeps the pill exactly where it was dropped")
+        // A drop dragged half off the right edge is pulled back on screen.
+        let offscreen = drop(x: visible.maxX - pill.width / 2, y: 400)
+        let pulledMaxX = offscreen.panelOrigin.x
+            + HUDPanel.capsuleMinX(edge: .trailing, capsuleWidth: pill.width) + pill.width
+        expect(
+            offscreen.edge == .trailing && pulledMaxX <= visible.maxX,
+            "a half-offscreen drop snaps back inside the visible frame")
+        // A drop near the bottom clamps so the taller session capsule fits.
+        let low = drop(x: 700, y: visible.minY + 2)
+        expect(
+            low.panelOrigin.y + HUDPanel.panelSize.height / 2 - HUDGeometry.height / 2
+                >= visible.minY,
+            "a drop hugging the Dock leaves room for the full-height capsule")
+
+        // Persistence round-trip: the stored fraction is the pill CENTER, so
+        // it is always 0…1 and restores fully on-screen on ANY display size —
+        // a panel-origin fraction scaled its fixed overhang across screens
+        // and pushed the capsule off-screen (review finding).
+        let small = NSRect(x: 0, y: 25, width: 1280, height: 775)
+        let big = NSRect(x: 0, y: 31, width: 3008, height: 1661)
+        for (store, restore) in [(small, big), (big, small), (small, small)] {
+            // Flush bottom-right drop on the store screen…
+            let dropped = HUDPanel.customAnchor(
+                capsule: NSRect(
+                    x: store.maxX - pill.width - 2, y: store.minY + 1,
+                    width: pill.width, height: pill.height),
+                visible: store)
+            let frac = HUDPanel.customFraction(
+                panelOrigin: dropped.panelOrigin, edge: dropped.edge, visible: store)
+            expect(
+                (0...1).contains(frac.x) && (0...1).contains(frac.y),
+                "the persisted custom fraction is always within 0…1")
+            // …restored on the restore screen.
+            let back = HUDPanel.customAnchor(
+                capsule: HUDPanel.customPillRect(fraction: frac, visible: restore),
+                visible: restore)
+            let maxWidth = HUDGeometry.maxListeningWidth
+            let grownMinX = back.panelOrigin.x
+                + HUDPanel.capsuleMinX(edge: back.edge, capsuleWidth: maxWidth)
+            expect(
+                grownMinX >= restore.minX && grownMinX + maxWidth <= restore.maxX,
+                "a custom spot restores with the max-width capsule on-screen on any display")
+            let backMidY = back.panelOrigin.y + HUDPanel.panelSize.height / 2
+            expect(
+                backMidY - HUDGeometry.height / 2 >= restore.minY
+                    && backMidY + HUDGeometry.height / 2 <= restore.maxY,
+                "a custom spot restores with the full-height capsule on-screen on any display")
+            if store == restore {
+                expect(
+                    abs(back.panelOrigin.x - dropped.panelOrigin.x) < 0.5
+                        && abs(back.panelOrigin.y - dropped.panelOrigin.y) < 0.5,
+                    "same-screen restore is an exact fixpoint — the pill does not creep")
+            }
+        }
 
         // Hit testing mirrors the visible capsule — an oversized rect is an
         // invisible click-to-record strip over the frontmost app (review
@@ -2667,6 +2763,19 @@ enum Selftest {
             HUDPanel.capsuleMinX(edge: .center, capsuleWidth: HUDPanel.panelSize.width)
                 == 0,
             "center anchor is symmetric")
+    }
+
+    // MARK: - Settings sidebar
+
+    private static func testSettingsSidebar() {
+        let listed = SettingsTab.sidebarGroups.flatMap { $0 }
+        expect(
+            listed.count == SettingsTab.allCases.count && Set(listed).count == listed.count
+                && Set(listed) == Set(SettingsTab.allCases),
+            "every settings pane appears in the sidebar exactly once")
+        expect(
+            listed.first == .general && listed.last == .about,
+            "the sidebar starts at General and ends at About")
     }
 
     // MARK: - Final-output clipboard staging
