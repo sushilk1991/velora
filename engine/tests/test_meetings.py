@@ -74,6 +74,103 @@ async def test_meeting_transcribe_emits_durable_segment_cursor(engine, tmp_path,
     assert done["id"] == "resume"
 
 
+async def test_meeting_transcribe_diarizes_system_track(engine, tmp_path, monkeypatch):
+    """A multi-speaker system track emits per-speaker s1/s2 segments with
+    turn-level timestamps; job-level events keep the track speaker 'them'."""
+    from velora_engine import diarization as diar_mod
+    from velora_engine.diarization import Turn
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "diarized words")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(diar_mod, "models_ready", lambda: True)
+    monkeypatch.setattr(
+        diar_mod, "diarize",
+        lambda pcm: [Turn(0.0, 4.0, "s1"), Turn(4.6, 9.5, "s2")])
+    _eng, sock = engine
+    clip = tmp_path / "them.wav"
+    _write_wav(clip, seconds=10.0)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "djob", "meeting_id": "meeting-d",
+        "speaker": "them", "path": str(clip), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    started = await client.recv_event("meeting_transcribe_started")
+    assert started["chunks"] == 2
+    assert started["speaker"] == "them"
+
+    first = await client.recv_event("meeting_segment")
+    assert first["speaker"] == "s1"
+    assert first["chunk_index"] == 0
+    assert first["start_ms"] == 0
+    # padded by 0.2 s but clamped to the next turn's start
+    assert 4000 <= first["end_ms"] <= 4600
+    progress = await client.recv_event("meeting_transcribe_progress")
+    assert progress["speaker"] == "them"
+
+    second = await client.recv_event("meeting_segment")
+    assert second["speaker"] == "s2"
+    assert second["chunk_index"] == 1
+    assert 4000 <= second["start_ms"] <= 4600
+    await client.recv_event("meeting_transcribe_progress")
+    done = await client.recv_event("meeting_transcribed")
+    assert done["chunks"] == 2
+
+
+async def test_meeting_transcribe_single_speaker_falls_back_to_them(
+    engine, tmp_path, monkeypatch
+):
+    from velora_engine import diarization as diar_mod
+    from velora_engine.diarization import Turn
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "solo caller")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(diar_mod, "models_ready", lambda: True)
+    monkeypatch.setattr(diar_mod, "diarize", lambda pcm: [Turn(0.0, 2.0, "s1")])
+    _eng, sock = engine
+    clip = tmp_path / "them.wav"
+    _write_wav(clip)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "sjob", "meeting_id": "meeting-s",
+        "speaker": "them", "path": str(clip), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    await client.recv_event("meeting_transcribe_started")
+    segment = await client.recv_event("meeting_segment")
+    assert segment["speaker"] == "them"  # 1:1 call reads as plain Them
+
+
+async def test_meeting_transcribe_diarization_failure_falls_back(
+    engine, tmp_path, monkeypatch
+):
+    from velora_engine import diarization as diar_mod
+
+    def boom(pcm):
+        raise RuntimeError("onnx exploded")
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "still transcribed")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(diar_mod, "models_ready", lambda: True)
+    monkeypatch.setattr(diar_mod, "diarize", boom)
+    _eng, sock = engine
+    clip = tmp_path / "them.wav"
+    _write_wav(clip)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "fjob", "meeting_id": "meeting-f",
+        "speaker": "them", "path": str(clip), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    await client.recv_event("meeting_transcribe_started")
+    segment = await client.recv_event("meeting_segment")
+    assert segment["speaker"] == "them"
+    assert segment["text"] == "still transcribed"
+
+
 async def test_meeting_transcribe_rejects_invalid_channel(engine, tmp_path):
     _eng, sock = engine
     clip = tmp_path / "clip.wav"

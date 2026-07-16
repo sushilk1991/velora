@@ -50,6 +50,11 @@ extension Hotkey {
     static let fnGlobe = Hotkey(
         keyCode: 63, modifiers: CGEventFlags.maskSecondaryFn.rawValue, isModifierOnly: true)
     static let f19 = Hotkey(keyCode: 80, modifiers: 0, isModifierOnly: false)
+    /// Default Safe Voice Edit hotkey: ⌥⇧E (E for edit, low collision risk).
+    static let optionShiftE = Hotkey(
+        keyCode: 14,
+        modifiers: CGEventFlags.maskAlternate.rawValue | CGEventFlags.maskShift.rawValue,
+        isModifierOnly: false)
 
     /// Curated one-click choices shown next to the recorder.
     static let quickPicks: [(name: String, hotkey: Hotkey)] = [

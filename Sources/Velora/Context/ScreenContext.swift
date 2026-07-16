@@ -99,6 +99,19 @@ enum ScreenContext {
         axString(element, kAXValueAttribute)
     }
 
+    /// The frontmost app's current text selection, for Safe Voice Edit.
+    /// Returns the selected string plus the element it came from so the
+    /// caller can verify focus hasn't moved before pasting the replacement.
+    /// Nil when there is no selection, the selection is empty/whitespace, or
+    /// the app exposes no AX text (some Electron surfaces).
+    static func selectedText(of app: NSRunningApplication?) -> (text: String, element: AXUIElement)? {
+        guard let focused = focusedElement(of: app) else { return nil }
+        guard let selection = axString(focused, kAXSelectedTextAttribute),
+              !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return (selection, focused)
+    }
+
     /// Characters immediately around the focused selection/caret. Used only at
     /// insertion time to prevent two dictations (or a dictation and existing
     /// prose) from being concatenated without a separator.

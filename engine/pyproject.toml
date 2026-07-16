@@ -16,6 +16,8 @@ dependencies = [
     # Audio archive (FLAC clips for reprocessing). Ships libsndfile; already
     # present transitively via mlx-whisper, pinned here since we depend on it.
     "soundfile>=0.12",
+    "sherpa-onnx>=1.13.4",
+    "sherpa-onnx-core>=1.13.4",
 ]
 
 [project.scripts]

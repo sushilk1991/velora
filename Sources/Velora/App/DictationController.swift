@@ -128,6 +128,14 @@ final class DictationController: NSObject {
     /// A menubar "Reformat Last as…" round-trip in flight: the history row and
     /// the app to paste the re-formatted result back into.
     private var pendingReformat: (id: Int64, bundleID: String?)?
+    /// Safe Voice Edit: the recording session whose transcript is an edit
+    /// INSTRUCTION for `selection`, not text to paste.
+    private var editSession: (
+        session: String, selection: String, bundleID: String?, element: AXUIElement)?
+    /// The engine `edit_text` round-trip in flight after an edit session's
+    /// final: verify-and-replace happens when `edited` comes back.
+    private var pendingEdit: (
+        id: String, selection: String, bundleID: String?, element: AXUIElement)?
     /// The last successful insertion, for the "scratch that" voice command —
     /// undo is only offered into the SAME app, shortly after.
     private var lastInsertion: (bundleID: String?, at: Date)?
@@ -348,6 +356,146 @@ final class DictationController: NSObject {
         if let appName = record.appName { cmd["app_name"] = appName }
         supervisor.send(cmd)
         NSLog("Velora: reformat last id=%lld as %@", record.id, mode)
+    }
+
+    // MARK: - Safe Voice Edit (selection + spoken instruction)
+
+    /// Begins an edit session: captures the current selection, then records a
+    /// spoken instruction using the normal dictation state machine. The
+    /// transcript is diverted in the `.final` handler — it is an instruction,
+    /// never pasted text. Scope safety is structural: only the captured
+    /// selection can ever be replaced, and only in its origin app.
+    func beginEditSession(locked: Bool) {
+        guard phase == .idle else { return }
+        guard config.voiceEdit else { return }
+        let app = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        guard let selected = ScreenContext.selectedText(of: app) else {
+            showError("Select some text first, then speak an edit")
+            return
+        }
+        guard selected.text.count <= 8_000 else {
+            showError("Selection too long to voice-edit")
+            return
+        }
+        // "Raw" mode: the instruction transcript skips the writing model —
+        // the words go to the edit prompt verbatim, no cleanup needed.
+        guard startRecording(locked: locked, explicitMode: "Raw", hudLabel: "Edit") else {
+            return
+        }
+        editSession = (
+            session: sessionID, selection: selected.text,
+            bundleID: app?.bundleIdentifier, element: selected.element)
+        NSLog("Velora: edit session started — %ld chars selected in %@",
+              selected.text.count, app?.bundleIdentifier ?? "unknown")
+    }
+
+    private func sendEditCommand(
+        edit: (session: String, selection: String, bundleID: String?, element: AXUIElement),
+        instruction: String
+    ) {
+        guard !instruction.isEmpty else {
+            phase = .idle
+            showError("Didn't catch an instruction — try again")
+            return
+        }
+        let id = UUID().uuidString
+        pendingEdit = (
+            id: id, selection: edit.selection,
+            bundleID: edit.bundleID, element: edit.element)
+        phase = .transcribing
+        armTranscribeTimeout()
+        supervisor.send([
+            "cmd": "edit_text", "id": id,
+            "text": edit.selection, "instruction": instruction,
+        ])
+        NSLog("Velora: edit_text sent — %ld chars, instruction %ld words",
+              edit.selection.count,
+              instruction.split(separator: " ").count)
+    }
+
+    private func applyEdit(
+        pending: (id: String, selection: String, bundleID: String?, element: AXUIElement),
+        text: String, applied: Bool, ms: Int, reason: String?
+    ) {
+        guard applied else {
+            NSLog("Velora: edit not applied (reason=%@)", reason ?? "model declined")
+            showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
+            return
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
+            return
+        }
+        // The result is always staged for a manual ⌘V, then the same delivery
+        // rails as live insertion decide whether we may paste it ourselves.
+        inserter.copyToClipboard(text)
+        guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
+              !SecureInput.isActive,
+              let bundleID = pending.bundleID,
+              NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
+        else {
+            showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
+            return
+        }
+        // The selection must still be what we edited — if the user clicked
+        // away or typed, replacing whatever is now selected would corrupt
+        // their document. Recovery stays one step: the text is on the clipboard.
+        let app = NSWorkspace.shared.frontmostApplication
+        guard let current = ScreenContext.selectedText(of: app),
+              current.text == pending.selection
+        else {
+            NSLog("Velora: edit paste skipped — selection changed")
+            showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
+            return
+        }
+        guard inserter.insertViaPasteboard(
+            text, targetBundleID: bundleID, targetElement: current.element)
+        else {
+            showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
+            return
+        }
+        lastInsertion = (bundleID: bundleID, at: Date())
+        sounds.play(.stop)
+        NSLog("Velora: edit applied (%d ms)", ms)
+        showNotice(symbol: "pencil.line", message: "Edited")
+    }
+
+    /// Pastes the last dictation's ORIGINAL raw transcript — exactly what the
+    /// speech model heard, before any cleanup. The escape hatch for a cleanup
+    /// that changed meaning: no engine round-trip, no STT re-run, works even
+    /// after the audio clip has been pruned.
+    func pasteLastRawOriginal() {
+        guard let record = history.recent(limit: 1).first else {
+            showError("No recent dictation")
+            return
+        }
+        let raw = record.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else {
+            showError("The last dictation has no transcript")
+            return
+        }
+        inserter.copyToClipboard(raw)
+        NSLog("Velora: paste last as-heard id=%lld (%d chars)", record.id, raw.count)
+        guard let bundleID = record.bundleID,
+              let app = NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleID).first
+        else { return }
+        app.activate(options: [.activateAllWindows])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            // Same rails as a live insertion: never synthesize input without
+            // the grant, into a secure field, or into a different app. The
+            // text is already on the clipboard for a manual paste either way.
+            guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
+                  !SecureInput.isActive,
+                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
+            else {
+                NSLog("Velora: as-heard paste skipped — target not ready (text on clipboard)")
+                return
+            }
+            self.inserter.insert(raw, targetBundleID: bundleID, mode: "Raw")
+        }
     }
 
     /// Pastes a completed "Reformat Last as…" result back into its origin app.
@@ -573,7 +721,8 @@ final class DictationController: NSObject {
 
     @discardableResult
     private func startRecording(
-        locked: Bool, explicitMode: String? = nil, external: Bool = false
+        locked: Bool, explicitMode: String? = nil, external: Bool = false,
+        hudLabel: String? = nil
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
         if let reason = recordingBlockReason?() {
@@ -646,7 +795,7 @@ final class DictationController: NSObject {
         }
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
-            modeName: explicitMode
+            modeName: hudLabel ?? explicitMode
                 ?? ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
 
         NSLog(
@@ -771,6 +920,8 @@ final class DictationController: NSObject {
         // Mark this session cancelled so a late `final` for it is refused
         // (the user explicitly gave up on it).
         cancelledSessionID = sessionID
+        editSession = nil
+        pendingEdit = nil
         capture.stop()
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
@@ -787,6 +938,7 @@ final class DictationController: NSObject {
             // fall through into the normal paste path.
             cancelledSessionID = failedSession
         }
+        if editSession?.session == failedSession { editSession = nil }
         capture.stop()
         transcribeTimer?.invalidate()
         transcribeTimer = nil
@@ -854,6 +1006,15 @@ final class DictationController: NSObject {
                 recordingDurationMs = elapsedRecordingMs
                 capture.stop()
             }
+            // Safe Voice Edit: this session's transcript is an INSTRUCTION for
+            // the captured selection, never text to paste.
+            if let edit = editSession, edit.session == session {
+                editSession = nil
+                let instruction = (raw.isEmpty ? text : raw)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                sendEditCommand(edit: edit, instruction: instruction)
+                return
+            }
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
                 mode: mode, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
@@ -876,6 +1037,22 @@ final class DictationController: NSObject {
             guard let id, pendingReformat?.id == id else { break }
             pendingReformat = nil
             showError("Reformat failed: \(error)")
+
+        case .edited(let id, let text, let applied, let ms, let reason):
+            guard let pending = pendingEdit, pending.id == id else { break }
+            pendingEdit = nil
+            transcribeTimer?.invalidate()
+            transcribeTimer = nil
+            if phase == .transcribing { phase = .idle }
+            applyEdit(pending: pending, text: text, applied: applied, ms: ms, reason: reason)
+
+        case .editFailed(let id, let error, let code):
+            guard let pending = pendingEdit, pending.id == id else { break }
+            pendingEdit = nil
+            transcribeTimer?.invalidate()
+            transcribeTimer = nil
+            if phase == .transcribing { phase = .idle }
+            showError(code == "busy" ? "Velora is busy — try the edit again" : error)
 
         case .error(let session, let message):
             // Only errors scoped to the active session may end the dictation;
@@ -1229,6 +1406,42 @@ extension DictationController: HotkeyMonitorDelegate {
         } else {
             // Short tap: recording locks on; the next tap (or Esc) ends it.
             NSLog("Velora: tap (%.0f ms) — recording locked on", heldFor * 1000)
+            phase = .recording(locked: true)
+        }
+    }
+
+    /// Safe Voice Edit hotkey: same hold/toggle semantics as dictation, but
+    /// only ever starts when idle with a selection — it never interrupts a
+    /// dictation in progress.
+    func editHotkeyDown() {
+        if phase == .transcribing { resetIfStuckTranscribing() }
+        let isEditRecording = editSession?.session == sessionID && isRecording
+
+        switch (config.hotkeyMode, phase) {
+        case (.toggle, .idle):
+            beginEditSession(locked: true)
+        case (.toggle, .recording) where isEditRecording:
+            stopAndTranscribe()
+        case (.hold, .idle):
+            hotkeyDownAt = Date()
+            beginEditSession(locked: false)
+        case (.hold, .recording(locked: true)) where isEditRecording:
+            stopAndTranscribe()
+        default:
+            break
+        }
+    }
+
+    func editHotkeyUp() {
+        guard config.hotkeyMode == .hold else { return }
+        guard editSession?.session == sessionID else { return }
+        guard case .recording(locked: false) = phase else { return }
+
+        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+        if heldFor >= Self.tapThreshold {
+            stopAndTranscribe()
+        } else {
+            NSLog("Velora: edit tap (%.0f ms) — recording locked on", heldFor * 1000)
             phase = .recording(locked: true)
         }
     }

@@ -9,11 +9,47 @@ enum MeetingStatus: String {
     case failed
 }
 
-enum MeetingSpeaker: String, CaseIterable {
+/// A transcript channel: the mic ("me"), the remote mix ("them"), or one
+/// diarized remote voice ("s1", "s2", … — the engine splits the system track
+/// when it hears more than one person). RawRepresentable keeps the DB and
+/// wire formats stable; unknown labels fail the initializer and callers
+/// default to .them, so an old app reading new rows still renders.
+enum MeetingSpeaker: RawRepresentable, Equatable, Hashable {
     case me
     case them
+    case remote(Int)
 
-    var displayName: String { self == .me ? "Me" : "Them" }
+    init?(rawValue: String) {
+        switch rawValue {
+        case "me": self = .me
+        case "them": self = .them
+        default:
+            guard rawValue.hasPrefix("s"), rawValue.count <= 3,
+                  let n = Int(rawValue.dropFirst()), n >= 1
+            else { return nil }
+            self = .remote(n)
+        }
+    }
+
+    var rawValue: String {
+        switch self {
+        case .me: return "me"
+        case .them: return "them"
+        case .remote(let n): return "s\(n)"
+        }
+    }
+
+    var displayName: String {
+        switch self {
+        case .me: return "Me"
+        case .them: return "Them"
+        case .remote(let n): return "Speaker \(n)"
+        }
+    }
+
+    /// True for any remote channel — plain "them" or a diarized voice.
+    /// The system track's resume cursor spans all of them (see nextChunk).
+    var isRemote: Bool { self != .me }
 }
 
 struct MeetingSegment: Identifiable, Equatable {
@@ -337,16 +373,23 @@ final class MeetingStore {
         }
     }
 
+    /// Resume cursor for a TRACK, not a label: the system track's segments
+    /// may carry diarized labels (s1, s2, …) interleaved with "them", and
+    /// chunk indexes are global per track — so the remote cursor is the max
+    /// over every non-mic row. (A diarization toggle flipped between a crash
+    /// and the resume can shift the plan; the cursor still only moves
+    /// forward, so the worst case is a re-transcribed or skipped chunk, not
+    /// a wedged meeting.)
     func nextChunk(meetingID: String, speaker: MeetingSpeaker) -> Int {
         queue.sync { [self] in
             var stmt: OpaquePointer?
+            let condition = speaker.isRemote ? "speaker != 'me'" : "speaker = 'me'"
             guard sqlite3_prepare_v2(db, """
                 SELECT COALESCE(MAX(chunk_index) + 1, 0) FROM meeting_segments
-                WHERE meeting_id = ? AND speaker = ?;
+                WHERE meeting_id = ? AND \(condition);
                 """, -1, &stmt, nil) == SQLITE_OK else { return 0 }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, meetingID)
-            bindText(stmt, 2, speaker.rawValue)
             return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
         }
     }

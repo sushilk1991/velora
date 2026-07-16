@@ -31,7 +31,7 @@ from typing import Any, Callable, TypeVar
 
 import numpy as np
 
-from . import __version__, formatting, models, protocol
+from . import __version__, diarization, editing, formatting, models, protocol
 from .audio_store import AudioStore
 from .cleanup import _RETRACTION_RE, CleanupEngine
 from .config import Config
@@ -573,6 +573,8 @@ class Engine:
                     requested is None or requested == self._meeting_transcribe_job_id
                 ):
                     self._meeting_transcribe_cancel = True
+            elif cmd == "edit_text":
+                await self._cmd_edit_text(msg)
             elif cmd == "meeting_notes":
                 await self._cmd_meeting_notes(msg)
             elif cmd == "meeting_notes_cancel":
@@ -1492,6 +1494,91 @@ class Engine:
         self._reprocess_backend = backend
         return backend
 
+    # ---------------- safe voice edit ----------------
+
+    async def _cmd_edit_text(self, msg: dict[str, Any]) -> None:
+        """Transform selected text per a spoken instruction (Safe Voice Edit).
+
+        Interactive — the user is waiting on the paste — so it refuses
+        rather than queues when the model is owned by something else. Scope
+        safety is structural (the app can only replace the selection it
+        sent); content safety is the benchmarked prompt contract plus the
+        deterministic instruction-echo backstop, and `applied: false` always
+        returns the original text so a failed edit pastes nothing new.
+        """
+        async def fail(error: str, code: str = "failed") -> None:
+            await self._send({
+                "event": "edit_failed", "id": msg.get("id"),
+                "code": code, "error": error,
+            })
+
+        if self.session is not None or self._starting or self._finalizing:
+            await fail("edit: busy (dictation in progress)", "busy")
+            return
+        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+            await fail("edit: busy (another job in progress)", "busy")
+            return
+        text = msg.get("text")
+        instruction = msg.get("instruction")
+        if not isinstance(text, str) or not text.strip():
+            await fail("edit: missing 'text'", "invalid_arguments")
+            return
+        if not isinstance(instruction, str) or not instruction.strip():
+            await fail("edit: missing 'instruction'", "invalid_arguments")
+            return
+        if len(text) > editing.MAX_TEXT_CHARS:
+            await fail(f"edit: selection over {editing.MAX_TEXT_CHARS} characters",
+                       "too_large")
+            return
+        if len(instruction) > editing.MAX_INSTRUCTION_CHARS:
+            await fail("edit: instruction too long", "too_large")
+            return
+        if self.cleanup is None:
+            await fail("edit: writing model unavailable", "cleanup_unavailable")
+            return
+        self._reprocessing = True  # same single-job mutex the other jobs honor
+        asyncio.create_task(self._run_edit_text(dict(msg), text, instruction))
+
+    async def _run_edit_text(self, msg: dict[str, Any], text: str, instruction: str) -> None:
+        try:
+            t0 = time.perf_counter()
+            result = await self.cleanup.cleanup(
+                text, editing.build_edit_prompt(instruction), check_ratio=False)
+            out = result.text.strip()
+            applied = bool(result.applied)
+            reason = result.reason or ""
+            if applied and not out:
+                applied, out, reason = False, text, "empty_output"
+            elif applied and editing.instruction_echoed(text, instruction, out):
+                # The one benchmarked failure mode (out-of-scope command
+                # echoed into the document) — keep the selection unchanged.
+                applied, out, reason = False, text, "instruction_echo"
+            elif applied and len(out) > max(4 * len(text), len(text) + 2_000):
+                applied, out, reason = False, text, "runaway_growth"
+            evt: dict[str, Any] = {
+                "event": "edited",
+                "text": out if applied else text,
+                "applied": applied,
+                "ms": int((time.perf_counter() - t0) * 1000),
+            }
+            if reason:
+                evt["reason"] = reason
+            if msg.get("id") is not None:
+                evt["id"] = msg.get("id")
+            await self._send(evt)
+            self._restart_if_cleanup_unhealthy()
+            log.info("edit_text: %d chars, applied=%s reason=%s ms=%d",
+                     len(text), applied, reason or "-", evt["ms"])
+        except Exception as exc:  # noqa: BLE001 — the app is waiting on an answer
+            log.exception("edit_text failed")
+            await self._send({
+                "event": "edit_failed", "id": msg.get("id"),
+                "code": "failed", "error": f"edit failed: {exc}",
+            })
+        finally:
+            self._reprocessing = False
+            self._schedule_mining()
+
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
         """Re-transcribe a saved audio clip, optionally with a different model,
         mode, or language. Validates synchronously, then runs the (possibly
@@ -1779,6 +1866,39 @@ class Engine:
             "meeting_id": meeting_id, "speaker": speaker,
         })
 
+    async def _diarize_spans(
+        self, pcm: Any, meeting_id: str
+    ) -> list[tuple[int, int, str]] | None:
+        """Diarized transcription plan for a system-audio track, or None.
+
+        None means "use the classic single-speaker path" — backend missing,
+        model download failed, diarization errored, or only one voice found
+        (a 1:1 call reads better as plain "Them" than as "Speaker 1"). The
+        plan must be deterministic per track: chunk indexes are the resume
+        cursor across engine restarts.
+        """
+        try:
+            if not diarization.available():
+                log.info("diarization: sherpa-onnx not importable — skipping")
+                return None
+            if not diarization.models_ready():
+                await asyncio.to_thread(diarization.ensure_models)
+            turns = await asyncio.to_thread(diarization.diarize, pcm)
+            speakers = {t.speaker for t in turns}
+            if len(speakers) < 2:
+                log.info("diarization: %d speaker(s) on %s — using plain labels",
+                         len(speakers), meeting_id)
+                return None
+            spans = diarization.plan_chunks(turns, total_samples=len(pcm))
+            if not spans:
+                return None
+            log.info("diarization: %s → %d speakers, %d chunks",
+                     meeting_id, len(speakers), len(spans))
+            return spans
+        except Exception:  # noqa: BLE001 — diarization must never sink a meeting
+            log.exception("diarization failed — falling back to single speaker")
+            return None
+
     async def _run_meeting_transcribe(self, msg: dict[str, Any]) -> None:
         path = str(msg["path"])
         meeting_id = str(msg["meeting_id"])
@@ -1809,19 +1929,28 @@ class Engine:
             if duration_s < 0.2:
                 await fail("no audio in file")
                 return
-            chunks = split_for_batch(pcm)
-            offsets: list[int] = []
-            cursor = 0
-            for chunk in chunks:
-                offsets.append(cursor)
-                cursor += len(chunk)
+            # The remote/system track may carry several people. Diarize it
+            # into per-speaker turns and transcribe turn-by-turn ("s1"/"s2"
+            # labels); anything short of a confident multi-speaker result
+            # falls back to the classic single-"them" silence chunking. The
+            # mic track is one person by construction — never diarized.
+            spans: list[tuple[int, int, str]] | None = None
+            if speaker == "them" and self.config.meeting_diarization:
+                spans = await self._diarize_spans(pcm, meeting_id)
+            if spans is None:
+                chunks = split_for_batch(pcm)
+                spans = []
+                cursor = 0
+                for chunk in chunks:
+                    spans.append((cursor, cursor + len(chunk), speaker))
+                    cursor += len(chunk)
             await self._send({
                 "event": "meeting_transcribe_started", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
-                "duration_s": round(duration_s, 1), "chunks": len(chunks),
-                "start_chunk": min(start_chunk, len(chunks)),
+                "duration_s": round(duration_s, 1), "chunks": len(spans),
+                "start_chunk": min(start_chunk, len(spans)),
             })
-            for index in range(start_chunk, len(chunks)):
+            for index in range(start_chunk, len(spans)):
                 while (
                     self.session is not None or self._finalizing or self._starting
                 ) and not self._meeting_transcribe_cancel:
@@ -1832,26 +1961,28 @@ class Engine:
                 if self._meeting_transcribe_cancel:
                     await fail("cancelled", "cancelled")
                     return
+                sample_a, sample_b, chunk_speaker = spans[index]
                 self.stt.initial_prompt = self._glossary()
-                text = await self._stt_call(transcribe_clip, self.stt, chunks[index])
+                text = await self._stt_call(
+                    transcribe_clip, self.stt, pcm[sample_a:sample_b])
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return
                 if self._meeting_transcribe_cancel:
                     await fail("cancelled", "cancelled")
                     return
-                start_ms = int(offsets[index] * 1000 / SAMPLE_RATE)
-                end_ms = int((offsets[index] + len(chunks[index])) * 1000 / SAMPLE_RATE)
                 await self._send({
                     "event": "meeting_segment", "id": job_id,
-                    "meeting_id": meeting_id, "speaker": speaker,
-                    "chunk_index": index, "start_ms": start_ms, "end_ms": end_ms,
+                    "meeting_id": meeting_id, "speaker": chunk_speaker,
+                    "chunk_index": index,
+                    "start_ms": int(sample_a * 1000 / SAMPLE_RATE),
+                    "end_ms": int(sample_b * 1000 / SAMPLE_RATE),
                     "text": (text or "").strip(),
                 })
                 await self._send({
                     "event": "meeting_transcribe_progress", "id": job_id,
                     "meeting_id": meeting_id, "speaker": speaker,
-                    "fraction": round((index + 1) / len(chunks), 3),
+                    "fraction": round((index + 1) / len(spans), 3),
                 })
             if self.shutdown.is_set():
                 await fail("engine shutting down", "engine_shutdown")
@@ -1859,7 +1990,7 @@ class Engine:
             await self._send({
                 "event": "meeting_transcribed", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
-                "duration_s": round(duration_s, 1), "chunks": len(chunks),
+                "duration_s": round(duration_s, 1), "chunks": len(spans),
             })
         except Exception as exc:  # noqa: BLE001
             log.exception("meeting transcription failed")
@@ -1911,7 +2042,8 @@ class Engine:
             "Create faithful meeting notes from this transcript chunk. Return JSON only with "
             "exact keys summary (string), decisions (array of strings), and action_items "
             "(array of strings). Do not invent owners, deadlines, decisions, or facts. "
-            "The labels Me and Them are audio channels, not identities."
+            "The labels Me, Them, and Speaker 1/2/… are audio channels, not "
+            "identities — never guess who a speaker is."
         )
         reduce_prompt = (
             "Merge these partial meeting notes without inventing facts or duplicates. Return "

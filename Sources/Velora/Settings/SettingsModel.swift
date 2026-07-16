@@ -205,6 +205,8 @@ final class SettingsModel: ObservableObject {
         dictionarySyncStatus = dictionarySync.status
         launchAtLogin = Self.launchAtLoginEnabled
         hotkey = config.hotkey
+        editHotkey = config.editHotkey
+        voiceEdit = config.voiceEdit
         hotkeyMode = config.hotkeyMode
         soundsEnabled = config.soundsEnabled
         soundVolume = config.soundVolume
@@ -222,9 +224,11 @@ final class SettingsModel: ObservableObject {
         saveAudio = config.saveAudio
         typingWPM = config.typingWPM
         localAgentAccess = config.localAgentAccess
+        updateChecks = config.updateChecks
         meetingSuggestions = config.meetingSuggestions
         meetingCalendar = config.meetingCalendar
         meetingAudioRetentionDays = config.meetingAudioRetentionDays
+        meetingDiarization = config.meetingDiarization
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
         // lands (the engine owns this key; status refreshes it).
@@ -405,6 +409,27 @@ final class SettingsModel: ObservableObject {
         didSet { config.localAgentAccess = localAgentAccess }
     }
 
+    @Published var updateChecks: Bool {
+        didSet { config.updateChecks = updateChecks }
+    }
+
+    /// Manual "Check Now" state for the General tab; nil = never ran.
+    @Published var updateCheckStatus: String?
+
+    func checkForUpdatesNow() {
+        updateCheckStatus = "Checking…"
+        UpdateChecker.shared.check { [weak self] outcome in
+            switch outcome {
+            case .upToDate:
+                self?.updateCheckStatus = "You're on the latest version."
+            case .updateAvailable(let update):
+                self?.updateCheckStatus = "Velora \(update.version) is available."
+            case .failed(let reason):
+                self?.updateCheckStatus = reason
+            }
+        }
+    }
+
     @Published var meetingSuggestions: Bool {
         didSet { config.meetingSuggestions = meetingSuggestions }
     }
@@ -415,6 +440,14 @@ final class SettingsModel: ObservableObject {
 
     @Published var meetingAudioRetentionDays: Int {
         didSet { config.meetingAudioRetentionDays = meetingAudioRetentionDays }
+    }
+
+    @Published var meetingDiarization: Bool {
+        didSet {
+            guard meetingDiarization != oldValue else { return }
+            config.meetingDiarization = meetingDiarization
+            supervisor?.send(["cmd": "reload_config"])
+        }
     }
 
     @Published var vocabMining: Bool {
@@ -473,6 +506,22 @@ final class SettingsModel: ObservableObject {
         didSet {
             guard hotkey != oldValue else { return }
             config.hotkey = hotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var editHotkey: Hotkey {
+        didSet {
+            guard editHotkey != oldValue else { return }
+            config.editHotkey = editHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var voiceEdit: Bool {
+        didSet {
+            guard voiceEdit != oldValue else { return }
+            config.voiceEdit = voiceEdit
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
     }

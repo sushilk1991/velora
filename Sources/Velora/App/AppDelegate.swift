@@ -232,6 +232,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController.install()
         contextTracker.start()
         hotkeyMonitor.start()
+
+        UpdateChecker.shared.onUpdate = { [weak self] update in
+            self?.statusController.updateAvailable = update
+        }
+        UpdateChecker.shared.checkAfterLaunch()
         veloraLog("Velora: hotkey monitor started (usingEventTap=\(hotkeyMonitor.usingEventTap))")
         supervisor.start()
         dictionarySync.start()
@@ -242,6 +247,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ) { [weak self] _ in
             guard let self else { return }
             self.hotkeyMonitor.hotkey = self.config.hotkey
+            self.hotkeyMonitor.editHotkey = self.config.activeEditHotkey
         }
 
         // First-run setup progress (venv bootstrap, model downloads) →
@@ -409,6 +415,10 @@ extension AppDelegate: DictationControllerDelegate {
 extension AppDelegate: StatusItemControllerDelegate {
     func statusItemToggleDictation() {
         dictation.toggleFromMenu()
+    }
+
+    func statusItemPasteLastRaw() {
+        dictation.pasteLastRawOriginal()
     }
 
     func statusItemReformatLast(mode: String) {

@@ -38,6 +38,14 @@ struct MeetingsSettingsView: View {
                     .onChange(of: model.meetingAudioRetentionDays) { _, _ in
                         coordinator.pruneAudio()
                     }
+                    Toggle(isOn: $model.meetingDiarization) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Identify different speakers")
+                            Text("Splits the other side of a call into Speaker 1, Speaker 2, … in the transcript. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 } footer: {
                     Text("Detection only suggests. Every recording still needs a Start Recording confirmation. macOS asks for computer-audio access after that confirmation on the first meeting. Transcripts and notes stay until you delete them; this setting removes only audio.")
                         .font(.caption).foregroundStyle(.secondary)

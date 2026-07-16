@@ -5,6 +5,7 @@ import Foundation
 protocol StatusItemControllerDelegate: AnyObject {
     func statusItemToggleDictation()
     func statusItemReformatLast(mode: String)
+    func statusItemPasteLastRaw()
     func statusItemTranscribeFile()
     func statusItemCancelTranscription()
     func statusItemStartMeeting()
@@ -60,6 +61,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     /// The live progress row, while the menu is open (weak: menus rebuild).
     private weak var setupMenuItem: NSMenuItem?
+
+    /// A newer release exists; the menu offers its release page. Menus
+    /// rebuild on open, so setting this is enough.
+    var updateAvailable: UpdateChecker.Update?
 
     init(history: HistoryStore) {
         self.history = history
@@ -215,21 +220,36 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let recents = history.recent(limit: 1)
 
         // "Reformat Last as…" — re-run the most recent dictation's cleanup in a
-        // different mode and paste it back. Only when the archived clip STILL
-        // exists — retention pruning deletes old clips but history keeps the
-        // row, and offering a reformat that can only fail is worse than not
-        // offering it (review finding).
-        if let clip = recents.first?.audioPath,
-           let clipURL = AppConfig.archivedAudioURL(name: clip),
-           FileManager.default.fileExists(atPath: clipURL.path) {
+        // different mode and paste it back. The re-run modes need the archived
+        // clip to STILL exist — retention pruning deletes old clips but history
+        // keeps the row, and offering a reformat that can only fail is worse
+        // than not offering it (review finding). "As Heard" needs only the
+        // stored raw text, so it survives clip pruning: it's the escape hatch
+        // for when cleanup got it wrong and the user just wants the words.
+        let lastRaw = recents.first?.raw.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let clipExists = recents.first?.audioPath
+            .flatMap(AppConfig.archivedAudioURL(name:))
+            .map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+        if !lastRaw.isEmpty || clipExists {
             let reformat = NSMenuItem(title: "Reformat Last as", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
-            for mode in DictationController.reformatModes {
-                let modeItem = NSMenuItem(
-                    title: mode, action: #selector(reformatLast(_:)), keyEquivalent: "")
-                modeItem.target = self
-                modeItem.representedObject = mode
-                submenu.addItem(modeItem)
+            if !lastRaw.isEmpty {
+                let rawItem = NSMenuItem(
+                    title: "As Heard (original)", action: #selector(pasteLastRaw),
+                    keyEquivalent: "")
+                rawItem.target = self
+                rawItem.toolTip = "Paste exactly what was transcribed, before any cleanup"
+                submenu.addItem(rawItem)
+            }
+            if clipExists {
+                if !lastRaw.isEmpty { submenu.addItem(.separator()) }
+                for mode in DictationController.reformatModes {
+                    let modeItem = NSMenuItem(
+                        title: mode, action: #selector(reformatLast(_:)), keyEquivalent: "")
+                    modeItem.target = self
+                    modeItem.representedObject = mode
+                    submenu.addItem(modeItem)
+                }
             }
             reformat.submenu = submenu
             menu.addItem(reformat)
@@ -256,6 +276,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
+
+        if let update = updateAvailable {
+            let item = NSMenuItem(
+                title: "Update Available — \(update.version)…",
+                action: #selector(openUpdatePage), keyEquivalent: "")
+            item.target = self
+            item.representedObject = update.page
+            item.image = NSImage(
+                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            menu.addItem(item)
+        }
 
         let historyItem = NSMenuItem(
             title: "History…", action: #selector(openHistory), keyEquivalent: "")
@@ -312,6 +343,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         delegate?.statusItemReformatLast(mode: mode)
     }
 
+    @objc private func pasteLastRaw() {
+        delegate?.statusItemPasteLastRaw()
+    }
+
     @objc private func transcribeFile() {
         delegate?.statusItemTranscribeFile()
     }
@@ -342,6 +377,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
 
     @objc private func openMeetings() { delegate?.statusItemOpenMeetings() }
+
+    @objc private func openUpdatePage(_ sender: NSMenuItem) {
+        guard let page = sender.representedObject as? URL else { return }
+        NSWorkspace.shared.open(page)
+    }
 
     @objc private func openSetupAssistant() {
         delegate?.statusItemOpenSetupAssistant()

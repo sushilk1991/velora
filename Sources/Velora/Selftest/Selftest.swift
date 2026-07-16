@@ -93,10 +93,55 @@ enum Selftest {
         testInsertionBoundary()
         testEmptyFinalFeedback()
         testClipboardStaging()
+        testUpdateChecker()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    // MARK: - Update checker
+
+    private static func testUpdateChecker() {
+        expect(UpdateChecker.isNewer("0.8.0", than: "0.7.2"), "minor bump is newer")
+        expect(UpdateChecker.isNewer("0.10.0", than: "0.9.9"), "numeric not lexicographic")
+        expect(UpdateChecker.isNewer("1.0.0", than: "0.99.99"), "major bump is newer")
+        expect(!UpdateChecker.isNewer("0.7.2", than: "0.7.2"), "same version is not newer")
+        expect(!UpdateChecker.isNewer("0.7.1", than: "0.7.2"), "older is not newer")
+        expect(UpdateChecker.isNewer("0.7.2.1", than: "0.7.2"), "extra component is newer")
+        expect(!UpdateChecker.isNewer("0.7", than: "0.7.0"), "missing component counts as zero")
+        expect(UpdateChecker.isNewer("0.8.0-beta", than: "0.7.9"),
+               "junk suffix compares by numeric prefix")
+
+        let ok = """
+        {"tag_name": "v9.9.9", "html_url": "https://github.com/x/y/releases/tag/v9.9.9"}
+        """.data(using: .utf8)
+        let http = HTTPURLResponse(
+            url: URL(string: "https://api.github.com")!, statusCode: 200,
+            httpVersion: nil, headerFields: nil)
+        if case .updateAvailable(let update) = UpdateChecker.parse(
+            current: "0.7.2", data: ok, response: http, error: nil) {
+            expect(update.version == "9.9.9", "parses and strips the v prefix")
+            expect(update.page.absoluteString.hasSuffix("v9.9.9"), "uses the release html_url")
+        } else {
+            expect(false, "release feed with newer tag parses as updateAvailable")
+        }
+        if case .upToDate = UpdateChecker.parse(
+            current: "9.9.9", data: ok, response: http, error: nil) {} else {
+            expect(false, "same-version feed parses as upToDate")
+        }
+        let rateLimited = HTTPURLResponse(
+            url: URL(string: "https://api.github.com")!, statusCode: 403,
+            httpVersion: nil, headerFields: nil)
+        if case .failed = UpdateChecker.parse(
+            current: "0.7.2", data: ok, response: rateLimited, error: nil) {} else {
+            expect(false, "non-200 parses as failed, never as an update")
+        }
+        if case .failed = UpdateChecker.parse(
+            current: "0.7.2", data: "not json".data(using: .utf8),
+            response: http, error: nil) {} else {
+            expect(false, "garbage body parses as failed")
+        }
     }
 
     // MARK: - Bundle identifier migration
@@ -1527,6 +1572,33 @@ enum Selftest {
             expect(false, "expected .transcribeStarted")
         }
 
+        let edited = EngineEvent.parse([
+            "event": "edited", "id": "e9", "text": "Fixed.", "applied": true, "ms": 412,
+        ])
+        if case .edited(let id, let text, let applied, let ms, let reason) = edited {
+            expect(id == "e9" && text == "Fixed." && applied && ms == 412 && reason == nil,
+                   "edited event parses")
+        } else {
+            expect(false, "expected .edited, got \(edited)")
+        }
+        let editGuard = EngineEvent.parse([
+            "event": "edited", "id": "e10", "text": "orig", "applied": false,
+            "ms": 5, "reason": "instruction_echo",
+        ])
+        if case .edited(_, _, let applied, _, let reason) = editGuard {
+            expect(!applied && reason == "instruction_echo", "guarded edit parses as not applied")
+        } else {
+            expect(false, "expected .edited for guard case")
+        }
+        let editFailed = EngineEvent.parse([
+            "event": "edit_failed", "id": "e11", "error": "busy", "code": "busy",
+        ])
+        if case .editFailed(let id, _, let code) = editFailed {
+            expect(id == "e11" && code == "busy", "edit_failed parses")
+        } else {
+            expect(false, "expected .editFailed")
+        }
+
         let done = EngineEvent.parse([
             "event": "transcribed", "path": "/a/b.m4a", "text": "notes",
             "mode": "Note", "duration_s": 12.3, "stt_ms": 1200,
@@ -2043,6 +2115,45 @@ enum Selftest {
             startMs: 0, endMs: 60_000, text: "I will ship the release tomorrow."))
         expect(store.nextChunk(meetingID: id, speaker: .me) == 1,
                "meeting segment cursor resumes after the last committed chunk")
+
+        // Diarized labels: the engine may split the system track into
+        // s1/s2/… — parsing, display, and the TRACK-level resume cursor.
+        // A separate meeting so the fixture above keeps its segment counts.
+        expect(MeetingSpeaker(rawValue: "s1") == .remote(1)
+               && MeetingSpeaker(rawValue: "s2")?.displayName == "Speaker 2"
+               && MeetingSpeaker(rawValue: "s2")?.rawValue == "s2"
+               && MeetingSpeaker(rawValue: "s0") == nil
+               && MeetingSpeaker(rawValue: "sx") == nil
+               && MeetingSpeaker(rawValue: "s123") == nil
+               && MeetingSpeaker(rawValue: "guest") == nil,
+               "diarized speaker labels parse s1/s2 and reject junk")
+        let diarizedID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: diarizedID, title: "Panel call", startedAt: started,
+            endedAt: started.addingTimeInterval(90), sourceApp: "zoom.us",
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: diarizedID, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 60_000, text: "Joint intro."))
+        store.appendSegment(MeetingSegment(
+            meetingID: diarizedID, speaker: .remote(1), chunkIndex: 1,
+            startMs: 60_000, endMs: 70_000, text: "Speaker one talks."))
+        store.appendSegment(MeetingSegment(
+            meetingID: diarizedID, speaker: .remote(2), chunkIndex: 2,
+            startMs: 70_000, endMs: 80_000, text: "Speaker two answers."))
+        expect(store.nextChunk(meetingID: diarizedID, speaker: .them) == 3,
+               "remote resume cursor spans them AND diarized s1/s2 rows")
+        expect(store.nextChunk(meetingID: diarizedID, speaker: .me) == 0,
+               "mic cursor is unaffected by diarized remote rows")
+        if let reloaded = store.record(id: diarizedID) {
+            expect(reloaded.formattedTranscript.contains("Speaker 1: Speaker one talks.")
+                   && reloaded.formattedTranscript.contains("Speaker 2: Speaker two answers."),
+                   "transcript renders diarized speaker names")
+        } else {
+            expect(false, "meeting with diarized segments reloads")
+        }
+        // Settle it: the resume/recovery checks below must only see `id`.
+        store.complete(meetingID: diarizedID, notes: MeetingNotes(summary: "Panel."))
         store.complete(meetingID: id, notes: MeetingNotes(
             summary: "The team approved launch.",
             decisions: ["Launch on Friday"],

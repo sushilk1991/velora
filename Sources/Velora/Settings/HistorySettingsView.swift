@@ -441,6 +441,7 @@ private struct HistoryCard: View {
     let onDelete: () -> Void
 
     @State private var expanded = false
+    @State private var showRaw = false
     @State private var hovering = false
     @State private var copied = false
     @State private var editing = false
@@ -578,6 +579,27 @@ private struct HistoryCard: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(VeloraBrand.violet.color)
             }
+            if hasDistinctRaw {
+                Button(showRaw ? "Hide original" : "As heard") {
+                    withAnimation(.easeInOut(duration: 0.15)) { showRaw.toggle() }
+                }
+                .buttonStyle(.plain)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+                .help("What the speech model transcribed, before cleanup")
+                if showRaw {
+                    Text(record.raw)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(VeloraSpacing.xs)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color(.separatorColor).opacity(0.18)))
+                }
+            }
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -686,6 +708,12 @@ private struct HistoryCard: View {
 
     private var hasTranscript: Bool {
         !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    /// Raw is worth showing only when cleanup actually changed something.
+    private var hasDistinctRaw: Bool {
+        let raw = record.raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !raw.isEmpty && raw != record.final.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func isLong(_ text: String) -> Bool {

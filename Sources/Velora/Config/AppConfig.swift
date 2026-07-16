@@ -192,6 +192,11 @@ final class AppConfig {
         static let meetingSuggestions = "velora.meetingSuggestions"
         static let meetingCalendar = "velora.meetingCalendar"
         static let meetingAudioRetentionDays = "velora.meetingAudioRetentionDays"
+        static let meetingDiarization = "velora.meetingDiarization"
+        static let editHotkey = "velora.editHotkey.v1"
+        static let voiceEdit = "velora.voiceEdit"
+        static let updateChecks = "velora.updateChecks"
+        static let lastUpdateCheckAt = "velora.lastUpdateCheckAt"
     }
 
     private init() {
@@ -219,6 +224,9 @@ final class AppConfig {
             Key.meetingSuggestions: true,
             Key.meetingCalendar: false,
             Key.meetingAudioRetentionDays: 30,
+            Key.meetingDiarization: true,
+            Key.voiceEdit: true,
+            Key.updateChecks: true,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -253,6 +261,26 @@ final class AppConfig {
         }
         set { defaults.set(newValue.defaultsRepresentation, forKey: Key.hotkey) }
     }
+
+    /// Safe Voice Edit: select text, press this, speak an instruction.
+    var editHotkey: Hotkey {
+        get {
+            if let dict = defaults.dictionary(forKey: Key.editHotkey),
+               let stored = Hotkey(defaultsRepresentation: dict) {
+                return stored
+            }
+            return .optionShiftE
+        }
+        set { defaults.set(newValue.defaultsRepresentation, forKey: Key.editHotkey) }
+    }
+
+    var voiceEdit: Bool {
+        get { defaults.bool(forKey: Key.voiceEdit) }
+        set { defaults.set(newValue, forKey: Key.voiceEdit) }
+    }
+
+    /// What the monitor should listen for — nil when the feature is off.
+    var activeEditHotkey: Hotkey? { voiceEdit ? editHotkey : nil }
 
     var hotkeyMode: HotkeyMode {
         get { HotkeyMode(rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold }
@@ -383,6 +411,26 @@ final class AppConfig {
         set { defaults.set(min(365, max(1, newValue)), forKey: Key.meetingAudioRetentionDays) }
     }
 
+    /// Split the meeting system-audio track into per-speaker turns
+    /// ("Speaker 1/2/…"). Mirrored as `meeting_diarization`; the engine
+    /// downloads its ~46 MB of ONNX models on first use, all local.
+    var meetingDiarization: Bool {
+        get { defaults.bool(forKey: Key.meetingDiarization) }
+        set { defaults.set(newValue, forKey: Key.meetingDiarization); writeEngineConfig() }
+    }
+
+    /// Daily anonymous GitHub releases check (UpdateChecker documents the
+    /// privacy contract). Off = Velora never talks to the network at all.
+    var updateChecks: Bool {
+        get { defaults.bool(forKey: Key.updateChecks) }
+        set { defaults.set(newValue, forKey: Key.updateChecks) }
+    }
+
+    var lastUpdateCheck: Date {
+        get { Date(timeIntervalSince1970: defaults.double(forKey: Key.lastUpdateCheckAt)) }
+        set { defaults.set(newValue.timeIntervalSince1970, forKey: Key.lastUpdateCheckAt) }
+    }
+
     /// Voice commands: an utterance that IS a command ("scratch that",
     /// "new line") executes instead of being pasted as text. App-side only.
     var voiceCommands: Bool {
@@ -507,6 +555,7 @@ final class AppConfig {
             payload["romanize_output"] = self.romanizeOutput
             payload["vocab_mining"] = self.vocabMining
             payload["smart_terminal"] = self.smartTerminal
+            payload["meeting_diarization"] = self.meetingDiarization
         }
     }
 

@@ -42,6 +42,11 @@ enum EngineEvent {
         sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool)
     case reprocessFailed(id: Int64?, error: String, code: String)
 
+    /// Safe Voice Edit result: the transformed selection (or the original
+    /// text when `applied` is false — a guard tripped or the model declined).
+    case edited(id: String?, text: String, applied: Bool, ms: Int, reason: String?)
+    case editFailed(id: String?, error: String, code: String)
+
     /// File-transcription command reached the engine (sent before decoding —
     /// distinguishes "working" from "command dropped while disconnected").
     case transcribeAccepted(id: String?)
@@ -138,6 +143,18 @@ enum EngineEvent {
             return .reprocessFailed(
                 id: (object["id"] as? NSNumber)?.int64Value,
                 error: object["error"] as? String ?? "reprocess failed",
+                code: object["code"] as? String ?? "failed")
+        case "edited":
+            return .edited(
+                id: object["id"] as? String,
+                text: object["text"] as? String ?? "",
+                applied: object["applied"] as? Bool ?? false,
+                ms: object["ms"] as? Int ?? 0,
+                reason: object["reason"] as? String)
+        case "edit_failed":
+            return .editFailed(
+                id: object["id"] as? String,
+                error: object["error"] as? String ?? "edit failed",
                 code: object["code"] as? String ?? "failed")
         case "transcribe_accepted":
             return .transcribeAccepted(id: object["id"] as? String)

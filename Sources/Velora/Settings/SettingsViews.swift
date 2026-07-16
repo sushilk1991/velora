@@ -125,6 +125,23 @@ struct GeneralSettingsView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            Section {
+                Toggle("Check for updates automatically", isOn: $model.updateChecks)
+                HStack {
+                    Button("Check Now") { model.checkForUpdatesNow() }
+                    if let status = model.updateCheckStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Updates")
+            } footer: {
+                Text("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations, and updating is always a manual download.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }
@@ -407,6 +424,22 @@ struct ShortcutsSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section {
+                Toggle(isOn: $model.voiceEdit) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Voice edit selection")
+                        Text("Select text anywhere, press the shortcut, and speak an edit — \u{201C}make this more formal\u{201D}, \u{201C}fix the grammar\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                LabeledContent("Edit selection") {
+                    HotkeyRecorderView(hotkey: $model.editHotkey)
+                }
+                .disabled(!model.voiceEdit)
+            } header: {
+                Text("Voice edit")
+            }
+            Section {
                 Picker("When pressed", selection: $model.hotkeyMode) {
                     ForEach(HotkeyMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)
@@ -464,8 +497,8 @@ struct AboutSettingsView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: VeloraSpacing.l) {
-                link("GitHub", "https://github.com/velora-app/velora")
-                link("Report an Issue", "https://github.com/velora-app/velora/issues")
+                link("GitHub", "https://github.com/\(UpdateChecker.repoSlug)")
+                link("Report an Issue", "https://github.com/\(UpdateChecker.repoSlug)/issues")
             }
             .padding(.top, VeloraSpacing.xs)
 
