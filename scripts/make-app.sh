@@ -77,13 +77,29 @@ echo "Building Velora $VERSION (build $BUILD_NUM)"
   || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string $BUILD_NUM" Resources/Info.plist
 
 # SwiftPM does not track the plist consumed only through the linker's
-# `-sectcreate` flag. Force one source input fresh so a version-only rebuild
-# relinks the binary instead of retaining stale embedded bundle metadata.
-touch Sources/Velora/App/main.swift
+# `-sectcreate` flag. Removing the executable forces a real relink against the
+# freshly stamped plist; touching a source file is insufficient under whole-
+# module optimization because SwiftPM can still reuse the old linked product.
+rm -f ".build/$CONFIG/Velora"
 swift build -c "$CONFIG"
 
 BIN=".build/$CONFIG/Velora"
 APP="build/Velora.app"
+
+# Exercise the headless path that reads the binary's embedded plist. The outer
+# bundle can have the right version while CLI/MCP still reports stale metadata,
+# so fail the build before signing if the two diverge.
+MCP_CHECK_ROOT=".build/$CONFIG/mcp-version-check"
+mkdir -p "$MCP_CHECK_ROOT/Resources/bin"
+ln -sf "$(pwd)/$BIN" "$MCP_CHECK_ROOT/Resources/bin/velora"
+MCP_METADATA="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  | "$MCP_CHECK_ROOT/Resources/bin/velora" mcp)"
+rm -rf "$MCP_CHECK_ROOT"
+if [[ "$MCP_METADATA" != *'"version":"'"$VERSION"'"'* ]]; then
+  echo "ERROR: embedded MCP version does not match $VERSION: $MCP_METADATA" >&2
+  exit 1
+fi
 
 # Ensure sounds exist (checked-in normally; regenerate when absent).
 if [[ ! -f Resources/start.caf || ! -f Resources/stop.caf || ! -f Resources/error.caf ]]; then

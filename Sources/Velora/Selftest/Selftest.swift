@@ -2424,6 +2424,11 @@ enum Selftest {
         let initResult = initialized?["result"] as? [String: Any]
         expect(initResult?["protocolVersion"] as? String == "2025-06-18",
                "MCP initialize negotiates the supported stable protocol")
+        let serverInfo = initResult?["serverInfo"] as? [String: Any]
+        let bundleVersion = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
+        expect(serverInfo?["version"] as? String == bundleVersion,
+               "MCP initialize advertises the running bundle version")
         expect(MCPStdioServer.process([
             "jsonrpc": "2.0", "method": "notifications/initialized",
         ], caller: caller) == nil,
