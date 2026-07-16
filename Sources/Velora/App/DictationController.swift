@@ -418,6 +418,8 @@ final class DictationController: NSObject {
         text: String, applied: Bool, ms: Int, reason: String?
     ) {
         guard applied else {
+            // A guarded edit returns the original text — nothing worth
+            // staging (the document still has it); leave the clipboard alone.
             NSLog("Velora: edit not applied (reason=%@)", reason ?? "model declined")
             showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
             return
@@ -427,8 +429,8 @@ final class DictationController: NSObject {
             showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
             return
         }
-        // The result is always staged for a manual ⌘V, then the same delivery
-        // rails as live insertion decide whether we may paste it ourselves.
+        // A successful result is always staged for a manual ⌘V; the same
+        // delivery rails as live insertion then decide whether we may paste.
         inserter.copyToClipboard(text)
         guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
               !SecureInput.isActive,
@@ -438,12 +440,15 @@ final class DictationController: NSObject {
             showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
             return
         }
-        // The selection must still be what we edited — if the user clicked
+        // The selection must still be what we edited, in the SAME field — the
+        // same string selected in a different field of the same app (two
+        // "Approved" cells, say) must not be overwritten. If the user clicked
         // away or typed, replacing whatever is now selected would corrupt
         // their document. Recovery stays one step: the text is on the clipboard.
         let app = NSWorkspace.shared.frontmostApplication
         guard let current = ScreenContext.selectedText(of: app),
-              current.text == pending.selection
+              current.text == pending.selection,
+              CFEqual(current.element, pending.element)
         else {
             NSLog("Velora: edit paste skipped — selection changed")
             showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
@@ -939,6 +944,10 @@ final class DictationController: NSObject {
             cancelledSessionID = failedSession
         }
         if editSession?.session == failedSession { editSession = nil }
+        // An edit round-trip that errored out (timeout, engine crash) must
+        // never apply later: the user has moved on, and a delayed paste into
+        // whatever is then selected would corrupt their document.
+        pendingEdit = nil
         capture.stop()
         transcribeTimer?.invalidate()
         transcribeTimer = nil
@@ -1052,7 +1061,14 @@ final class DictationController: NSObject {
             transcribeTimer?.invalidate()
             transcribeTimer = nil
             if phase == .transcribing { phase = .idle }
-            showError(code == "busy" ? "Velora is busy — try the edit again" : error)
+            switch code {
+            case "busy":
+                showError("Velora is busy — try the edit again")
+            case "cleanup_unavailable":
+                showError("The writing model is still loading — try again shortly")
+            default:
+                showError(error)
+            }
 
         case .error(let session, let message):
             // Only errors scoped to the active session may end the dictation;

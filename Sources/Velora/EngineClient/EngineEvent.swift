@@ -68,7 +68,7 @@ enum EngineEvent {
     case meetingTranscribeAccepted(id: String?, meetingID: String, speaker: MeetingSpeaker)
     case meetingTranscribeStarted(
         id: String?, meetingID: String, speaker: MeetingSpeaker,
-        durationS: Double, chunks: Int, startChunk: Int)
+        durationS: Double, chunks: Int, startChunk: Int, restarted: Bool)
     case meetingSegment(id: String?, segment: MeetingSegment)
     case meetingTranscribeProgress(
         id: String?, meetingID: String, speaker: MeetingSpeaker, fraction: Double)
@@ -191,7 +191,8 @@ enum EngineEvent {
                 speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them,
                 durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
                 chunks: (object["chunks"] as? NSNumber)?.intValue ?? 0,
-                startChunk: (object["start_chunk"] as? NSNumber)?.intValue ?? 0)
+                startChunk: (object["start_chunk"] as? NSNumber)?.intValue ?? 0,
+                restarted: object["restarted"] as? Bool ?? false)
         case "meeting_segment":
             let meetingID = object["meeting_id"] as? String ?? ""
             return .meetingSegment(

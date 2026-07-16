@@ -34,7 +34,7 @@ import numpy as np
 from . import __version__, diarization, editing, formatting, models, protocol
 from .audio_store import AudioStore
 from .cleanup import _RETRACTION_RE, CleanupEngine
-from .config import Config
+from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import load_media, split_for_batch
 from .meeting_notes import chunk_transcript, fallback_notes, merge_notes, parse_notes_json
@@ -192,6 +192,11 @@ class Engine:
         self._file_transcribe_job_id: Any = None
         self._meeting_transcribe_cancel = False
         self._meeting_transcribe_job_id: Any = None
+        # Safe Voice Edit: sub-second cleanup-model job. A dictation start
+        # PREEMPTS it (cancel event → cleanup returns between tokens) rather
+        # than being refused — the hotkey always wins.
+        self._editing = False
+        self._edit_cancel = threading.Event()
         # Meeting notes share the cleanup model but are chunked and
         # cooperatively preempted whenever live dictation starts.
         self._meeting_notes_running = False
@@ -575,6 +580,9 @@ class Engine:
                     self._meeting_transcribe_cancel = True
             elif cmd == "edit_text":
                 await self._cmd_edit_text(msg)
+            elif cmd == "edit_cancel":
+                if self._editing:
+                    self._edit_cancel.set()
             elif cmd == "meeting_notes":
                 await self._cmd_meeting_notes(msg)
             elif cmd == "meeting_notes_cancel":
@@ -596,6 +604,19 @@ class Engine:
         # Explicit-mode file cleanup uses the same writing model as foreground
         # dictation. Stop it between tokens and retry the exact chunk later.
         self._transcribe_preempt.set()
+        if self._editing:
+            # An in-flight voice edit is sub-second and preemptible: cancel it
+            # (the cleanup loop checks the event between tokens) and wait
+            # briefly instead of refusing — the dictation hotkey always wins.
+            self._edit_cancel.set()
+            for _ in range(20):
+                if not self._editing:
+                    break
+                await asyncio.sleep(0.1)
+            if self._editing:
+                # The wedge-restart backstop will catch a truly stuck worker;
+                # log so the rare fall-through is visible rather than silent.
+                log.warning("edit did not yield within 2s of a dictation start")
         if self._reprocessing:
             # A background reprocess may be using the live STT backend; starting
             # now would corrupt its stream state. Ask the app to retry.
@@ -1333,6 +1354,7 @@ class Engine:
                 if (
                     self.session is not None
                     or self._reprocessing
+                    or self._editing
                     or self._transcribing
                     or self._meeting_notes_running
                     or not (self.cleanup is not None and self.cleanup.loaded)
@@ -1433,7 +1455,7 @@ class Engine:
             await self._error("set_model: missing 'model'")
             return
         if (self.session is not None or self._reprocessing or self._transcribing
-                or self._meeting_notes_running):
+                or self._meeting_notes_running or self._editing):
             await self._error("set_model: busy (dictation, reprocess, or file transcription in progress)")
             return
         info = models.lookup(model_id)
@@ -1515,7 +1537,8 @@ class Engine:
         if self.session is not None or self._starting or self._finalizing:
             await fail("edit: busy (dictation in progress)", "busy")
             return
-        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing):
             await fail("edit: busy (another job in progress)", "busy")
             return
         text = msg.get("text")
@@ -1536,14 +1559,28 @@ class Engine:
         if self.cleanup is None:
             await fail("edit: writing model unavailable", "cleanup_unavailable")
             return
-        self._reprocessing = True  # same single-job mutex the other jobs honor
+        # Idle vocab mining shares the single-thread cleanup executor and can
+        # hold it for seconds. Without preempting it (as _cmd_start does), an
+        # edit queues behind a mining step, blows its own from-submission
+        # deadline, and would falsely mark the engine unhealthy → needless
+        # restart. Cancel mining now; the miner reschedules after the edit.
+        if self._miner_task is not None:
+            self._miner_task.cancel()
+        self._mine_cancel.set()
+        self._editing = True
+        self._edit_cancel.clear()
         asyncio.create_task(self._run_edit_text(dict(msg), text, instruction))
 
     async def _run_edit_text(self, msg: dict[str, Any], text: str, instruction: str) -> None:
         try:
             t0 = time.perf_counter()
+            # A dedicated budget scaled to selection size — the default
+            # adaptive timeout tops out at 6 s (tuned for dictation cleanup),
+            # so a long selection would always "time out" mid-rewrite.
+            timeout_ms = min(20_000, max(6_000, len(text) * 8))
             result = await self.cleanup.cleanup(
-                text, editing.build_edit_prompt(instruction), check_ratio=False)
+                text, editing.build_edit_prompt(instruction), timeout_ms=timeout_ms,
+                check_ratio=False, cancel_event=self._edit_cancel)
             out = result.text.strip()
             applied = bool(result.applied)
             reason = result.reason or ""
@@ -1576,7 +1613,7 @@ class Engine:
                 "code": "failed", "error": f"edit failed: {exc}",
             })
         finally:
-            self._reprocessing = False
+            self._editing = False
             self._schedule_mining()
 
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
@@ -1588,7 +1625,8 @@ class Engine:
             await self._reprocess_failed(
                 msg, "reprocess: busy (dictation in progress)", "busy")
             return
-        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing):
             await self._reprocess_failed(
                 msg, "reprocess: busy (another job in progress)", "busy")
             return
@@ -1678,7 +1716,8 @@ class Engine:
             await self._send({"event": "transcribe_failed", "id": msg.get("id"),
                               "error": "invalid formatting mode"})
             return
-        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing):
             await self._send({"event": "transcribe_failed", "id": msg.get("id"),
                               "error": "another transcription is already running"})
             return
@@ -1849,7 +1888,8 @@ class Engine:
         if not isinstance(start_chunk, int) or isinstance(start_chunk, bool) or start_chunk < 0:
             await self._error("meeting_transcribe: invalid 'start_chunk'")
             return
-        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing):
             await self._send({
                 "event": "meeting_transcribe_failed", "id": msg.get("id"),
                 "meeting_id": meeting_id, "speaker": speaker,
@@ -1866,6 +1906,55 @@ class Engine:
             "meeting_id": meeting_id, "speaker": speaker,
         })
 
+    def _meeting_plan_path(self, meeting_id: str, speaker: str) -> Path:
+        safe = "".join(c for c in f"{meeting_id}.{speaker}" if c.isalnum() or c in "._-")
+        return velora_home() / "cache" / "meeting-plans" / f"{safe}.json"
+
+    @staticmethod
+    def _load_meeting_plan(path: Path, total_samples: int) -> list[tuple[int, int, str]] | None:
+        """The chunk plan committed by this track's FIRST run, or None.
+
+        Chunk indexes are the crash-resume cursor, so a resume must transcribe
+        the exact plan the committed segments came from — recomputing could
+        differ (diarization toggled, model download now failing) and silently
+        skip or duplicate audio. The cache also makes resume independent of
+        the diarization backend entirely: spans are just sample ranges.
+        """
+        try:
+            data = json.loads(path.read_text())
+            spans = [
+                (int(a), int(b), str(label))
+                for a, b, label in data["spans"]
+            ]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if not spans:
+            return None
+        ok = all(
+            0 <= a < b <= total_samples and label
+            for a, b, label in spans
+        )
+        return spans if ok else None
+
+    @staticmethod
+    def _save_meeting_plan(path: Path, spans: list[tuple[int, int, str]]) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"spans": spans}))
+            tmp.replace(path)
+            # Opportunistic prune: plans are tiny, but deleted meetings leave
+            # orphans behind — drop anything older than a week.
+            cutoff = time.time() - 7 * 86_400
+            for old in path.parent.glob("*.json"):
+                try:
+                    if old.stat().st_mtime < cutoff:
+                        old.unlink()
+                except OSError:
+                    continue
+        except OSError:
+            log.warning("meeting plan cache write failed", exc_info=True)
+
     async def _diarize_spans(
         self, pcm: Any, meeting_id: str
     ) -> list[tuple[int, int, str]] | None:
@@ -1873,16 +1962,21 @@ class Engine:
 
         None means "use the classic single-speaker path" — backend missing,
         model download failed, diarization errored, or only one voice found
-        (a 1:1 call reads better as plain "Them" than as "Speaker 1"). The
-        plan must be deterministic per track: chunk indexes are the resume
-        cursor across engine restarts.
+        (a 1:1 call reads better as plain "Them" than as "Speaker 1").
         """
         try:
             if not diarization.available():
                 log.info("diarization: sherpa-onnx not importable — skipping")
                 return None
-            if not diarization.models_ready():
-                await asyncio.to_thread(diarization.ensure_models)
+            if self._meeting_transcribe_cancel:
+                return None
+            # Always runs the pinned-hash verification: existence alone must
+            # not bless a file truncated by a mid-download kill. The download
+            # and the diarize() call are each seconds+; check cancel around
+            # them so cancelling a long meeting bites promptly.
+            await asyncio.to_thread(diarization.ensure_models)
+            if self._meeting_transcribe_cancel:
+                return None
             turns = await asyncio.to_thread(diarization.diarize, pcm)
             speakers = {t.speaker for t in turns}
             if len(speakers) < 2:
@@ -1934,21 +2028,42 @@ class Engine:
             # labels); anything short of a confident multi-speaker result
             # falls back to the classic single-"them" silence chunking. The
             # mic track is one person by construction — never diarized.
+            #
+            # The chunk plan is committed to a cache file on first computation
+            # and a resume (start_chunk > 0) must run the CACHED plan: the
+            # committed chunk indexes came from it, and recomputing under a
+            # flipped diarization toggle or a failing model download would
+            # silently skip or duplicate audio. No cached plan on resume →
+            # restart from zero and tell the app to drop its stale rows.
+            plan_path = self._meeting_plan_path(meeting_id, speaker)
+            restarted = False
             spans: list[tuple[int, int, str]] | None = None
-            if speaker == "them" and self.config.meeting_diarization:
-                spans = await self._diarize_spans(pcm, meeting_id)
+            if start_chunk > 0:
+                spans = self._load_meeting_plan(plan_path, len(pcm))
+                if spans is None:
+                    log.warning(
+                        "meeting %s/%s: resume at chunk %d without a cached "
+                        "plan — restarting the track", meeting_id, speaker,
+                        start_chunk)
+                    restarted = True
+                    start_chunk = 0
             if spans is None:
-                chunks = split_for_batch(pcm)
-                spans = []
-                cursor = 0
-                for chunk in chunks:
-                    spans.append((cursor, cursor + len(chunk), speaker))
-                    cursor += len(chunk)
+                if speaker == "them" and self.config.meeting_diarization:
+                    spans = await self._diarize_spans(pcm, meeting_id)
+                if spans is None:
+                    chunks = split_for_batch(pcm)
+                    spans = []
+                    cursor = 0
+                    for chunk in chunks:
+                        spans.append((cursor, cursor + len(chunk), speaker))
+                        cursor += len(chunk)
+                self._save_meeting_plan(plan_path, spans)
             await self._send({
                 "event": "meeting_transcribe_started", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
                 "duration_s": round(duration_s, 1), "chunks": len(spans),
                 "start_chunk": min(start_chunk, len(spans)),
+                "restarted": restarted,
             })
             for index in range(start_chunk, len(spans)):
                 while (
@@ -1987,6 +2102,11 @@ class Engine:
             if self.shutdown.is_set():
                 await fail("engine shutting down", "engine_shutdown")
                 return
+            # The plan file deliberately OUTLIVES completion: a crash between
+            # transcribe-done and notes-done re-enqueues this track with
+            # start_chunk == len(spans), and only the cached plan proves that
+            # cursor means "already finished" rather than "plan changed".
+            # The 7-day prune in _save_meeting_plan retires it.
             await self._send({
                 "event": "meeting_transcribed", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
@@ -2017,7 +2137,8 @@ class Engine:
                 "error": "transcript is too large",
             })
             return
-        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing):
             await self._send({
                 "event": "meeting_notes_failed", "id": msg.get("id"),
                 "meeting_id": meeting_id, "code": "busy",

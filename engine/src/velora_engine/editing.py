@@ -39,7 +39,7 @@ def build_edit_prompt(instruction: str) -> str:
     return EDIT_SYSTEM_PROMPT_TEMPLATE.format(instruction=instruction.strip())
 
 
-_WORD_RE = re.compile(r"[a-z0-9']+")
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
 def _words(text: str) -> list[str]:
@@ -60,10 +60,13 @@ def instruction_echoed(original: str, instruction: str, output: str) -> bool:
     instruction_words = _words(instruction)
     if len(instruction_words) < 4:
         return False
-    original_joined = " ".join(_words(original))
-    output_joined = " ".join(_words(output))
+    # Space-pad so a run only matches on whole-word boundaries — otherwise
+    # "the cat sat on" would match inside "breathe cat sat on…" and reject a
+    # legitimate edit.
+    original_joined = " " + " ".join(_words(original)) + " "
+    output_joined = " " + " ".join(_words(output)) + " "
     for start in range(len(instruction_words) - 3):
-        run = " ".join(instruction_words[start:start + 4])
+        run = " " + " ".join(instruction_words[start:start + 4]) + " "
         if run in output_joined and run not in original_joined:
             return True
     return False

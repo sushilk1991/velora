@@ -29,6 +29,9 @@ Dictation tools like Superwhisper and Wispr Flow proved the product: invisible, 
 - **History browser** — every dictation (raw + final text, app, mode, duration) is stored in a local SQLite database. Browse, search, copy, or paste-again from the History tab; the menubar menu shows your last three (click to copy).
 - **Voice Intelligence** — an on-device dashboard turns local history into useful trends: words and dictations over time, estimated time saved, streaks, app and mode breakdowns, STT/cleanup latency, cleanup rate, and an honest zero-edit rate with observation coverage. Share cards contain aggregate numbers only — never transcript, app, or contact text.
 - **Private Meeting Memory** — Velora can suggest recording when Zoom, Google Meet, Teams, or a Slack Huddle is active, with optional Calendar matching. Capture starts only after an explicit confirmation, keeps microphone ("Me") and computer audio ("Them") as separate local tracks, and produces a searchable transcript, summary, decisions, and action items in the background. Processing is resumable and live dictation takes priority.
+- **Speaker diarization** — when more than one person is on the other side of a call, the transcript splits them into *Speaker 1 / Speaker 2 / …* using on-device diarization (sherpa-onnx: pyannote segmentation + titanet embeddings, ~46 MB downloaded on the first meeting, sha256-pinned). One-on-one calls stay plain "Them"; any diarization failure falls back cleanly. Toggle in Settings → Meetings.
+- **Safe Voice Edit** — select text in any app, press ⌥⇧E (configurable), and speak an edit: "make this more formal", "fix the grammar", "turn this into bullet points". Only the selection is touched, the result replaces it in place, and ⌘Z undoes it. The edit prompt is benchmarked (94% on a 50-command suite, `spikes/engine/bench_voice_edit.py`) and guarded — an unusable result keeps your text unchanged, and the edited text is always on the clipboard as backup.
+- **"As Heard" escape hatch** — when cleanup gets something wrong, paste the untouched raw transcript from the menubar (*Reformat Last as → As Heard*) or view it in History. No re-processing, works even after the audio clip has been pruned.
 - **Local CLI + MCP** — scripts and local agents can inspect allow-listed history/stats, transcribe an audio file, or request one visibly approved live dictation. Access is off by default, runs through an owner-only Unix socket instead of a network server, and never exposes raw audio, screen context, contacts, or learning data.
 - **Personal Dictionary** — teach Velora exact names, product terms, and optional “heard as → write as” corrections. Edit-learned and auto-learned words stay visible and reversible, and only confirmed dictionary entries sync through your app-specific iCloud Drive folder when iCloud is available.
 - **Audio archive + reprocess** — clips are saved as compact FLAC under `~/.velora/audio` (configurable retention, default 6 months / 4 GB cap) so you can re-transcribe any past dictation with a better model straight from the History tab.
@@ -87,13 +90,15 @@ The app must be running. Nothing listens on the network, and disabling the setti
 
 ## Performance
 
-Measured on Apple Silicon M-series with `Qwen3-4B-Instruct-2507-4bit` cleanup:
+The cleanup model is picked by RAM tier at first launch (Qwen3-1.7B-8bit on ≤14 GB Macs, Qwen3-4B-4bit up to 24 GB, Qwen3.5-4B-8bit above) and can be changed in Settings → Models. Measured on Apple Silicon M-series:
 
 | Metric | Measured |
 |---|---|
 | Streaming STT throughput (`parakeet-tdt-0.6b-v2`) | ~184× realtime |
 | Multilingual transcription (`whisper-large-v3-turbo`, default) | ~0.3 s per clip |
-| LLM cleanup, warm | ~0.8 s per paragraph |
+| LLM cleanup, warm | ~0.5–0.8 s per paragraph |
+| Voice edit (selection + spoken instruction) | ~0.4 s per sentence, ~1 s per paragraph |
+| Meeting diarization | ~2 s per audio-minute, ~0.5 GB peak |
 
 The default multilingual model is batch (transcribes on release rather than streaming), a deliberate quality tradeoff for accurate Hindi/Indian-English. For streaming English with live HUD partials, pick `parakeet-tdt-0.6b-v2` in Settings. If cleanup would blow its budget, Velora inserts the raw transcript immediately instead of making you wait — the cleaned version is never the bottleneck.
 
@@ -141,7 +146,8 @@ Edits are picked up via the engine's config reload — no restart dance required
 
 ## Privacy
 
-- Models are downloaded **once** from Hugging Face. Model downloads and Personal Dictionary iCloud Drive sync are the only network-backed features; Velora has no backend service.
+- Models are downloaded **once** from Hugging Face. Model downloads, Personal Dictionary iCloud Drive sync, and an optional update check are the only network-backed features; Velora has no backend service.
+- The update check is one anonymous HTTPS GET to the public GitHub releases feed, at most once a day, carrying nothing about you or your dictations. Turn it off in Settings → General and Velora never touches the network at all after model download.
 - At dictation time there are **zero network calls** — audio, transcripts, and cleaned text never leave the machine.
 - History is a local SQLite file under `~/.velora/`. Delete it whenever you like.
 - Meeting audio, transcripts, and notes live separately under `~/.velora/meetings/`. Meeting detection uses local app/window metadata and, only if enabled, nearby Calendar events. Detection can suggest a recording but can never start one; every recording requires an explicit confirmation and shows a persistent menu-bar indicator.
@@ -158,7 +164,8 @@ Known limitations:
 
 - **The `.app` bundle is required for real use** — microphone and accessibility (TCC) grants attach to the signed bundle, so hotkeys and insertion won't work from a bare `swift run` binary.
 - **Batch default** — the multilingual default model transcribes on release, not live; switch to `parakeet-tdt-0.6b-v2` for streaming HUD partials (English only).
-- **Meeting speaker labels are channel labels** — “Me” is the microphone track and “Them” is computer audio. Velora does not claim to identify individual remote speakers.
+- **Speaker labels are acoustic, not identities** — "Me" is the microphone track; remote voices are clustered into "Speaker 1/2/…" by how they sound. Velora never claims to know *who* a speaker is.
+- **Voice-edit casing quirks** — capitalization-specific instructions ("fix the weird capitalization") are the 4B model's weakest edit category; grammar, tone, shortening, and list edits are reliable.
 
 ## Contributing & license
 

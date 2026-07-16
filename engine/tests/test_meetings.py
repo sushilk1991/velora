@@ -171,6 +171,45 @@ async def test_meeting_transcribe_diarization_failure_falls_back(
     assert segment["text"] == "still transcribed"
 
 
+async def test_meeting_resume_without_cached_plan_restarts_track(
+    engine, tmp_path, monkeypatch
+):
+    """A resume cursor whose chunk plan is gone (crash before the cache was
+    written, or an upgraded install) must restart from zero and say so —
+    silently emitting `meeting_transcribed` with nothing would truncate the
+    transcript."""
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "recovered words")
+    _eng, sock = engine
+    clip = tmp_path / "them.wav"
+    _write_wav(clip)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "r1", "meeting_id": "meeting-lost-plan",
+        "speaker": "them", "path": str(clip), "start_chunk": 5,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    started = await client.recv_event("meeting_transcribe_started")
+    assert started["restarted"] is True
+    assert started["start_chunk"] == 0
+    segment = await client.recv_event("meeting_segment")
+    assert segment["chunk_index"] == 0
+    assert segment["text"] == "recovered words"
+    await client.recv_event("meeting_transcribed")
+
+    # Now the plan is cached — a legit resume past the end completes quietly.
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "r2", "meeting_id": "meeting-lost-plan",
+        "speaker": "them", "path": str(clip), "start_chunk": 1,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    resumed = await client.recv_event("meeting_transcribe_started")
+    assert resumed["restarted"] is False
+    assert resumed["start_chunk"] == 1
+    done = await client.recv_event("meeting_transcribed")
+    assert done["id"] == "r2"
+
+
 async def test_meeting_transcribe_rejects_invalid_channel(engine, tmp_path):
     _eng, sock = engine
     clip = tmp_path / "clip.wav"

@@ -513,10 +513,23 @@ final class SettingsModel: ObservableObject {
     @Published var editHotkey: Hotkey {
         didSet {
             guard editHotkey != oldValue else { return }
+            // The monitor deliberately ignores an edit hotkey equal to the
+            // dictation hotkey (dictation wins) — accepting the recording
+            // would silently disable Voice Edit, so reject it visibly.
+            guard editHotkey != hotkey else {
+                editHotkeyConflict = true
+                editHotkey = oldValue
+                return
+            }
+            editHotkeyConflict = false
             config.editHotkey = editHotkey
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
     }
+
+    /// Set when the user tried to record the dictation hotkey as the edit
+    /// hotkey; shown inline in the Shortcuts tab.
+    @Published var editHotkeyConflict = false
 
     @Published var voiceEdit: Bool {
         didSet {

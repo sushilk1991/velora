@@ -28,13 +28,34 @@ def test_alternating_speakers_never_merge() -> None:
     assert [c[2] for c in chunks] == ["s1", "s2", "s1"]
 
 
-def test_padding_never_overlaps_neighbouring_turn() -> None:
+def test_padding_never_overlaps_disjoint_neighbour() -> None:
     turns = [Turn(1.0, 5.0, "s1"), Turn(5.1, 9.0, "s2")]
     chunks = plan_chunks(turns, total_samples=SR * 10)
     assert len(chunks) == 2
     # s1's padded end must not cross into s2's start, and vice versa
     assert chunks[0][1] <= int(5.1 * SR)
     assert chunks[1][0] >= int(5.0 * SR)
+
+
+def test_overlapping_interjection_does_not_drop_the_long_turn() -> None:
+    # s1 speaks 0-60; s2 interjects 5-6. Neither speaker's audio may vanish.
+    turns = [Turn(0.0, 60.0, "s1"), Turn(5.0, 6.0, "s2")]
+    chunks = plan_chunks(turns, total_samples=SR * 61)
+    s1 = [c for c in chunks if c[2] == "s1"]
+    s2 = [c for c in chunks if c[2] == "s2"]
+    assert s1 and s2
+    # s1's coverage must span nearly the whole minute, not be truncated at 5s.
+    s1_end = max(c[1] for c in s1)
+    assert s1_end >= int(59 * SR), f"s1 truncated at {s1_end / SR:.1f}s"
+    # s2's interjection is transcribed, not collapsed to a negative span.
+    assert any(c[1] > c[0] for c in s2)
+
+
+def test_contained_same_speaker_turn_does_not_shrink_span() -> None:
+    # A later same-speaker turn fully inside the first must not cut it short.
+    turns = [Turn(0.0, 30.0, "s1"), Turn(10.0, 12.0, "s1")]
+    chunks = plan_chunks(turns, total_samples=SR * 31)
+    assert max(c[1] for c in chunks) >= int(29 * SR)
 
 
 def test_long_merged_span_splits_evenly_under_cap() -> None:

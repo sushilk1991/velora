@@ -394,6 +394,24 @@ final class MeetingStore {
         }
     }
 
+    /// Drops one track's committed segments — the engine restarted the track
+    /// from chunk zero (its resume plan was lost), so existing rows would
+    /// duplicate or mislabel lines once the fresh segments arrive.
+    func deleteSegments(meetingID: String, remoteTrack: Bool) {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            let condition = remoteTrack ? "speaker != 'me'" : "speaker = 'me'"
+            guard sqlite3_prepare_v2(db, """
+                DELETE FROM meeting_segments WHERE meeting_id = ? AND \(condition);
+                """, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, meetingID)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                NSLog("Velora: meeting segment reset failed: %@", lastError)
+            }
+        }
+    }
+
     func complete(meetingID: String, notes: MeetingNotes) {
         queue.sync { [self] in
             guard db != nil else { return }

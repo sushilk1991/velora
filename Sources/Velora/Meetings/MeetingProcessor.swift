@@ -104,11 +104,19 @@ final class MeetingProcessor: ObservableObject {
     func handle(_ event: EngineEvent) {
         guard var work else { return }
         switch event {
-        case .meetingTranscribeStarted(let id, let meetingID, let speaker, _, _, _):
+        case .meetingTranscribeStarted(
+            let id, let meetingID, let speaker, _, _, _, let restarted):
             guard matches(id: id, meetingID: meetingID, work: work),
                   work.stage == .transcribing,
                   work.tracks.indices.contains(work.trackIndex),
                   work.tracks[work.trackIndex].speaker == speaker else { return }
+            if restarted {
+                // The engine lost the chunk plan our committed rows came from
+                // (crash before the plan cache, or an upgraded install) and is
+                // re-running the whole track — stale rows would otherwise
+                // duplicate or mislabel transcript lines.
+                store.deleteSegments(meetingID: meetingID, remoteTrack: speaker.isRemote)
+            }
             state = .processing(
                 meetingID: meetingID,
                 label: "Transcribing \(speaker.displayName)…",

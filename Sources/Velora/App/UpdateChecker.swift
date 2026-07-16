@@ -53,7 +53,12 @@ final class UpdateChecker {
               Date().timeIntervalSince(config.lastUpdateCheck) >= Self.interval
         else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 30) { [weak self] in
-            guard let self, self.config.updateChecks else { return }
+            guard let self, self.config.updateChecks,
+                  // Re-gate on the timestamp: a manual "Check Now" during the
+                  // 30 s deferral already satisfied today's check — firing
+                  // again would break the advertised once-a-day behavior.
+                  Date().timeIntervalSince(self.config.lastUpdateCheck) >= Self.interval
+            else { return }
             self.check { _ in }
         }
     }

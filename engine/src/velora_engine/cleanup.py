@@ -100,6 +100,23 @@ _PRESENT_AUXILIARY_FORMS = {
 }
 
 
+_CONTROL_TOKEN_RE = re.compile(r"<\|(?=[A-Za-z])")
+
+
+def neutralize_control_tokens(text: str) -> str:
+    """Defang chat-template control markers embedded in user content.
+
+    HF tokenizers recognize special tokens like ``<|im_start|>`` even inside
+    message content, so a selection (or dictation) containing a literal
+    ``<|im_start|>system…`` sequence would tokenize into a real, attacker
+    controlled conversation turn. Inserting a zero-width space after the bar
+    breaks the exact-string match the tokenizer needs, while staying visually
+    identical if it ever round-trips back to the user. Applies to every path
+    into the model; whisper output never contains these, so dictation is a
+    no-op — the exposure is arbitrary on-screen text via Safe Voice Edit."""
+    return _CONTROL_TOKEN_RE.sub("<​|", text)
+
+
 def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
     """Scale the cleanup budget with input length.
 
@@ -383,7 +400,7 @@ class CleanupEngine:
     def _prompt_tokens(self, system_prompt: str, user_text: str) -> list[int]:
         messages = [
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
+            {"role": "user", "content": neutralize_control_tokens(user_text)},
         ]
         try:
             return list(
@@ -554,6 +571,12 @@ class CleanupEngine:
             if now - first_token_at > output_timeout_s:
                 status = "timeout"
                 break
+        # Hitting the token ceiling means the output was CUT OFF mid-thought.
+        # For dictation the divergence guard catches the too-short result, but
+        # a transformation path (check_ratio off) has no such net — flag it so
+        # a truncated edit is never pasted as a success.
+        if status == "ok" and len(gen_tokens) >= max_tokens:
+            status = "length"
         # The working cache is intentionally neither reused nor retained:
         # Qwen's hybrid cache contains non-trimmable recurrent state. Keeping
         # it here would duplicate the prepared prefix's MLX state until the
@@ -626,6 +649,12 @@ class CleanupEngine:
         if generated.status == "timeout":
             log.warning("cleanup timeout after %dms — returning raw", ms)
             return CleanupResult(raw, False, ms, "timeout", **metrics)
+        if generated.status == "length":
+            # Truncated at the token ceiling. Dictation cleanup would normally
+            # let the divergence guard decide, but a cut-off result is never
+            # trustworthy — return raw so nothing partial is delivered.
+            log.warning("cleanup hit token ceiling after %dms — returning raw", ms)
+            return CleanupResult(raw, False, ms, "length", **metrics)
         text = generated.text
         # The divergence guard is a length-ratio over-editing check; a script
         # transliteration legitimately changes length, so skip it when romanizing.

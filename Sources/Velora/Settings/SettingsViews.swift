@@ -436,6 +436,11 @@ struct ShortcutsSettingsView: View {
                     HotkeyRecorderView(hotkey: $model.editHotkey)
                 }
                 .disabled(!model.voiceEdit)
+                if model.editHotkeyConflict {
+                    Text("That's already the dictation shortcut — pick a different one.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             } header: {
                 Text("Voice edit")
             }

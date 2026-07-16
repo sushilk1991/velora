@@ -84,61 +84,64 @@ def models_ready() -> bool:
     return (root / _SEG_NAME).is_file() and (root / _EMB_NAME).is_file()
 
 
-def _verify(path: Path, expected: str) -> None:
-    digest = sha256(path.read_bytes()).hexdigest()
-    if digest != expected:
-        path.unlink(missing_ok=True)
-        raise ValueError(f"checksum mismatch for {path.name}: {digest}")
+def _hash_ok(path: Path, expected: str) -> bool:
+    return path.is_file() and sha256(path.read_bytes()).hexdigest() == expected
 
 
 def _download(url: str, dest: Path, progress: Callable[[int], None] | None) -> None:
-    """Stream ``url`` to ``dest`` atomically (tmp file + rename)."""
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    try:
-        with urllib.request.urlopen(url, timeout=60) as resp, tmp.open("wb") as out:
-            done = 0
-            while True:
-                block = resp.read(256 * 1024)
-                if not block:
-                    break
-                out.write(block)
-                done += len(block)
-                if progress is not None:
-                    progress(done)
-        tmp.replace(dest)
-    finally:
-        tmp.unlink(missing_ok=True)
+    """Stream ``url`` to ``dest`` (caller verifies before any rename)."""
+    with urllib.request.urlopen(url, timeout=60) as resp, dest.open("wb") as out:
+        done = 0
+        while True:
+            block = resp.read(256 * 1024)
+            if not block:
+                break
+            out.write(block)
+            done += len(block)
+            if progress is not None:
+                progress(done)
 
 
 def ensure_models(progress: Callable[[int], None] | None = None) -> None:
-    """Download + verify both models if missing. Raises on failure.
+    """Download missing models and verify EVERYTHING against pinned hashes.
 
-    ``progress`` receives cumulative bytes downloaded (vs DOWNLOAD_BYTES).
+    Existing files are re-hashed too: a kill mid-download/extract must not
+    leave a truncated file that passes an existence check forever. All writes
+    are verify-then-atomic-rename, so a crash at any point leaves either the
+    old state or a fully verified file. Raises on any failure. ``progress``
+    receives cumulative bytes downloaded (vs DOWNLOAD_BYTES).
     """
     root = models_dir()
     root.mkdir(parents=True, exist_ok=True)
     base = 0
 
     seg = root / _SEG_NAME
-    if not seg.is_file():
-        log.info("diarization: downloading segmentation model")
+    if not _hash_ok(seg, _SEG_SHA256):
+        log.info("diarization: fetching segmentation model")
         with tempfile.TemporaryDirectory(dir=root) as tmpdir:
             tarball = Path(tmpdir) / "seg.tar.bz2"
             _download(_SEG_URL, tarball,
                       (lambda n: progress(base + n)) if progress else None)
             with tarfile.open(tarball, "r:bz2") as tar:
                 member = tar.getmember(_SEG_TAR_MEMBER)
-                member.name = seg.name  # flatten, and never trust archive paths
-                tar.extract(member, root, filter="data")
-        _verify(seg, _SEG_SHA256)
+                member.name = "model.onnx"  # flatten; never trust archive paths
+                tar.extract(member, tmpdir, filter="data")
+            extracted = Path(tmpdir) / "model.onnx"
+            if not _hash_ok(extracted, _SEG_SHA256):
+                raise ValueError("segmentation model failed checksum after download")
+            extracted.replace(seg)
     base += 6_900_000
 
     emb = root / _EMB_NAME
-    if not emb.is_file():
-        log.info("diarization: downloading speaker-embedding model")
-        _download(_EMB_URL, emb,
-                  (lambda n: progress(base + n)) if progress else None)
-        _verify(emb, _EMB_SHA256)
+    if not _hash_ok(emb, _EMB_SHA256):
+        log.info("diarization: fetching speaker-embedding model")
+        with tempfile.TemporaryDirectory(dir=root) as tmpdir:
+            tmp = Path(tmpdir) / _EMB_NAME
+            _download(_EMB_URL, tmp,
+                      (lambda n: progress(base + n)) if progress else None)
+            if not _hash_ok(tmp, _EMB_SHA256):
+                raise ValueError("embedding model failed checksum after download")
+            tmp.replace(emb)
 
 
 def diarize(pcm: np.ndarray) -> list[Turn]:
@@ -192,20 +195,24 @@ def plan_chunks(
 
     Adjacent same-speaker turns closer than ``merge_gap_s`` merge into one
     chunk; merged spans longer than ``max_chunk_s`` split evenly (whisper
-    batch quality drops past a minute). Boundaries get ``pad_s`` of padding,
-    clamped so chunks never overlap a neighbouring turn — segmentation edges
-    land within ~100 ms of the true boundary and padding protects word onsets.
+    batch quality drops past a minute). Boundaries get ``pad_s`` of padding to
+    protect word onsets, clamped inward only against a *disjoint* neighbour —
+    an OVERLAPPING neighbour (pyannote seg-3.0 is overlap-aware, so a short
+    interjection inside a long turn is valid input) must never truncate this
+    turn, or that turn's speech is silently dropped.
 
     Returns (start_sample, end_sample, speaker) tuples, chronological. Must be
     deterministic for a given track: chunk indexes are the resume cursor.
     """
     if not turns:
         return []
+    total_s = total_samples / sample_rate
     merged: list[list[float | str]] = []
     for turn in turns:
         if (merged and merged[-1][2] == turn.speaker
                 and turn.start - float(merged[-1][1]) <= merge_gap_s):
-            merged[-1][1] = turn.end
+            # max(): a fully-contained later turn must not SHRINK the span.
+            merged[-1][1] = max(float(merged[-1][1]), turn.end)
         else:
             merged.append([turn.start, turn.end, turn.speaker])
 
@@ -215,13 +222,20 @@ def plan_chunks(
         if end_f - start_f < 0.3:
             # Too short to carry a word; padding must not resurrect it.
             continue
-        prev_end = float(merged[i - 1][1]) if i > 0 else 0.0
-        next_start = (
-            float(merged[i + 1][0]) if i + 1 < len(merged)
-            else total_samples / sample_rate
-        )
-        start_f = max(start_f - pad_s, prev_end, 0.0)
-        end_f = min(end_f + pad_s, next_start, total_samples / sample_rate)
+        # Pad into surrounding audio, never inward past this turn's own core
+        # (that would drop real speech). Clamp against a neighbour only when it
+        # is genuinely disjoint from this turn.
+        lo = max(start_f - pad_s, 0.0)
+        hi = min(end_f + pad_s, total_s)
+        if i > 0:
+            prev_end = float(merged[i - 1][1])
+            if prev_end <= start_f:
+                lo = max(lo, prev_end)
+        if i + 1 < len(merged):
+            next_start = float(merged[i + 1][0])
+            if next_start >= end_f:
+                hi = min(hi, next_start)
+        start_f, end_f = lo, hi
         if end_f - start_f < 0.2:
             continue
         # Even split keeps pieces comparable instead of a 60 s + 2 s tail.
