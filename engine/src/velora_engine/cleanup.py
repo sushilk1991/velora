@@ -117,6 +117,18 @@ def neutralize_control_tokens(text: str) -> str:
     return _CONTROL_TOKEN_RE.sub("<​|", text)
 
 
+def restore_control_tokens(text: str) -> str:
+    """Reverse :func:`neutralize_control_tokens` on model OUTPUT.
+
+    A model that preserves its input verbatim (e.g. Safe Voice Edit reformats
+    source containing a literal ``<|im_start|>``) would otherwise return the
+    text with the injected zero-width space still in it, silently corrupting
+    the source. Stripping the exact marker the neutralizer inserts restores a
+    clean round-trip; it can only remove a ZWSP that sits between ``<`` and
+    ``|word``, which no legitimate output places there."""
+    return text.replace("<​|", "<|")
+
+
 def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
     """Scale the cleanup budget with input length.
 
@@ -655,7 +667,9 @@ class CleanupEngine:
             # trustworthy — return raw so nothing partial is delivered.
             log.warning("cleanup hit token ceiling after %dms — returning raw", ms)
             return CleanupResult(raw, False, ms, "length", **metrics)
-        text = generated.text
+        # Undo the control-token neutralization applied to the prompt so a
+        # preserved marker round-trips cleanly (before the guard compares).
+        text = restore_control_tokens(generated.text)
         # The divergence guard is a length-ratio over-editing check; a script
         # transliteration legitimately changes length, so skip it when romanizing.
         if check_ratio:

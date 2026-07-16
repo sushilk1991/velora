@@ -69,6 +69,16 @@ def test_neutralize_control_tokens_defangs_chatml() -> None:
     assert neutralize_control_tokens("a < b and c > d") == "a < b and c > d"
 
 
+def test_control_token_round_trip_is_clean() -> None:
+    # Editing source that legitimately contains a ChatML marker must return it
+    # byte-identical — the neutralizer's zero-width space is undone on output.
+    from velora_engine.cleanup import neutralize_control_tokens, restore_control_tokens
+    original = "template uses <|im_start|>system then <|im_end|> to delimit"
+    assert restore_control_tokens(neutralize_control_tokens(original)) == original
+    # Restore is a no-op on text that never had a marker.
+    assert restore_control_tokens("plain output text") == "plain output text"
+
+
 # ---------------- socket command ----------------
 
 class FakeCleanup:

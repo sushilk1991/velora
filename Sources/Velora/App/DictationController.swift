@@ -71,6 +71,10 @@ final class DictationController: NSObject {
     private static let tapThreshold: TimeInterval = 0.35
     /// Give up on the engine this long after `stop`.
     private static let transcribeTimeout: TimeInterval = 20
+    /// Edit round-trip ceiling — above the engine's own 20 s edit budget so
+    /// the engine's `edit_failed` normally arrives first; this only fires if
+    /// the reply is lost entirely.
+    private static let editTimeout: TimeInterval = 25
 
     weak var delegate: DictationControllerDelegate?
     /// App-owned foreground capture exclusion (currently meeting recording).
@@ -136,6 +140,10 @@ final class DictationController: NSObject {
     /// final: verify-and-replace happens when `edited` comes back.
     private var pendingEdit: (
         id: String, selection: String, bundleID: String?, element: AXUIElement)?
+    /// Self-contained watchdog for the edit round-trip — kept separate from
+    /// the dictation transcribe timer so an unrelated failure's showError
+    /// never discards a valid in-flight edit.
+    private var editTimer: Timer?
     /// The last successful insertion, for the "scratch that" voice command —
     /// undo is only offered into the SAME app, shortly after.
     private var lastInsertion: (bundleID: String?, at: Date)?
@@ -403,7 +411,16 @@ final class DictationController: NSObject {
             id: id, selection: edit.selection,
             bundleID: edit.bundleID, element: edit.element)
         phase = .transcribing
-        armTranscribeTimeout()
+        editTimer?.invalidate()
+        editTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.editTimeout, repeats: false
+        ) { [weak self] _ in
+            guard let self, let pending = self.pendingEdit, pending.id == id else { return }
+            self.pendingEdit = nil
+            self.supervisor.send(["cmd": "edit_cancel", "id": id])
+            if self.phase == .transcribing { self.phase = .idle }
+            self.showNotice(symbol: "pencil.slash", message: "Edit timed out")
+        }
         supervisor.send([
             "cmd": "edit_text", "id": id,
             "text": edit.selection, "instruction": instruction,
@@ -926,7 +943,12 @@ final class DictationController: NSObject {
         // (the user explicitly gave up on it).
         cancelledSessionID = sessionID
         editSession = nil
-        pendingEdit = nil
+        if let pending = pendingEdit {
+            supervisor.send(["cmd": "edit_cancel", "id": pending.id])
+            pendingEdit = nil
+        }
+        editTimer?.invalidate()
+        editTimer = nil
         capture.stop()
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
@@ -944,10 +966,11 @@ final class DictationController: NSObject {
             cancelledSessionID = failedSession
         }
         if editSession?.session == failedSession { editSession = nil }
-        // An edit round-trip that errored out (timeout, engine crash) must
-        // never apply later: the user has moved on, and a delayed paste into
-        // whatever is then selected would corrupt their document.
-        pendingEdit = nil
+        // Deliberately does NOT clear pendingEdit: showError is a catch-all
+        // reached by unrelated failures (e.g. a rejected "Reformat Last as…"
+        // while an edit is in flight), and discarding a valid edit round-trip
+        // here would lose its result. The edit owns its own lifecycle —
+        // editTimer, the `edited`/`edit_failed` handlers, and cancel().
         capture.stop()
         transcribeTimer?.invalidate()
         transcribeTimer = nil
@@ -1050,16 +1073,17 @@ final class DictationController: NSObject {
         case .edited(let id, let text, let applied, let ms, let reason):
             guard let pending = pendingEdit, pending.id == id else { break }
             pendingEdit = nil
-            transcribeTimer?.invalidate()
-            transcribeTimer = nil
+            editTimer?.invalidate()
+            editTimer = nil
             if phase == .transcribing { phase = .idle }
             applyEdit(pending: pending, text: text, applied: applied, ms: ms, reason: reason)
 
         case .editFailed(let id, let error, let code):
             guard let pending = pendingEdit, pending.id == id else { break }
+            _ = pending
             pendingEdit = nil
-            transcribeTimer?.invalidate()
-            transcribeTimer = nil
+            editTimer?.invalidate()
+            editTimer = nil
             if phase == .transcribing { phase = .idle }
             switch code {
             case "busy":
