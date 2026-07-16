@@ -345,7 +345,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         case .status(let payload):
             NotificationCenter.default.post(
                 name: .veloraEngineStatus, object: nil, userInfo: ["payload": payload])
-        case .reprocessed:
+        case .reprocessed, .reprocessFailed:
             NotificationCenter.default.post(name: .veloraEngineReprocessed, object: event)
         default:
             break

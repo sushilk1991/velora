@@ -27,6 +27,9 @@ Dictation tools like Superwhisper and Wispr Flow proved the product: invisible, 
   - everything else → clean, well-punctuated default
 - **On-device STT + LLM** — transcription with `whisper-large-v3-turbo` (multilingual; `parakeet-tdt-0.6b-v2` available for streaming English, plus a Hindi/Hinglish specialist) and cleanup/formatting with `Qwen3-4B-Instruct-2507-4bit`. Cleanup removes fillers, applies self-corrections ("no wait, I meant Tuesday"), punctuates, and honors spoken "new line" / "new paragraph".
 - **History browser** — every dictation (raw + final text, app, mode, duration) is stored in a local SQLite database. Browse, search, copy, or paste-again from the History tab; the menubar menu shows your last three (click to copy).
+- **Voice Intelligence** — an on-device dashboard turns local history into useful trends: words and dictations over time, estimated time saved, streaks, app and mode breakdowns, STT/cleanup latency, cleanup rate, and an honest zero-edit rate with observation coverage. Share cards contain aggregate numbers only — never transcript, app, or contact text.
+- **Private Meeting Memory** — Velora can suggest recording when Zoom, Google Meet, Teams, or a Slack Huddle is active, with optional Calendar matching. Capture starts only after an explicit confirmation, keeps microphone ("Me") and computer audio ("Them") as separate local tracks, and produces a searchable transcript, summary, decisions, and action items in the background. Processing is resumable and live dictation takes priority.
+- **Local CLI + MCP** — scripts and local agents can inspect allow-listed history/stats, transcribe an audio file, or request one visibly approved live dictation. Access is off by default, runs through an owner-only Unix socket instead of a network server, and never exposes raw audio, screen context, contacts, or learning data.
 - **Personal Dictionary** — teach Velora exact names, product terms, and optional “heard as → write as” corrections. Edit-learned and auto-learned words stay visible and reversible, and only confirmed dictionary entries sync through your app-specific iCloud Drive folder when iCloud is available.
 - **Audio archive + reprocess** — clips are saved as compact FLAC under `~/.velora/audio` (configurable retention, default 6 months / 4 GB cap) so you can re-transcribe any past dictation with a better model straight from the History tab.
 - **Custom modes editor** — every mode is a JSON file in `~/.velora/modes/`, editable from the Modes tab: per-mode LLM prompt (the Superwhisper-style feature), formatting level, app bindings, vocabulary, and replacements. Drop in a file to create your own (see [Customization](#customization)).
@@ -62,7 +65,25 @@ Prefer not to build? Grab `Velora-x.y.z.dmg` from [Releases](https://github.com/
 
 > Run the `.app` bundle, not the bare binary — macOS permission grants (mic, accessibility) attach to the signed bundle identity.
 >
-> **Engine tests:** `make test` runs the Python engine suite (`cd engine && uv run pytest -q`).
+> **Tests:** `make test` runs the Python engine suite. The app also has an embedded Swift self-test (`swift run Velora --selftest`), and `make perf-test` checks Intelligence against a 100,000-row history.
+
+## CLI and local agents
+
+The installed app includes a CLI at:
+
+```sh
+/Applications/Velora.app/Contents/Resources/bin/velora --help
+```
+
+Enable **Allow local CLI and agents** in Settings → General, then use `status`, `recent`, `search`, `stats`, `transcribe`, or `listen`. Add `--json` for machine-readable output. `listen` always displays an approval prompt before the microphone starts.
+
+Velora also exposes the same narrow surface as a local MCP stdio server:
+
+```sh
+/Applications/Velora.app/Contents/Resources/bin/velora mcp
+```
+
+The app must be running. Nothing listens on the network, and disabling the setting immediately removes history, stats, and action access; `status` remains available so tools can explain what is missing.
 
 ## Performance
 
@@ -82,16 +103,15 @@ Two processes, one product:
 
 ```
 ┌────────────── Velora.app (Swift, SwiftPM) ──────────────┐
-│  menubar · hotkeys · mic capture · HUD · app context    │
-│  text insertion · settings/onboarding · history         │
-└────────────────────────┬─────────────────────────────────┘
-                         │ unix socket (~/.velora/engine.sock)
-                         │ framed JSON control + raw PCM audio
-┌────────────────────────┴─────────────────────────────────┐
-│           velora-engine (Python 3.12 + MLX, uv)          │
-│  streaming STT · LLM cleanup · mode/format policy        │
-│  model download & lifecycle                              │
-└──────────────────────────────────────────────────────────┘
+│ menubar · hotkeys · mic/HUD · insertion · settings       │
+│ history/intelligence · meeting capture/store · consent   │
+└────────────┬───────────────────────────────┬──────────────┘
+             │ engine.sock                   │ control.sock
+             │ framed JSON + PCM             │ owner-only JSON
+┌────────────┴────────────────────┐    ┌─────┴─────────────┐
+│ velora-engine (Python + MLX)    │    │ local CLI / MCP  │
+│ STT · cleanup · meeting notes   │    │ default-off      │
+└─────────────────────────────────┘    └───────────────────┘
 ```
 
 The Swift app owns everything user-facing; the Python engine is an invisible inference server, supervised (spawned, health-checked, restarted) by the app. Full details, wire protocol, and module map: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -124,17 +144,21 @@ Edits are picked up via the engine's config reload — no restart dance required
 - Models are downloaded **once** from Hugging Face. Model downloads and Personal Dictionary iCloud Drive sync are the only network-backed features; Velora has no backend service.
 - At dictation time there are **zero network calls** — audio, transcripts, and cleaned text never leave the machine.
 - History is a local SQLite file under `~/.velora/`. Delete it whenever you like.
+- Meeting audio, transcripts, and notes live separately under `~/.velora/meetings/`. Meeting detection uses local app/window metadata and, only if enabled, nearby Calendar events. Detection can suggest a recording but can never start one; every recording requires an explicit confirmation and shows a persistent menu-bar indicator.
+- Intelligence share cards are rendered locally from fixed labels and numeric aggregates. They cannot include transcript, app, contact, or calendar text.
+- Local agent access is off by default. When enabled, only processes running as your macOS user can reach the owner-only `~/.velora/control.sock`; there is no TCP listener. Live microphone use still requires approval for each request.
 - Personal Dictionary sync uses your standard iCloud Drive protection and contains only confirmed terms and corrections — never audio, transcripts, history, screen context, or model data. It remains fully usable offline and does not use a Velora server.
 - No accounts, no telemetry, no analytics. This is enforced by architecture, not by a settings checkbox.
 
 ## Project status
 
-Velora is at **v1**: the full dictation loop (capture → multilingual STT → app-aware cleanup → insertion → searchable history → audio archive → reprocess) is complete and tested (70 engine tests plus an end-to-end socket harness).
+Velora is actively developed and pre-1.0. The complete local dictation loop now sits alongside Voice Intelligence, consent-first Meeting Memory, and the default-off CLI/MCP surface. The release gate combines the Python engine suite, hundreds of embedded Swift checks, a 100,000-row Intelligence benchmark, packaged-app CLI/MCP smoke tests, and Apple signing/notarization verification.
 
 Known limitations:
 
 - **The `.app` bundle is required for real use** — microphone and accessibility (TCC) grants attach to the signed bundle, so hotkeys and insertion won't work from a bare `swift run` binary.
 - **Batch default** — the multilingual default model transcribes on release, not live; switch to `parakeet-tdt-0.6b-v2` for streaming HUD partials (English only).
+- **Meeting speaker labels are channel labels** — “Me” is the microphone track and “Them” is computer audio. Velora does not claim to identify individual remote speakers.
 
 ## Contributing & license
 

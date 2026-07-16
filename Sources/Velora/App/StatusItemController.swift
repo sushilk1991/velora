@@ -7,6 +7,10 @@ protocol StatusItemControllerDelegate: AnyObject {
     func statusItemReformatLast(mode: String)
     func statusItemTranscribeFile()
     func statusItemCancelTranscription()
+    func statusItemStartMeeting()
+    func statusItemStopMeeting()
+    func statusItemDiscardMeeting()
+    func statusItemOpenMeetings()
     func statusItemOpenSettings()
     func statusItemOpenHistory()
     func statusItemOpenSetupAssistant()
@@ -36,6 +40,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// Non-nil while a file transcription runs ("Transcribing… 45%"); the
     /// menu shows progress + cancel instead of the transcribe action.
     var transcriptionProgress: String?
+    var meetingRecordingTitle: String? { didSet { updateIcon() } }
+    var meetingPreparingTitle: String?
+    var meetingProcessingLabel: String?
 
     /// First-run setup status ("Downloading the speech model (1.6 GB) — 42%");
     /// shown as a disabled menu line + button tooltip while models download.
@@ -80,6 +87,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         let menu = NSMenu()
+        // Preserve the explicit state computed in `menuNeedsUpdate`. Cocoa's
+        // default auto-enable pass otherwise re-enables items that have an
+        // action even when a meeting or dictation deliberately disables them.
+        menu.autoenablesItems = false
         menu.delegate = self
         item.menu = menu
 
@@ -100,7 +111,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             (degradedReason != nil && iconState == .idle) ? .error : iconState
 
         let symbolName: String
-        switch effectiveState {
+        if meetingRecordingTitle != nil {
+            symbolName = "record.circle"
+        } else { switch effectiveState {
         case .idle: symbolName = "waveform"
         case .recording: symbolName = "waveform"
         case .transcribing:
@@ -108,7 +121,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                                  accessibilityDescription: nil) != nil
                 ? "waveform.badge.magnifyingglass" : "ellipsis"
         case .error: symbolName = "waveform.badge.exclamationmark"
-        }
+        } }
 
         let image = NSImage(systemSymbolName: symbolName, accessibilityDescription: "Velora")
         image?.isTemplate = true
@@ -117,7 +130,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         imageView.contentTintColor = .labelColor
 
         imageView.removeAllSymbolEffects()
-        if effectiveState == .recording {
+        if effectiveState == .recording || meetingRecordingTitle != nil {
             imageView.addSymbolEffect(.variableColor.iterative.dimInactiveLayers)
         }
     }
@@ -127,9 +140,38 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        if let meeting = meetingRecordingTitle {
+            let stop = NSMenuItem(
+                title: "Stop \(Self.truncate(meeting, to: 34)) & Create Notes",
+                action: #selector(stopMeeting), keyEquivalent: "")
+            stop.target = self
+            stop.attributedTitle = NSAttributedString(
+                string: stop.title,
+                attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold),
+                             .foregroundColor: NSColor.systemRed])
+            menu.addItem(stop)
+            let discard = NSMenuItem(
+                title: "Discard Meeting Recording…",
+                action: #selector(discardMeeting), keyEquivalent: "")
+            discard.target = self
+            menu.addItem(discard)
+        } else {
+            let record = NSMenuItem(
+                title: meetingPreparingTitle ?? "Record Meeting…",
+                action: #selector(startMeeting), keyEquivalent: "")
+            record.target = self
+            record.isEnabled = meetingPreparingTitle == nil
+                && iconState == .idle
+                && transcriptionProgress == nil
+            menu.addItem(record)
+        }
+
         let startTitle = iconState == .recording ? "Stop Dictation" : "Start Dictation"
         let start = NSMenuItem(title: startTitle, action: #selector(toggleDictation), keyEquivalent: "")
         start.target = self
+        // Consent/preparation does not use the microphone. Only an actual
+        // meeting recording excludes foreground dictation.
+        start.isEnabled = meetingRecordingTitle == nil
         start.attributedTitle = NSAttributedString(
             string: startTitle,
             attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
@@ -166,8 +208,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // row, and offering a reformat that can only fail is worse than not
         // offering it (review finding).
         if let clip = recents.first?.audioPath,
-           FileManager.default.fileExists(
-               atPath: AppConfig.audioDirectory.appendingPathComponent(clip).path) {
+           let clipURL = AppConfig.archivedAudioURL(name: clip),
+           FileManager.default.fileExists(atPath: clipURL.path) {
             let reformat = NSMenuItem(title: "Reformat Last as", action: nil, keyEquivalent: "")
             let submenu = NSMenu()
             for mode in DictationController.reformatModes {
@@ -195,12 +237,23 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(item)
         }
 
+        if let meetingProcessingLabel {
+            let item = NSMenuItem(title: meetingProcessingLabel, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+        }
+
         menu.addItem(.separator())
 
         let historyItem = NSMenuItem(
             title: "History…", action: #selector(openHistory), keyEquivalent: "")
         historyItem.target = self
         menu.addItem(historyItem)
+
+        let meetingsItem = NSMenuItem(
+            title: "Meetings…", action: #selector(openMeetings), keyEquivalent: "")
+        meetingsItem.target = self
+        menu.addItem(meetingsItem)
 
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
@@ -249,6 +302,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         delegate?.statusItemCancelTranscription()
     }
 
+    @objc private func startMeeting() { delegate?.statusItemStartMeeting() }
+
+    @objc private func stopMeeting() { delegate?.statusItemStopMeeting() }
+
+    @objc private func discardMeeting() { delegate?.statusItemDiscardMeeting() }
+
     @objc private func copyRecent(_ sender: NSMenuItem) {
         guard let text = sender.representedObject as? String else { return }
         let pasteboard = NSPasteboard.general
@@ -263,6 +322,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func openHistory() {
         delegate?.statusItemOpenHistory()
     }
+
+    @objc private func openMeetings() { delegate?.statusItemOpenMeetings() }
 
     @objc private func openSetupAssistant() {
         delegate?.statusItemOpenSetupAssistant()

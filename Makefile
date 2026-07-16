@@ -1,6 +1,6 @@
 # Velora — build orchestration (SwiftPM + hand-rolled .app; no Xcode).
 
-.PHONY: build release app dmg verify-dmg run sounds clean test
+.PHONY: build release app dmg verify-dmg run sounds clean test perf-test
 
 build:
 	swift build
@@ -28,3 +28,7 @@ clean:
 
 test:
 	cd engine && uv run pytest -q
+
+perf-test:
+	swift build
+	VELORA_PERF_SELFTEST=1 .build/debug/Velora --selftest

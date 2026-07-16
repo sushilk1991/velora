@@ -11,7 +11,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         supervisor: EngineSupervisor?,
         history: HistoryStore,
         dictionary: DictionaryRepository,
-        dictionarySync: ICloudDictionarySync
+        dictionarySync: ICloudDictionarySync,
+        meetings: MeetingStore,
+        meetingCoordinator: MeetingCoordinator,
+        meetingProcessor: MeetingProcessor
     ) {
         model = SettingsModel(
             supervisor: supervisor,
@@ -38,6 +41,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             case .history:
                 hosting = NSHostingController(rootView: HistorySettingsView(
                     model: model, history: history, supervisor: supervisor))
+            case .intelligence:
+                hosting = NSHostingController(rootView: IntelligenceSettingsView(
+                    model: model, history: history))
+            case .meetings:
+                hosting = NSHostingController(rootView: MeetingsSettingsView(
+                    model: model, coordinator: meetingCoordinator,
+                    processor: meetingProcessor, store: meetings))
             case .shortcuts:
                 hosting = NSHostingController(rootView: ShortcutsSettingsView(model: model))
             case .about:

@@ -1,5 +1,8 @@
 import AppKit
+import AVFoundation
 import Foundation
+import ScreenCaptureKit
+import SQLite3
 
 /// Headless pure-logic tests, run with `Velora --selftest` (CommandLineTools
 /// ships no XCTest/swift-testing, so tests live in the binary). Covers the
@@ -66,6 +69,24 @@ enum Selftest {
         testModeCategories()
         testVoiceCommands()
         testStreak()
+        testLongestStreak()
+        testHistoryStoreMigration()
+        testIntelligenceAggregates()
+        if ProcessInfo.processInfo.environment["VELORA_PERF_SELFTEST"] == "1" {
+            testIntelligencePerformance100K()
+        }
+        testQualityObservationMetrics()
+        testMeetingStore()
+        testMeetingAlertTokenSlot()
+        testMeetingSystemAudioWarnings()
+        testMeetingDetection()
+        testMinutesSavedDefinition()
+        testShareCardPrivacy()
+        testControlProtocol()
+        testControlRouter()
+        testCLIParsing()
+        testMCPProtocol()
+        testLocalControlSocket()
         testHUDGeometry()
         testInsertionBoundary()
         testEmptyFinalFeedback()
@@ -1504,10 +1525,15 @@ enum Selftest {
             expect(false, "expected .transcribeStarted")
         }
 
-        let done = EngineEvent.parse(
-            ["event": "transcribed", "path": "/a/b.m4a", "text": "notes", "stt_ms": 1200])
-        if case .transcribed(_, let path, let text, let ms) = done {
-            expect(path == "/a/b.m4a" && text == "notes" && ms == 1200, "transcribed parses")
+        let done = EngineEvent.parse([
+            "event": "transcribed", "path": "/a/b.m4a", "text": "notes",
+            "mode": "Note", "duration_s": 12.3, "stt_ms": 1200,
+        ])
+        if case .transcribed(_, let path, let text, let mode, let duration, let ms) = done {
+            expect(path == "/a/b.m4a" && text == "notes" && ms == 1200,
+                   "transcribed parses")
+            expect(mode == "Note" && abs(duration - 12.3) < 0.01,
+                   "transcribed mode and duration parse")
         } else {
             expect(false, "expected .transcribed")
         }
@@ -1587,6 +1613,934 @@ enum Selftest {
         expect(HistoryStore.streak(days: [day(0), day(1), day(2)]) == 3, "3 consecutive days")
         expect(HistoryStore.streak(days: [day(0), day(2), day(3)]) == 1, "gap breaks the streak")
         expect(HistoryStore.streak(days: [day(3), day(4)]) == 0, "stale history → no streak")
+    }
+
+    // MARK: - History store: migration, aggregates, quality, share card
+
+    private static func withHistoryStore(_ body: (HistoryStore, URL) -> Void) {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-history-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("history.sqlite3")
+        body(HistoryStore(url: url), url)
+        try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// A synthetic dictation `daysAgo` calendar days back. `final` defaults to
+    /// `words` repeated tokens so SQL word counts are exact.
+    private static func dictation(
+        daysAgo: Int, words: Int, durationMs: Int = 5_000,
+        app: String? = "TestApp", bundle: String? = "com.test.app",
+        mode: String? = "Default", raw: String? = nil, final: String? = nil,
+        session: String? = nil, sttMs: Int? = nil, cleanupMs: Int? = nil,
+        cleanupApplied: Bool? = nil
+    ) -> DictationRecord {
+        let text = final ?? Array(repeating: "word", count: words).joined(separator: " ")
+        return DictationRecord(
+            timestamp: Calendar.current.date(byAdding: .day, value: -daysAgo, to: Date())!,
+            bundleID: bundle, appName: app, raw: raw ?? text, final: text,
+            mode: mode, durationMs: durationMs, cleanupMs: cleanupMs,
+            audioPath: nil, sessionID: session, sttMs: sttMs,
+            cleanupApplied: cleanupApplied)
+    }
+
+    private static func testLongestStreak() {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        formatter.timeZone = .current
+        func day(_ offset: Int) -> String {
+            formatter.string(from: Calendar.current.date(
+                byAdding: .day, value: -offset, to: Date())!)
+        }
+        expect(HistoryStore.longestStreak(days: []) == 0, "no history → no longest streak")
+        expect(HistoryStore.longestStreak(days: [day(0)]) == 1, "single day → 1")
+        expect(HistoryStore.longestStreak(days: [day(0), day(1), day(3), day(4), day(5)]) == 3,
+               "longest run wins over the current run")
+        expect(HistoryStore.longestStreak(days: [day(5), day(6), day(7)]) == 3,
+               "longest streak doesn't have to reach today")
+        expect(HistoryStore.longestStreak(days: [day(0), day(2), day(4)]) == 1,
+               "gaps everywhere → longest is 1")
+    }
+
+    private static func testHistoryStoreMigration() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-history-migration-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("history.sqlite3")
+
+        // A database exactly as the oldest shipping build created it — before
+        // audio_path and every Intelligence column existed.
+        var handle: OpaquePointer?
+        expect(sqlite3_open(url.path, &handle) == SQLITE_OK, "legacy fixture database opens")
+        sqlite3_exec(handle, """
+            CREATE TABLE dictations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                bundle_id TEXT,
+                app_name TEXT,
+                raw TEXT NOT NULL,
+                final TEXT NOT NULL,
+                mode TEXT,
+                duration_ms INTEGER NOT NULL,
+                cleanup_ms INTEGER
+            );
+            INSERT INTO dictations (ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms)
+            VALUES (strftime('%s', 'now') - 60, 'com.legacy.app', 'Legacy',
+                    'legacy raw', 'legacy final words', 'Default', 4000, NULL);
+            """, nil, nil, nil)
+        sqlite3_close(handle)
+
+        let store = HistoryStore(url: url)
+        let migrated = store.recent(limit: 10)
+        expect(migrated.count == 1, "legacy row survives the additive migration")
+        expect(migrated.first?.final == "legacy final words",
+               "legacy transcript is intact after migration")
+        expect(migrated.first?.sessionID == nil && migrated.first?.sttMs == nil
+               && migrated.first?.cleanupApplied == nil,
+               "legacy row's new columns decode as unknown, not fabricated values")
+
+        store.insert(dictation(
+            daysAgo: 0, words: 5, session: "migrated-session",
+            sttMs: 250, cleanupMs: 120, cleanupApplied: true))
+        let rows = store.recent(limit: 10)
+        expect(rows.count == 2, "a migrated store accepts new inserts")
+        let fresh = rows.first(where: { $0.sessionID == "migrated-session" })
+        expect(fresh?.sttMs == 250 && fresh?.cleanupApplied == true,
+               "session id, stt latency, and cleanup state round-trip")
+
+        // Reopen: re-running the migration on an already-migrated store must
+        // be harmless.
+        let reopened = HistoryStore(url: url)
+        expect(reopened.recent(limit: 10).count == 2, "migration is idempotent on reopen")
+        let window = reopened.insights().allTime
+        expect(window.count == 2, "aggregates run over a migrated store")
+        expect(window.sttSamples == 1, "legacy rows never fake latency samples")
+        expect(window.cleanupKnown == 1, "legacy rows never fake a cleanup state")
+
+        // The schema real installs are on today: audio_path exists, none of
+        // the Intelligence columns do (its audio_path ALTER must fail-and-skip
+        // while the new ALTERs apply).
+        let currentURL = dir.appendingPathComponent("history-current.sqlite3")
+        var current: OpaquePointer?
+        expect(sqlite3_open(currentURL.path, &current) == SQLITE_OK,
+               "current-schema fixture database opens")
+        sqlite3_exec(current, """
+            CREATE TABLE dictations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                bundle_id TEXT,
+                app_name TEXT,
+                raw TEXT NOT NULL,
+                final TEXT NOT NULL,
+                mode TEXT,
+                duration_ms INTEGER NOT NULL,
+                cleanup_ms INTEGER,
+                audio_path TEXT
+            );
+            INSERT INTO dictations (ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms, audio_path)
+            VALUES (strftime('%s', 'now') - 60, 'com.current.app', 'Current',
+                    'raw', 'shipped final', 'Default', 3000, 250, 'clip.wav');
+            """, nil, nil, nil)
+        sqlite3_close(current)
+        let currentStore = HistoryStore(url: currentURL)
+        let currentRows = currentStore.recent(limit: 10)
+        expect(currentRows.count == 1 && currentRows.first?.audioPath == "clip.wav",
+               "audio_path-era rows survive with their clip reference")
+        currentStore.markQualityObservation(session: "no-such-session", state: .edited)
+        expect(currentStore.insights().allTime.count == 1,
+               "audio_path-era store gains the Intelligence columns")
+    }
+
+    private static func testIntelligenceAggregates() {
+        withHistoryStore { store, _ in
+            store.insert(dictation(
+                daysAgo: 0, words: 10, durationMs: 60_000, app: "Slack",
+                bundle: "com.slack", mode: "Message", raw: "different raw",
+                session: "a", sttMs: 200, cleanupMs: 100, cleanupApplied: true))
+            store.insert(dictation(
+                daysAgo: 0, words: 20, durationMs: 30_000, app: "Notes",
+                bundle: "com.notes", mode: "Note",
+                session: "b", sttMs: 400, cleanupMs: 300, cleanupApplied: true))
+            store.insert(dictation(
+                daysAgo: 3, words: 30, app: "Slack", bundle: "com.slack",
+                mode: "Message", session: "c", cleanupApplied: false))
+            store.insert(dictation(
+                daysAgo: 10, words: 40, app: "Notes", bundle: "com.notes", mode: "Note"))
+            store.insert(dictation(
+                daysAgo: 40, words: 50, app: "Terminal", bundle: "com.term", mode: "Terminal"))
+            // Empty-final rows (kept only for reprocessing) never enter stats.
+            store.insert(dictation(daysAgo: 0, words: 0, raw: "audio only", final: ""))
+
+            let insights = store.insights()
+            expect(insights.today.count == 2 && insights.today.words == 30,
+                   "today window counts only today's non-empty rows")
+            expect(insights.week.count == 3 && insights.week.words == 60,
+                   "7-day window spans the last 7 calendar days")
+            expect(insights.month.count == 4 && insights.month.words == 100,
+                   "30-day window spans the last 30 calendar days")
+            expect(insights.allTime.count == 5 && insights.allTime.words == 150,
+                   "all-time window covers every non-empty row")
+
+            expect(insights.today.averageSttMs == 300,
+                   "stt latency averages only rows that carry it")
+            expect(insights.week.sttSamples == 2 && insights.week.averageSttMs == 300,
+                   "rows without stt_ms don't drag the latency average")
+            expect(insights.allTime.averageCleanupMs == 200,
+                   "cleanup latency averages only cleanup-timed rows")
+
+            expect(insights.week.cleanupKnown == 3 && insights.week.cleanupApplied == 2,
+                   "cleanup-applied rate uses only state-known rows")
+            expect(insights.week.cleanupAppliedRate.map { abs($0 - 2.0 / 3.0) < 0.0001 } == true,
+                   "cleanup-applied rate = applied / known")
+            expect(insights.today.cleanupChanged == 1,
+                   "raw≠final delta counts only cleanup-applied rows that changed the text")
+            expect(insights.today.cleanupChangedRate == 0.5,
+                   "cleanup-changed rate = changed / applied")
+            expect(insights.allTime.zeroEditRate == nil,
+                   "no quality observations → no zero-edit claim")
+
+            expect(insights.daily.last?.words == 30,
+                   "daily series ends with today's word total")
+            expect(insights.daily.count <= 30 && insights.daily.allSatisfy { $0.count > 0 },
+                   "daily series is bounded to active days in the last 30")
+            expect(insights.apps.first?.name == "Notes" && insights.apps.first?.words == 60,
+                   "app breakdown ranks by words over the last 30 days")
+            expect(!insights.apps.contains(where: { $0.name == "Terminal" }),
+                   "app breakdown excludes rows older than 30 days")
+            expect(insights.modes.first?.name == "Note",
+                   "mode breakdown ranks by words over the last 30 days")
+        }
+
+        withHistoryStore { store, _ in
+            for daysAgo in [0, 1, 5, 6, 7] {
+                store.insert(dictation(daysAgo: daysAgo, words: 3))
+            }
+            let insights = store.insights()
+            expect(insights.currentStreak == 2, "current streak from stored rows")
+            expect(insights.longestStreak == 3, "longest streak from stored rows")
+            expect(store.stats().streakDays == insights.currentStreak,
+                   "History and Intelligence use the same non-empty streak definition")
+        }
+
+        withHistoryStore { store, _ in
+            store.insert(dictation(daysAgo: 0, words: 0, raw: "audio only", final: ""))
+            store.insert(dictation(daysAgo: 2, words: 3))
+            expect(store.stats().streakDays == 0 && store.insights().currentStreak == 0,
+                   "an empty failed dictation cannot keep either streak alive")
+        }
+    }
+
+    private static func testQualityObservationMetrics() {
+        withHistoryStore { store, _ in
+            store.insert(dictation(daysAgo: 0, words: 4, session: "kept"))
+            store.insert(dictation(daysAgo: 0, words: 4, session: "fixed"))
+            store.insert(dictation(daysAgo: 0, words: 4, session: "unwatched"))
+            store.insert(dictation(daysAgo: 0, words: 0, final: "", session: "empty"))
+
+            store.markQualityObservation(session: "kept", state: .unchanged)
+            store.markQualityObservation(session: "fixed", state: .edited)
+            // A later conflicting trigger for an already-observed session and
+            // an unknown session must both be no-ops.
+            store.markQualityObservation(session: "fixed", state: .unchanged)
+            store.markQualityObservation(session: "never-existed", state: .unchanged)
+
+            let window = store.insights().allTime
+            expect(window.qualityUnchanged == 1 && window.qualityEdited == 1,
+                   "observations persist keyed by session id")
+            expect(window.zeroEditRate == 0.5,
+                   "zero-edit rate = unchanged / observed — first observation wins")
+            expect(window.observationCoverage.map { abs($0 - 2.0 / 3.0) < 0.0001 } == true,
+                   "unobserved rows lower coverage instead of inflating the rate")
+            expect(window.count == 3,
+                   "empty-final rows stay out of the coverage denominator")
+
+            let fixedID = store.recent(limit: 10).first { $0.sessionID == "fixed" }!.id
+            store.updateAfterReprocess(
+                id: fixedID, raw: "new raw", final: "new final",
+                mode: "Note", sttMs: 77, cleanupMs: 33, cleanupApplied: true)
+            let reprocessed = store.recent(limit: 10).first { $0.id == fixedID }
+            expect(
+                reprocessed?.sttMs == 77 && reprocessed?.cleanupMs == 33
+                    && reprocessed?.cleanupApplied == true,
+                "reprocess replaces the run's performance measurements")
+            let afterReprocess = store.insights().allTime
+            expect(afterReprocess.qualityObserved == 1,
+                   "reprocess clears the old text's quality observation")
+        }
+
+        withHistoryStore { store, _ in
+            store.insert(dictation(daysAgo: 0, words: 4, session: "only-unobserved"))
+            let window = store.insights().allTime
+            expect(window.zeroEditRate == nil,
+                   "zero observations → nil rate, never a fabricated 100%")
+            expect(window.observationCoverage == 0, "coverage reports 0% honestly")
+        }
+    }
+
+    private static func testMinutesSavedDefinition() {
+        expect(HistoryStore.minutesSaved(words: 400, spokenMs: 120_000, typingWPM: 40) == 8,
+               "time saved = typing minutes at the configured wpm minus speaking minutes")
+        expect(HistoryStore.minutesSaved(words: 400, spokenMs: 120_000, typingWPM: 80) == 3,
+               "a faster typist saves less")
+        expect(HistoryStore.minutesSaved(words: 40, spokenMs: 600_000, typingWPM: 40) == 0,
+               "time saved floors at zero — speaking slower than typing never goes negative")
+        expect(HistoryStore.minutesSaved(words: 400, spokenMs: 0, typingWPM: 0) == 0,
+               "a zero wpm preference cannot divide by zero")
+    }
+
+    /// Opt-in release benchmark: exercise the exact Swift aggregate path over
+    /// a realistically large history without making every developer selftest
+    /// seed 100k rows. Run with VELORA_PERF_SELFTEST=1.
+    private static func testIntelligencePerformance100K() {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-intelligence-perf-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("history.sqlite3")
+        autoreleasepool { _ = HistoryStore(url: url) }
+
+        var handle: OpaquePointer?
+        guard sqlite3_open(url.path, &handle) == SQLITE_OK else {
+            expect(false, "100k intelligence fixture opens")
+            return
+        }
+        let seed = """
+            WITH RECURSIVE rows(x) AS (
+                SELECT 1 UNION ALL SELECT x + 1 FROM rows WHERE x < 100000
+            )
+            INSERT INTO dictations
+                (ts, bundle_id, app_name, raw, final, mode, duration_ms,
+                 cleanup_ms, session_id, stt_ms, cleanup_applied, quality_state)
+            SELECT
+                strftime('%s', 'now') - (x % 365) * 86400,
+                'com.perf.app' || (x % 8), 'Perf App ' || (x % 8),
+                'one two three four five six seven eight nine ten',
+                'one two three four five six seven eight nine ten',
+                CASE WHEN x % 2 = 0 THEN 'Message' ELSE 'Note' END,
+                5000, 120, 'perf-' || x, 250, 1,
+                CASE WHEN x % 3 = 0 THEN 2 ELSE 1 END
+            FROM rows;
+            """
+        let seeded = sqlite3_exec(handle, seed, nil, nil, nil) == SQLITE_OK
+        sqlite3_close(handle)
+        expect(seeded, "100k intelligence fixture seeds")
+        guard seeded else { return }
+
+        let store = HistoryStore(url: url)
+        let started = Date()
+        let insights = store.insights()
+        let firstPage = store.page(limit: 50, offset: 0, search: nil)
+        let elapsed = -started.timeIntervalSinceNow
+        expect(insights.allTime.count == 100_000 && firstPage.count == 50,
+               "100k intelligence aggregates and first page are complete")
+        expect(elapsed < 5,
+               "100k intelligence query stays under the five-second release ceiling")
+        print(String(format: "intelligence benchmark — 100k rows %.3fs", elapsed))
+    }
+
+    private static func testShareCardPrivacy() {
+        withHistoryStore { store, _ in
+            store.insert(dictation(
+                daysAgo: 0, words: 0, durationMs: 90_000,
+                app: "SENTINEL_APP_NAME", bundle: "com.sentinel.contact",
+                mode: "Message",
+                raw: "SECRET_TRANSCRIPT_SENTINEL raw",
+                final: "SECRET_TRANSCRIPT_SENTINEL wrote to ContactAlice today",
+                session: "share-1"))
+            store.insert(dictation(
+                daysAgo: 1, words: 12, app: "SENTINEL_APP_NAME",
+                bundle: "com.sentinel.contact", session: "share-2"))
+
+            let insights = store.insights()
+            let card = IntelligenceShareCard(
+                period: .allTime,
+                words: insights.allTime.words,
+                dictations: insights.allTime.count,
+                minutesSaved: insights.allTime.minutesSaved(typingWPM: 40),
+                currentStreakDays: insights.currentStreak)
+            let rendered = card.renderedStrings.joined(separator: "\n")
+            for sentinel in [
+                "SECRET_TRANSCRIPT_SENTINEL", "SENTINEL_APP_NAME",
+                "com.sentinel.contact", "ContactAlice",
+            ] {
+                expect(!rendered.contains(sentinel),
+                       "share card never renders \(sentinel)")
+            }
+            expect(card.metrics.count >= 3, "share card carries its aggregate metrics")
+        }
+
+        expect(IntelligenceShareCard.compact(12_345) == "12.3k",
+               "share card numbers use the compact format")
+        expect(IntelligenceShareCard.duration(minutes: 95) == "1h 35m",
+               "share card durations format as h/m")
+        let noStreak = IntelligenceShareCard(
+            period: .today, words: 10, dictations: 1,
+            minutesSaved: 0, currentStreakDays: 1)
+        expect(!noStreak.metrics.contains(where: { $0.label == "current streak" }),
+               "a 1-day streak isn't bragged about")
+        let image = MainActor.assumeIsolated {
+            IntelligenceShareCardRenderer.image(for: noStreak)
+        }
+        expect(image != nil && image!.size.width >= 460 && image!.size.height > 100,
+               "the real aggregate-only share card renders to a non-empty image")
+        expect((image?.tiffRepresentation?.count ?? 0) > 1_000,
+               "the rendered share card has exportable image data")
+    }
+
+    // MARK: - Private meeting memory
+
+    private static func testMeetingStore() {
+        expect(AppConfig.archivedAudioURL(name: "session-1.flac") != nil
+               && AppConfig.archivedAudioURL(name: "../outside.wav") == nil
+               && AppConfig.archivedAudioURL(name: "session-1.m4a") == nil,
+               "dictation archive paths accept only engine-owned FLAC/WAV basenames")
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meetings-\(UUID().uuidString)", isDirectory: true)
+        let db = root.appendingPathComponent("meetings.sqlite3")
+        let store = MeetingStore(url: db, filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let id = UUID().uuidString
+        let audioDir = root.appendingPathComponent(id, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(audioDir)
+        let mic = audioDir.appendingPathComponent("me.caf")
+        FileManager.default.createFile(atPath: mic.path, contents: Data("audio".utf8))
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Launch review", startedAt: started,
+            endedAt: started.addingTimeInterval(125), sourceApp: "Google Meet",
+            status: .processing, micPath: "\(id)/me.caf"))
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 60_000, text: "We approved the launch plan."))
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 60_000, text: "I will ship the release."))
+        // INSERT OR REPLACE makes a replayed chunk idempotent.
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 60_000, text: "I will ship the release tomorrow."))
+        expect(store.nextChunk(meetingID: id, speaker: .me) == 1,
+               "meeting segment cursor resumes after the last committed chunk")
+        store.complete(meetingID: id, notes: MeetingNotes(
+            summary: "The team approved launch.",
+            decisions: ["Launch on Friday"],
+            actionItems: ["Me: ship the release"]))
+
+        let loaded = store.record(id: id)
+        expect(loaded?.status == .ready && loaded?.segments.count == 2,
+               "meeting store persists status, notes, and idempotent segments")
+        expect(loaded?.formattedTranscript.contains("Me: I will ship") == true
+               && loaded?.formattedTranscript.contains("Them: We approved") == true,
+               "separate audio tracks render with honest Me/Them labels")
+        expect(loaded?.exportText.contains("## Decisions") == true
+               && loaded?.exportText.contains("[00:00]") == true,
+               "meeting export includes structured notes and cited timestamps")
+        let hits = store.search("approved launch", limit: 10)
+        expect(hits.first?.meetingID == id && hits.first?.title == "Launch review",
+               "meeting FTS recalls the local source meeting")
+        expect(store.search("", limit: 10).first?.meetingID == id,
+               "empty meeting search returns recent ready meetings without deadlock")
+        let metadata = store.recentMetadata(limit: 10)
+        expect(metadata.first?.id == id && metadata.first?.segments.isEmpty == true,
+               "meeting picker rows never load full transcripts")
+        expect(store.audioURL(relativePath: "../outside.wav") == nil
+               && store.audioURL(relativePath: "/tmp/outside.wav") == nil
+               && store.audioURL(relativePath: "\(id)/../outside.wav") == nil
+               && store.audioURL(relativePath: "\(id)/unexpected.aiff") == nil,
+               "meeting audio lookup cannot escape its private root")
+        let outside = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-outside-\(UUID().uuidString).caf")
+        defer { try? FileManager.default.removeItem(at: outside) }
+        FileManager.default.createFile(atPath: outside.path, contents: Data("outside".utf8))
+        let linkedID = UUID().uuidString
+        let linkedDirectory = root.appendingPathComponent(linkedID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(linkedDirectory)
+        try? FileManager.default.createSymbolicLink(
+            at: linkedDirectory.appendingPathComponent("me.caf"), withDestinationURL: outside)
+        expect(store.audioURL(relativePath: "\(linkedID)/me.caf") == nil,
+               "meeting audio lookup rejects symlinks that leave its private root")
+
+        let rootMode = (try? FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions]
+                        as? NSNumber)?.intValue ?? -1
+        let dbMode = (try? FileManager.default.attributesOfItem(atPath: db.path)[.posixPermissions]
+                      as? NSNumber)?.intValue ?? -1
+        expect(rootMode & 0o777 == 0o700, "meeting directory is owner-only")
+        expect(dbMode & 0o777 == 0o600, "meeting transcript database is owner-only")
+
+        store.markFailed(meetingID: id, error: "engine restarted")
+        expect(store.recoverable().first?.id == id
+               && store.recoverable().first?.segments.isEmpty == true,
+               "recovery queue uses bounded metadata rows")
+        expect(store.resumable().isEmpty,
+               "permanently failed meetings never auto-retry on engine ready")
+        expect(store.record(id: id)?.segments.count == 2,
+               "failed meeting processing preserves committed chunks for resume")
+        store.markProcessing(meetingID: id)
+        expect(store.resumable().first?.id == id,
+               "interrupted processing remains eligible for automatic resume")
+        expect(store.record(id: id)?.segments.count == 2,
+               "resuming processing never replaces or deletes prior chunks")
+        store.pruneAudio(olderThanDays: 7)
+        expect(FileManager.default.fileExists(atPath: mic.path)
+               && store.record(id: id)?.micPath != nil,
+               "retention never removes audio from queued or processing work")
+        store.delete(meetingID: id)
+        expect(store.record(id: id) == nil && !FileManager.default.fileExists(atPath: audioDir.path),
+               "complete meeting deletion removes database rows and retained audio")
+
+        let recoveryRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-recovery-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: recoveryRoot) }
+        let recoveryDB = recoveryRoot.appendingPathComponent("meetings.sqlite3")
+        let recoveredID = UUID().uuidString
+        let emptyID = UUID().uuidString
+        var interrupted: MeetingStore? = MeetingStore(url: recoveryDB, filesRoot: recoveryRoot)
+        let recoveredDirectory = recoveryRoot.appendingPathComponent(recoveredID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(recoveredDirectory)
+        let recoveredMic = recoveredDirectory.appendingPathComponent("me.caf")
+        if let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) {
+            autoreleasepool {
+                _ = try? AVAudioFile(forWriting: recoveredMic, settings: format.settings)
+            }
+            if let handle = try? FileHandle(forWritingTo: recoveredMic) {
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: Data(repeating: 1, count: 4_096))
+                try? handle.close()
+            }
+        }
+        let recoveredSystem = recoveredDirectory.appendingPathComponent("them.m4a")
+        FileManager.default.createFile(
+            atPath: recoveredSystem.path, contents: Data(repeating: 0xA5, count: 8_192))
+        let recoveredSize = (try? recoveredMic.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let recoveredProbe = try? AVAudioFile(forReading: recoveredMic)
+        expect((recoveredProbe?.length ?? 0) > 0 && recoveredSize > 4_096,
+               "flushed CAF audio stays readable without a final container rewrite")
+        let interruptedAt = Date(timeIntervalSince1970: 1_700_001_000)
+        interrupted?.insertRecording(MeetingRecord(
+            id: recoveredID, title: "Interrupted meeting",
+            startedAt: interruptedAt, endedAt: interruptedAt,
+            status: .recording, micPath: "\(recoveredID)/me.caf",
+            systemPath: "\(recoveredID)/them.m4a"))
+        interrupted?.insertRecording(MeetingRecord(
+            id: emptyID, title: "Empty preparation",
+            startedAt: interruptedAt, endedAt: interruptedAt,
+            status: .recording, micPath: "\(emptyID)/me.caf"))
+        interrupted = nil
+        let reopened = MeetingStore(url: recoveryDB, filesRoot: recoveryRoot)
+        let recoveredRecord = reopened.record(id: recoveredID)
+        expect(recoveredRecord?.status == .failed
+               && recoveredRecord?.micPath == "\(recoveredID)/me.caf"
+               && FileManager.default.fileExists(atPath: recoveredMic.path),
+               "relaunch retains interrupted microphone audio as recoverable work")
+        expect(recoveredRecord?.systemPath == nil
+               && !FileManager.default.fileExists(atPath: recoveredSystem.path),
+               "relaunch drops an unfinalized system track so mic-only retry can succeed")
+        expect(reopened.record(id: emptyID) == nil,
+               "relaunch removes an interrupted preparation that captured no audio")
+    }
+
+    private static func testMeetingDetection() {
+        let slackOnly = MeetingDetectionInput(
+            runningBundleIDs: ["com.tinyspeck.slackmacgap"],
+            windowTitles: ["com.tinyspeck.slackmacgap": ["Velora team — Slack"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.candidate(from: slackOnly) == nil,
+               "Slack merely running never triggers a meeting suggestion")
+
+        let huddle = MeetingDetectionInput(
+            runningBundleIDs: ["com.tinyspeck.slackmacgap"],
+            windowTitles: ["com.tinyspeck.slackmacgap": ["Huddle with Product"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.candidate(from: huddle)?.sourceApp == "Slack Huddle",
+               "an explicit Slack Huddle window produces a high-confidence candidate")
+
+        let zoomCalendar = MeetingDetectionInput(
+            runningBundleIDs: ["us.zoom.xos"], windowTitles: [:],
+            calendarTitle: "Weekly planning", calendarEventID: "event-1",
+            calendarHasConferenceLink: true)
+        let combined = MeetingDetector.candidate(from: zoomCalendar)
+        expect(combined?.title == "Weekly planning" && combined?.confidence == 85,
+               "calendar plus a running Zoom process crosses the suggestion threshold")
+
+        let browserMeet = MeetingDetectionInput(
+            runningBundleIDs: ["com.google.Chrome"],
+            windowTitles: ["com.google.Chrome": ["Roadmap – Google Meet"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.candidate(from: browserMeet)?.sourceApp == "Google Meet",
+               "Google Meet is detected from bounded browser window metadata")
+
+        let segmentEvent = EngineEvent.parse([
+            "event": "meeting_segment", "id": "job", "meeting_id": "m1",
+            "speaker": "me", "chunk_index": 2, "start_ms": 60_000,
+            "end_ms": 120_000, "text": "status update",
+        ])
+        if case .meetingSegment(let job, let segment) = segmentEvent {
+            expect(job == "job" && segment.speaker == .me && segment.chunkIndex == 2,
+                   "meeting segment engine events preserve resumable cursor and channel")
+        } else { expect(false, "expected meeting segment event") }
+
+        let notesEvent = EngineEvent.parse([
+            "event": "meeting_notes_ready", "meeting_id": "m1",
+            "summary": "Summary", "decisions": ["Ship"],
+            "action_items": ["Me: test"],
+        ])
+        if case .meetingNotesReady(_, let meetingID, let notes) = notesEvent {
+            expect(meetingID == "m1" && notes.decisions == ["Ship"]
+                   && notes.actionItems == ["Me: test"],
+                   "structured meeting notes parse without lossy string encoding")
+        } else { expect(false, "expected meeting notes event") }
+
+        let busyEvent = EngineEvent.parse([
+            "event": "meeting_transcribe_failed", "id": "job", "meeting_id": "m1",
+            "speaker": "me", "error": "localized text may change", "code": "busy",
+        ])
+        if case .meetingTranscribeFailed(_, _, _, _, let code) = busyEvent {
+            expect(code == "busy", "meeting retry policy parses a stable machine error code")
+        } else { expect(false, "expected meeting transcription failure event") }
+
+        let reprocessFailure = EngineEvent.parse([
+            "event": "reprocess_failed", "id": 42,
+            "error": "audio unavailable", "code": "invalid_file",
+        ])
+        if case .reprocessFailed(let id, _, let code) = reprocessFailure {
+            expect(id == 42 && code == "invalid_file",
+                   "history reprocess failures preserve row id and stable code")
+        } else { expect(false, "expected reprocess failure event") }
+    }
+
+    private static func testMeetingAlertTokenSlot() {
+        var slot = MeetingAlertTokenSlot()
+        let first = UUID()
+        let replacement = UUID()
+        slot.track(first)
+        slot.completed(replacement)
+        expect(slot.token == first,
+               "an unrelated alert completion cannot clear the active meeting warning")
+        expect(slot.take() == first && slot.token == nil,
+               "stopping a meeting takes and clears its visible warning token")
+        slot.track(replacement)
+        slot.completed(replacement)
+        expect(slot.token == nil,
+               "responding to a meeting warning clears only that warning token")
+    }
+
+    private static func testMeetingSystemAudioWarnings() {
+        let denied = MeetingAudioCapture.systemAudioWarning(for: NSError(
+            domain: SCStreamErrorDomain, code: -3801,
+            userInfo: [NSLocalizedDescriptionKey: "The user declined TCCs"]
+        ))
+        expect(denied.contains("Screen & System Audio Recording")
+               && !denied.contains("TCC"),
+               "a computer-audio denial gives a useful recovery path without TCC jargon")
+
+        let encoder = MeetingAudioCapture.systemAudioWarning(for: NSError(
+            domain: "VeloraMeetingCapture", code: 3,
+            userInfo: [NSLocalizedDescriptionKey: "audio encoder is unavailable"]
+        ))
+        expect(encoder.contains("audio encoder is unavailable"),
+               "non-permission computer-audio failures retain their actionable detail")
+    }
+
+    // MARK: - Local CLI / MCP control plane
+
+    private static func testControlProtocol() {
+        let valid: [String: Any] = [
+            "version": 1, "id": "request-1", "command": "recent",
+            "arguments": ["limit": 5],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: valid)
+        let parsed = try? ControlRequest.parse(data)
+        expect(parsed?.id == "request-1" && parsed?.command == "recent",
+               "control protocol parses a versioned request")
+        expect((parsed?.arguments["limit"] as? NSNumber)?.intValue == 5,
+               "control protocol preserves bounded arguments")
+
+        var invalid = valid
+        invalid["version"] = 99
+        expect((try? ControlRequest.parse(
+            try! JSONSerialization.data(withJSONObject: invalid))) == nil,
+               "control protocol rejects unknown versions")
+        invalid = valid
+        invalid["command"] = "recent; rm"
+        expect((try? ControlRequest.parse(
+            try! JSONSerialization.data(withJSONObject: invalid))) == nil,
+               "control protocol command is an identifier, never shell text")
+        expect((try? ControlRequest.parse(Data(repeating: 0x20,
+                                               count: ControlRequest.maxBytes + 1))) == nil,
+               "control protocol rejects inputs over 1 MiB")
+
+        let encoded = ControlResponse.success(
+            id: "r", result: ["value": true]).encodedLine()
+        expect(encoded?.last == 0x0A, "control responses are newline-delimited JSON")
+    }
+
+    private static func testControlRouter() {
+        withHistoryStore { store, _ in
+            store.insert(DictationRecord(
+                timestamp: Date(), bundleID: "SECRET_BUNDLE", appName: "Notes",
+                raw: "SECRET_RAW_TRANSCRIPT", final: "Budget is 100% approved",
+                mode: "Note", durationMs: 2_000, cleanupMs: 20,
+                audioPath: "SECRET_AUDIO.wav", sessionID: "SECRET_SESSION",
+                sttMs: 100, cleanupApplied: true))
+            var enabled = false
+            let router = LocalControlRouter(
+                history: store, accessEnabled: { enabled },
+                engineReady: { true }, typingWPM: { 50 })
+
+            let status = router.handle(ControlRequest(
+                id: "s", command: "status", arguments: [:]))
+            expect(status.failure == nil
+                   && (status.result?["access_enabled"] as? Bool) == false,
+                   "status remains available while local agent access is off")
+            let denied = router.handle(ControlRequest(
+                id: "r", command: "recent", arguments: [:]))
+            expect(denied.failure == .disabled,
+                   "history is deny-by-default until the user enables access")
+
+            enabled = true
+            let recent = router.handle(ControlRequest(
+                id: "r", command: "recent", arguments: ["limit": 500]))
+            let records = recent.result?["records"] as? [[String: Any]]
+            expect(records?.count == 1, "recent returns the allow-listed projection")
+            let serialized = VeloraCLI.json(recent.result ?? [:], pretty: false)
+            for secret in ["SECRET_RAW_TRANSCRIPT", "SECRET_BUNDLE",
+                           "SECRET_AUDIO.wav", "SECRET_SESSION"] {
+                expect(!serialized.contains(secret),
+                       "public control response omits \(secret)")
+            }
+            expect(serialized.contains("Budget is 100% approved")
+                   && serialized.contains("Notes"),
+                   "public control response includes requested final text and app label")
+            expect(records?.first?["id"] == nil,
+                   "public control response omits internal history row ids")
+
+            let escaped = router.handle(ControlRequest(
+                id: "q", command: "search", arguments: ["query": "100%", "limit": 1]))
+            expect((escaped.result?["records"] as? [[String: Any]])?.count == 1,
+                   "control search preserves literal LIKE metacharacters")
+            let stats = router.handle(ControlRequest(
+                id: "t", command: "stats", arguments: [:]))
+            expect(stats.result?["typing_wpm"] as? Int == 50,
+                   "control stats use the configured typing speed")
+            expect(stats.result?["apps"] == nil && stats.result?["modes"] == nil,
+                   "control stats expose aggregates, not app/mode labels")
+
+            var receivedArguments: [String: Any]?
+            let actionRouter = LocalControlRouter(
+                history: store, accessEnabled: { enabled },
+                engineReady: { true }, typingWPM: { 50 },
+                transcribeFile: { arguments, completion in
+                    receivedArguments = arguments
+                    completion(.success(["text": "agent transcript"]))
+                    return {}
+                },
+                listen: { arguments, completion in
+                    receivedArguments = arguments
+                    completion(.success(["text": "voice answer"]))
+                    return {}
+                })
+            var actionResponse: ControlResponse?
+            actionRouter.handle(ControlRequest(
+                id: "file", command: "transcribe",
+                arguments: ["path": "/tmp/../tmp/memo.wav", "mode": " Note "]
+            )) { actionResponse = $0 }
+            expect(actionResponse?.failure == nil
+                   && actionResponse?.result?["text"] as? String == "agent transcript",
+                   "control router completes an enabled file transcription capability")
+            expect(receivedArguments?["path"] as? String == "/tmp/memo.wav"
+                   && receivedArguments?["mode"] as? String == "Note",
+                   "control router normalizes bounded path and mode arguments")
+
+            actionResponse = nil
+            actionRouter.handle(ControlRequest(
+                id: "bad", command: "transcribe", arguments: ["path": "relative.wav"]
+            )) { actionResponse = $0 }
+            expect(actionResponse?.failure?.code == "invalid_arguments",
+                   "control router rejects relative file paths")
+
+            actionResponse = nil
+            actionRouter.handle(ControlRequest(
+                id: "listen", command: "listen", arguments: ["mode": "Raw"]
+            )) { actionResponse = $0 }
+            expect(actionResponse?.result?["text"] as? String == "voice answer"
+                   && receivedArguments?["mode"] as? String == "Raw",
+                   "control router exposes the consent-owned listening capability")
+
+            var cancelled = false
+            let cancellableRouter = LocalControlRouter(
+                history: store, accessEnabled: { true },
+                engineReady: { true }, typingWPM: { 50 },
+                listen: { _, _ in { cancelled = true } })
+            let cancel = cancellableRouter.handle(ControlRequest(
+                id: "cancel", command: "listen", arguments: [:]
+            )) { _ in }
+            cancel?()
+            expect(cancelled,
+                   "long-running control capabilities return a timeout cancellation hook")
+        }
+    }
+
+    private static func testCLIParsing() {
+        let recent = try? CLIInvocation.parse(["recent", "--limit", "500", "--json"])
+        expect(recent == CLIInvocation(command: .recent(limit: 100), json: true),
+               "CLI clamps recent limits and accepts JSON mode")
+        let search = try? CLIInvocation.parse(
+            ["search", "quarterly", "plan", "--limit", "7"])
+        expect(search == CLIInvocation(
+            command: .search(query: "quarterly plan", limit: 7), json: false),
+               "CLI parses multi-word searches and limits")
+        expect((try? CLIInvocation.parse(["search"])) == nil,
+               "CLI rejects a missing search query")
+        expect((try? CLIInvocation.parse(["recent", "--wat"])) == nil,
+               "CLI rejects unknown options")
+        let transcribe = try? CLIInvocation.parse([
+            "transcribe", "voice memo.m4a", "--mode", "Note", "--json",
+        ])
+        expect(transcribe == CLIInvocation(
+            command: .transcribe(path: "voice memo.m4a", mode: "Note"), json: true),
+               "CLI parses file transcription path, mode, and JSON output")
+        expect((try? CLIInvocation.parse(["listen", "--mode", "Raw"]))
+               == CLIInvocation(command: .listen(mode: "Raw"), json: false),
+               "CLI parses an explicitly formatted listening request")
+        expect((try? CLIInvocation.parse(["transcribe"])) == nil,
+               "CLI rejects file transcription without a path")
+        expect(VeloraCLI.shouldRun(arguments: ["/Applications/Velora.app/Contents/Resources/bin/velora", "status"]),
+               "lowercase bundled symlink selects CLI mode")
+        expect(!VeloraCLI.shouldRun(arguments: ["/Applications/Velora.app/Contents/MacOS/Velora"]),
+               "normal app executable never enters CLI mode")
+    }
+
+    private static func testMCPProtocol() {
+        var called: (String, [String: Any])?
+        let caller: MCPStdioServer.Caller = { command, arguments in
+            called = (command, arguments)
+            return .success(["records": []])
+        }
+        let initialized = MCPStdioServer.process([
+            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": [:],
+        ], caller: caller)
+        let initResult = initialized?["result"] as? [String: Any]
+        expect(initResult?["protocolVersion"] as? String == "2025-06-18",
+               "MCP initialize negotiates the supported stable protocol")
+        expect(MCPStdioServer.process([
+            "jsonrpc": "2.0", "method": "notifications/initialized",
+        ], caller: caller) == nil,
+               "MCP notifications produce no stdout response")
+
+        let listed = MCPStdioServer.process([
+            "jsonrpc": "2.0", "id": "tools", "method": "tools/list",
+        ], caller: caller)
+        let tools = (listed?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
+        expect(tools?.count == 6,
+               "MCP lists the read-only tools plus file and consented voice input")
+
+        let calledTool = MCPStdioServer.process([
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": [
+                "name": "search_dictations",
+                "arguments": ["query": "roadmap", "limit": 3],
+            ],
+        ], caller: caller)
+        expect(called?.0 == "search"
+               && (called?.1["query"] as? String) == "roadmap",
+               "MCP search tool maps to the bounded app broker command")
+        let toolResult = calledTool?["result"] as? [String: Any]
+        expect(toolResult?["isError"] as? Bool == false,
+               "MCP tool success uses a protocol-level successful result")
+
+        _ = MCPStdioServer.process([
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": ["name": "request_voice_input", "arguments": ["mode": "Raw"]],
+        ], caller: caller)
+        expect(called?.0 == "listen" && called?.1["mode"] as? String == "Raw",
+               "MCP voice input maps to the app's consent-requiring command")
+
+        let invalidArguments = MCPStdioServer.process([
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": ["name": "velora_status", "arguments": "wrong"],
+        ], caller: caller)
+        let invalidError = invalidArguments?["error"] as? [String: Any]
+        expect((invalidError?["code"] as? NSNumber)?.intValue == -32602,
+               "MCP rejects present non-object tool arguments")
+    }
+
+    private static func testLocalControlSocket() {
+        var pair = [Int32](repeating: -1, count: 2)
+        if socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 {
+            expect(!UnixSocket.peerDisconnected(pair[0]),
+                   "control peer liveness keeps a connected caller active")
+            close(pair[1])
+            expect(UnixSocket.peerDisconnected(pair[0]),
+                   "control peer liveness detects a disconnected caller")
+            close(pair[0])
+        } else {
+            expect(false, "socketpair fixture opens")
+            expect(false, "socketpair fixture reports disconnect")
+        }
+        withHistoryStore { store, _ in
+            // sockaddr_un.sun_path is only 104 bytes on Darwin; use a short
+            // explicit fixture path so the test exercises the socket, not the
+            // randomized macOS temporary-directory prefix.
+            let dir = URL(fileURLWithPath: "/tmp", isDirectory: true)
+                .appendingPathComponent("vc-\(UUID().uuidString.prefix(8))")
+            let path = dir.appendingPathComponent("control.sock").path
+            let longRequestStarted = DispatchSemaphore(value: 0)
+            let longRequestCancelled = DispatchSemaphore(value: 0)
+            let router = LocalControlRouter(
+                history: store, accessEnabled: { true },
+                engineReady: { true }, typingWPM: { 40 },
+                listen: { _, _ in
+                    longRequestStarted.signal()
+                    return { longRequestCancelled.signal() }
+                })
+            let server = LocalControlServer(path: path, router: router)
+            expect(server.start(), "local control socket binds")
+            defer {
+                server.stop()
+                try? FileManager.default.removeItem(at: dir)
+            }
+
+            var info = stat()
+            let statOK = lstat(path, &info) == 0
+            expect(statOK && (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK),
+                   "control endpoint is a Unix socket, never TCP")
+            expect(statOK && (info.st_mode & 0o777) == 0o600,
+                   "control socket is owner-readable/writable only")
+            let parentMode = (try? FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions]
+                              as? NSNumber)?.intValue ?? -1
+            expect(parentMode & 0o777 == 0o700,
+                   "control socket directory is owner-only")
+
+            let result = try? LocalControlClient.send(
+                command: "status", path: path, timeoutSeconds: 2)
+            expect((result?["engine_ready"] as? Bool) == true,
+                   "same-UID client completes the real socket round-trip")
+
+            let competing = LocalControlServer(path: path, router: router)
+            expect(!competing.start(),
+                   "a second app instance cannot steal a live control socket")
+            let afterCompetition = try? LocalControlClient.send(
+                command: "status", path: path, timeoutSeconds: 2)
+            expect((afterCompetition?["app_running"] as? Bool) == true,
+                   "failed second-instance startup leaves the first socket reachable")
+            competing.stop()
+            expect(FileManager.default.fileExists(atPath: path),
+                   "a server that never owned the socket cannot unlink it")
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = try? LocalControlClient.send(
+                    command: "listen", path: path, timeoutSeconds: 3)
+            }
+            expect(longRequestStarted.wait(timeout: .now() + 2) == .success,
+                   "control server begins a real long-running request")
+            server.stop()
+            expect(longRequestCancelled.wait(timeout: .now() + 2) == .success,
+                   "stopping control server cancels active client work")
+            expect(!FileManager.default.fileExists(atPath: path),
+                   "stopping the server removes the stale socket")
+        }
     }
 
     // MARK: - Mode categories

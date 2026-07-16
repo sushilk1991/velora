@@ -133,8 +133,12 @@ printf '%s %s\n' "$GIT_REV" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$BUNDLED_ENGINE/
 # Bundle uv (self-contained static binary; arm64-only app) so the engine can
 # bootstrap on machines without uv installed.
 UV_BIN="$(command -v uv || true)"
+mkdir -p "$APP/Contents/Resources/bin"
+# Default macOS volumes are case-insensitive, so `Velora` and `velora` cannot
+# coexist in Contents/MacOS. Keep the lowercase CLI in Resources/bin and point
+# it at the one signed app executable; argv[0] still selects headless mode.
+ln -s ../../MacOS/Velora "$APP/Contents/Resources/bin/velora"
 if [[ -n "$UV_BIN" ]]; then
-  mkdir -p "$APP/Contents/Resources/bin"
   cp "$UV_BIN" "$APP/Contents/Resources/bin/uv"
   chmod 755 "$APP/Contents/Resources/bin/uv"
 else

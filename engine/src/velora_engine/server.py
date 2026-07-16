@@ -37,6 +37,7 @@ from .cleanup import _RETRACTION_RE, CleanupEngine
 from .config import Config
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import load_media, split_for_batch
+from .meeting_notes import chunk_transcript, fallback_notes, merge_notes, parse_notes_json
 from .stt import (
     SAMPLE_RATE,
     STTBackend,
@@ -187,6 +188,16 @@ class Engine:
         # session is active, so the hotkey always wins.
         self._transcribing = False
         self._transcribe_cancel = False
+        self._transcribe_preempt = threading.Event()
+        self._file_transcribe_job_id: Any = None
+        self._meeting_transcribe_cancel = False
+        self._meeting_transcribe_job_id: Any = None
+        # Meeting notes share the cleanup model but are chunked and
+        # cooperatively preempted whenever live dictation starts.
+        self._meeting_notes_running = False
+        self._meeting_notes_cancel = False
+        self._meeting_notes_preempt = threading.Event()
+        self._meeting_notes_job_id: Any = None
         # True while a session's finalize is reading accumulated backend state.
         # `self.session` is already None then — the transcribe-file job must
         # ALSO wait on this, or its transcribe_clip() could reset the backend
@@ -496,6 +507,16 @@ class Engine:
             evt["session"] = session
         await self._send(evt)
 
+    async def _reprocess_failed(
+        self, msg: dict[str, Any], error: str, code: str = "failed"
+    ) -> None:
+        evt: dict[str, Any] = {
+            "event": "reprocess_failed", "error": error, "code": code,
+        }
+        if msg.get("id") is not None:
+            evt["id"] = msg.get("id")
+        await self._send(evt)
+
     # ---------------- dispatch ----------------
 
     async def _dispatch(self, frame_type: int, payload: bytes) -> None:
@@ -538,7 +559,29 @@ class Engine:
             elif cmd == "transcribe_file":
                 await self._cmd_transcribe_file(msg)
             elif cmd == "transcribe_cancel":
-                self._transcribe_cancel = True
+                requested = msg.get("id")
+                if self._file_transcribe_job_id is not None and (
+                    requested is None or requested == self._file_transcribe_job_id
+                ):
+                    self._transcribe_cancel = True
+                    self._transcribe_preempt.set()
+            elif cmd == "meeting_transcribe":
+                await self._cmd_meeting_transcribe(msg)
+            elif cmd == "meeting_transcribe_cancel":
+                requested = msg.get("id")
+                if self._meeting_transcribe_job_id is not None and (
+                    requested is None or requested == self._meeting_transcribe_job_id
+                ):
+                    self._meeting_transcribe_cancel = True
+            elif cmd == "meeting_notes":
+                await self._cmd_meeting_notes(msg)
+            elif cmd == "meeting_notes_cancel":
+                requested = msg.get("id")
+                if self._meeting_notes_job_id is not None and (
+                    requested is None or requested == self._meeting_notes_job_id
+                ):
+                    self._meeting_notes_cancel = True
+                    self._meeting_notes_preempt.set()
             else:
                 await self._error(f"unknown command: {cmd!r}")
         except Exception as exc:  # noqa: BLE001 — commands must never crash the engine
@@ -548,6 +591,9 @@ class Engine:
     # ---------------- session state machine ----------------
 
     async def _cmd_start(self, msg: dict[str, Any]) -> None:
+        # Explicit-mode file cleanup uses the same writing model as foreground
+        # dictation. Stop it between tokens and retry the exact chunk later.
+        self._transcribe_preempt.set()
         if self._reprocessing:
             # A background reprocess may be using the live STT backend; starting
             # now would corrupt its stream state. Ask the app to retry.
@@ -559,6 +605,10 @@ class Engine:
         # returns — without this flag the job would slip its next chunk in
         # between and wipe the just-started live stream (review P0).
         self._starting = True
+        # Background note generation yields immediately; its cleanup worker
+        # sees this event between output tokens, then the note job retries the
+        # same chunk after dictation releases the model.
+        self._meeting_notes_preempt.set()
         try:
             if self.session is not None:
                 log.warning("start while session %s active — discarding it", self.session.id)
@@ -1184,6 +1234,7 @@ class Engine:
         app_name: str | None,
         explicit_mode: str | None,
         entities: list[dict[str, str]] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[str, str, int, bool, str]:
         """Run the gate + optional LLM cleanup. Returns
         (text, mode_name, cleanup_ms, cleanup_applied, reason). Shared by live
@@ -1202,11 +1253,13 @@ class Engine:
             if gate.romanize:
                 # Transliteration: skip the length-ratio guard and allow longer.
                 result = await self.cleanup.cleanup(
-                    raw, gate.system_prompt or STATIC_SYSTEM_PROMPT, timeout_ms=4000, check_ratio=False
+                    raw, gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    timeout_ms=4000, check_ratio=False, cancel_event=cancel_event,
                 )
             else:
                 result = await self.cleanup.cleanup(
                     raw, gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    cancel_event=cancel_event,
                     allowed_terms=self._allowed_terms(gate.mode),
                 )
             if result.applied:
@@ -1279,6 +1332,7 @@ class Engine:
                     self.session is not None
                     or self._reprocessing
                     or self._transcribing
+                    or self._meeting_notes_running
                     or not (self.cleanup is not None and self.cleanup.loaded)
                     or not self.config.vocab_mining
                 ):
@@ -1376,7 +1430,8 @@ class Engine:
         if not model_id or not isinstance(model_id, str):
             await self._error("set_model: missing 'model'")
             return
-        if self.session is not None or self._reprocessing or self._transcribing:
+        if (self.session is not None or self._reprocessing or self._transcribing
+                or self._meeting_notes_running):
             await self._error("set_model: busy (dictation, reprocess, or file transcription in progress)")
             return
         info = models.lookup(model_id)
@@ -1443,14 +1498,16 @@ class Engine:
         slow) transcription off the dispatch loop so live control frames stay
         responsive. Emits a `reprocessed` event echoing the caller's id."""
         if self.session is not None:
-            await self._error("reprocess: busy (dictation in progress)")
+            await self._reprocess_failed(
+                msg, "reprocess: busy (dictation in progress)", "busy")
             return
-        if self._reprocessing or self._transcribing:
-            await self._error("reprocess: busy (another job in progress)")
+        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+            await self._reprocess_failed(
+                msg, "reprocess: busy (another job in progress)", "busy")
             return
         name = msg.get("audio")
         if not name or not isinstance(name, str):
-            await self._error("reprocess: missing 'audio'")
+            await self._reprocess_failed(msg, "reprocess: missing 'audio'", "invalid_arguments")
             return
         self._reprocessing = True
         asyncio.create_task(self._run_reprocess(dict(msg), name))
@@ -1465,7 +1522,8 @@ class Engine:
             try:
                 pcm = await asyncio.to_thread(self.audio.load, name)
             except (FileNotFoundError, ValueError, OSError) as exc:
-                await self._error(f"reprocess: audio unavailable: {exc}")
+                await self._reprocess_failed(
+                    msg, f"reprocess: audio unavailable: {exc}", "invalid_file")
                 return
             t0 = time.perf_counter()
             try:
@@ -1476,7 +1534,7 @@ class Engine:
                 raw = await self._stt_call(transcribe_clip, backend, pcm)
             except Exception as exc:  # noqa: BLE001
                 log.exception("reprocess transcription failed")
-                await self._error(f"reprocess failed: {exc}")
+                await self._reprocess_failed(msg, f"reprocess failed: {exc}")
                 return
             stt_ms = int((time.perf_counter() - t0) * 1000)
             text, mode_name, cleanup_ms, cleanup_applied, _reason = await self._apply_formatting(
@@ -1501,6 +1559,9 @@ class Engine:
             await self._send(evt)
             self._restart_if_cleanup_unhealthy()
             log.info("reprocess %s with %s: stt_ms=%d mode=%s", name, model_id, stt_ms, mode_name)
+        except Exception as exc:  # noqa: BLE001 — always complete the row request
+            log.exception("reprocess failed")
+            await self._reprocess_failed(msg, f"reprocess failed: {exc}")
         finally:
             if saved_language is not None and hasattr(self.stt, "language"):
                 self.stt.language = saved_language
@@ -1521,12 +1582,23 @@ class Engine:
         if not path or not isinstance(path, str):
             await self._error("transcribe_file: missing 'path'")
             return
-        if self._reprocessing or self._transcribing:
+        requested_mode = msg.get("mode")
+        if requested_mode is not None and (
+            not isinstance(requested_mode, str)
+            or not requested_mode.strip()
+            or len(requested_mode) > 128
+        ):
+            await self._send({"event": "transcribe_failed", "id": msg.get("id"),
+                              "error": "invalid formatting mode"})
+            return
+        if self._reprocessing or self._transcribing or self._meeting_notes_running:
             await self._send({"event": "transcribe_failed", "id": msg.get("id"),
                               "error": "another transcription is already running"})
             return
         self._transcribing = True
         self._transcribe_cancel = False
+        self._transcribe_preempt.clear()
+        self._file_transcribe_job_id = msg.get("id")
         asyncio.create_task(self._run_transcribe_file(dict(msg)))
         # Immediate ack so the app can distinguish "job accepted, decoding"
         # from "command was dropped" (engine restarting) and un-stick its UI.
@@ -1544,6 +1616,9 @@ class Engine:
                 pcm = await asyncio.to_thread(load_media, path)
             except ValueError as exc:
                 await fail(str(exc))
+                return
+            if self.shutdown.is_set():
+                await fail("engine shutting down")
                 return
             if self._transcribe_cancel:  # cancelled during a slow decode
                 await fail("cancelled")
@@ -1568,6 +1643,7 @@ class Engine:
                     self.session is not None or self._finalizing or self._starting
                 ) and not self._transcribe_cancel:
                     if self.shutdown.is_set():
+                        await fail("engine shutting down")
                         return
                     await asyncio.sleep(0.5)
                 if self._transcribe_cancel:
@@ -1576,6 +1652,9 @@ class Engine:
                 # Re-set per chunk: a dictation in between overwrites the prompt.
                 self.stt.initial_prompt = self._glossary()
                 piece = await self._stt_call(transcribe_clip, self.stt, chunk)
+                if self.shutdown.is_set():
+                    await fail("engine shutting down")
+                    return
                 # A cancel that landed while the chunk was decoding must win:
                 # the user said stop — never emit a result after that (review
                 # finding; the decode itself is seconds, not worth preempting).
@@ -1588,12 +1667,67 @@ class Engine:
                     "event": "transcribe_progress", "id": job_id,
                     "fraction": round((i + 1) / len(chunks), 3),
                 })
-            text = " ".join(texts).strip()
+            raw = " ".join(texts).strip()
+            mode_name: str | None = None
+            cleanup_ms = 0
+            cleanup_applied = False
+            text = raw
+            if isinstance(msg.get("mode"), str):
+                formatted: list[str] = []
+                for raw_piece in chunk_transcript(raw, max_chars=12_000):
+                    while True:
+                        while (
+                            self.session is not None or self._finalizing or self._starting
+                        ) and not self._transcribe_cancel:
+                            if self.shutdown.is_set():
+                                await fail("engine shutting down")
+                                return
+                            await asyncio.sleep(0.25)
+                        if self._transcribe_cancel:
+                            await fail("cancelled")
+                            return
+                        self._transcribe_preempt.clear()
+                        part, part_mode, part_ms, part_applied, _reason = (
+                            await self._apply_formatting(
+                                raw_piece,
+                                bundle_id=None,
+                                app_name="Local file",
+                                explicit_mode=msg["mode"],
+                                cancel_event=self._transcribe_preempt,
+                            )
+                        )
+                        if self.shutdown.is_set():
+                            await fail("engine shutting down")
+                            return
+                        if self._transcribe_cancel:
+                            await fail("cancelled")
+                            return
+                        if self._transcribe_preempt.is_set():
+                            # Foreground dictation interrupted generation. The
+                            # partial result is not authoritative; retry this
+                            # same bounded piece after the foreground releases.
+                            await asyncio.sleep(0.25)
+                            continue
+                        formatted.append(part)
+                        mode_name = part_mode
+                        cleanup_ms += part_ms
+                        cleanup_applied = cleanup_applied or part_applied
+                        break
+                text = _join_chunks(formatted)
+            if self.shutdown.is_set():
+                await fail("engine shutting down")
+                return
+            if self._transcribe_cancel:
+                await fail("cancelled")
+                return
             await self._send({
                 "event": "transcribed", "id": job_id, "path": path, "text": text,
+                "mode": mode_name,
                 "duration_s": round(duration_s, 1),
                 "stt_ms": int((time.perf_counter() - t0) * 1000),
                 "stt_model": self.stt.model_id,
+                "cleanup_ms": cleanup_ms,
+                "cleanup_applied": cleanup_applied,
             })
             log.info(
                 "transcribe_file done: %.0fs audio, %d chunks, %dms",
@@ -1605,6 +1739,264 @@ class Engine:
         finally:
             self._transcribing = False
             self._transcribe_cancel = False
+            self._transcribe_preempt.clear()
+            self._file_transcribe_job_id = None
+            self._schedule_mining()
+
+    # ---------------- resumable meeting transcription + notes ----------------
+
+    async def _cmd_meeting_transcribe(self, msg: dict[str, Any]) -> None:
+        path = msg.get("path")
+        meeting_id = msg.get("meeting_id")
+        speaker = msg.get("speaker")
+        start_chunk = msg.get("start_chunk", 0)
+        if not isinstance(path, str) or not path:
+            await self._error("meeting_transcribe: missing 'path'")
+            return
+        if not isinstance(meeting_id, str) or not meeting_id or len(meeting_id) > 128:
+            await self._error("meeting_transcribe: invalid 'meeting_id'")
+            return
+        if speaker not in ("me", "them"):
+            await self._error("meeting_transcribe: speaker must be 'me' or 'them'")
+            return
+        if not isinstance(start_chunk, int) or isinstance(start_chunk, bool) or start_chunk < 0:
+            await self._error("meeting_transcribe: invalid 'start_chunk'")
+            return
+        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+            await self._send({
+                "event": "meeting_transcribe_failed", "id": msg.get("id"),
+                "meeting_id": meeting_id, "speaker": speaker,
+                "code": "busy",
+                "error": "another background job is already running",
+            })
+            return
+        self._transcribing = True
+        self._meeting_transcribe_cancel = False
+        self._meeting_transcribe_job_id = msg.get("id")
+        asyncio.create_task(self._run_meeting_transcribe(dict(msg)))
+        await self._send({
+            "event": "meeting_transcribe_accepted", "id": msg.get("id"),
+            "meeting_id": meeting_id, "speaker": speaker,
+        })
+
+    async def _run_meeting_transcribe(self, msg: dict[str, Any]) -> None:
+        path = str(msg["path"])
+        meeting_id = str(msg["meeting_id"])
+        speaker = str(msg["speaker"])
+        job_id = msg.get("id")
+        start_chunk = int(msg.get("start_chunk", 0))
+
+        async def fail(error: str, code: str = "failed") -> None:
+            await self._send({
+                "event": "meeting_transcribe_failed", "id": job_id,
+                "meeting_id": meeting_id, "speaker": speaker,
+                "code": code, "error": error,
+            })
+
+        try:
+            try:
+                pcm = await asyncio.to_thread(load_media, path)
+            except ValueError as exc:
+                await fail(str(exc))
+                return
+            if self.shutdown.is_set():
+                await fail("engine shutting down", "engine_shutdown")
+                return
+            if self._meeting_transcribe_cancel:
+                await fail("cancelled", "cancelled")
+                return
+            duration_s = len(pcm) / SAMPLE_RATE
+            if duration_s < 0.2:
+                await fail("no audio in file")
+                return
+            chunks = split_for_batch(pcm)
+            offsets: list[int] = []
+            cursor = 0
+            for chunk in chunks:
+                offsets.append(cursor)
+                cursor += len(chunk)
+            await self._send({
+                "event": "meeting_transcribe_started", "id": job_id,
+                "meeting_id": meeting_id, "speaker": speaker,
+                "duration_s": round(duration_s, 1), "chunks": len(chunks),
+                "start_chunk": min(start_chunk, len(chunks)),
+            })
+            for index in range(start_chunk, len(chunks)):
+                while (
+                    self.session is not None or self._finalizing or self._starting
+                ) and not self._meeting_transcribe_cancel:
+                    if self.shutdown.is_set():
+                        await fail("engine shutting down", "engine_shutdown")
+                        return
+                    await asyncio.sleep(0.25)
+                if self._meeting_transcribe_cancel:
+                    await fail("cancelled", "cancelled")
+                    return
+                self.stt.initial_prompt = self._glossary()
+                text = await self._stt_call(transcribe_clip, self.stt, chunks[index])
+                if self.shutdown.is_set():
+                    await fail("engine shutting down", "engine_shutdown")
+                    return
+                if self._meeting_transcribe_cancel:
+                    await fail("cancelled", "cancelled")
+                    return
+                start_ms = int(offsets[index] * 1000 / SAMPLE_RATE)
+                end_ms = int((offsets[index] + len(chunks[index])) * 1000 / SAMPLE_RATE)
+                await self._send({
+                    "event": "meeting_segment", "id": job_id,
+                    "meeting_id": meeting_id, "speaker": speaker,
+                    "chunk_index": index, "start_ms": start_ms, "end_ms": end_ms,
+                    "text": (text or "").strip(),
+                })
+                await self._send({
+                    "event": "meeting_transcribe_progress", "id": job_id,
+                    "meeting_id": meeting_id, "speaker": speaker,
+                    "fraction": round((index + 1) / len(chunks), 3),
+                })
+            if self.shutdown.is_set():
+                await fail("engine shutting down", "engine_shutdown")
+                return
+            await self._send({
+                "event": "meeting_transcribed", "id": job_id,
+                "meeting_id": meeting_id, "speaker": speaker,
+                "duration_s": round(duration_s, 1), "chunks": len(chunks),
+            })
+        except Exception as exc:  # noqa: BLE001
+            log.exception("meeting transcription failed")
+            await fail(f"transcription failed: {exc}")
+        finally:
+            self._transcribing = False
+            self._meeting_transcribe_cancel = False
+            self._meeting_transcribe_job_id = None
+            self._schedule_mining()
+
+    async def _cmd_meeting_notes(self, msg: dict[str, Any]) -> None:
+        meeting_id = msg.get("meeting_id")
+        transcript = msg.get("transcript")
+        if not isinstance(meeting_id, str) or not meeting_id or len(meeting_id) > 128:
+            await self._error("meeting_notes: invalid 'meeting_id'")
+            return
+        if not isinstance(transcript, str) or not transcript.strip():
+            await self._error("meeting_notes: missing 'transcript'")
+            return
+        if len(transcript) > 2_000_000:
+            await self._send({
+                "event": "meeting_notes_failed", "id": msg.get("id"),
+                "meeting_id": meeting_id, "code": "invalid_arguments",
+                "error": "transcript is too large",
+            })
+            return
+        if self._reprocessing or self._transcribing or self._meeting_notes_running:
+            await self._send({
+                "event": "meeting_notes_failed", "id": msg.get("id"),
+                "meeting_id": meeting_id, "code": "busy",
+                "error": "another background job is already running",
+            })
+            return
+        self._meeting_notes_running = True
+        self._meeting_notes_cancel = False
+        self._meeting_notes_preempt.clear()
+        self._meeting_notes_job_id = msg.get("id")
+        asyncio.create_task(self._run_meeting_notes(dict(msg)))
+        await self._send({
+            "event": "meeting_notes_accepted", "id": msg.get("id"),
+            "meeting_id": meeting_id,
+        })
+
+    async def _run_meeting_notes(self, msg: dict[str, Any]) -> None:
+        meeting_id = str(msg["meeting_id"])
+        transcript = str(msg["transcript"])
+        job_id = msg.get("id")
+        map_prompt = (
+            "Create faithful meeting notes from this transcript chunk. Return JSON only with "
+            "exact keys summary (string), decisions (array of strings), and action_items "
+            "(array of strings). Do not invent owners, deadlines, decisions, or facts. "
+            "The labels Me and Them are audio channels, not identities."
+        )
+        reduce_prompt = (
+            "Merge these partial meeting notes without inventing facts or duplicates. Return "
+            "JSON only with exact keys summary, decisions, and action_items."
+        )
+
+        async def fail(error: str, code: str = "failed") -> None:
+            await self._send({
+                "event": "meeting_notes_failed", "id": job_id,
+                "meeting_id": meeting_id, "code": code, "error": error,
+            })
+
+        async def generate(user_text: str, prompt: str) -> dict[str, Any] | None:
+            while not self._meeting_notes_cancel:
+                if self.shutdown.is_set():
+                    return None
+                while self.session is not None or self._starting or self._finalizing:
+                    await asyncio.sleep(0.25)
+                    if self._meeting_notes_cancel or self.shutdown.is_set():
+                        return None
+                self._meeting_notes_preempt.clear()
+                cleanup = self.cleanup
+                if cleanup is None or not cleanup.loaded:
+                    return None
+                result = await cleanup.cleanup(
+                    user_text, prompt, timeout_ms=20_000, check_ratio=False,
+                    cancel_event=self._meeting_notes_preempt,
+                )
+                if self._meeting_notes_cancel or self.shutdown.is_set():
+                    return None
+                if self._meeting_notes_preempt.is_set():
+                    # A dictation interrupted generation. Retry this exact map
+                    # chunk once the foreground session has finished.
+                    await asyncio.sleep(0.25)
+                    continue
+                if not result.applied:
+                    return None
+                return parse_notes_json(result.text)
+            return None
+
+        try:
+            chunks = chunk_transcript(transcript)
+            partials: list[dict[str, Any]] = []
+            for index, chunk in enumerate(chunks):
+                if self.shutdown.is_set():
+                    await fail("engine shutting down", "engine_shutdown")
+                    return
+                if self._meeting_notes_cancel:
+                    await fail("cancelled", "cancelled")
+                    return
+                notes = await generate(chunk, map_prompt)
+                if self.shutdown.is_set():
+                    await fail("engine shutting down", "engine_shutdown")
+                    return
+                notes = notes or fallback_notes(chunk)
+                partials.append(notes)
+                await self._send({
+                    "event": "meeting_notes_progress", "id": job_id,
+                    "meeting_id": meeting_id,
+                    "fraction": round((index + 1) / max(1, len(chunks) + 1), 3),
+                })
+            merged = merge_notes(partials)
+            if len(partials) > 1:
+                reduced = await generate(json.dumps(partials, ensure_ascii=False), reduce_prompt)
+                if self.shutdown.is_set():
+                    await fail("engine shutting down", "engine_shutdown")
+                    return
+                if reduced is not None:
+                    merged = reduced
+            if self._meeting_notes_cancel:
+                await fail("cancelled", "cancelled")
+                return
+            await self._send({
+                "event": "meeting_notes_ready", "id": job_id,
+                "meeting_id": meeting_id, **merged,
+            })
+            self._restart_if_cleanup_unhealthy()
+        except Exception as exc:  # noqa: BLE001
+            log.exception("meeting note generation failed")
+            await fail(f"note generation failed: {exc}")
+        finally:
+            self._meeting_notes_running = False
+            self._meeting_notes_cancel = False
+            self._meeting_notes_preempt.clear()
+            self._meeting_notes_job_id = None
             self._schedule_mining()
 
 

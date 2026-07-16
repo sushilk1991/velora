@@ -218,6 +218,11 @@ final class SettingsModel: ObservableObject {
         smartTerminal = config.smartTerminal
         sttModel = config.sttModel
         saveAudio = config.saveAudio
+        typingWPM = config.typingWPM
+        localAgentAccess = config.localAgentAccess
+        meetingSuggestions = config.meetingSuggestions
+        meetingCalendar = config.meetingCalendar
+        meetingAudioRetentionDays = config.meetingAudioRetentionDays
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
         // lands (the engine owns this key; status refreshes it).
@@ -355,6 +360,27 @@ final class SettingsModel: ObservableObject {
 
     @Published var voiceCommands: Bool {
         didSet { config.voiceCommands = voiceCommands }
+    }
+
+    /// Typing speed the "time saved" metrics compare against (Intelligence tab).
+    @Published var typingWPM: Int {
+        didSet { config.typingWPM = typingWPM }
+    }
+
+    @Published var localAgentAccess: Bool {
+        didSet { config.localAgentAccess = localAgentAccess }
+    }
+
+    @Published var meetingSuggestions: Bool {
+        didSet { config.meetingSuggestions = meetingSuggestions }
+    }
+
+    @Published var meetingCalendar: Bool {
+        didSet { config.meetingCalendar = meetingCalendar }
+    }
+
+    @Published var meetingAudioRetentionDays: Int {
+        didSet { config.meetingAudioRetentionDays = meetingAudioRetentionDays }
     }
 
     @Published var vocabMining: Bool {

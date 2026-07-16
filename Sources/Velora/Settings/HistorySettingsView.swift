@@ -29,8 +29,8 @@ final class HistoryViewModel: ObservableObject {
     private var playGeneration = 0
 
     private static let pageSize = 50
-    /// How long to wait for a `reprocessed` reply before showing "failed"
-    /// (engine failures arrive as plain `error` events with no row id).
+    /// How long to wait for a reprocess reply before showing "failed". Stable
+    /// failures arrive immediately; this is the final defense for disconnects.
     private static let reprocessTimeout: TimeInterval = 90
 
     init(history: HistoryStore, supervisor: EngineSupervisor?) {
@@ -39,9 +39,16 @@ final class HistoryViewModel: ObservableObject {
         reprocessObserver = NotificationCenter.default.addObserver(
             forName: .veloraEngineReprocessed, object: nil, queue: .main
         ) { [weak self] note in
-            if case let .reprocessed(id, _, raw, text, mode, _, _, _, _)? =
+            if case let .reprocessed(
+                id, _, raw, text, mode, _, sttMs, cleanupMs, cleanupApplied
+            )? =
                 note.object as? EngineEvent {
-                self?.applyReprocessed(id: id, raw: raw, text: text, mode: mode)
+                self?.applyReprocessed(
+                    id: id, raw: raw, text: text, mode: mode,
+                    sttMs: sttMs, cleanupMs: cleanupMs,
+                    cleanupApplied: cleanupApplied)
+            } else if case let .reprocessFailed(id, _, _)? = note.object as? EngineEvent {
+                self?.applyReprocessFailed(id: id)
             }
         }
         reload()
@@ -134,8 +141,8 @@ final class HistoryViewModel: ObservableObject {
         inFlight.insert(id)
         supervisor?.send(reprocessCommand(record: record, audio: audio, sttModel: sttModel, mode: mode))
 
-        // Engine failures come back as plain `error` events with no row id, so
-        // fall back to a timeout to release the spinner and flag the row.
+        // A stable failure normally clears this immediately; retain a timeout
+        // for a process crash or dropped control connection.
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.reprocessTimeout) { [weak self] in
             guard let self, self.reprocessGen[id] == gen, self.inFlight.contains(id) else { return }
             self.inFlight.remove(id)
@@ -156,16 +163,23 @@ final class HistoryViewModel: ObservableObject {
         return command
     }
 
-    private func applyReprocessed(id: Int64?, raw: String, text: String, mode: String?) {
+    private func applyReprocessed(
+        id: Int64?, raw: String, text: String, mode: String?,
+        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool
+    ) {
         guard let id else { return }
-        history.updateAfterReprocess(id: id, raw: raw, final: text, mode: mode)
+        history.updateAfterReprocess(
+            id: id, raw: raw, final: text, mode: mode,
+            sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied)
         if let index = records.firstIndex(where: { $0.id == id }) {
             let old = records[index]
             records[index] = DictationRecord(
                 id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
                 appName: old.appName, raw: raw, final: text,
                 mode: mode ?? old.mode, durationMs: old.durationMs,
-                cleanupMs: old.cleanupMs, audioPath: old.audioPath)
+                cleanupMs: cleanupMs, audioPath: old.audioPath,
+                sessionID: old.sessionID, sttMs: sttMs,
+                cleanupApplied: cleanupApplied)
         }
         // A later request supersedes this reply's pending timeout.
         reprocessGen[id] = (reprocessGen[id] ?? 0) + 1
@@ -173,19 +187,28 @@ final class HistoryViewModel: ObservableObject {
         failed.remove(id)
     }
 
+    private func applyReprocessFailed(id: Int64?) {
+        guard let id else { return }
+        reprocessGen[id] = (reprocessGen[id] ?? 0) + 1
+        inFlight.remove(id)
+        failed.insert(id)
+    }
+
     // MARK: - Audio playback
 
     /// Whether the archived clip for this record exists on disk.
     func canPlay(_ record: DictationRecord) -> Bool {
-        guard let name = record.audioPath else { return false }
-        return FileManager.default.fileExists(atPath: audioURL(name).path)
+        guard let name = record.audioPath,
+              let url = AppConfig.archivedAudioURL(name: name) else { return false }
+        return FileManager.default.fileExists(atPath: url.path)
     }
 
     func togglePlayback(_ record: DictationRecord) {
-        guard let name = record.audioPath else { return }
+        guard let name = record.audioPath,
+              let url = AppConfig.archivedAudioURL(name: name) else { return }
         if playing == name { stopPlayback(); return }
         stopPlayback()
-        guard let player = try? AVAudioPlayer(contentsOf: audioURL(name)) else { return }
+        guard let player = try? AVAudioPlayer(contentsOf: url) else { return }
         self.player = player
         playing = name
         player.play()
@@ -209,9 +232,6 @@ final class HistoryViewModel: ObservableObject {
         playing = nil
     }
 
-    private func audioURL(_ name: String) -> URL {
-        AppConfig.audioDirectory.appendingPathComponent(name)
-    }
 }
 
 // MARK: - View
@@ -253,7 +273,9 @@ struct HistorySettingsView: View {
             cellDivider
             statCell(Self.compact(vm.stats.totalWords), "words all-time")
             cellDivider
-            statCell(Self.duration(minutes: vm.stats.minutesSaved), "saved vs typing")
+            statCell(
+                Self.duration(minutes: vm.stats.minutesSaved(typingWPM: model.typingWPM)),
+                "saved vs typing")
             if vm.stats.streakDays > 1 {
                 cellDivider
                 statCell("\(vm.stats.streakDays)-day", "streak 🔥")

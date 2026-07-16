@@ -12,16 +12,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let sounds = SoundPlayer()
 
     private var history: HistoryStore!
+    private var meetings: MeetingStore!
+    private var meetingProcessor: MeetingProcessor!
+    private var meetingCoordinator: MeetingCoordinator!
     private var dictionary: DictionaryRepository!
     private var dictionarySync: ICloudDictionarySync!
     private var dictation: DictationController!
     private var transcriber: FileTranscriber!
+    private var controlServer: LocalControlServer?
     private var statusController: StatusItemController!
     private var settingsController: SettingsWindowController?
     private var onboardingController: OnboardingWindowController?
     private var hotkeyObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
     private var loadingObserver: NSObjectProtocol?
+    private var terminationPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
@@ -33,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         config.writeEngineConfigIfMissing()
 
         history = HistoryStore()
+        meetings = MeetingStore()
         dictionary = DictionaryRepository(reload: { [weak self] in
             self?.supervisor.send(["cmd": "reload_config"])
         })
@@ -59,6 +65,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.statusController.transcriptionProgress = self.transcriber.progressLabel
         }
+        meetingProcessor = MeetingProcessor(supervisor: supervisor, store: meetings)
+        meetingCoordinator = MeetingCoordinator(
+            store: meetings, processor: meetingProcessor, sounds: sounds,
+            foregroundBusy: { [weak self] in
+                guard let self else { return true }
+                return self.dictation.phase != .idle || self.transcriber.isTranscribing
+            })
+        dictation.recordingBlockReason = { [weak self] in
+            guard let self, self.meetingCoordinator.state.isRecording else { return nil }
+            return "Meeting recording is active — stop it before dictating"
+        }
+        meetingCoordinator.onStateChange = { [weak self] state in
+            guard let self else { return }
+            switch state {
+            case .idle:
+                self.statusController.meetingRecordingTitle = nil
+                self.statusController.meetingPreparingTitle = nil
+            case .preparing(let title):
+                self.statusController.meetingRecordingTitle = nil
+                self.statusController.meetingPreparingTitle = title
+            case .recording(_, let title, _, _):
+                self.statusController.meetingPreparingTitle = nil
+                self.statusController.meetingRecordingTitle = title
+            }
+        }
+        meetingProcessor.onStateChange = { [weak self] state in
+            switch state {
+            case .idle: self?.statusController.meetingProcessingLabel = nil
+            case .processing(_, let label, let fraction):
+                self?.statusController.meetingProcessingLabel =
+                    "\(label) \(Int((fraction * 100).rounded()))%"
+            case .failed:
+                self?.statusController.meetingProcessingLabel =
+                    "Meeting processing needs attention"
+            }
+        }
+
+        let controlRouter = LocalControlRouter(
+            history: history,
+            accessEnabled: { AppConfig.shared.localAgentAccess },
+            engineReady: { [weak supervisor] in supervisor?.isReady ?? false },
+            typingWPM: { AppConfig.shared.typingWPM },
+            transcribeFile: { [weak self] arguments, completion in
+                let requestID = UUID()
+                DispatchQueue.main.async {
+                    guard let self else {
+                        completion(.failure(ControlFailure(
+                            code: "app_unavailable", message: "Velora is shutting down")))
+                        return
+                    }
+                    guard let path = arguments["path"] as? String else {
+                        completion(.failure(ControlFailure(
+                            code: "invalid_file", message: "The audio path is invalid")))
+                        return
+                    }
+                    self.transcriber.transcribeForAgent(
+                        url: URL(fileURLWithPath: path),
+                        mode: arguments["mode"] as? String,
+                        requestID: requestID
+                    ) { result in
+                        switch result {
+                        case .success(let value):
+                            var payload: [String: Any] = [
+                                "text": value.text,
+                                "path": value.path,
+                                "duration_ms": value.durationMs,
+                                "stt_ms": value.sttMs,
+                            ]
+                            if let mode = value.mode { payload["mode"] = mode }
+                            completion(.success(payload))
+                        case .failure(let error):
+                            let code: String
+                            switch error {
+                            case .busy: code = "busy"
+                            case .engineUnavailable: code = "engine_unavailable"
+                            case .invalidFile: code = "invalid_file"
+                            case .cancelled: code = "cancelled"
+                            case .failed: code = "transcription_failed"
+                            }
+                            completion(.failure(ControlFailure(
+                                code: code, message: error.localizedDescription)))
+                        }
+                    }
+                }
+                return { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.transcriber.cancelAgentRequest(requestID)
+                    }
+                }
+            },
+            listen: { [weak self] arguments, completion in
+                let requestID = UUID()
+                DispatchQueue.main.async {
+                    guard let self else {
+                        completion(.failure(ControlFailure(
+                            code: "app_unavailable", message: "Velora is shutting down")))
+                        return
+                    }
+                    self.dictation.requestExternalDictation(
+                        mode: arguments["mode"] as? String,
+                        requestID: requestID
+                    ) { result in
+                        switch result {
+                        case .success(let value):
+                            var payload: [String: Any] = [
+                                "text": value.text,
+                                "duration_ms": value.durationMs,
+                                "consent": "allow_once",
+                            ]
+                            if let mode = value.mode { payload["mode"] = mode }
+                            completion(.success(payload))
+                        case .failure(let error):
+                            let code: String
+                            switch error {
+                            case .denied: code = "consent_denied"
+                            case .busy: code = "busy"
+                            case .unavailable: code = "recording_unavailable"
+                            case .cancelled: code = "cancelled"
+                            }
+                            completion(.failure(ControlFailure(
+                                code: code, message: error.localizedDescription)))
+                        }
+                    }
+                }
+                return { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.dictation.cancelExternalRequest(requestID)
+                    }
+                }
+            })
+        let controlServer = LocalControlServer(router: controlRouter)
+        if controlServer.start() { self.controlServer = controlServer }
 
         supervisor.delegate = self
         dictation.delegate = self
@@ -79,6 +217,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         veloraLog("Velora: hotkey monitor started (usingEventTap=\(hotkeyMonitor.usingEventTap))")
         supervisor.start()
         dictionarySync.start()
+        meetingCoordinator.start()
 
         hotkeyObserver = NotificationCenter.default.addObserver(
             forName: .veloraHotkeyChanged, object: nil, queue: .main
@@ -117,8 +256,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !terminationPending else { return .terminateLater }
+        terminationPending = true
+        // Stop accepting new long-running work, then wait for meeting audio to
+        // finalize before allowing AppKit to tear down the engine and process.
+        controlServer?.stop()
+        dictation?.cancelForTermination()
+        transcriber?.cancelForTermination()
+        guard let meetingCoordinator else {
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+            return .terminateLater
+        }
+        meetingCoordinator.finishForTermination {
+            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        dictation?.cancel()
+        dictation?.cancelForTermination()
+        transcriber?.cancelForTermination()
+        meetingCoordinator?.stop()
+        controlServer?.stop()
         dictionarySync?.stop()
         hotkeyMonitor.stop()
         contextTracker.stop()
@@ -145,6 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // so the event tap picks up the new grant.
                 self.hotkeyMonitor.restart()
                 self.refreshDegradedState()
+                self.meetingCoordinator.start()
             }
             onboardingController = controller
         }
@@ -157,7 +318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 supervisor: supervisor,
                 history: history,
                 dictionary: dictionary,
-                dictionarySync: dictionarySync)
+                dictionarySync: dictionarySync,
+                meetings: meetings,
+                meetingCoordinator: meetingCoordinator,
+                meetingProcessor: meetingProcessor)
         }
         settingsController?.show(selecting: tab)
     }
@@ -190,6 +354,7 @@ extension AppDelegate: EngineSupervisorDelegate {
     func engineSupervisor(_ supervisor: EngineSupervisor, didChangeState state: EngineSupervisor.State) {
         dictation.handleEngineStateChange(state)
         transcriber.handleEngineStateChange(state)
+        meetingProcessor.handleEngineStateChange(state)
         refreshDegradedState()
     }
 
@@ -199,6 +364,7 @@ extension AppDelegate: EngineSupervisorDelegate {
         }
         dictation.handleEngineEvent(event)
         transcriber.handle(event)
+        meetingProcessor.handle(event)
     }
 }
 
@@ -236,6 +402,12 @@ extension AppDelegate: StatusItemControllerDelegate {
         transcriber.cancel()
     }
 
+    func statusItemStartMeeting() { meetingCoordinator.startManual() }
+
+    func statusItemStopMeeting() { meetingCoordinator.stopRecording() }
+
+    func statusItemDiscardMeeting() { meetingCoordinator.cancelRecording() }
+
     func statusItemOpenSettings() {
         showSettings()
     }
@@ -243,6 +415,8 @@ extension AppDelegate: StatusItemControllerDelegate {
     func statusItemOpenHistory() {
         showSettings(selecting: .history)
     }
+
+    func statusItemOpenMeetings() { showSettings(selecting: .meetings) }
 
     func statusItemOpenSetupAssistant() {
         showOnboarding(startingAt: firstMissingPermissionStep)

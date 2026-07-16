@@ -3,7 +3,7 @@ import SwiftUI
 /// Settings tabs (design brief §4.1): grouped forms, fixed 580 pt width,
 /// height hugging content. No custom chrome, one accent color.
 enum SettingsTab: CaseIterable {
-    case general, dictation, dictionary, model, modes, history, shortcuts, about
+    case general, dictation, dictionary, model, modes, history, intelligence, meetings, shortcuts, about
 
     var title: String {
         switch self {
@@ -13,6 +13,8 @@ enum SettingsTab: CaseIterable {
         case .model: return "Model"
         case .modes: return "Modes"
         case .history: return "History"
+        case .intelligence: return "Intelligence"
+        case .meetings: return "Meetings"
         case .shortcuts: return "Shortcuts"
         case .about: return "About"
         }
@@ -26,6 +28,8 @@ enum SettingsTab: CaseIterable {
         case .model: return "cpu"
         case .modes: return "slider.horizontal.3"
         case .history: return "clock.arrow.circlepath"
+        case .intelligence: return "chart.bar.xaxis"
+        case .meetings: return "person.2.wave.2"
         case .shortcuts: return "keyboard"
         case .about: return "info.circle"
         }
@@ -33,12 +37,14 @@ enum SettingsTab: CaseIterable {
 
     var preferredHeight: CGFloat {
         switch self {
-        case .general: return 270
+        case .general: return 350
         case .dictation: return 500
         case .dictionary: return 440
         case .model: return 480
         case .modes: return 600
         case .history: return 560
+        case .intelligence: return 620
+        case .meetings: return 720
         case .shortcuts: return 320
         case .about: return 320
         }
@@ -70,6 +76,13 @@ struct GeneralSettingsView: View {
                 }
             } footer: {
                 Text("Tip: while the HUD is on screen, drag the pill to place it anywhere — that switches it to Custom.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            Section {
+                Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
+            } footer: {
+                Text("Off by default. When enabled, processes running as your macOS user can read allow-listed local history and aggregate stats through an owner-only Unix socket. No network server is opened.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

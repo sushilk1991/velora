@@ -21,6 +21,28 @@ enum DictationOutputFailure {
     }
 }
 
+struct ExternalDictationResult {
+    let text: String
+    let mode: String?
+    let durationMs: Int
+}
+
+enum ExternalDictationError: LocalizedError {
+    case denied
+    case busy
+    case unavailable(String)
+    case cancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .denied: return "The user denied this listening request"
+        case .busy: return "Velora is already recording or transcribing"
+        case .unavailable(let message): return message
+        case .cancelled: return "The listening request was cancelled"
+        }
+    }
+}
+
 /// The full dictation state machine: hotkey → HUD + audio + engine `start` →
 /// release → `stop` → `final` event → insert → history. Main-thread only.
 ///
@@ -51,6 +73,9 @@ final class DictationController: NSObject {
     private static let transcribeTimeout: TimeInterval = 20
 
     weak var delegate: DictationControllerDelegate?
+    /// App-owned foreground capture exclusion (currently meeting recording).
+    /// Post-meeting background processing does not block dictation.
+    var recordingBlockReason: (() -> String?)?
 
     private let config = AppConfig.shared
     private let capture = AudioCapture()
@@ -87,9 +112,15 @@ final class DictationController: NSObject {
     private var consumedSessionID: String?
     private var sessionContext: AppContext?
     private var recordingStart: Date?
+    /// Speaking time is frozen when capture stops. History and time-saved
+    /// metrics must not count STT/cleanup latency as time spent speaking.
+    private var recordingDurationMs: Int?
     private var transcribeStartedAt: Date?
     private var hotkeyDownAt: Date?
     private var rawTranscript: String?
+    /// STT decode latency from this session's `transcript` event, persisted
+    /// with the history row (the live `final` event doesn't carry it).
+    private var sttMs: Int?
     private var transcribeTimer: Timer?
     /// When set, the error HUD's action button runs this instead of retrying
     /// dictation (e.g. "Open Settings" for a missing Accessibility grant).
@@ -110,8 +141,10 @@ final class DictationController: NSObject {
     private var contextGatherGeneration = 0
     private let contextQueue = DispatchQueue(label: "com.velora.context", qos: .userInitiated)
     /// Learning loop: what we last inserted, so a later edit can be diffed into
-    /// a learned correction.
-    private var pendingLearning: (element: AXUIElement, inserted: String, insertedWords: Set<String>)?
+    /// a learned correction. `session` keys the history row's quality
+    /// observation (the async insert never reports a rowid).
+    private var pendingLearning: (
+        element: AXUIElement, inserted: String, insertedWords: Set<String>, session: String)?
     /// Deferred re-check: `checkPendingLearning` normally runs when the NEXT
     /// dictation starts, so an edit made after the *last* dictation of a sitting
     /// would never be learned. This one-shot timer closes that gap.
@@ -130,6 +163,22 @@ final class DictationController: NSObject {
     /// Learning is scoped to compose-box-sized fields: we never diff a large
     /// document (can't isolate our span; would freeze on the hot path).
     private static let learningMaxWords = 60
+    /// One externally requested dictation may be active at a time. It remains
+    /// tied to the exact engine session approved by the user, so a late or
+    /// foreign event can never satisfy the requester.
+    private var externalRequest: (
+        requestID: UUID,
+        session: String,
+        completion: (Result<ExternalDictationResult, ExternalDictationError>) -> Void
+    )?
+    private var externalApproval: (
+        requestID: UUID,
+        alertToken: UUID,
+        completion: (Result<ExternalDictationResult, ExternalDictationError>) -> Void
+    )?
+    /// Terminal lifecycle gate. Once AppKit begins quitting, neither a queued
+    /// consent response nor a late menu/hotkey event may reopen the microphone.
+    private var terminating = false
 
     init(
         supervisor: EngineSupervisor,
@@ -177,6 +226,99 @@ final class DictationController: NSObject {
         }
     }
 
+    /// Agent/CLI entry point. Every request requires a fresh native approval;
+    /// the global Settings toggle only exposes the capability and is not
+    /// treated as microphone consent. Approved sessions use the normal visible
+    /// HUD/sounds and are stopped by the user's usual hotkey, menu item, or Esc.
+    func requestExternalDictation(
+        mode: String?,
+        requestID: UUID,
+        completion: @escaping (Result<ExternalDictationResult, ExternalDictationError>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !terminating else {
+            completion(.failure(.unavailable("Velora is shutting down")))
+            return
+        }
+        guard externalRequest == nil, externalApproval == nil, phase == .idle else {
+            completion(.failure(.busy))
+            return
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Allow a local agent to listen?"
+        alert.informativeText = "Velora will visibly record one dictation and return its transcript to the requesting process. It will not paste text or read your screen."
+        if let mode, !mode.isEmpty {
+            alert.informativeText += "\n\nFormatting mode: \(mode)"
+        }
+        alert.addButton(withTitle: "Allow Once")
+        alert.addButton(withTitle: "Deny")
+        let alertToken = VisibleAlert.present(alert) { [weak self] response in
+            guard let self else {
+                completion(.failure(.unavailable("Velora is shutting down")))
+                return
+            }
+            guard self.externalApproval?.requestID == requestID else { return }
+            self.externalApproval = nil
+            guard !self.terminating else {
+                completion(.failure(.cancelled))
+                return
+            }
+            guard response == .alertFirstButtonReturn else {
+                completion(.failure(.denied))
+                return
+            }
+            guard self.startRecording(
+                locked: true, explicitMode: mode, external: true
+            ) else {
+                completion(.failure(.unavailable(
+                    "Velora could not start the approved recording")))
+                return
+            }
+            self.externalRequest = (
+                requestID: requestID, session: self.sessionID, completion: completion)
+        }
+        externalApproval = (
+            requestID: requestID, alertToken: alertToken, completion: completion)
+    }
+
+    /// Cancels either an unapproved prompt or the exact approved session. Used
+    /// by the local socket timeout so a disconnected caller can never leave a
+    /// consent dialog wedged or a microphone recording running.
+    func cancelExternalRequest(_ requestID: UUID) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let approval = externalApproval, approval.requestID == requestID {
+            externalApproval = nil
+            approval.completion(.failure(.cancelled))
+            VisibleAlert.dismiss(approval.alertToken)
+            return
+        }
+        if externalRequest?.requestID == requestID { cancel() }
+    }
+
+    /// Completes every app-owned or broker-owned dictation before teardown.
+    /// Pending consent is completed immediately; dismissing its alert cannot
+    /// start capture because the approval state and lifecycle gate are cleared
+    /// first. Idempotent for applicationShouldTerminate/applicationWillTerminate.
+    func cancelForTermination() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        terminating = true
+        if let approval = externalApproval {
+            externalApproval = nil
+            approval.completion(.failure(.cancelled))
+            VisibleAlert.dismiss(approval.alertToken)
+        }
+        if phase != .idle {
+            cancel()
+            return
+        }
+        if let request = externalRequest {
+            externalRequest = nil
+            request.completion(.failure(.cancelled))
+        }
+    }
+
     // MARK: - Reformat last (menubar quick-override, off the hot path)
 
     /// Built-in modes offered in the "Reformat Last as…" menu.
@@ -194,8 +336,8 @@ final class DictationController: NSObject {
     /// requirement: the mode choice happens after the fact, not before cleanup).
     func reformatLast(mode: String) {
         guard let record = history.recent(limit: 1).first, let audio = record.audioPath,
-              FileManager.default.fileExists(
-                  atPath: AppConfig.audioDirectory.appendingPathComponent(audio).path)
+              let audioURL = AppConfig.archivedAudioURL(name: audio),
+              FileManager.default.fileExists(atPath: audioURL.path)
         else {
             showError("No recent dictation to reformat")
             return
@@ -209,10 +351,15 @@ final class DictationController: NSObject {
     }
 
     /// Pastes a completed "Reformat Last as…" result back into its origin app.
-    private func applyReformat(id: Int64, raw: String, text: String, mode: String?) {
+    private func applyReformat(
+        id: Int64, raw: String, text: String, mode: String?,
+        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool
+    ) {
         guard let pending = pendingReformat, pending.id == id else { return }
         pendingReformat = nil
-        history.updateAfterReprocess(id: id, raw: raw, final: text, mode: mode)
+        history.updateAfterReprocess(
+            id: id, raw: raw, final: text, mode: mode,
+            sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         inserter.copyToClipboard(text)
@@ -242,7 +389,7 @@ final class DictationController: NSObject {
     /// Remembers the focused field + exactly what we inserted, so a later edit
     /// can be diffed. Only for compose-box-sized insertions — we never learn
     /// from a big document (can't isolate our span and would freeze).
-    private func captureLearningBaseline(text: String, bundleID: String?) {
+    private func captureLearningBaseline(text: String, bundleID: String?, session: String) {
         guard config.learnFromEdits else { return }
         let inserted = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let insertedWords = Set(
@@ -262,7 +409,7 @@ final class DictationController: NSObject {
                 veloraLog("Velora: learning — no focused AX element (app=\(app?.bundleIdentifier ?? "nil")), cannot watch edits")
                 return
             }
-            self.pendingLearning = (element, inserted, insertedWords)
+            self.pendingLearning = (element, inserted, insertedWords, session)
             self.scheduleLearningRecheck()
             // Real-time: watch the field itself; edits evaluate a debounce
             // after the last keystroke instead of waiting for the 45s timer.
@@ -327,16 +474,27 @@ final class DictationController: NSObject {
         contextQueue.async { [weak self] in
             guard let self else { return }
             guard let edited = ScreenContext.stringValue(of: pending.element) else {
+                // Unobservable (field gone/unreadable) — never a quality verdict.
                 veloraLog("Velora: learning — field unreadable at evaluate (consume=\(consume))")
                 return
             }
-            guard edited != pending.inserted else { return }  // untouched — nothing to learn yet
+            guard edited != pending.inserted else {
+                // Untouched. Only the final (consuming) check is an honest
+                // "unchanged" observation — a live watcher tick just means the
+                // user hasn't edited YET.
+                if consume {
+                    self.history.markQualityObservation(
+                        session: pending.session, state: .unchanged)
+                }
+                return
+            }
             // Size cap only (a real document never diffs; would freeze/mislead).
             // Fields BIGGER than the insertion are fine below the cap:
             // CorrectionDiff isolates the best-matching window itself, so a
             // TextEdit/Notes doc accumulating several dictations still learns.
             let editedWords = edited.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
             guard editedWords <= 400 else {
+                // Unsupported (oversized field) — no observation either way.
                 veloraLog("Velora: learning — field too large to diff (\(editedWords) words)")
                 return
             }
@@ -344,6 +502,15 @@ final class DictationController: NSObject {
             let corrections = CorrectionDiff.corrections(baseline: pending.inserted, edited: edited)
                 .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
             guard !corrections.isEmpty else {
+                // The field changed but nothing learnable was isolated. If our
+                // inserted span survives verbatim inside the larger text, the
+                // user only added around it — an honest "unchanged" at the
+                // final check. Anything else (cleared on send, wholesale
+                // rewrite) is ambiguous and stays unobserved.
+                if consume, edited.contains(pending.inserted) {
+                    self.history.markQualityObservation(
+                        session: pending.session, state: .unchanged)
+                }
                 veloraLog("Velora: learning — edit seen, no learnable 1:1 correction (consume=\(consume))")
                 return
             }
@@ -355,9 +522,15 @@ final class DictationController: NSObject {
                     // dictation may have installed a fresh baseline meanwhile,
                     // and consuming THAT would kill its watcher (review
                     // finding).
-                    guard self.pendingLearning?.inserted == pending.inserted else { return }
+                    guard self.pendingLearning?.inserted == pending.inserted,
+                          self.pendingLearning?.session == pending.session else { return }
                     self.consumePendingLearning()
                 }
+                // A demonstrable user edit of our inserted words — the one
+                // honest "edited" signal (regardless of whether the dictionary
+                // commits the correction pair).
+                self.history.markQualityObservation(
+                    session: pending.session, state: .edited)
                 let committed = self.dictionary.observeCorrections(
                     corrections.map { ($0.wrong, $0.right) })
                 veloraLog("Velora: learning — \(corrections.count) correction(s) observed, \(committed.count) committed")
@@ -398,8 +571,15 @@ final class DictationController: NSObject {
 
     // MARK: - Recording lifecycle
 
-    private func startRecording(locked: Bool) {
-        guard phase == .idle else { return }
+    @discardableResult
+    private func startRecording(
+        locked: Bool, explicitMode: String? = nil, external: Bool = false
+    ) -> Bool {
+        guard !terminating, phase == .idle else { return false }
+        if let reason = recordingBlockReason?() {
+            showError(reason)
+            return false
+        }
 
         // A fresh press supersedes any lingering error/fallback HUD: clear its
         // one-shot retry action so we start clean (the transition to
@@ -411,21 +591,21 @@ final class DictationController: NSObject {
         guard !SecureInput.isActive else {
             NSLog("Velora: recording refused — secure input active")
             showError("Secure input active — dictation unavailable")
-            return
+            return false
         }
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         guard micStatus == .authorized else {
             NSLog("Velora: recording refused — mic auth status=%ld", micStatus.rawValue)
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
             showError("Microphone access needed")
-            return
+            return false
         }
         guard supervisor.isReady else {
             NSLog("Velora: recording refused — engine not ready")
             // First run: say WHAT is happening ("Downloading the speech model
             // (1.6 GB) — 42%") instead of a vague "starting…".
             showError(supervisor.loadingStatus ?? "Speech engine is starting…")
-            return
+            return false
         }
 
         // Learn from any edits the user made to the previous dictation before
@@ -434,20 +614,28 @@ final class DictationController: NSObject {
 
         sessionID = UUID().uuidString
         rawTranscript = nil
+        sttMs = nil
         recordingStart = Date()
+        recordingDurationMs = nil
         timeoutErrorAt = nil  // a stale timeout must never drop THIS session's final
 
         // Context chip: the target app's actual icon + the client-side
         // detected mode label (ModeCategory mirrors the engine's map).
-        let targetApp = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        let targetApp = external
+            ? nil
+            : (contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication)
 
         // Enrich the app context with on-screen entities (current file, the
         // person/channel you're messaging, …) via the Accessibility API, so the
         // engine can spell them right and, later, tag them. Cheap AX title read;
         // never blocks capture.
-        var enriched = contextTracker.current
-        enriched.entities = ScreenContext.entities(
-            for: targetApp, category: ModeCategory.category(forBundleID: enriched.bundleID))
+        var enriched = external
+            ? AppContext(bundleID: nil, appName: "Local agent")
+            : contextTracker.current
+        if !external {
+            enriched.entities = ScreenContext.entities(
+                for: targetApp, category: ModeCategory.category(forBundleID: enriched.bundleID))
+        }
         sessionContext = enriched
         if !enriched.entities.isEmpty {
             // Log only types/count — never the values (subject lines, names,
@@ -458,32 +646,41 @@ final class DictationController: NSObject {
         }
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
-            modeName: ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
+            modeName: explicitMode
+                ?? ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
 
         NSLog(
             "Velora: engine start session=%@ target=%@",
             sessionID, sessionContext?.bundleID ?? "unknown")
-        supervisor.send([
+        var startCommand: [String: Any] = [
             "cmd": "start",
             "session": sessionID,
             "context": sessionContext?.payload ?? [:],
-        ])
+        ]
+        if let explicitMode {
+            var payload = startCommand["context"] as? [String: Any] ?? [:]
+            payload["mode"] = explicitMode
+            startCommand["context"] = payload
+        }
+        supervisor.send(startCommand)
 
         // Background pass: read richer nearby AX text (the person you're
         // replying to, field labels) while the user speaks. It's heavier than
         // the title read, so it runs off the main thread and is attached to the
         // `stop` command — ready by the time the user finishes talking, adding
         // nothing to the release→insert latency.
-        contextGatherGeneration += 1
-        let generation = contextGatherGeneration
-        let gatherApp = targetApp
-        let gatherCategory = ModeCategory.category(forBundleID: enriched.bundleID)
         richEntities = []
-        contextQueue.async { [weak self] in
-            let rich = ScreenContext.richEntities(for: gatherApp, category: gatherCategory)
-            DispatchQueue.main.async {
-                guard let self, self.contextGatherGeneration == generation else { return }
-                self.richEntities = rich
+        if !external {
+            contextGatherGeneration += 1
+            let generation = contextGatherGeneration
+            let gatherApp = targetApp
+            let gatherCategory = ModeCategory.category(forBundleID: enriched.bundleID)
+            contextQueue.async { [weak self] in
+                let rich = ScreenContext.richEntities(for: gatherApp, category: gatherCategory)
+                DispatchQueue.main.async {
+                    guard let self, self.contextGatherGeneration == generation else { return }
+                    self.richEntities = rich
+                }
             }
         }
 
@@ -500,15 +697,17 @@ final class DictationController: NSObject {
         } catch {
             supervisor.send(["cmd": "cancel", "session": sessionID])
             showError(error.localizedDescription)
-            return
+            return false
         }
 
         phase = .recording(locked: locked)
+        return true
     }
 
     private func stopAndTranscribe() {
         guard isRecording else { return }
 
+        recordingDurationMs = elapsedRecordingMs
         capture.stop()
         sounds.play(.stop)
         NSLog("Velora: engine stop session=%@", sessionID)
@@ -555,9 +754,11 @@ final class DictationController: NSObject {
         transcribeTimer?.invalidate()
         transcribeTimer = nil
         supervisor.send(["cmd": "cancel", "session": sessionID])
+        cancelledSessionID = sessionID
         hud.model.recordingStart = nil
         hud.transition(to: .hidden(.cancel))
         phase = .idle
+        failExternalRequest(for: sessionID, error: .cancelled)
         return true
     }
 
@@ -576,9 +777,16 @@ final class DictationController: NSObject {
         hud.model.recordingStart = nil
         hud.transition(to: .hidden(.cancel))
         phase = .idle
+        failExternalRequest(for: sessionID, error: .cancelled)
     }
 
     private func showError(_ message: String) {
+        let failedSession = sessionID
+        if externalRequest?.session == failedSession {
+            // Once the requester has received a failure, a late final must not
+            // fall through into the normal paste path.
+            cancelledSessionID = failedSession
+        }
         capture.stop()
         transcribeTimer?.invalidate()
         transcribeTimer = nil
@@ -588,6 +796,8 @@ final class DictationController: NSObject {
         sounds.play(.error)
         hud.transition(to: .error(message))
         phase = .idle
+        failExternalRequest(
+            for: failedSession, error: .unavailable(message))
     }
 
     // MARK: - Engine events
@@ -601,15 +811,16 @@ final class DictationController: NSObject {
             // inside the waveform-first HUD.
             guard session == sessionID, phase != .idle else { return }
 
-        case .transcript(let session, let raw, _):
+        case .transcript(let session, let raw, let ms):
             guard session == sessionID else { return }
             rawTranscript = raw
+            sttMs = ms > 0 ? ms : nil
             // Progress signal: the engine has decoded and is now formatting.
             // Refresh the timeout so a slow LLM cleanup after a long batch
             // transcription doesn't trip the stop→final deadline.
             if phase == .transcribing { armTranscribeTimeout() }
 
-        case .final(let session, let text, let raw, let mode, let cleanupMs, _, let audio):
+        case .final(let session, let text, let raw, let mode, let cleanupMs, let cleanupApplied, let audio):
             // Honor a valid final for the CURRENT session even if phase drifted
             // from .transcribing — a missed hotkeyUp can leave us in .recording,
             // or a timeout can have reset us to .idle. The only final we refuse
@@ -639,18 +850,32 @@ final class DictationController: NSObject {
             transcribeTimer = nil
             // If we never observed the stop edge, capture is still running — stop
             // it now so the mic releases and we don't keep streaming audio.
-            if isRecording { capture.stop() }
+            if isRecording {
+                recordingDurationMs = elapsedRecordingMs
+                capture.stop()
+            }
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
-                mode: mode, cleanupMs: cleanupMs, audio: audio,
-                allowAutomaticInsertion: !arrivedTooLate)
+                mode: mode, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                audio: audio, allowAutomaticInsertion: !arrivedTooLate)
 
-        case .reprocessed(let id, _, let raw, let text, let mode, _, _, _, _):
+        case .reprocessed(
+            let id, _, let raw, let text, let mode, _,
+            let sttMs, let cleanupMs, let cleanupApplied
+        ):
             // Only the menubar "Reformat Last as…" path is handled here; the
             // History tab consumes its own reprocess replies via notification.
             if let id, pendingReformat?.id == id {
-                applyReformat(id: id, raw: raw, text: text, mode: mode)
+                applyReformat(
+                    id: id, raw: raw, text: text, mode: mode,
+                    sttMs: sttMs, cleanupMs: cleanupMs,
+                    cleanupApplied: cleanupApplied)
             }
+
+        case .reprocessFailed(let id, let error, _):
+            guard let id, pendingReformat?.id == id else { break }
+            pendingReformat = nil
+            showError("Reformat failed: \(error)")
 
         case .error(let session, let message):
             // Only errors scoped to the active session may end the dictation;
@@ -684,25 +909,51 @@ final class DictationController: NSObject {
         raw: String,
         mode: String?,
         cleanupMs: Int?,
+        cleanupApplied: Bool?,
         audio: String?,
         allowAutomaticInsertion: Bool = true
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let context = sessionContext
 
+        if let request = externalRequest, request.session == sessionID {
+            let durationMs = recordingDurationMs ?? elapsedRecordingMs
+            if let message = DictationOutputFailure.message(for: trimmed) {
+                if audio != nil {
+                    recordHistory(
+                        text: "", raw: raw, context: context, mode: mode,
+                        cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                }
+                externalRequest = nil
+                phase = .idle
+                showError(message)
+                request.completion(.failure(.unavailable(message)))
+            } else {
+                recordHistory(
+                    text: text, raw: raw, context: context, mode: mode,
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                externalRequest = nil
+                phase = .idle
+                showNotice(symbol: "waveform.badge.checkmark", message: "Sent to local agent")
+                request.completion(.success(ExternalDictationResult(
+                    text: text, mode: mode, durationMs: durationMs)))
+            }
+            return
+        }
+
         if !allowAutomaticInsertion {
             if let message = DictationOutputFailure.message(for: trimmed) {
                 if audio != nil {
                     recordHistory(
                         text: "", raw: raw, context: context, mode: mode,
-                        cleanupMs: cleanupMs, audio: audio)
+                        cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
                 }
                 showError(message)
             } else {
                 inserter.stageFinalOutput(text)
                 recordHistory(
                     text: text, raw: raw, context: context, mode: mode,
-                    cleanupMs: cleanupMs, audio: audio)
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
                 phase = .idle
                 showNotice(symbol: "doc.on.clipboard.fill", message: "Finished late — copied")
             }
@@ -725,7 +976,7 @@ final class DictationController: NSObject {
             if audio != nil {
                 recordHistory(
                     text: "", raw: raw, context: context, mode: mode,
-                    cleanupMs: cleanupMs, audio: audio)
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
             }
             showError(message)
             return
@@ -754,7 +1005,9 @@ final class DictationController: NSObject {
             hud.model.retryTitle = "Retry"
             hud.transition(to: .inserted)
             phase = .idle
-            recordHistory(text: text, raw: raw, context: context, mode: mode, cleanupMs: cleanupMs, audio: audio)
+            recordHistory(
+                text: text, raw: raw, context: context, mode: mode,
+                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
             scheduleInsertedHide()
             return
@@ -800,14 +1053,15 @@ final class DictationController: NSObject {
             phase = .idle
             recordHistory(
                 text: text, raw: raw, context: context, mode: mode,
-                cleanupMs: cleanupMs, audio: audio)
+                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
             return
         }
 
         recordHistory(
             text: text, raw: raw, context: context, mode: mode,
-            cleanupMs: cleanupMs, audio: audio)
+            cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
 
+        let session = sessionID
         inserter.insert(
             text, targetBundleID: context?.bundleID, mode: mode
         ) { [weak self] inserted in
@@ -823,16 +1077,18 @@ final class DictationController: NSObject {
             self.hud.transition(to: .inserted)
             self.phase = .idle
             self.lastInsertion = (bundleID: context?.bundleID, at: Date())
-            self.captureLearningBaseline(text: text, bundleID: context?.bundleID)
+            self.captureLearningBaseline(
+                text: text, bundleID: context?.bundleID, session: session)
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
             self.scheduleInsertedHide()
         }
     }
 
     private func recordHistory(
-        text: String, raw: String, context: AppContext?, mode: String?, cleanupMs: Int?, audio: String?
+        text: String, raw: String, context: AppContext?, mode: String?,
+        cleanupMs: Int?, cleanupApplied: Bool?, audio: String?
     ) {
-        let durationMs = recordingStart.map { Int(-$0.timeIntervalSinceNow * 1000) } ?? 0
+        let durationMs = recordingDurationMs ?? elapsedRecordingMs
         history.insert(
             DictationRecord(
                 timestamp: Date(),
@@ -843,7 +1099,22 @@ final class DictationController: NSObject {
                 mode: mode,
                 durationMs: durationMs,
                 cleanupMs: cleanupMs,
-                audioPath: audio))
+                audioPath: audio,
+                sessionID: sessionID.isEmpty ? nil : sessionID,
+                sttMs: sttMs,
+                cleanupApplied: cleanupApplied))
+    }
+
+    private var elapsedRecordingMs: Int {
+        recordingStart.map { max(0, Int(-$0.timeIntervalSinceNow * 1_000)) } ?? 0
+    }
+
+    private func failExternalRequest(
+        for session: String, error: ExternalDictationError
+    ) {
+        guard let request = externalRequest, request.session == session else { return }
+        externalRequest = nil
+        request.completion(.failure(error))
     }
 
     // MARK: - Voice commands

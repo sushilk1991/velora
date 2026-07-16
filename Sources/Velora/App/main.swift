@@ -11,6 +11,13 @@ if CommandLine.arguments.contains("--selftest") {
     exit(Selftest.run())
 }
 
+// The app binary doubles as the bundled headless CLI through its exact
+// `Resources/bin/velora` symlink (or explicitly with --cli). Do this before
+// NSApplication so renamed copies of the GUI binary still launch the app.
+if VeloraCLI.shouldRun(arguments: CommandLine.arguments) {
+    exit(VeloraCLI.run())
+}
+
 let migratedPreferenceCount = PreferencesDomainMigration.run()
 if migratedPreferenceCount > 0 {
     NSLog("Velora: migrated %d preferences from the legacy bundle identifier",

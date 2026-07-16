@@ -40,6 +40,7 @@ enum EngineEvent {
     case reprocessed(
         id: Int64?, audio: String, raw: String, text: String, mode: String?,
         sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool)
+    case reprocessFailed(id: Int64?, error: String, code: String)
 
     /// File-transcription command reached the engine (sent before decoding —
     /// distinguishes "working" from "command dropped while disconnected").
@@ -52,10 +53,30 @@ enum EngineEvent {
     case transcribeProgress(id: String?, fraction: Double)
 
     /// File-transcription result.
-    case transcribed(id: String?, path: String, text: String, sttMs: Int)
+    case transcribed(
+        id: String?, path: String, text: String, mode: String?,
+        durationS: Double, sttMs: Int)
 
     /// File-transcription failed (includes user-initiated cancel).
     case transcribeFailed(id: String?, error: String)
+
+    case meetingTranscribeAccepted(id: String?, meetingID: String, speaker: MeetingSpeaker)
+    case meetingTranscribeStarted(
+        id: String?, meetingID: String, speaker: MeetingSpeaker,
+        durationS: Double, chunks: Int, startChunk: Int)
+    case meetingSegment(id: String?, segment: MeetingSegment)
+    case meetingTranscribeProgress(
+        id: String?, meetingID: String, speaker: MeetingSpeaker, fraction: Double)
+    case meetingTranscribed(
+        id: String?, meetingID: String, speaker: MeetingSpeaker,
+        durationS: Double, chunks: Int)
+    case meetingTranscribeFailed(
+        id: String?, meetingID: String, speaker: MeetingSpeaker?,
+        error: String, code: String?)
+    case meetingNotesAccepted(id: String?, meetingID: String)
+    case meetingNotesProgress(id: String?, meetingID: String, fraction: Double)
+    case meetingNotesReady(id: String?, meetingID: String, notes: MeetingNotes)
+    case meetingNotesFailed(id: String?, meetingID: String, error: String, code: String?)
 
     /// Engine-reported error, optionally scoped to a session.
     case error(session: String?, message: String)
@@ -113,6 +134,11 @@ enum EngineEvent {
                 sttMs: object["stt_ms"] as? Int ?? 0,
                 cleanupMs: object["cleanup_ms"] as? Int ?? 0,
                 cleanupApplied: object["cleanup_applied"] as? Bool ?? false)
+        case "reprocess_failed":
+            return .reprocessFailed(
+                id: (object["id"] as? NSNumber)?.int64Value,
+                error: object["error"] as? String ?? "reprocess failed",
+                code: object["code"] as? String ?? "failed")
         case "transcribe_accepted":
             return .transcribeAccepted(id: object["id"] as? String)
         case "transcribe_started":
@@ -129,11 +155,80 @@ enum EngineEvent {
                 id: object["id"] as? String,
                 path: object["path"] as? String ?? "",
                 text: object["text"] as? String ?? "",
+                mode: object["mode"] as? String,
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
                 sttMs: object["stt_ms"] as? Int ?? 0)
         case "transcribe_failed":
             return .transcribeFailed(
                 id: object["id"] as? String,
                 error: object["error"] as? String ?? "transcription failed")
+        case "meeting_transcribe_accepted":
+            return .meetingTranscribeAccepted(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them)
+        case "meeting_transcribe_started":
+            return .meetingTranscribeStarted(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them,
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
+                chunks: (object["chunks"] as? NSNumber)?.intValue ?? 0,
+                startChunk: (object["start_chunk"] as? NSNumber)?.intValue ?? 0)
+        case "meeting_segment":
+            let meetingID = object["meeting_id"] as? String ?? ""
+            return .meetingSegment(
+                id: object["id"] as? String,
+                segment: MeetingSegment(
+                    meetingID: meetingID,
+                    speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them,
+                    chunkIndex: (object["chunk_index"] as? NSNumber)?.intValue ?? 0,
+                    startMs: (object["start_ms"] as? NSNumber)?.intValue ?? 0,
+                    endMs: (object["end_ms"] as? NSNumber)?.intValue ?? 0,
+                    text: object["text"] as? String ?? ""))
+        case "meeting_transcribe_progress":
+            return .meetingTranscribeProgress(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them,
+                fraction: (object["fraction"] as? NSNumber)?.doubleValue ?? 0)
+        case "meeting_transcribed":
+            return .meetingTranscribed(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them,
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
+                chunks: (object["chunks"] as? NSNumber)?.intValue ?? 0)
+        case "meeting_transcribe_failed":
+            return .meetingTranscribeFailed(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                speaker: (object["speaker"] as? String).flatMap(MeetingSpeaker.init(rawValue:)),
+                error: object["error"] as? String ?? "meeting transcription failed",
+                code: object["code"] as? String)
+        case "meeting_notes_accepted":
+            return .meetingNotesAccepted(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "")
+        case "meeting_notes_progress":
+            return .meetingNotesProgress(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                fraction: (object["fraction"] as? NSNumber)?.doubleValue ?? 0)
+        case "meeting_notes_ready":
+            return .meetingNotesReady(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                notes: MeetingNotes(
+                    summary: object["summary"] as? String ?? "",
+                    decisions: object["decisions"] as? [String] ?? [],
+                    actionItems: object["action_items"] as? [String] ?? []))
+        case "meeting_notes_failed":
+            return .meetingNotesFailed(
+                id: object["id"] as? String,
+                meetingID: object["meeting_id"] as? String ?? "",
+                error: object["error"] as? String ?? "meeting note generation failed",
+                code: object["code"] as? String)
         case "error":
             return .error(
                 session: object["session"] as? String,

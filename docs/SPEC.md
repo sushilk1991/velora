@@ -1,4 +1,4 @@
-# Velora — Product Specification v1.0
+# Velora — Product Specification
 
 Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, speak, release — polished text appears in whatever app you're using. All inference (speech-to-text and LLM cleanup) runs on-device via MLX on Apple Silicon. No audio or text ever leaves the machine.
 
@@ -11,6 +11,8 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 3. **Never lose the user's words.** Raw transcript is always recoverable from history, even when AI cleanup mangles it. Esc always cancels cleanly.
 4. **Don't over-edit.** The #1 Superwhisper complaint is AI polish changing intent (answers instead of transcription, hallucinated rewrites). Cleanup is conservative by default; formatting strength is user-controllable per mode.
 5. **Fast enough to trust.** Text lands < 1.5s after release for typical utterances. If cleanup would be slow, insert raw text fast rather than making the user wait.
+6. **Detection is not consent.** A call app or calendar event may justify a suggestion, never silent recording. Meeting capture and agent-requested microphone use require an explicit, visible approval every time.
+7. **Useful local data should stay legible.** Stats, meeting memory, and agent workflows may derive value from private data, but must expose narrow results, honest coverage, deletion controls, and no hidden network boundary.
 
 ## P0 — v1 must-have
 
@@ -46,11 +48,30 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 - Pasteboard save → set → synthesized ⌘V → restore, with CGEvent-typing fallback for apps that block paste. Per-app override list.
 - Clipboard contents always restored.
 
-### History
-- Local SQLite history: timestamp, app, raw transcript, final text, duration, mode. Menubar shows last 3 (click = copy). Full history window is P1; storage from day one.
+### History & Voice Intelligence
+- Local SQLite history: timestamp, app, raw/final transcript, duration, mode, STT/cleanup latency, cleanup outcome, archived audio reference, and optional edit-quality observation. Menubar shows last 3; the History tab supports search, copy, paste-again, playback, and reprocessing.
+- Intelligence windows: today / 7 days / 30 days / all time, with words, dictations, speaking time, estimated typing time saved, current/longest streak, 30-day activity, app and mode breakdowns, STT/cleanup latency, and cleanup rate.
+- Zero-edit rate includes only sessions the Accessibility observer could judge. The UI must show observation coverage separately; unknown legacy/unobservable rows are never counted as successful.
+- Estimated time saved uses a user-configurable typing speed (default 40 WPM) and measured speaking duration, frozen when recording stops.
+- Share cards are aggregate-only by construction: fixed labels, selected period, and numeric totals. Transcript, app, mode, contact, calendar, and path strings have no renderer input.
+
+### Private Meeting Memory
+- Detect active Zoom, Teams, Slack Huddle, and browser Google Meet surfaces from local metadata; optionally match nearby Calendar events after a separate permission grant.
+- Detection can only show a recording suggestion. Manual and detected meetings both require explicit confirmation before microphone/system-audio capture begins, plus a persistent menu-bar recording indicator and a clear stop/discard path.
+- Preserve microphone as `Me` and computer audio as `Them` in separate local tracks. Do not infer or claim individual remote-speaker identity. If system audio fails, require an explicit mic-only choice.
+- Store meeting metadata, audio, transcripts, notes, actions, and decisions under a separate owner-only `~/.velora/meetings` root. Support local retention, search, playback, export, retry, and complete deletion.
+- Capture is disk-spooled. Transcription and notes are checkpointed by speaker/chunk, resumable after interruption, and yield priority to live dictation.
+
+### Local CLI & MCP
+- Ship an installed CLI with `status`, `recent`, `search`, `stats`, `transcribe`, `listen`, and `mcp` commands plus JSON output.
+- The app exposes an owner-only AF_UNIX control broker; no TCP/network endpoint. History/stats/actions are off by default and require an explicit Settings toggle. `status` remains available while disabled.
+- Project history/search through an allow-list that omits raw transcript, bundle ids, audio/session paths, screen context, contacts, and learning state.
+- File transcription returns only to the requester and cannot paste, mutate the clipboard, or write an implicit sidecar.
+- Every live `listen` request requires visible one-time approval, captures no screen context, and cannot paste into the foreground app.
+- MCP is a stdio adapter over the same broker capabilities and policy, not a privileged second API.
 
 ### Settings & onboarding (world-class bar, per design brief)
-- Settings: General / Dictation / Model / Shortcuts / About tabs, grouped forms, 580pt.
+- Settings: General / Dictation / Dictionary / Model / Modes / History / Intelligence / Meetings / Shortcuts / About tabs, grouped forms, 580pt content width.
 - Onboarding: 5-step premium flow (welcome → mic permission → accessibility permission with live-polling grant detection → hotkey → try-it playground). Finish gated on one successful dictation.
 - Permissions degrade gracefully: degraded state shows menubar error icon + "Check Permissions…".
 
@@ -61,26 +82,30 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 - Cold start to ready: < 4s with default models cached.
 
 ## P1
-- History browser window with search, re-copy, re-process.
-- Mode editor GUI; per-mode hotkeys.
+- Per-mode hotkeys.
 - Browser URL awareness (Gmail vs Docs in Chrome) via Accessibility.
 - Selected-text context ("rewrite this") — transformation mode.
-- Multilingual dictation (Whisper multilingual models; auto language detect).
 - Launch-at-login, Sparkle-style updates (or brew cask).
 
 ## P2
-- Meeting transcription (system audio capture).
 - Voice commands ("send it", "delete last sentence").
-- Plugin/scripting hooks (shell command per mode output).
+- Additional explicit scripting hooks beyond the narrow CLI/MCP surface.
 - iOS companion.
 
-## Non-goals (v1)
+## Non-goals
 - No cloud inference of any kind. No accounts, telemetry, or analytics.
 - No screen-content context (screenshots/OCR) — trust-destroying; explicit opt-in someday at most.
+- No silent or autonomous meeting recording. Detection never implies consent.
+- No claimed individual-speaker diarization from the remote/system track; `Me` and `Them` are audio-channel labels only.
+- No remotely reachable agent API and no direct third-party access to the privileged engine socket.
 - No Windows/Linux.
 
-## Success criteria for v1 "done"
+## Current release success criteria
 1. E2E on real audio: speech in any focused app → correct, well-formatted text inserted, within targets.
 2. App-aware behavior verified across at least: TextEdit (default), a chat-style target, a code-style target.
 3. Full pipeline verified with sample audio from the internet (JFK clip + long-form sample).
 4. Buildable from clean checkout with `make build` (SwiftPM + uv, no Xcode), open-source ready (README, LICENSE, CONTRIBUTING).
+5. Intelligence migrations, privacy invariants, and production SQL remain responsive with a 100,000-row history.
+6. A signed app can capture a confirmed meeting's microphone and computer-audio tracks, process/resume them into searchable notes, and fully delete the test record and audio.
+7. Disabled/default and enabled CLI/MCP behavior are both verified through the packaged app; live listening is denied without per-request visible consent.
+8. Distribution is Developer ID-signed with hardened runtime, notarized and stapled, accepted by Gatekeeper, installed from the final DMG, and smoke-tested from `/Applications`.

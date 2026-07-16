@@ -1,22 +1,18 @@
-# Velora — Architecture v1.0
+# Velora — Architecture
 
 Two processes, one product:
 
 ```
-┌─────────────────────────── Velora.app (Swift, SwiftPM) ───────────────────────────┐
-│ NSStatusItem (menubar) · Hotkey (CGEventTap/NSEvent) · AVAudioEngine mic capture   │
-│ HUD (NSPanel + SwiftUI Canvas waveform) · App-context tracker (NSWorkspace + AX)   │
-│ Text inserter (pasteboard+⌘V / CGEvent typing) · Settings/Onboarding (SwiftUI)     │
-│ Engine supervisor (spawn, health, restart) · History (SQLite)                      │
-└───────────────┬────────────────────────────────────────────────────────────────────┘
-                │ Unix domain socket  ~/.velora/engine.sock
-                │ Framed protocol: JSON control + raw PCM audio frames
-┌───────────────┴──────────────── velora-engine (Python 3.12, uv) ───────────────────┐
-│ STT: mlx-community/whisper-large-v3-turbo (preview + final decode)                 │
-│ Cleanup: mlx-community/Qwen3.5-4B-MLX-8bit with prepared prefix snapshots          │
-│ Smart-format policy: mode resolution (app bundle id → mode file) + prompt builder  │
-│ Model manager: HuggingFace download, warm/unload lifecycle                         │
-└────────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────── Velora.app (Swift, SwiftPM) ────────────────────────────┐
+│ menubar/hotkeys · mic/HUD/insertion · settings/onboarding · consent alerts          │
+│ history/intelligence (SQLite) · meeting detector/capture/store · engine supervisor  │
+└────────────────────┬──────────────────────────────────────┬───────────────────────────┘
+                     │ ~/.velora/engine.sock                │ ~/.velora/control.sock
+                     │ framed JSON + raw PCM                │ owner-only newline JSON
+┌────────────────────┴────────── velora-engine ─────────┐   ┌┴─────────────────────────┐
+│ STT + conservative cleanup · modes · model lifecycle  │   │ installed CLI / MCP stdio│
+│ meeting-track transcription · local notes generation  │   │ narrow, default-off API  │
+└───────────────────────────────────────────────────────┘   └──────────────────────────┘
 ```
 
 ## Why this shape
@@ -24,6 +20,8 @@ Two processes, one product:
 - **MLX is required** → Python is where MLX STT/LLM APIs are mature (`parakeet-mlx`, `mlx-whisper`, `mlx-lm`). Pure-Swift MLX STT is not production-ready (swift-parakeet-mlx archived). Research: docs/research/stack-research.md.
 - **Native feel is required** → the user-facing surface (menubar, HUD, hotkeys, insertion, settings) is 100% Swift/AppKit/SwiftUI. Python is an invisible inference server.
 - **No Xcode project required** → SwiftPM executable + hand-rolled `.app` bundle. Development uses a stable local identity; release builds require Developer ID signing, hardened runtime, notarization, and stapling. The stable bundle id is `com.sushil.velora`; a one-time migration copies missing `velora.*` preferences from the legacy `com.velora.app` domain.
+- **Agents should not become a second trust boundary** → the CLI/MCP process never opens the engine socket directly. It asks the running app through a separate owner-only broker, which enforces the preference gate, response projection, single-use microphone consent, and foreground-work arbitration.
+- **Meeting capture must remain visible and recoverable** → detection only proposes a recording; the app owns explicit consent, a persistent recording indicator, disk-spooled tracks, retention/deletion, and resumable post-processing.
 
 ## Process lifecycle
 
@@ -66,6 +64,36 @@ engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode"
                "cleanup_ms":389,"cleanup_applied":true,"audio":"uuid.flac"}   # audio present when archived
 ```
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
+
+## Local control protocol (CLI and MCP)
+
+The installed `Resources/bin/velora` executable is a symlink to the app binary. Only that exact bundle-relative `Resources/bin/velora` location (or an explicit `--cli`) selects headless one-shot/MCP mode rather than AppKit; merely renaming a copy of the app binary does not. It connects to `~/.velora/control.sock`; the running app remains the authority for every request.
+
+- AF_UNIX only: no TCP listener and no remote access.
+- `~/.velora` is forced to mode `0700`; the socket is `0600`; `getpeereid` must equal the app's effective UID.
+- One newline-delimited JSON request (maximum 1 MiB) and one bounded response per connection. The client keeps the connection open until that response; a full disconnect cancels only that request's in-flight action. Eight client workers cap concurrent work without blocking the accept loop.
+- App shutdown closes the listener and every accepted client, revokes pending microphone consent, and locally completes active listen/file jobs before engine teardown. An approval response can never reopen capture after the lifecycle gate closes.
+- `status` works while access is disabled so clients can explain how to opt in. `recent`, `search`, `stats`, `transcribe`, and `listen` require **Allow local CLI and agents**.
+- History/search responses are projected to an explicit schema. They omit raw transcript, bundle id, audio/session paths, screen context, contacts, quality-learning state, and internal identifiers.
+- `transcribe` returns cleaned text to that client only: it does not touch clipboard, write a sidecar, display the dictation HUD, or paste into an app.
+- `listen` requires a visible approval for each call. It captures no AX screen context and never pastes. Cancellation or failure completes the external request and cannot fall through into the normal insertion path.
+- MCP uses protocol version `2025-06-18` over stdin/stdout and exposes the same six allow-listed operations; it does not widen the broker's authority.
+
+The control socket is deliberately separate from `engine.sock`. The engine socket carries PCM and privileged model controls for one app-owned connection; exposing it would bypass the app's policy and lifecycle checks.
+
+## Private Meeting Memory
+
+`MeetingDetector` polls local call-app/window metadata for Zoom, Teams, Slack Huddles, and browser-hosted Google Meet. Calendar matching is independent and opt-in. Detection only emits a candidate; `MeetingCoordinator` must show an explicit consent alert before capture starts, and the menu-bar surface stays visibly in the recording state.
+
+Capture preserves provenance instead of inventing diarization:
+
+1. `AVAudioEngine` writes the microphone track (`Me`) as linear PCM in a CAF container. CAF can extend its audio-data chunk to end-of-file, so frames already flushed remain readable after a hard process termination.
+2. `ScreenCaptureKit` writes computer audio (`Them`) to a separate AAC track. If system audio is unavailable, the user must explicitly continue microphone-only or discard.
+3. `MeetingStore` writes a recording row before capture begins, then keeps metadata/transcripts/notes in a separate owner-only `~/.velora/meetings` tree and SQLite/FTS database. Audio paths are validated as private-root-relative before use. Graceful app quit revokes pending consent and finalizes active capture; after a crash, audio that reached disk is preserved as a recoverable failed meeting while empty preparations are removed. Interrupted processing resumes automatically, but a permanently failed recording requires an explicit retry and repeated engine restarts are capped.
+4. `MeetingProcessor` transcribes each speaker track in bounded time chunks, checkpoints completed chunks, and resumes interrupted work. It then runs a chunked map/reduce notes pass for summary, decisions, and action items.
+5. Foreground dictation preempts meeting post-processing. Capture itself is disk-spooled; post-processing decodes one source track at a time.
+
+The UI fetches meeting metadata in pages and loads a full transcript only for the selected meeting. Users can search, retry processing, play/export local tracks, or delete a meeting and its audio.
 
 **Smart context (hybrid).** At session start the app reads the frontmost app's focused-window title via the Accessibility API (already-granted; no Screen Recording, ~5ms, capped at 0.25s) and extracts `entities` — current file (editors), person/channel (chat), subject (mail), site (browser: Gmail/Docs/Notion/Linear…). The engine (`formatting.py`) uses them to: (1) feed exact names/spellings into the cleanup prompt; (2) turn spoken **@-tags** into tokens ("tag authCheck" → `@authCheck.ts`, "mention Priya" → `@Priya`, conservative to avoid tagging ordinary prose); (3) refine a browser's mode by site. A small on-device VLM screen-read for thin-AX Electron editors is the planned second half of the hybrid.
 
@@ -124,6 +152,8 @@ Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|f
 | `EngineClient/` | socket client, framing, request/event routing |
 | `Settings/` | SwiftUI settings tabs + onboarding flow, permission checks |
 | `History/` | SQLite (raw SQL, no deps) store + menubar recents |
+| `Control/` | owner-only local broker, CLI, MCP stdio server, response projection |
+| `Meetings/` | candidate detection, explicit-consent orchestration, two-track capture, private store, resumable processing |
 | `Config/` | app config + mode file loading/watching |
 
 Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-concurrency friction with AVAudio/CGEventTap (spike finding); audio tap → lock-free level publishing to main actor.
@@ -138,6 +168,8 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 | `formatting.py` | deterministic gate, mode resolution, prompt assembly, replacements |
 | `models.py` | HF download/verify, model registry (user-selectable) |
 | `config.py` | modes/vocab loading shared with app via ~/.velora/ |
+| `media.py` | audio decode and exact-coverage meeting chunk planning |
+| `meeting_notes.py` | schema-checked chunk/map-reduce meeting summaries, decisions, and actions |
 
 ## Permissions (TCC)
 
@@ -145,6 +177,9 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 |---|---|---|
 | Microphone | capture | onboarding step 2 (NSMicrophoneUsageDescription in bundle Info.plist) |
 | Accessibility | CGEventTap hotkeys + ⌘V posting + AX context | onboarding step 3, live-polled |
+| Input Monitoring | reliable global hotkey event delivery | onboarding alongside Accessibility |
+| System Audio Recording | remote meeting track via ScreenCaptureKit | first explicitly confirmed meeting recording |
+| Calendar Full Access (optional) | match nearby events to call-app candidates | only when the Calendar meeting toggle is enabled |
 
 Spike finding: grants must be earned by the signed .app bundle (stable ad-hoc identity), not the bare binary; bare-binary tests mislead due to responsible-process attribution.
 
@@ -156,7 +191,7 @@ Velora/
 ├── Sources/Velora/...
 ├── engine/                  # uv project (pyproject.toml)
 │   ├── src/velora_engine/...
-│   └── tests/               # engine pytest + protocol integration tests
+│   └── tests/               # engine pytest + protocol/meeting integration tests
 ├── Resources/               # Info.plist, sounds, icon
 ├── scripts/                 # make-app.sh, make-sounds.sh, engine-smoke.py
 ├── docs/                    # SPEC, ARCHITECTURE, research/
@@ -165,7 +200,9 @@ Velora/
 
 ## Testing strategy
 
-- Engine unit tests (pytest): formatting gate, protocol framing, divergence guard, mode resolution.
-- Integration: scripted client feeds real WAV PCM over the socket → asserts transcript + formatted output + latency budgets (this is the E2E harness; runs headless, no TCC needed).
-- App: XCTest is unavailable without Xcode → swift-testing via SwiftPM where possible; UI/permission paths verified manually + via the try-it onboarding step.
-- Bench: `scripts/engine-smoke.py` reports stop→transcript / stop→final latencies per run.
+- Engine unit/integration tests (`make test`): formatting, protocol framing, cancellation and shutdown terminal events, STT/cleanup fallbacks, media chunk coverage, meeting-note schemas, and real socket flows.
+- App: the executable's `--selftest` path covers config/migrations, history/Intelligence SQL and privacy invariants, control protocol projection/limits/socket ownership, MCP framing/tools, meeting detection/store/recovery, and state-machine regressions without requiring TCC.
+- Performance: `make perf-test` seeds 100,000 history rows and times the production `HistoryStore.insights()` plus first-page query. Meeting media tests include a sparse one-hour track and exact chunk coverage.
+- Package: both debug and release binaries run self-tests; the built `.app` is exercised through its installed CLI, live app broker, file transcription, and MCP stdio path.
+- Release: Developer ID identity/team, hardened runtime, timestamp, embedded provisioning entitlements, notarization ticket, DMG signature, and Gatekeeper acceptance are verified before install/smoke testing.
+- Manual TCC/UI gates: real hotkey insertion, per-request agent consent, meeting system-audio capture, and Settings/Intelligence/Meetings visual inspection run from the signed app in an unlocked console session.

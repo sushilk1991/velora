@@ -1,5 +1,6 @@
 """File-transcription media decoding + batch splitting (pure + afconvert)."""
 
+import time
 import wave
 from pathlib import Path
 
@@ -58,6 +59,24 @@ def test_split_handles_constant_audio():
     chunks = split_for_batch(pcm)
     assert len(chunks) >= 2
     assert np.array_equal(np.concatenate(chunks), pcm)
+
+
+def test_hour_long_track_chunks_in_linear_time_without_copying(tmp_path):
+    # Sparse, file-backed zero audio keeps the fixture cheap while exercising
+    # every boundary of a real one-hour meeting track. Chunks must remain views
+    # into the decoded buffer, not duplicate hundreds of megabytes.
+    samples = 60 * 60 * SAMPLE_RATE
+    backing = tmp_path / "hour.f32"
+    with backing.open("wb") as output:
+        output.truncate(samples * np.dtype(np.float32).itemsize)
+    pcm = np.memmap(backing, dtype=np.float32, mode="r", shape=(samples,))
+    started = time.perf_counter()
+    chunks = split_for_batch(pcm)
+    elapsed = time.perf_counter() - started
+    assert sum(map(len, chunks)) == samples
+    assert 40 <= len(chunks) <= 100
+    assert all(np.shares_memory(pcm, chunk) for chunk in chunks)
+    assert elapsed < 5, f"one-hour boundary scan took {elapsed:.2f}s"
 
 
 # ---- load_media ----

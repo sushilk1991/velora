@@ -99,12 +99,26 @@ final class AppConfig {
         veloraDirectory.appendingPathComponent("engine.sock").path
     }
 
+    /// App-owned CLI/MCP broker, distinct from the engine's single-owner socket.
+    static var controlSocketPath: String {
+        veloraDirectory.appendingPathComponent("control.sock").path
+    }
+
     static var configFileURL: URL {
         veloraDirectory.appendingPathComponent("config.json")
     }
 
     static var historyDatabaseURL: URL {
         veloraDirectory.appendingPathComponent("history.sqlite3")
+    }
+
+    /// Independent meeting transcript index and disk-spooled audio root.
+    static var meetingsDirectory: URL {
+        veloraDirectory.appendingPathComponent("meetings", isDirectory: true)
+    }
+
+    static var meetingsDatabaseURL: URL {
+        meetingsDirectory.appendingPathComponent("meetings.sqlite3")
     }
 
     /// `~/.velora/modes` — one JSON file per mode (engine + editor shared).
@@ -115,6 +129,26 @@ final class AppConfig {
     /// `~/.velora/audio` — archived dictation clips for History → Reprocess.
     static var audioDirectory: URL {
         veloraDirectory.appendingPathComponent("audio", isDirectory: true)
+    }
+
+    /// Resolves only engine-owned archive basenames. History is a local file,
+    /// but a corrupted or manually edited row must never turn playback,
+    /// reprocessing, or deletion into a path traversal outside the archive.
+    static func archivedAudioURL(name: String?) -> URL? {
+        guard let name, !name.isEmpty,
+              name == URL(fileURLWithPath: name).lastPathComponent,
+              name.unicodeScalars.allSatisfy({
+                  CharacterSet.alphanumerics
+                      .union(CharacterSet(charactersIn: "._-"))
+                      .contains($0)
+              }),
+              name.hasSuffix(".flac") || name.hasSuffix(".wav")
+        else { return nil }
+        let root = audioDirectory.standardizedFileURL.resolvingSymlinksInPath()
+        let candidate = root.appendingPathComponent(name)
+            .standardizedFileURL.resolvingSymlinksInPath()
+        guard candidate.path.hasPrefix(root.path + "/") else { return nil }
+        return candidate
     }
 
     private enum Key {
@@ -140,6 +174,11 @@ final class AppConfig {
         static let smartTerminal = "velora.smartTerminal"
         static let voiceCommands = "velora.voiceCommands"
         static let typingFallbackApps = "velora.typingFallbackApps"
+        static let typingWPM = "velora.typingWPM"
+        static let localAgentAccess = "velora.localAgentAccess"
+        static let meetingSuggestions = "velora.meetingSuggestions"
+        static let meetingCalendar = "velora.meetingCalendar"
+        static let meetingAudioRetentionDays = "velora.meetingAudioRetentionDays"
     }
 
     private init() {
@@ -158,6 +197,11 @@ final class AppConfig {
             Key.vocabMining: true,
             Key.smartTerminal: true,
             Key.voiceCommands: true,
+            Key.typingWPM: 40,
+            Key.localAgentAccess: false,
+            Key.meetingSuggestions: true,
+            Key.meetingCalendar: false,
+            Key.meetingAudioRetentionDays: 30,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -271,6 +315,38 @@ final class AppConfig {
     var learnFromEdits: Bool {
         get { defaults.bool(forKey: Key.learnFromEdits) }
         set { defaults.set(newValue, forKey: Key.learnFromEdits) }
+    }
+
+    /// The user's typing speed in words per minute, used by the "time saved"
+    /// metrics (Intelligence + History header). Default 40; clamped positive
+    /// so a corrupted preference can't divide by zero.
+    var typingWPM: Int {
+        get { max(1, defaults.integer(forKey: Key.typingWPM)) }
+        set { defaults.set(max(1, newValue), forKey: Key.typingWPM) }
+    }
+
+    /// Grants owner-local CLI/MCP clients access to allow-listed history and
+    /// stats. Status remains available while off so the CLI can explain it.
+    var localAgentAccess: Bool {
+        get { defaults.bool(forKey: Key.localAgentAccess) }
+        set { defaults.set(newValue, forKey: Key.localAgentAccess) }
+    }
+
+    /// Detection only suggests; capture always needs an explicit per-meeting
+    /// confirmation regardless of this preference.
+    var meetingSuggestions: Bool {
+        get { defaults.bool(forKey: Key.meetingSuggestions) }
+        set { defaults.set(newValue, forKey: Key.meetingSuggestions) }
+    }
+
+    var meetingCalendar: Bool {
+        get { defaults.bool(forKey: Key.meetingCalendar) }
+        set { defaults.set(newValue, forKey: Key.meetingCalendar) }
+    }
+
+    var meetingAudioRetentionDays: Int {
+        get { max(1, defaults.integer(forKey: Key.meetingAudioRetentionDays)) }
+        set { defaults.set(min(365, max(1, newValue)), forKey: Key.meetingAudioRetentionDays) }
     }
 
     /// Voice commands: an utterance that IS a command ("scratch that",

@@ -116,7 +116,14 @@ def split_for_batch(
         end = start + step
         # Quietest 0.3 s window inside the last `search_s` of the chunk.
         seg = pcm[end - search : end].astype(np.float64)
-        energy = np.convolve(seg * seg, np.ones(win), mode="valid")
+        # Rolling window energy in O(n). `np.convolve` with a 4,800-sample
+        # boxcar is O(n*m) and made hour-long meeting tracks spend minutes just
+        # finding chunk boundaries before Whisper even started.
+        squared = seg * seg
+        cumulative = np.empty(len(squared) + 1, dtype=np.float64)
+        cumulative[0] = 0
+        np.cumsum(squared, out=cumulative[1:])
+        energy = cumulative[win:] - cumulative[:-win]
         cut = end - search + int(np.argmin(energy)) + win // 2
         chunks.append(pcm[start:cut])
         start = cut

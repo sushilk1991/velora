@@ -178,8 +178,9 @@ async def test_reprocess_missing_clip_errors(engine):
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({"cmd": "reprocess", "audio": "does-not-exist.flac"})
-    evt = await client.recv_event("error")
-    assert "audio unavailable" in evt["message"]
+    evt = await client.recv_event("reprocess_failed")
+    assert "audio unavailable" in evt["error"]
+    assert evt["code"] == "invalid_file"
     client.close()
 
 
