@@ -260,11 +260,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let historyItem = NSMenuItem(
             title: "History…", action: #selector(openHistory), keyEquivalent: "")
         historyItem.target = self
+        historyItem.image = NSImage(
+            systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)
         menu.addItem(historyItem)
 
         let meetingsItem = NSMenuItem(
             title: "Meetings…", action: #selector(openMeetings), keyEquivalent: "")
         meetingsItem.target = self
+        meetingsItem.image = NSImage(
+            systemSymbolName: "person.2", accessibilityDescription: nil)
         menu.addItem(meetingsItem)
 
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -274,6 +278,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         let assistant = NSMenuItem(
             title: "Setup Assistant…", action: #selector(openSetupAssistant), keyEquivalent: "")
         assistant.target = self
+        assistant.image = NSImage(
+            systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
         menu.addItem(assistant)
 
         if degradedReason != nil || Permissions.anyMissing {
