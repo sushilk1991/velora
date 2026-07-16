@@ -14,16 +14,27 @@ enum HotkeyMode: String, CaseIterable, Identifiable {
 
 /// Where the HUD capsule sits on screen. `custom` is set when the user drags
 /// the HUD; its origin is stored separately in `AppConfig.hudCustomOrigin`.
+/// Corner presets exist so the pill can live permanently somewhere that never
+/// collides with other dictation HUDs (Wispr Flow owns bottom-center).
 enum HUDPosition: String, CaseIterable, Identifiable {
-    case bottomCenter, topCenter, custom
+    case bottomCenter, bottomLeft, bottomRight, topCenter, topLeft, topRight, custom
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .bottomCenter: return "Bottom center"
-        case .topCenter: return "Top center"
+        case .bottomCenter: return "Bottom Center"
+        case .bottomLeft: return "Bottom Left"
+        case .bottomRight: return "Bottom Right"
+        case .topCenter: return "Top Center"
+        case .topLeft: return "Top Left"
+        case .topRight: return "Top Right"
         case .custom: return "Custom (dragged)"
         }
     }
+
+    /// Presets offered in menus (custom is drag-only).
+    static let presets: [HUDPosition] = [
+        .bottomLeft, .bottomCenter, .bottomRight, .topLeft, .topCenter, .topRight,
+    ]
 }
 
 /// A speech-to-text model the engine can run. The engine owns downloads;
@@ -163,6 +174,7 @@ final class AppConfig {
         static let hudPosition = "velora.hudPosition"
         static let hudCustomOriginX = "velora.hudCustomOriginX"
         static let hudCustomOriginY = "velora.hudCustomOriginY"
+        static let hudAlwaysVisible = "velora.hudAlwaysVisible"
         static let appearance = "velora.appearance"
         static let language = "velora.language"
         static let autoPunctuation = "velora.autoPunctuation"
@@ -186,7 +198,11 @@ final class AppConfig {
             Key.hotkeyMode: HotkeyMode.hold.rawValue,
             Key.soundsEnabled: true,
             Key.soundVolume: 40.0,
-            Key.hudPosition: HUDPosition.bottomCenter.rawValue,
+            // Bottom-right by default: bottom-center is where Wispr Flow (and
+            // Superwhisper) park their pills, and the persistent idle pill must
+            // never fight another dictation HUD for the same pixels.
+            Key.hudPosition: HUDPosition.bottomRight.rawValue,
+            Key.hudAlwaysVisible: true,
             Key.appearance: "system",
             Key.language: "auto",
             Key.autoPunctuation: true,
@@ -254,8 +270,15 @@ final class AppConfig {
     }
 
     var hudPosition: HUDPosition {
-        get { HUDPosition(rawValue: defaults.string(forKey: Key.hudPosition) ?? "") ?? .bottomCenter }
+        get { HUDPosition(rawValue: defaults.string(forKey: Key.hudPosition) ?? "") ?? .bottomRight }
         set { defaults.set(newValue.rawValue, forKey: Key.hudPosition) }
+    }
+
+    /// Keep the HUD on screen as a small idle pill when nothing is recording.
+    /// Clicking the pill starts/stops dictation; right-click opens quick actions.
+    var hudAlwaysVisible: Bool {
+        get { defaults.bool(forKey: Key.hudAlwaysVisible) }
+        set { defaults.set(newValue, forKey: Key.hudAlwaysVisible) }
     }
 
     /// Persisted custom HUD origin as a fraction (0…1) of the screen's visible

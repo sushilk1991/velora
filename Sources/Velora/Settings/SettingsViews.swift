@@ -1,19 +1,22 @@
 import SwiftUI
 
-/// Settings tabs (design brief §4.1): grouped forms, fixed 580 pt width,
-/// height hugging content. No custom chrome, one accent color.
-enum SettingsTab: CaseIterable {
+/// Settings sections, shown in a System Settings-style sidebar (the toolbar
+/// tab strip overflowed into a "»" chevron once the app grew past eight tabs).
+/// Grouped forms, one accent color, sidebar icons in the colored-tile idiom.
+enum SettingsTab: String, CaseIterable, Identifiable {
     case general, dictation, dictionary, model, modes, history, intelligence, meetings, shortcuts, about
+
+    var id: String { rawValue }
 
     var title: String {
         switch self {
         case .general: return "General"
         case .dictation: return "Dictation"
         case .dictionary: return "Dictionary"
-        case .model: return "Model"
+        case .model: return "Models"
         case .modes: return "Modes"
         case .history: return "History"
-        case .intelligence: return "Intelligence"
+        case .intelligence: return "Stats"
         case .meetings: return "Meetings"
         case .shortcuts: return "Shortcuts"
         case .about: return "About"
@@ -22,33 +25,44 @@ enum SettingsTab: CaseIterable {
 
     var symbol: String {
         switch self {
-        case .general: return "gearshape"
-        case .dictation: return "mic"
-        case .dictionary: return "text.book.closed"
-        case .model: return "cpu"
+        case .general: return "gearshape.fill"
+        case .dictation: return "mic.fill"
+        case .dictionary: return "character.book.closed.fill"
+        case .model: return "cpu.fill"
         case .modes: return "slider.horizontal.3"
         case .history: return "clock.arrow.circlepath"
-        case .intelligence: return "chart.bar.xaxis"
-        case .meetings: return "person.2.wave.2"
-        case .shortcuts: return "keyboard"
-        case .about: return "info.circle"
+        case .intelligence: return "chart.bar.fill"
+        case .meetings: return "person.2.wave.2.fill"
+        case .shortcuts: return "keyboard.fill"
+        case .about: return "info.circle.fill"
         }
     }
 
-    var preferredHeight: CGFloat {
+    /// Sidebar icon tile color — deliberate, System Settings-style palette
+    /// (one hue per section, not per row).
+    var tileColor: Color {
         switch self {
-        case .general: return 350
-        case .dictation: return 500
-        case .dictionary: return 440
-        case .model: return 480
-        case .modes: return 600
-        case .history: return 560
-        case .intelligence: return 620
-        case .meetings: return 720
-        case .shortcuts: return 320
-        case .about: return 320
+        case .general: return .gray
+        case .dictation: return .red
+        case .dictionary: return .brown
+        case .model: return .purple
+        case .modes: return .indigo
+        case .history: return .blue
+        case .intelligence: return .green
+        case .meetings: return .teal
+        case .shortcuts: return .orange
+        case .about: return VeloraBrand.violet.color
         }
     }
+
+    /// Sidebar layout: grouped like System Settings, every section always
+    /// visible (no overflow chevron).
+    static let sidebarSections: [(title: String?, tabs: [SettingsTab])] = [
+        (nil, [.general, .shortcuts]),
+        ("Dictation", [.dictation, .modes, .dictionary, .model]),
+        ("Activity", [.history, .intelligence, .meetings]),
+        (nil, [.about]),
+    ]
 }
 
 // MARK: - General
@@ -60,22 +74,33 @@ struct GeneralSettingsView: View {
         Form {
             Section {
                 Toggle("Launch Velora at login", isOn: $model.launchAtLogin)
-            }
-            Section {
-                Picker("HUD position", selection: $model.hudPosition) {
-                    Text("Bottom center").tag(HUDPosition.bottomCenter)
-                    Text("Top center").tag(HUDPosition.topCenter)
-                    if model.hudPosition == .custom {
-                        Text("Custom (dragged)").tag(HUDPosition.custom)
-                    }
-                }
                 Picker("Appearance", selection: $model.appearance) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
                 }
+            }
+            Section {
+                Toggle(isOn: $model.hudAlwaysVisible) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Keep HUD on screen when idle")
+                        Text("A small pill stays visible between dictations. Click it to start or stop; right-click it for recent transcripts and quick actions.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Picker("Position", selection: $model.hudPosition) {
+                    ForEach(HUDPosition.presets) { preset in
+                        Text(preset.displayName).tag(preset)
+                    }
+                    if model.hudPosition == .custom {
+                        Text(HUDPosition.custom.displayName).tag(HUDPosition.custom)
+                    }
+                }
+            } header: {
+                Text("HUD")
             } footer: {
-                Text("Tip: while the HUD is on screen, drag the pill to place it anywhere — that switches it to Custom.")
+                Text("Bottom Right stays clear of other dictation pills (Wispr Flow parks at bottom center). Drag the pill anywhere to switch to a custom spot.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -88,7 +113,6 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 580, height: SettingsTab.general.preferredHeight)
     }
 }
 
@@ -195,7 +219,6 @@ struct DictationSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 580, height: SettingsTab.dictation.preferredHeight)
         .task(id: model.saveAudio) { archiveSize = await Self.archiveSizeDescription() }
     }
 
@@ -300,7 +323,6 @@ struct ModelSettingsView: View {
             storageSection
         }
         .formStyle(.grouped)
-        .frame(width: 580, height: SettingsTab.model.preferredHeight)
         .task { await refreshStorage() }
         .onAppear { model.requestStatus() }
         .alert(item: $pendingDelete) { target in
@@ -414,7 +436,6 @@ struct ShortcutsSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 580, height: SettingsTab.shortcuts.preferredHeight)
     }
 }
 
@@ -426,17 +447,31 @@ struct AboutSettingsView: View {
         return short ?? "0.1.0"
     }
 
+    private var build: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    }
+
+    /// The real bundled app icon — the About pane must show exactly what sits
+    /// in the Dock/Finder, not an SF Symbol stand-in.
+    private var appIcon: NSImage {
+        if let bundled = Bundle.main.image(forResource: "AppIcon") { return bundled }
+        return NSApp.applicationIconImage ?? NSImage()
+    }
+
     var body: some View {
         VStack(spacing: VeloraSpacing.m) {
-            Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 56))
-                .foregroundStyle(VeloraBrand.iconGradient)
-                .padding(.top, VeloraSpacing.xl)
+            Spacer(minLength: VeloraSpacing.xl)
+            Image(nsImage: appIcon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 108, height: 108)
+                .shadow(color: .black.opacity(0.2), radius: 10, y: 4)
             Text("Velora")
                 .font(.title2.weight(.semibold))
-            Text("Version \(version)")
+            Text(build.map { "Version \(version) (\($0))" } ?? "Version \(version)")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+                .textSelection(.enabled)
             Text("Open-source, local-first dictation.\nYour voice never leaves this Mac.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
@@ -455,7 +490,7 @@ struct AboutSettingsView: View {
                 .foregroundStyle(.tertiary)
                 .padding(.bottom, VeloraSpacing.l)
         }
-        .frame(width: 580, height: SettingsTab.about.preferredHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Link that quietly renders nothing if the URL literal is malformed

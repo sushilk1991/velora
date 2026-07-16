@@ -60,20 +60,11 @@ final class HistoryViewModel: ObservableObject {
 
     // MARK: - Loading
 
-    /// Aggregate usage stats for the header card (refreshed with each reload).
-    @Published var stats = HistoryStore.Stats()
-
-    /// Reloads the first page for the current search term.
+    /// Reloads the first page for the current search term. (Usage stats moved
+    /// to the Stats tab — History is purely the transcript list now.)
     func reload() {
         let term = searchText
         records = history.page(limit: Self.pageSize, offset: 0, search: term)
-        // Stats are full-table aggregate scans — compute off the main thread
-        // so a years-deep history can't hitch the tab (review finding).
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            let fresh = self.history.stats()
-            DispatchQueue.main.async { self.stats = fresh }
-        }
         hasMore = records.count == Self.pageSize
         isEmpty = records.isEmpty
     }
@@ -98,17 +89,24 @@ final class HistoryViewModel: ObservableObject {
     /// Puts the text back on the clipboard and pastes it into the app it came
     /// from (best effort — needs Accessibility, degrades to a plain copy).
     func pasteAgain(_ record: DictationRecord) {
-        guard !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let inserter = TextInserter()
-        inserter.copyToClipboard(record.final)
-        if let bundleID = record.bundleID,
-           let app = NSRunningApplication.runningApplications(
-            withBundleIdentifier: bundleID).first {
-            app.activate(options: [.activateAllWindows])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                inserter.insert(
-                    record.final, targetBundleID: bundleID, mode: record.mode)
-            }
+        TextInserter.insertAgain(record)
+    }
+
+    /// Saves a user-edited transcript. The quality verdict about the original
+    /// insertion described the old text, so the store clears it.
+    func saveEdit(_ record: DictationRecord, newText: String) {
+        let trimmed = newText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != record.final else { return }
+        history.updateFinal(id: record.id, final: trimmed)
+        if let index = records.firstIndex(where: { $0.id == record.id }) {
+            let old = records[index]
+            records[index] = DictationRecord(
+                id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
+                appName: old.appName, raw: old.raw, final: trimmed,
+                mode: old.mode, durationMs: old.durationMs,
+                cleanupMs: old.cleanupMs, audioPath: old.audioPath,
+                sessionID: old.sessionID, sttMs: old.sttMs,
+                cleanupApplied: old.cleanupApplied)
         }
     }
 
@@ -249,69 +247,15 @@ struct HistorySettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             toolbar
-            if vm.stats.totalCount > 0 {
-                statsBar
-            }
             Divider()
             content
         }
-        .frame(width: 580, height: SettingsTab.history.preferredHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             model.requestStatus()
-            vm.reload()  // stats + fresh rows every time the tab appears
+            vm.reload()  // fresh rows every time the tab appears
         }
-    }
-
-    // MARK: Stats
-
-    /// FluidVoice-class usage header: words today, all-time, time saved vs
-    /// typing (~40 wpm), and the daily streak.
-    private var statsBar: some View {
-        HStack(spacing: 0) {
-            statCell(Self.compact(vm.stats.todayWords), "words today")
-            cellDivider
-            statCell(Self.compact(vm.stats.totalWords), "words all-time")
-            cellDivider
-            statCell(
-                Self.duration(minutes: vm.stats.minutesSaved(typingWPM: model.typingWPM)),
-                "saved vs typing")
-            if vm.stats.streakDays > 1 {
-                cellDivider
-                statCell("\(vm.stats.streakDays)-day", "streak 🔥")
-            }
-        }
-        .padding(.vertical, VeloraSpacing.s)
-        .padding(.horizontal, VeloraSpacing.m)
-        .frame(maxWidth: .infinity)
-        .background(Color(nsColor: .underPageBackgroundColor).opacity(0.6))
-    }
-
-    private var cellDivider: some View {
-        Rectangle()
-            .fill(Color(.separatorColor))
-            .frame(width: 1, height: 26)
-    }
-
-    private func statCell(_ value: String, _ label: String) -> some View {
-        VStack(spacing: 1) {
-            Text(value)
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-            Text(label)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    /// 12 → "12", 12 345 → "12.3k".
-    private static func compact(_ n: Int) -> String {
-        n >= 10_000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)"
-    }
-
-    private static func duration(minutes: Int) -> String {
-        minutes >= 60 ? "\(minutes / 60)h \(minutes % 60)m" : "\(minutes)m"
     }
 
     // MARK: Toolbar
@@ -376,6 +320,7 @@ struct HistorySettingsView: View {
                                     sttModels: model.sttEngineModels,
                                     onCopy: { vm.copy(record) },
                                     onPaste: { vm.pasteAgain(record) },
+                                    onEdit: { text in vm.saveEdit(record, newText: text) },
                                     onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
                                     onPlay: vm.canPlay(record) ? { vm.togglePlayback(record) } : nil,
                                     onDelete: { vm.delete(record) })
@@ -490,6 +435,7 @@ private struct HistoryCard: View {
     let sttModels: [EngineModel]
     let onCopy: () -> Void
     let onPaste: () -> Void
+    let onEdit: (String) -> Void
     let onReprocess: (_ sttModel: String?, _ mode: String?) -> Void
     let onPlay: (() -> Void)?
     let onDelete: () -> Void
@@ -497,6 +443,8 @@ private struct HistoryCard: View {
     @State private var expanded = false
     @State private var hovering = false
     @State private var copied = false
+    @State private var editing = false
+    @State private var editDraft = ""
 
     /// Built-in modes offered in the reprocess menu (mirrors the Modes editor).
     private static let builtInModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
@@ -528,6 +476,41 @@ private struct HistoryCard: View {
                 radius: hovering ? 8 : 3, x: 0, y: hovering ? 3 : 1)
         .animation(.easeOut(duration: 0.15), value: hovering)
         .onHover { hovering = $0 }
+        .sheet(isPresented: $editing) { editSheet }
+    }
+
+    // MARK: Edit sheet
+
+    private var editSheet: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+            Text("Edit Transcript")
+                .font(.headline)
+            TextEditor(text: $editDraft)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(VeloraSpacing.s)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color(nsColor: .textBackgroundColor)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color(.separatorColor)))
+                .frame(minHeight: 160)
+            HStack {
+                Spacer()
+                Button("Cancel") { editing = false }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    onEdit(editDraft)
+                    editing = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(editDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(VeloraSpacing.xl)
+        .frame(width: 460, height: 280)
     }
 
     // MARK: Header
@@ -619,6 +602,11 @@ private struct HistoryCard: View {
                 }
 
                 actionButton("arrow.uturn.left", "Paste again", action: onPaste)
+
+                actionButton("pencil", "Edit transcript") {
+                    editDraft = record.final
+                    editing = true
+                }
             }
 
             reprocessMenu

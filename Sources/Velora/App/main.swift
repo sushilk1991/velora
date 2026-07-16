@@ -11,6 +11,13 @@ if CommandLine.arguments.contains("--selftest") {
     exit(Selftest.run())
 }
 
+// Headless UI snapshots: renders HUD states + Settings panes to PNGs in the
+// given directory (offscreen — nothing appears on the user's display).
+if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
+   CommandLine.arguments.count > snapshotIndex + 1 {
+    SnapshotRenderer.run(outputDir: CommandLine.arguments[snapshotIndex + 1])
+}
+
 // The app binary doubles as the bundled headless CLI through its exact
 // `Resources/bin/velora` symlink (or explicitly with --cli). Do this before
 // NSApplication so renamed copies of the GUI binary still launch the app.

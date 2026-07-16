@@ -71,6 +71,7 @@ enum Selftest {
         testStreak()
         testLongestStreak()
         testHistoryStoreMigration()
+        testHistoryEdit()
         testIntelligenceAggregates()
         if ProcessInfo.processInfo.environment["VELORA_PERF_SELFTEST"] == "1" {
             testIntelligencePerformance100K()
@@ -1662,6 +1663,24 @@ enum Selftest {
                "gaps everywhere → longest is 1")
     }
 
+    /// Manual transcript editing (History tab pencil → HistoryStore.updateFinal).
+    private static func testHistoryEdit() {
+        withHistoryStore { store, _ in
+            store.insert(dictation(daysAgo: 0, words: 3, raw: "raw words here"))
+            guard let row = store.recent(limit: 1).first else {
+                expect(false, "edit test inserts a row")
+                return
+            }
+            store.updateFinal(id: row.id, final: "edited transcript text")
+            let reloaded = store.recent(limit: 1).first
+            expect(reloaded?.final == "edited transcript text",
+                   "manual edit replaces the final text")
+            expect(reloaded?.raw == "raw words here",
+                   "manual edit leaves the raw transcript untouched")
+            expect(reloaded?.id == row.id, "manual edit keeps the same row")
+        }
+    }
+
     private static func testHistoryStoreMigration() {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-history-migration-\(UUID().uuidString)")
@@ -2601,6 +2620,53 @@ enum Selftest {
         expect(
             HUDPanel.panelSize.width >= HUDGeometry.errorWidth + 40,
             "HUD host leaves horizontal room for the error action")
+
+        // Persistent standby pill (2026-07 HUD round).
+        expect(!HUDState.standby.isHidden, "the standby pill is a visible state")
+        expect(HUDState.standby.isAvailable, "standby counts as free for toasts")
+        expect(HUDState.hidden(.cancel).isAvailable, "hidden stays free for toasts")
+        expect(!HUDState.listening.isAvailable, "a live session blocks toasts")
+        expect(
+            HUDGeometry.standbySize.width < HUDGeometry.minListeningWidth
+                && HUDGeometry.standbySize.height < HUDGeometry.height,
+            "the standby pill is strictly smaller than the listening capsule")
+        expect(
+            HUDEdge.edge(for: .bottomRight) == .trailing
+                && HUDEdge.edge(for: .topLeft) == .leading
+                && HUDEdge.edge(for: .bottomCenter) == .center
+                && HUDEdge.edge(for: .custom) == .center,
+            "corner presets anchor the capsule to the matching panel edge")
+        expect(
+            !HUDPosition.presets.contains(.custom),
+            "custom placement is drag-only, never a menu preset")
+
+        // Hit testing mirrors the visible capsule — an oversized rect is an
+        // invisible click-to-record strip over the frontmost app (review
+        // finding: the .inserted circle is 56 pt, not 420).
+        expect(
+            HUDPanel.hitRect(for: .hidden(.cancel), edge: .center, context: nil) == .zero,
+            "a hidden HUD is fully click-through")
+        let inserted = HUDPanel.hitRect(for: .inserted, edge: .center, context: nil)
+        expect(
+            inserted.width <= HUDGeometry.insertedDiameter + VeloraSpacing.s,
+            "the success circle's hit area hugs the 56 pt circle")
+        let standby = HUDPanel.hitRect(for: .standby, edge: .trailing, context: nil)
+        expect(
+            standby.width <= HUDGeometry.standbySize.width + VeloraSpacing.s,
+            "the idle pill's hit area is pill-sized")
+        expect(
+            abs(standby.maxX
+                - (HUDPanel.panelSize.width - HUDGeometry.panelEdgePadding + VeloraSpacing.xs))
+                < 0.5,
+            "a trailing-anchored pill's hit area hugs the panel's right padding")
+        expect(
+            HUDPanel.capsuleMinX(edge: .leading, capsuleWidth: 100)
+                == HUDGeometry.panelEdgePadding,
+            "leading anchor starts at the panel padding")
+        expect(
+            HUDPanel.capsuleMinX(edge: .center, capsuleWidth: HUDPanel.panelSize.width)
+                == 0,
+            "center anchor is symmetric")
     }
 
     // MARK: - Final-output clipboard staging

@@ -264,11 +264,13 @@ struct ModesSettingsView: View {
             Divider()
             detail
         }
-        .frame(width: 580, height: SettingsTab.modes.preferredHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     // MARK: Sidebar
 
+    /// Mode list: quiet monochrome glyphs (the selection highlight is the only
+    /// color), so the list reads as one calm column instead of a hue lottery.
     private var sidebar: some View {
         VStack(spacing: 0) {
             List(selection: Binding(
@@ -278,16 +280,20 @@ struct ModesSettingsView: View {
                 ForEach(vm.modes) { mode in
                     HStack(spacing: VeloraSpacing.s) {
                         Image(systemName: Self.symbol(for: mode))
-                            .foregroundStyle(VeloraBrand.violet.color)
-                            .frame(width: 16)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 18)
                         Text(mode.name)
+                            .lineLimit(1)
                         Spacer()
                         if mode.isProtected {
                             Image(systemName: "lock.fill")
                                 .font(.caption2)
                                 .foregroundStyle(.tertiary)
+                                .help("Built-in mode")
                         }
                     }
+                    .padding(.vertical, 2)
                     .tag(mode.id)
                 }
             }
@@ -305,7 +311,7 @@ struct ModesSettingsView: View {
             .buttonStyle(.borderless)
             .padding(VeloraSpacing.s)
         }
-        .frame(width: 190)
+        .frame(width: 200)
     }
 
     private static func symbol(for mode: Mode) -> String {

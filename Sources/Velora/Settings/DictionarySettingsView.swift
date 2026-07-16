@@ -199,7 +199,7 @@ struct DictionarySettingsView: View {
 
             syncFooter
         }
-        .frame(width: 580, height: SettingsTab.dictionary.preferredHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .sheet(item: $editor) { context in
             DictionaryEditorSheet(
                 model: model,

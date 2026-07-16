@@ -545,7 +545,7 @@ final class DictationController: NSObject {
     /// struck through and the fix next to it. Only when nothing else is using
     /// the HUD — a toast must never stomp an active dictation.
     private func showLearnedToast(_ pair: (wrong: String, right: String)) {
-        guard phase == .idle, hud.model.state.isHidden else { return }
+        guard phase == .idle, hud.model.state.isAvailable else { return }
         hud.transition(to: .learned(wrong: pair.wrong, right: pair.right))
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
             guard let self, case .learned = self.hud.model.state else { return }

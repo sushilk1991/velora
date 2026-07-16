@@ -38,6 +38,23 @@ final class TextInserter {
         self.pasteboard = pasteboard
     }
 
+    /// Puts a history record's text back on the clipboard and pastes it into
+    /// the app it came from (best effort — needs Accessibility, degrades to a
+    /// plain copy). Shared by the History tab and the HUD context menu.
+    static func insertAgain(_ record: DictationRecord) {
+        guard !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let inserter = TextInserter()
+        inserter.copyToClipboard(record.final)
+        guard let bundleID = record.bundleID,
+              let app = NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleID).first
+        else { return }
+        app.activate(options: [.activateAllWindows])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            inserter.insert(record.final, targetBundleID: bundleID, mode: record.mode)
+        }
+    }
+
     /// Inserts `text` into the app identified by `bundleID`, choosing the
     /// strategy from per-app configuration. Every attempt is logged so
     /// `log show --predicate 'process == "Velora"'` tells the whole story.

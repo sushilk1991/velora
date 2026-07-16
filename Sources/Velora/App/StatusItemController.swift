@@ -186,21 +186,33 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             setupMenuItem = item
         }
 
-        let recents = history.recent(limit: 3)
-        if !recents.isEmpty {
-            let header = NSMenuItem(title: "Last transcription", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            for record in recents {
-                let title = Self.truncate(record.final, to: 40)
-                let item = NSMenuItem(title: title, action: #selector(copyRecent(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = record.final
-                item.toolTip = "Click to copy"
-                item.indentationLevel = 1
-                menu.addItem(item)
+        // Recent transcripts live on the HUD pill's right-click menu — the
+        // menubar stays a compact control surface (design round 2026-07).
+        // When the pill is disabled, the menubar remains their only quick
+        // access, so they come back here.
+        if !AppConfig.shared.hudAlwaysVisible {
+            let usable = history.recent(limit: 10)
+                .filter { !$0.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .prefix(3)
+            if !usable.isEmpty {
+                let header = NSMenuItem(
+                    title: "Recent Transcriptions", action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+                for record in usable {
+                    let item = NSMenuItem(
+                        title: Self.truncate(record.final, to: 40),
+                        action: #selector(copyRecent(_:)), keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = record.final
+                    item.toolTip = "Click to copy"
+                    item.indentationLevel = 1
+                    menu.addItem(item)
+                }
             }
         }
+
+        let recents = history.recent(limit: 1)
 
         // "Reformat Last as…" — re-run the most recent dictation's cleanup in a
         // different mode and paste it back. Only when the archived clip STILL

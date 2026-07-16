@@ -8,20 +8,96 @@ struct HUDView: View {
 
     @Environment(\.colorScheme) private var colorScheme
 
-    @State private var width: CGFloat = HUDGeometry.minListeningWidth
-    @State private var height: CGFloat = HUDGeometry.height
-    @State private var opacity: Double = 0
-    @State private var scale: CGFloat = 0.8
-    @State private var yOffset: CGFloat = 12
+    @State private var width: CGFloat
+    @State private var height: CGFloat
+    @State private var opacity: Double
+    @State private var scale: CGFloat
+    @State private var yOffset: CGFloat
     @State private var flashGreen = false
     @State private var showCheck = false
+    @State private var hovering = false
+
+    /// Seeds the animation state from the model's current state, so a view
+    /// created mid-state (relaunch into standby, `--snapshot` rendering)
+    /// starts visually correct instead of assuming "hidden".
+    init(model: HUDModel) {
+        self.model = model
+        let metrics = Self.capsuleMetrics(for: model.state, context: model.sessionContext)
+        _width = State(initialValue: metrics.size.width)
+        _height = State(initialValue: metrics.size.height)
+        _opacity = State(initialValue: metrics.visible ? 1 : 0)
+        _scale = State(initialValue: metrics.visible ? 1 : 0.8)
+        _yOffset = State(initialValue: metrics.visible ? 0 : 12)
+    }
+
+    /// The capsule's visual footprint per state. Shared with HUDPanel's hit
+    /// testing so the interactive region always matches what's on screen —
+    /// an oversized hit rect would swallow the frontmost app's clicks.
+    static func capsuleMetrics(
+        for state: HUDState, context: HUDSessionContext?
+    ) -> (size: CGSize, visible: Bool) {
+        switch state {
+        case .hidden:
+            return (CGSize(width: HUDGeometry.minListeningWidth, height: HUDGeometry.height), false)
+        case .standby:
+            return (HUDGeometry.standbySize, true)
+        case .listening, .transcribing:
+            let width = min(
+                max(
+                    HUDGeometry.controlRowWidth(chipWidth: Self.chipWidth(for: context)),
+                    HUDGeometry.minListeningWidth),
+                HUDGeometry.maxListeningWidth)
+            return (CGSize(width: width, height: HUDGeometry.height), true)
+        case .inserted:
+            return (CGSize(width: HUDGeometry.insertedDiameter, height: HUDGeometry.height), true)
+        case .error:
+            return (CGSize(width: HUDGeometry.errorWidth, height: HUDGeometry.height), true)
+        case .learned(let wrong, let right):
+            var value = HUDGeometry.contentInsetH * 2 + 14 + 12 + VeloraSpacing.s * 4
+            value += HUDGeometry.textWidth(wrong, font: HUDGeometry.bodyFont)
+            value += HUDGeometry.textWidth(right, font: HUDGeometry.bodyFont)
+            value += HUDGeometry.textWidth("· Learned", font: HUDGeometry.bodyFont)
+            return (CGSize(width: min(max(value, 190), 380), height: HUDGeometry.height), true)
+        case .notice(_, let message):
+            var value = HUDGeometry.contentInsetH * 2 + 14 + VeloraSpacing.s
+            value += HUDGeometry.textWidth(message, font: HUDGeometry.bodyFont)
+            return (
+                CGSize(
+                    width: min(max(value, 160), HUDGeometry.maxListeningWidth),
+                    height: HUDGeometry.height),
+                true)
+        }
+    }
+
+    private static func chipWidth(for context: HUDSessionContext?) -> CGFloat {
+        guard let context else { return 0 }
+        var value = HUDGeometry.textWidth(context.modeName, font: HUDGeometry.chipFont)
+        if context.appIcon != nil {
+            value += HUDGeometry.chipIconSide + VeloraSpacing.xs
+        }
+        return value
+    }
 
     var body: some View {
         capsule
-            .frame(width: HUDPanel.panelSize.width, height: HUDPanel.panelSize.height)
+            .padding(.horizontal, HUDGeometry.panelEdgePadding)
+            .frame(
+                width: HUDPanel.panelSize.width,
+                height: HUDPanel.panelSize.height,
+                alignment: panelAlignment)
             .onChange(of: model.state) { old, new in
                 transition(from: old, to: new)
             }
+    }
+
+    /// Corner presets anchor the capsule to the panel edge so width changes
+    /// grow inward from the screen edge instead of expanding symmetrically.
+    private var panelAlignment: Alignment {
+        switch model.edge {
+        case .leading: return .leading
+        case .center: return .center
+        case .trailing: return .trailing
+        }
     }
 
     // MARK: - Capsule
@@ -41,6 +117,11 @@ struct HUDView: View {
         .scaleEffect(scale)
         .offset(y: yOffset)
         .opacity(opacity)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.15), value: hovering)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Velora dictation")
+        .accessibilityHint(isStandby ? "Click to start dictation" : "Click to stop dictation")
     }
 
     @ViewBuilder private var background: some View {
@@ -57,13 +138,18 @@ struct HUDView: View {
                     ? Color.black.opacity(0.30)
                     : Color.white.opacity(0.25))
         }
+        // Hover highlight: a whisper of extra light (never a size change).
+        Capsule().fill(
+            colorScheme == .dark
+                ? Color.white.opacity(hovering ? 0.08 : 0)
+                : Color.black.opacity(hovering ? 0.05 : 0))
     }
 
     private var border: some View {
         Capsule().strokeBorder(
             colorScheme == .dark
-                ? Color.white.opacity(0.15)
-                : Color.black.opacity(0.08),
+                ? Color.white.opacity(hovering ? 0.30 : 0.15)
+                : Color.black.opacity(hovering ? 0.18 : 0.08),
             lineWidth: 1)
     }
 
@@ -90,6 +176,8 @@ struct HUDView: View {
 
     private var content: some View {
         ZStack {
+            standbyContent
+                .opacity(isStandby ? 1 : 0)
             recordingContent
                 .opacity(recordingContentOpacity)
             checkmark
@@ -100,6 +188,19 @@ struct HUDView: View {
             noticeContent
                 .opacity(isNotice ? 1 : 0)
         }
+    }
+
+    // MARK: - Standby pill
+
+    /// The persistent idle pill: the brand waveform glyph, warming up on hover
+    /// to say "click me".
+    private var standbyContent: some View {
+        Image(systemName: "waveform")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(
+                hovering && isStandby
+                    ? AnyShapeStyle(VeloraBrand.iconGradient)
+                    : AnyShapeStyle(.secondary))
     }
 
     // MARK: - Listening and transcribing
@@ -259,12 +360,7 @@ struct HUDView: View {
     }
 
     private var learnedWidth: CGFloat {
-        let pair = learnedPair
-        var value = HUDGeometry.contentInsetH * 2 + 14 + 12 + VeloraSpacing.s * 4
-        value += HUDGeometry.textWidth(pair.wrong, font: HUDGeometry.bodyFont)
-        value += HUDGeometry.textWidth(pair.right, font: HUDGeometry.bodyFont)
-        value += HUDGeometry.textWidth("· Learned", font: HUDGeometry.bodyFont)
-        return min(max(value, 190), 380)
+        Self.capsuleMetrics(for: model.state, context: nil).size.width
     }
 
     // MARK: - Notice
@@ -292,14 +388,14 @@ struct HUDView: View {
     }
 
     private var noticeWidth: CGFloat {
-        var value = HUDGeometry.contentInsetH * 2 + 14 + VeloraSpacing.s
-        value += HUDGeometry.textWidth(noticeParts.message, font: HUDGeometry.bodyFont)
-        return min(max(value, 160), HUDGeometry.maxListeningWidth)
+        Self.capsuleMetrics(for: model.state, context: nil).size.width
     }
 
     // MARK: - State
 
     private var isListening: Bool { model.state == .listening }
+
+    private var isStandby: Bool { model.state == .standby }
 
     private var isRecordingActive: Bool {
         switch model.state {
@@ -338,33 +434,48 @@ struct HUDView: View {
         }
     }
 
-    private var chipWidth: CGFloat {
-        guard let context = model.sessionContext else { return 0 }
-        var value = HUDGeometry.textWidth(context.modeName, font: HUDGeometry.chipFont)
-        if context.appIcon != nil {
-            value += HUDGeometry.chipIconSide + VeloraSpacing.xs
-        }
-        return value
-    }
-
     private var desiredListeningWidth: CGFloat {
-        min(
-            max(
-                HUDGeometry.controlRowWidth(chipWidth: chipWidth),
-                HUDGeometry.minListeningWidth),
-            HUDGeometry.maxListeningWidth)
+        Self.capsuleMetrics(for: .listening, context: model.sessionContext).size.width
     }
 
     // MARK: - Transitions
 
     private func transition(from old: HUDState, to new: HUDState) {
         switch new {
+        case .standby:
+            if old.isHidden {
+                resetInstant(
+                    width: HUDGeometry.standbySize.width,
+                    height: HUDGeometry.standbySize.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            } else {
+                // Session just ended — the capsule shrinks back into the pill.
+                flashGreen = false
+                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                    width = HUDGeometry.standbySize.width
+                    height = HUDGeometry.standbySize.height
+                    showCheck = false
+                }
+            }
+
         case .listening:
-            resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                opacity = 1
-                scale = 1
-                yOffset = 0
+            if old == .standby {
+                // The pill blooms into the listening capsule in place.
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    width = desiredListeningWidth
+                    height = HUDGeometry.height
+                }
+            } else {
+                resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
             }
 
         case .transcribing:
@@ -399,19 +510,33 @@ struct HUDView: View {
             }
 
         case .learned:
-            resetInstant(width: learnedWidth, height: HUDGeometry.height)
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                opacity = 1
-                scale = 1
-                yOffset = 0
+            if old == .standby {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = learnedWidth
+                    height = HUDGeometry.height
+                }
+            } else {
+                resetInstant(width: learnedWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
             }
 
         case .notice:
-            resetInstant(width: noticeWidth, height: HUDGeometry.height)
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
-                opacity = 1
-                scale = 1
-                yOffset = 0
+            if old == .standby {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = noticeWidth
+                    height = HUDGeometry.height
+                }
+            } else {
+                resetInstant(width: noticeWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
             }
 
         case .hidden(let style):

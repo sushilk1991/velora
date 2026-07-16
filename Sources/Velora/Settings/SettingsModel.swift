@@ -56,6 +56,7 @@ final class SettingsModel: ObservableObject {
     private let config = AppConfig.shared
     private weak var supervisor: EngineSupervisor?
     private var statusObserver: NSObjectProtocol?
+    private var hudPrefsObserver: NSObjectProtocol?
     let dictionary: DictionaryRepository
     let dictionarySync: ICloudDictionarySync
     private var dictionaryRowsObserver: AnyCancellable?
@@ -208,6 +209,7 @@ final class SettingsModel: ObservableObject {
         soundsEnabled = config.soundsEnabled
         soundVolume = config.soundVolume
         hudPosition = config.hudPosition
+        hudAlwaysVisible = config.hudAlwaysVisible
         appearance = config.appearance
         language = config.language
         autoPunctuation = config.autoPunctuation
@@ -233,6 +235,21 @@ final class SettingsModel: ObservableObject {
         ) { [weak self] note in
             self?.applyStatus(note.userInfo?["payload"] as? [String: Any])
         }
+        // A position change made from the HUD's context menu (or a drag that
+        // flips it to Custom) must reflect in an open Settings window.
+        hudPrefsObserver = NotificationCenter.default.addObserver(
+            forName: .veloraHUDPrefsChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.syncingHUDPrefs = true
+            if self.hudPosition != self.config.hudPosition {
+                self.hudPosition = self.config.hudPosition
+            }
+            if self.hudAlwaysVisible != self.config.hudAlwaysVisible {
+                self.hudAlwaysVisible = self.config.hudAlwaysVisible
+            }
+            self.syncingHUDPrefs = false
+        }
         dictionaryRowsObserver = dictionary.$rows.sink { [weak self] _ in
             self?.dictionaryRows = dictionary.rows
         }
@@ -244,6 +261,7 @@ final class SettingsModel: ObservableObject {
 
     deinit {
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
+        if let hudPrefsObserver { NotificationCenter.default.removeObserver(hudPrefsObserver) }
     }
 
     /// Asks the engine for its current status (models, retention, …). Cheap;
@@ -308,8 +326,24 @@ final class SettingsModel: ObservableObject {
     }
 
     @Published var hudPosition: HUDPosition {
-        didSet { config.hudPosition = hudPosition }
+        didSet {
+            guard !syncingHUDPrefs, hudPosition != oldValue else { return }
+            config.hudPosition = hudPosition
+            NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+        }
     }
+
+    @Published var hudAlwaysVisible: Bool {
+        didSet {
+            guard !syncingHUDPrefs, hudAlwaysVisible != oldValue else { return }
+            config.hudAlwaysVisible = hudAlwaysVisible
+            NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+        }
+    }
+
+    /// True while adopting a change made from the HUD's own context menu —
+    /// the didSet observers must not echo it back as another notification.
+    private var syncingHUDPrefs = false
 
     @Published var appearance: String {
         didSet {

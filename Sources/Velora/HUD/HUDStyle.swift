@@ -81,8 +81,16 @@ enum HUDGeometry {
     static let waveformSize = CGSize(width: 120, height: 32)
     static let dotDiameter: CGFloat = 8
     static let timerWidth: CGFloat = 36
-    static let chipIconSide: CGFloat = 16
-    static let chipIconCornerRadius: CGFloat = VeloraSpacing.xs
+    static let chipIconSide: CGFloat = 22
+    static let chipIconCornerRadius: CGFloat = 5
+
+    /// Idle standby pill (persistent HUD): a small capsule that morphs into
+    /// the full listening capsule on click.
+    static let standbySize = CGSize(width: 64, height: 30)
+
+    /// Horizontal breathing room between the capsule and the panel edge for
+    /// corner-anchored positions — covers the shadow (radius 20, y 6).
+    static let panelEdgePadding: CGFloat = 24
 
     static let bodyFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)

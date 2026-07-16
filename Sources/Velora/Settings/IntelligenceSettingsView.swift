@@ -184,7 +184,7 @@ struct IntelligenceSettingsView: View {
                 form
             }
         }
-        .frame(width: 580, height: SettingsTab.intelligence.preferredHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { vm.reload() }
     }
 
@@ -351,9 +351,9 @@ struct IntelligenceSettingsView: View {
             Image(systemName: "chart.bar.xaxis")
                 .font(.system(size: 44))
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text("No insights yet")
+            Text("No stats yet")
                 .font(.title3.weight(.semibold))
-            Text("Dictate a few times and your usage, latency, and accuracy trends appear here. Everything stays on this Mac.")
+            Text("Dictate a few times and your usage, streaks, latency, and accuracy trends appear here. Everything stays on this Mac.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

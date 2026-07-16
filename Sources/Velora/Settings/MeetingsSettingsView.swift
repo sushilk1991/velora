@@ -101,7 +101,7 @@ struct MeetingsSettingsView: View {
             }
             .padding(16)
         }
-        .frame(width: 580, height: SettingsTab.meetings.preferredHeight)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
         .onReceive(NotificationCenter.default.publisher(for: .veloraMeetingsChanged)) { _ in reload() }
     }

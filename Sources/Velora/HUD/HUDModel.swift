@@ -14,6 +14,10 @@ enum HUDState: Equatable {
     }
 
     case hidden(ExitStyle)
+    /// Persistent idle pill: a small always-on-screen capsule shown between
+    /// sessions when "keep HUD on screen" is enabled. Click starts dictation;
+    /// right-click opens quick actions.
+    case standby
     case listening
     case transcribing
     case inserted
@@ -29,6 +33,28 @@ enum HUDState: Equatable {
     var isHidden: Bool {
         if case .hidden = self { return true }
         return false
+    }
+
+    /// True when the HUD is not busy with a session — free for toasts and file
+    /// transcription notices. The standby pill counts as available: it is
+    /// idle chrome, not an active session.
+    var isAvailable: Bool {
+        isHidden || self == .standby
+    }
+}
+
+/// Which panel edge the capsule hugs, derived from `HUDPosition`. Corner
+/// presets anchor the capsule so it grows inward from the screen edge instead
+/// of expanding symmetrically off-screen.
+enum HUDEdge {
+    case leading, center, trailing
+
+    static func edge(for position: HUDPosition) -> HUDEdge {
+        switch position {
+        case .bottomLeft, .topLeft: return .leading
+        case .bottomRight, .topRight: return .trailing
+        case .bottomCenter, .topCenter, .custom: return .center
+        }
     }
 }
 
@@ -47,6 +73,9 @@ struct HUDSessionContext: Equatable {
 /// Observable state driving the HUD view. Main-actor only.
 final class HUDModel: ObservableObject {
     @Published var state: HUDState = .hidden(.cancel)
+    /// Horizontal anchor for the capsule inside the panel (set by HUDPanel
+    /// from the position preference).
+    @Published var edge: HUDEdge = .center
     /// Set when recording starts; drives the m:ss timer text.
     @Published var recordingStart: Date?
     /// Context chip contents for the active session (nil until a session

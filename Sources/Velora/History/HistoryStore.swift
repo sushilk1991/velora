@@ -243,6 +243,23 @@ final class HistoryStore {
         }
     }
 
+    /// Replaces a row's final text after a manual edit in the History tab.
+    /// The stored quality verdict described the old text and must not survive.
+    func updateFinal(id: Int64, final: String) {
+        queue.sync { [self] in
+            guard db != nil else { return }
+            let sql = "UPDATE dictations SET final = ?, quality_state = NULL WHERE id = ?;"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, final)
+            sqlite3_bind_int64(stmt, 2, id)
+            if sqlite3_step(stmt) != SQLITE_DONE {
+                NSLog("Velora: history edit failed: %@", lastError)
+            }
+        }
+    }
+
     /// Deletes a single row and its archived audio clip (if any).
     func delete(id: Int64) {
         queue.sync { [self] in

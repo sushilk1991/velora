@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotkeyObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
     private var loadingObserver: NSObjectProtocol?
+    private var hudPrefsObserver: NSObjectProtocol?
     private var terminationPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -59,7 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             supervisor: supervisor, hud: hud,
             hudIsFree: { [weak self] in
                 guard let self else { return false }
-                return self.dictation.phase == .idle && self.hud.model.state.isHidden
+                return self.dictation.phase == .idle && self.hud.model.state.isAvailable
             })
         transcriber.onStateChange = { [weak self] in
             guard let self else { return }
@@ -203,6 +204,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.delegate = dictation
         statusController.delegate = self
 
+        // The HUD pill is a control surface: click toggles dictation,
+        // right-click offers recent transcripts and placement.
+        hud.onTap = { [weak self] in self?.dictation.toggleFromMenu() }
+        hud.menuHooks = HUDPanel.MenuHooks(
+            isRecording: { [weak self] in self?.dictation.isRecording ?? false },
+            // Over-fetch: the menu drops rows with empty finals, and a run of
+            // failed dictations must not shrink the list below five usable ones.
+            recents: { [weak self] in self?.history.recent(limit: 10) ?? [] },
+            toggleDictation: { [weak self] in self?.dictation.toggleFromMenu() },
+            insertAgain: { record in TextInserter.insertAgain(record) },
+            openHistory: { [weak self] in self?.showSettings(selecting: .history) },
+            openSettings: { [weak self] in self?.showSettings() })
+        hudPrefsObserver = NotificationCenter.default.addObserver(
+            forName: .veloraHUDPrefsChanged, object: nil, queue: .main
+        ) { [weak self] _ in self?.hud.applyPreferences() }
+        hud.applyPreferences()
+
         veloraLog(String(
             format: "Velora: launch — permissions mic=%@ inputMonitoring=%@ accessibility=%@; hotkey=%@ mode=%@",
             Permissions.microphoneGranted ? "yes" : "no",
@@ -291,6 +309,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if let loadingObserver {
             NotificationCenter.default.removeObserver(loadingObserver)
+        }
+        if let hudPrefsObserver {
+            NotificationCenter.default.removeObserver(hudPrefsObserver)
         }
     }
 
