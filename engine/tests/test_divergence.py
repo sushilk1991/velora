@@ -207,3 +207,27 @@ def test_vocab_injection_rejected():
     out = "Send it to the Velora Airlearn Wispr Flow team after lunch."
     reason = check_divergence(raw, out, ["Velora", "Airlearn", "Wispr Flow"])
     assert reason is not None and reason.startswith("vocab_injection")
+
+
+def test_list_markers_not_novel():
+    # Line-leading numbering the speech explicitly asked for is formatting,
+    # not novel content — with breaks as ⏎ markers (the LLM transport form)
+    # and as real newlines (post-decode form).
+    raw = "put this in a numbered list apples bananas milk and eggs"
+    assert check_divergence(raw, "1. Apples ⏎ 2. Bananas ⏎ 3. Milk ⏎ 4. Eggs") is None
+    assert check_divergence(raw, "1. Apples\n2. Bananas\n3. Milk\n4. Eggs") is None
+
+
+def test_inline_numbers_still_novel():
+    # Numbers that are NOT list markers keep counting as novel content.
+    raw = "the plan needs a review before we ship it to the customer team"
+    out = "The plan needs 12 45 78 99 reviews before we ship it."
+    assert check_divergence(raw, out) is not None
+
+
+def test_non_sequential_markers_still_novel():
+    # Only a 1-anchored sequence reads as list formatting; arbitrary numbers
+    # dressed as markers must not slip past the guard (review finding).
+    raw = "the plan needs a review before we ship it to the customer team"
+    out = "42. alpha beta ⏎ 99. gamma delta ⏎ 73. epsilon zeta eta theta"
+    assert check_divergence(raw, out) is not None

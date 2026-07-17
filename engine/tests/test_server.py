@@ -766,3 +766,32 @@ async def test_screen_context_entities_tag_end_to_end(engine, monkeypatch):
     assert "@authCheck.ts" in final["text"], final["text"]
     assert "tag authCheck" not in final["text"]
     client.close()
+
+
+async def test_apply_formatting_passes_converted_text_to_llm(engine):
+    # The original regression: _apply_formatting sent RAW text to the model,
+    # so spoken break commands survived as literal words. The model must get
+    # gate.text with breaks encoded as the ⏎ transport marker.
+    eng, _sock = engine
+
+    class CapturingCleanup:
+        loaded = True
+        model_id = "fake-capture"
+        seen = None
+
+        async def cleanup(self, raw, _prompt, **_kwargs):
+            self.seen = raw
+            return CleanupResult(raw, True, 5)
+
+    fake = CapturingCleanup()
+    eng.cleanup = fake
+    text, _mode, _ms, applied, _reason = await eng._apply_formatting(
+        "point one is speed. now a new line. point two is privacy and it matters",
+        bundle_id="com.apple.Notes",
+        app_name="Notes",
+        explicit_mode=None,
+    )
+    assert fake.seen is not None
+    assert "new line" not in fake.seen.lower()
+    assert "⏎" in fake.seen
+    assert applied and "\n" in text

@@ -98,6 +98,13 @@ def _join_chunks(parts: list[str]) -> str:
     for part in parts:
         cleaned = part.strip("\r ")
         if not cleaned.strip():
+            # A chunk that was ONLY a spoken break command cleans to bare
+            # newline(s) — contribute the break (line vs paragraph) instead
+            # of vanishing.
+            if "\n" in cleaned and out:
+                wanted = min(2, cleaned.count("\n"))
+                have = len(out) - len(out.rstrip("\n"))
+                out += "\n" * max(0, wanted - have)
             continue
         if not out:
             out = cleaned
@@ -105,7 +112,10 @@ def _join_chunks(parts: list[str]) -> str:
             out += cleaned.lstrip("\n")
         else:
             out += " " + cleaned
-    return out.strip()
+    # Trailing breaks are dictated content ("… new paragraph" at the end) —
+    # strip everything else, keep up to one blank line.
+    trailing = len(out) - len(out.rstrip("\n"))
+    return out.strip() + "\n" * min(2, trailing)
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1165,8 +1175,15 @@ class Engine:
                 system_prompt += (
                     "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»"
                 )
+            # Same deterministic prep the whole-text gate gives the model
+            # (formatting.run_gate): spoken break commands become real line
+            # breaks before the LLM ever sees the chunk.
+            seg_input = formatting.apply_spoken_commands(formatting.scrub_fillers(seg_raw))
+            if not seg_input.strip():
+                # A chunk that was ONLY a break command must keep its break.
+                return _ChunkResult(seg_input, 0)
             result = await cleanup.cleanup(
-                seg_raw,
+                formatting.encode_breaks(seg_input),
                 system_prompt,
                 cancel_event=cancel_event,
                 allowed_terms=session.stream_allowed_terms,
@@ -1273,15 +1290,20 @@ class Engine:
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
         if gate.use_llm and self.cleanup is not None and self.cleanup.loaded:
+            # The model gets gate.text, NOT raw: the gate already converted
+            # spoken break commands ("now a new line") into real line breaks
+            # and scrubbed fillers. Passing raw here (the original bug) showed
+            # the model the literal words, which it dutifully kept as content.
             if gate.romanize:
                 # Transliteration: skip the length-ratio guard and allow longer.
                 result = await self.cleanup.cleanup(
-                    raw, gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    gate.text, gate.system_prompt or STATIC_SYSTEM_PROMPT,
                     timeout_ms=4000, check_ratio=False, cancel_event=cancel_event,
                 )
             else:
                 result = await self.cleanup.cleanup(
-                    raw, gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    formatting.encode_breaks(gate.text),
+                    gate.system_prompt or STATIC_SYSTEM_PROMPT,
                     cancel_event=cancel_event,
                     allowed_terms=self._allowed_terms(gate.mode),
                 )

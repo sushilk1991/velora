@@ -138,15 +138,95 @@ def resolve_mode(config: Config, bundle_id: str | None, explicit_mode: str | Non
 
 # --- deterministic text transforms ------------------------------------------
 
-_NEW_PARAGRAPH_RE = re.compile(r"\s*[,.;:!?]?\s*\bnew\s+paragraph\b[,.;:!?]?\s*", re.IGNORECASE)
-_NEW_LINE_RE = re.compile(r"\s*[,.;:!?]?\s*\bnew\s*line\b[,.;:!?]?\s*", re.IGNORECASE)
+# Spoken line-break commands. Two forms, applied in order:
+#
+# 1. A whole sentence that IS the command — "Now a new line.", "A new line.",
+#    "Okay, new paragraph." — lead-in words and the article are part of the
+#    command phrasing (real dictations, velora history rows 61-63) and are
+#    consumed with the break. A terminator (or end of text) must follow the
+#    phrase so "Next paragraph talks about X." is never eaten.
+# 2. The bare phrase inline — "first item new line second item" — guarded by
+#    the immediately preceding word: an article/possessive there means the
+#    words are a NOUN phrase ("we need a new line of products") and stay.
+# Anchored on sentence ends [.!?] and text start ONLY — after a colon or
+# semicolon, "A New Line" is likely a title/label ("the slogan is: A New
+# Line."), and the bare command there still converts via the inline form.
+_BREAK_SENTENCE_RE = re.compile(
+    r"(?:^|(?<=[.!?]))\s*"
+    r"(?:(?:now|then|okay|ok|and|so|next)[,\s]+){0,2}"
+    r"(?:(?:a|an|the)\s+)?"
+    r"n(?:ew|ext)\s*(line|paragraph)"
+    r"\s*(?:[.!?,;:]+\s*|$)",
+    re.IGNORECASE,
+)
+_BREAK_INLINE_RE = re.compile(
+    r"\s*[,.;:!?]?\s*\bnew\s*(line|paragraph)\b[,.;:!?]?\s*", re.IGNORECASE
+)
+# Immediate predecessors that mark "new line" as a noun phrase even without a
+# nearby determiner ("brand new line of shoes launched").
+_BREAK_NOUN_WORDS = frozenset("brand whole entire".split())
+# Determiners marking a noun reading for BREAK phrases. Unlike
+# _PUNCT_DETERMINERS this deliberately excludes number words: "point one new
+# line point two" is a genuine dictated break, not a noun phrase.
+_BREAK_DETERMINERS = frozenset(
+    "a an the this that these those my your his her its our their no some any "
+    "each every another either neither both several many few".split()
+)
 
 
 def apply_spoken_commands(text: str) -> str:
-    """Turn spoken 'new line' / 'new paragraph' into literal newlines."""
-    text = _NEW_PARAGRAPH_RE.sub("\n\n", text)
-    text = _NEW_LINE_RE.sub("\n", text)
-    return text
+    """Turn spoken 'new line' / 'new paragraph' commands into literal breaks."""
+
+    def _break(kind: str) -> str:
+        return "\n\n" if kind.lower() == "paragraph" else "\n"
+
+    text = _BREAK_SENTENCE_RE.sub(lambda m: _break(m.group(1)), text)
+
+    def _inline(m: "re.Match[str]") -> str:
+        # A determiner within the 2 preceding words — through one adjective
+        # ("an exciting new line of products", "a thin new line") — marks a
+        # noun, not a command. Two words, not three: a determiner further back
+        # attaches to another noun ("…of the whole pipeline new line second
+        # point" is a genuine command). Declining here is safe either way:
+        # the words reach the LLM, whose rule 6b can still convert a genuine
+        # command with full sentence context.
+        prev = re.findall(r"[A-Za-z']+", m.string[: m.start()])[-2:]
+        if prev and prev[-1].lower() in _BREAK_NOUN_WORDS:
+            return m.group(0)
+        if any(w.lower() in _BREAK_DETERMINERS for w in prev):
+            return m.group(0)
+        return _break(m.group(1))
+
+    return _BREAK_INLINE_RE.sub(_inline, text)
+
+
+# The cleanup model reliably preserves a line break between two complete
+# sentences, but flattens one that interrupts lowercase mid-flow ("…pipeline\n
+# second point…" comes back as ". Second point") — measured in
+# spikes/engine/bench_formatting.py. So breaks travel through the LLM as a
+# visible marker character it is instructed to copy verbatim, and postprocess
+# turns the markers back into real newlines.
+BREAK_MARK = "⏎"
+
+
+def encode_breaks(text: str) -> str:
+    """Real newlines → protected ⏎ markers, for the LLM's input."""
+    return text.replace("\n", f" {BREAK_MARK} ")
+
+
+def decode_breaks(text: str) -> str:
+    """⏎ markers (however the model spaced them) → real newlines."""
+    if BREAK_MARK not in text:
+        return text
+    return re.sub(rf"\s*(?:{BREAK_MARK}\s*)+", _mark_runs_to_newlines, text)
+
+
+def _mark_runs_to_newlines(m: "re.Match[str]") -> str:
+    # Real newlines adjacent to a marker (mixed streaming-chunk boundaries)
+    # count toward the break too — a line break next to a marker must not
+    # collapse the pair into a single break.
+    run = m.group(0)
+    return "\n" * min(2, max(run.count(BREAK_MARK), run.count("\n") + 1))
 
 
 # Determiners that mark a following spoken-punctuation phrase as a NOUN ("a full
@@ -263,7 +343,12 @@ def _tidy_whitespace(text: str) -> str:
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    # A trailing break is a dictated command ("… A new line." at the end =
+    # leave my cursor on a fresh line) — survive the strip, and keep a
+    # dictated "new paragraph" a paragraph (up to one blank line).
+    tail = text.rstrip(" \t")
+    trailing = "\n" * min(2, len(tail) - len(tail.rstrip("\n")))
+    return text.strip() + trailing
 
 
 _SENTENCE_END_RE = re.compile(r"[.!?…](?:['\")\]]*)$")
@@ -381,15 +466,21 @@ STATIC_SYSTEM_PROMPT = (
     "full stop' keep the words. When in doubt, treat it as a command if it sits "
     "where punctuation would naturally go.\n"
     "6b. The spoken words 'new line' mean a line break and 'new paragraph' mean a "
-    "paragraph break — replace them with the actual break, and remove the words.\n"
+    "paragraph break — replace them with the actual break, and remove the words. "
+    "The transcript may also contain the marker ⏎, which IS a line break the "
+    "speaker already dictated: copy every ⏎ through unchanged, exactly where it "
+    "stands, clean each side as its own line, and never delete a ⏎ or join its "
+    "lines together.\n"
     "7. Lists: use one ONLY when the speech explicitly enumerates items or asks "
     "for a list; otherwise keep prose. Put each item on its OWN line. Use a "
     "NUMBERED list ('1.', '2.', '3.') when the speaker says 'numbered list' or "
     "counts items off with 'first/second/third'; use '-' BULLETS when they say "
     "'bullet list' / 'bulleted' or just list items with no ordinal. Drop the "
-    "meta-instruction itself ('put this in a numbered list') from the output. Do "
-    "NOT listify ordinary counting ('count from one to ten' stays inline prose) "
-    "or short utterances.\n"
+    "meta-instruction itself ('put this in a numbered list') from the output. A "
+    "sentence that merely INTRODUCES the list ('these are the steps') is prose — "
+    "keep it as its own unnumbered line ending with ':' and start numbering at "
+    "the first item. Do NOT listify ordinary counting ('count from one to ten' "
+    "stays inline prose) or short utterances.\n"
     "8. Chat messages: casual tone, no trailing period on a single short sentence.\n"
 )
 
@@ -881,9 +972,33 @@ def strip_leaked_punct_commands(text: str) -> str:
     return _LEAKED_PUNCT_RE.sub(repl, text)
 
 
+_LEADING_LIST_MARKER_RE = re.compile(r"^1[.)]\s+")
+_LEADING_LIST_ITEM_RE = re.compile(r"^1[.)](?:\s|$)")
+
+
+def _strip_intro_list_marker(text: str) -> str:
+    """Fix the 4B model's one observed list tic: numbering the sentence that
+    INTRODUCES the list ("1. These are the steps:\n1. …\n2. …"). Two
+    UNINDENTED adjacent lines both starting with '1.' cannot both be items —
+    the first (which has content after the marker) is the intro, so its
+    marker goes. Indented duplicates are valid nested numbering and stay;
+    anything else is left to the model's judgment."""
+    lines = text.split("\n")
+    following = next((line for line in lines[1:] if line.strip()), "")
+    if (
+        len(lines) >= 2
+        and _LEADING_LIST_MARKER_RE.match(lines[0])
+        and _LEADING_LIST_ITEM_RE.match(following)
+    ):
+        lines[0] = _LEADING_LIST_MARKER_RE.sub("", lines[0])
+        return "\n".join(lines)
+    return text
+
+
 def postprocess(text: str, gate: GateResult) -> str:
     """Deterministic pass over LLM output and its punctuation contract."""
-    out = strip_leaked_punct_commands(_tidy_whitespace(text))
+    out = strip_leaked_punct_commands(_tidy_whitespace(decode_breaks(text)))
+    out = _strip_intro_list_marker(out)
     out = apply_replacements(out, gate.replacements)
     out = apply_tags(out, gate.entities, gate.category)
     mode_name = gate.mode.name.lower()
@@ -900,10 +1015,19 @@ def postprocess(text: str, gate: GateResult) -> str:
         gate.auto_punctuation
         and not gate.romanize
         and out
+        and not out.endswith("\n")  # dictated trailing break — no period after it
         and not _SENTENCE_END_RE.search(out)
     ):
         # Qwen occasionally stops after the last word even though the request
         # is complete prose. Keep the semantic punctuation decision in the LLM,
         # but guarantee a conservative declarative fallback at the final edge.
         out += "."
+    if gate.text.endswith("\n") and out:
+        # A dictated trailing break ("… a new line." at the end) must not
+        # depend on the model echoing a marker with nothing after it — the
+        # gate knows the break (line vs paragraph) was dictated, so re-apply
+        # exactly what it saw.
+        wanted = 2 if gate.text.endswith("\n\n") else 1
+        have = len(out) - len(out.rstrip("\n"))
+        out += "\n" * max(0, wanted - have)
     return out

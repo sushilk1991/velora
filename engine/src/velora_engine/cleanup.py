@@ -145,6 +145,30 @@ def _guard_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower())
 
 
+# Line-leading "1." / "2)" markers (the model's output carries breaks as the
+# ⏎ marker, so "after a break" counts as line-leading too). When the speech
+# asks for a numbered list these are formatting, not novel content — counting
+# them vetoed every numbered list the user explicitly requested. Inline
+# numbers elsewhere still count, and so do line-leading numbers that don't
+# form a 1-anchored sequence (review finding: "42. … 99. …" must not smuggle
+# invented values past the guard dressed as markers).
+_LIST_MARKER_RE = re.compile(r"(?:(?m:^)|(?<=⏎))\s*(\d{1,2})[.)]\s+")
+
+
+def _strip_list_markers(text: str) -> str:
+    prev = 0
+
+    def repl(m: "re.Match[str]") -> str:
+        nonlocal prev
+        value = int(m.group(1))
+        if value == 1 or value == prev + 1:  # new list or the next item
+            prev = value
+            return " "
+        return m.group(0)
+
+    return _LIST_MARKER_RE.sub(repl, text)
+
+
 def _grammatical_variants(token: str) -> set[str]:
     """Conservative output forms that preserve one raw token's identity.
 
@@ -188,7 +212,7 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
     if ratio > RATIO_MAX:
         return f"ratio_high({ratio:.2f})"
     raw_tokens = _guard_tokens(raw)
-    out_tokens = _guard_tokens(out)
+    out_tokens = _guard_tokens(_strip_list_markers(out))
     if raw_tokens and out_tokens:
         allowed = set(raw_tokens)
         raw_token_set = set(raw_tokens)

@@ -295,3 +295,25 @@ async def test_glossary_initial_prompt_set_from_start_entities(engine, monkeypat
     await client.recv_event("final")
     assert eng.stt.initial_prompt is None
     client.close()
+
+
+async def test_chunk_llm_receives_converted_breaks(engine, monkeypatch):
+    # The original regression: chunks reached the model RAW, literal "new
+    # line" words included. They must arrive converted, with breaks as the
+    # ⏎ transport marker, and decode back to a real newline in the final.
+    seg = "alpha item speed new line beta item privacy stays here"
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", seg)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", TAIL)
+    eng, sock = engine
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await run_dictation(client, "brk")
+    await client.recv_event("transcript")
+    final = await client.recv_event("final")
+    sent = cleanup.calls[0][0]
+    assert "new line" not in sent.lower()
+    assert "⏎" in sent
+    assert "\n" in final["text"]
+    client.close()

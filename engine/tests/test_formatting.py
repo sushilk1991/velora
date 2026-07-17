@@ -378,7 +378,66 @@ def test_replacements_applied_in_gate_paths(config):
 
 def test_spoken_commands():
     assert apply_spoken_commands("one new line two new paragraph three") == "one\ntwo\n\nthree"
-    assert apply_spoken_commands("hello. New line. Next") == "hello\nNext"
+    # A standalone command sentence now keeps the previous sentence's terminator.
+    assert apply_spoken_commands("hello. New line. Next") == "hello.\nNext"
+
+
+def test_spoken_commands_sentence_form():
+    # Lead-in words and articles are part of the command phrasing (the owner's
+    # real dictations: "Now a new line.", "A new line.").
+    assert (
+        apply_spoken_commands("This is line 1. Now a new line. This is line 2. A new line.")
+        == "This is line 1.\nThis is line 2.\n"
+    )
+    assert (
+        apply_spoken_commands("summary done. okay, new paragraph. details next")
+        == "summary done.\n\ndetails next"
+    )
+
+
+def test_spoken_commands_noun_guard():
+    # An article/possessive within two words of the phrase marks a noun — no
+    # break, even through an adjective (review finding).
+    assert (
+        apply_spoken_commands("we need a new line of products")
+        == "we need a new line of products"
+    )
+    assert (
+        apply_spoken_commands("their new line manager starts monday")
+        == "their new line manager starts monday"
+    )
+    assert (
+        apply_spoken_commands("We launched an exciting new line of products yesterday.")
+        == "We launched an exciting new line of products yesterday."
+    )
+    # After a colon, an article + "A New Line" is a title, not a command
+    # (the standalone form anchors on sentence ends only).
+    assert (
+        apply_spoken_commands("The campaign slogan is: A New Line.")
+        == "The campaign slogan is: A New Line."
+    )
+    # But a determiner attached to ANOTHER noun two-plus words back does not
+    # suppress a genuine command.
+    assert apply_spoken_commands(
+        "first point is the speed of the whole pipeline new line second point"
+    ) == "first point is the speed of the whole pipeline\nsecond point"
+    # "Next paragraph <prose>" is content, not a standalone command.
+    assert (
+        apply_spoken_commands("Next paragraph talks about pricing.")
+        == "Next paragraph talks about pricing."
+    )
+
+
+def test_gate_text_carries_breaks_for_llm(config):
+    # The LLM path's input (gate.text) must arrive with the breaks already
+    # real and the command words gone — server passes gate.text to the model.
+    gate = run_gate(
+        "point one is speed. now a new line. point two is privacy and it matters a lot",
+        config,
+    )
+    assert gate.use_llm
+    assert "\n" in gate.text
+    assert "new line" not in gate.text.lower()
 
 
 # ---- chat trailing period ----
@@ -903,3 +962,55 @@ def test_legacy_realword_hard_replacement_demoted(config, home):
     assert "lung" not in config.global_replacements  # demoted
     assert config.soft_corrections.get("lung") == "Airlearn"
     assert config.global_replacements.get("wrold") == "world"  # gibberish stays hard
+
+
+def test_tidy_preserves_trailing_break(config):
+    # "… A new line." dictated at the very end = leave the cursor on a fresh
+    # line; the trailing break must survive gate.text and postprocess.
+    assert apply_spoken_commands("send the draft tonight. a new line.") == (
+        "send the draft tonight.\n"
+    )
+    gate = run_gate(
+        "send the draft tonight and copy the design team on it. a new line.",
+        config,
+    )
+    assert gate.text.endswith("\n")
+
+
+def test_encode_decode_breaks():
+    from velora_engine.formatting import BREAK_MARK, decode_breaks, encode_breaks
+
+    assert encode_breaks("a\nb") == f"a {BREAK_MARK} b"
+    assert decode_breaks(f"a {BREAK_MARK} b") == "a\nb"
+    # However the model spaces or repeats the markers, runs collapse sanely
+    # and a paragraph break survives.
+    assert decode_breaks(f"a{BREAK_MARK}{BREAK_MARK}b") == "a\n\nb"
+    assert decode_breaks(f"a {BREAK_MARK}  {BREAK_MARK} {BREAK_MARK} b") == "a\n\nb"
+    assert decode_breaks("no markers here") == "no markers here"
+
+
+def test_postprocess_no_period_after_trailing_break(config):
+    gate = run_gate(
+        "send the draft tonight and copy the design team on it. a new line.", config
+    )
+    from velora_engine.formatting import postprocess
+
+    out = postprocess("Send the draft tonight and copy the design team on it. ⏎", gate)
+    assert out.endswith("\n") and not out.endswith(".\n") is False  # ends ".\n"
+    assert out == "Send the draft tonight and copy the design team on it.\n"
+
+
+def test_strip_intro_list_marker():
+    from velora_engine.formatting import _strip_intro_list_marker
+
+    # Duplicate '1.' → the content-bearing first line is the intro.
+    assert _strip_intro_list_marker("1. The steps:\n1. Backup\n2. Migrate") == (
+        "The steps:\n1. Backup\n2. Migrate"
+    )
+    # Bare-number items count as items too (owner's row 62).
+    assert _strip_intro_list_marker("1. The number list:\n1.\n2.") == (
+        "The number list:\n1.\n2."
+    )
+    # A legitimate list starting at 1. with no duplicate stays untouched.
+    assert _strip_intro_list_marker("1. Backup\n2. Migrate") == "1. Backup\n2. Migrate"
+    assert _strip_intro_list_marker("plain prose") == "plain prose"
