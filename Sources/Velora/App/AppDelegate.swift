@@ -217,7 +217,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             // failed dictations must not shrink the list below five usable ones.
             recents: { [weak self] in self?.history.recent(limit: 10) ?? [] },
             toggleDictation: { [weak self] in self?.dictation.toggleFromMenu() },
-            insertAgain: { record in TextInserter.insertAgain(record) },
             openHistory: { [weak self] in self?.showSettings(selecting: .history) },
             openSettings: { [weak self] in self?.showSettings() })
         hudPrefsObserver = NotificationCenter.default.addObserver(

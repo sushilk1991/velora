@@ -89,6 +89,7 @@ enum Selftest {
         testMCPProtocol()
         testLocalControlSocket()
         testHUDGeometry()
+        testHUDPerformance()
         testSettingsSidebar()
         testAudioInputDeviceResolution()
         testInsertionBoundary()
@@ -3064,6 +3065,180 @@ enum Selftest {
         expect(
             !screenRect.contains(NSPoint(x: 105, y: 270)),
             "panel margins outside the capsule stay click-through")
+    }
+
+    // MARK: - HUD performance (hot paths)
+
+    /// The HUD is always on screen with "keep on screen when idle", so its hot
+    /// paths run constantly: a global mouse monitor fires for every system-wide
+    /// move, and the waveform Canvas redraws ~30×/s during a session. These pin
+    /// that those paths stay cheap — and specifically that the mouse-move path
+    /// no longer pays Core Text layout on every move (user report: hovering the
+    /// HUD felt glitchy).
+    ///
+    /// The deterministic assertions (dependency contract + "not optimized away")
+    /// always run. The wall-clock BUDGET assertions gate behind
+    /// `VELORA_PERF_SELFTEST=1` (like `testIntelligencePerformance100K`) because
+    /// `systemUptime` includes scheduler preemption — a loaded CI box could
+    /// blow an absolute millisecond budget with no code regression. The timings
+    /// are always printed, so they are visible evidence even in a normal run.
+    private static func testHUDPerformance() {
+        let context = HUDSessionContext(appIcon: nil, modeName: "Terminal")
+
+        // Purity: the geometry that gets cached must be a stable function of its
+        // inputs, or caching it would drift from what is on screen.
+        let hit = HUDPanel.hitRect(for: .listening, edge: .trailing, context: context)
+        expect(
+            hit == HUDPanel.hitRect(for: .listening, edge: .trailing, context: context),
+            "the listening hit rect is a pure function of its inputs")
+
+        // Dependency contract: the hit rect must change when ANY of its inputs
+        // changes, so each is a real cache dependency the panel must invalidate
+        // on. If one of these stopped mattering, HUDPanel could skip
+        // invalidating for it and cache a stale rect.
+        let baseline = HUDPanel.hitRect(for: .listening, edge: .center, context: context)
+        expect(
+            baseline != HUDPanel.hitRect(for: .standby, edge: .center, context: context),
+            "state changes the hit rect — HUDPanel must invalidate on transition")
+        expect(
+            baseline != HUDPanel.hitRect(for: .listening, edge: .trailing, context: context),
+            "edge changes the hit rect — HUDPanel must invalidate on reposition")
+        // Two contexts in the unclamped width band so this holds regardless of
+        // the min/max listening-width constants.
+        let shortCtx = HUDSessionContext(appIcon: nil, modeName: "Terminal")
+        let longCtx = HUDSessionContext(appIcon: nil, modeName: "Terminal Window Here")
+        expect(
+            HUDView.capsuleMetrics(for: .listening, context: shortCtx).size
+                != HUDView.capsuleMetrics(for: .listening, context: longCtx).size,
+            "session context changes the capsule width — a cache dependency")
+        // The panel FRAME is a dependency too: a display reconfiguration
+        // relocates the panel with no state change, so the cache re-keys on the
+        // frame (review finding — otherwise the pill's click region goes stale
+        // at the new location).
+        let frameA = HUDPanel.interactiveScreenRect(
+            panelFrame: NSRect(x: 0, y: 0, width: 480, height: 160), hitRect: baseline)
+        let frameB = HUDPanel.interactiveScreenRect(
+            panelFrame: NSRect(x: 300, y: 400, width: 480, height: 160), hitRect: baseline)
+        expect(
+            frameA != frameB,
+            "the panel frame changes the interactive rect — the cache re-keys on frame")
+
+        // Drive the real cache HUDPanel uses. It must recompute exactly on a key
+        // miss and reuse the memoized rect on a hit, so the hot mouse path pays
+        // no Core Text. Each key field — frame, state, edge, context — counts as
+        // a miss, which is what guarantees the pill's click region can never go
+        // stale after a move, transition, reposition, or display reconfig.
+        let cache = HUDHitRectCache()
+        func lookup(_ key: HUDHitRectCache.Key) -> NSRect {
+            cache.rect(for: key) { k in
+                HUDPanel.interactiveScreenRect(
+                    panelFrame: k.frame,
+                    hitRect: HUDPanel.hitRect(for: k.state, edge: k.edge, context: k.context))
+            }
+        }
+        let baseFrame = NSRect(x: 0, y: 0, width: 480, height: 160)
+        let movedFrame = NSRect(x: 300, y: 400, width: 480, height: 160)
+        let key0 = HUDHitRectCache.Key(
+            frame: baseFrame, state: .listening, edge: .center, context: context)
+        let r0 = lookup(key0)
+        expect(cache.recomputeCount == 1, "the first lookup computes the rect")
+        _ = lookup(key0)
+        expect(
+            cache.recomputeCount == 1,
+            "an unchanged key reuses the memoized rect — no Core Text on the hot path")
+        _ = lookup(HUDHitRectCache.Key(
+            frame: movedFrame, state: .listening, edge: .center, context: context))
+        expect(cache.recomputeCount == 2, "a frame move recomputes — no stale click region")
+        _ = lookup(HUDHitRectCache.Key(
+            frame: movedFrame, state: .standby, edge: .center, context: context))
+        expect(cache.recomputeCount == 3, "a state transition recomputes")
+        _ = lookup(HUDHitRectCache.Key(
+            frame: movedFrame, state: .standby, edge: .trailing, context: context))
+        expect(cache.recomputeCount == 4, "a reposition (edge change) recomputes")
+        _ = lookup(HUDHitRectCache.Key(
+            frame: movedFrame, state: .standby, edge: .trailing, context: nil))
+        expect(cache.recomputeCount == 5, "a session-context change recomputes")
+        expect(
+            r0 == HUDPanel.interactiveScreenRect(
+                panelFrame: key0.frame,
+                hitRect: HUDPanel.hitRect(
+                    for: key0.state, edge: key0.edge, context: key0.context)),
+            "the memoized rect matches a direct computation")
+
+        // Measure the worst-case per-move cost: BUILD a fresh key each iteration
+        // (as production does from the model properties) using an icon-bearing
+        // context, so the measurement includes NSImage ARC traffic and String
+        // equality — then hit the cache and run contains. This is everything
+        // syncMouseInteractivity does per move bar the panel.frame getter, with
+        // no Core Text on the hit path.
+        let hotIcon = NSImage(size: NSSize(width: 22, height: 22))
+        let hotContext = HUDSessionContext(appIcon: hotIcon, modeName: "Terminal")
+        let hotFrame = NSRect(x: 12, y: 24, width: 480, height: 160)
+        func hotKey() -> HUDHitRectCache.Key {
+            HUDHitRectCache.Key(
+                frame: hotFrame, state: .listening, edge: .center, context: hotContext)
+        }
+        let hotRect = lookup(hotKey())         // prime the hot key (a miss)
+        let primedCount = cache.recomputeCount
+        let probe = NSPoint(x: hotRect.midX, y: hotRect.midY)
+        var containsHits = 0
+        let moveStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<200_000 where lookup(hotKey()).contains(probe) { containsHits += 1 }
+        let moveDuration = ProcessInfo.processInfo.systemUptime - moveStart
+        expect(containsHits == 200_000, "the cached hit test is exercised, not optimized away")
+        expect(
+            cache.recomputeCount == primedCount,
+            "200k hot-path lookups triggered zero recomputes — the cache holds")
+
+        // For contrast, capsuleMetrics for a live session pays NSString Core
+        // Text width measurement (the context chip) — orders of magnitude
+        // costlier than the cached contains, which is exactly why it must never
+        // run on every mouse move.
+        let metricsStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<2_000 { _ = HUDView.capsuleMetrics(for: .listening, context: context) }
+        let metricsDuration = ProcessInfo.processInfo.systemUptime - metricsStart
+
+        let standbyStart = ProcessInfo.processInfo.systemUptime
+        for _ in 0..<200_000 { _ = HUDView.capsuleMetrics(for: .standby, context: nil) }
+        let standbyDuration = ProcessInfo.processInfo.systemUptime - standbyStart
+
+        // The waveform Canvas redraws ~30×/s while recording: push a spectrum
+        // and compute bar heights per frame. 20k frames ≈ 11 minutes of
+        // recording.
+        let store = WaveformLevelStore()
+        let bands = (0..<WaveformLevelStore.halfCount).map { Float($0 % 5) / 5.0 }
+        var heightAccum: CGFloat = 0
+        let waveStart = ProcessInfo.processInfo.systemUptime
+        for frame in 0..<20_000 {
+            if frame % 3 == 0 { store.push(bands) }
+            let heights = store.displayHeights(settle: frame % 7 == 0, time: Double(frame) / 30.0)
+            heightAccum += heights[0]
+        }
+        let waveDuration = ProcessInfo.processInfo.systemUptime - waveStart
+        expect(heightAccum > 0, "the waveform smoothing actually advances (not optimized away)")
+
+        print(String(
+            format: "HUD perf — mouse move %.4fs/200k, metrics(listening) %.4fs/2k, "
+                + "metrics(standby) %.4fs/200k, waveform %.4fs/20k",
+            moveDuration, metricsDuration, standbyDuration, waveDuration))
+
+        // Absolute wall-clock budgets: opt-in, since preemption on a shared box
+        // can exceed them without any regression. Loose (≈10× the numbers above
+        // on this dev machine) so they still catch a pathological slowdown.
+        if ProcessInfo.processInfo.environment["VELORA_PERF_SELFTEST"] == "1" {
+            expect(
+                moveDuration < 0.1,
+                "the cached mouse-move hit test stays effectively free (200k in <0.1s)")
+            expect(
+                metricsDuration < 1.0,
+                "even the Core Text capsule-metrics path stays bounded (2k in <1s)")
+            expect(
+                standbyDuration < 0.3,
+                "idle-pill metrics are a constant lookup (200k in <0.3s)")
+            expect(
+                waveDuration < 0.5,
+                "20k waveform frames render in <0.5s — the 30 fps HUD has ~1000× headroom")
+        }
     }
 
     // MARK: - Settings sidebar

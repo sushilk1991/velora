@@ -25,7 +25,6 @@ final class HUDPanel: NSObject {
         var isRecording: () -> Bool
         var recents: () -> [DictationRecord]
         var toggleDictation: () -> Void
-        var insertAgain: (DictationRecord) -> Void
         var openHistory: () -> Void
         var openSettings: () -> Void
     }
@@ -47,6 +46,16 @@ final class HUDPanel: NSObject {
     /// on screen — moving the capsule mid-recording would yank it out from
     /// under the user's eyes. Applied when the HUD settles back to idle.
     private var needsPrefsReapply = false
+    /// Caches the interactive hit rect so the hot mouse path is a single
+    /// `rect.contains`. Without it, a global mouse monitor that fires for EVERY
+    /// system-wide move (the pill is always on screen) re-ran Core Text width
+    /// measurement through `capsuleMetrics` on each move during a session. The
+    /// cache keys on the whole tuple the rect derives from — panel frame, state,
+    /// edge, session context — so any change (including a window-server frame
+    /// relocation on display reconfiguration, which we do not drive) recomputes
+    /// on the next move. Keying on the full tuple means there is no separate
+    /// invalidation step to forget.
+    private let hitRectCache = HUDHitRectCache()
 
     override init() {
         panel = NSPanel(
@@ -125,14 +134,27 @@ final class HUDPanel: NSObject {
             width: hitRect.width, height: hitRect.height)
     }
 
+    /// The interactive footprint (screen coords), recomputed only when its key
+    /// (frame, state, edge, context) changes and reused on every other mouse
+    /// move. Keeps the hot path a single `rect.contains` with no Core Text
+    /// layout on the common (unchanged-key) path.
+    private func interactiveRect() -> NSRect {
+        hitRectCache.rect(for: HUDHitRectCache.Key(
+            frame: panel.frame, state: model.state, edge: model.edge,
+            context: model.sessionContext)
+        ) { key in
+            Self.interactiveScreenRect(
+                panelFrame: key.frame,
+                hitRect: Self.hitRect(for: key.state, edge: key.edge, context: key.context))
+        }
+    }
+
     /// Makes the panel interactive exactly while the cursor is over the
     /// capsule. Never flips mid-press: changing `ignoresMouseEvents` during a
     /// click or drag would yank the event stream out from under AppKit.
     private func syncMouseInteractivity() {
         guard NSEvent.pressedMouseButtons == 0 else { return }
-        let rect = Self.interactiveScreenRect(
-            panelFrame: panel.frame, hitRect: currentHitRect())
-        let interactive = rect.contains(NSEvent.mouseLocation)
+        let interactive = interactiveRect().contains(NSEvent.mouseLocation)
         if panel.ignoresMouseEvents != !interactive {
             panel.ignoresMouseEvents = !interactive
         }
@@ -186,9 +208,7 @@ final class HUDPanel: NSObject {
     /// (Retry) where a blind toggle would be wrong.
     private func recoverMissedTap() {
         guard panel.ignoresMouseEvents, model.state == .standby else { return }
-        let rect = Self.interactiveScreenRect(
-            panelFrame: panel.frame, hitRect: currentHitRect())
-        guard rect.contains(NSEvent.mouseLocation) else { return }
+        guard interactiveRect().contains(NSEvent.mouseLocation) else { return }
         panel.ignoresMouseEvents = false  // the cursor is on the pill now
         onTap?()
     }
@@ -487,39 +507,36 @@ final class HUDPanel: NSObject {
                 ofSize: NSFont.systemFontSize(for: .regular), weight: .semibold)])
         menu.addItem(toggle)
 
+        // Recent transcriptions live in a single hover submenu, not five inline
+        // rows each carrying their own Copy/Insert child menu. The old layout
+        // both cluttered the top level and thrashed submenus open and closed as
+        // the cursor tracked down the list (user report: "cluttered… glitchy").
+        // Now one "Recent Transcriptions" parent reveals the list on hover and a
+        // click copies the entry straight to the clipboard.
         let recents = (menuHooks?.recents() ?? []).filter {
             !$0.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
         if !recents.isEmpty {
             menu.addItem(.separator())
-            let header = NSMenuItem(title: "Recent Transcriptions", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
-            for record in recents.prefix(5) {
+            let parent = NSMenuItem(
+                title: "Recent Transcriptions", action: nil, keyEquivalent: "")
+            let recentsMenu = NSMenu()
+            recentsMenu.autoenablesItems = false
+            let hint = NSMenuItem(title: "Click to copy", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            recentsMenu.addItem(hint)
+            recentsMenu.addItem(.separator())
+            for record in recents.prefix(8) {
                 let item = NSMenuItem(
-                    title: Self.truncate(record.final, to: 46), action: nil, keyEquivalent: "")
-                item.indentationLevel = 1
+                    title: Self.truncate(record.final, to: 52),
+                    action: #selector(copyRecent(_:)), keyEquivalent: "")
+                item.target = self
                 item.toolTip = record.final
-
-                let submenu = NSMenu()
-                let copy = NSMenuItem(
-                    title: "Copy", action: #selector(copyRecent(_:)), keyEquivalent: "")
-                copy.target = self
-                copy.representedObject = RecordBox(record)
-                submenu.addItem(copy)
-                let insert = NSMenuItem(
-                    title: "Insert Again", action: #selector(insertRecent(_:)), keyEquivalent: "")
-                insert.target = self
-                insert.representedObject = RecordBox(record)
-                submenu.addItem(insert)
-                item.submenu = submenu
-                menu.addItem(item)
+                item.representedObject = RecordBox(record)
+                recentsMenu.addItem(item)
             }
-            let edit = NSMenuItem(
-                title: "Edit in History…", action: #selector(openHistoryAction),
-                keyEquivalent: "")
-            edit.target = self
-            menu.addItem(edit)
+            parent.submenu = recentsMenu
+            menu.addItem(parent)
         }
 
         menu.addItem(.separator())
@@ -631,11 +648,6 @@ final class HUDPanel: NSObject {
         pasteboard.setString(box.record.final, forType: .string)
     }
 
-    @objc private func insertRecent(_ sender: NSMenuItem) {
-        guard let box = sender.representedObject as? RecordBox else { return }
-        menuHooks?.insertAgain(box.record)
-    }
-
     @objc private func openHistoryAction() {
         menuHooks?.openHistory()
     }
@@ -661,6 +673,38 @@ final class HUDPanel: NSObject {
     @objc private func toggleAlwaysVisible() {
         AppConfig.shared.hudAlwaysVisible.toggle()
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+    }
+}
+
+/// Memoizes the HUD's interactive hit rect, recomputing only when its key
+/// changes. The rect is a pure function of (panel frame, HUD state, edge,
+/// session context); keying on the whole tuple means any change that could
+/// move or resize the capsule — including a window-server frame relocation on
+/// display reconfiguration — forces a recompute on the next lookup, with no
+/// separate invalidation step to forget. Extracted from HUDPanel so the
+/// selftest can drive it directly: prime it, change one key field, and assert
+/// the expensive provider re-runs exactly on a miss and not on a hit.
+final class HUDHitRectCache {
+    struct Key: Equatable {
+        let frame: NSRect
+        let state: HUDState
+        let edge: HUDEdge
+        let context: HUDSessionContext?
+    }
+
+    private var key: Key?
+    private var rect: NSRect = .zero
+    /// Number of times `compute` actually ran — lets a test prove the hot path
+    /// (unchanged key) does not re-invoke the Core Text width measurement.
+    private(set) var recomputeCount = 0
+
+    /// Returns the memoized rect for `key`, invoking `compute` only on a miss.
+    func rect(for key: Key, compute: (Key) -> NSRect) -> NSRect {
+        if self.key == key { return rect }
+        rect = compute(key)
+        self.key = key
+        recomputeCount += 1
+        return rect
     }
 }
 
