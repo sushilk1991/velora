@@ -39,6 +39,14 @@ struct Mode: Identifiable, Equatable {
     ]
 
     static let formattingOptions = ["off", "light", "full"]
+
+    /// Comma-separated list-field text -> trimmed, non-empty items. The
+    /// editor buffers field text locally and parses through this on change.
+    static func parseList(_ text: String) -> [String] {
+        text.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
 }
 
 /// Loads, edits, and persists modes to `~/.velora/modes/`. After any write it
@@ -354,67 +362,71 @@ struct ModesSettingsView: View {
 private struct ModeEditor: View {
     @ObservedObject var vm: ModesViewModel
     @State private var showProtectedAlert = false
+    /// Local text buffers for the comma-separated list fields. Binding the
+    /// field straight to the parsed array re-joins it on every keystroke,
+    /// which eats the ", " you just typed before the next item can exist.
+    @State private var appsText = ""
+    @State private var vocabularyText = ""
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-                field("Name") {
-                    TextField("Mode name", text: $vm.draft.name)
-                        .textFieldStyle(.roundedBorder)
-                }
-
-                field("AI instructions") {
-                    VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                        Text("Tell the model how to format text in this mode.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        TextEditor(text: $vm.draft.prompt)
-                            .font(.body)
-                            .frame(height: 96)
-                            .padding(VeloraSpacing.xs)
-                            .overlay(RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(Color(.separatorColor)))
-                    }
-                }
-
-                field("Formatting strength") {
-                    Picker("", selection: $vm.draft.formatting) {
+        // Grouped form + bottom action bar — the pre-0.9 editor was a bare
+        // stack of labeled fields that read as a different app from every
+        // other card-grouped pane.
+        VStack(spacing: 0) {
+            Form {
+                Section {
+                    TextField("Name", text: $vm.draft.name)
+                    Picker("Formatting strength", selection: $vm.draft.formatting) {
                         ForEach(Mode.formattingOptions, id: \.self) { option in
                             Text(option.capitalized).tag(option)
                         }
                     }
                     .pickerStyle(.segmented)
-                    .labelsHidden()
                 }
 
-                field("Apps") {
-                    VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                        Text("Bundle identifiers this mode auto-activates for (comma separated).")
-                            .font(.caption).foregroundStyle(.secondary)
-                        TextField("com.tinyspeck.slackmacgap, com.apple.MobileSMS",
-                                  text: listBinding(\.apps))
-                            .textFieldStyle(.roundedBorder)
-                    }
+                Section {
+                    TextEditor(text: $vm.draft.prompt)
+                        .font(.body)
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 96)
+                } header: {
+                    Text("AI instructions")
+                } footer: {
+                    SettingsFooter("Tell the model how to format text in this mode.")
                 }
 
-                field("Vocabulary") {
-                    VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                        Text("Custom words and proper nouns (comma separated).")
-                            .font(.caption).foregroundStyle(.secondary)
-                        TextField("Velora, Anthropic, Kubernetes",
-                                  text: listBinding(\.vocabulary))
-                            .textFieldStyle(.roundedBorder)
-                    }
+                Section {
+                    TextField(
+                        "Apps", text: $appsText,
+                        prompt: Text("com.tinyspeck.slackmacgap, com.apple.MobileSMS"))
+                        .onChange(of: appsText) { _, text in
+                            vm.draft.apps = Mode.parseList(text)
+                        }
+                    TextField(
+                        "Vocabulary", text: $vocabularyText,
+                        prompt: Text("Velora, Anthropic, Kubernetes"))
+                        .onChange(of: vocabularyText) { _, text in
+                            vm.draft.vocabulary = Mode.parseList(text)
+                        }
+                } footer: {
+                    SettingsFooter("Apps lists the bundle identifiers this mode auto-activates for; Vocabulary adds words and proper nouns it should recognize. Both are comma separated.")
                 }
 
-                field("Replacements") {
+                Section {
                     replacementsTable
+                } header: {
+                    Text("Replacements")
+                } footer: {
+                    SettingsFooter("Rewrite dictated phrases (heard → written).")
                 }
-
-                Divider()
-                footer
             }
-            .padding(VeloraSpacing.l)
+            .formStyle(.grouped)
+
+            Divider()
+            footer
         }
+        .onAppear { syncListBuffers() }
+        .onChange(of: vm.selectedID) { _, _ in syncListBuffers() }
         .alert(
             "Can't save mode",
             isPresented: Binding(get: { vm.saveError != nil },
@@ -426,10 +438,14 @@ private struct ModeEditor: View {
         }
     }
 
+    /// Re-seeds the list-field buffers from the (newly selected) draft.
+    private func syncListBuffers() {
+        appsText = vm.draft.apps.joined(separator: ", ")
+        vocabularyText = vm.draft.vocabulary.joined(separator: ", ")
+    }
+
     private var replacementsTable: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-            Text("Rewrite dictated phrases (heard → written).")
-                .font(.caption).foregroundStyle(.secondary)
             ForEach($vm.draft.replacements) { $pair in
                 HStack(spacing: VeloraSpacing.s) {
                     TextField("heard", text: $pair.key).textFieldStyle(.roundedBorder)
@@ -452,8 +468,10 @@ private struct ModeEditor: View {
         }
     }
 
+    /// Bottom action bar: destructive on the left, primary on the right, the
+    /// standard macOS bottom-button arrangement.
     private var footer: some View {
-        HStack {
+        HStack(spacing: VeloraSpacing.s) {
             Button(role: .destructive) {
                 if vm.draft.isProtected { showProtectedAlert = true } else { vm.delete() }
             } label: {
@@ -469,36 +487,21 @@ private struct ModeEditor: View {
             Spacer()
 
             Text("Modes activate automatically per app — or force one from the menubar.")
-                .font(.caption).foregroundStyle(.tertiary)
+                .font(.caption).foregroundStyle(.secondary)
+                .lineLimit(2)
 
-            Button("Save") { vm.save() }
+            Button("Save") {
+                vm.save()
+                // Show the normalized lists ("a,,b " → "a, b") after a save.
+                syncListBuffers()
+            }
                 .buttonStyle(.borderedProminent)
+                .keyboardShortcut("s", modifiers: .command)
                 .disabled(vm.draft.name.trimmingCharacters(in: .whitespaces).isEmpty)
         }
+        .padding(.horizontal, VeloraSpacing.m)
+        .padding(.vertical, 10)
+        .background(.bar)
     }
 
-    // MARK: Helpers
-
-    @ViewBuilder
-    private func field<Content: View>(
-        _ title: String, @ViewBuilder _ content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-            Text(title).font(.callout.weight(.semibold))
-            content()
-        }
-    }
-
-    /// Two-way binding between a `[String]` mode field and a comma-joined
-    /// editable string.
-    private func listBinding(_ keyPath: WritableKeyPath<Mode, [String]>) -> Binding<String> {
-        Binding(
-            get: { vm.draft[keyPath: keyPath].joined(separator: ", ") },
-            set: { newValue in
-                vm.draft[keyPath: keyPath] = newValue
-                    .split(separator: ",")
-                    .map { $0.trimmingCharacters(in: .whitespaces) }
-                    .filter { !$0.isEmpty }
-            })
-    }
 }

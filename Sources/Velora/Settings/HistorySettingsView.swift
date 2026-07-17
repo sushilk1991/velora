@@ -262,24 +262,7 @@ struct HistorySettingsView: View {
 
     private var toolbar: some View {
         HStack(spacing: VeloraSpacing.s) {
-            HStack(spacing: VeloraSpacing.xs) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                TextField("Search transcripts", text: $vm.searchText)
-                    .textFieldStyle(.plain)
-                if !vm.searchText.isEmpty {
-                    Button {
-                        vm.searchText = ""
-                    } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(.horizontal, VeloraSpacing.s)
-            .padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color(.textBackgroundColor)))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separatorColor)))
+            SettingsSearchBox(prompt: "Search transcripts", query: $vm.searchText)
 
             Button(role: .destructive) {
                 showClearConfirm = true

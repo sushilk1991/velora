@@ -224,9 +224,7 @@ struct IntelligenceSettingsView: View {
                     LabeledContent("Your typing speed", value: "\(model.typingWPM) wpm")
                 }
             } footer: {
-                Text("“Saved vs typing” compares your speaking time against typing the same words at this speed.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter("“Saved vs typing” compares your speaking time against typing the same words at this speed.")
             }
             shareSection
         }
@@ -282,9 +280,7 @@ struct IntelligenceSettingsView: View {
         } header: {
             Text("Performance — \(window.title.lowercased())")
         } footer: {
-            Text("Latency and cleanup state are recorded from this build on; older dictations don't carry them.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SettingsFooter("Latency and cleanup state are recorded from this build on; older dictations don't carry them.")
         }
     }
 
@@ -298,9 +294,7 @@ struct IntelligenceSettingsView: View {
         } header: {
             Text("Accuracy signals — \(window.title.lowercased())")
         } footer: {
-            Text("“Kept without edits” counts only dictations Velora could verify after inserting — “Observation coverage” shows how many that is.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SettingsFooter("“Kept without edits” counts only dictations Velora could verify after inserting — “Observation coverage” shows how many that is.")
         }
     }
 
@@ -325,9 +319,7 @@ struct IntelligenceSettingsView: View {
                 }
             }
         } footer: {
-            Text("The card contains aggregate numbers only — never transcripts, app names, or contacts.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SettingsFooter("The card contains aggregate numbers only — never transcripts, app names, or contacts.")
         }
     }
 

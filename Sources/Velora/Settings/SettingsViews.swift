@@ -157,6 +157,55 @@ enum VeloraAppInfo {
     }
 }
 
+// MARK: - Shared form pieces
+
+/// Grouped-form section footer in the System Settings idiom: caption-sized,
+/// secondary. Every footer goes through this so panes can't drift apart again
+/// (they used to mix `.callout` and `.caption` and read as two designs).
+struct SettingsFooter: View {
+    private let text: String
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+}
+
+/// The bordered search field used by list-style panes (History, Dictionary) —
+/// one look for in-pane search everywhere.
+struct SettingsSearchBox: View {
+    let prompt: String
+    @Binding var query: String
+    var accessibilityLabel: String?
+
+    var body: some View {
+        HStack(spacing: VeloraSpacing.xs) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
+            TextField(prompt, text: $query)
+                .textFieldStyle(.plain)
+                .accessibilityLabel(accessibilityLabel ?? prompt)
+            if !query.isEmpty {
+                Button {
+                    query = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, VeloraSpacing.s)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.textBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separatorColor)))
+    }
+}
+
 // MARK: - General
 
 struct GeneralSettingsView: View {
@@ -192,9 +241,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("Dictation pill")
             } footer: {
-                Text("Drag the pill anywhere on screen to set your own position.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter("Drag the pill anywhere on screen to set your own position.")
             }
             Section("Sounds") {
                 Toggle("Play sound effects", isOn: $model.soundsEnabled)
@@ -213,9 +260,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("Advanced")
             } footer: {
-                Text("Lets command-line tools running as your user read dictation history and stats. Everything stays on this Mac — no network server is opened.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter("Lets command-line tools running as your user read dictation history and stats. Everything stays on this Mac — no network server is opened.")
             }
             Section {
                 Toggle("Check for updates automatically", isOn: $model.updateChecks)
@@ -225,9 +270,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("Updates")
             } footer: {
-                Text("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations. Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace the app.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations. Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace the app.")
             }
         }
         .formStyle(.grouped)
@@ -453,9 +496,7 @@ struct ModelSettingsView: View {
                     }
                 }
             } footer: {
-                Text(cleanupFooter)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter(cleanupFooter)
             }
             Section("Available speech models") {
                 ForEach(choices) { choice in
@@ -552,9 +593,7 @@ struct ModelSettingsView: View {
         } header: {
             Text("Model storage")
         } footer: {
-            Text("Reclaim space by removing models you no longer use. The two in-use models can't be removed.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            SettingsFooter("Reclaim space by removing models you no longer use. The two in-use models can't be removed.")
         }
     }
 
@@ -585,9 +624,7 @@ struct ShortcutsSettingsView: View {
                 }
                 LabeledContent("Cancel dictation", value: "Esc")
             } footer: {
-                Text("Click the shortcut, then press a new key combo — a bare modifier like Right Option works too.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter("Click the shortcut, then press a new key combo — a bare modifier like Right Option works too.")
             }
             Section {
                 Toggle(isOn: $model.voiceEdit) {
@@ -620,9 +657,7 @@ struct ShortcutsSettingsView: View {
             } header: {
                 Text("Hotkey behavior")
             } footer: {
-                Text("With Hold to talk, a quick tap locks recording on; tap again to finish.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                SettingsFooter("With Hold to talk, a quick tap locks recording on; tap again to finish.")
             }
         }
         .formStyle(.grouped)

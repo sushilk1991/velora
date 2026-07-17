@@ -133,12 +133,9 @@ struct DictionarySettingsView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: VeloraSpacing.s) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.secondary)
-                    .accessibilityHidden(true)
-                TextField("Search names and terms", text: $query)
-                    .textFieldStyle(.plain)
-                    .accessibilityLabel("Search personal dictionary")
+                SettingsSearchBox(
+                    prompt: "Search names and terms", query: $query,
+                    accessibilityLabel: "Search personal dictionary")
                 Button {
                     editor = EditorContext(row: nil, promotesLearned: false)
                 } label: {
@@ -149,14 +146,14 @@ struct DictionarySettingsView: View {
                 .help("Add a word or heard-as correction")
                 dictionaryMenu
             }
-            .padding(.horizontal, VeloraSpacing.m)
-            .padding(.vertical, 10)
-            .background(.bar)
+            .padding(VeloraSpacing.m)
 
             Divider()
 
             // The toggles that grow this dictionary live with it, not in a
             // different pane (they control what appears in the list below).
+            // Switches, not checkboxes — every other boolean in the app is a
+            // switch, and mixing the two read as two designs.
             HStack(spacing: VeloraSpacing.xl) {
                 Toggle("Learn from your edits", isOn: $model.learnFromEdits)
                     .help("When you correct a misheard word right after Velora inserts it, the fix is saved here.")
@@ -164,11 +161,11 @@ struct DictionarySettingsView: View {
                     .help("Velora spots recurring names and jargon in your dictations and adds confirmed terms here.")
                 Spacer(minLength: 0)
             }
-            .toggleStyle(.checkbox)
+            .toggleStyle(.switch)
+            .controlSize(.small)
             .font(.callout)
             .padding(.horizontal, VeloraSpacing.m)
             .padding(.vertical, VeloraSpacing.s)
-            .background(.bar)
 
             Divider()
 
