@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 import CoreMedia
 import Foundation
@@ -36,7 +37,9 @@ enum MeetingCaptureError: LocalizedError {
 /// separate so the transcript can honestly label Me/Them without pretending
 /// to perform remote-speaker diarization.
 final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
-    private let micEngine = AVAudioEngine()
+    /// Rebuilt per meeting so a device pinned for one meeting can never leak
+    /// into the next after the mic setting changes back to system default.
+    private var micEngine = AVAudioEngine()
     private var micFile: AVAudioFile?
     private var stream: SCStream?
     private var writer: AVAssetWriter?
@@ -81,7 +84,24 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let micURL = directory.appendingPathComponent("me.caf")
         let systemURL = directory.appendingPathComponent("them.m4a")
         do {
+            micEngine = AVAudioEngine()
             let input = micEngine.inputNode
+            // Same pin as AudioCapture.start(): bind the chosen mic before
+            // the format is read; nil (system default) changes nothing. No
+            // mid-meeting fallback here — losing the mic device already
+            // surfaces through reportMicrophoneFailure.
+            if AppConfig.shared.inputDeviceUID != nil,
+               let chosen = AudioInputDevices.resolve(
+                   persistedUID: AppConfig.shared.inputDeviceUID, in: AudioInputDevices.current()),
+               let unit = input.audioUnit {
+                var deviceID = chosen
+                let status = AudioUnitSetProperty(
+                    unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                    &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
+                if status != noErr {
+                    NSLog("Velora: meeting mic pin failed (%d); using system default", status)
+                }
+            }
             let format = input.outputFormat(forBus: 0)
             guard format.sampleRate > 0, format.channelCount > 0 else {
                 throw NSError(

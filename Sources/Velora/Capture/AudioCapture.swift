@@ -1,3 +1,4 @@
+import AudioToolbox
 import AVFoundation
 import Foundation
 
@@ -30,6 +31,11 @@ final class AudioCapture {
     private var engine: AVAudioEngine?
     private(set) var isRunning = false
     private var configObserver: NSObjectProtocol?
+    private var devicesObserver: NSObjectProtocol?
+    /// The device successfully pinned on the current engine (nil = system
+    /// default) — compared against a fresh resolve when the device list
+    /// changes to decide whether a rebuild is needed.
+    private var appliedInputDevice: AudioDeviceID?
 
     /// Called (main queue) when capture could not be re-established after an
     /// audio-device change mid-recording (e.g. the only mic unplugged).
@@ -63,6 +69,31 @@ final class AudioCapture {
 
         let engine = AVAudioEngine()
         let input = engine.inputNode
+
+        // Pin the user's chosen mic (Settings → Dictation) on the input
+        // node's HAL unit BEFORE reading the format: macOS re-routes the
+        // default input when AirPods connect, and the chosen device must be
+        // bound before the tap/converter formats are derived from it. nil
+        // (system default) leaves the engine completely untouched; a chosen
+        // device that is unplugged right now resolves to nil too (default),
+        // without clearing the persisted choice.
+        var pinned: AudioDeviceID?
+        if AppConfig.shared.inputDeviceUID != nil,
+           let chosen = AudioInputDevices.resolve(
+               persistedUID: AppConfig.shared.inputDeviceUID, in: AudioInputDevices.current()),
+           let unit = input.audioUnit {
+            var deviceID = chosen
+            let status = AudioUnitSetProperty(
+                unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
+            if status == noErr {
+                pinned = chosen
+            } else {
+                veloraLog("Velora: could not pin input device (\(status)); using system default")
+            }
+        }
+        appliedInputDevice = pinned
+
         let inFormat = input.outputFormat(forBus: 0)
         guard inFormat.sampleRate > 0, inFormat.channelCount > 0 else {
             throw CaptureError.noInputDevice
@@ -128,11 +159,28 @@ final class AudioCapture {
         ) { [weak self] _ in
             self?.recoverFromConfigChange()
         }
+
+        // The chosen mic vanishing (or coming back) mid-recording does not
+        // reliably trip AVAudioEngineConfigurationChange for a pinned device.
+        // Re-resolve on device-list changes and reuse the same rebuild path
+        // when the answer differs: gone → falls back to the system default,
+        // reappeared → the persisted choice wins again.
+        AudioInputDevices.beginObserving()
+        devicesObserver = NotificationCenter.default.addObserver(
+            forName: .veloraAudioInputDevicesChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.isRunning else { return }
+            let resolved = AudioInputDevices.resolve(
+                persistedUID: AppConfig.shared.inputDeviceUID, in: AudioInputDevices.current())
+            if resolved != self.appliedInputDevice { self.recoverFromConfigChange() }
+        }
     }
 
     private func removeConfigObserver() {
         if let configObserver { NotificationCenter.default.removeObserver(configObserver) }
         configObserver = nil
+        if let devicesObserver { NotificationCenter.default.removeObserver(devicesObserver) }
+        devicesObserver = nil
     }
 
     /// Tears down the dead engine and restarts capture with the same handlers

@@ -77,6 +77,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
             ]
         case .dictation:
             return [
+                "microphone", "mic", "input device", "airpods",
                 "language", "punctuation", "smart cleanup", "terminal",
                 "voice commands", "scratch that", "new line", "recordings",
                 "audio", "transliterate", "english letters", "hinglish",
@@ -399,6 +400,7 @@ struct UpdateActionRow: View {
 struct DictationSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var archiveSize: String = "…"
+    @State private var inputDevices: [AudioInputDevices.Device] = []
 
     /// Whisper language codes, weighted toward the most-spoken languages.
     private static let languages: [(String, String)] = [
@@ -410,6 +412,23 @@ struct DictationSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Microphone", selection: $model.inputDeviceUID) {
+                    Text("System default").tag(String?.none)
+                    ForEach(inputDevices, id: \.uid) { device in
+                        Text(device.name).tag(String?.some(device.uid))
+                    }
+                    // A chosen mic that is unplugged right now must stay
+                    // selected (an unmatched tag renders the picker empty);
+                    // it wins again automatically when it reconnects.
+                    if let uid = model.inputDeviceUID,
+                       !inputDevices.contains(where: { $0.uid == uid }) {
+                        Text("Chosen microphone (not connected)").tag(String?.some(uid))
+                    }
+                }
+            } footer: {
+                SettingsFooter("Velora records from this microphone even when macOS switches its default input (for example when AirPods connect). System default follows macOS.")
+            }
             Section {
                 Picker("Language", selection: $model.language) {
                     ForEach(Self.languages, id: \.0) { code, name in
@@ -458,6 +477,13 @@ struct DictationSettingsView: View {
         }
         .formStyle(.grouped)
         .task(id: model.saveAudio) { archiveSize = await Self.archiveSizeDescription() }
+        .onAppear {
+            AudioInputDevices.beginObserving()
+            inputDevices = AudioInputDevices.displayList()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .veloraAudioInputDevicesChanged)) { _ in
+            inputDevices = AudioInputDevices.displayList()
+        }
     }
 
     /// Sums the archived-clip directory size off the main thread.

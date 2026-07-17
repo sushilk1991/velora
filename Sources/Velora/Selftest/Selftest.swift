@@ -90,6 +90,7 @@ enum Selftest {
         testLocalControlSocket()
         testHUDGeometry()
         testSettingsSidebar()
+        testAudioInputDeviceResolution()
         testInsertionBoundary()
         testEmptyFinalFeedback()
         testClipboardStaging()
@@ -3102,6 +3103,37 @@ enum Selftest {
         expect(
             updates.contains(.general) && updates.contains(.about),
             "\"updates\" finds both homes of the update controls")
+    }
+
+    // MARK: - Microphone selection
+
+    private static func testAudioInputDeviceResolution() {
+        let mac = AudioInputDevices.Device(uid: "BuiltInMicUID", name: "MacBook Pro Microphone", id: 41)
+        let pods = AudioInputDevices.Device(uid: "AirPodsUID", name: "Sushil's AirPods Pro", id: 77)
+
+        expect(
+            AudioInputDevices.resolve(persistedUID: nil, in: [mac, pods]) == nil,
+            "no persisted mic follows the system default")
+        expect(
+            AudioInputDevices.resolve(persistedUID: "", in: [mac, pods]) == nil,
+            "an empty persisted UID follows the system default, never matches a device")
+        expect(
+            AudioInputDevices.resolve(persistedUID: "BuiltInMicUID", in: [mac, pods]) == mac.id,
+            "the persisted mic resolves to its device id while connected")
+        expect(
+            AudioInputDevices.resolve(persistedUID: "BuiltInMicUID", in: [pods]) == nil,
+            "an unplugged persisted mic falls back to the system default")
+
+        // The AirPods scenario: the chosen built-in mic disappears and comes
+        // back. The persisted UID is never rewritten by resolution — the same
+        // value must win again the moment the device is available.
+        let persisted = "BuiltInMicUID"
+        expect(
+            AudioInputDevices.resolve(persistedUID: persisted, in: []) == nil,
+            "no devices at all still resolves cleanly to the system default")
+        expect(
+            AudioInputDevices.resolve(persistedUID: persisted, in: [pods, mac]) == mac.id,
+            "the preserved choice wins again when its device reappears")
     }
 
     // MARK: - Final-output clipboard staging

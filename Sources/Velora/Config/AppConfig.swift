@@ -194,6 +194,7 @@ final class AppConfig {
         static let meetingCalendar = "velora.meetingCalendar"
         static let meetingAudioRetentionDays = "velora.meetingAudioRetentionDays"
         static let meetingDiarization = "velora.meetingDiarization"
+        static let inputDeviceUID = "velora.inputDeviceUID"
         static let editHotkey = "velora.editHotkey.v1"
         static let voiceEdit = "velora.voiceEdit"
         static let updateChecks = "velora.updateChecks"
@@ -347,6 +348,17 @@ final class AppConfig {
                 defaults.removeObject(forKey: Key.hudCustomOriginX)
                 defaults.removeObject(forKey: Key.hudCustomOriginY)
             }
+        }
+    }
+
+    /// UID of the microphone to record from; nil = follow the system default.
+    /// Kept while the device is unplugged so the choice wins again on
+    /// reconnect (see AudioInputDevices.resolve).
+    var inputDeviceUID: String? {
+        get { defaults.string(forKey: Key.inputDeviceUID) }
+        set {
+            if let newValue { defaults.set(newValue, forKey: Key.inputDeviceUID) }
+            else { defaults.removeObject(forKey: Key.inputDeviceUID) }
         }
     }
 
