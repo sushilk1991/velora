@@ -319,7 +319,7 @@ struct ModesSettingsView: View {
             .buttonStyle(.borderless)
             .padding(VeloraSpacing.s)
         }
-        .frame(width: 200)
+        .frame(width: 180)
     }
 
     private static func symbol(for mode: Mode) -> String {
@@ -385,10 +385,20 @@ private struct ModeEditor: View {
                 }
 
                 Section {
+                    // A visibly editable text area — borderless looked like a
+                    // caption, and the owner read the whole pane as unclear.
                     TextEditor(text: $vm.draft.prompt)
                         .font(.body)
                         .scrollContentBackground(.hidden)
-                        .frame(minHeight: 96)
+                        .frame(minHeight: 120)
+                        .padding(VeloraSpacing.xs)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color(.textBackgroundColor)))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .strokeBorder(Color(.separatorColor)))
+                        .padding(.vertical, VeloraSpacing.xs)
                 } header: {
                     Text("AI instructions")
                 } footer: {
@@ -396,20 +406,23 @@ private struct ModeEditor: View {
                 }
 
                 Section {
-                    TextField(
+                    // Long comma lists get label-above, wrapping fields — the
+                    // labeled-row idiom truncated them into an unreadable
+                    // right-aligned sliver in this column.
+                    stackedField(
                         "Apps", text: $appsText,
-                        prompt: Text("com.tinyspeck.slackmacgap, com.apple.MobileSMS"))
+                        prompt: "com.tinyspeck.slackmacgap, com.apple.MobileSMS")
                         .onChange(of: appsText) { _, text in
                             vm.draft.apps = Mode.parseList(text)
                         }
-                    TextField(
+                    stackedField(
                         "Vocabulary", text: $vocabularyText,
-                        prompt: Text("Velora, Anthropic, Kubernetes"))
+                        prompt: "Velora, Anthropic, Kubernetes")
                         .onChange(of: vocabularyText) { _, text in
                             vm.draft.vocabulary = Mode.parseList(text)
                         }
                 } footer: {
-                    SettingsFooter("Apps lists the bundle identifiers this mode auto-activates for; Vocabulary adds words and proper nouns it should recognize. Both are comma separated.")
+                    SettingsFooter("Apps lists the bundle identifiers this mode auto-activates for; Vocabulary adds words and proper nouns it should recognize. Both are comma separated. Modes also activate from the menubar's Mode menu.")
                 }
 
                 Section {
@@ -444,6 +457,20 @@ private struct ModeEditor: View {
         vocabularyText = vm.draft.vocabulary.joined(separator: ", ")
     }
 
+    /// Label-above bordered field that wraps long values across lines.
+    private func stackedField(
+        _ label: String, text: Binding<String>, prompt: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+            Text(label)
+            TextField(label, text: text, prompt: Text(prompt), axis: .vertical)
+                .labelsHidden()
+                .lineLimit(1...4)
+                .textFieldStyle(.roundedBorder)
+        }
+        .padding(.vertical, VeloraSpacing.xs)
+    }
+
     private var replacementsTable: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
             ForEach($vm.draft.replacements) { $pair in
@@ -451,6 +478,7 @@ private struct ModeEditor: View {
                     TextField("heard", text: $pair.key).textFieldStyle(.roundedBorder)
                     Image(systemName: "arrow.right").foregroundStyle(.tertiary)
                     TextField("written", text: $pair.value).textFieldStyle(.roundedBorder)
+                        .padding(.vertical, 0)
                     Button {
                         vm.draft.replacements.removeAll { $0.id == pair.id }
                     } label: {
@@ -485,10 +513,6 @@ private struct ModeEditor: View {
             }
 
             Spacer()
-
-            Text("Modes activate automatically per app — or force one from the menubar.")
-                .font(.caption).foregroundStyle(.secondary)
-                .lineLimit(2)
 
             Button("Save") {
                 vm.save()
