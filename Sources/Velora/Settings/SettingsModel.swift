@@ -257,6 +257,9 @@ final class SettingsModel: ObservableObject {
             if self.hudAlwaysVisible != self.config.hudAlwaysVisible {
                 self.hudAlwaysVisible = self.config.hudAlwaysVisible
             }
+            if self.inputDeviceUID != self.config.inputDeviceUID {
+                self.inputDeviceUID = self.config.inputDeviceUID
+            }
             self.syncingHUDPrefs = false
         }
         dictionaryRowsObserver = dictionary.$rows.sink { [weak self] _ in

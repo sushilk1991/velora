@@ -547,6 +547,37 @@ final class HUDPanel: NSObject {
         position.submenu = positionMenu
         menu.addItem(position)
 
+        // Microphone choice, mirroring Settings → Dictation (user ask: pick
+        // the mic straight from the pill, e.g. keep the MacBook mic while
+        // AirPods are connected).
+        let mic = NSMenuItem(title: "Microphone", action: nil, keyEquivalent: "")
+        let micMenu = NSMenu()
+        let chosenUID = AppConfig.shared.inputDeviceUID
+        let systemDefault = NSMenuItem(
+            title: "System Default", action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+        systemDefault.target = self
+        systemDefault.state = chosenUID == nil ? .on : .off
+        micMenu.addItem(systemDefault)
+        let devices = AudioInputDevices.displayList()
+        if !devices.isEmpty { micMenu.addItem(.separator()) }
+        for device in devices {
+            let item = NSMenuItem(
+                title: device.name, action: #selector(selectMicrophone(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = device.uid
+            item.state = chosenUID == device.uid ? .on : .off
+            micMenu.addItem(item)
+        }
+        if let chosenUID, !devices.contains(where: { $0.uid == chosenUID }) {
+            let missing = NSMenuItem(
+                title: "Chosen microphone (not connected)", action: nil, keyEquivalent: "")
+            missing.isEnabled = false
+            missing.state = .on
+            micMenu.addItem(missing)
+        }
+        mic.submenu = micMenu
+        menu.addItem(mic)
+
         let keep = NSMenuItem(
             title: "Keep on Screen When Idle", action: #selector(toggleAlwaysVisible),
             keyEquivalent: "")
@@ -617,6 +648,13 @@ final class HUDPanel: NSObject {
         guard let raw = sender.representedObject as? String,
               let preset = HUDPosition(rawValue: raw) else { return }
         AppConfig.shared.hudPosition = preset
+        NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+    }
+
+    /// representedObject is the device UID; nil (the System Default item)
+    /// clears the pin. Applies at the next capture start.
+    @objc private func selectMicrophone(_ sender: NSMenuItem) {
+        AppConfig.shared.inputDeviceUID = sender.representedObject as? String
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
     }
 
