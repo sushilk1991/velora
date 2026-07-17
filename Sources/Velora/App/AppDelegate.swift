@@ -28,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var loadingObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
     private var terminationPending = false
+    private var terminationReplied = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
@@ -294,19 +295,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
+        veloraLog("Velora: termination requested")
+        // Watchdog: if any teardown callback below is parked and never fires,
+        // the pending reply would leave the app unquittable forever — and the
+        // `terminationPending` latch makes every LATER quit a silent no-op
+        // (field report: menubar Quit dead + update stuck on "Installing…").
+        // Losing the tail of a meeting finalize after 8s is strictly better
+        // than an app that can never exit.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self, !self.terminationReplied else { return }
+            veloraLog("Velora: termination watchdog fired — forcing quit")
+            self.replyTerminationOnce()
+        }
         // Stop accepting new long-running work, then wait for meeting audio to
         // finalize before allowing AppKit to tear down the engine and process.
         controlServer?.stop()
         dictation?.cancelForTermination()
         transcriber?.cancelForTermination()
         guard let meetingCoordinator else {
-            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+            DispatchQueue.main.async { self.replyTerminationOnce() }
             return .terminateLater
         }
-        meetingCoordinator.finishForTermination {
-            DispatchQueue.main.async { NSApp.reply(toApplicationShouldTerminate: true) }
+        meetingCoordinator.finishForTermination { [weak self] in
+            DispatchQueue.main.async { self?.replyTerminationOnce() }
         }
         return .terminateLater
+    }
+
+    /// Answers the pending terminateLater exactly once — the normal completion
+    /// and the watchdog can both race to deliver it.
+    private func replyTerminationOnce() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !terminationReplied else { return }
+        terminationReplied = true
+        veloraLog("Velora: termination proceeding")
+        NSApp.reply(toApplicationShouldTerminate: true)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

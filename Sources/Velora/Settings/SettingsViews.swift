@@ -257,6 +257,26 @@ struct GeneralSettingsView: View {
             }
             Section {
                 Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
+                if model.localAgentAccess {
+                    agentIntegrationRow(
+                        title: "Command-line tool",
+                        detail: model.cliInstallPath
+                            ?? "Puts a “velora” command on your PATH.",
+                        buttonTitle: model.cliInstallPath == nil ? "Install" : "Reinstall"
+                    ) { model.installCLITool() }
+                    agentIntegrationRow(
+                        title: "Agent skill",
+                        detail: model.agentSkillInstalled
+                            ? "Installed — Claude Code knows what it can ask Velora."
+                            : "Teaches local agents (Claude Code) where to look and what they can ask.",
+                        buttonTitle: model.agentSkillInstalled ? "Reinstall" : "Install"
+                    ) { model.installAgentSkill() }
+                    if let error = model.agentIntegrationError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
             } header: {
                 Text("Advanced")
             } footer: {
@@ -274,10 +294,28 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { model.refreshAgentIntegration() }
     }
 
     private var updateStatusRow: some View {
         UpdateActionRow(model: model)
+    }
+
+    /// Title + status caption on the left, install action on the right.
+    private func agentIntegrationRow(
+        title: String, detail: String, buttonTitle: String, action: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button(buttonTitle, action: action)
+        }
     }
 }
 

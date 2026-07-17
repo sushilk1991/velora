@@ -421,6 +421,36 @@ final class SettingsModel: ObservableObject {
         didSet { config.localAgentAccess = localAgentAccess }
     }
 
+    // MARK: Agent integration (CLI on PATH + agent skill)
+
+    @Published var cliInstallPath: String?
+    @Published var agentSkillInstalled = false
+    @Published var agentIntegrationError: String?
+
+    func refreshAgentIntegration() {
+        cliInstallPath = AgentIntegration.installedCLIPath()
+        agentSkillInstalled = AgentIntegration.skillInstalled()
+    }
+
+    func installCLITool() {
+        do {
+            cliInstallPath = try AgentIntegration.installCLI()
+            agentIntegrationError = nil
+        } catch {
+            agentIntegrationError = error.localizedDescription
+        }
+    }
+
+    func installAgentSkill() {
+        do {
+            _ = try AgentIntegration.installSkill()
+            agentSkillInstalled = true
+            agentIntegrationError = nil
+        } catch {
+            agentIntegrationError = error.localizedDescription
+        }
+    }
+
     @Published var updateChecks: Bool {
         didSet { config.updateChecks = updateChecks }
     }

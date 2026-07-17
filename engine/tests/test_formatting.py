@@ -716,6 +716,33 @@ def test_romanize_ignores_latin_text(config):
     assert gate.romanize is False
 
 
+def test_romanize_wins_in_formatting_off_modes(config):
+    # Script intent outranks formatting-off: Hindi dictated into a terminal
+    # must still romanize (owner report: the toggle looked broken because
+    # the off-branch returned before the romanize check).
+    config.data["romanize_output"] = True
+    gate = run_gate(
+        "नमस्ते आज मौसम बहुत अच्छा है और मैं काम कर रहा हूँ",
+        config, bundle_id="com.googlecode.iterm2")
+    assert gate.romanize is True
+    assert gate.reason == "romanize"
+
+
+def test_non_latin_skips_smart_terminal(config):
+    # With romanize OFF, long non-Latin terminal dictation must keep its
+    # native script — never the English-tuned smart-terminal prompt.
+    config.data["romanize_output"] = False
+    gate = run_gate(
+        "नमस्ते आज मौसम बहुत अच्छा है और मैं काम कर रहा हूँ "
+        "क्योंकि आज बहुत सारा काम बाकी है",
+        config, bundle_id="com.googlecode.iterm2")
+    assert gate.use_llm is False
+    # Terminal's own verbatim path answers first; what matters is that no
+    # English-tuned prompt runs and the script survives untouched.
+    assert gate.reason == "formatting_off"
+    assert "नमस्ते" in gate.text
+
+
 # ---- screen-context entities feed the cleanup prompt ----
 
 

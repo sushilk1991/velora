@@ -565,6 +565,15 @@ final class HUDPanel: NSObject {
         settings.target = self
         menu.addItem(settings)
 
+        menu.addItem(.separator())
+        // An escape hatch that works even if the menubar icon is hidden or
+        // wedged (user report: no way to quit from the pill).
+        let quit = NSMenuItem(
+            title: "Quit Velora", action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "")
+        quit.target = NSApp
+        menu.addItem(quit)
+
         return menu
     }
 

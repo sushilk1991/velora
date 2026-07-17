@@ -2827,6 +2827,25 @@ enum Selftest {
             expect(!FileManager.default.fileExists(atPath: path),
                    "stopping the server removes the stale socket")
         }
+
+        // Agent integration: the skill must tell agents the truth about the
+        // surface — command names, flags, the socket path, and the gate.
+        let skill = AgentIntegration.skillMarkdown(
+            cliPath: "/opt/homebrew/bin/velora", version: "9.9.9")
+        for token in [
+            "velora status", "velora recent", "velora search", "velora stats",
+            "velora transcribe", "velora listen", "--json",
+            "~/.velora/control.sock", "access_disabled",
+            "/opt/homebrew/bin/velora", "velora mcp", "name: velora",
+        ] {
+            expect(skill.contains(token), "agent skill documents \(token)")
+        }
+        expect(skill.contains("Velora 9.9.9"), "agent skill stamps the real version")
+        let dirs = AgentIntegration.candidateBinDirectories()
+        expect(!dirs.isEmpty && dirs.allSatisfy { $0.path.hasPrefix("/") },
+               "CLI install candidates are absolute paths")
+        expect(dirs.contains { $0.path.hasSuffix("/.local/bin") },
+               "CLI install candidates include the personal bin fallback")
     }
 
     // MARK: - Mode categories

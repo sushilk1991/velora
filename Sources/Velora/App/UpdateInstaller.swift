@@ -423,6 +423,17 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                 guard gen == self.generation, case .installing = self.state else { return }
                 guard self.spawnHelper(staged: staged, relaunch: true) else { return }
                 NSApp.terminate(nil)
+                // Escalation: a wedged terminate reply used to leave the app
+                // alive showing "Installing…" forever while the helper waited
+                // for an exit that never came (field report, 0.8.1 → 0.9.0).
+                // The helper re-verifies the bytes and handles the swap +
+                // relaunch on its own once this process dies, so after a
+                // grace period a hard exit is strictly better than a zombie.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
+                    guard gen == self.generation, case .installing = self.state else { return }
+                    veloraLog("Velora: update terminate did not complete in 15s — forcing exit for the swap helper")
+                    exit(0)
+                }
             }
         }
     }

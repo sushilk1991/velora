@@ -798,6 +798,18 @@ def run_gate(
 
     text = raw.strip()
 
+    # Romanization is explicit SCRIPT intent, not cleanup, so it outranks
+    # every formatting decision below — including formatting-off modes. It
+    # used to live after the off-branch return, which meant dictating Hindi
+    # into a terminal (Terminal/Raw are formatting-off) never romanized and
+    # the toggle looked broken (owner report).
+    if getattr(config, "romanize_output", False) and is_mostly_non_latin(text):
+        cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
+        return GateResult(
+            mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT,
+            replacements, romanize=True, entities=entities or [],
+            auto_punctuation=config.auto_punctuation)
+
     if mode.formatting == "off":
         # Smart terminal: route long or unmistakably prose-shaped dictation to
         # the existing terminal-aware cleanup prompt. Scoped to the built-in
@@ -808,6 +820,9 @@ def run_gate(
             getattr(config, "smart_terminal", True)
             and mode.name.lower() == "terminal"
             and not mode.prompt.strip()
+            # Non-Latin text must fall through to the native-script skip —
+            # the smart-terminal prompt is English-tuned.
+            and not is_mostly_non_latin(text)
             and (
                 len(text.split()) >= SMART_TERMINAL_MIN_WORDS
                 or _short_terminal_is_prose(text)
@@ -851,19 +866,11 @@ def run_gate(
             auto_punctuation=config.auto_punctuation)
 
     if is_mostly_non_latin(text):
+        # Keep the native script (romanize, handled above, is the only
+        # non-Latin LLM path) and skip the English-tuned cleanup LLM. Checked
+        # BEFORE the short-utterance path so an unspaced CJK sentence doesn't
+        # get a Latin period appended.
         cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
-        if getattr(config, "romanize_output", False):
-            # Opt-in: transliterate non-Latin → Latin script via the LLM
-            # (Hindi → natural Hinglish). Deterministic transliteration reads
-            # badly (no schwa deletion); the multilingual LLM does it well.
-            return GateResult(
-                mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT,
-                replacements, romanize=True, entities=entities or [],
-                auto_punctuation=config.auto_punctuation,
-            )
-        # Otherwise keep the native script and skip the English-tuned cleanup
-        # LLM. Checked BEFORE the short-utterance path so an unspaced CJK
-        # sentence doesn't get a Latin period appended.
         out = apply_replacements(cleaned, replacements)
         return GateResult(
             mode, category, False, "non_latin_script", out, None,

@@ -133,18 +133,22 @@ final class MeetingCoordinator: ObservableObject {
             return
         }
         if finishingMeetingID != nil {
+            veloraLog("Velora: termination waiting on meeting finish")
             finishCallbacks.append(completion)
             return
         }
         if discardingMeetingID != nil {
+            veloraLog("Velora: termination waiting on meeting discard")
             finishCallbacks.append(completion)
             return
         }
         if state.isRecording {
+            veloraLog("Velora: termination finalizing active meeting recording")
             finishActiveRecording(enqueue: false, completion: completion)
             return
         }
         guard capture.isCapturing else { completion(); return }
+        veloraLog("Velora: termination stopping pending meeting capture")
         let pendingID = pendingMeetingID
         capture.stop(cancelled: true) { [weak self] _ in
             guard let self else { completion(); return }
