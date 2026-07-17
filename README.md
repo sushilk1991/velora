@@ -70,7 +70,7 @@ Prefer not to build? Install with Homebrew:
 brew install --cask sushilk1991/tap/velora
 ```
 
-Or grab `Velora-x.y.z.dmg` from [Releases](https://github.com/sushilk1991/velora/releases), drag Velora to Applications, and open it. Releases from v0.4.3 onward are Developer ID-signed and notarized by Apple, so they open normally through Gatekeeper. The older v0.4.1 image predates notarization and should be replaced rather than bypassed.
+Or grab the latest release from [Releases](https://github.com/sushilk1991/velora/releases), drag Velora to Applications, and open it.
 
 > Run the `.app` bundle, not the bare binary — macOS permission grants (mic, accessibility) attach to the signed bundle identity.
 >
@@ -175,16 +175,6 @@ Known limitations:
 
 ## Contributing & license
 
-Developer ID release builds that include Personal Dictionary sync need the explicit `com.sushil.velora` App ID with iCloud Documents enabled, the existing `iCloud.com.velora.app` ubiquity container, and an Apple-issued Developer ID provisioning profile. Keep that expiring profile outside Git and pass its path at release time:
-
-```sh
-VELORA_DISTRIBUTION=1 \
-VELORA_PROVISIONING_PROFILE="$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/velora.provisionprofile" \
-./scripts/make-dmg.sh release minor
-```
-
-The packaging scripts decode the profile before version stamping, require the exact Team ID, bundle ID, iCloud container, and `CloudDocuments` service, embed it at `Contents/embedded.provisionprofile`, and re-check the signed app during DMG verification. Ordinary local `make app` builds do not require a profile.
-
-Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout, and PR guidelines.
+Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, repo layout, and PR guidelines. Building the app locally is just `make app`; no signing setup or Apple credentials are needed.
 
 Licensed under the [MIT License](LICENSE).
