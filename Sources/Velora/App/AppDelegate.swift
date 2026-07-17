@@ -234,9 +234,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyMonitor.start()
 
         UpdateChecker.shared.onUpdate = { [weak self] update in
-            self?.statusController.updateAvailable = update
+            guard let self else { return }
+            self.statusController.updateAvailable = update
+            // Opt-in autoupdate: fetch + verify + stage silently; the swap
+            // happens on the next quit or via "Restart to Update". begin()
+            // no-ops while busy or when this version is already staged.
+            if self.config.autoInstallUpdates, UpdateInstaller.canInstallInPlace {
+                UpdateInstaller.shared.begin(update)
+            }
         }
-        UpdateChecker.shared.checkAfterLaunch()
+        UpdateChecker.shared.startPeriodicChecks()
+        UpdateInstaller.shared.resumeOrCleanOnLaunch()
         veloraLog("Velora: hotkey monitor started (usingEventTap=\(hotkeyMonitor.usingEventTap))")
         supervisor.start()
         dictionarySync.start()
@@ -299,6 +307,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        UpdateInstaller.shared.installOnQuitIfReady()
         dictation?.cancelForTermination()
         transcriber?.cancelForTermination()
         meetingCoordinator?.stop()

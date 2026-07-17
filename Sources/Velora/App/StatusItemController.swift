@@ -277,16 +277,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        if let update = updateAvailable {
-            let item = NSMenuItem(
-                title: "Update Available — \(update.version)…",
-                action: #selector(openUpdatePage), keyEquivalent: "")
-            item.target = self
-            item.representedObject = update.page
-            item.image = NSImage(
-                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
-            menu.addItem(item)
-        }
+        addUpdateItems(to: menu)
 
         let historyItem = NSMenuItem(
             title: "History…", action: #selector(openHistory), keyEquivalent: "")
@@ -324,6 +315,74 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit Velora", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// One menu line reflecting the updater's state: an offer to update
+    /// in-place, live download progress, or a restart button once a verified
+    /// build is staged. Falls back to the releases page when in-place
+    /// installs are impossible (dev builds, unwritable /Applications, …).
+    private func addUpdateItems(to menu: NSMenu) {
+        func disabled(_ title: String) {
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            item.image = NSImage(
+                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            menu.addItem(item)
+        }
+        switch UpdateInstaller.shared.state {
+        case .downloading(let version, let progress):
+            disabled("Downloading Velora \(version) — \(Int(progress * 100))%")
+        case .verifying(let version):
+            disabled("Verifying Velora \(version)…")
+        case .installing:
+            disabled("Installing Update…")
+        case .ready(let version):
+            let item = NSMenuItem(
+                title: "Restart to Update to \(version)",
+                action: #selector(installStagedUpdate), keyEquivalent: "")
+            item.target = self
+            item.image = NSImage(
+                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+            menu.addItem(item)
+        case .idle, .failed:
+            guard let update = updateAvailable else {
+                // A resume-adopted update that failed at install time has no
+                // checker discovery to fall back on — still leave the user a
+                // path forward.
+                if case .failed(let reason) = UpdateInstaller.shared.state {
+                    let item = NSMenuItem(
+                        title: "Update Failed — Open Releases Page…",
+                        action: #selector(openUpdatePage), keyEquivalent: "")
+                    item.target = self
+                    item.toolTip = reason
+                    item.representedObject = URL(
+                        string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest")
+                    item.image = NSImage(
+                        systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+                    menu.addItem(item)
+                }
+                return
+            }
+            let item: NSMenuItem
+            if update.asset != nil, UpdateInstaller.canInstallInPlace {
+                item = NSMenuItem(
+                    title: "Update to Velora \(update.version)…",
+                    action: #selector(startUpdate), keyEquivalent: "")
+                item.representedObject = update
+            } else {
+                item = NSMenuItem(
+                    title: "Update Available — \(update.version)…",
+                    action: #selector(openUpdatePage), keyEquivalent: "")
+                item.representedObject = update.page
+            }
+            if case .failed(let reason) = UpdateInstaller.shared.state {
+                item.toolTip = "Last attempt failed: \(reason)"
+            }
+            item.target = self
+            item.image = NSImage(
+                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            menu.addItem(item)
+        }
     }
 
     private static func truncate(_ text: String, to limit: Int) -> String {
@@ -381,6 +440,15 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     @objc private func openUpdatePage(_ sender: NSMenuItem) {
         guard let page = sender.representedObject as? URL else { return }
         NSWorkspace.shared.open(page)
+    }
+
+    @objc private func startUpdate(_ sender: NSMenuItem) {
+        guard let update = sender.representedObject as? UpdateChecker.Update else { return }
+        UpdateInstaller.shared.begin(update)
+    }
+
+    @objc private func installStagedUpdate() {
+        UpdateInstaller.shared.installAndRelaunch()
     }
 
     @objc private func openSetupAssistant() {

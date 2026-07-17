@@ -11,6 +11,13 @@ if CommandLine.arguments.contains("--selftest") {
     exit(Selftest.run())
 }
 
+// Headless updater end-to-end: exercises check → download → verify → stage
+// (→ swap with --install) against the real pipeline without starting the
+// app. See UpdateE2E; point VELORA_UPDATE_FEED_URL at a local feed to drive.
+if CommandLine.arguments.contains("--update-e2e") {
+    exit(UpdateE2E.run(install: CommandLine.arguments.contains("--install")))
+}
+
 // Headless UI snapshots: renders HUD states + Settings panes to PNGs in the
 // given directory (offscreen — nothing appears on the user's display).
 if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),

@@ -196,6 +196,7 @@ final class AppConfig {
         static let editHotkey = "velora.editHotkey.v1"
         static let voiceEdit = "velora.voiceEdit"
         static let updateChecks = "velora.updateChecks"
+        static let autoInstallUpdates = "velora.autoInstallUpdates"
         static let lastUpdateCheckAt = "velora.lastUpdateCheckAt"
     }
 
@@ -227,6 +228,9 @@ final class AppConfig {
             Key.meetingDiarization: true,
             Key.voiceEdit: true,
             Key.updateChecks: true,
+            // Off by default: downloading and swapping the app without being
+            // asked should be something the user opted into.
+            Key.autoInstallUpdates: false,
         ])
         migrateLegacyHotkeyIfNeeded()
     }
@@ -424,6 +428,13 @@ final class AppConfig {
     var updateChecks: Bool {
         get { defaults.bool(forKey: Key.updateChecks) }
         set { defaults.set(newValue, forKey: Key.updateChecks) }
+    }
+
+    /// When a daily check finds a release, download + verify + stage it
+    /// silently and install on the next quit or restart (UpdateInstaller).
+    var autoInstallUpdates: Bool {
+        get { defaults.bool(forKey: Key.autoInstallUpdates) }
+        set { defaults.set(newValue, forKey: Key.autoInstallUpdates) }
     }
 
     var lastUpdateCheck: Date {

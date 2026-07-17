@@ -57,6 +57,7 @@ final class SettingsModel: ObservableObject {
     private weak var supervisor: EngineSupervisor?
     private var statusObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
+    private var updateStateObserver: NSObjectProtocol?
     let dictionary: DictionaryRepository
     let dictionarySync: ICloudDictionarySync
     private var dictionaryRowsObserver: AnyCancellable?
@@ -225,6 +226,9 @@ final class SettingsModel: ObservableObject {
         typingWPM = config.typingWPM
         localAgentAccess = config.localAgentAccess
         updateChecks = config.updateChecks
+        autoInstallUpdates = config.autoInstallUpdates
+        updateState = UpdateInstaller.shared.state
+        availableUpdate = UpdateChecker.shared.available
         meetingSuggestions = config.meetingSuggestions
         meetingCalendar = config.meetingCalendar
         meetingAudioRetentionDays = config.meetingAudioRetentionDays
@@ -260,12 +264,20 @@ final class SettingsModel: ObservableObject {
         dictionarySyncObserver = dictionarySync.$status.sink { [weak self] status in
             self?.dictionarySyncStatus = status
         }
+        updateStateObserver = NotificationCenter.default.addObserver(
+            forName: .veloraUpdateStateChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.updateState = UpdateInstaller.shared.state
+            self.availableUpdate = UpdateChecker.shared.available
+        }
         requestStatus()
     }
 
     deinit {
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
         if let hudPrefsObserver { NotificationCenter.default.removeObserver(hudPrefsObserver) }
+        if let updateStateObserver { NotificationCenter.default.removeObserver(updateStateObserver) }
     }
 
     /// Asks the engine for its current status (models, retention, …). Cheap;
@@ -413,21 +425,68 @@ final class SettingsModel: ObservableObject {
         didSet { config.updateChecks = updateChecks }
     }
 
+    @Published var autoInstallUpdates: Bool {
+        didSet {
+            config.autoInstallUpdates = autoInstallUpdates
+            // Flipping the toggle on with an update already discovered should
+            // act on it now, not wait for tomorrow's check.
+            if autoInstallUpdates, let update = availableUpdate,
+               UpdateInstaller.canInstallInPlace {
+                UpdateInstaller.shared.begin(update)
+            }
+        }
+    }
+
     /// Manual "Check Now" state for the General tab; nil = never ran.
     @Published var updateCheckStatus: String?
+
+    /// Mirrors UpdateInstaller.shared.state / UpdateChecker.shared.available
+    /// for the Updates section (kept fresh by the state-change observer).
+    @Published var updateState: UpdateInstaller.State
+    @Published var availableUpdate: UpdateChecker.Update?
 
     func checkForUpdatesNow() {
         updateCheckStatus = "Checking…"
         UpdateChecker.shared.check { [weak self] outcome in
+            guard let self else { return }
             switch outcome {
             case .upToDate:
-                self?.updateCheckStatus = "You're on the latest version."
+                self.updateCheckStatus = "You're on the latest version."
             case .updateAvailable(let update):
-                self?.updateCheckStatus = "Velora \(update.version) is available."
+                self.updateCheckStatus = "Velora \(update.version) is available."
+                self.availableUpdate = update
             case .failed(let reason):
-                self?.updateCheckStatus = reason
+                self.updateCheckStatus = reason
             }
         }
+    }
+
+    /// Whether the Updates section can offer a one-click in-place install.
+    var canInstallUpdateInPlace: Bool {
+        availableUpdate?.asset != nil && UpdateInstaller.canInstallInPlace
+    }
+
+    func startUpdateInstall() {
+        guard let update = availableUpdate else { return }
+        UpdateInstaller.shared.begin(update)
+    }
+
+    func installStagedUpdate() {
+        UpdateInstaller.shared.installAndRelaunch()
+    }
+
+    func discardStagedUpdate() {
+        UpdateInstaller.shared.discardStagedUpdate()
+    }
+
+    func cancelUpdateDownload() {
+        UpdateInstaller.shared.cancelDownload()
+    }
+
+    func openReleasesPage() {
+        let url = availableUpdate?.page
+            ?? URL(string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest")!
+        NSWorkspace.shared.open(url)
     }
 
     @Published var meetingSuggestions: Bool {

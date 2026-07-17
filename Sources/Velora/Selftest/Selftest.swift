@@ -114,7 +114,15 @@ enum Selftest {
                "junk suffix compares by numeric prefix")
 
         let ok = """
-        {"tag_name": "v9.9.9", "html_url": "https://github.com/x/y/releases/tag/v9.9.9"}
+        {"tag_name": "v9.9.9", "html_url": "https://github.com/x/y/releases/tag/v9.9.9",
+         "assets": [
+           {"name": "Velora-9.9.9.zip", "size": 5,
+            "browser_download_url": "https://github.com/x/y/releases/download/v9.9.9/Velora-9.9.9.zip"},
+           {"name": "Other.dmg", "size": 7,
+            "browser_download_url": "https://github.com/x/y/releases/download/v9.9.9/Other.dmg"},
+           {"name": "Velora-9.9.9.dmg", "size": 42,
+            "browser_download_url": "https://github.com/x/y/releases/download/v9.9.9/Velora-9.9.9.dmg"}
+         ]}
         """.data(using: .utf8)
         let http = HTTPURLResponse(
             url: URL(string: "https://api.github.com")!, statusCode: 200,
@@ -123,9 +131,42 @@ enum Selftest {
             current: "0.7.2", data: ok, response: http, error: nil) {
             expect(update.version == "9.9.9", "parses and strips the v prefix")
             expect(update.page.absoluteString.hasSuffix("v9.9.9"), "uses the release html_url")
+            expect(update.asset?.name == "Velora-9.9.9.dmg",
+                   "prefers the canonical versioned DMG over other assets")
+            expect(update.asset?.size == 42, "carries the asset size")
         } else {
             expect(false, "release feed with newer tag parses as updateAvailable")
         }
+        let noAssets = """
+        {"tag_name": "v9.9.9", "html_url": "https://github.com/x/y/releases/tag/v9.9.9"}
+        """.data(using: .utf8)
+        if case .updateAvailable(let update) = UpdateChecker.parse(
+            current: "0.7.2", data: noAssets, response: http, error: nil) {
+            expect(update.asset == nil, "release without a DMG still surfaces, without an asset")
+        } else {
+            expect(false, "release without assets parses as updateAvailable")
+        }
+        expect(UpdateChecker.pickAsset(version: "1.0.0", assets: [
+            ["name": "Other.dmg", "size": 1,
+             "browser_download_url": "https://github.com/x/y/releases/download/v1/Other.dmg"]
+        ])?.name == "Other.dmg", "falls back to any DMG when the canonical name is absent")
+        expect(UpdateChecker.pickAsset(version: "1.0.0", assets: [
+            ["name": "Velora.zip", "size": 1,
+             "browser_download_url": "https://github.com/x/y/releases/download/v1/Velora.zip"]
+        ]) == nil, "non-DMG assets are never picked")
+        // Downloads are pinned to GitHub over HTTPS (the feed URL override is
+        // absent in selftest runs, so the pin is active).
+        expect(UpdateChecker.pickAsset(version: "1.0.0", assets: [
+            ["name": "Velora-1.0.0.dmg", "size": 1,
+             "browser_download_url": "https://evil.example.com/Velora-1.0.0.dmg"]
+        ]) == nil, "assets hosted off GitHub are rejected")
+        expect(UpdateChecker.pickAsset(version: "1.0.0", assets: [
+            ["name": "Velora-1.0.0.dmg", "size": 1,
+             "browser_download_url": "http://github.com/x/y/Velora-1.0.0.dmg"]
+        ]) == nil, "plain-HTTP assets are rejected")
+        expect(UpdateChecker.assetURLAllowed(
+            URL(string: "https://objects.githubusercontent.com/x")!),
+            "the release-asset CDN host is allowed")
         if case .upToDate = UpdateChecker.parse(
             current: "9.9.9", data: ok, response: http, error: nil) {} else {
             expect(false, "same-version feed parses as upToDate")
@@ -142,6 +183,115 @@ enum Selftest {
             response: http, error: nil) {} else {
             expect(false, "garbage body parses as failed")
         }
+
+        testUpdateInstaller()
+    }
+
+    private static func testUpdateInstaller() {
+        // hdiutil `attach -plist` output → first mount point.
+        let hdiutilPlist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict>
+          <key>system-entities</key>
+          <array>
+            <dict><key>content-hint</key><string>GUID_partition_scheme</string></dict>
+            <dict>
+              <key>content-hint</key><string>Apple_HFS</string>
+              <key>mount-point</key><string>/Volumes/Velora</string>
+            </dict>
+          </array>
+        </dict></plist>
+        """.data(using: .utf8)!
+        expect(UpdateInstaller.mountPoint(fromHdiutilPlist: hdiutilPlist) == "/Volumes/Velora",
+               "extracts the mount point from hdiutil plist output")
+        expect(UpdateInstaller.mountPoint(fromHdiutilPlist: Data("junk".utf8)) == nil,
+               "garbage hdiutil output yields no mount point")
+
+        // The swap helper takes paths as positional arguments (no
+        // interpolation → no quoting bugs) and restores the old bundle when
+        // the swap fails.
+        let script = UpdateInstaller.helperScript
+        expect(script.hasPrefix("#!/bin/sh"), "helper script is a shell script")
+        expect(script.contains("PID=\"$1\""), "helper takes the pid as an argument")
+        expect(script.contains("mv \"$OLD\" \"$TARGET\""),
+               "helper restores the previous app when the swap fails")
+        expect(script.contains("/usr/bin/open \"$TARGET\""),
+               "helper can relaunch the swapped-in app")
+        expect(script.contains("codesign --verify --deep --strict"),
+               "helper re-validates the signature of the bytes it installs")
+        expect(!script.contains("/Applications"),
+               "helper hard-codes no paths — everything arrives as arguments")
+
+        testHelperScriptDryRun(script)
+
+        // A bare `swift build` binary (what runs this selftest) must never
+        // think it can swap itself.
+        expect(UpdateInstaller.installBlocker() != nil,
+               "bare binaries are blocked from in-place installs")
+
+        // The verify gate rejects an unsigned bundle outright.
+        let fake = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-selftest-\(UUID().uuidString).app")
+        try? FileManager.default.createDirectory(
+            at: fake.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fake) }
+        expect(UpdateInstaller.verifyStagedApp(at: fake, expectedVersion: "9.9.9") != nil,
+               "an unsigned bundle never passes the verify gate")
+    }
+
+    /// Actually executes the swap helper in a temp sandbox (both HIGH-severity
+    /// review findings lived in the helper's failure paths, so string checks
+    /// alone are not enough). The empty team argument skips the codesign
+    /// re-check — these are marker directories, not signed bundles. The dead
+    /// pid makes the wait loop exit immediately.
+    private static func testHelperScriptDryRun(_ script: String) {
+        let fm = FileManager.default
+        let sandbox = fm.temporaryDirectory
+            .appendingPathComponent("velora-helper-test-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: sandbox) }
+        let scriptFile = sandbox.appendingPathComponent("install.sh")
+        let log = sandbox.appendingPathComponent("log.txt")
+        let target = sandbox.appendingPathComponent("target.app")
+        let staged = sandbox.appendingPathComponent("staged.app")
+        let deadPID = "999999999"
+
+        func runHelper(stagedPath: String) -> Int32 {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/sh")
+            proc.arguments = [scriptFile.path, deadPID, stagedPath, target.path,
+                              "0", log.path, ""]
+            do { try proc.run() } catch { return -1 }
+            proc.waitUntilExit()
+            return proc.terminationStatus
+        }
+        func marker(_ dir: URL) -> String? {
+            try? String(contentsOf: dir.appendingPathComponent("marker"), encoding: .utf8)
+        }
+
+        do {
+            try fm.createDirectory(at: sandbox, withIntermediateDirectories: true)
+            try script.write(to: scriptFile, atomically: true, encoding: .utf8)
+            try fm.createDirectory(at: target, withIntermediateDirectories: true)
+            try fm.createDirectory(at: staged, withIntermediateDirectories: true)
+            try "old".write(to: target.appendingPathComponent("marker"),
+                            atomically: true, encoding: .utf8)
+            try "new".write(to: staged.appendingPathComponent("marker"),
+                            atomically: true, encoding: .utf8)
+        } catch {
+            expect(false, "helper dry-run sandbox setup failed: \(error)")
+            return
+        }
+
+        expect(runHelper(stagedPath: staged.path) == 0, "helper swap succeeds")
+        expect(marker(target) == "new", "helper installed the staged app")
+        expect(!fm.fileExists(atPath: staged.path), "helper cleans up the staging copy")
+
+        // Failure path: the staged app is gone → the old app must survive.
+        try? "old".write(to: target.appendingPathComponent("marker"),
+                         atomically: true, encoding: .utf8)
+        expect(runHelper(stagedPath: staged.path) != 0, "helper fails on a missing staged app")
+        expect(marker(target) == "old", "old app is intact after a failed swap")
     }
 
     // MARK: - Bundle identifier migration

@@ -127,23 +127,87 @@ struct GeneralSettingsView: View {
             }
             Section {
                 Toggle("Check for updates automatically", isOn: $model.updateChecks)
-                HStack {
-                    Button("Check Now") { model.checkForUpdatesNow() }
-                    if let status = model.updateCheckStatus {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
+                Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
+                    .disabled(!model.updateChecks)
+                updateStatusRow
             } header: {
                 Text("Updates")
             } footer: {
-                Text("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations, and updating is always a manual download.")
+                Text("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations. Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace the app.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
+    }
+
+    /// The Updates section's action row, mirroring the updater's state:
+    /// check → download progress → verify → restart. Failures show the
+    /// reason and fall back to the releases page.
+    @ViewBuilder
+    private var updateStatusRow: some View {
+        switch model.updateState {
+        case .downloading(let version, let progress):
+            HStack(spacing: 12) {
+                ProgressView(value: progress)
+                    .frame(maxWidth: 220)
+                Text("Downloading Velora \(version) — \(Int(progress * 100))%")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Cancel") { model.cancelUpdateDownload() }
+            }
+        case .verifying(let version):
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Verifying Velora \(version)…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .installing:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Installing…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .ready(let version):
+            HStack {
+                Button("Restart to Update") { model.installStagedUpdate() }
+                Button("Discard") { model.discardStagedUpdate() }
+                Text(model.autoInstallUpdates
+                     ? "Velora \(version) is ready — it installs when the app restarts or quits."
+                     : "Velora \(version) is downloaded and verified.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .failed(let reason):
+            HStack {
+                if model.canInstallUpdateInPlace {
+                    Button("Try Again") { model.startUpdateInstall() }
+                } else {
+                    Button("Open Releases Page") { model.openReleasesPage() }
+                }
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .idle:
+            HStack {
+                Button("Check Now") { model.checkForUpdatesNow() }
+                if let update = model.availableUpdate {
+                    if model.canInstallUpdateInPlace {
+                        Button("Install Velora \(update.version)") { model.startUpdateInstall() }
+                    } else {
+                        Button("Open Releases Page") { model.openReleasesPage() }
+                    }
+                }
+                if let status = model.updateCheckStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
     }
 }
 

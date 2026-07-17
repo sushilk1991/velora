@@ -154,6 +154,7 @@ Edits are picked up via the engine's config reload — no restart dance required
 
 - Models are downloaded **once** from Hugging Face. Model downloads, Personal Dictionary iCloud Drive sync, and an optional update check are the only network-backed features; Velora has no backend service.
 - The update check is one anonymous HTTPS GET to the public GitHub releases feed, at most once a day, carrying nothing about you or your dictations. Turn it off in Settings → General and Velora never touches the network at all after model download.
+- Installing an update downloads the release DMG from GitHub — only when you click Update, or automatically if you opt in (Settings → General). Before it replaces the app, the download must pass strict code-signature validation against Velora's Developer ID, Apple's notarization check, and a version check; anything else is discarded.
 - At dictation time there are **zero network calls** — audio, transcripts, and cleaned text never leave the machine.
 - History is a local SQLite file under `~/.velora/`. Delete it whenever you like.
 - Meeting audio, transcripts, and notes live separately under `~/.velora/meetings/`. Meeting detection uses local app/window metadata and, only if enabled, nearby Calendar events. Detection can suggest a recording but can never start one; every recording requires an explicit confirmation and shows a persistent menu-bar indicator.
