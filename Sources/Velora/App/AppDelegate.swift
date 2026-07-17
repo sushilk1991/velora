@@ -300,13 +300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // the pending reply would leave the app unquittable forever — and the
         // `terminationPending` latch makes every LATER quit a silent no-op
         // (field report: menubar Quit dead + update stuck on "Installing…").
-        // Losing the tail of a meeting finalize after 8s is strictly better
-        // than an app that can never exit.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
-            guard let self, !self.terminationReplied else { return }
-            veloraLog("Velora: termination watchdog fired — forcing quit")
-            self.replyTerminationOnce()
-        }
+        // A genuinely-finalizing meeting gets ONE extension to 60s (cutting a
+        // mid-flight .m4a finalize loses the system track — review catch);
+        // anything else wedged is forced at 8s.
+        scheduleTerminationWatchdog(after: 8, allowMeetingExtension: true)
         // Stop accepting new long-running work, then wait for meeting audio to
         // finalize before allowing AppKit to tear down the engine and process.
         controlServer?.stop()
@@ -320,6 +317,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             DispatchQueue.main.async { self?.replyTerminationOnce() }
         }
         return .terminateLater
+    }
+
+    private func scheduleTerminationWatchdog(
+        after seconds: TimeInterval, allowMeetingExtension: Bool
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self, !self.terminationReplied else { return }
+            if allowMeetingExtension,
+               self.meetingCoordinator?.terminationWorkInFlight == true {
+                veloraLog("Velora: termination waiting on a meeting finalize — extending watchdog to 60s")
+                self.scheduleTerminationWatchdog(after: 52, allowMeetingExtension: false)
+                return
+            }
+            veloraLog("Velora: termination watchdog fired — forcing quit")
+            self.replyTerminationOnce()
+        }
     }
 
     /// Answers the pending terminateLater exactly once — the normal completion

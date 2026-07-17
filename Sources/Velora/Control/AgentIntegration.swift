@@ -26,12 +26,24 @@ enum AgentIntegration {
         ]
     }
 
-    /// Where a `velora` command already exists in a candidate directory.
+    /// True when the entry at `path` is a symlink we own — one that resolves
+    /// into a Velora bundle. The install path may only ever replace these.
+    static func isVeloraLink(_ path: String) -> Bool {
+        guard let destination = try? FileManager.default
+            .destinationOfSymbolicLink(atPath: path) else { return false }
+        let resolved = destination.hasPrefix("/")
+            ? destination
+            : (path as NSString).deletingLastPathComponent + "/" + destination
+        return resolved.contains("Velora.app/Contents/")
+    }
+
+    /// Where a Velora-owned `velora` link already exists in a candidate
+    /// directory. A foreign `velora` binary is deliberately NOT reported as
+    /// installed — install must never claim (or clobber) someone else's tool.
     static func installedCLIPath() -> String? {
-        let fm = FileManager.default
         for dir in candidateBinDirectories() {
             let path = dir.appendingPathComponent("velora").path
-            if fm.fileExists(atPath: path) { return path }
+            if isVeloraLink(path) { return path }
         }
         return nil
     }
@@ -39,6 +51,7 @@ enum AgentIntegration {
     enum InstallError: LocalizedError {
         case missingBundledCLI
         case noWritableDirectory
+        case foreignFile(String)
 
         var errorDescription: String? {
             switch self {
@@ -46,12 +59,17 @@ enum AgentIntegration {
                 return "This build has no bundled CLI (run from the installed app)"
             case .noWritableDirectory:
                 return "No writable install directory (tried /opt/homebrew/bin, /usr/local/bin, ~/.local/bin)"
+            case .foreignFile(let path):
+                return "A different “velora” already exists at \(path) — remove or rename it first"
             }
         }
     }
 
     /// Symlinks the bundled CLI into the first writable candidate directory
-    /// and returns the resulting path. Replaces a stale `velora` in place.
+    /// and returns the resulting path. Only a symlink that provably points
+    /// into a Velora bundle is ever replaced; any other existing `velora`
+    /// (review catch: could have been a different product's binary or even a
+    /// directory) fails the install with its path instead of being deleted.
     @discardableResult
     static func installCLI() throws -> String {
         guard let cli = bundledCLI,
@@ -59,6 +77,7 @@ enum AgentIntegration {
             throw InstallError.missingBundledCLI
         }
         let fm = FileManager.default
+        var conflict: String?
         for dir in candidateBinDirectories() {
             if !fm.fileExists(atPath: dir.path) {
                 // Only the personal dir is worth creating; making
@@ -68,7 +87,19 @@ enum AgentIntegration {
             }
             guard fm.isWritableFile(atPath: dir.path) else { continue }
             let link = dir.appendingPathComponent("velora")
-            try? fm.removeItem(at: link)
+            var exists = fm.fileExists(atPath: link.path)
+            // A dangling symlink (e.g. to a deleted Velora.app) reports as
+            // nonexistent above but still blocks link creation.
+            if !exists {
+                exists = (try? fm.destinationOfSymbolicLink(atPath: link.path)) != nil
+            }
+            if exists {
+                guard isVeloraLink(link.path) else {
+                    conflict = conflict ?? link.path
+                    continue
+                }
+                try? fm.removeItem(at: link)
+            }
             do {
                 try fm.createSymbolicLink(at: link, withDestinationURL: cli)
                 return link.path
@@ -76,6 +107,7 @@ enum AgentIntegration {
                 continue
             }
         }
+        if let conflict { throw InstallError.foreignFile(conflict) }
         throw InstallError.noWritableDirectory
     }
 
@@ -132,8 +164,10 @@ enum AgentIntegration {
 
         - The Velora app must be running (menubar waveform icon).
         - "Allow local CLI and agents" must be ON in Velora Settings → General →
-          Advanced. When it is off, every call fails with `access_disabled` —
-          tell the user to flip the toggle rather than retrying.
+          Advanced. When it is off, `velora status` still answers (it reports
+          `access_enabled: false`) but every other call fails with
+          `access_disabled` — tell the user to flip the toggle rather than
+          retrying.
 
         ## CLI
 
@@ -142,7 +176,7 @@ enum AgentIntegration {
 
         | Command | What it returns |
         |---|---|
-        | `velora status` | app/engine readiness and version |
+        | `velora status` | app/engine readiness and whether access is enabled |
         | `velora recent [--limit N]` | newest dictation transcripts |
         | `velora search <query> [--limit N]` | full-text history search |
         | `velora stats` | words, dictations, streaks, time saved |
@@ -158,7 +192,7 @@ enum AgentIntegration {
         (protocol 2025-06-18). Register it, e.g. for Claude Code:
 
         ```bash
-        claude mcp add velora -- \(cliPath) mcp
+        claude mcp add velora -- "\(cliPath)" mcp
         ```
 
         ## Direct socket (advanced)

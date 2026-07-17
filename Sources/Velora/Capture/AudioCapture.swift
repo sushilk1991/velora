@@ -77,6 +77,10 @@ final class AudioCapture {
         // (system default) leaves the engine completely untouched; a chosen
         // device that is unplugged right now resolves to nil too (default),
         // without clearing the persisted choice.
+        // Listener first, snapshot second — the reverse order leaves a window
+        // where a device change between the snapshot and the listener install
+        // is never observed (review catch).
+        AudioInputDevices.beginObserving()
         var pinned: AudioDeviceID?
         if AppConfig.shared.inputDeviceUID != nil,
            let chosen = AudioInputDevices.resolve(

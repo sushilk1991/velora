@@ -728,6 +728,25 @@ def test_romanize_wins_in_formatting_off_modes(config):
     assert gate.reason == "romanize"
 
 
+def test_romanize_keeps_terminal_commands_verbatim(config):
+    # Command-shaped input in a formatting-off mode keeps the byte-for-byte
+    # contract even with romanize on: a Latin command word with non-Latin
+    # arguments must not be rewritten (review catch).
+    config.data["romanize_output"] = True
+    gate = run_gate("echo नमस्ते दुनिया", config, bundle_id="com.googlecode.iterm2")
+    assert gate.romanize is False
+    assert gate.use_llm is False
+    assert "echo नमस्ते दुनिया" in gate.text
+
+
+def test_romanize_still_fires_for_terminal_prose(config):
+    config.data["romanize_output"] = True
+    gate = run_gate(
+        "नमस्ते आज मौसम बहुत अच्छा है और मैं काम कर रहा हूँ",
+        config, bundle_id="com.googlecode.iterm2")
+    assert gate.romanize is True
+
+
 def test_non_latin_skips_smart_terminal(config):
     # With romanize OFF, long non-Latin terminal dictation must keep its
     # native script — never the English-tuned smart-terminal prompt.

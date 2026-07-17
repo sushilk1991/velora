@@ -802,13 +802,22 @@ def run_gate(
     # every formatting decision below — including formatting-off modes. It
     # used to live after the off-branch return, which meant dictating Hindi
     # into a terminal (Terminal/Raw are formatting-off) never romanized and
-    # the toggle looked broken (owner report).
+    # the toggle looked broken (owner report). One carve-out (review catch):
+    # in formatting-off modes, command-shaped input keeps the byte-for-byte
+    # contract — "echo नमस्ते दुनिया" must not be rewritten. A Latin leading
+    # token (a command name) or shell syntax marks a command; prose dictated
+    # in a non-Latin script starts with non-Latin words.
     if getattr(config, "romanize_output", False) and is_mostly_non_latin(text):
-        cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
-        return GateResult(
-            mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT,
-            replacements, romanize=True, entities=entities or [],
-            auto_punctuation=config.auto_punctuation)
+        first_token = text.split()[0] if text.split() else ""
+        command_shaped = mode.formatting == "off" and (
+            _TERMINAL_SHELL_SYNTAX_RE.search(text) is not None
+            or any(c.isascii() and c.isalpha() for c in first_token))
+        if not command_shaped:
+            cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
+            return GateResult(
+                mode, category, True, "romanize", cleaned, ROMANIZE_SYSTEM_PROMPT,
+                replacements, romanize=True, entities=entities or [],
+                auto_punctuation=config.auto_punctuation)
 
     if mode.formatting == "off":
         # Smart terminal: route long or unmistakably prose-shaped dictation to

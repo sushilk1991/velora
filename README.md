@@ -86,6 +86,8 @@ The installed app includes a CLI at:
 
 Enable **Allow local CLI and agents** in Settings → General, then use `status`, `recent`, `search`, `stats`, `transcribe`, or `listen`. Add `--json` for machine-readable output. `listen` always displays an approval prompt before the microphone starts.
 
+With the toggle on, the same Settings section can put a `velora` command on your PATH and install a Claude Code skill (`~/.claude/skills/velora`) that teaches local agents what they can ask — including registering the MCP server with `claude mcp add velora -- velora mcp`.
+
 Velora also exposes the same narrow surface as a local MCP stdio server:
 
 ```sh

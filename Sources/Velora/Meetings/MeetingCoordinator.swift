@@ -119,6 +119,14 @@ final class MeetingCoordinator: ObservableObject {
     /// Finalizes an active recording before app teardown. Graceful quit must
     /// never take the same path as an explicit discard. A capture still in its
     /// permission/preparation phase has no user audio and is removed cleanly.
+    /// True while termination is genuinely waiting on meeting work — the
+    /// AppDelegate watchdog extends its deadline instead of cutting a
+    /// mid-flight recording finalize (the system .m4a would be lost).
+    var terminationWorkInFlight: Bool {
+        finishingMeetingID != nil || discardingMeetingID != nil
+            || state.isRecording || capture.isCapturing
+    }
+
     func finishForTermination(completion: @escaping () -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         terminating = true

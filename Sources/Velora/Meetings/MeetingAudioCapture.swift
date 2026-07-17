@@ -40,6 +40,7 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Rebuilt per meeting so a device pinned for one meeting can never leak
     /// into the next after the mic setting changes back to system default.
     private var micEngine = AVAudioEngine()
+    private var micConfigObserver: NSObjectProtocol?
     private var micFile: AVAudioFile?
     private var stream: SCStream?
     private var writer: AVAssetWriter?
@@ -87,9 +88,9 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             micEngine = AVAudioEngine()
             let input = micEngine.inputNode
             // Same pin as AudioCapture.start(): bind the chosen mic before
-            // the format is read; nil (system default) changes nothing. No
-            // mid-meeting fallback here — losing the mic device already
-            // surfaces through reportMicrophoneFailure.
+            // the format is read; nil (system default) changes nothing.
+            // Mid-meeting device loss is surfaced by the configuration-change
+            // observer installed after start (no silent-track meetings).
             if AppConfig.shared.inputDeviceUID != nil,
                let chosen = AudioInputDevices.resolve(
                    persistedUID: AppConfig.shared.inputDeviceUID, in: AudioInputDevices.current()),
@@ -153,6 +154,7 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             // practical origin; system samples are ignored until this point.
             do {
                 try self.micEngine.start()
+                self.installMicConfigObserver()
                 let startedAt = Date()
                 self.startedAt = startedAt
                 self.enableSystemSamples()
@@ -190,6 +192,7 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         let mic = micURL
         let system = systemURL
+        removeMicConfigObserver()
         micEngine.stop()
         micEngine.inputNode.removeTap(onBus: 0)
         micFile = nil
@@ -382,6 +385,7 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func abortPreparedCapture(meetingID: String, completion: @escaping () -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
+        removeMicConfigObserver()
         micEngine.stop()
         micEngine.inputNode.removeTap(onBus: 0)
         micFile = nil
@@ -430,6 +434,36 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self, self.isCapturing else { return }
             self.onSystemAudioFailure?(message)
         }
+    }
+
+    /// A mic device that disappears mid-meeting stops buffer delivery with
+    /// NO error — the tap just goes quiet and the meeting would keep looking
+    /// live while recording nothing (review catch). Surface it loudly: on an
+    /// engine configuration change, restart if possible, and report a real
+    /// failure when the chosen device is gone or the restart fails.
+    private func installMicConfigObserver() {
+        micConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange, object: micEngine, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.meetingID != nil else { return }
+            if let uid = AppConfig.shared.inputDeviceUID, !uid.isEmpty,
+               AudioInputDevices.resolve(
+                   persistedUID: uid, in: AudioInputDevices.current()) == nil {
+                self.reportMicrophoneFailure("The chosen microphone disconnected")
+                return
+            }
+            guard !self.micEngine.isRunning else { return }
+            do {
+                try self.micEngine.start()
+            } catch {
+                self.reportMicrophoneFailure(error.localizedDescription)
+            }
+        }
+    }
+
+    private func removeMicConfigObserver() {
+        if let micConfigObserver { NotificationCenter.default.removeObserver(micConfigObserver) }
+        micConfigObserver = nil
     }
 
     private func reportMicrophoneFailure(_ message: String) {
