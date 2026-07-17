@@ -209,6 +209,7 @@ final class SettingsModel: ObservableObject {
         editHotkey = config.editHotkey
         voiceEdit = config.voiceEdit
         hotkeyMode = config.hotkeyMode
+        inputDeviceUID = config.inputDeviceUID
         soundsEnabled = config.soundsEnabled
         soundVolume = config.soundVolume
         hudPosition = config.hudPosition
@@ -380,6 +381,15 @@ final class SettingsModel: ObservableObject {
 
     @Published var hotkeyMode: HotkeyMode {
         didSet { config.hotkeyMode = hotkeyMode }
+    }
+
+    /// Microphone UID to record from; nil follows the system default. Applied
+    /// at the next capture start — no engine push needed.
+    @Published var inputDeviceUID: String? {
+        didSet {
+            guard inputDeviceUID != oldValue else { return }
+            config.inputDeviceUID = inputDeviceUID
+        }
     }
 
     @Published var language: String {
