@@ -3,7 +3,7 @@ import Foundation
 
 /// Composition root: builds every module, wires delegates, and owns app
 /// lifecycle (engine supervision, onboarding on first launch, teardown).
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let config = AppConfig.shared
     private let supervisor = EngineSupervisor()
     private let contextTracker = AppContextTracker()
@@ -33,6 +33,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
         // call is the reliable path for bare `swift build` binaries.
         NSApp.setActivationPolicy(.accessory)
+        // Ready before any window opens: the moment the app becomes regular
+        // (AppActivation), the menu bar must show real menus.
+        MainMenu.install(target: self)
         SettingsModel.applyAppearance(config.appearance)
 
         config.ensureVeloraDirectory()
@@ -360,6 +363,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 meetingProcessor: meetingProcessor)
         }
         settingsController?.show(selecting: tab)
+    }
+
+    // MARK: - Main menu actions
+
+    @objc func menuOpenSettings() {
+        showSettings()
+    }
+
+    @objc func menuOpenAbout() {
+        showSettings(selecting: .about)
+    }
+
+    @objc func menuToggleSidebar() {
+        settingsController?.toggleSidebar()
+    }
+
+    @objc func menuOpenGitHub() {
+        if let url = URL(string: "https://github.com/\(UpdateChecker.repoSlug)") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc func menuReportIssue() {
+        if let url = URL(string: "https://github.com/\(UpdateChecker.repoSlug)/issues") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Retitles Hide/Show Sidebar to the state it would produce and disables
+    /// it while no Settings window is open (the only window with a sidebar).
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(menuToggleSidebar) else { return true }
+        menuItem.title = AppConfig.shared.settingsSidebarCollapsed
+            ? "Show Sidebar" : "Hide Sidebar"
+        return settingsController?.window?.isVisible ?? false
     }
 
     /// The onboarding step to reopen at: the first missing permission, or

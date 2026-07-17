@@ -6,6 +6,9 @@ import SwiftUI
 /// the window behaves normally; the accessory policy is restored on close.
 final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
     private let model = OnboardingModel()
+    /// See SettingsWindowController.holdsActivation — isVisible is false for
+    /// a miniaturized window, so it can't gate the acquire.
+    private var holdsActivation = false
 
     /// Called when onboarding finishes or the window closes.
     var onComplete: (() -> Void)?
@@ -40,7 +43,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
             model.step = step
         }
         model.refreshPermissions()
-        NSApp.setActivationPolicy(.regular)
+        if !holdsActivation {
+            holdsActivation = true
+            AppActivation.acquireRegular()
+        }
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -48,7 +54,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         AppConfig.shared.onboardingComplete = true
-        NSApp.setActivationPolicy(.accessory)
+        if holdsActivation {
+            holdsActivation = false
+            AppActivation.releaseRegular()
+        }
         onComplete?()
     }
 }

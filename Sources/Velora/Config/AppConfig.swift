@@ -176,6 +176,7 @@ final class AppConfig {
         static let hudCustomOriginY = "velora.hudCustomOriginY"
         static let hudCustomEdge = "velora.hudCustomEdge"
         static let hudAlwaysVisible = "velora.hudAlwaysVisible"
+        static let settingsSidebarCollapsed = "velora.settingsSidebarCollapsed"
         static let appearance = "velora.appearance"
         static let language = "velora.language"
         static let autoPunctuation = "velora.autoPunctuation"
@@ -312,6 +313,12 @@ final class AppConfig {
     var hudAlwaysVisible: Bool {
         get { defaults.bool(forKey: Key.hudAlwaysVisible) }
         set { defaults.set(newValue, forKey: Key.hudAlwaysVisible) }
+    }
+
+    /// Settings sidebar collapsed to the icon-only rail (default: expanded).
+    var settingsSidebarCollapsed: Bool {
+        get { defaults.bool(forKey: Key.settingsSidebarCollapsed) }
+        set { defaults.set(newValue, forKey: Key.settingsSidebarCollapsed) }
     }
 
     /// Growth anchor for the dragged (custom) pill position — chosen from

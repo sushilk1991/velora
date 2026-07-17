@@ -113,6 +113,12 @@ enum SnapshotRenderer {
         window.titleVisibility = .hidden
         window.setContentSize(NSSize(width: 820, height: 620))
 
+        // Deterministic panes regardless of the user's persisted sidebar
+        // state; the flag round-trips through AppConfig (selection persists
+        // it), so the user's own value is restored at the end.
+        let userCollapsed = selection.sidebarCollapsed
+        selection.sidebarCollapsed = false
+
         for tab in SettingsTab.allCases {
             selection.tab = tab
             // Give SwiftUI a few runloop turns to swap the detail pane and run
@@ -122,6 +128,16 @@ enum SnapshotRenderer {
             content.layoutSubtreeIfNeeded()
             write(view: content, to: dir.appendingPathComponent("settings-\(tab.rawValue).png"))
         }
+
+        // The collapsed icon rail, once.
+        selection.tab = .general
+        selection.sidebarCollapsed = true
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.8))
+        if let content = window.contentView {
+            content.layoutSubtreeIfNeeded()
+            write(view: content, to: dir.appendingPathComponent("settings-general-collapsed.png"))
+        }
+        selection.sidebarCollapsed = userCollapsed
     }
 
     // MARK: - Rendering

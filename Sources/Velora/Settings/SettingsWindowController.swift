@@ -2,23 +2,36 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// Sidebar selection shared between the window controller (deep links from
-/// the menubar/HUD) and the SwiftUI shell. `tab` stays optional for API
-/// stability; `current` resolves nil to General.
+/// Sidebar selection + shell state shared between the window controller
+/// (deep links from the menubar/HUD, the View menu's sidebar toggle) and the
+/// SwiftUI shell. `tab` stays optional for API stability; `current` resolves
+/// nil to General.
 final class SettingsWindowSelection: ObservableObject {
     @Published var tab: SettingsTab? = .general
+
+    /// Superwhisper-style collapsed icon rail. Persisted so the window
+    /// reopens the way the user left it.
+    @Published var sidebarCollapsed = AppConfig.shared.settingsSidebarCollapsed {
+        didSet { AppConfig.shared.settingsSidebarCollapsed = sidebarCollapsed }
+    }
 
     var current: SettingsTab { tab ?? .general }
 }
 
-/// The Settings window: a System Settings-style `NavigationSplitView` — a
-/// grouped sidebar with colored icon tiles on the left, one grouped form per
-/// section on the right. Replaces the toolbar tab strip, which overflowed
-/// Shortcuts and About into a "»" chevron once the app passed eight tabs.
+/// The Settings window: a Superwhisper-style shell — flat collapsible
+/// sidebar (search, grouped colored-tile rows, identity chip bottom bar) on
+/// the left, one grouped form per section on the right, pane title in the
+/// content header. Replaces the toolbar tab strip, which overflowed once the
+/// app passed eight tabs.
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private let model: SettingsModel
     private let selection = SettingsWindowSelection()
     private var titleObserver: AnyCancellable?
+    /// Whether this window currently holds the regular-app activation. An
+    /// `isVisible` check would double-acquire when show() reopens a
+    /// MINIATURIZED window (isVisible is false there) and the hold would
+    /// never drain.
+    private var holdsActivation = false
 
     init(
         supervisor: EngineSupervisor?,
@@ -77,14 +90,34 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     }
 
     /// Shows the window, activating the app so it becomes key. Optionally
-    /// selects a specific section (e.g. the menubar "History…" item).
+    /// selects a specific section (e.g. the menubar "History…" item). While
+    /// the window is open the app runs as a regular app so the menu bar
+    /// carries the Velora menus (user report: no app menu when focused).
     func show(selecting tab: SettingsTab? = nil) {
         if let tab {
             selection.tab = tab
         }
+        if !holdsActivation {
+            holdsActivation = true
+            AppActivation.acquireRegular()
+        }
         NSApp.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        if holdsActivation {
+            holdsActivation = false
+            AppActivation.releaseRegular()
+        }
+    }
+
+    /// View → Hide/Show Sidebar (⌃⌘S).
+    func toggleSidebar() {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            selection.sidebarCollapsed.toggle()
+        }
     }
 }
 
@@ -101,25 +134,39 @@ struct SettingsRootView: View {
     let meetingProcessor: MeetingProcessor
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
+        HStack(spacing: 0) {
             SettingsSidebar(selection: selection)
+            Divider()  // hairline between sidebar and content (vertical in HStack)
             detail(for: selection.current)
-                .frame(minWidth: 540, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)
                 .safeAreaInset(edge: .top, spacing: 0) { detailHeader }
         }
-        .frame(minWidth: 780, minHeight: 560)
+        .frame(minWidth: 760, minHeight: 560)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
     /// Pane title above the detail column — the visible replacement for the
-    /// window title, System Settings-style. Content scrolls under the bar.
+    /// window title. Leads with the sidebar toggle, anchored here like
+    /// Superwhisper/Finder/Notes (its menu counterpart is View → Hide
+    /// Sidebar). Content scrolls under the bar.
     private var detailHeader: some View {
-        HStack {
+        HStack(spacing: VeloraSpacing.m) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    selection.sidebarCollapsed.toggle()
+                }
+            } label: {
+                Image(systemName: "sidebar.leading")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help(selection.sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar")
             Text(selection.current.title)
                 .font(.system(size: 15, weight: .semibold))
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, VeloraSpacing.xl + VeloraSpacing.xs)
+        .padding(.horizontal, VeloraSpacing.xl)
         .frame(height: 46)
         // Matches the (transparent) titlebar strip above, so the top chrome
         // reads as one surface; scrolled form content hides behind it.
@@ -163,80 +210,44 @@ struct SettingsRootView: View {
     }
 }
 
-/// The sidebar column: an enclosed rounded card (the Raycast idiom on top of
-/// the HIG's opaque-sidebar-for-settings rule) holding a search field, the
-/// app identity row, and the grouped pane list. The traffic lights float on
-/// the window background just above the card.
+/// The sidebar column, Superwhisper-style: a flat full-height source list —
+/// search at the top (HIG sidebar rule), grouped pane rows, and the app
+/// identity chip as the sidebar's bottom bar. Collapsible to an icon-only
+/// rail; the toggle lives in the content header and in View → Hide Sidebar.
 struct SettingsSidebar: View {
     @ObservedObject var selection: SettingsWindowSelection
     @State private var query = ""
 
+    private var collapsed: Bool { selection.sidebarCollapsed }
+
     var body: some View {
-        card
-            .frame(width: 236)
-            .padding(.top, VeloraSpacing.xs)  // small gap below the titlebar strip
-            .padding(.leading, VeloraSpacing.s + 2)
-            .padding(.bottom, VeloraSpacing.s + 2)
-            .padding(.trailing, VeloraSpacing.xs)
-    }
-
-    private var card: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SettingsSearchField(query: $query, onSubmit: selectFirstMatch)
-                .padding(.bottom, VeloraSpacing.m)
-            identityRow
-                .padding(.bottom, VeloraSpacing.s)
-            groupList
-        }
-        .padding(VeloraSpacing.m)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.primary.opacity(0.04)))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
-    }
-
-    /// App icon + name + version, the sidebar's identity block (Raycast puts
-    /// the account here; Velora has no accounts, so the app itself is the
-    /// identity). Clicking it opens About.
-    private var identityRow: some View {
-        Button {
-            selection.tab = .about
-        } label: {
-            HStack(spacing: VeloraSpacing.s + 1) {
-                Image(nsImage: VeloraAppInfo.icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 34, height: 34)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Velora")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.primary)
-                    Text("Version \(VeloraAppInfo.shortVersion)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                Spacer(minLength: 0)
+            if !collapsed {
+                SettingsSearchField(query: $query, onSubmit: selectFirstMatch)
+                    .padding(.horizontal, VeloraSpacing.m)
+                    .padding(.top, VeloraSpacing.s)
+                    .padding(.bottom, VeloraSpacing.m)
+            } else {
+                Color.clear.frame(height: VeloraSpacing.s)
             }
-            .padding(.horizontal, VeloraSpacing.xs)
-            .frame(height: 42)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            groupList
+            identityChip
+                .padding(.horizontal, collapsed ? VeloraSpacing.s : VeloraSpacing.m)
+                .padding(.vertical, VeloraSpacing.m)
         }
-        .buttonStyle(.plain)
-        .help("About Velora")
+        .frame(width: collapsed ? 64 : 240)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var groupList: some View {
-        let groups = SettingsTab.filteredGroups(query: query)
+        let groups = SettingsTab.filteredGroups(query: collapsed ? "" : query)
         return ScrollView {
             VStack(alignment: .leading, spacing: VeloraSpacing.l) {
                 ForEach(Array(groups.enumerated()), id: \.offset) { _, group in
                     VStack(alignment: .leading, spacing: 2) {
                         ForEach(group) { tab in
-                            SettingsSidebarRow(tab: tab, selection: selection)
+                            SettingsSidebarRow(
+                                tab: tab, selection: selection, collapsed: collapsed)
                         }
                     }
                 }
@@ -248,8 +259,46 @@ struct SettingsSidebar: View {
                         .padding(.top, VeloraSpacing.l)
                 }
             }
+            .padding(.horizontal, collapsed ? VeloraSpacing.xs : VeloraSpacing.m)
             .padding(.vertical, VeloraSpacing.xs)
         }
+    }
+
+    /// App icon + name + version pinned at the bottom (the Superwhisper chip;
+    /// per the HIG this strip is the sidebar's bottom bar). Clicking opens
+    /// About. Velora has no accounts, so the app itself is the identity.
+    private var identityChip: some View {
+        Button {
+            selection.tab = .about
+        } label: {
+            HStack(spacing: VeloraSpacing.s) {
+                Image(nsImage: VeloraAppInfo.icon)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: 26, height: 26)
+                if !collapsed {
+                    Text("Velora")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text("v\(VeloraAppInfo.shortVersion)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                }
+            }
+            .padding(.horizontal, collapsed ? VeloraSpacing.xs : VeloraSpacing.s + 2)
+            .frame(height: 40)
+            .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.primary.opacity(0.05)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .help("About Velora")
     }
 
     /// Return in the search field jumps to the best match, System
@@ -312,12 +361,15 @@ struct SettingsSearchField: View {
     }
 }
 
-/// One sidebar row: 25 pt colored icon tile + pane name, 34 pt tall, selected
-/// row filled with the accent color and white text (the System Settings look).
+/// One sidebar row: 25 pt colored icon tile + pane name, 34 pt tall. The
+/// selected row gets a soft neutral fill (the Superwhisper/source-list look —
+/// still unmistakable, which a settings sidebar must be; user-reported
+/// failure, twice). Collapsed mode shows just the tile, title as tooltip.
 /// Internal so `--snapshot` renders the real row, selection state included.
 struct SettingsSidebarRow: View {
     let tab: SettingsTab
     @ObservedObject var selection: SettingsWindowSelection
+    var collapsed = false
 
     var body: some View {
         let selected = selection.current == tab
@@ -332,20 +384,23 @@ struct SettingsSidebarRow: View {
                     .background(
                         RoundedRectangle(cornerRadius: 6.5, style: .continuous)
                             .fill(tab.tileColor.gradient))
-                Text(tab.title)
-                    .font(.system(size: 13))
-                    .foregroundStyle(selected ? Color.white : Color.primary)
-                Spacer(minLength: 0)
+                if !collapsed {
+                    Text(tab.title)
+                        .font(.system(size: 13))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 0)
+                }
             }
-            .padding(.horizontal, VeloraSpacing.s)
+            .padding(.horizontal, collapsed ? 0 : VeloraSpacing.s)
             .frame(height: 34)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .background(
-            selected ? Color.accentColor : Color.clear,
+            selected ? Color.primary.opacity(0.09) : Color.clear,
             in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(tab.title)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 }

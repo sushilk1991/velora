@@ -64,7 +64,6 @@ private final class AlertSession: NSObject, NSWindowDelegate {
     private let alert: NSAlert
     private let completion: (NSApplication.ModalResponse) -> Void
     private let onFinish: () -> Void
-    private var priorPolicy: NSApplication.ActivationPolicy = .accessory
     private var finished = false
 
     init(
@@ -80,8 +79,11 @@ private final class AlertSession: NSObject, NSWindowDelegate {
     }
 
     func show() {
-        priorPolicy = NSApp.activationPolicy()
-        let changedPolicy = priorPolicy == .regular || NSApp.setActivationPolicy(.regular)
+        // Through the shared ref count, NOT a snapshot/restore of its own —
+        // restoring a policy captured before the user opened Settings would
+        // strip the regular-app state out from under the still-open window
+        // (review finding).
+        AppActivation.acquireRegular()
         alert.layout()
         let window = alert.window
         window.delegate = self
@@ -104,7 +106,7 @@ private final class AlertSession: NSObject, NSWindowDelegate {
         window.makeKey()
         veloraLog(
             "Velora: presenting explicit consent alert "
-            + "policy=\(NSApp.activationPolicy().rawValue) changed=\(changedPolicy) "
+            + "policy=\(NSApp.activationPolicy().rawValue) "
             + "visible=\(window.isVisible)")
     }
 
@@ -130,7 +132,7 @@ private final class AlertSession: NSObject, NSWindowDelegate {
         finished = true
         alert.window.orderOut(nil)
         alert.window.delegate = nil
-        if priorPolicy != .regular { NSApp.setActivationPolicy(priorPolicy) }
+        AppActivation.releaseRegular()
         veloraLog("Velora: consent alert response=\(response.rawValue)")
         completion(response)
         onFinish()
