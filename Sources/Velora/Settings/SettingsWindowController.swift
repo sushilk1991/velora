@@ -147,7 +147,7 @@ struct SettingsRootView: View {
         case .shortcuts:
             ShortcutsSettingsView(model: model)
         case .about:
-            AboutSettingsView()
+            AboutSettingsView(model: model)
         }
     }
 }

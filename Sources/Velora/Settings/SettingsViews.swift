@@ -141,11 +141,21 @@ struct GeneralSettingsView: View {
         .formStyle(.grouped)
     }
 
-    /// The Updates section's action row, mirroring the updater's state:
-    /// check → download progress → verify → restart. Failures show the
-    /// reason and fall back to the releases page.
-    @ViewBuilder
     private var updateStatusRow: some View {
+        UpdateActionRow(model: model)
+    }
+}
+
+/// Update controls mirroring the updater's state: check → download progress →
+/// verify → restart. Failures show the reason and fall back to the releases
+/// page. Shared by Settings → General → Updates and the About pane.
+struct UpdateActionRow: View {
+    @ObservedObject var model: SettingsModel
+    /// The idle-state button title ("Check Now" in the Updates section,
+    /// "Check for Updates" in About).
+    var checkLabel = "Check Now"
+
+    var body: some View {
         switch model.updateState {
         case .downloading(let version, let progress):
             HStack(spacing: 12) {
@@ -193,7 +203,7 @@ struct GeneralSettingsView: View {
             }
         case .idle:
             HStack {
-                Button("Check Now") { model.checkForUpdatesNow() }
+                Button(checkLabel) { model.checkForUpdatesNow() }
                 if let update = model.availableUpdate {
                     if model.canInstallUpdateInPlace {
                         Button("Install Velora \(update.version)") { model.startUpdateInstall() }
@@ -530,6 +540,8 @@ struct ShortcutsSettingsView: View {
 // MARK: - About
 
 struct AboutSettingsView: View {
+    @ObservedObject var model: SettingsModel
+
     private var version: String {
         let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         return short ?? "0.1.0"
@@ -564,6 +576,9 @@ struct AboutSettingsView: View {
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
+
+            UpdateActionRow(model: model, checkLabel: "Check for Updates")
+                .padding(.top, VeloraSpacing.xs)
 
             HStack(spacing: VeloraSpacing.l) {
                 link("GitHub", "https://github.com/\(UpdateChecker.repoSlug)")
