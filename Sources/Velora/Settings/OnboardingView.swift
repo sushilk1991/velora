@@ -257,7 +257,8 @@ struct OnboardingView: View {
                 granted: model.inputMonitoringGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestInputMonitoring() }),
-            continueEnabled: model.inputMonitoringGranted)
+            continueEnabled: model.inputMonitoringGranted,
+            staleHint: !model.inputMonitoringGranted)
             // Fire the native "Velora would like to monitor input" prompt as
             // soon as the step appears — this also registers Velora in the
             // Input Monitoring list so the toggle exists when the pane opens.
@@ -276,14 +277,33 @@ struct OnboardingView: View {
                 granted: model.accessibilityGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestAccessibility() }),
-            continueEnabled: model.accessibilityGranted)
+            continueEnabled: model.accessibilityGranted,
+            staleHint: !model.accessibilityGranted)
     }
 
     private func permissionStep(
-        title: String, card: PermissionCard, continueEnabled: Bool
+        title: String, card: PermissionCard, continueEnabled: Bool,
+        staleHint: Bool = false
     ) -> some View {
         stepLayout(title: title) {
             card
+            // TCC grants are tied to the app's code signature. After an app
+            // update whose signature changed, an old "Velora" row can linger
+            // in the list, toggled on, while the running build stays denied —
+            // toggling it does nothing. Removing and re-adding fixes it. Shown
+            // only while the permission reads as not granted.
+            if staleHint {
+                HStack(alignment: .top, spacing: 6) {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 11))
+                    Text("Already see Velora in the list but it still won't turn on? Select it, remove it with the “−” button, then add Velora back. An older build was signed differently, so macOS kept a stale entry.")
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: 480, alignment: .leading)
+                .padding(.top, VeloraSpacing.xs)
+            }
         } button: {
             Button("Continue") { model.advance() }
                 .buttonStyle(.borderedProminent)
