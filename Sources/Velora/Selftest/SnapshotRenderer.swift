@@ -72,7 +72,7 @@ enum SnapshotRenderer {
         .frame(width: 215)
         .background(Color(nsColor: .windowBackgroundColor))
         let view = NSHostingView(rootView: rows)
-        snapshot(view, size: NSSize(width: 215, height: 420), name: "settings-sidebar-rows", dir: dir)
+        snapshot(view, size: NSSize(width: 215, height: 480), name: "settings-sidebar-rows", dir: dir)
     }
 
     // MARK: - Settings
@@ -101,13 +101,23 @@ enum SnapshotRenderer {
             meetingCoordinator: coordinator, meetingProcessor: processor)
 
         let window = NSWindow(contentViewController: NSHostingController(rootView: root))
+        // Mirror the production shell (SettingsWindowController) — a default
+        // window would hide layout regressions the custom chrome can introduce
+        // (review finding; `.fullSizeContentView` died exactly here). One
+        // deliberate exception: `titlebarAppearsTransparent` stays OFF —
+        // it switches the window to backdrop-material compositing, which
+        // offscreen cacheDisplay renders as an all-white detail column
+        // (bisected). The flag only affects the titlebar strip, which these
+        // contentView snapshots exclude anyway.
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.titleVisibility = .hidden
         window.setContentSize(NSSize(width: 820, height: 620))
 
         for tab in SettingsTab.allCases {
             selection.tab = tab
             // Give SwiftUI a few runloop turns to swap the detail pane and run
             // its async onAppear loads before drawing.
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.6))
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.8))
             guard let content = window.contentView else { continue }
             content.layoutSubtreeIfNeeded()
             write(view: content, to: dir.appendingPathComponent("settings-\(tab.rawValue).png"))

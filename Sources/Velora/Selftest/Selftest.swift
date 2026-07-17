@@ -3024,6 +3024,26 @@ enum Selftest {
             HUDPanel.capsuleMinX(edge: .center, capsuleWidth: HUDPanel.panelSize.width)
                 == 0,
             "center anchor is symmetric")
+
+        // Click-through: the interactive screen rect is the hit rect offset by
+        // the panel frame, and vanishes with the capsule — the whole reason
+        // the panel can keep `ignoresMouseEvents` on while the margins overlap
+        // the frontmost app (user report: a top-center pill deadened the
+        // browser's address bar).
+        expect(
+            HUDPanel.interactiveScreenRect(
+                panelFrame: NSRect(x: 100, y: 200, width: 480, height: 160),
+                hitRect: .zero) == .zero,
+            "no capsule → no interactive area anywhere on screen")
+        let screenRect = HUDPanel.interactiveScreenRect(
+            panelFrame: NSRect(x: 100, y: 200, width: 480, height: 160),
+            hitRect: NSRect(x: 30, y: 60, width: 70, height: 40))
+        expect(
+            screenRect == NSRect(x: 130, y: 260, width: 70, height: 40),
+            "interactive screen rect is the hit rect offset by the panel origin")
+        expect(
+            !screenRect.contains(NSPoint(x: 105, y: 270)),
+            "panel margins outside the capsule stay click-through")
     }
 
     // MARK: - Settings sidebar
@@ -3037,6 +3057,32 @@ enum Selftest {
         expect(
             listed.first == .general && listed.last == .about,
             "the sidebar starts at General and ends at About")
+
+        // Sidebar search: title + control-label keywords, all tokens must hit.
+        expect(
+            SettingsTab.filteredGroups(query: "") == SettingsTab.sidebarGroups,
+            "an empty query shows the full sidebar")
+        expect(
+            SettingsTab.general.matches(query: "volume")
+                && SettingsTab.general.matches(query: "PILL"),
+            "General is findable by its control labels, case-insensitively")
+        expect(
+            SettingsTab.meetings.matches(query: "speakers")
+                && SettingsTab.shortcuts.matches(query: "hold to talk"),
+            "panes are findable by what their controls do")
+        expect(
+            SettingsTab.general.matches(query: "sound volume"),
+            "multi-token queries AND together")
+        expect(
+            !SettingsTab.modes.matches(query: "volume"),
+            "keywords are per-pane, not global")
+        expect(
+            SettingsTab.filteredGroups(query: "qzxv").isEmpty,
+            "a garbage query filters everything out (sidebar shows No matches)")
+        let updates = SettingsTab.filteredGroups(query: "updates").flatMap { $0 }
+        expect(
+            updates.contains(.general) && updates.contains(.about),
+            "\"updates\" finds both homes of the update controls")
     }
 
     // MARK: - Final-output clipboard staging

@@ -39,6 +39,10 @@ final class HUDPanel: NSObject {
     private let panel: NSPanel
     private var hideWorkItem: DispatchWorkItem?
     private var screenObserver: NSObjectProtocol?
+    /// Cursor tracking for `ignoresMouseEvents` (see init): event monitors for
+    /// low latency plus a slow timer safety net, running only while visible.
+    private var mouseMonitors: [Any] = []
+    private var mouseSyncTimer: Timer?
     /// Set when a placement/visibility preference changes while a session is
     /// on screen — moving the capsule mid-recording would yank it out from
     /// under the user's eyes. Applied when the HUD settles back to idle.
@@ -55,7 +59,13 @@ final class HUDPanel: NSObject {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = false  // the capsule draws its own animated shadow
-        panel.ignoresMouseEvents = false
+        // Click-through by default: the panel is far larger than the capsule
+        // (animation headroom), and the window server routes every click in
+        // the frame to the panel — in-process hitTest filtering can't give the
+        // click back to the app underneath, so a top-center pill deadened the
+        // browser's address bar (user report). `syncMouseInteractivity()`
+        // flips this off only while the cursor is over the capsule itself.
+        panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         // Click vs. drag is disambiguated manually in HUDHostingView (a tap
         // toggles dictation; a real drag calls performDrag), so AppKit's
@@ -99,6 +109,96 @@ final class HUDPanel: NSObject {
 
     deinit {
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        stopMouseSync()
+    }
+
+    // MARK: - Click-through
+
+    /// Screen-coordinate rect of the capsule's interactive footprint (the
+    /// state-dependent hit rect offset by the panel's frame). Pure geometry so
+    /// the selftest can pin it.
+    static func interactiveScreenRect(panelFrame: NSRect, hitRect: NSRect) -> NSRect {
+        guard hitRect != .zero else { return .zero }
+        return NSRect(
+            x: panelFrame.minX + hitRect.minX,
+            y: panelFrame.minY + hitRect.minY,
+            width: hitRect.width, height: hitRect.height)
+    }
+
+    /// Makes the panel interactive exactly while the cursor is over the
+    /// capsule. Never flips mid-press: changing `ignoresMouseEvents` during a
+    /// click or drag would yank the event stream out from under AppKit.
+    private func syncMouseInteractivity() {
+        guard NSEvent.pressedMouseButtons == 0 else { return }
+        let rect = Self.interactiveScreenRect(
+            panelFrame: panel.frame, hitRect: currentHitRect())
+        let interactive = rect.contains(NSEvent.mouseLocation)
+        if panel.ignoresMouseEvents != !interactive {
+            panel.ignoresMouseEvents = !interactive
+        }
+    }
+
+    /// Mouse-moved monitors give near-zero latency when the cursor approaches
+    /// the capsule; the timer is the safety net for cases monitors miss (the
+    /// system only generates move events some windows asked for). Runs only
+    /// while the panel is on screen.
+    private func startMouseSync() {
+        if mouseSyncTimer == nil {
+            let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
+                self?.syncMouseInteractivity()
+            }
+            timer.tolerance = 0.04
+            RunLoop.main.add(timer, forMode: .common)
+            mouseSyncTimer = timer
+        }
+        if mouseMonitors.isEmpty {
+            if let monitor = NSEvent.addGlobalMonitorForEvents(
+                matching: [.mouseMoved, .leftMouseDragged],
+                handler: { [weak self] _ in self?.syncMouseInteractivity() }
+            ) {
+                mouseMonitors.append(monitor)
+            }
+            if let monitor = NSEvent.addLocalMonitorForEvents(
+                matching: .mouseMoved,
+                handler: { [weak self] event in
+                    self?.syncMouseInteractivity()
+                    return event
+                }
+            ) {
+                mouseMonitors.append(monitor)
+            }
+            if let monitor = NSEvent.addGlobalMonitorForEvents(
+                matching: .leftMouseDown,
+                handler: { [weak self] _ in self?.recoverMissedTap() }
+            ) {
+                mouseMonitors.append(monitor)
+            }
+        }
+        syncMouseInteractivity()
+    }
+
+    /// A click can land in the instant between the cursor reaching the pill
+    /// and the panel turning interactive (monitor latency / the timer gap).
+    /// The window server has already routed that click to the app underneath
+    /// — unrecoverable at the event level — but the tap INTENT isn't lost:
+    /// a global mouse-down inside the standby pill still starts dictation
+    /// (review finding). Standby only; session capsules host real controls
+    /// (Retry) where a blind toggle would be wrong.
+    private func recoverMissedTap() {
+        guard panel.ignoresMouseEvents, model.state == .standby else { return }
+        let rect = Self.interactiveScreenRect(
+            panelFrame: panel.frame, hitRect: currentHitRect())
+        guard rect.contains(NSEvent.mouseLocation) else { return }
+        panel.ignoresMouseEvents = false  // the cursor is on the pill now
+        onTap?()
+    }
+
+    private func stopMouseSync() {
+        mouseSyncTimer?.invalidate()
+        mouseSyncTimer = nil
+        for monitor in mouseMonitors { NSEvent.removeMonitor(monitor) }
+        mouseMonitors.removeAll()
+        panel.ignoresMouseEvents = true
     }
 
     /// Called by the hosting view when a user drag of the capsule finishes
@@ -272,9 +372,16 @@ final class HUDPanel: NSObject {
 
         if target.isHidden {
             // Keep the panel on screen long enough for the exit animation.
-            let item = DispatchWorkItem { [weak self] in self?.panel.orderOut(nil) }
+            let item = DispatchWorkItem { [weak self] in
+                self?.stopMouseSync()
+                self?.panel.orderOut(nil)
+            }
             hideWorkItem = item
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: item)
+        } else {
+            // A capsule may have appeared or resized under a stationary
+            // cursor — recompute interactivity now, not on the next move.
+            startMouseSync()
         }
 
         // A placement change made mid-session applies once the HUD settles.
@@ -334,6 +441,7 @@ final class HUDPanel: NSObject {
             }
         }
         panel.setFrameOrigin(origin)
+        syncMouseInteractivity()
         veloraLog(String(
             format: "Velora: HUD position=%@ origin=(%.0f, %.0f) frame=%@",
             AppConfig.shared.hudPosition.rawValue, origin.x, origin.y,

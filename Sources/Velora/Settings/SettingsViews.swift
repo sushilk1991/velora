@@ -63,6 +63,98 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         [.history, .meetings, .intelligence],
         [.about],
     ]
+
+    /// What the sidebar search matches besides the pane title: the labels of
+    /// the controls that actually live in the pane, so "volume" finds General
+    /// and "speakers" finds Meetings the way System Settings search would.
+    var searchKeywords: [String] {
+        switch self {
+        case .general:
+            return [
+                "launch at login", "appearance", "theme", "dark", "light",
+                "pill", "hud", "position", "sounds", "volume",
+                "updates", "install", "version", "cli", "agents", "advanced",
+            ]
+        case .dictation:
+            return [
+                "language", "punctuation", "smart cleanup", "terminal",
+                "voice commands", "scratch that", "new line", "recordings",
+                "audio", "transliterate", "english letters", "hinglish",
+            ]
+        case .dictionary:
+            return [
+                "vocabulary", "words", "replacements", "learn from edits",
+                "discover", "icloud", "sync", "spelling", "jargon", "names",
+            ]
+        case .model:
+            return [
+                "speech", "whisper", "parakeet", "qwen", "cleanup",
+                "download", "storage", "remove", "stt", "llm", "streaming",
+            ]
+        case .modes:
+            return ["apps", "prompt", "rules", "context", "code", "email", "notes"]
+        case .history:
+            return [
+                "transcripts", "recordings", "replay", "retention",
+                "delete", "search", "insert again", "copy",
+            ]
+        case .intelligence:
+            return ["statistics", "usage", "streak", "daily activity", "words", "charts"]
+        case .meetings:
+            return [
+                "record", "speakers", "diarization", "summary", "action items",
+                "decisions", "calendar", "calls", "transcript",
+            ]
+        case .shortcuts:
+            return [
+                "hotkey", "keyboard", "key combo", "hold to talk", "toggle",
+                "voice edit", "selection", "escape", "cancel",
+            ]
+        case .about:
+            return [
+                "version", "updates", "check for updates", "github",
+                "license", "issue", "acknowledgments", "credits",
+            ]
+        }
+    }
+
+    /// True when every whitespace-separated token of `query` occurs in the
+    /// pane's title or keywords (case-insensitive). An empty query matches
+    /// everything — the sidebar shows the full list.
+    func matches(query: String) -> Bool {
+        let tokens = query.lowercased().split(whereSeparator: \.isWhitespace)
+        guard !tokens.isEmpty else { return true }
+        let haystack = ([title] + searchKeywords).joined(separator: " ").lowercased()
+        return tokens.allSatisfy { haystack.contains($0) }
+    }
+
+    /// `sidebarGroups` with non-matching panes removed and emptied groups
+    /// dropped, preserving group order — what a filtering sidebar renders.
+    static func filteredGroups(query: String) -> [[SettingsTab]] {
+        sidebarGroups
+            .map { $0.filter { $0.matches(query: query) } }
+            .filter { !$0.isEmpty }
+    }
+}
+
+/// Bundle identity shared by the sidebar header and the About pane — one
+/// source for the marketing version, build number, and the real app icon.
+enum VeloraAppInfo {
+    static var shortVersion: String {
+        (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String)
+            ?? "0.1.0"
+    }
+
+    static var buildNumber: String? {
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+    }
+
+    /// The real bundled app icon — never an SF Symbol stand-in (a bare
+    /// `swift build` binary falls back to the generic app icon).
+    static var icon: NSImage {
+        if let bundled = Bundle.main.image(forResource: "AppIcon") { return bundled }
+        return NSApp.applicationIconImage ?? NSImage()
+    }
 }
 
 // MARK: - General
@@ -84,7 +176,7 @@ struct GeneralSettingsView: View {
                 Toggle(isOn: $model.hudAlwaysVisible) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Show the pill when idle")
-                        Text("Click the pill to start dictating. Right-click it for recent transcripts and quick actions.")
+                        Text("Click the pill to start dictating. Right-click it for recent transcripts and quick actions. Turn this off to hide the HUD until dictation is active.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -542,21 +634,13 @@ struct ShortcutsSettingsView: View {
 struct AboutSettingsView: View {
     @ObservedObject var model: SettingsModel
 
-    private var version: String {
-        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        return short ?? "0.1.0"
-    }
+    private var version: String { VeloraAppInfo.shortVersion }
 
-    private var build: String? {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-    }
+    private var build: String? { VeloraAppInfo.buildNumber }
 
     /// The real bundled app icon — the About pane must show exactly what sits
     /// in the Dock/Finder, not an SF Symbol stand-in.
-    private var appIcon: NSImage {
-        if let bundled = Bundle.main.image(forResource: "AppIcon") { return bundled }
-        return NSApp.applicationIconImage ?? NSImage()
-    }
+    private var appIcon: NSImage { VeloraAppInfo.icon }
 
     var body: some View {
         VStack(spacing: VeloraSpacing.m) {
