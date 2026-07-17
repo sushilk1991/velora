@@ -18,21 +18,29 @@ validate_developer_id_identity_name() {
 }
 
 # A local app that listens for global keyboard input must have a stable code
-# requirement. TCC grants are tied to that requirement, so silently falling
-# back to ad-hoc signing makes System Settings show an old Velora grant while
-# the rebuilt process remains denied. Prefer the dedicated local identity,
-# then this team's Developer ID identity, then any stable Apple Development
-# identity. Callers must fail closed when none exists.
+# requirement. TCC grants (Mic, Accessibility, Input Monitoring) are tied to
+# the app's DESIGNATED REQUIREMENT, which is derived from the bundle id + the
+# signing certificate — not the cdhash, hardened-runtime flag, or entitlements.
+#
+# So the identity must be consistent with what RELEASE builds use, or every
+# switch between a local `make app` build and an installed DMG resets every
+# grant (and leaves a stale "Velora" entry in System Settings that the new
+# process can't match). Release builds sign with this team's Developer ID, so
+# prefer that SAME Developer ID identity for local builds too — then dev and
+# release share one designated requirement and grants persist across both.
+# Fall back to the dedicated self-signed identity (contributors without the
+# Developer ID cert — still stable for their own rebuilds), then any stable
+# Apple Development identity. Callers must fail closed when none exists.
 select_local_signing_identity() {
   local identities="${1:-$(security find-identity -v -p codesigning 2>/dev/null)}"
   local identity
 
   identity="$(printf '%s\n' "$identities" \
-    | sed -n 's/.*"\(Velora Dev Signing\)".*/\1/p' \
+    | sed -n "s/.*\"\\(Developer ID Application: [^\"]* (${VELORA_TEAM_ID})\\)\".*/\\1/p" \
     | head -n 1)"
   if [[ -z "$identity" ]]; then
     identity="$(printf '%s\n' "$identities" \
-      | sed -n "s/.*\"\\(Developer ID Application: [^\"]* (${VELORA_TEAM_ID})\\)\".*/\\1/p" \
+      | sed -n 's/.*"\(Velora Dev Signing\)".*/\1/p' \
       | head -n 1)"
   fi
   if [[ -z "$identity" ]]; then
