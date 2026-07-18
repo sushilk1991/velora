@@ -41,10 +41,51 @@ enum AudioInputDevices {
         return ids.compactMap { id in
             guard inputChannelCount(id) > 0,
                   let uid = stringProperty(id, selector: kAudioDevicePropertyDeviceUID),
-                  let name = stringProperty(id, selector: kAudioObjectPropertyName)
+                  let name = stringProperty(id, selector: kAudioObjectPropertyName),
+                  // Hide the HAL's private default-device aggregate (e.g.
+                  // "CADefaultDeviceAggregate-43981-0"): it is an internal
+                  // wrapper for whatever the system default is, so it both
+                  // duplicates the "System Default" choice and shows a raw
+                  // identifier instead of a real name. The private-aggregate
+                  // flag is the general signal; the name check is a backstop
+                  // for the exact reported case if the flag read ever fails.
+                  !isInternalDeviceName(name),
+                  !isPrivateAggregate(id)
             else { return nil }
             return Device(uid: uid, name: name, id: id)
         }
+    }
+
+    /// True for internal Core Audio identifiers that are not real, user-facing
+    /// device names — chiefly the private default-device aggregate the HAL
+    /// creates ("CADefaultDeviceAggregate-<pid>-<n>"). Pure and name-based so
+    /// the selftest can pin it; the authoritative filter is the private
+    /// aggregate flag in `isPrivateAggregate`.
+    static func isInternalDeviceName(_ name: String) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        return trimmed.hasPrefix("CADefaultDeviceAggregate")
+    }
+
+    /// True when the device is a PRIVATE aggregate — the kind Core Audio
+    /// creates internally (default-device wrapper, process taps). User-created
+    /// aggregates from Audio MIDI Setup are NOT private and stay visible.
+    private static func isPrivateAggregate(_ id: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyComposition,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectHasProperty(id, &address) else { return false }
+        var value: CFDictionary?
+        var size = UInt32(MemoryLayout<CFDictionary?>.size)
+        let status = withUnsafeMutablePointer(to: &value) {
+            AudioObjectGetPropertyData(id, &address, 0, nil, &size, $0)
+        }
+        guard status == noErr,
+              let composition = value as? [String: Any],
+              let flag = composition[kAudioAggregateDeviceIsPrivateKey] as? NSNumber
+        else { return false }
+        return flag.boolValue
     }
 
     /// `current()` in a stable order for menus and pickers.

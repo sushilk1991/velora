@@ -3309,6 +3309,25 @@ enum Selftest {
         expect(
             AudioInputDevices.resolve(persistedUID: persisted, in: [pods, mac]) == mac.id,
             "the preserved choice wins again when its device reappears")
+
+        // The mic picker must not show the HAL's private default-device
+        // aggregate (user report: "CADefaultDeviceAggregate-43981-0" appeared
+        // as a selectable mic). Real device names pass; internal identifiers
+        // and empties are hidden.
+        expect(
+            AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate-43981-0"),
+            "the private default-device aggregate is hidden from the mic picker")
+        expect(
+            AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate-7-2"),
+            "any CADefaultDeviceAggregate instance is hidden regardless of its suffix")
+        expect(
+            AudioInputDevices.isInternalDeviceName("   ") && AudioInputDevices.isInternalDeviceName(""),
+            "a blank device name is treated as internal, never shown")
+        expect(
+            !AudioInputDevices.isInternalDeviceName("MacBook Pro Microphone")
+                && !AudioInputDevices.isInternalDeviceName("Sushil's AirPods Pro")
+                && !AudioInputDevices.isInternalDeviceName("External USB Mic"),
+            "real microphone names are shown")
     }
 
     // MARK: - Final-output clipboard staging
