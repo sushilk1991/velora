@@ -422,16 +422,33 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             DispatchQueue.main.async {
                 guard gen == self.generation, case .installing = self.state else { return }
                 guard self.spawnHelper(staged: staged, relaunch: true) else { return }
-                NSApp.terminate(nil)
-                // Escalation: a wedged terminate reply used to leave the app
-                // alive showing "Installing…" forever while the helper waited
-                // for an exit that never came (field report, 0.8.1 → 0.9.0).
-                // The helper re-verifies the bytes and handles the swap +
-                // relaunch on its own once this process dies, so after a
-                // grace period a hard exit is strictly better than a zombie.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 15) {
-                    guard gen == self.generation, case .installing = self.state else { return }
-                    veloraLog("Velora: update terminate did not complete in 15s — forcing exit for the swap helper")
+                // Quit from a run-loop turn, NOT synchronously inside this
+                // main-dispatch-queue block. -[NSApplication terminate:]
+                // answers a .terminateLater delegate by spinning a nested
+                // event loop that waits for reply(toApplicationShouldTerminate:).
+                // That reply — and every termination watchdog — is delivered on
+                // DispatchQueue.main, which is non-reentrant and already
+                // draining THIS block, so none of them ever run and the quit
+                // deadlocks (sampled from a hung build: installAndRelaunch →
+                // terminate: → nested runloop pinned in mach_msg forever,
+                // "Installing…" stuck until the swap helper gives up 5 min
+                // later). Firing terminate from a CFRunLoop timer runs it after
+                // this block returns with the main queue free — the same
+                // context a menubar Quit uses, where the reply is serviced and
+                // the app quits cleanly.
+                let quit = Timer(timeInterval: 0, repeats: false) { _ in
+                    NSApp.terminate(nil)
+                }
+                RunLoop.main.add(quit, forMode: .common)
+                // Last-resort guarantee on a queue the main-thread quit cannot
+                // starve: if graceful termination still stalls, hard-exit so the
+                // swap helper (which re-verifies the exact bytes it installs)
+                // can finish. The engine self-exits via --parent-pid, so a hard
+                // exit loses nothing. 75s clears the 60s a meeting finalize may
+                // legitimately hold the quit (AppDelegate's watchdog), so this
+                // never clips a real finalize — only a genuine hang.
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 75) {
+                    veloraLog("Velora: update quit stalled >75s — forcing exit for the swap helper")
                     exit(0)
                 }
             }
