@@ -3319,7 +3319,7 @@ enum Selftest {
             "the private default-device aggregate is hidden from the mic picker")
         expect(
             AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate-7-2"),
-            "any CADefaultDeviceAggregate instance is hidden regardless of its suffix")
+            "any generated CADefaultDeviceAggregate-<pid>-<n> instance is hidden")
         expect(
             AudioInputDevices.isInternalDeviceName("   ") && AudioInputDevices.isInternalDeviceName(""),
             "a blank device name is treated as internal, never shown")
@@ -3328,6 +3328,13 @@ enum Selftest {
                 && !AudioInputDevices.isInternalDeviceName("Sushil's AirPods Pro")
                 && !AudioInputDevices.isInternalDeviceName("External USB Mic"),
             "real microphone names are shown")
+        // The backstop matches only the generated form — a real device whose
+        // name merely starts with that string is NOT hidden (review finding);
+        // the private-aggregate flag remains the authoritative filter.
+        expect(
+            !AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate Pro")
+                && !AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate-mic"),
+            "the name backstop does not over-match legitimate names")
     }
 
     // MARK: - Final-output clipboard staging

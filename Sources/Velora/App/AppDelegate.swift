@@ -41,6 +41,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
         config.ensureVeloraDirectory()
         config.writeEngineConfigIfMissing()
+        // Drop a stale mic choice that points at the HAL's private aggregate
+        // (selectable before it was filtered) so it is never misread as a
+        // disconnected mic mid-meeting.
+        AudioInputDevices.sanitizePersistedSelection()
 
         history = HistoryStore()
         meetings = MeetingStore()

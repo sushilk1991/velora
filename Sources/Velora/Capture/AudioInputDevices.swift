@@ -22,9 +22,41 @@ enum AudioInputDevices {
         let id: AudioDeviceID
     }
 
-    /// Snapshot of currently connected devices that can capture audio
-    /// (at least one input stream channel).
+    /// Snapshot of currently connected devices that can capture audio (at least
+    /// one input stream channel), minus the ones we hide from the picker.
     static func current() -> [Device] {
+        inputDeviceIDs().compactMap { id in
+            guard let uid = stringProperty(id, selector: kAudioDevicePropertyDeviceUID),
+                  let name = stringProperty(id, selector: kAudioObjectPropertyName),
+                  !isHiddenDevice(id, name: name)
+            else { return nil }
+            return Device(uid: uid, name: name, id: id)
+        }
+    }
+
+    /// Clears a persisted mic choice that points at a device we now hide (a
+    /// private aggregate). Such a UID could have been selected before this
+    /// filter existed; left in place it would be misread as a disconnected
+    /// microphone on an engine configuration change and stop a meeting. A real
+    /// but currently-unplugged mic is NOT in the connected set, so its choice
+    /// is preserved and still wins on reconnect. Call once at startup.
+    static func sanitizePersistedSelection() {
+        guard let uid = AppConfig.shared.inputDeviceUID, !uid.isEmpty else { return }
+        let pointsAtHidden = inputDeviceIDs().contains { id in
+            guard stringProperty(id, selector: kAudioDevicePropertyDeviceUID) == uid else {
+                return false
+            }
+            let name = stringProperty(id, selector: kAudioObjectPropertyName) ?? ""
+            return isHiddenDevice(id, name: name)
+        }
+        if pointsAtHidden {
+            AppConfig.shared.inputDeviceUID = nil
+            veloraLog("Velora: cleared a mic choice that pointed at a hidden private aggregate")
+        }
+    }
+
+    /// Input-capable device IDs (at least one input stream channel), unfiltered.
+    private static func inputDeviceIDs() -> [AudioDeviceID] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -38,33 +70,28 @@ enum AudioInputDevices {
         guard AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &ids) == noErr
         else { return [] }
-        return ids.compactMap { id in
-            guard inputChannelCount(id) > 0,
-                  let uid = stringProperty(id, selector: kAudioDevicePropertyDeviceUID),
-                  let name = stringProperty(id, selector: kAudioObjectPropertyName),
-                  // Hide the HAL's private default-device aggregate (e.g.
-                  // "CADefaultDeviceAggregate-43981-0"): it is an internal
-                  // wrapper for whatever the system default is, so it both
-                  // duplicates the "System Default" choice and shows a raw
-                  // identifier instead of a real name. The private-aggregate
-                  // flag is the general signal; the name check is a backstop
-                  // for the exact reported case if the flag read ever fails.
-                  !isInternalDeviceName(name),
-                  !isPrivateAggregate(id)
-            else { return nil }
-            return Device(uid: uid, name: name, id: id)
-        }
+        return ids.filter { inputChannelCount($0) > 0 }
     }
 
-    /// True for internal Core Audio identifiers that are not real, user-facing
-    /// device names — chiefly the private default-device aggregate the HAL
-    /// creates ("CADefaultDeviceAggregate-<pid>-<n>"). Pure and name-based so
-    /// the selftest can pin it; the authoritative filter is the private
-    /// aggregate flag in `isPrivateAggregate`.
+    /// Whether a device should be kept out of the picker: the HAL's private
+    /// default-device aggregate (e.g. "CADefaultDeviceAggregate-43981-0"), an
+    /// internal wrapper for the current system default that duplicates the
+    /// "System Default" choice and shows a raw identifier instead of a real
+    /// name. The private-aggregate flag is authoritative; the name check is a
+    /// backstop for the exact generated form if the flag read ever fails.
+    private static func isHiddenDevice(_ id: AudioDeviceID, name: String) -> Bool {
+        isInternalDeviceName(name) || isPrivateAggregate(id)
+    }
+
+    /// True only for the HAL's generated private-aggregate name form
+    /// (`CADefaultDeviceAggregate-<pid>-<n>`) or a blank name — narrow enough
+    /// that no real device is caught. Pure and name-based so the selftest can
+    /// pin it; the authoritative filter is `isPrivateAggregate`.
     static func isInternalDeviceName(_ name: String) -> Bool {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty { return true }
-        return trimmed.hasPrefix("CADefaultDeviceAggregate")
+        return trimmed.range(
+            of: #"^CADefaultDeviceAggregate-\d+-\d+$"#, options: .regularExpression) != nil
     }
 
     /// True when the device is a PRIVATE aggregate — the kind Core Audio
