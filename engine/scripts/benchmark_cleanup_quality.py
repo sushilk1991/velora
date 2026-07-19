@@ -131,13 +131,14 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
     if not output.endswith(case.ending):
         failures.append(f"missing_ending:{case.ending}")
     lower = output.lower()
-    for required in case.required:
-        if required.lower() not in lower:
-            failures.append(f"missing:{required}")
     if case.numbered_items is not None:
         numbered = [
             line for line in output.splitlines()
             if re.match(r"^\d+\.\s+", line.strip())
+        ]
+        all_list_items = [
+            line for line in output.splitlines()
+            if re.match(r"^(?:\d+[.)]|[-*])\s+", line.strip())
         ]
         if len(numbered) != case.numbered_items:
             failures.append(
@@ -148,6 +149,20 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
             for index, line in enumerate(numbered, start=1)
         ):
             failures.append("numbering_not_sequential")
+        if case.numbered_items == 0 and all_list_items:
+            failures.append("unexpected_list_items")
+        elif case.numbered_items > 0 and len(all_list_items) != len(numbered):
+            failures.append("unexpected_non_numbered_list_items")
+        required_scope = (
+            "\n".join(numbered).lower()
+            if case.numbered_items > 0
+            else lower
+        )
+    else:
+        required_scope = lower
+    for required in case.required:
+        if required.lower() not in required_scope:
+            failures.append(f"missing:{required}")
     return failures
 
 

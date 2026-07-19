@@ -1240,6 +1240,23 @@ class Engine:
         if expected != raw.strip():
             log.warning("streaming stitch mismatch — falling back to whole-text cleanup")
             return None
+        ctx = session.context
+        # The final tail is not visible to `_on_new_segment`. A Latin opening
+        # can therefore start English streaming cleanup even when a long
+        # non-Latin tail makes the COMPLETE utterance a romanization/native-
+        # script case. Honor the full-text language gate before cleaning that
+        # tail; the existing whole-text path applies the correct policy once.
+        gate = formatting.run_gate(
+            raw,
+            self.config,
+            bundle_id=ctx.get("bundle_id"),
+            app_name=ctx.get("app_name"),
+            explicit_mode=ctx.get("mode"),
+            entities=ctx.get("entities"),
+        )
+        if gate.romanize or gate.reason == "non_latin_script":
+            log.info("full transcript requires non-Latin handling — falling back to whole-text cleanup")
+            return None
         # The chunk cleanups ran during recording; this is normally instant.
         # return_exceptions: a cancelled/failed task must surface as a value
         # (→ fallback below), not raise CancelledError through finalize.
@@ -1279,18 +1296,9 @@ class Engine:
         assembled = _join_chunks(cleaned)
         if not assembled.strip():
             return None
-        ctx = session.context
         # Gate over the FULL raw text — for its GateResult fields only
         # (replacements/tags/category/chat rules, now with stop-time entities).
         # Its use_llm is deliberately ignored: no second LLM pass here.
-        gate = formatting.run_gate(
-            raw,
-            self.config,
-            bundle_id=ctx.get("bundle_id"),
-            app_name=ctx.get("app_name"),
-            explicit_mode=ctx.get("mode"),
-            entities=ctx.get("entities"),
-        )
         text = formatting.postprocess(assembled, gate)
         # applied reflects whether the LLM actually cleaned ANY chunk — a
         # session where every chunk fell back deterministic must not report

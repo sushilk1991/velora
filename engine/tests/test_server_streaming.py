@@ -249,6 +249,32 @@ async def test_romanize_enabled_non_latin_uses_whole_text_path(engine, monkeypat
     client.close()
 
 
+async def test_romanize_latin_segment_with_non_latin_tail_uses_whole_text(engine, monkeypatch):
+    tail = (
+        "यह दूसरी समस्या है और इसे पूरा रखना है क्योंकि यह अंतिम लंबा हिस्सा है "
+        "और इसे रोमन में आना चाहिए"
+    )
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", SEG1)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", tail)
+    eng, sock = engine
+    eng.config.data["romanize_output"] = True
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await run_dictation(client, "romanize-mixed-tail", chunks=2)
+    final = await client.recv_event("final")
+    raw = f"{SEG1} {tail}"
+
+    # The Latin segment may be pre-cleaned during speech, but the unseen Hindi
+    # tail must make finalize discard that assembly and romanize the FULL raw.
+    assert [call[0] for call in cleanup.calls] == [SEG1, raw]
+    assert final["text"] == f"<{raw}>"
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
 async def test_cleanup_allows_only_global_and_active_mode_vocabulary(engine, segments):
     eng, sock = engine
     eng.config.data["vocabulary"] = ["GlobalTerm"]
