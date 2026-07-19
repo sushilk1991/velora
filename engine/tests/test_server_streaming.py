@@ -10,6 +10,7 @@ import pytest
 from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 
 from velora_engine.cleanup import CleanupResult
+from velora_engine.server import _join_chunks, _numbering_restarts
 
 SEG1 = "alpha one two three four five six"
 SEG2 = "beta seven eight nine ten eleven twelve"
@@ -37,6 +38,29 @@ class FakeCleanup:
         if self.delay:
             await asyncio.sleep(self.delay)
         return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
+
+
+class RestartingListCleanup(FakeCleanup):
+    """Simulate independently cleaned chunks that each start numbering at 1."""
+
+    async def cleanup(
+        self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+        cancel_event=None, allowed_terms=None,
+    ):
+        self.calls.append((raw, system_prompt))
+        self.cancel_events.append(cancel_event)
+        self.allowed_terms_calls.append(allowed_terms)
+        if raw == SEG1:
+            text = "1. Saving is slow.\n2. Search misses files."
+        elif raw == SEG2:
+            text = "1. Errors give no recovery step."
+        else:
+            text = (
+                "1. Saving is slow.\n"
+                "2. Search misses files.\n"
+                "3. Errors give no recovery step."
+            )
+        return CleanupResult(text=text, applied=True, ms=7)
 
 
 @pytest.fixture
@@ -92,6 +116,54 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     client.close()
 
 
+def test_join_chunks_keeps_generated_list_items_on_separate_lines():
+    assert _join_chunks([
+        "I found three issues:",
+        "1. Saving is slow.\n2. Search misses files.",
+        "3. Errors give no recovery step.",
+    ]) == (
+        "I found three issues:\n"
+        "1. Saving is slow.\n"
+        "2. Search misses files.\n"
+        "3. Errors give no recovery step."
+    )
+
+
+def test_numbering_restart_detection_checks_model_output_without_rewriting_it():
+    assert not _numbering_restarts(["1. First.\n2. Second.", "3. Third."])
+    assert _numbering_restarts(["1. First.\n2. Second.", "1. Third."])
+    assert _numbering_restarts(["1. First.\n2. Second.", "4. Fourth."])
+    assert _numbering_restarts(["2. Second.", "3. Third."])
+
+
+async def test_streaming_numbering_restart_falls_back_to_whole_text(engine, monkeypatch):
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{SEG2}")
+    monkeypatch.delenv("VELORA_FAKE_STT_TEXT", raising=False)
+    eng, sock = engine
+    cleanup = RestartingListCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await run_dictation(
+        client,
+        "streaming-list-restart",
+        chunks=4,
+        context={"bundle_id": "com.apple.Terminal", "app_name": "Terminal"},
+    )
+    final = await client.recv_event("final")
+    raw = f"{SEG1} {SEG2}"
+
+    assert [call[0] for call in cleanup.calls] == [SEG1, SEG2, raw]
+    assert "continue with the next number; never restart at 1" in cleanup.calls[1][1]
+    assert final["text"] == (
+        "1. Saving is slow.\n"
+        "2. Search misses files.\n"
+        "3. Errors give no recovery step."
+    )
+    client.close()
+
+
 async def test_short_first_segment_does_not_disable_long_session_streaming(engine, monkeypatch):
     eng, sock = engine
     short_first = "alpha beta"
@@ -131,6 +203,48 @@ async def test_short_first_terminal_segment_keeps_long_session_streaming(engine,
 
     assert [call[0] for call in cleanup.calls] == [short_first, SEG2, TAIL]
     assert final["text"] == f"<{short_first}> <{SEG2}> <{TAIL}>."
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_romanize_enabled_keeps_latin_long_session_streaming(engine, segments):
+    """The Romanize preference applies only to non-Latin speech. English must
+    keep the during-recording cleanup path instead of paying one whole-text
+    generation after stop."""
+    eng, sock = engine
+    eng.config.data["romanize_output"] = True
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await run_dictation(client, "romanize-latin", chunks=4)
+    final = await client.recv_event("final")
+
+    assert [call[0] for call in cleanup.calls] == [SEG1, SEG2, TAIL]
+    assert final["text"] == f"<{SEG1}> <{SEG2}> <{TAIL}>."
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_romanize_enabled_non_latin_uses_whole_text_path(engine, monkeypatch):
+    segment = "यह पहली समस्या है और इसे पूरा रखना है"
+    tail = "यह दूसरा वाक्य है"
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", segment)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", tail)
+    eng, sock = engine
+    eng.config.data["romanize_output"] = True
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await run_dictation(client, "romanize-non-latin", chunks=2)
+    final = await client.recv_event("final")
+    raw = f"{segment} {tail}"
+
+    assert [call[0] for call in cleanup.calls] == [raw]
+    assert final["text"] == f"<{raw}>"
     assert final["cleanup_applied"] is True
     client.close()
 

@@ -18,6 +18,7 @@ import asyncio
 from dataclasses import asdict, dataclass
 import json
 import os
+import re
 import tempfile
 
 from velora_engine.cleanup import CleanupEngine
@@ -40,6 +41,7 @@ class Case:
     app_name: str = "Notes"
     ending: str = "."
     required: tuple[str, ...] = ()
+    numbered_items: int | None = None
 
 
 CASES = (
@@ -80,6 +82,45 @@ CASES = (
         "or text away from the device",
         required=("M4 Max", "Whisper", "Qwen", "audio", "device"),
     ),
+    Case(
+        "implicit_issue_list",
+        "there are three issues with Velora the first issue is long dictations take too long "
+        "after I release the hotkey the second issue is rambling feedback stays as one paragraph "
+        "and the third issue is that correction messages are not structured clearly",
+        bundle_id="com.mitchellh.ghostty",
+        app_name="Ghostty",
+        required=("long dictations", "one paragraph", "correction messages"),
+        numbered_items=3,
+    ),
+    Case(
+        "implicit_feedback_list",
+        "I have a few pieces of feedback about the settings screen the microphone picker is hard "
+        "to scan also the save action gives no confirmation and the error message does not explain "
+        "how to recover",
+        bundle_id="com.mitchellh.ghostty",
+        app_name="Ghostty",
+        required=("microphone picker", "save action", "error message"),
+        numbered_items=3,
+    ),
+    Case(
+        "rambling_multi_problem_request",
+        "Velora feels very slow compared with Wispr Flow and longer dictations take too much "
+        "time to return the text and I also do not feel it is smart about issue reports because "
+        "separate problems stay in one paragraph and the intended structure is lost",
+        bundle_id="com.mitchellh.ghostty",
+        app_name="Ghostty",
+        required=("longer dictations", "issue reports"),
+        numbered_items=2,
+    ),
+    Case(
+        "single_issue_stays_prose",
+        "the only issue I found is that the settings window opens slowly after the first launch "
+        "but everything else behaves correctly and should stay unchanged",
+        bundle_id="com.mitchellh.ghostty",
+        app_name="Ghostty",
+        required=("only issue", "everything else"),
+        numbered_items=0,
+    ),
 )
 
 
@@ -93,6 +134,20 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
     for required in case.required:
         if required.lower() not in lower:
             failures.append(f"missing:{required}")
+    if case.numbered_items is not None:
+        numbered = [
+            line for line in output.splitlines()
+            if re.match(r"^\d+\.\s+", line.strip())
+        ]
+        if len(numbered) != case.numbered_items:
+            failures.append(
+                f"numbered_items:{len(numbered)}!=expected:{case.numbered_items}"
+            )
+        elif any(
+            not line.strip().startswith(f"{index}. ")
+            for index, line in enumerate(numbered, start=1)
+        ):
+            failures.append("numbering_not_sequential")
     return failures
 
 

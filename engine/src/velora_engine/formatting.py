@@ -471,16 +471,30 @@ STATIC_SYSTEM_PROMPT = (
     "speaker already dictated: copy every ⏎ through unchanged, exactly where it "
     "stands, clean each side as its own line, and never delete a ⏎ or join its "
     "lines together.\n"
-    "7. Lists: use one ONLY when the speech explicitly enumerates items or asks "
-    "for a list; otherwise keep prose. Put each item on its OWN line. Use a "
-    "NUMBERED list ('1.', '2.', '3.') when the speaker says 'numbered list' or "
-    "counts items off with 'first/second/third'; use '-' BULLETS when they say "
-    "'bullet list' / 'bulleted' or just list items with no ordinal. Drop the "
+    "7. Lists: use one when the speech explicitly enumerates items, asks for a "
+    "list, or clearly contains two or more distinct issues, feedback points, "
+    "tasks, or requirements. Otherwise keep prose. Put each item on its OWN "
+    "line. Use a NUMBERED list ('1.', '2.', '3.') for issues, feedback, tasks, "
+    "requirements, a requested numbered list, or items counted off with "
+    "'first/second/third'. Use '-' BULLETS only for a requested bullet list or "
+    "a simple unsequenced collection. Never invent headings, labels, or items, "
+    "and never reorder the speaker's points. Never repeat the same points first "
+    "as prose and then again as a list; output each point exactly once. WRONG: "
+    "'Saving is slow and errors are vague.\n1. Saving is slow.\n2. Errors are "
+    "vague.' RIGHT: '1. Saving is slow.\n2. Errors are vague.' Drop the "
     "meta-instruction itself ('put this in a numbered list') from the output. A "
     "sentence that merely INTRODUCES the list ('these are the steps') is prose — "
     "keep it as its own unnumbered line ending with ':' and start numbering at "
-    "the first item. Do NOT listify ordinary counting ('count from one to ten' "
-    "stays inline prose) or short utterances.\n"
+    "the first item. Do NOT listify a narrative, a single point, ordinary "
+    "counting ('count from one to ten' stays inline prose), or short utterances. "
+    "Example: 'I have a few feedback points: saving is slow, also errors are "
+    "vague, and search misses files' → 'I have a few feedback points:\n1. Saving "
+    "is slow.\n2. Errors are vague.\n3. Search misses files.' Example without an "
+    "intro: 'the app feels slow compared with the alternative and long messages "
+    "take too much time and I also do not feel it is smart about issue reports "
+    "because they stay as one paragraph' → '1. The app feels slow compared with "
+    "the alternative and long messages take too much time.\n2. I also do not feel "
+    "it is smart about issue reports because they stay as one paragraph.'\n"
     "8. Chat messages: casual tone, no trailing period on a single short sentence.\n"
 )
 
@@ -490,7 +504,10 @@ SMART_TERMINAL_PROMPT = (
     "The user is dictating into a terminal. A dictation this long is usually a "
     "message to an AI coding assistant (Claude Code, codex) running there — "
     "clean it like normal prose: punctuation, capitalization, fillers, "
-    "self-corrections. BUT any fragment that is a shell command, code "
+    "self-corrections. When that message contains two or more distinct problems, "
+    "requests, constraints, or pieces of feedback, a numbered list is REQUIRED "
+    "even if the speaker did not explicitly ask for one. BUT any fragment that "
+    "is a shell command, code "
     "identifier, flag, or file path must stay VERBATIM: exact casing and "
     "symbols, never capitalize identifiers or commands, and never add a "
     "trailing period after a command. Spoken symbols inside a command convert "
@@ -840,7 +857,7 @@ def run_gate(
             smart_mode = Mode(
                 name=mode.name,
                 prompt=SMART_TERMINAL_PROMPT,
-                formatting="light",
+                formatting="full",
                 vocabulary=mode.vocabulary,
                 replacements=mode.replacements,
             )
@@ -939,7 +956,7 @@ def build_prefill_prompt_candidates(
         effective_mode = Mode(
             name=gate.mode.name,
             prompt=SMART_TERMINAL_PROMPT,
-            formatting="light",
+            formatting="full",
             vocabulary=gate.mode.vocabulary,
             replacements=gate.mode.replacements,
         )
@@ -988,33 +1005,9 @@ def strip_leaked_punct_commands(text: str) -> str:
     return _LEAKED_PUNCT_RE.sub(repl, text)
 
 
-_LEADING_LIST_MARKER_RE = re.compile(r"^1[.)]\s+")
-_LEADING_LIST_ITEM_RE = re.compile(r"^1[.)](?:\s|$)")
-
-
-def _strip_intro_list_marker(text: str) -> str:
-    """Fix the 4B model's one observed list tic: numbering the sentence that
-    INTRODUCES the list ("1. These are the steps:\n1. …\n2. …"). Two
-    UNINDENTED adjacent lines both starting with '1.' cannot both be items —
-    the first (which has content after the marker) is the intro, so its
-    marker goes. Indented duplicates are valid nested numbering and stay;
-    anything else is left to the model's judgment."""
-    lines = text.split("\n")
-    following = next((line for line in lines[1:] if line.strip()), "")
-    if (
-        len(lines) >= 2
-        and _LEADING_LIST_MARKER_RE.match(lines[0])
-        and _LEADING_LIST_ITEM_RE.match(following)
-    ):
-        lines[0] = _LEADING_LIST_MARKER_RE.sub("", lines[0])
-        return "\n".join(lines)
-    return text
-
-
 def postprocess(text: str, gate: GateResult) -> str:
     """Deterministic pass over LLM output and its punctuation contract."""
     out = strip_leaked_punct_commands(_tidy_whitespace(decode_breaks(text)))
-    out = _strip_intro_list_marker(out)
     out = apply_replacements(out, gate.replacements)
     out = apply_tags(out, gate.entities, gate.category)
     mode_name = gate.mode.name.lower()

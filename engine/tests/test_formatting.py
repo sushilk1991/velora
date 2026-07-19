@@ -121,6 +121,20 @@ def test_terminal_long_prose_uses_smart_llm(config):
     assert "VERBATIM" in (gate.system_prompt or "")
 
 
+def test_terminal_issue_report_allows_inferred_numbered_structure(config):
+    raw = (
+        "there are a few issues with this app the first is that saving is slow "
+        "also the toolbar is confusing and the last problem is that errors give no recovery step"
+    )
+    gate = run_gate(raw, config, bundle_id="com.mitchellh.ghostty")
+    prompt = gate.system_prompt or ""
+
+    assert gate.reason == "smart_terminal"
+    assert "Formatting strength: FULL" in prompt
+    assert "two or more distinct issues, feedback points, tasks, or requirements" in prompt
+    assert "numbered list" in prompt.lower()
+
+
 def test_terminal_long_prose_keeps_sentence_period_after_cleanup(config):
     gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
     assert gate.reason == "smart_terminal"
@@ -171,6 +185,7 @@ def test_prefill_candidates_cover_smart_terminal_without_dynamic_context(config)
     stable_system, first_user = candidates[0]
     dynamic_system, second_user = candidates[1]
     assert formatting.SMART_TERMINAL_PROMPT in stable_system
+    assert "Formatting strength: FULL" in stable_system
     assert "volatile terminal contents" not in stable_system
     assert "Screen context —" in dynamic_system
     assert first_user != second_user
@@ -1046,17 +1061,11 @@ def test_postprocess_no_period_after_trailing_break(config):
     assert out == "Send the draft tonight and copy the design team on it.\n"
 
 
-def test_strip_intro_list_marker():
-    from velora_engine.formatting import _strip_intro_list_marker
+def test_postprocess_preserves_literal_duplicate_list_markers(config):
+    from velora_engine.formatting import postprocess
 
-    # Duplicate '1.' → the content-bearing first line is the intro.
-    assert _strip_intro_list_marker("1. The steps:\n1. Backup\n2. Migrate") == (
-        "The steps:\n1. Backup\n2. Migrate"
-    )
-    # Bare-number items count as items too (owner's row 62).
-    assert _strip_intro_list_marker("1. The number list:\n1.\n2.") == (
-        "The number list:\n1.\n2."
-    )
-    # A legitimate list starting at 1. with no duplicate stays untouched.
-    assert _strip_intro_list_marker("1. Backup\n2. Migrate") == "1. Backup\n2. Migrate"
-    assert _strip_intro_list_marker("plain prose") == "plain prose"
+    gate = run_gate(LONG, config)
+    literal = "1. Buy milk\n1. Buy eggs."
+    quoted = 'He wrote "1. Keep this"\n1. Then he left.'
+    assert postprocess(literal, gate) == literal
+    assert postprocess(quoted, gate) == quoted

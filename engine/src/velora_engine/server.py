@@ -19,6 +19,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import sys
 import threading
@@ -79,6 +80,9 @@ CHUNK_CONTEXT_WORDS = 15
 # the segment boundary — merge with the previous segment and re-clean.
 RETRACTION_HEAD_WORDS = 4
 
+_LIST_ITEM_START_RE = re.compile(r"^(?:\d+[.)]|[-*])\s+")
+_NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*(\d+)[.)]\s+")
+
 
 @dataclass
 class _ChunkResult:
@@ -110,12 +114,34 @@ def _join_chunks(parts: list[str]) -> str:
             out = cleaned
         elif out.endswith("\n"):
             out += cleaned.lstrip("\n")
+        elif _LIST_ITEM_START_RE.match(cleaned.lstrip("\n")):
+            # A list item generated in the next segment must remain a new
+            # line. Gluing it with a space produces "2. Previous 3. Next".
+            out += "\n" + cleaned.lstrip("\n")
         else:
             out += " " + cleaned
     # Trailing breaks are dictated content ("… new paragraph" at the end) —
     # strip everything else, keep up to one blank line.
     trailing = len(out) - len(out.rstrip("\n"))
     return out.strip() + "\n" * min(2, trailing)
+
+
+def _numbering_restarts(parts: list[str]) -> bool:
+    """Return True when independently cleaned chunks produce invalid numbering.
+
+    Streaming chunks are generated separately. A restart, backward step,
+    skipped number, or list that does not begin at 1 would publish a corrupt
+    list. This is a validity check over model output, not a rewrite: the caller
+    falls back to the existing whole-text cleanup path.
+    """
+    expected = 1
+    for part in parts:
+        for match in _NUMBERED_ITEM_RE.finditer(part):
+            number = int(match.group(1))
+            if number != expected:
+                return True
+            expected += 1
+    return False
 
 
 def _pid_alive(pid: int) -> bool:
@@ -1054,7 +1080,6 @@ class Engine:
             self.config.streaming_cleanup
             and self.cleanup is not None
             and self.cleanup.loaded
-            and not self.config.romanize_output
             and not formatting.is_mostly_non_latin(seg_raw)
         ):
             session.streaming_disabled = True
@@ -1173,7 +1198,9 @@ class Engine:
                 # Appended AFTER the static prompt so the KV prefix still hits.
                 tail_words = " ".join(prev_text.split()[-CHUNK_CONTEXT_WORDS:])
                 system_prompt += (
-                    "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»"
+                    "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "». "
+                    "If it ends in a numbered list, continue with the next number; "
+                    "never restart at 1."
                 )
             # Same deterministic prep the whole-text gate gives the model
             # (formatting.run_gate): spoken break commands become real line
@@ -1246,6 +1273,9 @@ class Engine:
                 cleaned.append(tail_result.text)
                 tail_ms = tail_result.ms
                 applied_any = applied_any or tail_result.applied
+        if _numbering_restarts(cleaned):
+            log.warning("streaming list numbering was invalid — falling back to whole-text cleanup")
+            return None
         assembled = _join_chunks(cleaned)
         if not assembled.strip():
             return None
