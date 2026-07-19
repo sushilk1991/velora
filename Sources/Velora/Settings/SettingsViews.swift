@@ -113,8 +113,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
             ]
         case .about:
             return [
-                "version", "updates", "check for updates", "github",
-                "license", "issue", "acknowledgments", "credits",
+                "version", "updates", "check for updates", "website", "github", "star",
+                "support", "email", "license", "issue", "acknowledgments", "credits",
             ]
         }
     }
@@ -763,9 +763,21 @@ struct AboutSettingsView: View {
             UpdateActionRow(model: model, checkLabel: "Check for Updates")
                 .padding(.top, VeloraSpacing.xs)
 
+            if let supportURL = VeloraLinks.supportEmailURL {
+                Link(destination: supportURL) {
+                    Label("Email Support", systemImage: "envelope.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .accessibilityHint("Opens a new support email to \(VeloraLinks.supportEmailAddress)")
+                .padding(.top, VeloraSpacing.xs)
+            }
+
             HStack(spacing: VeloraSpacing.l) {
-                link("GitHub", "https://github.com/\(UpdateChecker.repoSlug)")
-                link("Report an Issue", "https://github.com/\(UpdateChecker.repoSlug)/issues")
+                link("Website", VeloraLinks.websiteURL)
+                link("GitHub", VeloraLinks.repositoryURL)
+                link("Star Velora", VeloraLinks.starURL)
+                link("Report an Issue", VeloraLinks.issuesURL)
             }
             .padding(.top, VeloraSpacing.xs)
 
@@ -779,11 +791,10 @@ struct AboutSettingsView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Link that quietly renders nothing if the URL literal is malformed
-    /// (keeps the view force-unwrap free).
+    /// Link that quietly renders nothing if a destination cannot be formed.
     @ViewBuilder
-    private func link(_ title: String, _ urlString: String) -> some View {
-        if let url = URL(string: urlString) {
+    private func link(_ title: String, _ url: URL?) -> some View {
+        if let url {
             Link(title, destination: url)
         }
     }

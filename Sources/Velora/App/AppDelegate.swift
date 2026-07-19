@@ -418,16 +418,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         settingsController?.toggleSidebar()
     }
 
+    @objc func menuOpenWebsite() {
+        open(VeloraLinks.websiteURL)
+    }
+
     @objc func menuOpenGitHub() {
-        if let url = URL(string: "https://github.com/\(UpdateChecker.repoSlug)") {
-            NSWorkspace.shared.open(url)
-        }
+        open(VeloraLinks.repositoryURL)
+    }
+
+    @objc func menuStarOnGitHub() {
+        open(VeloraLinks.starURL)
     }
 
     @objc func menuReportIssue() {
-        if let url = URL(string: "https://github.com/\(UpdateChecker.repoSlug)/issues") {
-            NSWorkspace.shared.open(url)
-        }
+        open(VeloraLinks.issuesURL)
+    }
+
+    @objc func menuEmailSupport() {
+        open(VeloraLinks.supportEmailURL)
+    }
+
+    private func open(_ url: URL?) {
+        if let url { NSWorkspace.shared.open(url) }
     }
 
     /// Retitles Hide/Show Sidebar to the state it would produce and disables

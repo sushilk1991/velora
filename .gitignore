@@ -4,6 +4,8 @@
 # Swift / SwiftPM
 .build/
 *.xcodeproj
+!ios/VeloraMobile.xcodeproj/
+!ios/VeloraMobile.xcodeproj/**
 DerivedData/
 
 # Python

@@ -86,8 +86,12 @@ enum MainMenu {
         main.addItem(submenuItem(windowMenu))
 
         let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(item("Velora Website", #selector(AppDelegate.menuOpenWebsite), target: target))
         helpMenu.addItem(item("Velora on GitHub", #selector(AppDelegate.menuOpenGitHub), target: target))
+        helpMenu.addItem(item("Star Velora on GitHub", #selector(AppDelegate.menuStarOnGitHub), target: target))
         helpMenu.addItem(item("Report an Issue…", #selector(AppDelegate.menuReportIssue), target: target))
+        helpMenu.addItem(.separator())
+        helpMenu.addItem(item("Email Support…", #selector(AppDelegate.menuEmailSupport), target: target))
         main.addItem(submenuItem(helpMenu))
 
         NSApp.mainMenu = main
