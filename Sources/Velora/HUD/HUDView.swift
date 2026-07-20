@@ -48,6 +48,8 @@ struct HUDView: View {
                     HUDGeometry.minListeningWidth),
                 HUDGeometry.maxListeningWidth)
             return (CGSize(width: width, height: HUDGeometry.height), true)
+        case .meeting:
+            return (CGSize(width: HUDGeometry.meetingWidth, height: HUDGeometry.height), true)
         case .inserted:
             return (CGSize(width: HUDGeometry.insertedDiameter, height: HUDGeometry.height), true)
         case .error:
@@ -119,9 +121,11 @@ struct HUDView: View {
         .opacity(opacity)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Velora dictation")
-        .accessibilityHint(isStandby ? "Click to start dictation" : "Click to stop dictation")
+        .accessibilityElement(children: isMeeting ? .contain : .ignore)
+        .accessibilityLabel(isMeeting ? "Velora meeting recording" : "Velora dictation")
+        .accessibilityHint(isMeeting
+            ? "Use the stop button to finish the meeting recording"
+            : (isStandby ? "Click to start dictation" : "Click to stop dictation"))
     }
 
     @ViewBuilder private var background: some View {
@@ -180,6 +184,8 @@ struct HUDView: View {
                 .opacity(isStandby ? 1 : 0)
             recordingContent
                 .opacity(recordingContentOpacity)
+            meetingContent
+                .opacity(isMeeting ? 1 : 0)
             checkmark
             errorContent
                 .opacity(isError ? 1 : 0)
@@ -228,6 +234,47 @@ struct HUDView: View {
         .animation(.easeOut(duration: 0.2), value: isListening)
     }
 
+    // MARK: - Meeting recording
+
+    private var meetingValue: (title: String, systemAudio: Bool)? {
+        if case .meeting(let title, let systemAudio) = model.state {
+            return (title, systemAudio)
+        }
+        return nil
+    }
+
+    private var meetingContent: some View {
+        HStack(spacing: VeloraSpacing.s) {
+            Circle()
+                .fill(Color(nsColor: .systemRed))
+                .frame(width: HUDGeometry.dotDiameter, height: HUDGeometry.dotDiameter)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(meetingValue?.title ?? "Meeting")
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                if meetingValue?.systemAudio == false {
+                    Text("Mic only")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Color(nsColor: .systemOrange))
+                }
+            }
+            .frame(width: 112, alignment: .leading)
+            Spacer(minLength: 0)
+            timerText
+            Button { model.onMeetingStop?() } label: {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 10, weight: .bold))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(.borderless)
+            .help("Stop meeting recording")
+            .accessibilityLabel("Stop meeting recording")
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: HUDGeometry.meetingWidth)
+    }
+
     private var recordingDot: some View {
         TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !isListening)) { timeline in
             let phase = timeline.date.timeIntervalSinceReferenceDate
@@ -263,7 +310,7 @@ struct HUDView: View {
     }
 
     @ViewBuilder private var timerText: some View {
-        if isListening {
+        if isListening || isMeeting {
             TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
                 timerLabel(at: timeline.date)
             }
@@ -397,6 +444,11 @@ struct HUDView: View {
 
     private var isStandby: Bool { model.state == .standby }
 
+    private var isMeeting: Bool {
+        if case .meeting = model.state { return true }
+        return false
+    }
+
     private var isRecordingActive: Bool {
         switch model.state {
         case .listening, .transcribing:
@@ -481,6 +533,23 @@ struct HUDView: View {
         case .transcribing:
             // The waveform settles and shimmers; dot, timer, and ring fade.
             break
+
+        case .meeting:
+            let target = HUDGeometry.meetingWidth
+            if old.isHidden {
+                resetInstant(width: target, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            } else {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = target
+                    height = HUDGeometry.height
+                    showCheck = false
+                }
+            }
 
         case .inserted:
             flashGreen = true

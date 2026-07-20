@@ -115,6 +115,75 @@ final class SettingsModel: ObservableObject {
     /// One-line outcome of the last dictionary import/export, shown inline.
     @Published var dictionaryTransferResult: String?
 
+    /// One-line outcome of the last full settings import/export.
+    @Published var settingsTransferResult: String?
+
+    func exportSettings() {
+        settingsTransferResult = nil
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "velora-settings.json"
+        panel.title = "Export Velora Settings"
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                try self.config.exportSettingsData().write(to: url, options: .atomic)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: url.path)
+                self.settingsTransferResult = "Settings exported"
+            } catch {
+                self.settingsTransferResult = "Export failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func importSettings() {
+        settingsTransferResult = nil
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]
+        panel.allowsMultipleSelection = false
+        panel.title = "Import Velora Settings"
+        NSApp.activate(ignoringOtherApps: true)
+        panel.begin { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                let imported = try AppConfig.portableSettings(from: Data(contentsOf: url))
+                let confirmation = NSAlert()
+                confirmation.messageText = "Replace your Velora settings?"
+                var details =
+                    "This changes preferences, shortcuts, and the selected speech model. "
+                    + "History, dictionary, modes, permissions, microphone choice, "
+                    + "Calendar access, and local-agent access stay unchanged."
+                if imported.models.speech != self.sttModel {
+                    details += " The selected speech model may need a large download on this Mac."
+                }
+                let currentEngine = self.config.portableEngineSettings
+                if imported.engine.audioRetentionDays < currentEngine.audioRetentionDays {
+                    details += " Dictation recordings older than \(Int(imported.engine.audioRetentionDays)) days will be removed during cleanup."
+                }
+                let importedCap = imported.engine.audioMaximumMegabytes
+                let currentCap = currentEngine.audioMaximumMegabytes
+                if importedCap > 0, currentCap == 0 || importedCap < currentCap {
+                    details += " Dictation recordings beyond \(Int(importedCap)) MB total will be removed during cleanup."
+                }
+                if imported.meetings.audioRetentionDays < self.meetingAudioRetentionDays {
+                    details += " Meeting audio older than \(imported.meetings.audioRetentionDays) days will be removed."
+                }
+                confirmation.informativeText = details
+                confirmation.addButton(withTitle: "Import")
+                confirmation.addButton(withTitle: "Cancel")
+                guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+
+                try self.config.applyPortableSettings(imported)
+                self.applyImportedSettings(imported)
+                self.settingsTransferResult = "Settings imported"
+            } catch {
+                self.settingsTransferResult = "Import failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
     /// Exports the personal dictionary (corrections + vocabulary) to a JSON
     /// file the user picks — Superwhisper can't move vocab between Macs;
     /// Velora can.
@@ -191,6 +260,7 @@ final class SettingsModel: ObservableObject {
     func setCleanupModel(_ id: String) {
         guard !id.isEmpty, id != cleanupModel else { return }
         cleanupModel = id
+        config.cleanupModel = id
         supervisor?.send(["cmd": "set_model", "model": id, "kind": "cleanup"])
     }
 
@@ -237,7 +307,8 @@ final class SettingsModel: ObservableObject {
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
         // lands (the engine owns this key; status refreshes it).
-        cleanupModel = Self.cleanupModelFromDisk() ?? ""
+        cleanupModel = config.cleanupModel ?? Self.cleanupModelFromDisk() ?? ""
+        config.launchAtLogin = launchAtLogin
 
         statusObserver = NotificationCenter.default.addObserver(
             forName: .veloraEngineStatus, object: nil, queue: .main
@@ -290,6 +361,57 @@ final class SettingsModel: ObservableObject {
         supervisor?.send(["cmd": "status"])
     }
 
+    /// Refreshes every live setting surface after the validated document has
+    /// been committed. Persistence observers are suppressed, then the few
+    /// required runtime effects are applied once.
+    private func applyImportedSettings(_ imported: SettingsDocument.PortableSettings) {
+        let previousSTTModel = sttModel
+        applyingImportedSettings = true
+        appearance = imported.general.appearance
+        soundsEnabled = imported.general.soundsEnabled
+        soundVolume = imported.general.soundVolume
+        hudPosition = imported.hud.position
+        hudAlwaysVisible = imported.hud.alwaysVisible
+
+        hotkey = imported.shortcuts.dictation
+        editHotkey = imported.shortcuts.editSelection
+        voiceEdit = imported.shortcuts.voiceEdit
+        hotkeyMode = imported.shortcuts.behavior
+
+        language = imported.dictation.language
+        autoPunctuation = imported.dictation.autoPunctuation
+        saveAudio = imported.dictation.saveAudio
+        romanizeOutput = imported.dictation.romanizeOutput
+        learnFromEdits = imported.dictation.learnFromEdits
+        vocabMining = imported.dictation.vocabularyMining
+        smartTerminal = imported.dictation.smartTerminal
+        voiceCommands = imported.dictation.voiceCommands
+        typingWPM = imported.dictation.typingWordsPerMinute
+        audioRetentionDays = imported.engine.audioRetentionDays
+
+        meetingSuggestions = imported.meetings.suggestions
+        meetingAudioRetentionDays = imported.meetings.audioRetentionDays
+        meetingDiarization = imported.meetings.diarization
+        updateChecks = imported.updates.checkAutomatically
+        autoInstallUpdates = imported.updates.installAutomatically
+
+        sttModel = imported.models.speech
+        applyingImportedSettings = false
+
+        // The custom HUD origin/edge and typing fallback list have no published
+        // SettingsModel properties; AppConfig already owns their imported values.
+        Self.applyAppearance(imported.general.appearance)
+        NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+        NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        if imported.models.speech != previousSTTModel {
+            supervisor?.send(["cmd": "set_model", "model": imported.models.speech])
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                self?.requestStatus()
+            }
+        }
+        supervisor?.send(["cmd": "reload_config"])
+    }
+
     private func applyStatus(_ payload: [String: Any]?) {
         guard let payload else { return }
         let models = EngineModel.parse(payload["models"])
@@ -297,7 +419,10 @@ final class SettingsModel: ObservableObject {
         if let days = payload["audio_retention_days"] as? NSNumber {
             audioRetentionDays = days.doubleValue
         }
-        if let active = payload["cleanup_model"] as? String { cleanupModel = active }
+        if let active = payload["cleanup_model"] as? String, !active.isEmpty {
+            cleanupModel = active
+            config.cleanupModel = active
+        }
         if let rec = payload["recommended_cleanup_model"] as? String {
             recommendedCleanupModel = rec
         }
@@ -315,6 +440,10 @@ final class SettingsModel: ObservableObject {
     /// True while adopting engine-reported state — property observers must
     /// not echo a `set_model` back for it.
     private var syncingFromEngine = false
+    /// The import transaction already committed AppConfig in one write. This
+    /// prevents published-property observers from writing it dozens more times
+    /// or starting unrelated work such as an updater download.
+    private var applyingImportedSettings = false
 
     // MARK: - General
 
@@ -331,12 +460,14 @@ final class SettingsModel: ObservableObject {
                 } else {
                     try SMAppService.mainApp.unregister()
                 }
+                config.launchAtLogin = launchAtLogin
             } catch {
                 NSLog("Velora: launch-at-login toggle failed: \(error)")
                 // Revert silently (fails for non-bundled dev binaries).
                 revertingLaunchAtLogin = true
                 launchAtLogin = oldValue
                 revertingLaunchAtLogin = false
+                config.launchAtLogin = oldValue
             }
         }
     }
@@ -347,7 +478,8 @@ final class SettingsModel: ObservableObject {
 
     @Published var hudPosition: HUDPosition {
         didSet {
-            guard !syncingHUDPrefs, hudPosition != oldValue else { return }
+            guard !applyingImportedSettings, !syncingHUDPrefs,
+                  hudPosition != oldValue else { return }
             config.hudPosition = hudPosition
             NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
         }
@@ -355,7 +487,8 @@ final class SettingsModel: ObservableObject {
 
     @Published var hudAlwaysVisible: Bool {
         didSet {
-            guard !syncingHUDPrefs, hudAlwaysVisible != oldValue else { return }
+            guard !applyingImportedSettings, !syncingHUDPrefs,
+                  hudAlwaysVisible != oldValue else { return }
             config.hudAlwaysVisible = hudAlwaysVisible
             NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
         }
@@ -367,6 +500,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var appearance: String {
         didSet {
+            guard !applyingImportedSettings else { return }
             config.appearance = appearance
             Self.applyAppearance(appearance)
         }
@@ -383,7 +517,10 @@ final class SettingsModel: ObservableObject {
     // MARK: - Dictation
 
     @Published var hotkeyMode: HotkeyMode {
-        didSet { config.hotkeyMode = hotkeyMode }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.hotkeyMode = hotkeyMode
+        }
     }
 
     /// Microphone UID to record from; nil follows the system default. Applied
@@ -397,6 +534,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var language: String {
         didSet {
+            guard !applyingImportedSettings else { return }
             config.language = language
             supervisor?.send(["cmd": "reload_config"])
         }
@@ -404,6 +542,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var autoPunctuation: Bool {
         didSet {
+            guard !applyingImportedSettings else { return }
             config.autoPunctuation = autoPunctuation
             supervisor?.send(["cmd": "reload_config"])
         }
@@ -411,23 +550,32 @@ final class SettingsModel: ObservableObject {
 
     @Published var romanizeOutput: Bool {
         didSet {
-            guard romanizeOutput != oldValue else { return }
+            guard !applyingImportedSettings, romanizeOutput != oldValue else { return }
             config.romanizeOutput = romanizeOutput
             supervisor?.send(["cmd": "reload_config"])
         }
     }
 
     @Published var learnFromEdits: Bool {
-        didSet { config.learnFromEdits = learnFromEdits }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.learnFromEdits = learnFromEdits
+        }
     }
 
     @Published var voiceCommands: Bool {
-        didSet { config.voiceCommands = voiceCommands }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.voiceCommands = voiceCommands
+        }
     }
 
     /// Typing speed the "time saved" metrics compare against (Intelligence tab).
     @Published var typingWPM: Int {
-        didSet { config.typingWPM = typingWPM }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.typingWPM = typingWPM
+        }
     }
 
     @Published var localAgentAccess: Bool {
@@ -465,11 +613,15 @@ final class SettingsModel: ObservableObject {
     }
 
     @Published var updateChecks: Bool {
-        didSet { config.updateChecks = updateChecks }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.updateChecks = updateChecks
+        }
     }
 
     @Published var autoInstallUpdates: Bool {
         didSet {
+            guard !applyingImportedSettings else { return }
             config.autoInstallUpdates = autoInstallUpdates
             // Flipping the toggle on with an update already discovered should
             // act on it now, not wait for tomorrow's check.
@@ -533,7 +685,10 @@ final class SettingsModel: ObservableObject {
     }
 
     @Published var meetingSuggestions: Bool {
-        didSet { config.meetingSuggestions = meetingSuggestions }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.meetingSuggestions = meetingSuggestions
+        }
     }
 
     @Published var meetingCalendar: Bool {
@@ -541,12 +696,15 @@ final class SettingsModel: ObservableObject {
     }
 
     @Published var meetingAudioRetentionDays: Int {
-        didSet { config.meetingAudioRetentionDays = meetingAudioRetentionDays }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.meetingAudioRetentionDays = meetingAudioRetentionDays
+        }
     }
 
     @Published var meetingDiarization: Bool {
         didSet {
-            guard meetingDiarization != oldValue else { return }
+            guard !applyingImportedSettings, meetingDiarization != oldValue else { return }
             config.meetingDiarization = meetingDiarization
             supervisor?.send(["cmd": "reload_config"])
         }
@@ -554,7 +712,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var vocabMining: Bool {
         didSet {
-            guard vocabMining != oldValue else { return }
+            guard !applyingImportedSettings, vocabMining != oldValue else { return }
             config.vocabMining = vocabMining
             supervisor?.send(["cmd": "reload_config"])
         }
@@ -562,25 +720,31 @@ final class SettingsModel: ObservableObject {
 
     @Published var smartTerminal: Bool {
         didSet {
-            guard smartTerminal != oldValue else { return }
+            guard !applyingImportedSettings, smartTerminal != oldValue else { return }
             config.smartTerminal = smartTerminal
             supervisor?.send(["cmd": "reload_config"])
         }
     }
 
     @Published var soundsEnabled: Bool {
-        didSet { config.soundsEnabled = soundsEnabled }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.soundsEnabled = soundsEnabled
+        }
     }
 
     @Published var soundVolume: Double {
-        didSet { config.soundVolume = soundVolume }
+        didSet {
+            guard !applyingImportedSettings else { return }
+            config.soundVolume = soundVolume
+        }
     }
 
     // MARK: - Model
 
     @Published var sttModel: String {
         didSet {
-            guard sttModel != oldValue else { return }
+            guard !applyingImportedSettings, sttModel != oldValue else { return }
             config.sttModel = sttModel
             guard !syncingFromEngine else { return }
             supervisor?.send(["cmd": "set_model", "model": sttModel])
@@ -596,7 +760,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var saveAudio: Bool {
         didSet {
-            guard saveAudio != oldValue else { return }
+            guard !applyingImportedSettings, saveAudio != oldValue else { return }
             config.saveAudio = saveAudio
             supervisor?.send(["cmd": "reload_config"])
         }
@@ -606,7 +770,13 @@ final class SettingsModel: ObservableObject {
 
     @Published var hotkey: Hotkey {
         didSet {
-            guard hotkey != oldValue else { return }
+            guard !applyingImportedSettings, hotkey != oldValue else { return }
+            guard hotkey != editHotkey else {
+                editHotkeyConflict = true
+                hotkey = oldValue
+                return
+            }
+            editHotkeyConflict = false
             config.hotkey = hotkey
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
@@ -614,7 +784,7 @@ final class SettingsModel: ObservableObject {
 
     @Published var editHotkey: Hotkey {
         didSet {
-            guard editHotkey != oldValue else { return }
+            guard !applyingImportedSettings, editHotkey != oldValue else { return }
             // The monitor deliberately ignores an edit hotkey equal to the
             // dictation hotkey (dictation wins) — accepting the recording
             // would silently disable Voice Edit, so reject it visibly.
@@ -629,13 +799,12 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// Set when the user tried to record the dictation hotkey as the edit
-    /// hotkey; shown inline in the Shortcuts tab.
+    /// Set when either recorder would make the two shortcuts collide.
     @Published var editHotkeyConflict = false
 
     @Published var voiceEdit: Bool {
         didSet {
-            guard voiceEdit != oldValue else { return }
+            guard !applyingImportedSettings, voiceEdit != oldValue else { return }
             config.voiceEdit = voiceEdit
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }

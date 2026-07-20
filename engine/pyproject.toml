@@ -7,6 +7,9 @@ requires-python = ">=3.12"
 dependencies = [
     "mlx-lm>=0.31.3",
     "mlx-whisper>=0.4.3",
+    # Experimental faster Whisper backend. Pin the 0.x ABI while Velora's
+    # adapter and fallback behavior are validated against this exact release.
+    "transcribe-cpp==0.1.3",
     "parakeet-mlx>=0.5.2",
     # mlx-lm 0.31.3 crashes on import with transformers 5.13 (AutoTokenizer.register).
     # Pin until upstream fixes compatibility. See spikes/engine/FINDINGS.md.

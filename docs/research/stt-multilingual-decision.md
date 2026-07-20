@@ -53,3 +53,31 @@ preview and speak English/European can pick parakeet-v3.
 Research: `yoyo research` (codex+claude+pi, 5 lenses), 2026-07-08.
 Open follow-up: bake off full large-v3 vs turbo on the user's own voice with
 cleanup disabled; consider Devanagari-vs-Romanized as a per-mode preference.
+
+## 2026-07-19 acceleration candidate: transcribe.cpp Q8
+
+Velora now offers `handy-computer/whisper-large-v3-turbo-gguf` as an
+experimental STT choice. It runs the Q8 artifact through transcribe.cpp while
+reusing Velora's glossary prompting, pause-aligned segmentation, long-session
+stitching, prompt-echo protection, and repeated-tail guard. A native load
+failure automatically returns the app to the default MLX F16 backend.
+
+On an M4 Max synthetic smoke set (Indian English, Hindi, Hinglish, silence),
+the live-session stop-to-transcript median improved by 33.6% and p95 by 31.5%
+with no relative word-error or glossary-recall regression. This is promising,
+not production acceptance: synthetic speech cannot represent the owner's
+voice, mic, noise, or real code-switching.
+
+The Q8 file is pinned to Hub revision
+`d222c9f621c1128299248f2ded4d8a1820519780` and SHA-256
+`d5e65f2b0828802ae2c231673d31982cebe3a778c95d9494a9f3efee6bd17448`.
+The benchmark records that identity plus the transcribe.cpp native commit and
+hardware. A separate 50-second synthetic live-feed stress pass measured a
+0.014 ingestion real-time factor, comfortably inside the 0.9 gate; the real
+corpus still has to prove this on non-repeated speech.
+
+The default remains MLX until `engine/scripts/benchmark_stt_backends.py`
+passes its private real-voice gate: at least 18 referenced clips across Indian
+English/Hindi/Hinglish, silence/noise, and a ≥45-second dictation; ≥10% p50 and
+p95 improvement; no cohort quality or glossary regression; zero new
+guard/stitch failures; and worst-case ingestion real-time factor ≤0.9.

@@ -309,34 +309,34 @@ wheels = [
 
 [package.optional-dependencies]
 cudart = [
-    { name = "nvidia-cuda-runtime" },
+    { name = "nvidia-cuda-runtime", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufft = [
-    { name = "nvidia-cufft" },
+    { name = "nvidia-cufft", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cufile = [
-    { name = "nvidia-cufile" },
+    { name = "nvidia-cufile", marker = "sys_platform == 'linux'" },
 ]
 cupti = [
-    { name = "nvidia-cuda-cupti" },
+    { name = "nvidia-cuda-cupti", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 curand = [
-    { name = "nvidia-curand" },
+    { name = "nvidia-curand", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusolver = [
-    { name = "nvidia-cusolver" },
+    { name = "nvidia-cusolver", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 cusparse = [
-    { name = "nvidia-cusparse" },
+    { name = "nvidia-cusparse", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvjitlink = [
-    { name = "nvidia-nvjitlink" },
+    { name = "nvidia-nvjitlink", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvrtc = [
-    { name = "nvidia-cuda-nvrtc" },
+    { name = "nvidia-cuda-nvrtc", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 nvtx = [
-    { name = "nvidia-nvtx" },
+    { name = "nvidia-nvtx", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
 [[package]]
@@ -1606,8 +1606,8 @@ name = "standard-aifc"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts" },
-    { name = "standard-chunk" },
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "standard-chunk", marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/53/6050dc3dde1671eb3db592c13b55a8005e5040131f7509cef0215212cb84/standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43", size = 15240, upload-time = "2024-10-30T16:01:31.772Z" }
 wheels = [
@@ -1628,7 +1628,7 @@ name = "standard-sunau"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts" },
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/66/e3/ce8d38cb2d70e05ffeddc28bb09bad77cfef979eb0a299c9117f7ed4e6a9/standard_sunau-3.13.0.tar.gz", hash = "sha256:b319a1ac95a09a2378a8442f403c66f4fd4b36616d6df6ae82b8e536ee790908", size = 9368, upload-time = "2024-10-30T16:01:41.626Z" }
 wheels = [
@@ -1782,6 +1782,31 @@ wheels = [
 ]
 
 [[package]]
+name = "transcribe-cpp"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "transcribe-cpp-native" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b5/1f/a8133750c06c06f294f5cb9a34ab4abf8e44fc03624075390d1ea0659604/transcribe_cpp-0.1.3.tar.gz", hash = "sha256:d138c7ed1589215200bc3e33776d017bb94dcb53b21d1e44460f1b4097fa0b3e", size = 88713, upload-time = "2026-07-11T14:24:56.106Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/7e/3508e736a482c927d7e157a7ff2604590fd96607d7554d45122ac8930df1/transcribe_cpp-0.1.3-py3-none-any.whl", hash = "sha256:3ff03780048b47e567dc519e5f130f050a5d9092abffd01b4e41545b8e6acb69", size = 32562, upload-time = "2026-07-11T14:24:41.008Z" },
+]
+
+[[package]]
+name = "transcribe-cpp-native"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/66/b1/85643cda7676dc2ac8f1ebae3854822a3f5773cbc5419135a572b8e1484e/transcribe_cpp_native-0.1.3.tar.gz", hash = "sha256:9947592ab31698ed91b0e31334c1bb8c9ecaad58bc703acfe49d41e79b9619e0", size = 7144566, upload-time = "2026-07-11T14:24:57.623Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5e/67/d98e2209f424b3abad7fd6d9d7cb9259bee6c11b4b9e6146b6d2034e58c7/transcribe_cpp_native-0.1.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:753767d9c42f31f5699436a3138dc4af64f6ff1010a664149d312fd468bf2003", size = 1416097, upload-time = "2026-07-11T14:24:42.539Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/ae/cf5aa50011d80c5d39d1892328c5d0651ca770d35f2c2f521d0830b329a8/transcribe_cpp_native-0.1.3-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:a00d67c4fdabe595c2ee77c1a65ba19ac7783bc622061d124e7dd5709b622a2b", size = 1346656, upload-time = "2026-07-11T14:24:44.268Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/6e/bcf5e9324541951d11aeb82a0c8afdd8871cc757d0bb3fa2aa3feb308274/transcribe_cpp_native-0.1.3-py3-none-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:d4c828ad919218473697146e2a08967e11f65b1ee62a688e3ae0e7604027675f", size = 26608670, upload-time = "2026-07-11T14:24:46.825Z" },
+    { url = "https://files.pythonhosted.org/packages/4e/8d/5a21cb2640fa4f87442912258b56402ab10a54bb6e5e3d044ae217b70920/transcribe_cpp_native-0.1.3-py3-none-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:46d8211013a773091849af7901880717d2b6b98a576b4775ebfd839f5d60b897", size = 30200673, upload-time = "2026-07-11T14:24:50.416Z" },
+    { url = "https://files.pythonhosted.org/packages/79/6a/efe50143fc6124c9bc95bda5c124db161fbb755a14fad83d0d4af83fc4ae/transcribe_cpp_native-0.1.3-py3-none-win_amd64.whl", hash = "sha256:7c5fd9f7471c589ef76a5c2e96217f123ff433d138abf1abd1b2d01202752044", size = 26440596, upload-time = "2026-07-11T14:24:53.873Z" },
+]
+
+[[package]]
 name = "transformers"
 version = "5.3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1862,6 +1887,7 @@ dependencies = [
     { name = "sherpa-onnx" },
     { name = "sherpa-onnx-core" },
     { name = "soundfile" },
+    { name = "transcribe-cpp" },
     { name = "transformers" },
 ]
 
@@ -1881,6 +1907,7 @@ requires-dist = [
     { name = "sherpa-onnx", specifier = ">=1.13.4" },
     { name = "sherpa-onnx-core", specifier = ">=1.13.4" },
     { name = "soundfile", specifier = ">=0.12" },
+    { name = "transcribe-cpp", specifier = "==0.1.3" },
     { name = "transformers", specifier = ">=5.0,<5.4" },
 ]
 

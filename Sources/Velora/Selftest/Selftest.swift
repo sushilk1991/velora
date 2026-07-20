@@ -1,7 +1,7 @@
 import AppKit
 import AVFoundation
+import CoreAudio
 import Foundation
-import ScreenCaptureKit
 import SQLite3
 
 /// Headless pure-logic tests, run with `Velora --selftest` (CommandLineTools
@@ -47,6 +47,7 @@ enum Selftest {
         testLearningStoreProjection()
         testAutoVocabProjection()
         testManualConfigProjection()
+        testSettingsDocument()
         testPreferencesDomainMigration()
         testDictionaryRepositoryMigration()
         testDictionaryRepositoryCRUD()
@@ -78,7 +79,9 @@ enum Selftest {
         }
         testQualityObservationMetrics()
         testMeetingStore()
-        testMeetingAlertTokenSlot()
+        testMeetingCaptureReadiness()
+        testMeetingSystemAudioBackendPolicy()
+        testMeetingSystemAudioFrameMath()
         testMeetingSystemAudioWarnings()
         testMeetingDetection()
         testMinutesSavedDefinition()
@@ -92,10 +95,27 @@ enum Selftest {
         testHUDPerformance()
         testSettingsSidebar()
         testAudioInputDeviceResolution()
+        testMicrophoneCaptureDeviceSelection()
+        testMediaPlaybackNoop()
+        testMediaPlaybackPauseResume()
+        testMediaPlaybackEarlyStop()
+        testMediaPlaybackFailedPause()
+        testMediaPlaybackUserOverride()
+        testMediaPlaybackAmbiguousPlayers()
+        testMediaPlaybackUnsupportedOutput()
+        testMediaPlaybackUnsupportedOutputOnRestore()
+        testMediaPlaybackTerminationRestore()
+        testMediaPlaybackTerminationDuringVerification()
+        testMediaPlaybackSupportedPlayers()
         testInsertionBoundary()
         testEmptyFinalFeedback()
         testClipboardStaging()
         testUpdateChecker()
+        if ProcessInfo.processInfo.environment["VELORA_LIVE_AUDIO_SELFTEST"] == "1" {
+            testLiveMicrophoneCapture()
+            testLiveSystemAudioCapture()
+            testLiveMeetingCapture()
+        }
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
@@ -294,6 +314,318 @@ enum Selftest {
                          atomically: true, encoding: .utf8)
         expect(runHelper(stagedPath: staged.path) != 0, "helper fails on a missing staged app")
         expect(marker(target) == "old", "old app is intact after a failed swap")
+    }
+
+    // MARK: - Portable settings
+
+    private static func testSettingsDocument() {
+        var document = SettingsDocument.defaults
+        document.settings.general.appearance = "dark"
+        document.settings.general.soundVolume = 73
+        document.settings.hud.position = .custom
+        document.settings.hud.customOrigin = .init(x: 0.25, y: 0.75)
+        document.settings.dictation.language = "hi"
+        document.settings.dictation.typingWordsPerMinute = 67
+        document.settings.engine.maximumRecordingSeconds = 420
+        document.settings.engine.audioMaximumMegabytes = 8192
+        document.settings.shortcuts.dictation = .fnGlobe
+
+        do {
+            let data = try SettingsDocumentCodec.encode(document)
+            let decoded = try SettingsDocumentCodec.decode(data)
+            expect(decoded == document, "settings document round-trips every typed field")
+
+            let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let dictation = ((root?["settings"] as? [String: Any])?["dictation"] as? [String: Any])
+            expect(dictation?["typing_words_per_minute"] as? Int == 67,
+                   "settings JSON uses stable human-readable snake_case keys")
+
+            let portableData = try SettingsDocumentCodec.encode(document)
+            let portableRoot = try JSONSerialization.jsonObject(with: portableData) as? [String: Any]
+            let portable = try SettingsDocumentCodec.decode(portableData)
+            expect(portableRoot?["local"] == nil,
+                   "settings document never contains machine or security state")
+            expect(portable.settings == document.settings,
+                   "settings export preserves every portable preference")
+
+            var withHostileLocal = portableRoot ?? [:]
+            withHostileLocal["local"] = [
+                "local_agent_access": true,
+                "onboarding_complete": true,
+                "input_device_uid": "other-machine",
+            ]
+            let hostileData = try JSONSerialization.data(withJSONObject: withHostileLocal)
+            expect(try AppConfig.portableSettings(from: hostileData) == portable.settings,
+                   "settings import ignores injected machine and security state")
+
+            var withUnknownKey = portableRoot ?? [:]
+            withUnknownKey["future_metadata"] = ["safe_to_ignore": true]
+            let unknownData = try JSONSerialization.data(withJSONObject: withUnknownKey)
+            expect(try SettingsDocumentCodec.decode(unknownData).settings == portable.settings,
+                   "same-version settings ignore unknown future fields")
+        } catch {
+            expect(false, "valid settings document threw: \(error)")
+        }
+
+        let futureRoot: [String: Any] = [
+            "format": SettingsDocument.formatIdentifier,
+            "version": SettingsDocument.currentVersion + 1,
+            "settings": [:],
+        ]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: futureRoot)
+            _ = try SettingsDocumentCodec.decode(data)
+            expect(false, "future settings version is rejected")
+        } catch let error as SettingsDocumentError {
+            expect(error == .unsupportedVersion(SettingsDocument.currentVersion + 1),
+                   "future settings version reports an actionable compatibility error")
+        } catch {
+            expect(false, "future settings version returned the wrong error")
+        }
+
+        var invalidVolume = document
+        invalidVolume.settings.general.soundVolume = 101
+        do {
+            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidVolume))
+            expect(false, "out-of-range sound volume is rejected")
+        } catch {
+            expect(true, "out-of-range sound volume is rejected")
+        }
+
+        var invalidNumericLimits = document
+        invalidNumericLimits.settings.dictation.typingWordsPerMinute = Int.max
+        do {
+            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
+            expect(false, "unbounded imported typing speed is rejected")
+        } catch {
+            expect(true, "unbounded imported typing speed is rejected")
+        }
+        invalidNumericLimits = document
+        invalidNumericLimits.settings.engine.maximumRecordingSeconds = Double.greatestFiniteMagnitude
+        do {
+            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
+            expect(false, "unbounded imported recording duration is rejected")
+        } catch {
+            expect(true, "unbounded imported recording duration is rejected")
+        }
+        invalidNumericLimits = document
+        invalidNumericLimits.settings.engine.audioRetentionDays = Double.greatestFiniteMagnitude
+        do {
+            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
+            expect(false, "unbounded imported audio retention is rejected")
+        } catch {
+            expect(true, "unbounded imported audio retention is rejected")
+        }
+        invalidNumericLimits = document
+        invalidNumericLimits.settings.engine.audioMaximumMegabytes = Double.greatestFiniteMagnitude
+        do {
+            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
+            expect(false, "unbounded imported audio storage is rejected")
+        } catch {
+            expect(true, "unbounded imported audio storage is rejected")
+        }
+
+        var invalidShortcuts = document
+        invalidShortcuts.settings.shortcuts.editSelection =
+            invalidShortcuts.settings.shortcuts.dictation
+        do {
+            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidShortcuts))
+            expect(false, "conflicting imported shortcuts are rejected")
+        } catch {
+            expect(true, "conflicting imported shortcuts are rejected")
+        }
+
+        do {
+            _ = try SettingsDocumentCodec.decode(Data("{\"version\":1}".utf8))
+            expect(false, "non-Velora JSON is rejected")
+        } catch {
+            expect(true, "non-Velora JSON is rejected")
+        }
+
+        // One-time UserDefaults migration keeps current user choices and adopts
+        // the engine-selected cleanup model without touching the real domain.
+        let suite = "com.sushil.velora.selftest.settings.\(UUID().uuidString)"
+        let legacy = UserDefaults(suiteName: suite)!
+        let transactionSuite = "com.sushil.velora.selftest.settings-transaction.\(UUID().uuidString)"
+        let transactionDefaults = UserDefaults(suiteName: transactionSuite)!
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-settings-migration-\(UUID().uuidString)")
+        let engineConfig = directory.appendingPathComponent("config.json")
+        defer {
+            legacy.removePersistentDomain(forName: suite)
+            transactionDefaults.removePersistentDomain(forName: transactionSuite)
+            try? FileManager.default.removeItem(at: directory)
+        }
+        legacy.set("dark", forKey: "velora.appearance")
+        legacy.set(Hotkey.f19.defaultsRepresentation, forKey: "velora.hotkey.v2")
+        legacy.set("hi", forKey: "velora.language")
+        legacy.set(true, forKey: "velora.localAgentAccess")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data("{\"cleanup_model\":\"mlx-community/Test-Cleanup\",\"streaming_cleanup\":false,\"audio_max_mb\":2048}".utf8)
+                .write(to: engineConfig)
+            let migrated = AppConfig.migratedSettingsDocument(
+                defaults: legacy, engineConfigURL: engineConfig)
+            expect(migrated.settings.general.appearance == "dark"
+                   && migrated.settings.shortcuts.dictation == .f19
+                   && migrated.settings.dictation.language == "hi",
+                   "settings migration preserves existing UserDefaults preferences")
+            expect(!migrated.settings.engine.streamingCleanup
+                   && migrated.settings.engine.audioMaximumMegabytes == 2048,
+                   "settings migration preserves advanced engine preferences")
+            expect(AppConfig.migratedLocalSettings(defaults: legacy).localAgentAccess,
+                   "settings migration keeps security gates local")
+
+            legacy.set(Hotkey.optionShiftE.defaultsRepresentation, forKey: "velora.hotkey.v2")
+            legacy.removeObject(forKey: "velora.editHotkey.v1")
+            let collisionSafe = AppConfig.migratedSettingsDocument(
+                defaults: legacy, engineConfigURL: engineConfig)
+            expect(collisionSafe.settings.shortcuts.dictation == .optionShiftE
+                   && collisionSafe.settings.shortcuts.editSelection == .rightOption,
+                   "shortcut migration chooses a distinct fallback when dictation uses the edit default")
+            legacy.set(Hotkey.f19.defaultsRepresentation, forKey: "velora.hotkey.v2")
+
+            // Drive the real import transaction against isolated files. A
+            // directory at the engine config path forces projection failure;
+            // the typed settings file must return to its exact prior value.
+            let rollbackDirectory = directory.appendingPathComponent("rollback")
+            let rollbackSettings = rollbackDirectory.appendingPathComponent("settings.json")
+            let blockedEngineConfig = rollbackDirectory.appendingPathComponent("blocked-config")
+            let rollbackConfig = AppConfig(
+                defaults: transactionDefaults,
+                settingsFileURL: rollbackSettings,
+                engineConfigURL: blockedEngineConfig,
+                registerDefaults: false)
+            let previous = try SettingsDocumentCodec.decode(Data(contentsOf: rollbackSettings))
+            var previousRoot = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: rollbackSettings)) as? [String: Any] ?? [:]
+            previousRoot["future_metadata"] = ["keep": true]
+            let previousRawData = try JSONSerialization.data(withJSONObject: previousRoot)
+            try previousRawData.write(to: rollbackSettings)
+            var imported = previous.settings
+            imported.general.appearance = "dark"
+            try FileManager.default.createDirectory(
+                at: blockedEngineConfig, withIntermediateDirectories: true)
+            do {
+                try rollbackConfig.applyPortableSettings(imported)
+                expect(false, "settings import reports engine projection failure")
+            } catch let error as SettingsDocumentError {
+                expect(error == .engineProjectionFailed,
+                       "settings import reports engine projection failure")
+            } catch {
+                expect(false, "settings import returned the wrong projection error")
+            }
+            let restored = try SettingsDocumentCodec.decode(Data(contentsOf: rollbackSettings))
+            expect(restored == previous,
+                   "settings import restores the full previous document when engine projection fails")
+            expect(try Data(contentsOf: rollbackSettings) == previousRawData,
+                   "settings rollback preserves unknown fields byte-for-byte")
+            let rollbackRecovery = rollbackSettings.deletingPathExtension()
+                .appendingPathExtension("import-backup.json")
+            expect(!FileManager.default.fileExists(atPath: rollbackRecovery.path),
+                   "successful rollback removes its temporary recovery copy")
+
+            let malformedEngine = directory.appendingPathComponent("malformed-config.json")
+            let malformedData = Data("not-json".utf8)
+            try malformedData.write(to: malformedEngine)
+            expect(!AppConfig.applyManualDictionary(
+                .init(vocabulary: ["Velora"], replacements: [:]), at: malformedEngine),
+                "engine projection fails closed on malformed config")
+            expect(try Data(contentsOf: malformedEngine) == malformedData,
+                   "engine projection preserves malformed config for recovery")
+
+            transactionDefaults.set(true, forKey: "velora.localAgentAccess")
+            let successDirectory = directory.appendingPathComponent("successful-import")
+            let successSettings = successDirectory.appendingPathComponent("settings.json")
+            let successEngine = successDirectory.appendingPathComponent("config.json")
+            try FileManager.default.createDirectory(
+                at: successDirectory, withIntermediateDirectories: true)
+            try Data("{\"cleanup_model\":\"ram/model\",\"future_key\":true}".utf8)
+                .write(to: successEngine)
+            let successConfig = AppConfig(
+                defaults: transactionDefaults,
+                settingsFileURL: successSettings,
+                engineConfigURL: successEngine,
+                registerDefaults: false)
+            var successfulImport = try AppConfig.portableSettings(
+                from: successConfig.exportSettingsData())
+            successfulImport.general.appearance = "dark"
+            successfulImport.dictation.language = "hi"
+            successfulImport.engine.maximumRecordingSeconds = 720
+            try successConfig.applyPortableSettings(successfulImport)
+            let committed = try SettingsDocumentCodec.decode(Data(contentsOf: successSettings))
+            let projected = try JSONSerialization.jsonObject(
+                with: Data(contentsOf: successEngine)) as? [String: Any]
+            expect(committed.settings == successfulImport,
+                   "settings import commits the complete validated document")
+            let settingsMode = (try FileManager.default.attributesOfItem(
+                atPath: successSettings.path)[.posixPermissions] as? NSNumber)?.intValue
+            expect(settingsMode == 0o600,
+                   "settings import keeps the canonical file owner-only")
+            expect(successConfig.localAgentAccess,
+                   "successful settings import preserves machine-local security state")
+            expect(projected?["language"] as? String == "hi"
+                   && (projected?["max_recording_s"] as? NSNumber)?.doubleValue == 720,
+                   "settings import projects engine-facing preferences")
+            expect(projected?["cleanup_model"] as? String == "ram/model"
+                   && projected?["future_key"] as? Bool == true,
+                   "settings import preserves cleanup selection and unknown engine keys")
+            let durableBackup = successSettings.deletingPathExtension()
+                .appendingPathExtension("backup.json")
+            expect(FileManager.default.fileExists(atPath: durableBackup.path),
+                   "portable settings keep a last-known-good recovery copy")
+            try FileManager.default.removeItem(at: successSettings)
+            let missingRecovery = AppConfig(
+                defaults: transactionDefaults,
+                settingsFileURL: successSettings,
+                engineConfigURL: successEngine,
+                registerDefaults: false)
+            expect(try AppConfig.portableSettings(
+                from: missingRecovery.exportSettingsData()) == successfulImport,
+                "a missing settings.json recovers without remigrating stale UserDefaults")
+            try Data("not-json".utf8).write(to: successSettings)
+            let corruptRecovery = AppConfig(
+                defaults: transactionDefaults,
+                settingsFileURL: successSettings,
+                engineConfigURL: successEngine,
+                registerDefaults: false)
+            expect(try AppConfig.portableSettings(
+                from: corruptRecovery.exportSettingsData()) == successfulImport,
+                "a corrupt settings.json recovers from the last-known-good copy")
+            let successRecovery = successSettings.deletingPathExtension()
+                .appendingPathExtension("import-backup.json")
+            expect(!FileManager.default.fileExists(atPath: successRecovery.path),
+                   "successful settings import removes its temporary recovery copy")
+
+            let newerDirectory = directory.appendingPathComponent("newer-version")
+            let newerSettings = newerDirectory.appendingPathComponent("settings.json")
+            try FileManager.default.createDirectory(
+                at: newerDirectory, withIntermediateDirectories: true)
+            let newerData = try JSONSerialization.data(withJSONObject: futureRoot)
+            try newerData.write(to: newerSettings)
+            let newerConfig = AppConfig(
+                defaults: transactionDefaults,
+                settingsFileURL: newerSettings,
+                engineConfigURL: newerDirectory.appendingPathComponent("config.json"),
+                registerDefaults: false)
+            newerConfig.appearance = "dark"
+            expect(try Data(contentsOf: newerSettings) == newerData,
+                   "a downgraded app never overwrites a newer settings document")
+            do {
+                try newerConfig.applyPortableSettings(.defaults)
+                expect(false, "a downgraded app refuses to import over newer settings")
+            } catch let error as SettingsDocumentError {
+                expect(error == .unsupportedVersion(SettingsDocument.currentVersion + 1),
+                       "a downgraded app refuses to import over newer settings")
+            } catch {
+                expect(false, "newer settings import refusal returned the wrong error")
+            }
+            expect(try Data(contentsOf: newerSettings) == newerData,
+                   "refused import leaves the newer settings document byte-for-byte intact")
+
+        } catch {
+            expect(false, "settings migration fixture failed: \(error)")
+        }
     }
 
     // MARK: - Bundle identifier migration
@@ -1699,9 +2031,14 @@ enum Selftest {
     // MARK: - EngineEvent parsing
 
     private static func testEventParsing() {
-        let ready = EngineEvent.parse(["event": "ready", "setup_complete": true])
-        if case .ready(let setupComplete) = ready {
+        let ready = EngineEvent.parse([
+            "event": "ready", "setup_complete": true,
+            "stt_model": "mlx-community/whisper-large-v3-turbo",
+        ])
+        if case .ready(let setupComplete, let sttModel) = ready {
             expect(setupComplete, "ready event carries cached setup completion")
+            expect(sttModel == "mlx-community/whisper-large-v3-turbo",
+                   "ready event carries the engine's proven speech backend")
         } else {
             expect(false, "expected .ready, got \(ready)")
         }
@@ -2333,6 +2670,8 @@ enum Selftest {
                && store.audioURL(relativePath: "\(id)/../outside.wav") == nil
                && store.audioURL(relativePath: "\(id)/unexpected.aiff") == nil,
                "meeting audio lookup cannot escape its private root")
+        expect(store.audioURL(relativePath: "\(id)/them.caf")?.lastPathComponent == "them.caf",
+               "meeting storage accepts the audio-only Core Audio system track")
         let outside = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-outside-\(UUID().uuidString).caf")
         defer { try? FileManager.default.removeItem(at: outside) }
@@ -2493,30 +2832,78 @@ enum Selftest {
         } else { expect(false, "expected reprocess failure event") }
     }
 
-    private static func testMeetingAlertTokenSlot() {
-        var slot = MeetingAlertTokenSlot()
-        let first = UUID()
-        let replacement = UUID()
-        slot.track(first)
-        slot.completed(replacement)
-        expect(slot.token == first,
-               "an unrelated alert completion cannot clear the active meeting warning")
-        expect(slot.take() == first && slot.token == nil,
-               "stopping a meeting takes and clears its visible warning token")
-        slot.track(replacement)
-        slot.completed(replacement)
-        expect(slot.token == nil,
-               "responding to a meeting warning clears only that warning token")
+    private static func testMeetingCaptureReadiness() {
+        let gate = MeetingCaptureReadiness(requiresSystemAudio: true)
+        expect(!gate.recordMicrophone(frames: 0),
+               "an empty microphone callback cannot make meeting capture ready")
+        expect(!gate.recordMicrophone(frames: 256),
+               "microphone frames alone cannot claim full meeting capture")
+        expect(gate.missingTracks == [.systemAudio],
+               "startup health reports the exact missing system-audio track")
+        expect(gate.recordSystemAudio(frames: 256),
+               "the first healthy frame from both tracks makes capture ready")
+        expect(!gate.recordSystemAudio(frames: 256),
+               "meeting readiness fires exactly once")
+
+        let fallback = MeetingCaptureReadiness(requiresSystemAudio: true)
+        expect(!fallback.recordMicrophone(frames: 128),
+               "full capture waits for computer audio")
+        expect(fallback.continueWithoutSystemAudio(),
+               "an explicit mic-only fallback becomes ready after microphone proof")
+        expect(fallback.missingTracks.isEmpty,
+               "a deliberate mic-only fallback no longer waits on a failed track")
+
+        let noMic = MeetingCaptureReadiness(requiresSystemAudio: false)
+        expect(!noMic.continueWithoutSystemAudio(),
+               "mic-only capture still cannot start before microphone frames arrive")
+        expect(noMic.missingTracks == [.microphone],
+               "startup health names a missing microphone track")
+    }
+
+    private static func testMeetingSystemAudioBackendPolicy() {
+        expect(
+            MeetingSystemAudioPolicy.backend(for: OperatingSystemVersion(
+                majorVersion: 14, minorVersion: 2, patchVersion: 0)) == .coreAudioTap,
+            "macOS 14.2 uses an audio-only Core Audio process tap")
+        expect(
+            MeetingSystemAudioPolicy.backend(for: OperatingSystemVersion(
+                majorVersion: 14, minorVersion: 1, patchVersion: 0)) == .unavailable,
+            "older systems fail honestly instead of opening a display-capture stream")
+        expect(MeetingSystemAudioPolicy.relativePath(meetingID: "m1") == "m1/them.caf",
+               "computer audio is stored as a crash-resilient CAF track")
+        expect(MeetingCoordinator.consentDescription.count <= 110
+               && MeetingCoordinator.consentDescription.contains("microphone")
+               && MeetingCoordinator.consentDescription.contains("computer audio"),
+               "meeting consent stays minimal while naming both recorded sources")
+        expect(MeetingCoordinator.systemAudioFailurePresentation == .hud,
+               "computer-audio degradation stays in the compact HUD instead of opening a modal")
+        expect(MeetingCoordinator.State.preparing(title: "Starting…").isActive
+               && MeetingCoordinator.State.recording(
+                    id: "m1", title: "Call", startedAt: Date(), systemAudio: true).isActive
+               && !MeetingCoordinator.State.idle.isActive,
+               "meeting capture exclusion covers preparation and recording, but not idle")
+        expect(MeetingProcessingHUDPolicy.shouldShow(
+            dictationIsIdle: true, meetingIsIdle: true, hudAllowsMeetingProgress: true),
+               "meeting-note progress stays visible while the foreground is free")
+        expect(!MeetingProcessingHUDPolicy.shouldShow(
+            dictationIsIdle: false, meetingIsIdle: true, hudAllowsMeetingProgress: true)
+               && !MeetingProcessingHUDPolicy.shouldShow(
+                    dictationIsIdle: true, meetingIsIdle: false,
+                    hudAllowsMeetingProgress: true)
+               && !MeetingProcessingHUDPolicy.shouldShow(
+                    dictationIsIdle: true, meetingIsIdle: true,
+                    hudAllowsMeetingProgress: false),
+               "background meeting-note progress never overwrites capture or error UI")
     }
 
     private static func testMeetingSystemAudioWarnings() {
         let denied = MeetingAudioCapture.systemAudioWarning(for: NSError(
-            domain: SCStreamErrorDomain, code: -3801,
-            userInfo: [NSLocalizedDescriptionKey: "The user declined TCCs"]
+            domain: "VeloraSystemAudioCapture", code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "system-audio permission denied"]
         ))
         expect(denied.contains("Screen & System Audio Recording")
-               && !denied.contains("TCC"),
-               "a computer-audio denial gives a useful recovery path without TCC jargon")
+               && !denied.contains("screen recording"),
+               "a computer-audio denial gives the audio-only recovery path")
 
         let encoder = MeetingAudioCapture.systemAudioWarning(for: NSError(
             domain: "VeloraMeetingCapture", code: 3,
@@ -2909,6 +3296,12 @@ enum Selftest {
         expect(HUDState.standby.isAvailable, "standby counts as free for toasts")
         expect(HUDState.hidden(.cancel).isAvailable, "hidden stays free for toasts")
         expect(!HUDState.listening.isAvailable, "a live session blocks toasts")
+        let meetingState = HUDState.meeting(title: "Design review", systemAudio: true)
+        expect(!meetingState.isAvailable,
+               "a live meeting owns the HUD until recording stops")
+        let meetingMetrics = HUDView.capsuleMetrics(for: meetingState, context: nil)
+        expect(meetingMetrics.visible && meetingMetrics.size.width <= 280,
+               "the persistent meeting indicator is a compact HUD capsule")
         expect(
             HUDGeometry.standbySize.width < HUDGeometry.minListeningWidth
                 && HUDGeometry.standbySize.height < HUDGeometry.height,
@@ -3335,6 +3728,425 @@ enum Selftest {
             !AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate Pro")
                 && !AudioInputDevices.isInternalDeviceName("CADefaultDeviceAggregate-mic"),
             "the name backstop does not over-match legitimate names")
+    }
+
+    private static func testMicrophoneCaptureDeviceSelection() {
+        expect(
+            MicrophoneCaptureDevicePolicy.selectedUID(
+                persistedUID: "BuiltInMicrophoneDevice",
+                availableUIDs: ["AirPods:input", "BuiltInMicrophoneDevice"],
+                defaultUID: "AirPods:input") == "BuiltInMicrophoneDevice",
+            "a chosen built-in microphone stays independent from AirPods system output")
+        expect(
+            MicrophoneCaptureDevicePolicy.selectedUID(
+                persistedUID: "DisconnectedUSBMic",
+                availableUIDs: ["AirPods:input", "BuiltInMicrophoneDevice"],
+                defaultUID: "AirPods:input") == "AirPods:input",
+            "a disconnected chosen microphone falls back to the current default")
+        expect(
+            MicrophoneCaptureDevicePolicy.selectedUID(
+                persistedUID: nil,
+                availableUIDs: ["BuiltInMicrophoneDevice"],
+                defaultUID: nil) == "BuiltInMicrophoneDevice",
+            "microphone capture can use the only available input when no default is reported")
+    }
+
+    private static func testMeetingSystemAudioFrameMath() {
+        expect(
+            SystemAudioFrameMath.frames(byteCount: 4_096, bytesPerFrame: 8) == 512,
+            "system-audio IO derives frames from the tap stream format")
+        expect(
+            SystemAudioFrameMath.frames(byteCount: 4_096, bytesPerFrame: 0) == 0,
+            "system-audio IO rejects an unusable zero-byte frame format")
+    }
+
+    /// Explicit opt-in integration probe for the signed app. It listens only
+    /// long enough to prove buffers arrive, retains no microphone audio, and is
+    /// excluded from ordinary/CI selftests because it needs the user's TCC grant.
+    private static func testLiveMicrophoneCapture() {
+        let source = MicrophoneStreamCapture()
+        let sourceLock = NSLock()
+        var rawFrames = 0
+        var sourceFailure: String?
+        var sourceStart: Result<Void, Error>?
+        source.start(
+            persistedUID: AppConfig.shared.inputDeviceUID,
+            onBuffer: { buffer in
+                sourceLock.lock(); rawFrames += Int(buffer.frameLength); sourceLock.unlock()
+            },
+            onFailure: { message in
+                sourceLock.lock(); sourceFailure = message; sourceLock.unlock()
+            },
+            completion: { sourceStart = $0 })
+        _ = waitUntil(timeout: 3) { sourceStart != nil }
+        if case .success = sourceStart {
+            _ = waitUntil(timeout: 3) {
+                sourceLock.lock(); defer { sourceLock.unlock() }
+                return rawFrames > 0 || sourceFailure != nil
+            }
+            var stopped = false
+            source.stop { stopped = true }
+            _ = waitUntil(timeout: 3) { stopped }
+            sourceLock.lock()
+            let receivedRaw = rawFrames
+            let rawFailure = sourceFailure
+            sourceLock.unlock()
+            expect(receivedRaw > 0,
+                   "direct selected-microphone source receives PCM"
+                       + (rawFailure.map { ": \($0)" } ?? ""))
+        } else {
+            source.stop()
+            let detail: String
+            if case .failure(let error) = sourceStart {
+                detail = error.localizedDescription
+            } else {
+                detail = "timed out"
+            }
+            expect(false, "direct selected-microphone source starts: \(detail)")
+        }
+
+        let capture = AudioCapture()
+        let lock = NSLock()
+        var byteCount = 0
+        var captureFailure: String?
+        capture.onDeviceLost = { message in
+            lock.lock(); captureFailure = message; lock.unlock()
+        }
+        var captureStart: Result<Void, Error>?
+        capture.start(onChunk: { data in
+                lock.lock(); byteCount += data.count; lock.unlock()
+            }, onLevel: { _ in }, completion: { captureStart = $0 })
+        _ = waitUntil(timeout: 3) { captureStart != nil }
+        if case .success = captureStart {
+            _ = waitUntil(timeout: 3) {
+                lock.lock(); defer { lock.unlock() }
+                return byteCount > 0
+            }
+            var stopped = false
+            capture.stop { stopped = true }
+            _ = waitUntil(timeout: 3) { stopped }
+            lock.lock()
+            let captured = byteCount
+            let convertedFailure = captureFailure
+            lock.unlock()
+            expect(captured > 0,
+                   "live microphone probe receives 16 kHz PCM from the selected/AirPods route"
+                       + (convertedFailure.map { ": \($0)" } ?? ""))
+        } else {
+            capture.stop()
+            let detail: String
+            if case .failure(let error) = captureStart {
+                detail = error.localizedDescription
+            } else {
+                detail = "timed out"
+            }
+            expect(false, "live microphone probe starts: \(detail)")
+        }
+    }
+
+    /// Plays one stock macOS sound from a child process and records it through
+    /// the audio-only Core Audio tap. The temporary CAF is deleted immediately.
+    private static func testLiveSystemAudioCapture() {
+        guard #available(macOS 14.2, *) else { return }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-system-audio-probe-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("probe.caf")
+        let capture = CoreAudioSystemAudioCapture()
+        let lock = NSLock()
+        var frames = 0
+        capture.onFrames = { count in
+            lock.lock(); frames += count; lock.unlock()
+        }
+        do {
+            try capture.start(to: url)
+            let player = Process()
+            player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+            player.arguments = ["/System/Library/Sounds/Glass.aiff"]
+            try player.run()
+            _ = waitUntil(timeout: 4) {
+                lock.lock(); defer { lock.unlock() }
+                return frames > 0
+            }
+            player.waitUntilExit()
+            let hadFrames = capture.stop()
+            let audio = try? AVAudioFile(forReading: url)
+            lock.lock(); let callbackFrames = frames; lock.unlock()
+            expect(hadFrames && callbackFrames > 0 && (audio?.length ?? 0) > 0,
+                   "audio-only Core Audio tap records synthetic computer audio into CAF")
+        } catch {
+            _ = capture.stop()
+            expect(false, "live system-audio probe starts: \(error.localizedDescription)")
+        }
+    }
+
+    /// Exercises the same two-track owner used by the meeting UI, including
+    /// its frame-readiness gate and lazy microphone file creation. The probe
+    /// deletes its private meeting directory immediately after inspection.
+    private static func testLiveMeetingCapture() {
+        let meetingID = "selftest-\(UUID().uuidString)"
+        let directory = AppConfig.meetingsDirectory
+            .appendingPathComponent(meetingID, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let capture = MeetingAudioCapture()
+        var startResult: Result<MeetingCaptureStart, MeetingCaptureError>?
+        capture.start(meetingID: meetingID) { startResult = $0 }
+        _ = waitUntil(timeout: 7) { startResult != nil }
+
+        guard case .success(let start) = startResult else {
+            if case .failure(let error) = startResult {
+                expect(false, "live meeting capture becomes ready: \(error.localizedDescription)")
+            } else {
+                expect(false, "live meeting capture becomes ready before its startup deadline")
+            }
+            capture.stop(cancelled: true) { _ in }
+            return
+        }
+
+        var files: MeetingCaptureFiles?
+        var stopFinished = false
+        capture.stop(cancelled: false) {
+            files = $0
+            stopFinished = true
+        }
+        _ = waitUntil(timeout: 5) { stopFinished }
+        let micURL = directory.appendingPathComponent("me.caf")
+        let systemURL = directory.appendingPathComponent("them.caf")
+        let micAudio = try? AVAudioFile(forReading: micURL)
+        let systemAudio = try? AVAudioFile(forReading: systemURL)
+        expect(
+            files?.micRelativePath == "\(meetingID)/me.caf"
+                && (micAudio?.length ?? 0) > 0,
+            "live meeting flow writes a readable nonempty selected-microphone track")
+        if start.systemAudio {
+            expect(
+                files?.systemRelativePath == "\(meetingID)/them.caf"
+                    && (systemAudio?.length ?? 0) > 0,
+                "live meeting flow writes a readable nonempty computer-audio track")
+        }
+    }
+
+    // MARK: - Dictation media pause/resume
+
+    private static func testMediaPlaybackNoop() {
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { .init(processes: [], playing: []) },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        coordinator.restoreAfterDictation()
+
+        expect(toggles == 0, "dictation never toggles media that was already paused")
+        expect(scheduled.isEmpty, "no-player dictation schedules no media work")
+    }
+
+    private static func testMediaPlaybackPauseResume() {
+        let player = AudioObjectID(41)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        expect(toggles == 1, "playing media gets one pause command at dictation start")
+        expect(scheduled.count == 1, "a posted pause is verified before Velora owns resumption")
+
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        expect(scheduled.count == 1, "verified media pause schedules a delayed restore")
+
+        scheduled.removeFirst().1()
+        expect(toggles == 2, "only a verified Velora pause gets a matching resume command")
+    }
+
+    private static func testMediaPlaybackEarlyStop() {
+        let player = AudioObjectID(42)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        coordinator.restoreAfterDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        expect(scheduled.count == 1,
+               "capture ending before pause verification still queues the required restore")
+
+        scheduled.removeFirst().1()
+        expect(toggles == 2, "an early stop restores media after verification completes")
+    }
+
+    private static func testMediaPlaybackFailedPause() {
+        let player = AudioObjectID(43)
+        let snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+
+        expect(toggles == 1, "an unobserved pause is never followed by a destructive toggle")
+        expect(scheduled.isEmpty, "failed pause verification leaves no restore pending")
+    }
+
+    private static func testMediaPlaybackUserOverride() {
+        let player = AudioObjectID(44)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        snapshot.playing = [player]
+        snapshot.allPlaying = [player]
+        scheduled.removeFirst().1()
+
+        expect(toggles == 1, "Velora does not toggle media the user already resumed")
+    }
+
+    private static func testMediaPlaybackAmbiguousPlayers() {
+        let playing = AudioObjectID(45)
+        let paused = AudioObjectID(46)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { .init(processes: [playing, paused], playing: [playing]) },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+
+        expect(toggles == 0, "an open paused player makes the global media target ambiguous")
+        expect(scheduled.isEmpty, "ambiguous media ownership schedules no pause verification")
+    }
+
+    private static func testMediaPlaybackUnsupportedOutput() {
+        let music = AudioObjectID(47)
+        let browser = AudioObjectID(48)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: {
+                .init(
+                    processes: [music], playing: [music],
+                    allPlaying: [music, browser])
+            },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+
+        expect(toggles == 0, "unsupported browser or call output makes media-key targeting unsafe")
+        expect(scheduled.isEmpty, "unsupported active output schedules no media work")
+    }
+
+    private static func testMediaPlaybackUnsupportedOutputOnRestore() {
+        let music = AudioObjectID(50)
+        let browser = AudioObjectID(51)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [music], playing: [music])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        snapshot.allPlaying = [browser]
+        scheduled.removeFirst().1()
+
+        expect(toggles == 1, "new browser or call audio suppresses the media resume toggle")
+    }
+
+    private static func testMediaPlaybackTerminationRestore() {
+        let player = AudioObjectID(49)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        coordinator.restoreImmediatelyForTermination()
+
+        expect(toggles == 2, "termination restores verified media without waiting on a timer")
+        scheduled.removeFirst().1()
+        expect(toggles == 2, "the stale delayed restore is inert after termination restoration")
+    }
+
+    private static func testMediaPlaybackTerminationDuringVerification() {
+        let player = AudioObjectID(52)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        coordinator.restoreImmediatelyForTermination()
+        scheduled.removeFirst().1()
+
+        expect(toggles == 2, "termination can restore a pause before verification fires")
+    }
+
+    private static func testMediaPlaybackSupportedPlayers() {
+        expect(
+            MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.apple.Music")
+                && MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.spotify.client"),
+            "dedicated Apple Music and Spotify playback is eligible for dictation pause")
+        expect(
+            !MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.google.Chrome")
+                && !MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.apple.FaceTime"),
+            "ambiguous browser and call audio never triggers a global media toggle")
     }
 
     // MARK: - Final-output clipboard staging

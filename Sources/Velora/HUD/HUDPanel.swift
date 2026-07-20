@@ -23,8 +23,10 @@ final class HUDPanel: NSObject {
     /// AppDelegate once the modules exist.
     struct MenuHooks {
         var isRecording: () -> Bool
+        var isMeetingRecording: () -> Bool
         var recents: () -> [DictationRecord]
         var toggleDictation: () -> Void
+        var stopMeeting: () -> Void
         var openHistory: () -> Void
         var openSettings: () -> Void
     }
@@ -86,10 +88,11 @@ final class HUDPanel: NSObject {
 
         let hosting = HUDHostingView(rootView: HUDView(model: model))
         hosting.capsuleHitRect = { [weak self] in self?.currentHitRect() ?? .zero }
-        // The error state hosts a real SwiftUI Retry button — let SwiftUI own
+        // Error and meeting states host real SwiftUI buttons — let SwiftUI own
         // the mouse there instead of the tap/drag interceptor.
         hosting.wantsNativeMouse = { [weak self] in
             if case .error = self?.model.state { return true }
+            if case .meeting = self?.model.state { return true }
             return false
         }
         hosting.onTap = { [weak self] in self?.onTap?() }
@@ -496,10 +499,15 @@ final class HUDPanel: NSObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
+        let meetingRecording = menuHooks?.isMeetingRecording() ?? false
         let recording = menuHooks?.isRecording() ?? false
-        let toggleTitle = recording ? "Stop Dictation" : "Start Dictation"
+        let toggleTitle = meetingRecording
+            ? "Stop Meeting Recording"
+            : (recording ? "Stop Dictation" : "Start Dictation")
         let toggle = NSMenuItem(
-            title: toggleTitle, action: #selector(menuToggleDictation), keyEquivalent: "")
+            title: toggleTitle,
+            action: meetingRecording ? #selector(menuStopMeeting) : #selector(menuToggleDictation),
+            keyEquivalent: "")
         toggle.target = self
         toggle.attributedTitle = NSAttributedString(
             string: toggleTitle,
@@ -639,6 +647,10 @@ final class HUDPanel: NSObject {
 
     @objc private func menuToggleDictation() {
         menuHooks?.toggleDictation()
+    }
+
+    @objc private func menuStopMeeting() {
+        menuHooks?.stopMeeting()
     }
 
     @objc private func copyRecent(_ sender: NSMenuItem) {

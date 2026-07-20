@@ -1,5 +1,8 @@
 """Resumable meeting transcription and preemptible structured notes."""
 
+# The imported pytest fixture intentionally shares its name with test parameters.
+# ruff: noqa: F811
+
 import asyncio
 import json
 import wave
@@ -82,7 +85,7 @@ async def test_meeting_transcribe_diarizes_system_track(engine, tmp_path, monkey
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "diarized words")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
-    monkeypatch.setattr(diar_mod, "models_ready", lambda: True)
+    monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
     monkeypatch.setattr(
         diar_mod, "diarize",
         lambda pcm: [Turn(0.0, 4.0, "s1"), Turn(4.6, 9.5, "s2")])
@@ -126,7 +129,7 @@ async def test_meeting_transcribe_single_speaker_falls_back_to_them(
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "solo caller")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
-    monkeypatch.setattr(diar_mod, "models_ready", lambda: True)
+    monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
     monkeypatch.setattr(diar_mod, "diarize", lambda pcm: [Turn(0.0, 2.0, "s1")])
     _eng, sock = engine
     clip = tmp_path / "them.wav"
@@ -153,7 +156,7 @@ async def test_meeting_transcribe_diarization_failure_falls_back(
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "still transcribed")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
-    monkeypatch.setattr(diar_mod, "models_ready", lambda: True)
+    monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
     monkeypatch.setattr(diar_mod, "diarize", boom)
     _eng, sock = engine
     clip = tmp_path / "them.wav"

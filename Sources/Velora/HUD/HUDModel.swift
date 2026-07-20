@@ -20,6 +20,9 @@ enum HUDState: Equatable {
     case standby
     case listening
     case transcribing
+    /// Persistent meeting indicator. It stays visible for the full capture and
+    /// includes the truth of whether the remote/system track is healthy.
+    case meeting(title: String, systemAudio: Bool)
     case inserted
     case error(String)
     /// Learned-a-correction toast (Wispr-style): the misheard word struck
@@ -47,7 +50,7 @@ enum HUDState: Equatable {
 /// presets anchor the capsule so it grows inward from the screen edge instead
 /// of expanding symmetrically off-screen. Raw values persist the anchor for
 /// dragged (custom) positions.
-enum HUDEdge: String {
+enum HUDEdge: String, Codable {
     case leading, center, trailing
 
     /// `custom` positions carry their own stored anchor (chosen from where the
@@ -92,6 +95,8 @@ final class HUDModel: ObservableObject {
 
     /// Invoked by the error-state action button.
     var onRetry: (() -> Void)?
+    /// Invoked by the stop control in the persistent meeting capsule.
+    var onMeetingStop: (() -> Void)?
     /// Title of the error-state action button ("Retry" normally; "Open
     /// Settings" when the fix is granting a permission).
     @Published var retryTitle = "Retry"

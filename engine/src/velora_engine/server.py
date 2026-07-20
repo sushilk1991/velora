@@ -282,6 +282,14 @@ class Engine:
     async def _stt_call(self, fn: Callable[..., T], *args: Any) -> T:
         return await asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
 
+    async def _close_stt_backend(self, backend: STTBackend) -> None:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                await self._stt_call(close)
+            except Exception:  # noqa: BLE001 — replacement is already usable
+                log.exception("failed to close retired STT backend %s", backend.model_id)
+
     def _restart_if_cleanup_unhealthy(self) -> bool:
         """Restart the sidecar after its unkillable cleanup worker wedges.
 
@@ -350,11 +358,43 @@ class Engine:
             await self._set_loading(None)
             log.info("stt ready (%s) in %.2fs", self.stt.model_id, time.perf_counter() - t0)
         except Exception:
-            log.exception("FATAL: STT model failed to load")
-            with contextlib.suppress(Exception):
-                await self._set_loading(None)  # never strand a stale phase
-            self.shutdown.set()
-            return
+            fallback_id = getattr(self.stt, "fallback_model_id", None)
+            if not isinstance(fallback_id, str) or not fallback_id:
+                log.exception("FATAL: STT model failed to load")
+                with contextlib.suppress(Exception):
+                    await self._set_loading(None)  # never strand a stale phase
+                self.shutdown.set()
+                return
+            log.exception(
+                "experimental STT backend failed to load; falling back to %s",
+                fallback_id,
+            )
+            try:
+                await self._close_stt_backend(self.stt)
+                fallback = create_backend(fallback_id, self.config.language)
+                if not fake_stt_enabled() and not await asyncio.to_thread(
+                    models.is_cached, fallback.model_id
+                ):
+                    await self._download_with_progress(fallback.model_id, "fallback speech")
+                await self._set_loading("Loading the fallback speech model…")
+                await self._stt_call(fallback.load)
+                # Persist the proven backend so a broken experimental install
+                # cannot put every subsequent launch into the same failure loop.
+                # Setup can take minutes and the app writes this file directly;
+                # preserve any newer, unrelated settings before the full save.
+                self.config.reload()
+                fallback.language = self.config.language
+                self.stt = fallback
+                self.config.data["stt_model"] = fallback.model_id
+                self.config.save(keys={"stt_model"})
+                await self._set_loading(None)
+                log.info("fallback stt ready (%s)", fallback.model_id)
+            except Exception:
+                log.exception("FATAL: fallback STT model failed to load")
+                with contextlib.suppress(Exception):
+                    await self._set_loading(None)
+                self.shutdown.set()
+                return
         self.stt_ready.set()
         # Enforce audio retention once at startup (deletes clips > 6 months and
         # trims the archive under its size cap).
@@ -1533,8 +1573,10 @@ class Engine:
         if kind == "stt":
             backend = create_backend(model_id, self.config.language)
             await self._stt_call(backend.load)
+            old = self.stt
             self.stt = backend
             self.config.data["stt_model"] = model_id
+            await self._close_stt_backend(old)
         else:
             # Load-then-swap: build and fully load the replacement FIRST, then
             # retire the old one. A failed load (bad download, OOM) therefore
@@ -1553,7 +1595,7 @@ class Engine:
             self.config.data["cleanup_model"] = model_id
             if old is not None:
                 old.close()
-        self.config.save()
+        self.config.save(keys={f"{kind}_model"})
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)
 
@@ -1573,7 +1615,10 @@ class Engine:
             await asyncio.to_thread(models.ensure_downloaded, model_id)
         backend = create_backend(model_id, language)
         await self._stt_call(backend.load)
+        old = self._reprocess_backend
         self._reprocess_backend = backend
+        if old is not None:
+            await self._close_stt_backend(old)
         return backend
 
     # ---------------- safe voice edit ----------------

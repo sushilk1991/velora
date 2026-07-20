@@ -54,6 +54,7 @@ enum ExternalDictationError: LocalizedError {
 final class DictationController: NSObject {
     enum Phase: Equatable {
         case idle
+        case starting(locked: Bool)
         case recording(locked: Bool)
         case transcribing
 
@@ -61,6 +62,7 @@ final class DictationController: NSObject {
         var label: String {
             switch self {
             case .idle: return "idle"
+            case .starting(let locked): return locked ? "starting(locked)" : "starting(hold)"
             case .recording(let locked): return locked ? "recording(locked)" : "recording(hold)"
             case .transcribing: return "transcribing"
             }
@@ -83,6 +85,7 @@ final class DictationController: NSObject {
 
     private let config = AppConfig.shared
     private let capture = AudioCapture()
+    private let mediaPlayback = MediaPlaybackCoordinator()
     private let contextTracker: AppContextTracker
     private let hud: HUDPanel
     private let inserter = TextInserter()
@@ -121,11 +124,15 @@ final class DictationController: NSObject {
     private var recordingDurationMs: Int?
     private var transcribeStartedAt: Date?
     private var hotkeyDownAt: Date?
+    /// A hold-to-talk release can arrive while macOS is still negotiating a
+    /// Bluetooth input route. Finish immediately once capture becomes ready.
+    private var stopAfterCaptureStarts = false
     private var rawTranscript: String?
     /// STT decode latency from this session's `transcript` event, persisted
     /// with the history row (the live `final` event doesn't carry it).
     private var sttMs: Int?
     private var transcribeTimer: Timer?
+    private var captureStartTimer: Timer?
     /// When set, the error HUD's action button runs this instead of retrying
     /// dictation (e.g. "Open Settings" for a missing Accessibility grant).
     private var errorRetryAction: (() -> Void)?
@@ -212,14 +219,20 @@ final class DictationController: NSObject {
         self.dictionary = dictionary
         super.init()
         hud.model.onRetry = { [weak self] in self?.retryFromError() }
-        // Successful device-change recovery is silent (capture rebuilds and the
-        // recording continues); this only fires when NO input could be
-        // re-established (the last mic unplugged).
+        // The direct device adapter reports runtime interruption or removal;
+        // a failed microphone cannot leave a silent "recording" HUD alive.
         capture.onDeviceLost = { [weak self] _ in
-            guard let self, self.isRecording else { return }
+            guard let self else { return }
+            guard case .starting = self.phase else {
+                guard self.isRecording else { return }
+                self.supervisor.send(["cmd": "cancel", "session": self.sessionID])
+                self.cancelledSessionID = self.sessionID
+                self.showError("Microphone disconnected")
+                return
+            }
             self.supervisor.send(["cmd": "cancel", "session": self.sessionID])
             self.cancelledSessionID = self.sessionID
-            self.showError("Microphone disconnected")
+            self.showError("Microphone could not start")
         }
     }
 
@@ -235,6 +248,8 @@ final class DictationController: NSObject {
         switch phase {
         case .idle:
             startRecording(locked: true)
+        case .starting:
+            cancel()
         case .recording:
             stopAndTranscribe()
         case .transcribing:
@@ -327,12 +342,11 @@ final class DictationController: NSObject {
         }
         if phase != .idle {
             cancel()
-            return
-        }
-        if let request = externalRequest {
+        } else if let request = externalRequest {
             externalRequest = nil
             request.completion(.failure(.cancelled))
         }
+        mediaPlayback.restoreImmediatelyForTermination()
     }
 
     // MARK: - Reformat last (menubar quick-override, off the hot path)
@@ -779,6 +793,11 @@ final class DictationController: NSObject {
             return false
         }
 
+        // Request the media pause before opening the microphone. On Bluetooth
+        // headphones this prevents music from playing through the lower-quality
+        // two-way headset route while Velora captures speech.
+        mediaPlayback.pauseForDictation()
+
         // Learn from any edits the user made to the previous dictation before
         // starting a new one (they've clearly finished with it).
         checkPendingLearning()
@@ -786,8 +805,11 @@ final class DictationController: NSObject {
         sessionID = UUID().uuidString
         rawTranscript = nil
         sttMs = nil
-        recordingStart = Date()
+        recordingStart = nil
         recordingDurationMs = nil
+        stopAfterCaptureStarts = false
+        captureStartTimer?.invalidate()
+        captureStartTimer = nil
         timeoutErrorAt = nil  // a stale timeout must never drop THIS session's final
 
         // Context chip: the target app's actual icon + the client-side
@@ -833,6 +855,7 @@ final class DictationController: NSObject {
             payload["mode"] = explicitMode
             startCommand["context"] = payload
         }
+        phase = .starting(locked: locked)
         supervisor.send(startCommand)
 
         // Background pass: read richer nearby AX text (the person you're
@@ -855,23 +878,43 @@ final class DictationController: NSObject {
             }
         }
 
-        hud.model.levels.reset()
-        hud.model.recordingStart = recordingStart
-        hud.transition(to: .listening)
-        sounds.play(.start)
-
+        hud.transition(to: .notice(symbol: "mic", message: "Starting microphone…"))
         let client = supervisor.client
-        do {
-            try capture.start(
-                onChunk: { data in client.send(audio: data) },
-                onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) })
-        } catch {
-            supervisor.send(["cmd": "cancel", "session": sessionID])
-            showError(error.localizedDescription)
-            return false
+        let requestedSession = sessionID
+        capture.start(
+            onChunk: { data in client.send(audio: data) },
+            onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) }
+        ) { [weak self] result in
+            guard let self, self.sessionID == requestedSession,
+                  case .starting(let currentLocked) = self.phase else { return }
+            self.captureStartTimer?.invalidate()
+            self.captureStartTimer = nil
+            switch result {
+            case .failure(let error):
+                self.supervisor.send(["cmd": "cancel", "session": requestedSession])
+                self.showError(error.localizedDescription)
+            case .success:
+                self.recordingStart = Date()
+                self.hud.model.levels.reset()
+                self.hud.model.recordingStart = self.recordingStart
+                self.hud.transition(to: .listening)
+                self.sounds.play(.start)
+                self.phase = .recording(locked: currentLocked)
+                if self.stopAfterCaptureStarts {
+                    self.stopAfterCaptureStarts = false
+                    self.stopAndTranscribe()
+                }
+            }
         }
-
-        phase = .recording(locked: locked)
+        captureStartTimer = Timer.scheduledTimer(
+            withTimeInterval: 8, repeats: false
+        ) { [weak self] _ in
+            guard let self, self.sessionID == requestedSession,
+                  case .starting = self.phase else { return }
+            self.supervisor.send(["cmd": "cancel", "session": requestedSession])
+            self.cancelledSessionID = requestedSession
+            self.showError("Microphone did not start — check the selected input")
+        }
         return true
     }
 
@@ -879,9 +922,7 @@ final class DictationController: NSObject {
         guard isRecording else { return }
 
         recordingDurationMs = elapsedRecordingMs
-        capture.stop()
         sounds.play(.stop)
-        NSLog("Velora: engine stop session=%@", sessionID)
         // Attach the background-gathered rich context (if it finished) so the
         // engine's cleanup sees the on-screen names. Falls back to the basic
         // title entities already sent with `start`.
@@ -889,10 +930,19 @@ final class DictationController: NSObject {
         if !richEntities.isEmpty {
             stopCmd["entities"] = richEntities.map { $0.payload }
         }
-        supervisor.send(stopCmd)
+        let stoppedSession = sessionID
         hud.transition(to: .transcribing)
         phase = .transcribing
-        armTranscribeTimeout()
+        capture.stop { [weak self] in
+            guard let self else { return }
+            self.mediaPlayback.restoreAfterDictation()
+            guard self.sessionID == stoppedSession,
+                  self.phase == .transcribing,
+                  self.cancelledSessionID != stoppedSession else { return }
+            NSLog("Velora: engine stop session=%@", stoppedSession)
+            self.supervisor.send(stopCmd)
+            self.armTranscribeTimeout()
+        }
     }
 
     /// (Re)arms the stop→final watchdog. Reset on `transcript` progress so a
@@ -936,12 +986,15 @@ final class DictationController: NSObject {
     /// Esc or explicit cancel: stop everything, insert nothing.
     func cancel() {
         guard phase != .idle else { return }
+        captureStartTimer?.invalidate()
+        captureStartTimer = nil
         transcribeTimer?.invalidate()
         transcribeTimer = nil
 
         // Mark this session cancelled so a late `final` for it is refused
         // (the user explicitly gave up on it).
         cancelledSessionID = sessionID
+        stopAfterCaptureStarts = false
         editSession = nil
         if let pending = pendingEdit {
             supervisor.send(["cmd": "edit_cancel", "id": pending.id])
@@ -949,7 +1002,7 @@ final class DictationController: NSObject {
         }
         editTimer?.invalidate()
         editTimer = nil
-        capture.stop()
+        stopCaptureAndRestoreMedia()
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
         hud.model.recordingStart = nil
@@ -971,7 +1024,9 @@ final class DictationController: NSObject {
         // while an edit is in flight), and discarding a valid edit round-trip
         // here would lose its result. The edit owns its own lifecycle —
         // editTimer, the `edited`/`edit_failed` handlers, and cancel().
-        capture.stop()
+        stopCaptureAndRestoreMedia()
+        captureStartTimer?.invalidate()
+        captureStartTimer = nil
         transcribeTimer?.invalidate()
         transcribeTimer = nil
         errorRetryAction = nil
@@ -1036,7 +1091,7 @@ final class DictationController: NSObject {
             // it now so the mic releases and we don't keep streaming audio.
             if isRecording {
                 recordingDurationMs = elapsedRecordingMs
-                capture.stop()
+                stopCaptureAndRestoreMedia()
             }
             // Safe Voice Edit: this session's transcript is an INSTRUCTION for
             // the captured selection, never text to paste.
@@ -1326,6 +1381,11 @@ final class DictationController: NSObject {
         recordingStart.map { max(0, Int(-$0.timeIntervalSinceNow * 1_000)) } ?? 0
     }
 
+    private func stopCaptureAndRestoreMedia() {
+        capture.stop()
+        mediaPlayback.restoreAfterDictation()
+    }
+
     private func failExternalRequest(
         for session: String, error: ExternalDictationError
     ) {
@@ -1420,6 +1480,8 @@ extension DictationController: HotkeyMonitorDelegate {
         switch (config.hotkeyMode, phase) {
         case (.toggle, .idle):
             startRecording(locked: true)
+        case (.toggle, .starting):
+            cancel()
         case (.toggle, .recording):
             stopAndTranscribe()
         case (.toggle, .transcribing):
@@ -1428,6 +1490,10 @@ extension DictationController: HotkeyMonitorDelegate {
         case (.hold, .idle):
             hotkeyDownAt = Date()
             startRecording(locked: false)
+        case (.hold, .starting(locked: true)):
+            cancel()
+        case (.hold, .starting(locked: false)):
+            break
         case (.hold, .recording(locked: true)):
             // Tap while locked → finish.
             stopAndTranscribe()
@@ -1438,9 +1504,17 @@ extension DictationController: HotkeyMonitorDelegate {
 
     func hotkeyUp() {
         guard config.hotkeyMode == .hold else { return }
+        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+        if case .starting(locked: false) = phase {
+            if heldFor >= Self.tapThreshold {
+                stopAfterCaptureStarts = true
+            } else {
+                phase = .starting(locked: true)
+            }
+            return
+        }
         guard case .recording(locked: false) = phase else { return }
 
-        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
         if heldFor >= Self.tapThreshold {
             stopAndTranscribe()
         } else {
@@ -1460,11 +1534,15 @@ extension DictationController: HotkeyMonitorDelegate {
         switch (config.hotkeyMode, phase) {
         case (.toggle, .idle):
             beginEditSession(locked: true)
+        case (.toggle, .starting) where isEditRecording:
+            cancel()
         case (.toggle, .recording) where isEditRecording:
             stopAndTranscribe()
         case (.hold, .idle):
             hotkeyDownAt = Date()
             beginEditSession(locked: false)
+        case (.hold, .starting(locked: true)) where isEditRecording:
+            cancel()
         case (.hold, .recording(locked: true)) where isEditRecording:
             stopAndTranscribe()
         default:
@@ -1475,9 +1553,17 @@ extension DictationController: HotkeyMonitorDelegate {
     func editHotkeyUp() {
         guard config.hotkeyMode == .hold else { return }
         guard editSession?.session == sessionID else { return }
+        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+        if case .starting(locked: false) = phase {
+            if heldFor >= Self.tapThreshold {
+                stopAfterCaptureStarts = true
+            } else {
+                phase = .starting(locked: true)
+            }
+            return
+        }
         guard case .recording(locked: false) = phase else { return }
 
-        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
         if heldFor >= Self.tapThreshold {
             stopAndTranscribe()
         } else {
@@ -1488,7 +1574,7 @@ extension DictationController: HotkeyMonitorDelegate {
 
     func escapePressed() {
         switch phase {
-        case .recording, .transcribing:
+        case .starting, .recording, .transcribing:
             cancel()
         case .idle:
             // Dismiss a lingering error HUD.

@@ -11,6 +11,15 @@ if CommandLine.arguments.contains("--selftest") {
     exit(Selftest.run())
 }
 
+// Migrate before any headless path can instantiate AppConfig.shared and create
+// settings.json from defaults. Selftest stays first so it never touches the
+// user's preference domains.
+let migratedPreferenceCount = PreferencesDomainMigration.run()
+if migratedPreferenceCount > 0 {
+    NSLog("Velora: migrated %d preferences from the legacy bundle identifier",
+          migratedPreferenceCount)
+}
+
 // Headless updater end-to-end: exercises check → download → verify → stage
 // (→ swap with --install) against the real pipeline without starting the
 // app. See UpdateE2E; point VELORA_UPDATE_FEED_URL at a local feed to drive.
@@ -30,12 +39,6 @@ if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
 // NSApplication so renamed copies of the GUI binary still launch the app.
 if VeloraCLI.shouldRun(arguments: CommandLine.arguments) {
     exit(VeloraCLI.run())
-}
-
-let migratedPreferenceCount = PreferencesDomainMigration.run()
-if migratedPreferenceCount > 0 {
-    NSLog("Velora: migrated %d preferences from the legacy bundle identifier",
-          migratedPreferenceCount)
 }
 
 let app = NSApplication.shared

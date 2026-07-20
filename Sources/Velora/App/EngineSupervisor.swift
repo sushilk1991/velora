@@ -322,10 +322,18 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     func engineClient(_ client: EngineClient, didReceive event: EngineEvent) {
         switch event {
-        case .ready(let setupIsComplete):
+        case .ready(let setupIsComplete, let activeSTTModel):
             if state != .ready {
                 restartAttempts = 0
                 state = .ready
+            }
+            if let activeSTTModel, !activeSTTModel.isEmpty,
+               activeSTTModel != AppConfig.shared.sttModel {
+                // The engine can fall back from an experimental backend after
+                // a load failure. Persist the backend it actually proved so
+                // settings.json does not request the broken model next launch.
+                AppConfig.shared.sttModel = activeSTTModel
+                veloraLog("Velora: reconciled speech model to engine-ready backend \(activeSTTModel)")
             }
             // Ready ends the pre-dictation setup phases; the post-ready
             // writing-model download re-sets the status via .loading events.

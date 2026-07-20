@@ -5,7 +5,7 @@ import Foundation
 enum EngineEvent {
     /// Engine finished STT startup and is ready for `start`. `setupComplete`
     /// snapshots whether the later writing-model setup has also finished.
-    case ready(setupComplete: Bool)
+    case ready(setupComplete: Bool, sttModel: String?)
 
     /// First-run setup progress ("Downloading the speech model (1.6 GB)",
     /// fraction 0…1 when measurable). `phase == nil` clears the status.
@@ -100,7 +100,9 @@ enum EngineEvent {
         let name = (object["event"] as? String) ?? (object["reply"] as? String) ?? ""
         switch name {
         case "ready":
-            return .ready(setupComplete: object["setup_complete"] as? Bool ?? false)
+            return .ready(
+                setupComplete: object["setup_complete"] as? Bool ?? false,
+                sttModel: object["stt_model"] as? String)
         case "loading":
             return .loading(
                 phase: (object["phase"] as? String).flatMap { $0.isEmpty ? nil : $0 },

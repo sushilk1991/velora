@@ -20,6 +20,7 @@ import math
 import os
 import re
 import time
+import zlib
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -400,6 +401,11 @@ def _trim_repeated_tail(text: str) -> str:
     return " ".join(words)
 
 
+def _text_compression_ratio(text: str) -> float:
+    encoded = text.encode("utf-8")
+    return len(encoded) / len(zlib.compress(encoded)) if encoded else 0.0
+
+
 def guard_whisper_result(result: dict[str, Any]) -> str:
     """Drop hallucinated segments, then trim repeated tails."""
     segments = result.get("segments") or []
@@ -497,35 +503,39 @@ class WhisperBackend:
         self.segments_used_for_final = False
         self.final_tail = ""
 
-    def _decode(self, audio: np.ndarray, *, had_speech: bool | None = None) -> str:
-        """One guarded mlx-whisper decode (segment, tail, or whole clip)."""
+    def _transcribe(
+        self,
+        audio: np.ndarray,
+        initial_prompt: str | None,
+        *,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        """Run one engine decode and return the mlx-whisper result shape."""
         import mlx_whisper
 
+        options: dict[str, Any] = {}
+        if temperature is not None:
+            options["temperature"] = temperature
+        return mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=self._model_path,
+            condition_on_previous_text=False,
+            language=whisper_language(self.language),
+            fp16=True,
+            initial_prompt=initial_prompt,
+            **options,
+        )
+
+    def _decode(self, audio: np.ndarray, *, had_speech: bool | None = None) -> str:
+        """One guarded Whisper decode (segment, tail, or whole clip)."""
         if had_speech is None:
             had_speech = self._span_had_speech
         # The backend is shared by live and file transcription. Snapshot
         # session-scoped decode options before model work so another session
         # cannot change how this result is stripped or retried mid-decode.
         prompt = self.initial_prompt
-        language = whisper_language(self.language)
 
-        def transcribe(
-            initial_prompt: str | None, *, temperature: float | None = None
-        ) -> dict[str, Any]:
-            options: dict[str, Any] = {}
-            if temperature is not None:
-                options["temperature"] = temperature
-            return mlx_whisper.transcribe(
-                audio,
-                path_or_hf_repo=self._model_path,
-                condition_on_previous_text=False,
-                language=language,
-                fp16=True,
-                initial_prompt=initial_prompt,
-                **options,
-            )
-
-        result = transcribe(prompt)
+        result = self._transcribe(audio, prompt)
         guarded_text = guard_whisper_result(result)
         text = strip_prompt_echo(guarded_text, prompt)
 
@@ -566,7 +576,9 @@ class WhisperBackend:
             # could turn background noise into invented words.
             log.warning("glossary-biased whisper decode rejected/empty — retrying without prompt")
             try:
-                return guard_whisper_result(transcribe(None, temperature=0.0))
+                return guard_whisper_result(
+                    self._transcribe(audio, None, temperature=0.0)
+                )
             except Exception:  # noqa: BLE001 — optional recovery must not fail the session
                 log.exception("prompt-free whisper recovery decode failed")
         return text
@@ -790,6 +802,88 @@ class WhisperBackend:
         # the finalize flags right after finalize() has reset the audio state.
 
 
+class TranscribeCppWhisperBackend(WhisperBackend):
+    """Whisper Q8 through transcribe.cpp, retaining Velora's session logic."""
+
+    fallback_model_id = "mlx-community/whisper-large-v3-turbo"
+
+    def __init__(self, model_id: str, language: str = "auto") -> None:
+        super().__init__(model_id, language)
+        self._native_model: Any = None
+        self._native_session: Any = None
+
+    def load(self) -> None:
+        from transcribe_cpp import Model
+
+        from .models import ensure_downloaded
+
+        self._model_path = ensure_downloaded(self.model_id)
+        t0 = time.perf_counter()
+        self._native_model = Model(self._model_path)
+        self._native_session = self._native_model.session()
+        self._loaded = True
+        log.info(
+            "transcribe.cpp whisper weights loaded %s in %.2fs",
+            self.model_id,
+            time.perf_counter() - t0,
+        )
+
+    def close(self) -> None:
+        """Release native handles explicitly on their owning STT thread."""
+        session, self._native_session = self._native_session, None
+        model, self._native_model = self._native_model, None
+        self._loaded = False
+        try:
+            if session is not None:
+                session.close()
+        finally:
+            if model is not None:
+                model.close()
+
+    def _transcribe(
+        self,
+        audio: np.ndarray,
+        initial_prompt: str | None,
+        *,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        from transcribe_cpp import WhisperRunOptions
+
+        if self._native_session is None:
+            raise RuntimeError("transcribe.cpp backend is not loaded")
+        options: dict[str, Any] = {
+            "initial_prompt": initial_prompt,
+            "condition_on_prev_tokens": False,
+        }
+        if temperature is not None:
+            options["temperature"] = temperature
+            # Shared prompt recovery requests deterministic temperature zero.
+            # transcribe.cpp otherwise keeps its default +0.2 fallback ladder.
+            options["temperature_inc"] = 0.0
+        result = self._native_session.run(
+            np.ascontiguousarray(audio, dtype=np.float32),
+            language=whisper_language(self.language),
+            timestamps="segment",
+            family=WhisperRunOptions(**options),
+        )
+        # transcribe.cpp applies Whisper's compression/logprob/no-speech
+        # thresholds internally. Its stable Python Result exposes accepted
+        # segment text but not per-window trace values, so retain Velora's
+        # text-level junk/echo/repetition guards over that accepted surface.
+        return {
+            "text": result.text,
+            "segments": [
+                {
+                    "text": segment.text,
+                    # Match mlx-whisper's public compression metric so the
+                    # existing >2.4 hallucination guard stays engine-neutral.
+                    "compression_ratio": _text_compression_ratio(segment.text),
+                }
+                for segment in result.segments
+            ],
+        }
+
+
 class FakeBackend:
     """Deterministic backend for tests — no models, no downloads.
 
@@ -886,6 +980,11 @@ def create_backend(model_id: str, language: str = "auto") -> STTBackend:
     """
     if fake_stt_enabled():
         return FakeBackend(model_id, language)
+    from .models import lookup
+
+    info = lookup(model_id)
+    if info is not None and info.backend == "transcribe-cpp":
+        return TranscribeCppWhisperBackend(model_id, language)
     if "whisper" in model_id.lower():
         return WhisperBackend(model_id, language)
     return ParakeetBackend(model_id)

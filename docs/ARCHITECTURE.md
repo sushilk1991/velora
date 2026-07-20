@@ -23,12 +23,37 @@ Two processes, one product:
 - **Agents should not become a second trust boundary** → the CLI/MCP process never opens the engine socket directly. It asks the running app through a separate owner-only broker, which enforces the preference gate, response projection, single-use microphone consent, and foreground-work arbitration.
 - **Meeting capture must remain visible and recoverable** → detection only proposes a recording; the app owns explicit consent, a persistent recording indicator, disk-spooled tracks, retention/deletion, and resumable post-processing.
 
+## Settings persistence and portability
+
+`~/.velora/settings.json` is the typed source of truth for portable app preferences and every known portable engine setting. It has a format identifier and schema version and is written atomically with mode `0600`. On first launch after this change, `AppConfig` migrates the old portable `UserDefaults` values plus default-mode/cleanup flags, streaming cleanup, recording limit, and audio retention/cap into the file. Machine identity, security gates, onboarding/sidebar state, Calendar opt-in, microphone UID, launch-at-login state, and update timestamps remain in the macOS preferences domain and can never enter the portable document.
+
+The engine still owns `~/.velora/config.json`. The app projects speech/language and portable engine settings into it while preserving the machine-selected cleanup model, dictionary keys, and unknown keys. Swift and Python hold the same `config.json.lock` across each read/mutate/atomic-write transaction; Python model changes patch only their owned key, so the two processes cannot lose one another's changes. App writes fail closed when an existing engine config is unreadable, preserving it for recovery. App launch re-projects the engine subset so an installed settings file takes effect.
+
+Settings → General exports that same versioned, portable-by-construction document. Import validates the complete file and rejects malformed values or newer schema versions before writing; a downgraded app also refuses to import over a preserved newer canonical file. During commit, an owner-only `settings.import-backup.json` remains beside the canonical file until engine projection succeeds. Projection failure restores the prior bytes exactly. The app then applies hotkey, HUD, appearance, meeting, and speech-model effects without replaying dozens of persistence observers or starting an updater download. A changed speech model and tighter dictation/meeting audio limits are disclosed before confirmation. Machine-local state remains on the destination Mac. History, recordings, dictionary state, the cleanup model, macOS permissions, and `modes/*.json` have separate lifecycles and are not settings-transfer payloads.
+
 ## Process lifecycle
 
 1. App launch → engine supervisor starts `uv run velora-engine` (working dir `engine/`), waits for the `ready` handshake (engine preloads the STT model, then warms the cleanup model and a generic immutable prompt prefix in the background).
 2. Crash/hang → supervisor restarts engine with backoff; HUD shows error state if a dictation was in flight; app remains usable (menubar shows degraded state while restarting).
 3. App quit → engine terminated (it also self-exits if socket closes / parent pid dies).
 4. Idle unload (optional setting): engine drops LLM weights after N min idle to free memory.
+
+## Foreground audio coexistence
+
+Opening a Bluetooth headset microphone makes macOS switch that headset from
+high-quality output to its lower-bandwidth two-way voice route. A microphone
+explicitly selected in Settings is opened directly, independently of the
+output route; choosing the Mac's built-in microphone avoids that Bluetooth
+route change entirely.
+
+For foreground dictation, `MediaPlaybackCoordinator` also pauses playback when
+Core Audio reports exactly one unambiguous supported player (Music or Spotify)
+actively producing output. It verifies that the same process stopped before it
+owns any resume obligation, then restores playback shortly after microphone
+capture ends. Already-paused, active browser/call, multi-player, quit, manually
+resumed, and permission-denied cases never receive a matching toggle. This uses
+the existing Accessibility grant and the system media key, not Apple Events or
+private MediaRemote APIs. Meeting capture does not use this policy.
 
 ## Wire protocol (unix socket, length-prefixed frames)
 
@@ -83,12 +108,12 @@ The control socket is deliberately separate from `engine.sock`. The engine socke
 
 ## Private Meeting Memory
 
-`MeetingDetector` polls local call-app/window metadata for Zoom, Teams, Slack Huddles, and browser-hosted Google Meet. Calendar matching is independent and opt-in. Detection only emits a candidate; `MeetingCoordinator` must show an explicit consent alert before capture starts, and the menu-bar surface stays visibly in the recording state.
+`MeetingDetector` polls local call-app/window metadata for Zoom, Teams, Slack Huddles, and browser-hosted Google Meet. Calendar matching is independent and opt-in. Detection only emits a candidate; `MeetingCoordinator` must show an explicit consent alert before capture starts, and a compact persistent HUD plus the menu-bar surface stay visibly in the recording state.
 
 Capture preserves provenance instead of inventing diarization:
 
-1. `AVAudioEngine` writes the microphone track (`Me`) as linear PCM in a CAF container. CAF can extend its audio-data chunk to end-of-file, so frames already flushed remain readable after a hard process termination.
-2. `ScreenCaptureKit` writes computer audio (`Them`) to a separate AAC track. If system audio is unavailable, the user must explicitly continue microphone-only or discard.
+1. A directly selected `AVCaptureDevice` writes the microphone track (`Me`) as linear PCM in a CAF container. This keeps the chosen microphone independent of an AirPods/default output route. CAF can extend its audio-data chunk to end-of-file, so frames already flushed remain readable after a hard process termination.
+2. An audio-only Core Audio process tap writes computer audio (`Them`) as a separate crash-resilient CAF track. It never requests display or window frames. Capture is not declared healthy until both requested tracks deliver frames; if computer audio fails, the persistent HUD says `Mic only` and keeps Stop available.
 3. `MeetingStore` writes a recording row before capture begins, then keeps metadata/transcripts/notes in a separate owner-only `~/.velora/meetings` tree and SQLite/FTS database. Audio paths are validated as private-root-relative before use. Graceful app quit revokes pending consent and finalizes active capture; after a crash, audio that reached disk is preserved as a recoverable failed meeting while empty preparations are removed. Interrupted processing resumes automatically, but a permanently failed recording requires an explicit retry and repeated engine restarts are capped.
 4. `MeetingProcessor` transcribes each speaker track in bounded time chunks, checkpoints completed chunks, and resumes interrupted work. It then runs a chunked map/reduce notes pass for summary, decisions, and action items.
 5. Foreground dictation preempts meeting post-processing. Capture itself is disk-spooled; post-processing decodes one source track at a time.
@@ -144,7 +169,7 @@ Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|f
 | Module | Responsibility |
 |---|---|
 | `App/` | main, AppDelegate, activation policy, engine supervisor |
-| `Capture/` | AVAudioEngine 16kHz mono Float32 tap, RMS levels for HUD |
+| `Capture/` | Direct AVCapture microphone source, 16kHz mono Float32 conversion, RMS levels for HUD |
 | `Hotkey/` | CGEventTap (hold + double-tap detection), Esc-cancel monitor, secure-input detection (`IsSecureEventInputEnabled`) |
 | `Context/` | NSWorkspace frontmost app tracking, AX focused-element probe (secure field check) |
 | `HUD/` | NSPanel host + SwiftUI capsule (state machine per design brief), Canvas waveform |
@@ -178,7 +203,7 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 | Microphone | capture | onboarding step 2 (NSMicrophoneUsageDescription in bundle Info.plist) |
 | Accessibility | CGEventTap hotkeys + ⌘V posting + AX context | onboarding step 3, live-polled |
 | Input Monitoring | reliable global hotkey event delivery | onboarding alongside Accessibility |
-| System Audio Recording | remote meeting track via ScreenCaptureKit | first explicitly confirmed meeting recording |
+| System Audio Recording | remote meeting track via an audio-only Core Audio process tap | first explicitly confirmed meeting recording |
 | Calendar Full Access (optional) | match nearby events to call-app candidates | only when the Calendar meeting toggle is enabled |
 
 Spike finding: grants must be earned by the signed .app bundle (stable ad-hoc identity), not the bare binary; bare-binary tests mislead due to responsible-process attribution.

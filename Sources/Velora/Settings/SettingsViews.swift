@@ -74,6 +74,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
                 "launch at login", "appearance", "theme", "dark", "light",
                 "pill", "hud", "position", "sounds", "volume",
                 "updates", "install", "version", "cli", "agents", "advanced",
+                "export", "import", "transfer", "settings file", "json", "backup",
             ]
         case .dictation:
             return [
@@ -282,6 +283,34 @@ struct GeneralSettingsView: View {
                 Text("Advanced")
             } footer: {
                 SettingsFooter("Lets command-line tools running as your user read dictation history and stats. Everything stays on this Mac — no network server is opened.")
+            }
+            Section {
+                HStack {
+                    Button("Export Settings…") { model.exportSettings() }
+                    Button("Import Settings…") { model.importSettings() }
+                    Spacer()
+                    if let result = model.settingsTransferResult {
+                        if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
+                            Label(result, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Label(result, systemImage: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                LabeledContent("Config file") {
+                    Text("~/.velora/settings.json")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            } header: {
+                Text("Settings transfer")
+            } footer: {
+                SettingsFooter("Exports portable preferences, shortcuts, the speech model, and advanced engine settings as JSON. History, recordings, dictionary, custom modes, the hardware-selected cleanup model, macOS permissions, microphone choice, Calendar access, and local-agent access stay on this Mac.")
             }
             Section {
                 Toggle("Check for updates automatically", isOn: $model.updateChecks)
@@ -704,7 +733,7 @@ struct ShortcutsSettingsView: View {
                 }
                 .disabled(!model.voiceEdit)
                 if model.editHotkeyConflict {
-                    Text("That's already the dictation shortcut — pick a different one.")
+                    Text("Dictation and Edit selection need different shortcuts.")
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }

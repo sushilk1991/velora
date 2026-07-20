@@ -37,6 +37,7 @@ Dictation tools like Superwhisper and Wispr Flow proved the product: invisible, 
 - **Audio archive + reprocess** — clips are saved as compact FLAC under `~/.velora/audio` (configurable retention, default 6 months / 4 GB cap) so you can re-transcribe any past dictation with a better model straight from the History tab.
 - **Custom modes editor** — every mode is a JSON file in `~/.velora/modes/`, editable from the Modes tab: per-mode LLM prompt (the Superwhisper-style feature), formatting level, app bindings, vocabulary, and replacements. Drop in a file to create your own (see [Customization](#customization)).
 - **Model picker** — choose your STT model in Settings from the engine's registry, with managed downloads.
+- **Portable settings** — Velora keeps typed portable app and engine preferences in `~/.velora/settings.json`. Settings → General can export the versioned JSON file and import it on another Mac; the import is validated before it replaces anything and never transfers permissions, device IDs, local-agent access, the hardware-selected cleanup model, history, recordings, dictionary entries, or custom modes.
 - **Live spectrum waveform** — the HUD's 24-bar waveform is driven by a real FFT of your mic, so bars react to both loudness and pitch.
 - **Safe insertion** — clipboard is snapshotted and restored around the synthesized ⌘V, with a keystroke-typing fallback for apps that block paste. Secure input fields (passwords) are detected and insertion is suppressed.
 

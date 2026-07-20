@@ -49,6 +49,24 @@ class Client:
         self.writer.close()
 
 
+def test_config_patch_save_preserves_newer_unrelated_writer_values(home):
+    config = Config(home)
+    config.data["stt_model"] = "example/new-stt"
+
+    # Mirror the app committing a preference after this Config instance loaded.
+    on_disk = json.loads(config.config_path.read_text())
+    on_disk["language"] = "hi"
+    on_disk["future_app_key"] = {"keep": True}
+    config.config_path.write_text(json.dumps(on_disk))
+
+    config.save(keys={"stt_model"})
+
+    projected = json.loads(config.config_path.read_text())
+    assert projected["stt_model"] == "example/new-stt"
+    assert projected["language"] == "hi"
+    assert projected["future_app_key"] == {"keep": True}
+
+
 @pytest.fixture
 async def engine(home, fake_stt):
     config = Config()
@@ -142,6 +160,48 @@ async def test_setup_complete_event_is_after_ready_and_sent_once(home, fake_stt)
         eng.shutdown.set()
         await asyncio.wait_for(task, 5)
         shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+async def test_startup_falls_back_to_mlx_when_transcribe_cpp_cannot_load(
+    home, monkeypatch
+):
+    from velora_engine import models
+    from velora_engine.config import DEFAULT_STT_MODEL
+    from velora_engine.stt import TranscribeCppWhisperBackend, WhisperBackend
+
+    monkeypatch.delenv("VELORA_FAKE_STT", raising=False)
+    config = Config()
+    config.data.update({
+        "stt_model": models.TRANSCRIBE_CPP_Q8_MODEL,
+        "cleanup_enabled": False,
+    })
+    config.save()
+    monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
+    monkeypatch.setattr(
+        TranscribeCppWhisperBackend,
+        "load",
+        lambda self: (_ for _ in ()).throw(RuntimeError("native load failed")),
+    )
+
+    def load_fallback_after_app_config_write(_backend):
+        # Model setup can take minutes. Mirror the app updating an unrelated
+        # setting directly on disk while the fallback is loading.
+        latest = Config(home)
+        latest.data["language"] = "hi"
+        latest.save()
+
+    monkeypatch.setattr(WhisperBackend, "load", load_fallback_after_app_config_write)
+    eng = Engine(config, parent_pid=None)
+
+    await eng._load_models()
+
+    assert eng.stt_ready.is_set()
+    assert eng.shutdown.is_set() is False
+    assert eng.stt.model_id == DEFAULT_STT_MODEL
+    assert Config(home).stt_model == DEFAULT_STT_MODEL
+    assert Config(home).language == "hi"
+    assert eng.config.language == "hi"
+    assert eng.stt.language == "hi"
 
 
 async def test_second_pre_ready_client_cannot_displace_setup_owner(home, fake_stt):
@@ -705,7 +765,13 @@ async def test_auto_stop_at_max_duration(engine):
 
 def test_whisper_language_mapping(monkeypatch):
     monkeypatch.delenv("VELORA_FAKE_STT", raising=False)
-    from velora_engine.stt import WhisperBackend, create_backend, whisper_language
+    from velora_engine.models import TRANSCRIBE_CPP_Q8_MODEL
+    from velora_engine.stt import (
+        TranscribeCppWhisperBackend,
+        WhisperBackend,
+        create_backend,
+        whisper_language,
+    )
 
     assert whisper_language("auto") is None
     assert whisper_language("AUTO") is None
@@ -719,6 +785,10 @@ def test_whisper_language_mapping(monkeypatch):
     # parakeet is English-only: language is ignored (no attribute consumed)
     parakeet = create_backend("mlx-community/parakeet-tdt-0.6b-v2", "de")
     assert not isinstance(parakeet, WhisperBackend)
+
+    accelerated = create_backend(TRANSCRIBE_CPP_Q8_MODEL, "hi")
+    assert isinstance(accelerated, TranscribeCppWhisperBackend)
+    assert accelerated.language == "hi"
 
 
 async def test_reload_config_propagates_language(engine, home):

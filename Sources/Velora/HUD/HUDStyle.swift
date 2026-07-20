@@ -67,6 +67,7 @@ enum HUDGeometry {
     static let height: CGFloat = 56
     static let minListeningWidth: CGFloat = 280
     static let maxListeningWidth: CGFloat = 420
+    static let meetingWidth: CGFloat = 268
     static let insertedDiameter: CGFloat = height
 
     /// Error pill width (icon + one-line message + action button).

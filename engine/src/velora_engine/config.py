@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import importlib.resources
+import fcntl
 import json
 import logging
 import os
@@ -339,12 +340,40 @@ class Config:
         except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
             log.warning("auto_learned.json unreadable (%s); ignoring", exc)
 
-    def save(self) -> None:
-        # Atomic: write a sibling temp then rename, so a crash mid-write can't
-        # truncate config.json and we don't race the app's atomic writer.
-        tmp = self.config_path.with_name(self.config_path.name + ".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2) + "\n")
-        tmp.replace(self.config_path)
+    def save(self, *, keys: set[str] | None = None) -> None:
+        """Persist config under the same advisory lock used by the Swift app.
+
+        Production mutations pass their owned keys so a long model load cannot
+        overwrite unrelated app preferences from stale in-memory state. A full
+        save remains available for first-file creation and isolated tests.
+        """
+        self.home.mkdir(parents=True, exist_ok=True)
+        lock_path = self.config_path.with_name(self.config_path.name + ".lock")
+        with lock_path.open("a+") as lock_file:
+            os.chmod(lock_path, 0o600)
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                payload = dict(self.data)
+                if keys is not None and self.config_path.exists():
+                    on_disk = json.loads(self.config_path.read_text())
+                    if not isinstance(on_disk, dict):
+                        raise ValueError("config.json is not an object")
+                    payload = on_disk
+                    for key in keys:
+                        if key in self.data:
+                            payload[key] = self.data[key]
+                        else:
+                            payload.pop(key, None)
+
+                # Atomic sibling replace prevents a crash from truncating JSON;
+                # the interprocess lock prevents lost read/modify/write updates.
+                tmp = self.config_path.with_name(self.config_path.name + ".tmp")
+                tmp.write_text(json.dumps(payload, indent=2) + "\n")
+                os.chmod(tmp, 0o600)
+                tmp.replace(self.config_path)
+                self.data = {**DEFAULT_CONFIG, **payload}
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _load_or_create_config(self) -> None:
         self._config_corrupt = False
@@ -360,7 +389,7 @@ class Config:
                 # recommendation here too, once, when the app hasn't chosen one.
                 if "cleanup_model" not in on_disk:
                     self.data["cleanup_model"] = self._auto_cleanup_model()
-                    self.save()
+                    self.save(keys={"cleanup_model"})
                 return
             except Exception as exc:  # noqa: BLE001 — corrupt config must not kill the engine
                 log.warning("config.json unreadable (%s); using defaults in memory", exc)
@@ -431,7 +460,7 @@ class Config:
                 code_path.write_text(pkg.read_text())
                 log.info("migrated stale built-in code.json to the Code/Terminal split")
         self.data["builtin_split_migrated"] = True
-        self.save()
+        self.save(keys={"builtin_split_migrated"})
 
     @classmethod
     def _is_old_default_code(cls, data: dict[str, Any]) -> bool:

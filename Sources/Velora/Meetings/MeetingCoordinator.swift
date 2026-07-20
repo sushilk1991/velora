@@ -3,24 +3,21 @@ import Combine
 import EventKit
 import Foundation
 
-struct MeetingAlertTokenSlot {
-    private(set) var token: UUID?
-
-    mutating func track(_ token: UUID) {
-        self.token = token
-    }
-
-    mutating func completed(_ token: UUID) {
-        if self.token == token { self.token = nil }
-    }
-
-    mutating func take() -> UUID? {
-        defer { token = nil }
-        return token
-    }
-}
-
 final class MeetingCoordinator: ObservableObject {
+    enum RecordingEndOutcome: Equatable {
+        case saved
+        case discarded
+        case failed
+    }
+
+    enum SystemAudioFailurePresentation: Equatable {
+        case hud
+    }
+
+    static let consentDescription =
+        "Records your microphone and computer audio locally. Make sure everyone knows."
+    static let systemAudioFailurePresentation: SystemAudioFailurePresentation = .hud
+
     enum State: Equatable {
         case idle
         case preparing(title: String)
@@ -30,6 +27,8 @@ final class MeetingCoordinator: ObservableObject {
             if case .recording = self { return true }
             return false
         }
+
+        var isActive: Bool { self != .idle }
     }
 
     private let config = AppConfig.shared
@@ -47,13 +46,13 @@ final class MeetingCoordinator: ObservableObject {
     /// The one alert capable of starting a new capture. Other informational
     /// alerts may close naturally, but this token is revoked during teardown.
     private var consentToken: UUID?
-    private var recordingWarning = MeetingAlertTokenSlot()
     private var terminating = false
 
     @Published private(set) var state: State = .idle {
         didSet { if state != oldValue { onStateChange?(state) } }
     }
     var onStateChange: ((State) -> Void)?
+    var onRecordingEnded: ((RecordingEndOutcome) -> Void)?
 
     init(
         store: MeetingStore,
@@ -94,7 +93,7 @@ final class MeetingCoordinator: ObservableObject {
         guard !terminating, state == .idle else { return }
         let field = NSTextField(string: "Meeting")
         field.placeholderString = "Meeting title"
-        field.frame = NSRect(x: 0, y: 0, width: 320, height: 24)
+        field.frame = NSRect(x: 0, y: 0, width: 220, height: 24)
         let alert = consentAlert(title: "Record a meeting?")
         alert.accessoryView = field
         state = .preparing(title: "Waiting for confirmation…")
@@ -121,10 +120,17 @@ final class MeetingCoordinator: ObservableObject {
     /// permission/preparation phase has no user audio and is removed cleanly.
     /// True while termination is genuinely waiting on meeting work — the
     /// AppDelegate watchdog extends its deadline instead of cutting a
-    /// mid-flight recording finalize (the system .m4a would be lost).
+    /// mid-flight recording finalize (pending CAF writes must be flushed).
     var terminationWorkInFlight: Bool {
         finishingMeetingID != nil || discardingMeetingID != nil
             || state.isRecording || capture.isCapturing
+    }
+
+    /// Includes device negotiation/teardown after the visible state has
+    /// already reported a startup failure. This is the foreground exclusion
+    /// truth used by dictation.
+    var foregroundCaptureActive: Bool {
+        state.isActive || capture.isCapturing
     }
 
     func finishForTermination(completion: @escaping () -> Void) {
@@ -180,10 +186,8 @@ final class MeetingCoordinator: ObservableObject {
         finishingMeetingID = id
         sounds.play(.stop)
         state = .preparing(title: "Saving \(title)…")
-        dismissRecordingWarning()
         capture.stop(cancelled: false) { [weak self] files in
             guard let self else { return }
-            self.state = .idle
             let metadata = self.pendingMetadata
             self.pendingMetadata = nil
             self.pendingMeetingID = nil
@@ -197,6 +201,8 @@ final class MeetingCoordinator: ObservableObject {
                 self.store.markFailed(
                     meetingID: id, error: "Recording could not be finalized")
                 NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
+                self.onRecordingEnded?(.failed)
+                self.state = .idle
                 return
             }
             let record = MeetingRecord(
@@ -213,6 +219,8 @@ final class MeetingCoordinator: ObservableObject {
             // the durable processing row, but let next launch resume it rather
             // than starting fresh engine work during teardown.
             if enqueue && !self.terminating { self.processor.enqueue(meetingID: id) }
+            self.onRecordingEnded?(.saved)
+            self.state = .idle
         }
     }
 
@@ -269,9 +277,9 @@ final class MeetingCoordinator: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .informational
         alert.messageText = title
-        alert.informativeText = "Velora will record your microphone and computer audio, show a persistent menu-bar recording indicator, and keep both tracks locally until the retention window expires. Everyone in the meeting should know it is being recorded. Capture never starts without this confirmation."
-        alert.addButton(withTitle: "Start Recording")
-        alert.addButton(withTitle: "Cancel")
+        alert.informativeText = Self.consentDescription
+        alert.addButton(withTitle: "Record")
+        alert.addButton(withTitle: "Not Now")
         return alert
     }
 
@@ -290,7 +298,8 @@ final class MeetingCoordinator: ObservableObject {
             startedAt: placeholderStart, endedAt: placeholderStart,
             sourceApp: source, calendarEventID: calendarID,
             status: .recording,
-            micPath: "\(id)/me.caf", systemPath: "\(id)/them.m4a"))
+            micPath: "\(id)/me.caf",
+            systemPath: MeetingSystemAudioPolicy.relativePath(meetingID: id)))
         state = .preparing(title: title)
         capture.start(meetingID: id) { [weak self] result in
             guard let self else { return }
@@ -329,24 +338,7 @@ final class MeetingCoordinator: ObservableObject {
                     startedAt: start.startedAt, systemAudio: start.systemAudio)
                 self.sounds.play(.start)
                 if let warning = start.warning {
-                    let alert = NSAlert()
-                    alert.alertStyle = .warning
-                    alert.messageText = "Recording microphone only"
-                    alert.informativeText = warning
-                    alert.addButton(withTitle: "Continue Mic-only")
-                    alert.addButton(withTitle: "Cancel and Discard")
-                    var presentedToken: UUID?
-                    let token = VisibleAlert.present(alert) { [weak self] response in
-                        guard let self, let presentedToken else { return }
-                        self.recordingWarning.completed(presentedToken)
-                        guard response != .alertFirstButtonReturn,
-                              case .recording(let currentID, _, _, _) = self.state,
-                              currentID == id
-                        else { return }
-                        self.discardActiveCapture()
-                    }
-                    presentedToken = token
-                    self.recordingWarning.track(token)
+                    veloraLog("Velora: meeting capture degraded: \(warning)")
                 }
             }
         }
@@ -356,7 +348,6 @@ final class MeetingCoordinator: ObservableObject {
         guard case .recording(let id, let title, _, _) = state else { return }
         discardingMeetingID = id
         state = .preparing(title: "Discarding \(title)…")
-        dismissRecordingWarning()
         sounds.play(.stop)
         capture.stop(cancelled: true) { [weak self] _ in
             guard let self else { return }
@@ -364,6 +355,7 @@ final class MeetingCoordinator: ObservableObject {
             self.pendingMeetingID = nil
             self.pendingMetadata = nil
             self.discardingMeetingID = nil
+            self.onRecordingEnded?(.discarded)
             self.state = .idle
             let callbacks = self.finishCallbacks
             self.finishCallbacks.removeAll()
@@ -374,20 +366,8 @@ final class MeetingCoordinator: ObservableObject {
     private func systemAudioDidFail(_ message: String) {
         guard case .recording(let id, let title, let startedAt, true) = state else { return }
         state = .recording(id: id, title: title, startedAt: startedAt, systemAudio: false)
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Computer audio stopped"
-        alert.informativeText = "Velora is still recording your microphone, but the remote side is no longer being captured (\(message)). The incomplete computer-audio track will not be saved as a complete recording."
-        alert.addButton(withTitle: "Continue Mic-only")
-        alert.addButton(withTitle: "Stop & Create Notes")
-        var presentedToken: UUID?
-        let token = VisibleAlert.present(alert) { [weak self] response in
-            guard let self, let presentedToken else { return }
-            self.recordingWarning.completed(presentedToken)
-            if response != .alertFirstButtonReturn { self.stopRecording() }
-        }
-        presentedToken = token
-        recordingWarning.track(token)
+        sounds.play(.error)
+        veloraLog("Velora: meeting computer audio stopped: \(message)")
     }
 
     private func microphoneDidFail(_ message: String) {
@@ -413,8 +393,4 @@ final class MeetingCoordinator: ObservableObject {
         VisibleAlert.present(alert) { _ in }
     }
 
-    private func dismissRecordingWarning() {
-        guard let token = recordingWarning.take() else { return }
-        VisibleAlert.dismiss(token)
-    }
 }

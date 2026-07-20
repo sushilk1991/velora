@@ -14,7 +14,7 @@ extension Notification.Name {
 /// that fires on `flagsChanged`, or a regular key plus a required modifier
 /// set that fires on keyDown/keyUp. Both shapes have a clean release edge,
 /// so hold-to-talk semantics work for every recordable hotkey.
-struct Hotkey: Equatable {
+struct Hotkey: Codable, Equatable {
     /// Virtual key code (`kVK_*`). For modifier-only hotkeys this is the
     /// modifier key's own code (e.g. 61 = Right Option), which distinguishes
     /// left/right variants that share a `CGEventFlags` bit.
@@ -34,6 +34,19 @@ struct Hotkey: Equatable {
 // MARK: - Well-known values
 
 extension Hotkey {
+    /// Portable settings files are untrusted input. Keep imported key codes in
+    /// the macOS virtual-key range and reject modifier-only shapes that do not
+    /// actually name a modifier key.
+    var isValidSettingsHotkey: Bool {
+        guard (0...127).contains(keyCode),
+              modifiers & ~Self.allModifierMask == 0 else { return false }
+        if isModifierOnly {
+            guard let expected = Self.modifierMask(forKeyCode: keyCode) else { return false }
+            return modifiers == expected.rawValue
+        }
+        return true
+    }
+
     /// Modifier bits that participate in combo matching (see `modifiers`).
     static let strictModifierMask: UInt64 =
         CGEventFlags.maskCommand.rawValue

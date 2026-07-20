@@ -1,8 +1,6 @@
 import AudioToolbox
 import AVFoundation
-import CoreMedia
 import Foundation
-import ScreenCaptureKit
 
 struct MeetingCaptureStart {
     let startedAt: Date
@@ -33,33 +31,88 @@ enum MeetingCaptureError: LocalizedError {
     }
 }
 
-/// Disk-spooled, bounded-memory capture. Microphone and system audio are kept
-/// separate so the transcript can honestly label Me/Them without pretending
-/// to perform remote-speaker diarization.
-final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
-    /// Rebuilt per meeting so a device pinned for one meeting can never leak
-    /// into the next after the mic setting changes back to system default.
-    private var micEngine = AVAudioEngine()
-    private var micConfigObserver: NSObjectProtocol?
+/// Thread-safe startup proof shared by the microphone and system-audio
+/// callbacks. A successful API return only proves that a graph was created;
+/// recording becomes visible only after every requested track delivers frames.
+final class MeetingCaptureReadiness {
+    enum Track: Equatable {
+        case microphone
+        case systemAudio
+    }
+
+    private let lock = NSLock()
+    private var microphoneReady = false
+    private var systemAudioReady = false
+    private var requiresSystemAudio: Bool
+    private var emittedReady = false
+
+    init(requiresSystemAudio: Bool) {
+        self.requiresSystemAudio = requiresSystemAudio
+    }
+
+    var missingTracks: [Track] {
+        lock.lock(); defer { lock.unlock() }
+        var result: [Track] = []
+        if !microphoneReady { result.append(.microphone) }
+        if requiresSystemAudio && !systemAudioReady { result.append(.systemAudio) }
+        return result
+    }
+
+    @discardableResult
+    func recordMicrophone(frames: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if frames > 0 { microphoneReady = true }
+        return consumeReadyLocked()
+    }
+
+    @discardableResult
+    func recordSystemAudio(frames: Int) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if frames > 0 { systemAudioReady = true }
+        return consumeReadyLocked()
+    }
+
+    @discardableResult
+    func continueWithoutSystemAudio() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        requiresSystemAudio = false
+        return consumeReadyLocked()
+    }
+
+    private func consumeReadyLocked() -> Bool {
+        guard !emittedReady, microphoneReady,
+              !requiresSystemAudio || systemAudioReady else { return false }
+        emittedReady = true
+        return true
+    }
+}
+
+/// Disk-spooled, bounded-memory capture. Microphone and computer audio remain
+/// separate so the transcript can label Me/Them honestly. Computer audio uses
+/// an audio-only Core Audio process tap; this class never asks for screen or
+/// display frames.
+final class MeetingAudioCapture {
+    private let micCapture = MicrophoneStreamCapture()
     private var micFile: AVAudioFile?
-    private var stream: SCStream?
-    private var writer: AVAssetWriter?
-    private var writerInput: AVAssetWriterInput?
-    private var writerStarted = false
-    private let systemQueue = DispatchQueue(label: "com.velora.meetings.system-audio")
+    private var systemCapture: AnyObject?
     private var meetingID: String?
     private var startedAt: Date?
     private var micURL: URL?
     private var systemURL: URL?
+    private var readiness: MeetingCaptureReadiness?
+    private var startupCompletion:
+        ((Result<MeetingCaptureStart, MeetingCaptureError>) -> Void)?
+    private var startupTimeout: DispatchWorkItem?
+    private var startupSystemAudio = false
+    private var startupWarning: String?
     private let failureLock = NSLock()
     private var systemAudioFailed = false
     private var microphoneWriteFailed = false
     private var stopping = false
-    private var systemSamplesEnabled = false
 
-    /// Failure callbacks are delivered once on the main queue. Capture may
-    /// fail after its initial permission/start handshake (device removal,
-    /// ScreenCaptureKit revocation, disk full), and that must be visible.
+    /// Failure callbacks are delivered once on the main queue. A stream can
+    /// fail after startup (device removal, permission revocation, disk full),
+    /// and that must remain visible for the whole meeting.
     var onSystemAudioFailure: ((String) -> Void)?
     var onMicrophoneFailure: ((String) -> Void)?
 
@@ -79,92 +132,54 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         let directory = AppConfig.meetingsDirectory
             .appendingPathComponent(meetingID, isDirectory: true)
         MeetingStore.ensurePrivateDirectory(directory)
-        // CAF permits an Audio Data chunk with an unknown size extending to
-        // EOF, so audio already flushed remains readable after a hard crash.
-        // RIFF/WAV normally needs its final data length patched on close.
+        // CAF keeps already-flushed PCM readable after a hard crash; neither
+        // track depends on a final container-length patch.
         let micURL = directory.appendingPathComponent("me.caf")
-        let systemURL = directory.appendingPathComponent("them.m4a")
-        do {
-            micEngine = AVAudioEngine()
-            let input = micEngine.inputNode
-            // Same pin as AudioCapture.start(): bind the chosen mic before
-            // the format is read; nil (system default) changes nothing.
-            // Mid-meeting device loss is surfaced by the configuration-change
-            // observer installed after start (no silent-track meetings).
-            if AppConfig.shared.inputDeviceUID != nil,
-               let chosen = AudioInputDevices.resolve(
-                   persistedUID: AppConfig.shared.inputDeviceUID, in: AudioInputDevices.current()),
-               let unit = input.audioUnit {
-                var deviceID = chosen
-                let status = AudioUnitSetProperty(
-                    unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                    &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size))
-                if status != noErr {
-                    NSLog("Velora: meeting mic pin failed (%d); using system default", status)
+        let systemURL = directory.appendingPathComponent("them.caf")
+        let wantsSystemAudio = MeetingSystemAudioPolicy.backend(
+            for: ProcessInfo.processInfo.operatingSystemVersion) == .coreAudioTap
+        readiness = MeetingCaptureReadiness(requiresSystemAudio: wantsSystemAudio)
+        self.micURL = micURL
+        self.systemURL = systemURL
+        self.meetingID = meetingID
+        self.startupCompletion = completion
+        startupSystemAudio = false
+        startupWarning = nil
+
+        if wantsSystemAudio {
+            do {
+                try startSystemAudio(to: systemURL)
+                startupSystemAudio = true
+            } catch {
+                startupWarning = Self.systemAudioWarning(for: error)
+                markSystemAudioFailed()
+                try? FileManager.default.removeItem(at: systemURL)
+                if readiness?.continueWithoutSystemAudio() == true {
+                    finishStartupIfReady()
                 }
             }
-            let format = input.outputFormat(forBus: 0)
-            guard format.sampleRate > 0, format.channelCount > 0 else {
-                throw NSError(
-                    domain: "VeloraMeetingCapture", code: 1,
-                    userInfo: [NSLocalizedDescriptionKey: "no input device is available"])
-            }
-            let file = try AVAudioFile(forWriting: micURL, settings: format.settings)
-            input.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, _ in
-                do {
-                    try file.write(from: buffer)
-                } catch {
-                    self?.reportMicrophoneFailure(error.localizedDescription)
-                }
-            }
-            micEngine.prepare()
-            self.micFile = file
-            self.micURL = micURL
-            self.systemURL = systemURL
-            self.meetingID = meetingID
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: micURL.path)
-        } catch {
-            micEngine.inputNode.removeTap(onBus: 0)
-            try? FileManager.default.removeItem(at: directory)
-            completion(.failure(.microphone(error.localizedDescription)))
-            return
+        } else {
+            startupWarning = "Computer-audio capture requires macOS 14.2 or later. This meeting is recording your microphone only."
+            markSystemAudioFailed()
+            _ = readiness?.continueWithoutSystemAudio()
         }
 
-        startSystemAudio(meetingID: meetingID, url: systemURL) { [weak self] result in
+        // Bound the entire Bluetooth/device negotiation plus first-frame
+        // readiness window. Scheduling only after startRunning completed left
+        // the meeting UI stuck forever if macOS wedged while opening a route.
+        scheduleStartupTimeout()
+        micCapture.start(
+            persistedUID: AppConfig.shared.inputDeviceUID,
+            onBuffer: { [weak self] buffer in self?.writeMicrophone(buffer) },
+            onFailure: { [weak self] message in
+                self?.reportMicrophoneFailure(message)
+            }
+        ) { [weak self] result in
             guard let self, self.meetingID == meetingID else { return }
-            let systemAudio: Bool
-            let warning: String?
             switch result {
             case .success:
-                systemAudio = true
-                warning = nil
+                break
             case .failure(let error):
-                self.markSystemAudioFailed()
-                self.stream = nil
-                self.writer = nil
-                self.writerInput = nil
-                try? FileManager.default.removeItem(at: systemURL)
-                systemAudio = false
-                warning = Self.systemAudioWarning(for: error)
-            }
-            // Do not record the microphone while ScreenCaptureKit is still
-            // preparing or showing its permission UI. Starting it only after
-            // the system-audio handshake also gives the two tracks a common
-            // practical origin; system samples are ignored until this point.
-            do {
-                try self.micEngine.start()
-                self.installMicConfigObserver()
-                let startedAt = Date()
-                self.startedAt = startedAt
-                self.enableSystemSamples()
-                completion(.success(MeetingCaptureStart(
-                    startedAt: startedAt,
-                    systemAudio: systemAudio,
-                    micRelativePath: "\(meetingID)/me.caf",
-                    systemRelativePath: systemAudio ? "\(meetingID)/them.m4a" : nil,
-                    warning: warning)))
-            } catch {
                 self.abortPreparedCapture(meetingID: meetingID) {
                     completion(.failure(.microphone(error.localizedDescription)))
                 }
@@ -173,11 +188,14 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     static func systemAudioWarning(for error: Error) -> String {
-        let failure = error as NSError
-        if failure.domain == SCStreamErrorDomain && failure.code == -3801 {
-            return "macOS has not allowed computer-audio capture. In System Settings, open Privacy & Security → Screen & System Audio Recording, allow Velora, then relaunch it. This meeting is recording your microphone only."
+        let detail = error.localizedDescription
+        let permissionFailure = detail.localizedCaseInsensitiveContains("permission")
+            || detail.localizedCaseInsensitiveContains("denied")
+            || detail.localizedCaseInsensitiveContains("not allowed")
+        if permissionFailure {
+            return "macOS has not allowed computer-audio capture. In System Settings, open Privacy & Security → Screen & System Audio Recording, allow Velora, then relaunch it. Velora records system audio only—not your screen. This meeting is recording your microphone only."
         }
-        return "Computer audio could not start (\(error.localizedDescription)). This meeting is recording your microphone only."
+        return "Computer audio could not start (\(detail)). This meeting is recording your microphone only."
     }
 
     func stop(
@@ -192,169 +210,171 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         let mic = micURL
         let system = systemURL
-        removeMicConfigObserver()
-        micEngine.stop()
-        micEngine.inputNode.removeTap(onBus: 0)
-        micFile = nil
-        let activeStream = stream
-        stream = nil
+        startupTimeout?.cancel()
+        startupTimeout = nil
         markStopping()
+        micCapture.stop { [weak self] in
+            guard let self else { completion(nil); return }
+            self.micFile = nil
+            let systemHadFrames = self.stopSystemAudio()
+            let hasSystem = !self.didSystemAudioFail && systemHadFrames
+                && FileManager.default.fileExists(atPath: system?.path ?? "")
 
-        let finishSystem = { [weak self] in
-            guard let self else { DispatchQueue.main.async { completion(nil) }; return }
-            self.systemQueue.async {
-                let finish = {
-                    let hasSystem = !self.didSystemAudioFail
-                        && self.writerStarted
-                        && self.writer?.status == .completed
-                        && FileManager.default.fileExists(atPath: system?.path ?? "")
-                    DispatchQueue.main.async {
-                        let endedAt = Date()
-                        self.writer = nil
-                        self.writerInput = nil
-                        self.writerStarted = false
-                        self.meetingID = nil
-                        self.startedAt = nil
-                        self.micURL = nil
-                        self.systemURL = nil
-                        let directory = AppConfig.meetingsDirectory
-                            .appendingPathComponent(meetingID, isDirectory: true)
-                        if cancelled {
-                            try? FileManager.default.removeItem(at: directory)
-                            completion(nil)
-                            return
-                        }
-                        if !hasSystem, let system {
-                            try? FileManager.default.removeItem(at: system)
-                        }
-                        if let mic { try? FileManager.default.setAttributes(
-                            [.posixPermissions: 0o600], ofItemAtPath: mic.path) }
-                        if hasSystem, let system { try? FileManager.default.setAttributes(
-                            [.posixPermissions: 0o600], ofItemAtPath: system.path) }
-                        completion(MeetingCaptureFiles(
-                            startedAt: startedAt, endedAt: endedAt,
-                            micRelativePath: FileManager.default.fileExists(atPath: mic?.path ?? "")
-                                ? "\(meetingID)/me.caf" : nil,
-                            systemRelativePath: hasSystem ? "\(meetingID)/them.m4a" : nil))
-                    }
-                }
-                if self.writerStarted, self.writer?.status == .writing {
-                    self.writerInput?.markAsFinished()
-                    self.writer?.finishWriting(completionHandler: finish)
-                } else {
-                    if let system { try? FileManager.default.removeItem(at: system) }
-                    finish()
-                }
-            }
-        }
-
-        if let activeStream {
-            activeStream.stopCapture { _ in finishSystem() }
-        } else {
-            finishSystem()
-        }
-    }
-
-    private func startSystemAudio(
-        meetingID: String,
-        url: URL,
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        SCShareableContent.getExcludingDesktopWindows(
-            false, onScreenWindowsOnly: false
-        ) { [weak self] content, error in
-            // Discovery can finish after quit/cancel has already cleared this
-            // preparation. Serialize setup with the rest of the capture state
-            // and require the exact meeting so a stale callback cannot start a
-            // stream for a later session.
-            DispatchQueue.main.async {
-                guard let self, self.meetingID == meetingID else { return }
-                if let error { completion(.failure(error)); return }
-                guard let content, let display = content.displays.first else {
-                    let error = NSError(
-                        domain: "VeloraMeetingCapture", code: 2,
-                        userInfo: [NSLocalizedDescriptionKey: "no display is available"])
-                    completion(.failure(error))
-                    return
-                }
-                do {
-                    let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
-                    let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
-                        AVFormatIDKey: kAudioFormatMPEG4AAC,
-                        AVSampleRateKey: 48_000,
-                        AVNumberOfChannelsKey: 2,
-                        AVEncoderBitRateKey: 128_000,
-                    ])
-                    input.expectsMediaDataInRealTime = true
-                    guard writer.canAdd(input) else {
-                        throw NSError(
-                            domain: "VeloraMeetingCapture", code: 3,
-                            userInfo: [NSLocalizedDescriptionKey: "audio encoder is unavailable"])
-                    }
-                    writer.add(input)
-                    self.writer = writer
-                    self.writerInput = input
-
-                    let current = content.applications.filter {
-                        $0.processID == ProcessInfo.processInfo.processIdentifier
-                    }
-                    let filter = SCContentFilter(
-                        display: display, excludingApplications: current, exceptingWindows: [])
-                    let configuration = SCStreamConfiguration()
-                    configuration.width = 2
-                    configuration.height = 2
-                    configuration.queueDepth = 3
-                    configuration.capturesAudio = true
-                    configuration.sampleRate = 48_000
-                    configuration.channelCount = 2
-                    configuration.excludesCurrentProcessAudio = true
-                    let stream = SCStream(
-                        filter: filter, configuration: configuration, delegate: self)
-                    try stream.addStreamOutput(
-                        self, type: .audio, sampleHandlerQueue: self.systemQueue)
-                    self.stream = stream
-                    stream.startCapture { error in
-                        DispatchQueue.main.async {
-                            guard self.meetingID == meetingID else { return }
-                            if let error { completion(.failure(error)) }
-                            else { completion(.success(())) }
-                        }
-                    }
-                } catch {
-                    completion(.failure(error))
-                }
-            }
-        }
-    }
-
-    func stream(
-        _ stream: SCStream,
-        didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
-        of outputType: SCStreamOutputType
-    ) {
-        guard outputType == .audio, CMSampleBufferDataIsReady(sampleBuffer),
-              systemSamplesAreEnabled, !didSystemAudioFail,
-              let writer, let writerInput else { return }
-        if !writerStarted {
-            guard writer.startWriting() else {
-                reportSystemAudioFailure(
-                    writer.error?.localizedDescription ?? "the audio writer could not start")
+            self.meetingID = nil
+            self.startedAt = nil
+            self.micURL = nil
+            self.systemURL = nil
+            self.readiness = nil
+            self.startupCompletion = nil
+            self.startupSystemAudio = false
+            self.startupWarning = nil
+            let directory = AppConfig.meetingsDirectory
+                .appendingPathComponent(meetingID, isDirectory: true)
+            if cancelled {
+                try? FileManager.default.removeItem(at: directory)
+                completion(nil)
                 return
             }
-            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
-            writerStarted = true
+            if !hasSystem, let system { try? FileManager.default.removeItem(at: system) }
+            if let mic { try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: mic.path) }
+            if hasSystem, let system { try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: system.path) }
+            completion(MeetingCaptureFiles(
+                startedAt: startedAt, endedAt: Date(),
+                micRelativePath: FileManager.default.fileExists(atPath: mic?.path ?? "")
+                    ? "\(meetingID)/me.caf" : nil,
+                systemRelativePath: hasSystem
+                    ? MeetingSystemAudioPolicy.relativePath(meetingID: meetingID) : nil))
         }
-        if writer.status == .writing, writerInput.isReadyForMoreMediaData {
-            if !writerInput.append(sampleBuffer) {
-                reportSystemAudioFailure(
-                    writer.error?.localizedDescription ?? "the audio writer stopped accepting data")
+    }
+
+    private func startSystemAudio(to url: URL) throws {
+        guard #available(macOS 14.2, *) else {
+            throw NSError(
+                domain: "VeloraSystemAudioCapture", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "macOS 14.2 is required"])
+        }
+        let capture = CoreAudioSystemAudioCapture()
+        capture.onFrames = { [weak self] frames in
+            guard let self else { return }
+            if self.readiness?.recordSystemAudio(frames: frames) == true {
+                DispatchQueue.main.async { [weak self] in self?.finishStartupIfReady() }
+            }
+        }
+        capture.onFailure = { [weak self] message in
+            self?.systemCaptureDidFail(message)
+        }
+        try capture.start(to: url)
+        systemCapture = capture
+    }
+
+    @discardableResult
+    private func stopSystemAudio() -> Bool {
+        guard #available(macOS 14.2, *),
+              let capture = systemCapture as? CoreAudioSystemAudioCapture else {
+            systemCapture = nil
+            return false
+        }
+        let result = capture.stop()
+        systemCapture = nil
+        return result
+    }
+
+    private func finishStartupIfReady() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let meetingID, startedAt == nil, let completion = startupCompletion else { return }
+        startupTimeout?.cancel()
+        startupTimeout = nil
+        let date = Date()
+        startedAt = date
+        startupCompletion = nil
+        readiness = nil
+        completion(.success(MeetingCaptureStart(
+            startedAt: date,
+            systemAudio: startupSystemAudio && !didSystemAudioFail,
+            micRelativePath: "\(meetingID)/me.caf",
+            systemRelativePath: startupSystemAudio && !didSystemAudioFail
+                ? MeetingSystemAudioPolicy.relativePath(meetingID: meetingID) : nil,
+            warning: startupWarning)))
+    }
+
+    private func scheduleStartupTimeout() {
+        startupTimeout?.cancel()
+        let meetingID = self.meetingID
+        let item = DispatchWorkItem { [weak self] in
+            guard let self, self.meetingID == meetingID, self.startedAt == nil,
+                  let readiness = self.readiness else { return }
+            let missing = readiness.missingTracks
+            if missing.contains(.microphone) {
+                let completion = self.startupCompletion
+                self.startupCompletion = nil
+                self.abortPreparedCapture(meetingID: meetingID ?? "") {
+                    completion?(.failure(.microphone(
+                        "no microphone audio arrived; check the selected input device")))
+                }
+                return
+            }
+            if missing.contains(.systemAudio) {
+                self.markSystemAudioFailed()
+                _ = self.stopSystemAudio()
+                if let systemURL = self.systemURL {
+                    try? FileManager.default.removeItem(at: systemURL)
+                }
+                self.startupSystemAudio = false
+                self.startupWarning = "Computer audio did not deliver any samples. This meeting is recording your microphone only."
+                if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
+            }
+        }
+        startupTimeout = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: item)
+    }
+
+    private func systemCaptureDidFail(_ message: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isCapturing else { return }
+            if self.startedAt == nil, let readiness = self.readiness {
+                self.markSystemAudioFailed()
+                _ = self.stopSystemAudio()
+                if let systemURL = self.systemURL {
+                    try? FileManager.default.removeItem(at: systemURL)
+                }
+                self.startupSystemAudio = false
+                self.startupWarning = Self.systemAudioWarning(for: NSError(
+                    domain: "VeloraSystemAudioCapture", code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: message]))
+                if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
+            } else {
+                self.reportSystemAudioFailure(message)
             }
         }
     }
 
-    func stream(_ stream: SCStream, didStopWithError error: Error) {
-        NSLog("Velora: meeting system-audio stream stopped: %@", error.localizedDescription)
-        reportSystemAudioFailure(error.localizedDescription)
+    private func abortPreparedCapture(meetingID: String, completion: @escaping () -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        startupTimeout?.cancel()
+        startupTimeout = nil
+        markStopping()
+        // Surface the startup failure immediately. Hardware teardown stays
+        // serialized off-main and `isCapturing` remains true until it finishes,
+        // so the coordinator can continue excluding a second foreground mic.
+        completion()
+        micCapture.stop { [weak self] in
+            guard let self else { return }
+            self.micFile = nil
+            _ = self.stopSystemAudio()
+            self.meetingID = nil
+            self.startedAt = nil
+            self.micURL = nil
+            self.systemURL = nil
+            self.readiness = nil
+            self.startupCompletion = nil
+            self.startupSystemAudio = false
+            self.startupWarning = nil
+            try? FileManager.default.removeItem(
+                at: AppConfig.meetingsDirectory
+                    .appendingPathComponent(meetingID, isDirectory: true))
+        }
     }
 
     private func resetFailureState() {
@@ -362,7 +382,6 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         systemAudioFailed = false
         microphoneWriteFailed = false
         stopping = false
-        systemSamplesEnabled = false
         failureLock.unlock()
     }
 
@@ -370,47 +389,6 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         failureLock.lock()
         stopping = true
         failureLock.unlock()
-    }
-
-    private func enableSystemSamples() {
-        failureLock.lock()
-        systemSamplesEnabled = true
-        failureLock.unlock()
-    }
-
-    private var systemSamplesAreEnabled: Bool {
-        failureLock.lock(); defer { failureLock.unlock() }
-        return systemSamplesEnabled
-    }
-
-    private func abortPreparedCapture(meetingID: String, completion: @escaping () -> Void) {
-        dispatchPrecondition(condition: .onQueue(.main))
-        removeMicConfigObserver()
-        micEngine.stop()
-        micEngine.inputNode.removeTap(onBus: 0)
-        micFile = nil
-        let activeStream = stream
-        stream = nil
-        markStopping()
-        let finish = { [weak self] in
-            DispatchQueue.main.async {
-                guard let self else { completion(); return }
-                self.writer?.cancelWriting()
-                self.writer = nil
-                self.writerInput = nil
-                self.writerStarted = false
-                self.meetingID = nil
-                self.startedAt = nil
-                self.micURL = nil
-                self.systemURL = nil
-                try? FileManager.default.removeItem(
-                    at: AppConfig.meetingsDirectory
-                        .appendingPathComponent(meetingID, isDirectory: true))
-                completion()
-            }
-        }
-        if let activeStream { activeStream.stopCapture { _ in finish() } }
-        else { finish() }
     }
 
     private func markSystemAudioFailed() {
@@ -436,34 +414,25 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    /// A mic device that disappears mid-meeting stops buffer delivery with
-    /// NO error — the tap just goes quiet and the meeting would keep looking
-    /// live while recording nothing (review catch). Surface it loudly: on an
-    /// engine configuration change, restart if possible, and report a real
-    /// failure when the chosen device is gone or the restart fails.
-    private func installMicConfigObserver() {
-        micConfigObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: micEngine, queue: .main
-        ) { [weak self] _ in
-            guard let self, self.meetingID != nil else { return }
-            if let uid = AppConfig.shared.inputDeviceUID, !uid.isEmpty,
-               AudioInputDevices.resolve(
-                   persistedUID: uid, in: AudioInputDevices.current()) == nil {
-                self.reportMicrophoneFailure("The chosen microphone disconnected")
-                return
+    /// Called on MicrophoneStreamCapture's serial sample queue. The file is
+    /// opened lazily from the real stream format, then every callback is
+    /// written before readiness can declare the meeting healthy.
+    private func writeMicrophone(_ buffer: AVAudioPCMBuffer) {
+        guard let micURL else { return }
+        do {
+            if micFile == nil {
+                micFile = try AVAudioFile(forWriting: micURL, settings: buffer.format.settings)
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: micURL.path)
             }
-            guard !self.micEngine.isRunning else { return }
-            do {
-                try self.micEngine.start()
-            } catch {
-                self.reportMicrophoneFailure(error.localizedDescription)
+            try micFile?.write(from: buffer)
+            let frames = Int(buffer.frameLength)
+            if readiness?.recordMicrophone(frames: frames) == true {
+                DispatchQueue.main.async { [weak self] in self?.finishStartupIfReady() }
             }
+        } catch {
+            reportMicrophoneFailure(error.localizedDescription)
         }
-    }
-
-    private func removeMicConfigObserver() {
-        if let micConfigObserver { NotificationCenter.default.removeObserver(micConfigObserver) }
-        micConfigObserver = nil
     }
 
     private func reportMicrophoneFailure(_ message: String) {

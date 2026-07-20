@@ -622,7 +622,8 @@ final class MeetingStore {
             separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard components.count == 2,
               UUID(uuidString: components[0]) != nil,
-              components[1] == "me.caf" || components[1] == "them.m4a"
+              components[1] == "me.caf" || components[1] == "them.caf"
+                  || components[1] == "them.m4a"
         else { return nil }
         let root = filesRoot.standardizedFileURL.resolvingSymlinksInPath()
         let candidate = root.appendingPathComponent(relativePath)

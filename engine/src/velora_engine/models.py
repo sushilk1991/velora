@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import hashlib
 import logging
 import re
 import time
@@ -11,12 +12,22 @@ from pathlib import Path
 
 log = logging.getLogger("velora.models")
 
+TRANSCRIBE_CPP_Q8_MODEL = "handy-computer/whisper-large-v3-turbo-gguf"
+TRANSCRIBE_CPP_Q8_REVISION = "d222c9f621c1128299248f2ded4d8a1820519780"
+TRANSCRIBE_CPP_Q8_SHA256 = "d5e65f2b0828802ae2c231673d31982cebe3a778c95d9494a9f3efee6bd17448"
+_SINGLE_FILE_MODELS = {
+    TRANSCRIBE_CPP_Q8_MODEL: "whisper-large-v3-turbo-Q8_0.gguf",
+}
+_SINGLE_FILE_REVISIONS = {
+    TRANSCRIBE_CPP_Q8_MODEL: TRANSCRIBE_CPP_Q8_REVISION,
+}
+
 
 @dataclass(frozen=True)
 class ModelInfo:
     id: str
     kind: str  # "stt" | "cleanup"
-    backend: str  # "parakeet" | "whisper" | "mlx-lm"
+    backend: str  # "parakeet" | "whisper" | "transcribe-cpp" | "mlx-lm"
     size: str  # human-readable download size
     description: str
 
@@ -30,6 +41,16 @@ REGISTRY: list[ModelInfo] = [
         description=(
             "Default — fast & multilingual (99 languages incl. Hindi, Indian "
             "English, Mandarin, Arabic, Spanish, French). Best all-round balance."
+        ),
+    ),
+    ModelInfo(
+        id=TRANSCRIBE_CPP_Q8_MODEL,
+        kind="stt",
+        backend="transcribe-cpp",
+        size="0.85 GB",
+        description=(
+            "Experimental — faster multilingual Whisper via transcribe.cpp "
+            "(Q8, Hindi and Indian English)."
         ),
     ),
     ModelInfo(
@@ -152,14 +173,65 @@ def lookup(model_id: str) -> ModelInfo | None:
     return _BY_ID.get(model_id)
 
 
+@functools.lru_cache(maxsize=8)
+def _verified_sha256(path: str, size: int, mtime_ns: int, expected: str) -> bool:
+    """Hash an immutable Hub artifact once per process/stat identity."""
+    del size, mtime_ns  # cache-key inputs; the path is streamed below
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest() == expected
+
+
+def _single_file_is_valid(model_id: str, path: str) -> bool:
+    if model_id != TRANSCRIBE_CPP_Q8_MODEL:
+        return True
+    try:
+        stat = Path(path).stat()
+        return _verified_sha256(
+            str(Path(path).resolve()), stat.st_size, stat.st_mtime_ns,
+            TRANSCRIBE_CPP_Q8_SHA256,
+        )
+    except OSError:
+        return False
+
+
 def ensure_downloaded(model_id: str) -> str:
     """Return the local snapshot path, downloading only when not cached.
 
     Local-first: a complete cached snapshot is used without any network
     request — the Hub is only contacted when files are actually missing.
     """
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
+
+    filename = _SINGLE_FILE_MODELS.get(model_id)
+    if filename is not None:
+        revision = _SINGLE_FILE_REVISIONS[model_id]
+        try:
+            path = hf_hub_download(
+                repo_id=model_id,
+                filename=filename,
+                revision=revision,
+                local_files_only=True,
+            )
+            if _single_file_is_valid(model_id, path):
+                log.info("model %s found in verified local cache at %s", model_id, path)
+                return path
+            log.warning("cached model %s failed SHA-256 verification; replacing it", model_id)
+        except LocalEntryNotFoundError:
+            pass
+        log.info("downloading model %s artifact %s ...", model_id, filename)
+        t0 = time.perf_counter()
+        path = hf_hub_download(
+            repo_id=model_id, filename=filename, revision=revision,
+            force_download=True,
+        )
+        if not _single_file_is_valid(model_id, path):
+            raise OSError(f"downloaded model {model_id} failed SHA-256 verification")
+        log.info("model %s ready at %s (%.1fs)", model_id, path, time.perf_counter() - t0)
+        return path
 
     try:
         path = snapshot_download(repo_id=model_id, local_files_only=True)
@@ -177,10 +249,19 @@ def ensure_downloaded(model_id: str) -> str:
 
 def is_cached(model_id: str) -> bool:
     """True when a complete snapshot exists locally (no network touched)."""
-    from huggingface_hub import snapshot_download
+    from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
     try:
+        filename = _SINGLE_FILE_MODELS.get(model_id)
+        if filename is not None:
+            path = hf_hub_download(
+                repo_id=model_id,
+                filename=filename,
+                revision=_SINGLE_FILE_REVISIONS[model_id],
+                local_files_only=True,
+            )
+            return _single_file_is_valid(model_id, path)
         snapshot_download(repo_id=model_id, local_files_only=True)
         return True
     except LocalEntryNotFoundError:

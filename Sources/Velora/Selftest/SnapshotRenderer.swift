@@ -30,6 +30,8 @@ enum SnapshotRenderer {
         let cases: [(String, HUDState)] = [
             ("hud-standby", .standby),
             ("hud-listening", .listening),
+            ("hud-meeting", .meeting(title: "Design review", systemAudio: true)),
+            ("hud-meeting-mic-only", .meeting(title: "Design review", systemAudio: false)),
             ("hud-inserted", .inserted),
             ("hud-error", .error("Microphone disconnected")),
         ]
@@ -43,6 +45,9 @@ enum SnapshotRenderer {
                     appIcon: NSWorkspace.shared.icon(
                         forFile: "/System/Applications/Utilities/Terminal.app"),
                     modeName: "Terminal")
+            }
+            if case .meeting = state {
+                model.recordingStart = Date(timeIntervalSinceNow: -372)
             }
             let view = NSHostingView(rootView: HUDView(model: model))
             snapshot(view, size: HUDPanel.panelSize, name: name, dir: dir)

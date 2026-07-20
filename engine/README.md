@@ -43,12 +43,48 @@ uv --project engine run python scripts/engine-smoke.py \
 
 | Model | Role | Backend |
 |---|---|---|
-| `mlx-community/parakeet-tdt-0.6b-v2` | STT default — streams during recording | parakeet-mlx |
-| `mlx-community/whisper-large-v3-turbo` | STT fallback — batch, hallucination guard | mlx-whisper |
+| `mlx-community/whisper-large-v3-turbo` | STT default — multilingual, hallucination guard | mlx-whisper |
+| `handy-computer/whisper-large-v3-turbo-gguf` | Experimental faster Whisper Q8; automatically falls back on load failure | transcribe.cpp |
 | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | cleanup/formatting LLM | mlx-lm |
 
 Note: `transformers` is pinned `>=5.0,<5.4` — mlx-lm 0.31.3 crashes on import
 with transformers 5.13 (see `spikes/engine/FINDINGS.md`).
+
+### STT backend bakeoff
+
+The transcribe.cpp Q8 model remains experimental until it clears Velora's
+real-voice acceptance gate. Create a private local manifest (audio and
+transcripts are never printed or uploaded):
+
+```json
+{
+  "cases": [
+    {
+      "name": "indian-english-01",
+      "audio": "clips/indian-english-01.flac",
+      "reference": "The exact words that were spoken.",
+      "cohort": "indian_english",
+      "glossary": ["Velora", "SwiftUI"]
+    }
+  ]
+}
+```
+
+Run from `engine/`:
+
+```sh
+uv run python scripts/benchmark_stt_backends.py /path/to/private-manifest.json
+```
+
+The full gate requires at least 18 clips spanning `indian_english`, `hindi`,
+and `hinglish`, plus silence/noise and a ≥45-second dictation. It passes only
+when both p50 and p95 stop-to-transcript latency improve by at least 10%, no
+cohort has more word errors, glossary recall does not fall, and there are no
+new empty/repetition failures. The slowest candidate ingestion real-time factor
+must also stay at or below 0.9, leaving at least 10% headroom before live audio
+can outpace decoding. Results identify the immutable GGUF revision and digest,
+native provider/commit, macOS version, architecture, and Mac model. `--smoke`
+bypasses corpus coverage only; it does not relax the speed or quality rules.
 
 ## Wire protocol (summary — normative spec in docs/ARCHITECTURE.md)
 
