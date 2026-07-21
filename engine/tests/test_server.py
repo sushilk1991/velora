@@ -339,104 +339,47 @@ async def test_partials_emitted(engine):
     client.close()
 
 
-async def test_start_prepares_cleanup_prefix_without_blocking_audio(engine):
+async def test_recording_never_runs_cleanup_prefill_against_live_stt(engine):
     eng, sock = engine
 
-    class BlockingPrefixCleanup:
+    class RecordingCleanup:
         loaded = True
         model_id = "fake-prefix"
+        unhealthy = False
 
         def __init__(self):
             self.calls = []
-            self.release = asyncio.Event()
 
         async def prepare_prefix(self, candidates, cancel_event=None):
             self.calls.append((candidates, cancel_event))
-            await self.release.wait()
 
-    cleanup = BlockingPrefixCleanup()
+        async def cleanup(self, raw, _prompt, **_kwargs):
+            return CleanupResult("Hello world, this is a fake transcript.", True, 3)
+
+    cleanup = RecordingCleanup()
     eng.cleanup = cleanup
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
         "cmd": "start",
-        "session": "prefill-1",
+        "session": "no-prefill-race",
         "context": {
             "bundle_id": "com.apple.Notes",
             "app_name": "Notes",
             "entities": [{"type": "nearby", "value": "cursor text"}],
         },
     })
-
-    for _ in range(100):
-        if cleanup.calls:
-            break
-        await asyncio.sleep(0.01)
-    assert len(cleanup.calls) == 1
-    candidates, cancel_event = cleanup.calls[0]
-    assert len(candidates) == 2
-    assert cancel_event is not None and not cancel_event.is_set()
-
-    # Prefix inference remains blocked, but the recording feeder is live.
     await client.send_audio(AUDIO)
     partial = await client.recv_event("partial")
-    assert partial["session"] == "prefill-1"
+    assert partial["session"] == "no-prefill-race"
+    assert cleanup.calls == []
 
-    await client.send_json({"cmd": "cancel", "session": "prefill-1"})
-    await client.recv_event("cancelled")
-    assert cancel_event.is_set()
-    cleanup.release.set()
-    client.close()
-
-
-async def test_stop_cancels_prefix_before_final_cleanup(engine):
-    eng, sock = engine
-
-    class OrderedCleanup:
-        loaded = True
-        model_id = "fake-ordered"
-        unhealthy = False
-
-        def __init__(self):
-            self.started = asyncio.Event()
-            self.cancel_event = None
-            self.cancelled_before_cleanup = None
-
-        async def prepare_prefix(self, candidates, cancel_event=None):
-            assert candidates
-            self.cancel_event = cancel_event
-            self.started.set()
-            await asyncio.Future()
-
-        async def cleanup(self, raw, _prompt, **_kwargs):
-            assert self.cancel_event is not None
-            self.cancelled_before_cleanup = self.cancel_event.is_set()
-            return CleanupResult(
-                "Hello world, this is a fake transcript.", True, 3
-            )
-
-    cleanup = OrderedCleanup()
-    eng.cleanup = cleanup
-    client = await connect(sock)
-    await client.recv_event("ready")
-    await client.send_json({
-        "cmd": "start",
-        "session": "prefill-priority",
-        "context": {
-            "bundle_id": "com.apple.Notes",
-            "app_name": "Notes",
-        },
-    })
-    await asyncio.wait_for(cleanup.started.wait(), 1)
-
-    await client.send_audio(AUDIO)
-    await client.send_json({"cmd": "stop", "session": "prefill-priority"})
+    await client.send_json({"cmd": "stop", "session": "no-prefill-race"})
     final = await client.recv_event("final")
 
     assert final["text"] == "Hello world, this is a fake transcript."
     assert final["cleanup_applied"] is True
-    assert cleanup.cancel_event is not None and cleanup.cancel_event.is_set()
-    assert cleanup.cancelled_before_cleanup is True
+    assert cleanup.calls == []
     assert cleanup.unhealthy is False
     assert not eng.shutdown.is_set()
     client.close()

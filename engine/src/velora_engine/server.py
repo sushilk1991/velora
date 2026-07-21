@@ -200,13 +200,6 @@ class Session:
         self.start_entities: list[dict[str, Any]] = [
             e for e in (self.context.get("entities") or []) if isinstance(e, dict)
         ]
-        # Session prompt preparation runs on the cleanup model's owner thread
-        # while audio is captured. The event reaches that thread even when the
-        # asyncio wrapper is cancelled.
-        self.prefix_task: asyncio.Task[Any] | None = None
-        self.prefix_cancel = threading.Event()
-
-
 class Engine:
     def __init__(self, config: Config, parent_pid: int | None = None) -> None:
         self.config = config
@@ -730,11 +723,6 @@ class Engine:
             await self._stt_call(self.stt.start_session)
             session.feeder = asyncio.create_task(self._feed_loop(session))
             self.session = session
-            self._start_prefix_preparation(session)
-            # Let the preparation coroutine submit its executor job before a
-            # very short dictation can enqueue final cleanup. This never waits
-            # for model work, so audio acceptance remains immediate.
-            await asyncio.sleep(0)
         finally:
             self._starting = False
         log.info(
@@ -744,43 +732,6 @@ class Engine:
             context.get("app_name"),
             context.get("mode"),
         )
-
-    def _start_prefix_preparation(self, session: Session) -> None:
-        cleanup = self.cleanup
-        prepare = getattr(cleanup, "prepare_prefix", None)
-        if (
-            cleanup is None
-            or not cleanup.loaded
-            or getattr(cleanup, "unhealthy", False)
-            or not callable(prepare)
-        ):
-            return
-        ctx = session.context
-        candidates = formatting.build_prefill_prompt_candidates(
-            self.config,
-            bundle_id=ctx.get("bundle_id"),
-            app_name=ctx.get("app_name"),
-            explicit_mode=ctx.get("mode"),
-            entities=session.start_entities,
-        )
-        if not candidates:
-            return
-
-        async def run() -> None:
-            try:
-                await prepare(candidates, cancel_event=session.prefix_cancel)
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 — prefill is an optimization
-                log.exception("session %s cleanup prefix preparation failed", session.id)
-
-        session.prefix_task = asyncio.create_task(run())
-
-    @staticmethod
-    def _cancel_prefix_preparation(session: Session) -> None:
-        session.prefix_cancel.set()
-        if session.prefix_task is not None and not session.prefix_task.done():
-            session.prefix_task.cancel()
 
     async def _emit_partial(self, session: Session, partial: str | None) -> None:
         """Send one current-session partial, shared by stream and preview lanes."""
@@ -963,7 +914,6 @@ class Engine:
         self.session = None
         session.cancelled = True
         session.pcm_chunks = []  # discard archived audio for a cancelled session
-        self._cancel_prefix_preparation(session)
         self._cancel_chunk_tasks(session)
         await self._drain_feeder(session)
         await self._drain_preview(session)
@@ -1021,11 +971,6 @@ class Engine:
         # closes the window where a background transcribe-file chunk could
         # grab the backend before our finalize() drains it.
         self._finalizing = True
-        # Prefix preparation is optional recording-time work on the same
-        # single-worker cleanup executor as the authoritative final pass. Set
-        # its cooperative cancellation signal before any finalization awaits
-        # so it can release the model thread while Whisper drains.
-        self._cancel_prefix_preparation(session)
         try:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
@@ -1165,10 +1110,6 @@ class Engine:
                 return
             session.stream_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
             session.stream_allowed_terms = self._allowed_terms(gate.mode)
-        # A committed segment cleanup can become part of the authoritative
-        # final for a long dictation. Optional prefix preparation must never
-        # sit ahead of that work on the cleanup engine's single executor.
-        self._cancel_prefix_preparation(session)
         # Cross-boundary self-correction: a segment that BEGINS with a
         # retraction marker ("no wait…", "scratch that…") refers back across
         # the boundary — never clean it alone. Merge with the previous raw

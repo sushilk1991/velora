@@ -21,6 +21,7 @@ class SiteParser(HTMLParser):
         self.local_assets: list[str] = []
         self.remote_executables: list[str] = []
         self.hrefs: list[str] = []
+        self.canonical_hrefs: list[str] = []
         self.demo_examples: list[str] = []
         self.h1_count = 0
 
@@ -32,6 +33,8 @@ class SiteParser(HTMLParser):
             self.h1_count += 1
         if tag == "a" and (href := values.get("href")):
             self.hrefs.append(href)
+        if tag == "link" and values.get("rel") == "canonical" and (href := values.get("href")):
+            self.canonical_hrefs.append(href)
         if example := values.get("data-demo-example"):
             self.demo_examples.append(example)
 
@@ -52,6 +55,10 @@ def main() -> None:
     parser.feed(html)
 
     assert parser.h1_count == 1, "the product page must have exactly one h1"
+    assert parser.canonical_hrefs == ["https://sushilk1991.github.io/velora/"], (
+        "the landing page must declare the clean default URL as canonical"
+    )
+    assert "?v=" not in html, "cache-busting query parameters must not become public URLs"
     assert len(parser.ids) == len(set(parser.ids)), "HTML ids must be unique"
     assert {"main", "top", "how-it-works", "privacy", "iphone", "download"}.issubset(
         parser.ids
@@ -89,6 +96,18 @@ def main() -> None:
         "the full-bleed iPhone section must not inherit the capped section width"
     )
     public_source = "\n".join((html, css, script)).lower()
+    assert "new line decisions" not in public_source, (
+        "the demo must not imply that natural structure requires a spoken command"
+    )
+    assert "voice / 01" not in public_source and "live dictation demo" in public_source, (
+        "the hero demo label must describe what the visitor is seeing"
+    )
+    assert "including browser playback" in public_source, (
+        "the direct-dictation playback claim must include browser media"
+    )
+    assert "meeting capture leaves call audio running" in public_source, (
+        "the playback claim must preserve the meeting-capture boundary"
+    )
     forbidden = ("google-analytics", "googletagmanager", "mixpanel", "posthog", "segment.io")
     assert not any(marker in public_source for marker in forbidden), (
         "the public site must not add analytics or tracking"
@@ -110,6 +129,23 @@ def main() -> None:
     )
     assert "if (reducedMotion || !animate)" in script, (
         "the JavaScript demo must settle immediately for reduced-motion users"
+    )
+    assert 'demoStage.classList.toggle("is-structured", index === 1)' in script, (
+        "the inferred-list demo must use its compact multi-line treatment"
+    )
+    assert ".dictation-stage.is-structured .typed" in css, (
+        "the inferred-list result must fit inside the demo card"
+    )
+    assert "height: clamp(34rem, 48vw, 38rem)" in css, (
+        "switching examples must not resize the dictation card"
+    )
+    ready_wave = re.search(
+        r"\.dictation-stage\.is-ready\s+\.waveform\s+i\s*\{([^}]*)\}",
+        css,
+        flags=re.DOTALL,
+    )
+    assert ready_wave and "animation-play-state: paused" not in ready_wave.group(1), (
+        "the visible waveform must keep moving after the demo reaches ready state"
     )
     assert '<script>document.documentElement.classList.add("js");</script>' in html, (
         "animated reveals must use an explicit progressive-enhancement gate"

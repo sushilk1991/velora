@@ -22,21 +22,25 @@
   const demoTime = dictationDemo?.querySelector("[data-demo-time]");
   const demoSpoken = dictationDemo?.querySelector("[data-demo-spoken]");
   const demoTyped = dictationDemo?.querySelector("[data-demo-typed]");
+  const demoCaption = dictationDemo?.querySelector("[data-demo-caption]");
   const demoButtons = dictationDemo?.querySelectorAll("[data-demo-example]") ?? [];
   const examples = [
     {
-      spoken: "“Send Maya the launch notes, uh, before lunch.”",
-      typed: "Send Maya the launch notes before lunch.",
-      time: "00:04",
+      spoken: "“Tell Maya I can do three—actually, make that three thirty.”",
+      typed: "Tell Maya I can do 3:30.",
+      caption: "Changed your mind? Velora fixes the sentence.",
+      time: "00:05",
     },
     {
-      spoken: "“New line decisions: launch Friday. New line owners: Sam and me.”",
-      typed: "Decisions:\n• Launch Friday\n• Owners: Sam and me",
-      time: "00:07",
+      spoken: "“For Friday’s launch, Sam owns the release, Maya will send the notes before lunch, and I’ll check metrics after we ship.”",
+      typed: "For Friday’s launch:\n1. Sam owns the release.\n2. Maya will send the notes before lunch.\n3. I’ll check metrics after we ship.",
+      caption: "Three clear actions. No formatting commands.",
+      time: "00:10",
     },
     {
-      spoken: "“The idea is, um, writing should feel as fast as thinking.”",
-      typed: "Writing should feel as fast as thinking.",
+      spoken: "“The idea is, um, your voice should work like a keyboard, only faster.”",
+      typed: "Your voice should work like a keyboard—only faster.",
+      caption: "Filler gone. The thought stays yours.",
       time: "00:05",
     },
   ];
@@ -48,7 +52,7 @@
   };
 
   const setDemoExample = (index, animate = true) => {
-    if (!demoStage || !demoStatus || !demoTime || !demoSpoken || !demoTyped) return;
+    if (!demoStage || !demoStatus || !demoTime || !demoSpoken || !demoTyped || !demoCaption) return;
     const example = examples[index] ?? examples[0];
     clearDemoTimers();
 
@@ -57,12 +61,14 @@
       button.classList.toggle("is-active", isActive);
       button.setAttribute("aria-pressed", String(isActive));
     });
+    demoStage.classList.toggle("is-structured", index === 1);
 
     if (reducedMotion || !animate) {
       demoSpoken.textContent = example.spoken;
       demoTyped.textContent = example.typed;
+      demoCaption.textContent = example.caption;
       demoTime.textContent = example.time;
-      demoStatus.textContent = "Ready — kept on-device";
+      demoStatus.textContent = "Ready to paste";
       demoStage.classList.remove("is-listening", "is-processing", "is-swapping");
       demoStage.classList.add("is-ready");
       return;
@@ -70,24 +76,25 @@
 
     demoStage.classList.remove("is-listening", "is-processing", "is-ready");
     demoStage.classList.add("is-swapping");
-    demoStatus.textContent = "Listening on-device";
+    demoStatus.textContent = "Listening — stays on this Mac";
 
     demoTimers.push(window.setTimeout(() => {
       demoSpoken.textContent = example.spoken;
       demoTyped.textContent = example.typed;
+      demoCaption.textContent = example.caption;
       demoTime.textContent = example.time;
       demoStage.classList.remove("is-swapping");
       demoStage.classList.add("is-listening");
     }, 220));
 
     demoTimers.push(window.setTimeout(() => {
-      demoStatus.textContent = "Cleaning up on-device";
+      demoStatus.textContent = "Polishing on this Mac";
       demoStage.classList.remove("is-listening");
       demoStage.classList.add("is-processing");
     }, 1050));
 
     demoTimers.push(window.setTimeout(() => {
-      demoStatus.textContent = "Ready — kept on-device";
+      demoStatus.textContent = "Ready to paste";
       demoStage.classList.remove("is-processing");
       demoStage.classList.add("is-ready");
     }, 2050));

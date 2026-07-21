@@ -473,7 +473,12 @@ STATIC_SYSTEM_PROMPT = (
     "lines together.\n"
     "7. Lists: use one when the speech explicitly enumerates items, asks for a "
     "list, or clearly contains two or more distinct issues, feedback points, "
-    "tasks, or requirements. Otherwise keep prose. Put each item on its OWN "
+    "tasks, or requirements. Otherwise keep prose. Infer those item boundaries "
+    "from meaning and parallel clauses: the "
+    "speaker does NOT need to say 'new line', 'bullet', 'list', or "
+    "'first/second/third'. Only infer a boundary when each clause stands as a "
+    "separate actionable or evaluative point; do not split an ordinary compound "
+    "sentence. Put each item on its OWN "
     "line. Use a NUMBERED list ('1.', '2.', '3.') for issues, feedback, tasks, "
     "requirements, a requested numbered list, or items counted off with "
     "'first/second/third'. Use '-' BULLETS only for a requested bullet list or "
@@ -482,7 +487,10 @@ STATIC_SYSTEM_PROMPT = (
     "as prose and then again as a list; output each point exactly once. WRONG: "
     "'Saving is slow and errors are vague.\n1. Saving is slow.\n2. Errors are "
     "vague.' RIGHT: '1. Saving is slow.\n2. Errors are vague.' Drop the "
-    "meta-instruction itself ('put this in a numbered list') from the output. A "
+    "meta-instruction itself ('put this in a numbered list') from the output. "
+    "Parallel owner-action clauses ARE separate tasks: 'for the release priya "
+    "owns QA omar sends the notes and i monitor metrics' → 'For the release:\n"
+    "1. Priya owns QA.\n2. Omar sends the notes.\n3. I monitor metrics.' A "
     "sentence that merely INTRODUCES the list ('these are the steps') is prose — "
     "keep it as its own unnumbered line ending with ':' and start numbering at "
     "the first item. Do NOT listify a narrative, a single point, ordinary "
@@ -535,8 +543,10 @@ _STRENGTH_INSTRUCTIONS = {
     ),
     "full": (
         "Formatting strength: FULL. In addition to cleanup, you may add "
-        "paragraph breaks on topic shifts and structure explicit enumerations "
-        "as lists. Still never rewrite wording."
+        "paragraph breaks on topic shifts and structure semantically distinct "
+        "issues, feedback, tasks, or requirements as lists even without a spoken "
+        "formatting command. Keep ordinary compound sentences as prose. Still "
+        "never rewrite wording."
     ),
 }
 

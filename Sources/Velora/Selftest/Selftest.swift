@@ -97,15 +97,22 @@ enum Selftest {
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
         testMediaPlaybackNoop()
+        testMediaPlaybackUnknownStateFailsClosed()
         testMediaPlaybackPauseResume()
         testMediaPlaybackEarlyStop()
         testMediaPlaybackFailedPause()
         testMediaPlaybackUserOverride()
         testMediaPlaybackAmbiguousPlayers()
+        testMediaPlaybackMisdirectedToggleRollsBack()
         testMediaPlaybackUnsupportedOutput()
+        testMediaPlaybackActiveInput()
+        testMediaPlaybackUnrelatedSystemInput()
         testMediaPlaybackUnsupportedOutputOnRestore()
         testMediaPlaybackTerminationRestore()
         testMediaPlaybackTerminationDuringVerification()
+        testMediaPlaybackRapidRestart()
+        testMediaPlaybackMisdirectedRestoreRollsBack()
+        testMediaPlaybackBrowserStreamDrain()
         testMediaPlaybackSupportedPlayers()
         testInsertionBoundary()
         testEmptyFinalFeedback()
@@ -3946,8 +3953,25 @@ enum Selftest {
         expect(scheduled.isEmpty, "no-player dictation schedules no media work")
     }
 
+    private static func testMediaPlaybackUnknownStateFailsClosed() {
+        let player = AudioObjectID(40)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: {
+                .init(processes: [player], playing: [player], isComplete: false)
+            },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+
+        expect(toggles == 0, "an unreadable Core Audio snapshot never sends a media command")
+        expect(scheduled.isEmpty, "unknown media state never creates a resume obligation")
+    }
+
     private static func testMediaPlaybackPauseResume() {
-        let player = AudioObjectID(41)
+        let player = AudioObjectID(41) // browser, Music, Spotify, or another media process
         var snapshot = MediaPlaybackCoordinator.Snapshot(
             processes: [player], playing: [player])
         var toggles = 0
@@ -3958,7 +3982,7 @@ enum Selftest {
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
-        expect(toggles == 1, "playing media gets one pause command at dictation start")
+        expect(toggles == 1, "single-process media gets one pause command at dictation start")
         expect(scheduled.count == 1, "a posted pause is verified before Velora owns resumption")
 
         snapshot.playing = []
@@ -4006,7 +4030,7 @@ enum Selftest {
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
-        scheduled.removeFirst().1()
+        while !scheduled.isEmpty { scheduled.removeFirst().1() }
         coordinator.restoreAfterDictation()
 
         expect(toggles == 1, "an unobserved pause is never followed by a destructive toggle")
@@ -4037,44 +4061,109 @@ enum Selftest {
     }
 
     private static func testMediaPlaybackAmbiguousPlayers() {
-        let playing = AudioObjectID(45)
-        let paused = AudioObjectID(46)
+        let first = AudioObjectID(45)
+        let second = AudioObjectID(46)
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
-            snapshot: { .init(processes: [playing, paused], playing: [playing]) },
+            snapshot: { .init(processes: [first, second], playing: [first, second]) },
             postToggle: { toggles += 1; return true },
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
 
-        expect(toggles == 0, "an open paused player makes the global media target ambiguous")
+        expect(toggles == 0, "simultaneous output processes make the global media target ambiguous")
         expect(scheduled.isEmpty, "ambiguous media ownership schedules no pause verification")
+    }
+
+    private static func testMediaPlaybackMisdirectedToggleRollsBack() {
+        let intended = AudioObjectID(54)
+        let accidental = AudioObjectID(55)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [intended], playing: [intended])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.processes = [intended, accidental]
+        snapshot.playing = [intended, accidental]
+        snapshot.allPlaying = [intended, accidental]
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+
+        expect(toggles == 2, "a media key that starts the wrong player is immediately reversed")
+        expect(scheduled.isEmpty, "a misdirected media key never earns a later resume")
     }
 
     private static func testMediaPlaybackUnsupportedOutput() {
         let music = AudioObjectID(47)
-        let browser = AudioObjectID(48)
+        let call = AudioObjectID(48)
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
             snapshot: {
                 .init(
                     processes: [music], playing: [music],
-                    allPlaying: [music, browser])
+                    allPlaying: [music, call])
             },
             postToggle: { toggles += 1; return true },
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
 
-        expect(toggles == 0, "unsupported browser or call output makes media-key targeting unsafe")
-        expect(scheduled.isEmpty, "unsupported active output schedules no media work")
+        expect(toggles == 0, "simultaneous conference output makes media-key targeting unsafe")
+        expect(scheduled.isEmpty, "conference output schedules no media work")
+    }
+
+    private static func testMediaPlaybackActiveInput() {
+        let browser = AudioObjectID(60)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: {
+                .init(
+                    processes: [browser], playing: [browser],
+                    inputProcesses: [browser],
+                    bundleIDs: [browser: "com.google.Chrome.helper"])
+            },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        expect(toggles == 0, "browser media keys are blocked while another process captures input")
+        expect(scheduled.isEmpty, "active call input creates no media resume obligation")
+    }
+
+    private static func testMediaPlaybackUnrelatedSystemInput() {
+        let browser = AudioObjectID(61)
+        let systemSpeech = AudioObjectID(62)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: {
+                .init(
+                    processes: [browser, systemSpeech], playing: [browser],
+                    inputProcesses: [systemSpeech],
+                    bundleIDs: [
+                        browser: "com.google.Chrome.helper",
+                        systemSpeech: "com.apple.CoreSpeech",
+                    ])
+            },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        expect(toggles == 1, "unrelated system speech input does not block browser media")
+        expect(scheduled.count == 1, "eligible browser media still enters verification")
     }
 
     private static func testMediaPlaybackUnsupportedOutputOnRestore() {
         let music = AudioObjectID(50)
-        let browser = AudioObjectID(51)
+        let call = AudioObjectID(51)
         var snapshot = MediaPlaybackCoordinator.Snapshot(
             processes: [music], playing: [music])
         var toggles = 0
@@ -4089,10 +4178,10 @@ enum Selftest {
         snapshot.allPlaying = []
         scheduled.removeFirst().1()
         coordinator.restoreAfterDictation()
-        snapshot.allPlaying = [browser]
+        snapshot.allPlaying = [call]
         scheduled.removeFirst().1()
 
-        expect(toggles == 1, "new browser or call audio suppresses the media resume toggle")
+        expect(toggles == 1, "new conference audio suppresses the media resume toggle")
     }
 
     private static func testMediaPlaybackTerminationRestore() {
@@ -4138,15 +4227,117 @@ enum Selftest {
         expect(toggles == 2, "termination can restore a pause before verification fires")
     }
 
+    private static func testMediaPlaybackRapidRestart() {
+        let player = AudioObjectID(53)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        coordinator.restoreAfterDictation()
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        expect(scheduled.isEmpty,
+               "a second dictation inherits a pending pause without an early resume")
+        coordinator.restoreAfterDictation()
+        expect(scheduled.count == 1,
+               "the inherited pause is restored only after the second dictation")
+        scheduled.removeFirst().1()
+        expect(toggles == 2, "rapid dictations produce one pause and one final resume")
+
+        // Also cover a restart after the restore timer was already scheduled.
+        snapshot.playing = [player]
+        snapshot.allPlaying = [player]
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        let staleRestore = scheduled.removeFirst().1
+        coordinator.pauseForDictation()
+        staleRestore()
+        expect(toggles == 3, "a restarted dictation cancels the stale resume timer")
+        coordinator.restoreAfterDictation()
+        scheduled.removeFirst().1()
+        expect(toggles == 4, "the restarted dictation eventually performs one resume")
+    }
+
+    private static func testMediaPlaybackMisdirectedRestoreRollsBack() {
+        let intended = AudioObjectID(56)
+        let accidental = AudioObjectID(57)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [intended], playing: [intended])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        scheduled.removeFirst().1()
+
+        snapshot.processes = [intended, accidental]
+        snapshot.playing = [accidental]
+        snapshot.allPlaying = [accidental]
+        scheduled.removeFirst().1()
+
+        expect(toggles == 3, "a media restore that starts the wrong player is reversed")
+        coordinator.restoreAfterDictation()
+        expect(scheduled.isEmpty, "a misdirected restore leaves no outstanding media work")
+    }
+
+    private static func testMediaPlaybackBrowserStreamDrain() {
+        let browser = AudioObjectID(58)
+        let snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [browser],
+            playing: [browser],
+            bundleIDs: [browser: "com.google.Chrome.helper"])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        // Chrome deliberately remains `IsRunningOutput == true` for roughly
+        // 15 seconds after its Media Session has accepted the pause.
+        for _ in 0..<4 { scheduled.removeFirst().1() }
+        coordinator.restoreAfterDictation()
+        scheduled.removeFirst().1()
+        expect(toggles == 2,
+               "a browser pause is paired without waiting for its stale Core Audio stream")
+
+        scheduled.removeFirst().1()
+        expect(scheduled.isEmpty, "the paired browser restore creates no extra media commands")
+    }
+
     private static func testMediaPlaybackSupportedPlayers() {
         expect(
-            MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.apple.Music")
-                && MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.spotify.client"),
-            "dedicated Apple Music and Spotify playback is eligible for dictation pause")
+            MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.apple.Music")
+                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.spotify.client")
+                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.google.Chrome")
+                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.google.Chrome.helper")
+                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "org.mozilla.firefox"),
+            "dedicated players and browser playback are eligible for direct dictation pause")
         expect(
-            !MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.google.Chrome")
-                && !MediaPlaybackSystem.isSupportedPlayer(bundleID: "com.apple.FaceTime"),
-            "ambiguous browser and call audio never triggers a global media toggle")
+            !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.apple.FaceTime")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "us.zoom.xos")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.microsoft.teams2")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.example.unknown"),
+            "conference clients and unknown output never trigger a global media toggle")
     }
 
     // MARK: - Final-output clipboard staging

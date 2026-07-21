@@ -135,6 +135,21 @@ def test_terminal_issue_report_allows_inferred_numbered_structure(config):
     assert "numbered list" in prompt.lower()
 
 
+def test_note_prompt_infers_structure_without_spoken_formatting_commands(config):
+    raw = (
+        "for friday's launch sam owns the release maya will send the notes before lunch "
+        "and i will check metrics after we ship"
+    )
+    gate = run_gate(raw, config, bundle_id="com.apple.Notes")
+    prompt = gate.system_prompt or ""
+
+    assert gate.use_llm is True
+    assert gate.mode.name == "Note"
+    assert "speaker does NOT need to say 'new line'" in prompt
+    assert "even without a spoken formatting command" in prompt
+    assert "Keep ordinary compound sentences as prose" in prompt
+
+
 def test_terminal_long_prose_keeps_sentence_period_after_cleanup(config):
     gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
     assert gate.reason == "smart_terminal"

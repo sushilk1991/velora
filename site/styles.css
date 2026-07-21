@@ -401,8 +401,11 @@ h3 {
   --tilt-x: 0deg;
   --tilt-y: 0deg;
   position: relative;
+  display: grid;
+  grid-template-rows: auto 8.5rem minmax(0, 1fr) auto;
   overflow: hidden;
-  min-height: 31rem;
+  height: clamp(34rem, 48vw, 38rem);
+  min-height: 0;
   padding: clamp(1.4rem, 4vw, 2.3rem);
   border: 1px solid oklch(66% 0.08 294);
   border-radius: 2.6rem 2.6rem 7rem 2.6rem;
@@ -454,7 +457,7 @@ h3 {
   display: flex;
   align-items: center;
   justify-content: center;
-  height: 11rem;
+  height: 8.5rem;
   gap: 0.45rem;
 }
 
@@ -491,19 +494,19 @@ h3 {
 }
 
 .dictation-stage.is-ready .waveform i {
-  animation-play-state: paused;
-  opacity: 0.28;
-  transform: scaleY(0.38);
-  transition: opacity 300ms ease-out, transform 500ms var(--ease-out);
+  animation-duration: 2.2s;
+  opacity: 0.62;
 }
 
 .transcript-demo {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-rows: auto minmax(3.4rem, auto) auto minmax(4.8rem, auto);
+  grid-template-rows: auto minmax(3.5rem, auto) auto minmax(0, 1fr);
+  align-content: start;
+  min-height: 0;
   gap: 0.45rem;
-  padding-bottom: var(--space-2xl);
+  padding-bottom: var(--space-md);
 }
 
 .demo-label {
@@ -541,6 +544,12 @@ h3 {
   line-height: 1.15;
   white-space: pre-line;
   transition: opacity 220ms ease-out, transform 320ms var(--ease-out);
+}
+
+.dictation-stage.is-structured .typed {
+  max-width: 100%;
+  font-size: clamp(1.05rem, 1.4vw, 1.25rem);
+  line-height: 1.35;
 }
 
 .type-caret {
@@ -592,6 +601,11 @@ h3 {
   font-family: var(--font-display);
   font-size: 1rem;
   font-style: italic;
+}
+
+.demo-caption {
+  max-width: 28rem;
+  min-height: 1.4em;
 }
 
 .demo-switcher {

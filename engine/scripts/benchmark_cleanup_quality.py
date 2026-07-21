@@ -103,6 +103,13 @@ CASES = (
         numbered_items=3,
     ),
     Case(
+        "natural_launch_plan",
+        "for friday's launch sam owns the release maya will send the notes before lunch and i "
+        "will check metrics after we ship",
+        required=("Sam", "Maya", "before lunch", "metrics"),
+        numbered_items=3,
+    ),
+    Case(
         "rambling_multi_problem_request",
         "Velora feels very slow compared with Wispr Flow and longer dictations take too much "
         "time to return the text and I also do not feel it is smart about issue reports because "
