@@ -4,16 +4,17 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f7f2e8">
-  <meta name="description" content="Velora is free, open-source, local-first dictation for Apple Silicon Macs, with a focused voice-to-clipboard companion for iPhone.">
-  <meta property="og:title" content="Velora — private dictation for Mac and iPhone">
-  <meta property="og:description" content="Hold a key, speak, and polished text appears. Your voice stays on your device.">
+  <meta name="description" content="Private voice typing for Mac. Hold Right Option, speak naturally, and clean text appears in any app—without cloud transcription.">
+  <meta property="og:title" content="Velora — private voice typing for Mac">
+  <meta property="og:description" content="Say it once. Velora turns it into clean text in any Mac app, locally.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://sushilk1991.github.io/velora/">
   <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
   <meta name="twitter:card" content="summary_large_image">
-  <title>Velora — Dictation that stays on your device</title>
+  <title>Velora — Private voice typing for Mac</title>
   <link rel="icon" href="assets/app-icon.png">
   <link rel="apple-touch-icon" href="assets/app-icon.png">
+  <script>document.documentElement.classList.add("js");</script>
   <link rel="stylesheet" href="styles.css">
   <script defer src="script.js"></script>
   <script type="application/ld+json">
@@ -64,52 +65,63 @@
   <main id="main">
     <section class="hero" id="top">
       <div class="hero-copy reveal" style="--reveal-order: 0">
-        <p class="eyebrow"><span class="eyebrow-dot"></span> Local-first dictation for Apple devices</p>
-        <h1>Dictation that keeps your voice <em>on your Mac.</em></h1>
-        <p class="hero-lede">Hold a key, speak naturally, and polished text appears in the app you’re already using. No account. No subscription. No cloud transcription.</p>
+        <p class="eyebrow"><span class="eyebrow-dot"></span> Private voice typing for Mac</p>
+        <h1>Say it once. <em>It’s already typed.</em></h1>
+        <p class="hero-lede">Hold Right Option, speak naturally, and clean text lands in the app you’re already using. Fast, free, and processed on your Mac.</p>
         <div class="hero-actions">
-          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">Download for Mac</a>
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download free for Mac <span aria-hidden="true">↓</span>
+          </a>
           <a class="button button-quiet" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
-            <span aria-hidden="true">★</span> Star the project
+            <span aria-hidden="true">★</span> Star on GitHub
           </a>
         </div>
         <ul class="hero-facts" aria-label="Velora facts">
-          <li>Free &amp; MIT licensed</li>
-          <li>Apple Silicon</li>
-          <li>macOS 14+</li>
+          <li>No account</li>
+          <li>No subscription</li>
+          <li>Apple Silicon · macOS 14+</li>
         </ul>
       </div>
 
-      <figure class="hero-visual reveal" style="--reveal-order: 1" aria-label="Velora dictation demonstration">
+      <figure class="hero-visual reveal" id="demo" style="--reveal-order: 1" aria-label="Velora dictation demonstration" data-dictation-demo>
         <div class="visual-index" aria-hidden="true">VOICE / 01</div>
-        <div class="dictation-stage">
+        <div class="dictation-stage" data-demo-stage>
           <div class="stage-topline">
             <span class="status-dot"></span>
-            <span>Listening on-device</span>
-            <span class="stage-time">00:08</span>
+            <span data-demo-status>Listening on-device</span>
+            <span class="stage-time" data-demo-time>00:04</span>
           </div>
 
           <div class="waveform" aria-hidden="true">
             <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
           </div>
 
-          <div class="transcript-demo" aria-live="polite">
-            <span class="spoken">“Send Maya the launch notes, uh, before lunch.”</span>
-            <span class="typed">Send Maya the launch notes before lunch.</span>
+          <div class="transcript-demo">
+            <span class="demo-label">You say</span>
+            <span class="spoken" data-demo-spoken>“Send Maya the launch notes, uh, before lunch.”</span>
+            <span class="demo-label result-label">Velora types</span>
+            <span class="typed"><span data-demo-typed>Send Maya the launch notes before lunch.</span><i class="type-caret" aria-hidden="true"></i></span>
           </div>
 
           <div class="stage-footer">
             <span>Right ⌥</span>
             <span class="stage-arrow" aria-hidden="true">→</span>
-            <span>Any text field</span>
+            <span>Current app</span>
           </div>
         </div>
-        <figcaption class="visual-caption">Filler removed. Punctuation restored. Meaning preserved.</figcaption>
+        <figcaption class="visual-caption">
+          <span>Filler removed. Meaning kept.</span>
+          <span class="demo-switcher" role="group" aria-label="Dictation demo examples">
+            <button class="is-active" type="button" data-demo-example="0" aria-label="Show message example" aria-pressed="true">Message</button>
+            <button type="button" data-demo-example="1" aria-label="Show notes example" aria-pressed="false">Notes</button>
+            <button type="button" data-demo-example="2" aria-label="Show idea example" aria-pressed="false">Idea</button>
+          </span>
+        </figcaption>
       </figure>
     </section>
 
     <section class="trust-strip" aria-label="Privacy summary">
-      <p>While you dictate</p>
+      <p>The business model is simple</p>
       <strong>0</strong>
       <span>audio uploads</span>
       <span class="trust-divider" aria-hidden="true"></span>
@@ -123,61 +135,101 @@
     <section class="workflow section" id="how-it-works">
       <div class="section-intro reveal">
         <p class="eyebrow">The shortest path from thought to text</p>
-        <h2>Speak at the speed you think.</h2>
-        <p>Velora disappears into one dependable gesture. The hard work happens locally, after you release the key.</p>
+        <h2>Your keyboard just became optional.</h2>
+        <p>No new editor. No voice-command performance. Velora turns one key into a direct line from thought to polished text.</p>
       </div>
 
       <ol class="workflow-list">
         <li class="reveal" style="--reveal-order: 0">
           <span class="step-number">01</span>
           <div>
-            <h3>Hold</h3>
-            <p>Press Right Option—or choose your own shortcut. A small waveform confirms Velora is listening without stealing focus.</p>
+            <h3>Hold Right Option</h3>
+            <p>Or choose your own shortcut. A compact waveform confirms Velora is listening without stealing focus.</p>
           </div>
           <span class="step-mark" aria-hidden="true">⌥</span>
         </li>
         <li class="reveal" style="--reveal-order: 1">
           <span class="step-number">02</span>
           <div>
-            <h3>Speak</h3>
-            <p>Talk normally. Local speech recognition handles English, Hindi, Indian English, and dozens of other languages.</p>
+            <h3>Talk like yourself</h3>
+            <p>Pause, correct yourself, say “new line”—Velora handles natural speech across English, Hindi, Indian English, and dozens of other languages.</p>
           </div>
           <span class="step-mark waveform-mini" aria-hidden="true">≋</span>
         </li>
         <li class="reveal" style="--reveal-order: 2">
           <span class="step-number">03</span>
           <div>
-            <h3>Release</h3>
-            <p>On-device cleanup removes filler, respects your meaning, and places the result exactly where you were typing.</p>
+            <h3>Release to type</h3>
+            <p>On-device cleanup removes filler, respects your meaning, and places the result exactly where your cursor already is.</p>
           </div>
           <span class="step-mark" aria-hidden="true">↵</span>
         </li>
       </ol>
     </section>
 
+    <section class="real-life section" aria-labelledby="real-life-title">
+      <div class="section-intro reveal">
+        <p class="eyebrow">Built for the Mac you actually use</p>
+        <h2 id="real-life-title">Less friction around the words, too.</h2>
+      </div>
+
+      <div class="real-life-grid">
+        <article class="music-card reveal" style="--reveal-order: 0">
+          <div class="card-copy">
+            <p class="card-kicker">Music + AirPods</p>
+            <h3>Your music knows when to get out of the way.</h3>
+            <p>Velora can pause active playback in Apple Music or Spotify while you dictate, then resume only what it paused.</p>
+          </div>
+          <div class="media-demo" aria-hidden="true">
+            <div class="album-art"><span>V</span></div>
+            <div class="media-copy">
+              <strong>Playing softly</strong>
+              <span>Paused for dictation</span>
+              <div class="media-progress"><i></i></div>
+            </div>
+            <div class="media-control"><span class="pause-bars"></span><span class="play-mark">▶</span></div>
+          </div>
+        </article>
+
+        <article class="meeting-card reveal" style="--reveal-order: 1">
+          <div class="card-copy">
+            <p class="card-kicker">Meetings, with permission</p>
+            <h3>Records the meeting. Never your screen.</h3>
+            <p>After you confirm, Velora captures microphone and computer audio, keeps a visible recording indicator, and makes local notes you can search.</p>
+          </div>
+          <div class="meeting-hud" aria-hidden="true">
+            <span class="record-ring"><i></i></span>
+            <span><strong>Design review</strong><small>Mic + system audio</small></span>
+            <span class="meeting-time">18:42</span>
+            <span class="stop-mark">■</span>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <section class="capabilities section" id="privacy">
       <div class="privacy-manifesto reveal">
         <p class="eyebrow">Private by architecture</p>
-        <h2>Your voice is not a data source.</h2>
-        <p>Speech-to-text and cleanup run on your Apple Silicon Mac. Audio, transcripts, history, and personal vocabulary stay under your control.</p>
+        <h2>Private isn’t a promise. It’s how Velora works.</h2>
+        <p>Speech-to-text and cleanup run on your Apple Silicon Mac. Your audio, transcripts, history, and personal vocabulary stay under your control.</p>
         <a class="text-link" href="https://github.com/sushilk1991/velora#privacy" target="_blank" rel="noreferrer">Read the privacy model <span aria-hidden="true">↗</span></a>
       </div>
 
       <div class="capability-lines">
         <article class="reveal">
           <span>01</span>
-          <h3>It learns your words, not your identity.</h3>
+          <h3>Teach it the words that matter.</h3>
           <p>A visible Personal Dictionary handles names and jargon. Entries are editable, reversible, and local.</p>
         </article>
         <article class="reveal">
           <span>02</span>
-          <h3>It cleans up without taking over.</h3>
+          <h3>Cleaned up, not rewritten.</h3>
           <p>Conservative formatting removes filler and applies self-corrections. A divergence guard keeps rewrites honest.</p>
         </article>
         <article class="reveal">
           <span>03</span>
-          <h3>It remembers meetings only when invited.</h3>
-          <p>Explicitly approved recordings become searchable local transcripts, summaries, decisions, and action items.</p>
+          <h3>Your history stays useful—and yours.</h3>
+          <p>Search past dictation, recover the raw transcript, or revisit approved meeting notes without turning private work into cloud data.</p>
         </article>
       </div>
     </section>
@@ -215,9 +267,10 @@
 
     <section class="install-section section" id="download">
       <div class="install-copy reveal">
-        <p class="eyebrow">Install on your Mac</p>
-        <h2>One command. Yours for good.</h2>
-        <p>Velora is free and open source. Models download on first run, then dictation works without sending your voice to a server.</p>
+        <p class="eyebrow">Start talking in minutes</p>
+        <h2>Free to install. Yours for good.</h2>
+        <p>Download the signed app or install with Homebrew. The models arrive during setup; after that, dictation works without sending your voice to a transcription server.</p>
+        <a class="button button-primary install-download" href="https://github.com/sushilk1991/velora/releases/latest">Download the signed app <span aria-hidden="true">↓</span></a>
       </div>
 
       <div class="terminal reveal" role="group" aria-label="Homebrew install command">
@@ -246,7 +299,7 @@
         </details>
         <details class="reveal">
           <summary>What Mac do I need?</summary>
-          <p>An Apple Silicon Mac running macOS 14 or later. The default models need roughly 4.4 GB of storage after download.</p>
+          <p>An Apple Silicon Mac running macOS 14 or later. Model storage varies with the speech and cleanup options you choose.</p>
         </details>
         <details class="reveal">
           <summary>Is the iPhone app in the App Store?</summary>
@@ -263,12 +316,13 @@
       <div class="closing-mark" aria-hidden="true">
         <i></i><i></i><i></i><i></i><i></i>
       </div>
-      <p class="eyebrow">Free. Open. Local.</p>
-      <h2>Let your keyboard catch up.</h2>
+      <p class="eyebrow">Free. Open source. Local.</p>
+      <h2>Stop typing. Keep writing.</h2>
       <div class="hero-actions">
-        <a class="button button-light" href="https://github.com/sushilk1991/velora/releases/latest">Download Velora</a>
+        <a class="button button-light" href="https://github.com/sushilk1991/velora/releases/latest">Get Velora for Mac</a>
         <a class="button button-outline-light" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">★ Star on GitHub</a>
       </div>
+      <p class="closing-note">Already using Velora? A GitHub star helps another Mac user find it.</p>
     </section>
   </main>
 
@@ -278,7 +332,7 @@
         <img src="assets/app-icon.png" alt="" width="40" height="40">
         <span>Velora</span>
       </a>
-      <p>Local-first voice tools for Apple devices.</p>
+      <p>Private voice typing for Mac.</p>
     </div>
     <nav aria-label="Footer navigation">
       <a href="https://github.com/sushilk1991/velora">GitHub</a>

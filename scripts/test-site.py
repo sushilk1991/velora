@@ -1,0 +1,146 @@
+#!/usr/bin/env python3
+"""Small deterministic checks for the static public site."""
+
+from __future__ import annotations
+
+from html import unescape
+from html.parser import HTMLParser
+from pathlib import Path
+import re
+from urllib.parse import urlparse
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SITE = ROOT / "site"
+
+
+class SiteParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: list[str] = []
+        self.local_assets: list[str] = []
+        self.remote_executables: list[str] = []
+        self.hrefs: list[str] = []
+        self.demo_examples: list[str] = []
+        self.h1_count = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if element_id := values.get("id"):
+            self.ids.append(element_id)
+        if tag == "h1":
+            self.h1_count += 1
+        if tag == "a" and (href := values.get("href")):
+            self.hrefs.append(href)
+        if example := values.get("data-demo-example"):
+            self.demo_examples.append(example)
+
+        reference = values.get("src") or values.get("href")
+        if not reference:
+            return
+        parsed = urlparse(reference)
+        if tag == "script" or (tag == "link" and values.get("rel") == "stylesheet"):
+            if parsed.scheme in {"http", "https"}:
+                self.remote_executables.append(reference)
+        if not parsed.scheme and not reference.startswith("#"):
+            self.local_assets.append(parsed.path)
+
+
+def main() -> None:
+    html = (SITE / "index.html").read_text(encoding="utf-8")
+    parser = SiteParser()
+    parser.feed(html)
+
+    assert parser.h1_count == 1, "the product page must have exactly one h1"
+    assert len(parser.ids) == len(set(parser.ids)), "HTML ids must be unique"
+    assert {"main", "top", "how-it-works", "privacy", "iphone", "download"}.issubset(
+        parser.ids
+    ), "primary navigation targets must exist"
+    assert "demo" in parser.ids, "the product demonstration must remain directly linkable"
+    assert set(parser.demo_examples) == {"0", "1", "2"}, (
+        "the dictation demo must keep all three user-controlled examples"
+    )
+    assert parser.hrefs.count("https://github.com/sushilk1991/velora/releases/latest") >= 3, (
+        "download conversion paths must exist at the top, install section, and close"
+    )
+    assert parser.hrefs.count("https://github.com/sushilk1991/velora") >= 3, (
+        "GitHub-star paths must exist in the navigation, hero, and close"
+    )
+    missing_fragments = sorted(
+        href for href in parser.hrefs if href.startswith("#") and href[1:] not in parser.ids
+    )
+    assert not missing_fragments, (
+        "in-page links must resolve: " + ", ".join(missing_fragments)
+    )
+    assert not parser.remote_executables, (
+        "scripts and styles must remain self-hosted: " + ", ".join(parser.remote_executables)
+    )
+
+    missing = sorted(
+        reference
+        for reference in parser.local_assets
+        if reference and not (SITE / reference).is_file()
+    )
+    assert not missing, "missing local site assets: " + ", ".join(missing)
+
+    css = (SITE / "styles.css").read_text(encoding="utf-8")
+    script = (SITE / "script.js").read_text(encoding="utf-8")
+    public_source = "\n".join((html, css, script)).lower()
+    forbidden = ("google-analytics", "googletagmanager", "mixpanel", "posthog", "segment.io")
+    assert not any(marker in public_source for marker in forbidden), (
+        "the public site must not add analytics or tracking"
+    )
+    assert not re.search(r"https?://", script, flags=re.IGNORECASE), (
+        "site JavaScript must not make or embed remote network requests"
+    )
+    assert not re.search(
+        r"\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(",
+        script,
+    ), "site JavaScript must remain presentation-only"
+    assert not re.search(
+        r"(?:@import\s+(?:url\()?|url\()\s*['\"]?https?://",
+        css,
+        flags=re.IGNORECASE,
+    ), "site CSS must not load remote resources"
+    assert "@media (prefers-reduced-motion: reduce)" in css, (
+        "motion must keep an explicit reduced-motion path"
+    )
+    assert "if (reducedMotion || !animate)" in script, (
+        "the JavaScript demo must settle immediately for reduced-motion users"
+    )
+    assert '<script>document.documentElement.classList.add("js");</script>' in html, (
+        "animated reveals must use an explicit progressive-enhancement gate"
+    )
+    visible_without_js = re.search(r"\.reveal\s*\{[^}]*opacity:\s*1", css, flags=re.DOTALL)
+    hidden_with_js = re.search(r"\.js\s+\.reveal\s*\{[^}]*opacity:\s*0", css, flags=re.DOTALL)
+    assert visible_without_js and hidden_with_js, (
+        "reveal content must remain visible when JavaScript is unavailable"
+    )
+
+    copy_match = re.search(r'data-copy="([^"]+)"', html)
+    visible_match = re.search(
+        r"<pre><code><span[^>]*>.*?</span>\s*([^<]+)</code></pre>",
+        html,
+        flags=re.DOTALL,
+    )
+    assert copy_match and visible_match, "the Homebrew command needs copy and visible forms"
+    assert unescape(copy_match.group(1)).strip() == unescape(visible_match.group(1)).strip(), (
+        "the copied Homebrew command must match the visible command"
+    )
+
+    truth_sources = "\n".join(
+        (
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            (ROOT / "engine/src/velora_engine/models.py").read_text(encoding="utf-8"),
+        )
+    )
+    storage_sizes = re.findall(r"\b\d+(?:\.\d+)? GB\b", html)
+    assert all(size in truth_sources for size in storage_sizes), (
+        "site storage claims must exist in README.md or the model registry"
+    )
+
+    print(f"site checks OK — {len(parser.local_assets)} local references")
+
+
+if __name__ == "__main__":
+    main()
