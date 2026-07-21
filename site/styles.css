@@ -1441,7 +1441,7 @@ h3 {
   .site-header,
   .hero,
   .trust-strip,
-  .section,
+  .section:not(.iphone-section),
   .site-footer {
     width: min(100% - 4rem, 86rem);
   }

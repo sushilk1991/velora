@@ -85,6 +85,9 @@ def main() -> None:
 
     css = (SITE / "styles.css").read_text(encoding="utf-8")
     script = (SITE / "script.js").read_text(encoding="utf-8")
+    assert ".section:not(.iphone-section)" in css, (
+        "the full-bleed iPhone section must not inherit the capped section width"
+    )
     public_source = "\n".join((html, css, script)).lower()
     forbidden = ("google-analytics", "googletagmanager", "mixpanel", "posthog", "segment.io")
     assert not any(marker in public_source for marker in forbidden), (
