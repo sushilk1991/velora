@@ -45,8 +45,12 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 - Global vocabulary list (proper nouns, jargon) injected into STT prompt + cleanup prompt. Text replacements (e.g. "vs code" → "VS Code") applied post-cleanup.
 
 ### Insertion
-- Pasteboard save → set → synthesized ⌘V → restore, with CGEvent-typing fallback for apps that block paste. Per-app override list.
-- Clipboard contents always restored.
+- Every non-command final transcript is placed on the clipboard before automatic
+  insertion, so a blocked or silently ignored paste still leaves the user's words
+  ready for manual paste.
+- Paste delivery may temporarily write boundary-adjusted text, synthesize ⌘V,
+  then restore the staged final transcript. CGEvent typing remains the per-app
+  fallback. A clipboard write made by the user during delivery always wins.
 
 ### History & Voice Intelligence
 - Local SQLite history: timestamp, app, raw/final transcript, duration, mode, STT/cleanup latency, cleanup outcome, archived audio reference, and optional edit-quality observation. Menubar shows last 3; the History tab supports search, copy, paste-again, playback, and reprocessing.

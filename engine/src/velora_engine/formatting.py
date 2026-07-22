@@ -393,9 +393,9 @@ def _is_chat(mode: Mode, category: str | None) -> bool:
 
 def is_mostly_non_latin(text: str) -> bool:
     """True when most letters are outside the Latin range (Devanagari, CJK,
-    Arabic, Cyrillic, …). The cleanup LLM's system prompt is English and the
-    small model risks corrupting or "answering" non-Latin dictation — so we run
-    the deterministic path instead and keep the (already strong) raw STT."""
+    Arabic, Cyrillic, …). Used to distinguish unspaced scripts such as CJK
+    from genuinely short Latin-script utterances and to route explicit
+    romanization requests."""
     letters = [c for c in text if c.isalpha()]
     if not letters:
         return False
@@ -421,7 +421,12 @@ STATIC_SYSTEM_PROMPT = (
     "3. Preserve meaning, wording, and tone. Fix punctuation, capitalization, "
     "obvious speech artifacts, and only clear grammatical errors such as "
     "subject-verb agreement or verb tense. Do not paraphrase, embellish, or "
-    "restructure wording to make it sound better. When unsure, leave it as dictated.\n"
+    "restructure wording to make it sound better. Preserve the input language "
+    "and script exactly; never translate or romanize unless a separate "
+    "romanization mode explicitly asks for it. Apply every rule below using "
+    "semantic equivalents in the input language, including local words for "
+    "fillers, punctuation, counts, and ordinal item cues. When unsure, leave it "
+    "as dictated.\n"
     "4. Remove filler words (um, uh, 'you know', 'like' as filler) and "
     "accidental word repetitions — conservatively. Fillers count in ANY casing "
     "or position, including when transcribed as their own sentence ('UM.', "
@@ -901,9 +906,6 @@ def run_gate(
             getattr(config, "smart_terminal", True)
             and mode.name.lower() == "terminal"
             and not mode.prompt.strip()
-            # Non-Latin text must fall through to the native-script skip —
-            # the smart-terminal prompt is English-tuned.
-            and not is_mostly_non_latin(text)
             and (
                 len(text.split()) >= SMART_TERMINAL_MIN_WORDS
                 or _short_terminal_is_prose(text)
@@ -946,19 +948,10 @@ def run_gate(
             replacements, entities=entities or [],
             auto_punctuation=config.auto_punctuation)
 
-    if is_mostly_non_latin(text):
-        # Keep the native script (romanize, handled above, is the only
-        # non-Latin LLM path) and skip the English-tuned cleanup LLM. Checked
-        # BEFORE the short-utterance path so an unspaced CJK sentence doesn't
-        # get a Latin period appended.
-        cleaned = _tidy_whitespace(apply_spoken_commands(scrub_fillers(text)))
-        out = apply_replacements(cleaned, replacements)
-        return GateResult(
-            mode, category, False, "non_latin_script", out, None,
-            replacements, entities=entities or [],
-            auto_punctuation=config.auto_punctuation)
-
-    if len(text.split()) < SHORT_UTTERANCE_WORDS:
+    # Non-Latin scripts use the same prompt-driven cleanup path. In particular,
+    # unspaced CJK text must not look like a one-word short utterance and bypass
+    # the model entirely.
+    if len(text.split()) < SHORT_UTTERANCE_WORDS and not is_mostly_non_latin(text):
         out = normalize_spoken_punctuation(scrub_fillers(apply_spoken_commands(text)))
         out = _punctuation_only(out, chat_style, config.auto_punctuation)
         out = apply_replacements(out, replacements)
@@ -1079,6 +1072,10 @@ def postprocess(text: str, gate: GateResult) -> str:
         gate.auto_punctuation
         and not gate.romanize
         and out
+        # Native-script punctuation is owned by the multilingual model. Do not
+        # append a Latin full stop after Chinese 。, Devanagari ।, Arabic ؟,
+        # or another language's own sentence boundary.
+        and not is_mostly_non_latin(out)
         and not out.endswith("\n")  # dictated trailing break — no period after it
         and not _SENTENCE_END_RE.search(out)
     ):

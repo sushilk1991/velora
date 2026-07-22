@@ -33,6 +33,31 @@ def test_boundary_identity_passes():
     assert check_divergence(RAW, RAW) is None
 
 
+def test_rejects_full_translation_that_drops_devanagari():
+    raw = (
+        "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, "
+        "और चौथी एक दर्जन अंडे।"
+    )
+    out = "I need to buy three things today: books, three apples, and one dozen eggs."
+    assert check_divergence(raw, out) == "script_loss(DEVANAGARI)"
+
+
+def test_rejects_translation_of_short_cjk_phrase():
+    assert check_divergence("买书", "Buy books") == "script_loss(CJK)"
+
+
+def test_accepts_native_script_list_formatting():
+    raw = "मुझे तीन चीज़ें खरीदनी हैं, पहली किताबें, दूसरी सेब, तीसरी अंडे"
+    out = "1. किताबें ⏎ 2. सेब ⏎ 3. अंडे"
+    assert check_divergence(raw, out) is None
+
+
+def test_accepts_mixed_latin_and_native_script_when_both_are_preserved():
+    raw = "OpenAI पर बात करनी है अभी"
+    out = "OpenAI पर अभी बात करनी है।"
+    assert check_divergence(raw, out) is None
+
+
 # ---- guard v2: self-corrections may shrink, hallucinations may not ----
 
 

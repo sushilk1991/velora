@@ -11,8 +11,9 @@ extension Notification.Name {
 
 /// Inserts dictated text into the frontmost app.
 ///
-/// Default strategy: snapshot the pasteboard (all items, all representations),
-/// set the text, synthesize ⌘V, then restore the snapshot after 800 ms.
+/// Default strategy: the controller persistently stages the final transcript,
+/// then this inserter snapshots it, sets any boundary-adjusted delivery text,
+/// synthesizes ⌘V, and restores the staged transcript after 800 ms.
 /// Fallback strategy: CGEvent unicode typing (chunked ≤ 20 UTF-16 units per
 /// event) for apps that block programmatic paste — used automatically for
 /// terminal-like apps (`AppConfig.typingFallbackApps`).
@@ -257,10 +258,10 @@ final class TextInserter {
 
     // MARK: - Pasteboard + ⌘V
 
-    /// Makes a final result persistently available for manual paste. Normal
-    /// successful insertion does not call this: its temporary pasteboard write
-    /// restores the user's prior clipboard. This is the explicit fallback for
-    /// blocked/interrupted insertion and copy-only actions.
+    /// Makes a final result persistently available for manual paste before any
+    /// best-effort insertion is attempted. The synthesized Command-V path then
+    /// snapshots this item and restores the final transcript, not the user's
+    /// older clipboard contents.
     func stageFinalOutput(_ text: String) {
         let changeCount = writeDictation(text, to: pasteboard)
         NSLog(

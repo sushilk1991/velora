@@ -4728,6 +4728,15 @@ enum Selftest {
             pasteboard.string(forType: .string) == "A final sentence.",
             "final output remains available for manual paste")
 
+        let stagedFinal = TextInserter.snapshotItems(from: pasteboard)
+        inserter.stageFinalOutput(" A boundary-adjusted delivery")
+        let deliveryChange = pasteboard.changeCount
+        expect(
+            TextInserter.restore(
+                stagedFinal, to: pasteboard, ifUnchanged: deliveryChange)
+                && pasteboard.string(forType: .string) == "A final sentence.",
+            "paste restoration returns to the persistent final transcript")
+
         let customType = NSPasteboard.PasteboardType("com.velora.selftest.custom")
         let original = NSPasteboardItem()
         original.setString("Original clipboard", forType: .string)

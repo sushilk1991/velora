@@ -1291,10 +1291,10 @@ class Engine:
             return None
         ctx = session.context
         # The final tail is not visible to `_on_new_segment`. A Latin opening
-        # can therefore start English streaming cleanup even when a long
-        # non-Latin tail makes the COMPLETE utterance a romanization/native-
-        # script case. Honor the full-text language gate before cleaning that
-        # tail; the existing whole-text path applies the correct policy once.
+        # can therefore start streaming cleanup even when a long non-Latin tail
+        # makes the COMPLETE utterance a romanization/native-script case. Use
+        # one whole-text multilingual pass so language and list cues cannot be
+        # split across two writing systems at the final seam.
         gate = formatting.run_gate(
             raw,
             self.config,
@@ -1303,7 +1303,7 @@ class Engine:
             explicit_mode=ctx.get("mode"),
             entities=ctx.get("entities"),
         )
-        if gate.romanize or gate.reason == "non_latin_script":
+        if gate.romanize or formatting.is_mostly_non_latin(raw):
             log.info("full transcript requires non-Latin handling — falling back to whole-text cleanup")
             return None
         # The chunk cleanups ran during recording; this is normally instant.

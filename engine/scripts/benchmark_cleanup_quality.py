@@ -133,6 +133,22 @@ CASES = (
         required_intro="three items",
     ),
     Case(
+        "hindi_counted_list",
+        "मुझे आज तीन चीज़ें खरीदनी हैं। पहली किताबें, दूसरी तीन सेब, और चौथी एक दर्जन अंडे।",
+        ending="",
+        required=("किताबें", "तीन सेब", "एक दर्जन अंडे"),
+        numbered_items=3,
+        required_intro="तीन चीज़ें",
+    ),
+    Case(
+        "chinese_counted_list",
+        "我今天需要买三样东西。第一是书，第二是三个苹果，第四是一打鸡蛋。",
+        ending="。",
+        required=("书", "三个苹果", "一打鸡蛋"),
+        numbered_items=3,
+        required_intro="三样东西",
+    ),
+    Case(
         "three_priorities_counterexample",
         "Just want to test out. So there are three priorities for today. First, I need to "
         "update Velora. Second, I need to post it on Hacker News. And the third important "

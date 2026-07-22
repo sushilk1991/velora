@@ -140,12 +140,13 @@ A model different from the live one is loaded once and cached across reprocess c
 **STT models.** Default is `whisper-large-v3-turbo` (multilingual — Hindi, Indian
 English, and the top world languages; batch decode on stop). The picker also
 offers full `whisper-large-v3` (highest accuracy), a Hindi/Hinglish specialist,
-and the parakeet models (English/European, live streaming partials). Non-Latin
-transcripts (Devanagari, CJK, Arabic) skip the English-tuned cleanup LLM and take
-the deterministic path — see the formatting gate. Opt-in `romanize_output` instead
-routes non-Latin text through the multilingual LLM to transliterate it into the Latin
-alphabet (Hindi → natural Hinglish; the words are kept, not translated). The length-ratio
-divergence guard is disabled for that pass since transliteration changes length.
+and the parakeet models (English/European, live streaming partials). Cleanup uses
+the same meaning-preserving prompt for Latin and non-Latin transcripts, retains
+the input language and script, and applies list/structure cues semantically.
+Opt-in `romanize_output` instead transliterates non-Latin text into the Latin
+alphabet (Hindi → natural Hinglish; the words are kept, not translated). The
+length-ratio divergence guard is disabled for that pass since transliteration
+changes length.
 
 **Latency budget:** the default Whisper model emits non-committing preview decodes after a pause or bounded interval so the HUD can show readable partial text before release. On `stop`, its authoritative final decode still covers every audio sample. Cleanup prepares the exact stable prompt prefix during recording, snapshots that immutable cache, and forks it for preview/chunk/final generation. The adaptive soft deadline begins at the first output token; a separate outer watchdog bounds stalled prefill or generation. If cleanup exceeds its budget, is cancelled, or fails, the engine emits `final` with `cleanup_applied:false` carrying the raw transcript. Raw is always retained in history.
 
@@ -173,7 +174,7 @@ Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|f
 | `Hotkey/` | CGEventTap (hold + double-tap detection), Esc-cancel monitor, secure-input detection (`IsSecureEventInputEnabled`) |
 | `Context/` | NSWorkspace frontmost app tracking, AX focused-element probe (secure field check) |
 | `HUD/` | NSPanel host + SwiftUI capsule (state machine per design brief), Canvas waveform |
-| `Insert/` | pasteboard snapshot → ⌘V → restore; CGEvent unicode typing fallback; per-app overrides |
+| `Insert/` | persist final transcript on pasteboard → temporary boundary-adjusted ⌘V → restore final transcript; CGEvent unicode typing fallback; per-app overrides |
 | `EngineClient/` | socket client, framing, request/event routing |
 | `Settings/` | SwiftUI settings tabs + onboarding flow, permission checks |
 | `History/` | SQLite (raw SQL, no deps) store + menubar recents |

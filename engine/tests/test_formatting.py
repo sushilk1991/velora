@@ -210,6 +210,13 @@ def test_prose_cleanup_adds_missing_terminal_period(config):
     )
 
 
+def test_native_script_cleanup_does_not_add_latin_terminal_period(config):
+    gate = run_gate("我今天需要买三样东西。第一是书，第二是苹果。", config)
+    assert gate.use_llm is True
+    assert formatting.postprocess("买书。", gate) == "买书。"
+    assert formatting.postprocess("买书", gate) == "买书"
+
+
 def test_prose_cleanup_respects_auto_punctuation_off(config):
     config.data["auto_punctuation"] = False
     gate = run_gate(LONG, config, bundle_id="com.apple.Notes")
@@ -718,16 +725,17 @@ def test_recommended_cleanup_model_by_ram():
     assert small != big
 
 
-# ---- non-Latin script routing (skip English-tuned cleanup LLM) ----
+# ---- multilingual prompt-driven cleanup ----
 
 
-def test_hindi_skips_llm(config):
+def test_hindi_uses_multilingual_llm_prompt(config):
     hindi = "नमस्ते आज मौसम बहुत अच्छा है क्या आप मेरे साथ बाजार चलेंगे"
     gate = run_gate(hindi, config)
-    assert gate.use_llm is False
-    assert gate.reason == "non_latin_script"
-    assert gate.system_prompt is None
-    assert "नमस्ते" in gate.text  # preserved verbatim, not rewritten
+    assert gate.use_llm is True
+    assert gate.reason == "llm"
+    assert "Preserve the input language and script exactly" in (gate.system_prompt or "")
+    assert "never translate or romanize" in (gate.system_prompt or "")
+    assert "नमस्ते" in gate.text
 
 
 def test_accented_latin_still_uses_llm(config):
@@ -745,12 +753,12 @@ def test_is_mostly_non_latin_helper():
 
 
 def test_cjk_sentence_routes_non_latin_not_short(config):
-    # Unspaced CJK splits to one "word" but must take the non-Latin path
-    # (no Latin period appended), not short_utterance.
+    # Unspaced CJK splits to one "word" but must still use semantic cleanup,
+    # not the Latin short-utterance path.
     gate = run_gate("这是一个中文测试今天天气很好", config)
-    assert gate.use_llm is False
-    assert gate.reason == "non_latin_script"
-    assert not gate.text.endswith(".")
+    assert gate.use_llm is True
+    assert gate.reason == "llm"
+    assert "semantic equivalents in the input language" in (gate.system_prompt or "")
 
 
 def test_romanize_routes_non_latin_to_llm(config):
@@ -765,8 +773,9 @@ def test_romanize_routes_non_latin_to_llm(config):
 def test_romanize_off_keeps_native_script(config):
     config.data["romanize_output"] = False
     gate = run_gate("नमस्ते आज मौसम बहुत अच्छा है क्या आप ठीक हैं", config)
-    assert gate.use_llm is False
-    assert gate.reason == "non_latin_script"
+    assert gate.use_llm is True
+    assert gate.reason == "llm"
+    assert gate.romanize is False
 
 
 def test_romanize_ignores_latin_text(config):
@@ -807,18 +816,17 @@ def test_romanize_still_fires_for_terminal_prose(config):
     assert gate.romanize is True
 
 
-def test_non_latin_skips_smart_terminal(config):
-    # With romanize OFF, long non-Latin terminal dictation must keep its
-    # native script — never the English-tuned smart-terminal prompt.
+def test_non_latin_terminal_prose_uses_multilingual_smart_prompt(config):
+    # Long native-script prose in Terminal gets the same safe semantic cleanup;
+    # short command-shaped input remains on formatting_off above.
     config.data["romanize_output"] = False
     gate = run_gate(
         "नमस्ते आज मौसम बहुत अच्छा है और मैं काम कर रहा हूँ "
         "क्योंकि आज बहुत सारा काम बाकी है",
         config, bundle_id="com.googlecode.iterm2")
-    assert gate.use_llm is False
-    # Terminal's own verbatim path answers first; what matters is that no
-    # English-tuned prompt runs and the script survives untouched.
-    assert gate.reason == "formatting_off"
+    assert gate.use_llm is True
+    assert gate.reason == "smart_terminal"
+    assert "Preserve the input language and script exactly" in (gate.system_prompt or "")
     assert "नमस्ते" in gate.text
 
 

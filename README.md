@@ -12,6 +12,8 @@ transcripts, and history are not sent to a transcription service.
   email, notes, documents, and other text fields.
 - **Keeps your meaning.** Velora removes filler, adds punctuation, follows
   spoken line breaks, and preserves the original transcript in History.
+- **Keeps every result pasteable.** Each final dictation stays on the clipboard,
+  even if the current app ignores the automatic paste.
 - **Adapts to your work.** Formatting changes with the app, and a Personal
   Dictionary teaches Velora names and terms you use often.
 - **Edits selected text.** Select text, describe the change, and undo normally

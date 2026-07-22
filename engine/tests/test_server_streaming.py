@@ -276,6 +276,30 @@ async def test_romanize_latin_segment_with_non_latin_tail_uses_whole_text(engine
     client.close()
 
 
+async def test_native_script_tail_uses_whole_text_multilingual_cleanup(engine, monkeypatch):
+    tail = (
+        "यह दूसरी समस्या है और इसे पूरा रखना है क्योंकि यह अंतिम लंबा हिस्सा है "
+        "और इसकी भाषा तथा सूची की संरचना नहीं बदलनी चाहिए"
+    )
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", SEG1)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", tail)
+    eng, sock = engine
+    eng.config.data["romanize_output"] = False
+    cleanup = FakeCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await run_dictation(client, "native-script-tail", chunks=2)
+    final = await client.recv_event("final")
+    raw = f"{SEG1} {tail}"
+
+    assert [call[0] for call in cleanup.calls] == [SEG1, raw]
+    assert final["text"] == f"<{raw}>"
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
 async def test_cleanup_allows_only_global_and_active_mode_vocabulary(engine, segments):
     eng, sock = engine
     eng.config.data["vocabulary"] = ["GlobalTerm"]

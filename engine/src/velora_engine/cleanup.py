@@ -22,6 +22,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
@@ -53,6 +54,13 @@ NOVEL_FRACTION_MAX = 0.20
 NOVEL_MIN_TOKENS = 3
 MIN_MAX_TOKENS = 96
 OUTPUT_TOKEN_FACTOR = 1.8
+
+# A cleanup may add punctuation or line breaks, but it must not silently
+# translate away the transcript's writing system. Two letters is enough to
+# make a script meaningful (for example, the complete Chinese phrase "买书").
+# This is a rejection guard only: it never rewrites output, identifies a
+# language, or decides how the text should be formatted.
+MIN_SIGNIFICANT_SCRIPT_LETTERS = 2
 
 # Spoken retraction / self-repair markers. Deliberately NOT used to rewrite
 # text (the owner's steer: semantics live in the LLM prompt, not regex) — the
@@ -150,6 +158,36 @@ def _guard_tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower())
 
 
+def _non_latin_script_counts(text: str) -> dict[str, int]:
+    """Count Unicode letters by their writing-system name.
+
+    Unicode character names conventionally begin with the script name
+    (DEVANAGARI, ARABIC, CJK, HIRAGANA, and so on). NFKD first reduces
+    compatibility glyphs to their underlying letters. Latin is intentionally
+    excluded because the token-containment guard below already covers it.
+    """
+    counts: dict[str, int] = {}
+    for char in unicodedata.normalize("NFKD", text):
+        if not char.isalpha():
+            continue
+        name = unicodedata.name(char, "")
+        if not name or name.startswith("LATIN "):
+            continue
+        script = name.split(" ", 1)[0]
+        counts[script] = counts.get(script, 0) + 1
+    return counts
+
+
+def _lost_native_script(raw: str, output: str) -> str | None:
+    """Return the name of a significant source script absent from output."""
+    raw_counts = _non_latin_script_counts(raw)
+    output_counts = _non_latin_script_counts(output)
+    for script, count in raw_counts.items():
+        if count >= MIN_SIGNIFICANT_SCRIPT_LETTERS and output_counts.get(script, 0) == 0:
+            return script
+    return None
+
+
 # Line-leading "1." / "2)" markers (the model's output carries breaks as the
 # ⏎ marker, so "after a break" counts as line-leading too). When the speech
 # asks for a numbered list these are formatting, not novel content — counting
@@ -214,6 +252,9 @@ def check_divergence(raw: str, output: str, allowed_terms: list[str] | None = No
         return "empty_output"
     raw_len = max(1, len(raw.strip()))
     ratio = len(out) / raw_len
+    lost_script = _lost_native_script(raw, out)
+    if lost_script is not None:
+        return f"script_loss({lost_script})"
     if ratio > RATIO_MAX:
         return f"ratio_high({ratio:.2f})"
     raw_tokens = _guard_tokens(raw)
