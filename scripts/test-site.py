@@ -136,16 +136,37 @@ def main() -> None:
     assert ".dictation-stage.is-structured .typed" in css, (
         "the inferred-list result must fit inside the demo card"
     )
-    assert "height: clamp(34rem, 48vw, 38rem)" in css, (
+    assert "height: clamp(36rem, 48vw, 38rem)" in css, (
         "switching examples must not resize the dictation card"
+    )
+    wave_speeds = [
+        int(value) for value in re.findall(r"--wave-speed:\s*(\d+)ms", css)
+    ]
+    assert len(wave_speeds) == 11 and len(set(wave_speeds)) == 11, (
+        "every waveform bar must keep an independent speech rhythm"
+    )
+    assert 800 <= min(wave_speeds) and max(wave_speeds) <= 1_000, (
+        "active waveform bars must remain within the natural speech-rate timing band"
+    )
+    assert "@keyframes voice-bar" in css and "transform: scaleY(" in css, (
+        "waveform motion must stay transform-only"
     )
     ready_wave = re.search(
         r"\.dictation-stage\.is-ready\s+\.waveform\s+i\s*\{([^}]*)\}",
         css,
         flags=re.DOTALL,
     )
-    assert ready_wave and "animation-play-state: paused" not in ready_wave.group(1), (
-        "the visible waveform must keep moving after the demo reaches ready state"
+    assert ready_wave and "animation: none" in ready_wave.group(1), (
+        "the waveform must settle once the demo reaches ready state"
+    )
+    assert "type-caret" not in html and "type-caret" not in css, (
+        "the demo must not reintroduce a detached output caret"
+    )
+    assert "pointermove" not in script and "--tilt-" not in css, (
+        "pointer movement must not distort the demo card geometry"
+    )
+    assert (SITE / "assets/app-icon.png").stat().st_size <= 50_000, (
+        "the shared site icon must remain below the 50 KB transfer budget"
     )
     assert '<script>document.documentElement.classList.add("js");</script>' in html, (
         "animated reveals must use an explicit progressive-enhancement gate"

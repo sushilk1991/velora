@@ -61,9 +61,8 @@
       button.classList.toggle("is-active", isActive);
       button.setAttribute("aria-pressed", String(isActive));
     });
-    demoStage.classList.toggle("is-structured", index === 1);
-
     if (reducedMotion || !animate) {
+      demoStage.classList.toggle("is-structured", index === 1);
       demoSpoken.textContent = example.spoken;
       demoTyped.textContent = example.typed;
       demoCaption.textContent = example.caption;
@@ -79,25 +78,26 @@
     demoStatus.textContent = "Listening — stays on this Mac";
 
     demoTimers.push(window.setTimeout(() => {
+      demoStage.classList.toggle("is-structured", index === 1);
       demoSpoken.textContent = example.spoken;
       demoTyped.textContent = example.typed;
       demoCaption.textContent = example.caption;
       demoTime.textContent = example.time;
       demoStage.classList.remove("is-swapping");
       demoStage.classList.add("is-listening");
-    }, 220));
+    }, 160));
 
     demoTimers.push(window.setTimeout(() => {
       demoStatus.textContent = "Polishing on this Mac";
       demoStage.classList.remove("is-listening");
       demoStage.classList.add("is-processing");
-    }, 1050));
+    }, 1420));
 
     demoTimers.push(window.setTimeout(() => {
       demoStatus.textContent = "Ready to paste";
       demoStage.classList.remove("is-processing");
       demoStage.classList.add("is-ready");
-    }, 2050));
+    }, 1840));
   };
 
   demoButtons.forEach((button) => {
@@ -107,22 +107,6 @@
   });
 
   setDemoExample(0, !reducedMotion);
-
-  const precisePointer = window.matchMedia("(pointer: fine)").matches;
-  if (demoStage && precisePointer && !reducedMotion) {
-    demoStage.addEventListener("pointermove", (event) => {
-      const bounds = demoStage.getBoundingClientRect();
-      const x = (event.clientX - bounds.left) / bounds.width - 0.5;
-      const y = (event.clientY - bounds.top) / bounds.height - 0.5;
-      demoStage.style.setProperty("--tilt-x", `${(x * 2.4).toFixed(2)}deg`);
-      demoStage.style.setProperty("--tilt-y", `${(y * -2.4).toFixed(2)}deg`);
-    });
-
-    demoStage.addEventListener("pointerleave", () => {
-      demoStage.style.removeProperty("--tilt-x");
-      demoStage.style.removeProperty("--tilt-y");
-    });
-  }
 
   document.querySelectorAll("[data-current-year]").forEach((item) => {
     item.textContent = String(new Date().getFullYear());
