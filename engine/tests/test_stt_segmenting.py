@@ -12,6 +12,7 @@ import velora_engine.stt as stt_mod
 from velora_engine.stt import (
     HARD_SEGMENT_S,
     LONG_DICTATION_S,
+    MIN_FINAL_AUDIO_S,
     MIN_SEGMENT_S,
     PREVIEW_FIRST_S,
     PREVIEW_MIN_SPAN_S,
@@ -225,6 +226,19 @@ def test_production_whisper_does_not_queue_hud_previews_by_default():
     assert backend.preview_enabled is False
     assert feed_seconds(backend, PREVIEW_FIRST_S + 1) == []
     assert backend.take_preview_request() is None
+
+
+def test_tiny_capture_tail_skips_whisper_decode(whisper):
+    backend, fake = whisper(["invented transcript"])
+    tiny = np.full(
+        int(MIN_FINAL_AUDIO_S * SAMPLE_RATE) - 1,
+        0.1,
+        dtype=np.float32,
+    )
+    backend.feed_chunk(tiny)
+
+    assert backend.finalize() == ""
+    assert fake.calls == []
 
 
 def test_preview_is_requested_early_without_decoding_in_feed(whisper):

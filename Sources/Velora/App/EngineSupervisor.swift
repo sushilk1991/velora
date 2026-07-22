@@ -35,6 +35,11 @@ protocol EngineSupervisorDelegate: AnyObject {
 /// engine (e.g. started by a developer in a terminal) is picked up
 /// automatically.
 final class EngineSupervisor: NSObject, EngineClientDelegate {
+    /// The Python sidecar uses BSD `EX_TEMPFAIL` after it has already returned
+    /// raw text from an unkillable cleanup-model wedge. This is a controlled
+    /// replacement request, not a crash that benefits from backoff.
+    static let cleanupRestartExitStatus: Int32 = 75
+
     enum State: Equatable {
         case stopped
         /// Process spawned (or probing an external engine); socket not up yet.
@@ -239,14 +244,28 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         // re-reports its own progress.
         updateLoading(phase: nil, fraction: nil)
         client.disconnect(notify: false)
-        restartAttempts += 1
-        let delay = min(30.0, pow(2.0, Double(min(restartAttempts, 5))))
-        state = .degraded("Engine exited (status \(status)) — restarting in \(Int(delay))s")
-        NSLog("Velora: engine exited status=%d, restart in %.0fs", status, delay)
+        restartAttempts = Self.nextRestartAttempt(status: status, current: restartAttempts)
+        let delay = Self.restartDelay(status: status, attempt: restartAttempts)
+        if delay == 0 {
+            state = .launching
+            NSLog("Velora: cleanup worker requested immediate engine restart")
+        } else {
+            state = .degraded("Engine exited (status \(status)) — restarting in \(Int(delay))s")
+            NSLog("Velora: engine exited status=%d, restart in %.0fs", status, delay)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self, !self.isQuitting else { return }
             self.spawnEngineProcess()
         }
+    }
+
+    static func restartDelay(status: Int32, attempt: Int) -> TimeInterval {
+        if status == cleanupRestartExitStatus { return 0 }
+        return min(30.0, pow(2.0, Double(min(max(attempt, 1), 5))))
+    }
+
+    static func nextRestartAttempt(status: Int32, current: Int) -> Int {
+        status == cleanupRestartExitStatus ? current : current + 1
     }
 
     private func terminateProcess() {

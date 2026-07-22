@@ -3,6 +3,12 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+extension Notification.Name {
+    /// Text was pasted by a surface that does not share the dictation
+    /// controller's inserter (currently History's "Insert again").
+    static let veloraExternalTextInsertion = Notification.Name("VeloraExternalTextInsertion")
+}
+
 /// Inserts dictated text into the frontmost app.
 ///
 /// Default strategy: snapshot the pasteboard (all items, all representations),
@@ -38,11 +44,95 @@ final class TextInserter {
         self.pasteboard = pasteboard
     }
 
+    // MARK: - Continuation boundary (targets with no readable AX caret)
+
+    /// What the last successful delivery wrote, and where. Many Electron/web
+    /// targets expose no caret over AX, so `selectionBoundary` returns nil and
+    /// an immediately following dictation would glue onto this text with no
+    /// separator. The tail stands in for the text before the caret.
+    struct PriorDelivery {
+        let bundleID: String
+        let element: AXUIElement?
+        let tail: String
+        let at: Date
+    }
+
+    private var priorDelivery: PriorDelivery?
+    /// Follow-up dictations this close together into the same target count as
+    /// a continuation of the prior text. Bounded and short: past it, the caret
+    /// has too often moved (message sent, click elsewhere) for the memory to
+    /// be trusted.
+    static let continuationWindow: TimeInterval = 15
+
+    /// Synthesizes the boundary for a delivery whose AX caret read failed: the
+    /// prior delivery's tail runs through the normal `TextInsertionBoundary`
+    /// rules, so a follow-up sentence gets its one separating space while a
+    /// punctuation-only follow-up stays attached. Applies only to the same
+    /// non-code target within `continuationWindow`; Code/Terminal modes and
+    /// typing-fallback (terminal-like) apps never get invented separators.
+    static func continuationBoundary(
+        prior: PriorDelivery?,
+        targetBundleID: String?,
+        targetElement: AXUIElement?,
+        mode: String?,
+        typingFallbackApps: Set<String>,
+        now: Date = Date()
+    ) -> TextSelectionBoundary? {
+        guard let prior, let targetBundleID,
+              prior.bundleID == targetBundleID,
+              now.timeIntervalSince(prior.at) >= 0,
+              now.timeIntervalSince(prior.at) <= continuationWindow,
+              !isCodeLike(mode: mode),
+              !typingFallbackApps.contains(targetBundleID)
+        else { return nil }
+        // A readable focused element that differs from the recorded one means
+        // the user moved fields — the prior text is not adjacent to this
+        // caret. When either side is unreadable, bundle + window is the only
+        // signal we have.
+        if let recorded = prior.element, let targetElement,
+           !CFEqual(recorded, targetElement) {
+            return nil
+        }
+        return TextSelectionBoundary(before: prior.tail, after: "")
+    }
+
+    /// Mirrors `TextInsertionBoundary`'s Code/Terminal mode test: dictated
+    /// code assembles tokens, so a separator must never be invented for it.
+    private static func isCodeLike(mode: String?) -> Bool {
+        guard let mode = mode?.lowercased() else { return false }
+        return mode == "code" || mode == "terminal"
+    }
+
+    /// Remembers a successful delivery for `continuationBoundary`. The used
+    /// boundary's `before` context is chained in so a punctuation-only
+    /// follow-up ("!") doesn't erase the sentence it attached to.
+    private func recordDelivery(
+        _ deliveryText: String, precededBy before: String?,
+        targetBundleID: String?, targetElement: AXUIElement?
+    ) {
+        guard let targetBundleID else {
+            priorDelivery = nil
+            return
+        }
+        let tail = String(
+            ((before ?? "") + deliveryText).suffix(TextSelectionBoundary.contextLimit))
+        priorDelivery = PriorDelivery(
+            bundleID: targetBundleID, element: targetElement, tail: tail, at: Date())
+    }
+
+    /// Forgets the prior delivery — called when the caret demonstrably moved
+    /// (Return pressed, insertion undone, selection edited) so a stale tail
+    /// can't invent a separator.
+    func resetContinuationContext() {
+        priorDelivery = nil
+    }
+
     /// Puts a history record's text back on the clipboard and pastes it into
     /// the app it came from (best effort — needs Accessibility, degrades to a
     /// plain copy). Shared by the History tab and the HUD context menu.
     static func insertAgain(_ record: DictationRecord) {
         guard !record.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        NotificationCenter.default.post(name: .veloraExternalTextInsertion, object: nil)
         let inserter = TextInserter()
         inserter.copyToClipboard(record.final)
         guard let bundleID = record.bundleID,
@@ -72,7 +162,13 @@ final class TextInserter {
         let frontmost = NSWorkspace.shared.frontmostApplication
         let targetStillFocused = targetBundleID == nil || frontmost?.bundleIdentifier == targetBundleID
         let targetElement = targetStillFocused ? ScreenContext.focusedElement(of: frontmost) : nil
+        // When the target exposes no AX caret, fall back to the memory of what
+        // we just delivered there so consecutive dictations don't concatenate.
         let boundary = targetElement.flatMap { ScreenContext.selectionBoundary(of: $0) }
+            ?? Self.continuationBoundary(
+                prior: priorDelivery, targetBundleID: targetBundleID,
+                targetElement: targetElement, mode: mode,
+                typingFallbackApps: Set(AppConfig.shared.typingFallbackApps))
         let deliveryText = TextInsertionBoundary.adjusted(
             text, boundary: boundary, mode: mode)
 
@@ -94,13 +190,25 @@ final class TextInserter {
             insertViaTyping(
                 deliveryText,
                 targetBundleID: targetBundleID,
-                targetElement: targetElement,
-                completion: completion)
+                targetElement: targetElement
+            ) { [weak self] inserted in
+                if inserted {
+                    self?.recordDelivery(
+                        deliveryText, precededBy: boundary?.before,
+                        targetBundleID: targetBundleID, targetElement: targetElement)
+                }
+                completion?(inserted)
+            }
         } else {
             let inserted = insertViaPasteboard(
                 deliveryText,
                 targetBundleID: targetBundleID,
                 targetElement: targetElement)
+            if inserted {
+                recordDelivery(
+                    deliveryText, precededBy: boundary?.before,
+                    targetBundleID: targetBundleID, targetElement: targetElement)
+            }
             completion?(inserted)
         }
     }

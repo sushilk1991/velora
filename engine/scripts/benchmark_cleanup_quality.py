@@ -25,7 +25,6 @@ from velora_engine.cleanup import CleanupEngine
 from velora_engine.config import Config
 from velora_engine.formatting import (
     STATIC_SYSTEM_PROMPT,
-    build_prefill_prompt_candidates,
     postprocess,
     run_gate,
 )
@@ -42,6 +41,9 @@ class Case:
     ending: str = "."
     required: tuple[str, ...] = ()
     numbered_items: int | None = None
+    required_lines: tuple[str, ...] = ()
+    explicit_mode: str | None = None
+    required_intro: str | None = None
 
 
 CASES = (
@@ -110,6 +112,35 @@ CASES = (
         numbered_items=3,
     ),
     Case(
+        "three_priorities_counterexample",
+        "Just want to test out. So there are three priorities for today. First, I need to "
+        "update Velora. Second, I need to post it on Hacker News. And the third important "
+        "priority is posting the first comment on Hacker News.",
+        bundle_id="com.openai.codex",
+        app_name="ChatGPT",
+        required=("update Velora", "post it on Hacker News", "first comment on Hacker News"),
+        numbered_items=3,
+    ),
+    Case(
+        "explicit_separate_count_lines",
+        "Here are the counting and each of them is on a different line. 1, 2, 3, 4.",
+        bundle_id="com.openai.codex",
+        app_name="ChatGPT",
+        ending="",
+        required_lines=("1", "2", "3", "4"),
+        required_intro="different line",
+    ),
+    Case(
+        "note_ordinal_priorities",
+        "For the launch there are three priorities. First update Velora. Second post it "
+        "on Hacker News. Third post the first comment.",
+        bundle_id="com.apple.Notes",
+        app_name="Notes",
+        required=("update Velora", "Hacker News", "first comment"),
+        numbered_items=3,
+        explicit_mode="Note",
+    ),
+    Case(
         "rambling_multi_problem_request",
         "Velora feels very slow compared with Wispr Flow and longer dictations take too much "
         "time to return the text and I also do not feel it is smart about issue reports because "
@@ -170,6 +201,29 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
     for required in case.required:
         if required.lower() not in required_scope:
             failures.append(f"missing:{required}")
+    if case.required_lines:
+        lines = [line.strip() for line in output.splitlines()]
+        cursor = 0
+        for index, required in enumerate(case.required_lines):
+            matched = next(
+                (
+                    line_index for line_index in range(cursor, len(lines))
+                    if lines[line_index] == required
+                    or (
+                        index == len(case.required_lines) - 1
+                        and lines[line_index].rstrip(".!?") == required
+                    )
+                ),
+                None,
+            )
+            if matched is None:
+                failures.append(f"missing_line:{required}")
+            else:
+                cursor = matched + 1
+    if case.required_intro:
+        first_line = output.splitlines()[0] if output.splitlines() else ""
+        if case.required_intro.lower() not in first_line.lower():
+            failures.append(f"missing_intro:{case.required_intro}")
     return failures
 
 
@@ -189,6 +243,7 @@ async def run(selected: set[str] | None) -> int:
                     config,
                     bundle_id=case.bundle_id,
                     app_name=case.app_name,
+                    explicit_mode=case.explicit_mode,
                 )
                 if not gate.use_llm:
                     record = {
@@ -199,14 +254,6 @@ async def run(selected: set[str] | None) -> int:
                     print(json.dumps(record, ensure_ascii=False))
                     failures += 1
                     continue
-                candidates = build_prefill_prompt_candidates(
-                    config,
-                    bundle_id=case.bundle_id,
-                    app_name=case.app_name,
-                    explicit_mode=None,
-                    entities=None,
-                )
-                prepared = await engine.prepare_prefix(candidates)
                 result = await engine.cleanup(
                     case.raw,
                     gate.system_prompt or STATIC_SYSTEM_PROMPT,
@@ -214,18 +261,16 @@ async def run(selected: set[str] | None) -> int:
                 )
                 output = postprocess(result.text, gate) if result.applied else result.text
                 case_failures = validate(case, output, result.applied)
-                if not prepared.applied:
-                    case_failures.append(f"prefix_not_prepared:{prepared.reason}")
                 if not result.cache_hit:
-                    case_failures.append("prepared_cache_miss")
+                    case_failures.append("startup_cache_miss")
                 failures += bool(case_failures)
                 print(json.dumps({
                     "case": case.name,
                     "words": len(case.raw.split()),
                     "model": MODEL_ID,
-                    "prepared_ms": prepared.ms,
-                    "prepared_tokens": prepared.tokens,
+                    "prefix_tokens": result.prefix_tokens,
                     "cleanup_ms": result.ms,
+                    "reason": result.reason,
                     "ttft_ms": result.ttft_ms,
                     "decode_ms": result.decode_ms,
                     "cache_hit": result.cache_hit,

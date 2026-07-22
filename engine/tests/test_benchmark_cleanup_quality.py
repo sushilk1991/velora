@@ -27,3 +27,26 @@ def test_prose_case_rejects_bullets_as_well_as_numbered_items():
     failures = validate(case, "- Unexpected bullet.", applied=True)
 
     assert "unexpected_list_items" in failures
+
+
+def test_bare_line_case_requires_exact_values_and_preserved_intro():
+    case = Case(
+        "bare_lines",
+        "placeholder",
+        ending="",
+        required_lines=("1", "2"),
+        required_intro="different line",
+    )
+
+    assert validate(
+        case, "Each value is on a different line:\n1\n2", applied=True
+    ) == []
+    assert validate(
+        case, "Each value is on a different line:\n1\n2.", applied=True
+    ) == []
+    assert "missing_line:1" in validate(
+        case, "Each value is on a different line:\n1.\n2.", applied=True
+    )
+    assert "missing_intro:different line" in validate(
+        case, "Values:\n1\n2", applied=True
+    )

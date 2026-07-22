@@ -1,6 +1,6 @@
 {
   "name": "Note",
-  "prompt": "The user is dictating a note. Markdown is allowed. Use a bulleted list ONLY when the speech clearly enumerates items (e.g. 'first... second...', 'one... two...'); otherwise keep prose. Paragraph breaks on topic shifts.",
+  "prompt": "The user is dictating a note. Markdown is allowed. Use a numbered list for ordered steps, priorities, or items explicitly counted with ordinals such as 'first... second... third...'. Use bullets only for a requested bullet list or a simple unsequenced collection. If the speaker explicitly asks for bare separate lines, do not add bullets or numbering. Otherwise keep prose. Add paragraph breaks on topic shifts.",
   "formatting": "full",
   "apps": [
     "com.apple.Notes",

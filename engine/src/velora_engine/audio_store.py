@@ -12,10 +12,12 @@ transcripts stored beside it.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
 import time
+import uuid
 import wave
 from pathlib import Path
 
@@ -76,20 +78,32 @@ class AudioStore:
         self._ensure_dir()
         name = self.name_for(session_id)
         path = self.dir / name
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         try:
             samples = np.asarray(pcm, dtype=np.float32)
             samples = np.clip(np.nan_to_num(samples), -1.0, 1.0)
             if self._sf is not None:
                 # PCM_16 subtype: 16-bit is ample for 16kHz speech and halves
                 # the FLAC size versus 24-bit.
-                self._sf.write(str(path), samples, SAMPLE_RATE, subtype="PCM_16", format="FLAC")
+                self._sf.write(
+                    str(temporary),
+                    samples,
+                    SAMPLE_RATE,
+                    subtype="PCM_16",
+                    format="FLAC",
+                )
             else:
-                self._write_wav(path, samples)
+                self._write_wav(temporary, samples)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
             os.chmod(path, 0o600)
             return name
         except Exception:  # noqa: BLE001 — archiving must never break dictation
             log.exception("failed to save audio clip for session %s", session_id)
             return None
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
 
     @staticmethod
     def _write_wav(path: Path, samples: np.ndarray) -> None:

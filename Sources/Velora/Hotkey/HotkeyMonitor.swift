@@ -12,6 +12,9 @@ protocol HotkeyMonitorDelegate: AnyObject {
     func editHotkeyDown()
     func editHotkeyUp()
     func escapePressed()
+    /// A real user keystroke or click happened between dictations. Callers use
+    /// this to discard any AX-opaque insertion boundary they had to remember.
+    func nonHotkeyInput()
 }
 
 /// Global hotkey listener for arbitrary recorded hotkeys (`Hotkey`).
@@ -162,6 +165,9 @@ final class HotkeyMonitor {
             (1 << CGEventType.keyDown.rawValue)
             | (1 << CGEventType.keyUp.rawValue)
             | (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue)
+            | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.otherMouseDown.rawValue)
 
         // C callback: cannot capture context; self travels via refcon.
         let callback: CGEventTapCallBack = { _, type, event, refcon in
@@ -218,15 +224,21 @@ final class HotkeyMonitor {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
+        let sourcePID = event.getIntegerValueField(.eventSourceUnixProcessID)
+        let isVeloraEvent = sourcePID == Int64(ProcessInfo.processInfo.processIdentifier)
 
         switch type {
         case .flagsChanged:
             handleFlagsChanged(keyCode: keyCode, flags: flags)
         case .keyDown:
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-            handleKeyDown(keyCode: keyCode, flags: flags, isRepeat: isRepeat)
+            handleKeyDown(
+                keyCode: keyCode, flags: flags, isRepeat: isRepeat,
+                invalidateContinuation: !isVeloraEvent)
         case .keyUp:
             handleKeyUp(keyCode: keyCode)
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            if !isVeloraEvent { emit { $0.nonHotkeyInput() } }
         default:
             break
         }
@@ -236,7 +248,8 @@ final class HotkeyMonitor {
 
     private func startGlobalMonitor() {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.flagsChanged, .keyDown, .keyUp]
+            matching: [.flagsChanged, .keyDown, .keyUp,
+                       .leftMouseDown, .rightMouseDown, .otherMouseDown]
         ) { [weak self] event in
             guard let self else { return }
             let flags = Hotkey.cgFlags(from: event.modifierFlags)
@@ -248,6 +261,8 @@ final class HotkeyMonitor {
                     keyCode: Int64(event.keyCode), flags: flags, isRepeat: event.isARepeat)
             case .keyUp:
                 self.handleKeyUp(keyCode: Int64(event.keyCode))
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                self.emit { $0.nonHotkeyInput() }
             default:
                 break
             }
@@ -279,7 +294,10 @@ final class HotkeyMonitor {
         }
     }
 
-    private func handleKeyDown(keyCode: Int64, flags: UInt64, isRepeat: Bool) {
+    private func handleKeyDown(
+        keyCode: Int64, flags: UInt64, isRepeat: Bool,
+        invalidateContinuation: Bool = true
+    ) {
         if keyCode == Self.escKeyCode {
             if !suspended {
                 emit { $0.escapePressed() }
@@ -308,7 +326,9 @@ final class HotkeyMonitor {
                 "Velora: edit hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
                 edit.displayLabel, keyCode, flags)
             emitEditHotkey(down: true)
+            return
         }
+        if !isRepeat, invalidateContinuation { emit { $0.nonHotkeyInput() } }
     }
 
     private func handleKeyUp(keyCode: Int64) {

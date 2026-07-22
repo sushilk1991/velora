@@ -12,6 +12,7 @@ import pytest
 
 from velora_engine.cleanup import (
     CleanupEngine,
+    CleanupResult,
     _restore_prompt_cache,
     _snapshot_prompt_cache,
 )
@@ -95,6 +96,24 @@ async def test_prepare_prefix_caches_only_exact_common_prompt_tokens():
         assert result.applied is True
         assert result.tokens == len(expected)
         assert engine.prefilled == expected
+    finally:
+        engine.close()
+
+
+def test_static_warm_cache_matches_extended_runtime_system_prompt():
+    engine = RecordingCleanup()
+    try:
+        engine._warm("stable instructions")
+        runtime = engine._prompt_tokens(
+            "stable instructions\n\nFormatting strength: FULL.",
+            "raw transcript",
+        )
+
+        _cache, common, hit = engine._cache_for_tokens(runtime)
+
+        assert hit is True
+        assert common == len(engine._prepared_tokens)
+        assert common > len("<system>stable instructions")
     finally:
         engine.close()
 
@@ -312,6 +331,80 @@ async def test_outer_hard_watchdog_still_bounds_a_wedged_generation(monkeypatch)
         assert result.reason == "timeout_hard"
         assert engine.unhealthy is True
     finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_hard_watchdog_starts_when_generation_enters_worker(monkeypatch):
+    import velora_engine.cleanup as cleanup_mod
+
+    engine = RecordingCleanup()
+    blocker_started = threading.Event()
+    blocker_release = threading.Event()
+
+    def block_worker():
+        blocker_started.set()
+        blocker_release.wait(0.5)
+
+    blocker = engine._executor.submit(block_worker)
+    assert blocker_started.wait(0.2)
+    monkeypatch.setattr(cleanup_mod, "QUEUE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(cleanup_mod, "HARD_TIMEOUT_GRACE_S", 0.01)
+    monkeypatch.setattr(
+        engine,
+        "_run",
+        lambda *_args, **_kwargs: CleanupResult("fixed", True, 1),
+    )
+    try:
+        task = asyncio.create_task(engine.cleanup(
+            "raw", "system", timeout_ms=10, check_ratio=False
+        ))
+        # This exceeds the runtime watchdog, but the generation has not begun.
+        await asyncio.sleep(0.03)
+        blocker_release.set()
+        result = await asyncio.wait_for(task, 0.3)
+
+        assert result.applied is True
+        assert result.text == "fixed"
+        assert engine.unhealthy is False
+    finally:
+        blocker_release.set()
+        blocker.result(timeout=0.5)
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_timeout_retires_unavailable_worker_without_running_followup(monkeypatch):
+    import velora_engine.cleanup as cleanup_mod
+
+    engine = RecordingCleanup()
+    blocker_started = threading.Event()
+    blocker_release = threading.Event()
+    calls = []
+
+    def block_worker():
+        blocker_started.set()
+        blocker_release.wait(0.5)
+
+    blocker = engine._executor.submit(block_worker)
+    assert blocker_started.wait(0.2)
+    monkeypatch.setattr(cleanup_mod, "QUEUE_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(
+        engine,
+        "_run",
+        lambda raw, *_args, **_kwargs: calls.append(raw),
+    )
+    try:
+        result = await engine.cleanup(
+            "must not run", "system", timeout_ms=10, check_ratio=False
+        )
+
+        assert result.reason == "timeout_queue"
+        assert engine.unhealthy is True
+        assert calls == []
+    finally:
+        blocker_release.set()
+        blocker.result(timeout=0.5)
         engine.close()
 
 

@@ -29,6 +29,11 @@ import numpy as np
 log = logging.getLogger("velora.stt")
 
 SAMPLE_RATE = 16_000
+# AVCapture can finish opening just as a very short hotkey press is released,
+# leaving only a few dozen milliseconds of device noise. Whisper pads that to
+# its inference window and can spend 3-6 seconds producing a repeated prompt
+# hallucination. No intelligible utterance fits in this span; fail fast.
+MIN_FINAL_AUDIO_S = 0.15
 
 # Feed parakeet in ~0.5s increments: each add_audio() call runs the encoder,
 # so per-100ms-frame calls would waste compute for no latency win.
@@ -751,6 +756,10 @@ class WhisperBackend:
             self.reset()
             return ""
         duration_s = self._samples / SAMPLE_RATE
+        if duration_s < MIN_FINAL_AUDIO_S:
+            log.info("whisper clip too short to decode (%d samples)", self._samples)
+            self.reset()
+            return ""
         # Long dictation with usable segments: decode only the un-decoded tail
         # and stitch — stop→final stays flat however long the user spoke. Short
         # and medium clips re-decode WHOLE, exactly like the pre-segmenting

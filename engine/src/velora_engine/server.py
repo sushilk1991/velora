@@ -54,6 +54,10 @@ T = TypeVar("T")
 
 log = logging.getLogger("velora.server")
 
+CLEANUP_RESTART_EXIT_CODE = os.EX_TEMPFAIL
+CLEANUP_RESTART_GRACE_S = 0.1
+CLEANUP_RESTART_ARCHIVE_GRACE_S = 1.0
+
 PARENT_POLL_S = 2.0
 
 # Bound the per-session audio queue: ~60s of backlog at 100ms chunks. If STT
@@ -66,7 +70,10 @@ MAX_DROPPED_FRAMES = 50
 # nearly always done at stop; this bound only catches a wedged task (each has
 # its own internal timeouts) before we give up and fall back to the whole-text
 # pipeline.
-STREAM_GATHER_TIMEOUT_S = 15.0
+# Streaming cleanup happens while the user speaks. Stop should wait only for a
+# nearly-finished chunk; otherwise cancel it and use the whole-text path. A
+# long wait here is pure post-hotkey latency and previously reached 15 seconds.
+STREAM_GATHER_TIMEOUT_S = 1.5
 
 # Idle gap before (and between) vocab-mining steps — mining must only ever use
 # compute nobody is waiting on, and yields the moment a session starts.
@@ -200,8 +207,15 @@ class Session:
         self.start_entities: list[dict[str, Any]] = [
             e for e in (self.context.get("entities") or []) if isinstance(e, dict)
         ]
+
+
 class Engine:
-    def __init__(self, config: Config, parent_pid: int | None = None) -> None:
+    def __init__(
+        self,
+        config: Config,
+        parent_pid: int | None = None,
+        hard_exit: Callable[[int], Any] = os._exit,
+    ) -> None:
         self.config = config
         self.parent_pid = parent_pid
         self.stt: STTBackend = create_backend(config.stt_model, config.language)
@@ -256,6 +270,11 @@ class Engine:
         self.session: Session | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.shutdown = asyncio.Event()
+        self._hard_exit = hard_exit
+        self._cleanup_restart_scheduled = False
+        self._cleanup_restart_task: asyncio.Task[None] | None = None
+        self._cleanup_restart_timer: threading.Timer | None = None
+        self._archive_tasks: set[asyncio.Task[None]] = set()
         self._server: asyncio.Server | None = None
         self._client_gen = 0
         self._ready_client_gen: int | None = None
@@ -294,9 +313,53 @@ class Engine:
         cleanup = self.cleanup
         if cleanup is None or not getattr(cleanup, "unhealthy", False):
             return False
+        if self._cleanup_restart_scheduled:
+            return True
+        self._cleanup_restart_scheduled = True
         log.error("cleanup worker is unhealthy — restarting engine after fallback")
         self.shutdown.set()
+        # `shutdown` normally lets `serve()` unwind cleanly. A wedged native
+        # MLX call can also strand asyncio/executor teardown, which previously
+        # left the process alive and every later dictation on `llm_unhealthy`.
+        # The final/raw fallback has already been drained to the client before
+        # every caller reaches here, so use a short hard-exit backstop and let
+        # the Swift supervisor replace the sidecar from a clean process.
+        # Keep a loop-independent daemon timer as the actual backstop. If
+        # `serve()` unwinds and `asyncio.run()` cancels pending tasks, a wedged
+        # non-daemon MLX executor thread would otherwise keep Python alive
+        # forever. The async task normally exits earlier after archive writes.
+        timer = threading.Timer(
+            CLEANUP_RESTART_ARCHIVE_GRACE_S + CLEANUP_RESTART_GRACE_S,
+            self._hard_exit,
+            args=(CLEANUP_RESTART_EXIT_CODE,),
+        )
+        timer.daemon = True
+        timer.start()
+        self._cleanup_restart_timer = timer
+        self._cleanup_restart_task = asyncio.create_task(self._hard_exit_after_archives())
         return True
+
+    async def _hard_exit_after_archives(self) -> None:
+        """Preserve the just-finished dictation's optional audio, then exit.
+
+        Audio encoding normally stays off the final-result path. A cleanup
+        recovery is rare and process-destructive, so give already-started
+        archive writes one bounded second before replacing the sidecar.
+        """
+        pending = tuple(self._archive_tasks)
+        if pending:
+            _done, unfinished = await asyncio.wait(
+                pending, timeout=CLEANUP_RESTART_ARCHIVE_GRACE_S
+            )
+            if unfinished:
+                log.warning(
+                    "engine restart timed out waiting for %d audio archive write(s)",
+                    len(unfinished),
+                )
+        await asyncio.sleep(CLEANUP_RESTART_GRACE_S)
+        if self._cleanup_restart_timer is not None:
+            self._cleanup_restart_timer.cancel()
+        self._hard_exit(CLEANUP_RESTART_EXIT_CODE)
 
     # ---------------- model loading ----------------
 
@@ -595,6 +658,8 @@ class Engine:
 
     async def _dispatch(self, frame_type: int, payload: bytes) -> None:
         if frame_type == protocol.FRAME_AUDIO:
+            if self.shutdown.is_set():
+                return
             await self._on_audio(payload)
             return
         if frame_type != protocol.FRAME_JSON:
@@ -606,6 +671,9 @@ class Engine:
                 raise ValueError("control frame is not a JSON object")
         except (ValueError, UnicodeDecodeError) as exc:
             await self._error(f"malformed control frame: {exc}")
+            return
+        if self.shutdown.is_set():
+            await self._error("engine shutting down", msg.get("session"))
             return
         cmd = msg.get("cmd")
         try:
@@ -1460,7 +1528,9 @@ class Engine:
                 # Prune is an O(clips) stat sweep — also off the hot path.
                 await self._prune_audio_bg()
 
-        asyncio.create_task(_write())
+        task = asyncio.create_task(_write())
+        self._archive_tasks.add(task)
+        task.add_done_callback(self._archive_tasks.discard)
         return self.audio.name_for(session.id)
 
     async def _prune_audio_bg(self) -> None:

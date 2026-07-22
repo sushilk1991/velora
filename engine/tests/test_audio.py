@@ -67,14 +67,18 @@ def test_audio_store_wav_fallback_roundtrips_and_sanitizes(tmp_path):
 def test_audio_store_write_failure_does_not_break_dictation(tmp_path):
     class BrokenSoundFile:
         @staticmethod
-        def write(*_args, **_kwargs):
+        def write(path, *_args, **_kwargs):
+            Path(path).write_bytes(b"partial")
             raise OSError("disk unavailable")
 
-    store = AudioStore(tmp_path / "audio")
+    audio_dir = tmp_path / "audio"
+    store = AudioStore(audio_dir)
     store._sf = BrokenSoundFile()
     store.ext = "flac"
 
     assert store.save("session", np.ones(10, dtype=np.float32)) is None
+    assert not (audio_dir / "session.flac").exists()
+    assert list(audio_dir.glob(".*.tmp")) == []
 
 
 def test_audio_store_prune_missing_directory_is_noop(tmp_path):

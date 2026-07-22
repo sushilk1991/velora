@@ -117,6 +117,8 @@ enum Selftest {
         testMediaPlaybackBrowserStreamDrain()
         testMediaPlaybackSupportedPlayers()
         testInsertionBoundary()
+        testInsertionContinuation()
+        testEngineRestartDelay()
         testEmptyFinalFeedback()
         testClipboardStaging()
         testUpdateChecker()
@@ -4602,6 +4604,109 @@ enum Selftest {
         expect(
             replacementBoundary?.previous == "b" && replacementBoundary?.next == "c",
             "AX replacement ranges inspect text outside the selection")
+    }
+
+    /// The delivery-layer fallback for targets with no readable AX caret:
+    /// a recent delivery into the same target synthesizes the boundary from
+    /// the prior inserted text, so consecutive dictations never concatenate
+    /// while punctuation follow-ups stay attached and code targets are
+    /// never reshaped.
+    private static func testInsertionContinuation() {
+        let base = Date()
+        let prior = TextInserter.PriorDelivery(
+            bundleID: "com.example.chat", element: nil,
+            tail: "First sentence.", at: base)
+
+        let boundary = TextInserter.continuationBoundary(
+            prior: prior, targetBundleID: "com.example.chat", targetElement: nil,
+            mode: nil, typingFallbackApps: [], now: base.addingTimeInterval(5))
+        expect(
+            boundary == TextSelectionBoundary(before: "First sentence.", after: ""),
+            "a recent same-target delivery yields its tail as the boundary")
+        expect(
+            TextInsertionBoundary.adjusted("Second sentence.", boundary: boundary, mode: nil)
+                == " Second sentence.",
+            "consecutive dictations without an AX caret get one separating space")
+        expect(
+            TextInsertionBoundary.adjusted("!", boundary: boundary, mode: nil) == "!",
+            "a punctuation-only follow-up stays attached to the prior dictation")
+
+        expect(
+            TextInserter.continuationBoundary(
+                prior: prior, targetBundleID: "com.example.chat", targetElement: nil,
+                mode: nil, typingFallbackApps: [],
+                now: base.addingTimeInterval(TextInserter.continuationWindow + 1)) == nil,
+            "the continuation memory expires after the bounded window")
+        expect(
+            TextInserter.continuationBoundary(
+                prior: prior, targetBundleID: "com.example.editor", targetElement: nil,
+                mode: nil, typingFallbackApps: [], now: base.addingTimeInterval(5)) == nil,
+            "a different app never inherits the prior delivery's boundary")
+        expect(
+            TextInserter.continuationBoundary(
+                prior: prior, targetBundleID: nil, targetElement: nil,
+                mode: nil, typingFallbackApps: [], now: base.addingTimeInterval(5)) == nil,
+            "an unknown target never gets an invented separator")
+
+        expect(
+            TextInserter.continuationBoundary(
+                prior: prior, targetBundleID: "com.example.chat", targetElement: nil,
+                mode: "Code", typingFallbackApps: [], now: base.addingTimeInterval(5)) == nil,
+            "Code mode never gets an invented separator")
+        expect(
+            TextInserter.continuationBoundary(
+                prior: prior, targetBundleID: "com.example.chat", targetElement: nil,
+                mode: "Terminal", typingFallbackApps: [], now: base.addingTimeInterval(5)) == nil,
+            "Terminal mode never gets an invented separator")
+        expect(
+            TextInserter.continuationBoundary(
+                prior: TextInserter.PriorDelivery(
+                    bundleID: "com.apple.Terminal", element: nil,
+                    tail: "ls", at: base),
+                targetBundleID: "com.apple.Terminal", targetElement: nil,
+                mode: nil, typingFallbackApps: ["com.apple.Terminal"],
+                now: base.addingTimeInterval(5)) == nil,
+            "typing-fallback (terminal-like) targets never get an invented separator")
+
+        // AXUIElementCreateApplication needs no TCC grant; two pids give
+        // distinguishable elements for the moved-fields check.
+        let elementA = AXUIElementCreateApplication(1)
+        let elementB = AXUIElementCreateApplication(2)
+        let elementPrior = TextInserter.PriorDelivery(
+            bundleID: "com.example.chat", element: elementA,
+            tail: "First sentence.", at: base)
+        expect(
+            TextInserter.continuationBoundary(
+                prior: elementPrior, targetBundleID: "com.example.chat",
+                targetElement: elementB, mode: nil, typingFallbackApps: [],
+                now: base.addingTimeInterval(5)) == nil,
+            "a different focused element never inherits the prior boundary")
+        expect(
+            TextInserter.continuationBoundary(
+                prior: elementPrior, targetBundleID: "com.example.chat",
+                targetElement: elementA, mode: nil, typingFallbackApps: [],
+                now: base.addingTimeInterval(5)) != nil,
+            "the same focused element keeps the continuation boundary")
+    }
+
+    private static func testEngineRestartDelay() {
+        expect(
+            EngineSupervisor.restartDelay(
+                status: EngineSupervisor.cleanupRestartExitStatus, attempt: 1) == 0,
+            "a poisoned cleanup worker requests an immediate sidecar replacement")
+        expect(
+            EngineSupervisor.restartDelay(status: 1, attempt: 1) == 2,
+            "the first unexpected engine crash retains exponential backoff")
+        expect(
+            EngineSupervisor.restartDelay(status: 1, attempt: 10) == 30,
+            "unexpected engine crash backoff remains capped")
+        expect(
+            EngineSupervisor.nextRestartAttempt(
+                status: EngineSupervisor.cleanupRestartExitStatus, current: 4) == 4,
+            "controlled cleanup replacement does not consume the crash budget")
+        expect(
+            EngineSupervisor.nextRestartAttempt(status: 1, current: 4) == 5,
+            "an unexpected engine crash increments the crash budget")
     }
 
     private static func testEmptyFinalFeedback() {

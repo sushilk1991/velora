@@ -93,6 +93,7 @@ final class DictationController: NSObject {
     private let sounds: SoundPlayer
     private let supervisor: EngineSupervisor
     private let dictionary: DictionaryRepository
+    private var externalInsertionObserver: NSObjectProtocol?
 
     private(set) var phase: Phase = .idle {
         didSet {
@@ -218,6 +219,11 @@ final class DictationController: NSObject {
         self.sounds = sounds
         self.dictionary = dictionary
         super.init()
+        externalInsertionObserver = NotificationCenter.default.addObserver(
+            forName: .veloraExternalTextInsertion, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.inserter.resetContinuationContext()
+        }
         hud.model.onRetry = { [weak self] in self?.retryFromError() }
         // The direct device adapter reports runtime interruption or removal;
         // a failed microphone cannot leave a silent "recording" HUD alive.
@@ -233,6 +239,12 @@ final class DictationController: NSObject {
             self.supervisor.send(["cmd": "cancel", "session": self.sessionID])
             self.cancelledSessionID = self.sessionID
             self.showError("Microphone could not start")
+        }
+    }
+
+    deinit {
+        if let externalInsertionObserver {
+            NotificationCenter.default.removeObserver(externalInsertionObserver)
         }
     }
 
@@ -511,6 +523,9 @@ final class DictationController: NSObject {
             showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
             return
         }
+        // The edit rewrote text in place; the remembered delivery tail no
+        // longer describes what sits before the caret.
+        inserter.resetContinuationContext()
         lastInsertion = (bundleID: bundleID, at: Date())
         sounds.play(.stop)
         NSLog("Velora: edit applied (%d ms)", ms)
@@ -898,7 +913,11 @@ final class DictationController: NSObject {
             }
         }
 
-        hud.transition(to: .notice(symbol: "mic", message: "Starting microphone…"))
+        // No HUD transition while capture spins up: a hidden HUD stays hidden
+        // and the standby pill morphs straight to `.listening` on success —
+        // flashing the wide "Starting microphone…" capsule on every start read
+        // as jank. The 8 s watchdog below still surfaces a mic that never
+        // starts, and a capture failure shows the error HUD immediately.
         let client = supervisor.client
         let requestedSession = sessionID
         capture.start(
@@ -1438,6 +1457,8 @@ final class DictationController: NSObject {
             inserter.pressKey(
                 Hotkey.keyCode(for: "z") ?? 6,
                 flags: .maskCommand)
+            // The undone text is gone; its tail must not shape the next insert.
+            inserter.resetContinuationContext()
             NSLog("Velora: voice command — undid last insertion")
             showNotice(symbol: "arrow.uturn.backward.circle.fill", message: "Undone")
         case .pressReturn, .newParagraph:
@@ -1452,6 +1473,9 @@ final class DictationController: NSObject {
             }
             inserter.pressKey(36)  // kVK_Return
             if command == .newParagraph { inserter.pressKey(36) }
+            // The caret moved to a fresh line (or the message was sent) — the
+            // prior delivery is no longer adjacent to it.
+            inserter.resetContinuationContext()
             NSLog("Velora: voice command — return")
             hud.transition(to: .inserted)
             scheduleInsertedHide()
@@ -1485,6 +1509,10 @@ final class DictationController: NSObject {
 // MARK: - HotkeyMonitorDelegate
 
 extension DictationController: HotkeyMonitorDelegate {
+    func nonHotkeyInput() {
+        inserter.resetContinuationContext()
+    }
+
     func hotkeyDown() {
         // Self-heal a wedged transcribe: normally `transcribeTimer` recovers,
         // but a missed event or a hung engine shouldn't strand the hotkey. If

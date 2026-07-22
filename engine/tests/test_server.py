@@ -2,11 +2,13 @@
 (VELORA_FAKE_STT=1): start → audio → stop → transcript/final, and cancel."""
 
 import asyncio
+import contextlib
 import json
 import shutil
 import tempfile
 import threading
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -70,7 +72,7 @@ def test_config_patch_save_preserves_newer_unrelated_writer_values(home):
 @pytest.fixture
 async def engine(home, fake_stt):
     config = Config()
-    eng = Engine(config, parent_pid=None)
+    eng = Engine(config, parent_pid=None, hard_exit=Mock())
     # AF_UNIX paths are length-limited (~104 bytes on macOS); pytest's tmp_path
     # is too deep, so use a short scratch dir for the socket.
     sock_dir = Path(tempfile.mkdtemp(prefix="velora-t-"))
@@ -322,6 +324,8 @@ async def test_hard_wedged_cleanup_sends_raw_final_then_restarts_engine(engine):
     assert final["text"] == final["raw"] + "."
     assert final["cleanup_applied"] is False
     assert eng.shutdown.is_set()
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     client.close()
 
 
@@ -430,7 +434,55 @@ async def test_cancel_sends_confirmation_then_restarts_unhealthy_cleanup(engine)
     cancelled = await client.recv_event("cancelled")
     assert cancelled["session"] == "cancel-poisoned"
     assert eng.shutdown.is_set()
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     client.close()
+
+
+async def test_cleanup_restart_waits_for_pending_audio_archive(engine):
+    eng, _sock = engine
+    release = asyncio.Event()
+
+    class UnhealthyCleanup:
+        unhealthy = True
+
+    eng.cleanup = UnhealthyCleanup()
+
+    async def archive_write():
+        await release.wait()
+
+    archive = asyncio.create_task(archive_write())
+    eng._archive_tasks.add(archive)
+    archive.add_done_callback(eng._archive_tasks.discard)
+
+    assert eng._restart_if_cleanup_unhealthy() is True
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    eng._hard_exit.assert_not_called()
+
+    release.set()
+    await archive
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
+
+
+async def test_cleanup_restart_keeps_loop_independent_exit_backstop(engine, monkeypatch):
+    eng, _sock = engine
+
+    class UnhealthyCleanup:
+        unhealthy = True
+
+    eng.cleanup = UnhealthyCleanup()
+    monkeypatch.setattr(server_mod, "CLEANUP_RESTART_GRACE_S", 0.01)
+    monkeypatch.setattr(server_mod, "CLEANUP_RESTART_ARCHIVE_GRACE_S", 0.01)
+
+    assert eng._restart_if_cleanup_unhealthy() is True
+    assert eng._cleanup_restart_task is not None
+    eng._cleanup_restart_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await eng._cleanup_restart_task
+    await asyncio.sleep(0.04)
+
+    eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
 
 
 async def test_malformed_frames_get_error_not_crash(engine):
@@ -463,6 +515,22 @@ async def test_malformed_frames_get_error_not_crash(engine):
     # engine still healthy
     await client.send_json({"cmd": "ping"})
     assert (await client.recv())["event"] == "pong"
+    client.close()
+
+
+async def test_shutdown_rejects_new_sessions_on_an_existing_connection(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    eng.shutdown.set()
+    await client.send_json({"cmd": "start", "session": "doomed", "context": {}})
+
+    evt = await client.recv()
+    assert evt["event"] == "error"
+    assert evt["session"] == "doomed"
+    assert "shutting down" in evt["message"]
+    assert eng.session is None
     client.close()
 
 

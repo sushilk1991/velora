@@ -31,6 +31,11 @@ log = logging.getLogger("velora.cleanup")
 TIMEOUT_MS = 1500  # base budget, for a short/normal sentence
 TIMEOUT_CEILING_MS = 6000  # hard ceiling however long the dictation
 HARD_TIMEOUT_GRACE_S = 3.0  # independent TTFT/prefill wedge allowance
+# A cancelled preview/streaming generation can remain inside native prefill
+# until MLX yields. Final cleanup must not spend its own generation budget
+# merely waiting to enter the single thread. Bound that wait separately, then
+# replace the sidecar because its only model worker is unavailable.
+QUEUE_TIMEOUT_S = 1.0
 MS_PER_WORD = 45  # generation grows ~linearly with length past the base
 BASE_WORDS = 25  # words covered by the base budget before scaling kicks in
 RATIO_MAX = 1.6
@@ -450,13 +455,17 @@ class CleanupEngine:
     def _warm(self, system_prompt: str) -> None:
         """Prefill the KV cache with the static system prefix.
 
-        Two deliberately different user suffixes identify the exact shared
-        chat-template prefix. Unlike a one-token dummy generation, this leaves
-        no sampled token in the reusable snapshot.
+        Runtime prompts append mode/strength/context inside the SAME system
+        message. Warming a completed static-only system message caches its
+        closing chat-template token, which cannot prefix that extended prompt
+        and causes a full TTFT cache miss. Two deliberately different SYSTEM
+        suffixes identify only the exact shared static content (plus whatever
+        delimiter tokenization is common). Unlike a dummy generation, this
+        leaves no sampled token in the reusable snapshot.
         """
         self._prepare_prefix([
-            (system_prompt, "alpha"),
-            (system_prompt, "zulu"),
+            (system_prompt + "\n\nalpha", "transcript"),
+            (system_prompt + "\n\nzulu", "transcript"),
         ])
 
     def _make_prompt_cache(self) -> list[Any]:
@@ -727,17 +736,40 @@ class CleanupEngine:
         if not self.loaded:
             return CleanupResult(raw, False, 0, "llm_not_loaded")
         worker_cancel = cancel_event if cancel_event is not None else threading.Event()
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+
+        def run_started() -> CleanupResult:
+            # asyncio.Event is not thread-safe. Schedule the signal onto the
+            # owning loop before entering `_run`, so the hard watchdog measures
+            # native execution time rather than time queued behind old work.
+            loop.call_soon_threadsafe(started.set)
+            return self._run(
+                raw, system_prompt, timeout_ms, check_ratio,
+                worker_cancel, allowed_terms,
+            )
+
+        worker = loop.run_in_executor(self._executor, run_started)
         try:
-            # In-thread deadline enforces the budget between tokens. The outer
-            # wait_for catches a truly wedged generation; because that thread
-            # cannot be killed safely, the timeout poisons this engine and the
-            # server restarts the sidecar after returning the raw fallback.
-            loop = asyncio.get_running_loop()
+            try:
+                await asyncio.wait_for(started.wait(), timeout=QUEUE_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                worker_cancel.set()
+                worker.cancel()
+                self.unhealthy = True
+                log.error(
+                    "cleanup worker unavailable after %dms in queue — returning raw",
+                    int(QUEUE_TIMEOUT_S * 1000),
+                )
+                return CleanupResult(
+                    raw, False, int(QUEUE_TIMEOUT_S * 1000), "timeout_queue"
+                )
+
+            # In-thread deadline enforces the budget between tokens. This
+            # independent outer watchdog starts only once this job is actually
+            # running. If native generation then wedges, retire the process.
             return await asyncio.wait_for(
-                loop.run_in_executor(
-                    self._executor, self._run, raw, system_prompt, timeout_ms, check_ratio,
-                    worker_cancel, allowed_terms,
-                ),
+                worker,
                 timeout=timeout_ms / 1000.0 + HARD_TIMEOUT_GRACE_S,
             )
         except asyncio.TimeoutError:
@@ -745,6 +777,10 @@ class CleanupEngine:
             self.unhealthy = True
             log.error("cleanup hard-wedged past %dms — returning raw", timeout_ms)
             return CleanupResult(raw, False, timeout_ms, "timeout_hard")
+        except asyncio.CancelledError:
+            worker_cancel.set()
+            worker.cancel()
+            raise
         except Exception as exc:  # noqa: BLE001 — cleanup must never break dictation
             log.exception("cleanup failed")
             return CleanupResult(raw, False, 0, f"error:{exc}")
