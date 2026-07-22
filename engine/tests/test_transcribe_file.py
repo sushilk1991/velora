@@ -2,6 +2,8 @@
 happy path, dictation priority (job waits for a live session), busy rejection,
 cancel, and bad-input errors."""
 
+# ruff: noqa: F811
+
 import asyncio
 import wave
 from unittest.mock import AsyncMock

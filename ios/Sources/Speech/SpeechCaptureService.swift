@@ -22,8 +22,11 @@ final class SpeechCaptureService {
     private var recognizer: SFSpeechRecognizer?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var activeSpeechSession: ActiveSpeechCaptureSession?
     private var finalizationWatchdogTask: Task<Void, Never>?
+    private var refinementTask: Task<Void, Never>?
     private var activeSessionID: UUID?
+    private var refinementSessionID: UUID?
     private var inputTapInstalled = false
     private var finalizationStartedAt: Date?
     private var lastTranscriptUpdateAt: Date?
@@ -68,8 +71,62 @@ final class SpeechCaptureService {
                 forKey: VeloraPreferences.speechLocaleIdentifierKey
             )
         )
+
+        do {
+            try configureAudioSession()
+        } catch {
+            fail("Velora could not start the microphone. Check that another app is not using it, then try again.")
+            return
+        }
+
+        if #available(iOS 26.0, *) {
+            let sessionID = UUID()
+            activeSessionID = sessionID
+            do {
+                let session = try await ModernSpeechCaptureSession.start(
+                    localeIdentifier: identifier,
+                    onTranscript: { [weak self] updatedTranscript in
+                        guard let self, self.activeSessionID == sessionID else { return }
+                        if updatedTranscript != self.transcript {
+                            self.transcript = updatedTranscript
+                            self.lastTranscriptUpdateAt = Date()
+                        }
+                    },
+                    onLevel: { [weak self] level in
+                        guard let self, self.activeSessionID == sessionID else { return }
+                        self.audioLevel = level
+                    },
+                    onFinished: { [weak self] finalTranscript in
+                        guard let self, self.activeSessionID == sessionID else { return }
+                        self.beginRefinement(with: finalTranscript)
+                    },
+                    onFailure: { [weak self] in
+                        guard let self, self.activeSessionID == sessionID else { return }
+                        if self.phase == .finishing, !self.transcript.isEmpty {
+                            self.beginRefinement(with: self.transcript)
+                        } else {
+                            self.fail("Dictation stopped before Velora received any words. Check the selected language and try again.")
+                        }
+                    }
+                )
+                activeSpeechSession = session
+                phase = .listening
+                prewarmRefinement()
+                return
+            } catch {
+                activeSessionID = nil
+            }
+        }
+
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: identifier)) else {
             fail("Speech recognition is not available for the selected language. Choose another language in Settings.")
+            return
+        }
+        guard VeloraPreferences.recognitionLocale(
+            recognizer.locale,
+            matches: identifier
+        ) else {
+            fail("On-device recognition is not available for the selected language. Choose another language in Velora Settings.")
             return
         }
         guard recognizer.isAvailable else {
@@ -77,12 +134,13 @@ final class SpeechCaptureService {
             return
         }
         guard recognizer.supportsOnDeviceRecognition else {
-            fail("On-device dictation is not ready for this language. Download the language in iPhone Settings or choose another one in Velora.")
+            fail("On-device dictation is unavailable for this language on this iPhone. Check Siri & Dictation settings or choose another language in Velora.")
             return
         }
 
         do {
             try beginRecognition(using: recognizer)
+            prewarmRefinement()
         } catch {
             fail("Velora could not start the microphone. Check that another app is not using it, then try again.")
         }
@@ -92,8 +150,13 @@ final class SpeechCaptureService {
         guard phase == .listening else { return }
         phase = .finishing
         finalizationStartedAt = Date()
-        stopAudioInput(endingRecognition: true)
-        recognitionTask?.finish()
+
+        if let activeSpeechSession {
+            activeSpeechSession.finish()
+        } else {
+            stopAudioInput(endingRecognition: true)
+            recognitionTask?.finish()
+        }
 
         finalizationWatchdogTask?.cancel()
         finalizationWatchdogTask = Task { [weak self] in
@@ -118,7 +181,7 @@ final class SpeechCaptureService {
                 case .wait:
                     continue
                 case .deliverFallback:
-                    self.complete(with: self.transcript)
+                    self.beginRefinement(with: self.transcript)
                     return
                 case .fail:
                     self.fail("Velora did not hear any words. Move closer to the microphone and try again.")
@@ -130,6 +193,9 @@ final class SpeechCaptureService {
 
     func cancel() {
         guard phase == .listening || phase == .finishing else { return }
+        refinementTask?.cancel()
+        refinementTask = nil
+        refinementSessionID = nil
         tearDownSession(cancelRecognition: true)
         transcript = ""
         errorMessage = nil
@@ -137,7 +203,7 @@ final class SpeechCaptureService {
     }
 
     func copyAgain() {
-        let normalized = TranscriptFormatter.normalize(transcript)
+        let normalized = TranscriptFormatter.normalizeStructured(transcript)
         guard !normalized.isEmpty else { return }
         clipboard.write(normalized)
         copiedPulse += 1
@@ -145,6 +211,9 @@ final class SpeechCaptureService {
 
     func reset() {
         guard phase == .copied || phase == .failed else { return }
+        refinementTask?.cancel()
+        refinementTask = nil
+        refinementSessionID = nil
         transcript = ""
         errorMessage = nil
         audioLevel = 0.08
@@ -153,10 +222,7 @@ final class SpeechCaptureService {
 
     private func beginRecognition(using recognizer: SFSpeechRecognizer) throws {
         tearDownSession(cancelRecognition: true)
-
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(.record, mode: .measurement, options: [])
-        try audioSession.setActive(true)
+        try configureAudioSession()
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -196,7 +262,7 @@ final class SpeechCaptureService {
                         self.lastTranscriptUpdateAt = Date()
                     }
                     if result.isFinal {
-                        self.complete(with: self.transcript)
+                        self.beginRefinement(with: self.transcript)
                         return
                     }
                 }
@@ -214,25 +280,60 @@ final class SpeechCaptureService {
         phase = .listening
     }
 
-    private func complete(with rawText: String) {
+    private func beginRefinement(with rawText: String) {
         guard phase == .listening || phase == .finishing else { return }
+        let basic = TranscriptFormatter.normalize(rawText)
         tearDownSession(cancelRecognition: true)
 
-        guard let normalized = TranscriptDelivery.deliver(
-            rawText,
-            to: clipboard,
-            store: store
-        ) else {
+        guard !basic.isEmpty else {
             fail("Velora did not hear any words. Move closer to the microphone and try again.")
             return
         }
 
-        transcript = normalized
-        phase = .copied
-        copiedPulse += 1
+        phase = .finishing
+        let sessionID = UUID()
+        refinementSessionID = sessionID
+        let style = DictationStyle.resolve(
+            UserDefaults.standard.string(forKey: VeloraPreferences.dictationStyleKey)
+        )
+        let localeIdentifier = VeloraPreferences.resolvedSpeechLocaleIdentifier(
+            storedIdentifier: UserDefaults.standard.string(
+                forKey: VeloraPreferences.speechLocaleIdentifierKey
+            )
+        )
+        refinementTask?.cancel()
+        refinementTask = Task { [weak self] in
+            let refined = await TranscriptRefiner.refine(
+                basic,
+                for: style,
+                localeIdentifier: localeIdentifier
+            )
+            guard !Task.isCancelled, let self,
+                  self.phase == .finishing,
+                  self.refinementSessionID == sessionID
+            else { return }
+
+            self.refinementTask = nil
+            self.refinementSessionID = nil
+            guard let normalized = TranscriptDelivery.deliver(
+                refined,
+                to: self.clipboard,
+                store: self.store
+            ) else {
+                self.fail("Velora did not hear any words. Move closer to the microphone and try again.")
+                return
+            }
+
+            self.transcript = normalized
+            self.phase = .copied
+            self.copiedPulse += 1
+        }
     }
 
     private func fail(_ message: String) {
+        refinementTask?.cancel()
+        refinementTask = nil
+        refinementSessionID = nil
         tearDownSession(cancelRecognition: true)
         errorMessage = message
         phase = .failed
@@ -257,6 +358,8 @@ final class SpeechCaptureService {
         finalizationWatchdogTask = nil
         finalizationStartedAt = nil
         lastTranscriptUpdateAt = nil
+        activeSpeechSession?.cancel()
+        activeSpeechSession = nil
         stopAudioInput(endingRecognition: !cancelRecognition)
         if cancelRecognition {
             recognitionTask?.cancel()
@@ -269,6 +372,19 @@ final class SpeechCaptureService {
             false,
             options: [.notifyOthersOnDeactivation]
         )
+    }
+
+    private func configureAudioSession() throws {
+        let audioSession = AVAudioSession.sharedInstance()
+        try audioSession.setCategory(.record, mode: .measurement, options: [])
+        try audioSession.setActive(true)
+    }
+
+    private func prewarmRefinement() {
+        let style = DictationStyle.resolve(
+            UserDefaults.standard.string(forKey: VeloraPreferences.dictationStyleKey)
+        )
+        Task { await TranscriptRefiner.prewarm(for: style) }
     }
 
     private func requestMicrophonePermission() async -> Bool {
@@ -291,7 +407,7 @@ final class SpeechCaptureService {
         }
     }
 
-    nonisolated private static func normalizedLevel(from buffer: AVAudioPCMBuffer) -> Double {
+    nonisolated static func normalizedLevel(from buffer: AVAudioPCMBuffer) -> Double {
         guard let channel = buffer.floatChannelData?.pointee else { return 0.08 }
         let frameCount = Int(buffer.frameLength)
         guard frameCount > 0 else { return 0.08 }

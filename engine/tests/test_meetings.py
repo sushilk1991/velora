@@ -192,7 +192,10 @@ async def test_meeting_resume_without_cached_plan_restarts_track(
         "speaker": "them", "path": str(clip), "start_chunk": 5,
     })
     await client.recv_event("meeting_transcribe_accepted")
-    started = await client.recv_event("meeting_transcribe_started")
+    # Loading and planning a restarted remote track can exceed the generic
+    # five-second protocol timeout under branch-coverage instrumentation.
+    # This assertion is about restart correctness, not startup latency.
+    started = await client.recv_event("meeting_transcribe_started", timeout=15)
     assert started["restarted"] is True
     assert started["start_chunk"] == 0
     segment = await client.recv_event("meeting_segment")

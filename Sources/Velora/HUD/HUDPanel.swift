@@ -69,6 +69,10 @@ final class HUDPanel: NSObject {
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        // The HUD must remain a dark, high-contrast control surface even when
+        // Velora or the app behind it uses a light appearance. Pinning the host
+        // appearance also keeps macOS 26 glass and native controls dark.
+        panel.appearance = NSAppearance(named: .darkAqua)
         panel.hasShadow = false  // the capsule draws its own animated shadow
         // Click-through by default: the panel is far larger than the capsule
         // (animation headroom), and the window server routes every click in

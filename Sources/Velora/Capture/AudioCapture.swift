@@ -1,6 +1,20 @@
 import AVFoundation
 import Foundation
 
+/// Narrow seam around the hardware source so AudioCapture's asynchronous
+/// start/stop ownership can be regression-tested without opening a microphone.
+protocol MicrophoneStreamCapturing: AnyObject {
+    func start(
+        persistedUID: String?,
+        onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+        onFailure: @escaping (String) -> Void,
+        completion: @escaping (Result<Void, Error>) -> Void
+    )
+    func stop(completion: @escaping () -> Void)
+}
+
+extension MicrophoneStreamCapture: MicrophoneStreamCapturing {}
+
 /// Microphone capture: a directly selected AVCaptureDevice converted to 16 kHz mono
 /// Float32, delivered as ~100 ms chunks (1600 samples / 6400 bytes) for the
 /// engine, plus normalized RMS levels for the HUD waveform.
@@ -13,9 +27,13 @@ final class AudioCapture {
     /// ~100 ms at 16 kHz.
     private static let chunkFrames = 1600
 
-    private let source = MicrophoneStreamCapture()
+    private let source: any MicrophoneStreamCapturing
     private(set) var isRunning = false
     private var isStarting = false
+    /// Identifies the start that owns the handlers currently installed below.
+    /// A stale stop completion must never tear down a newer recording.
+    private var generation: UInt64 = 0
+    private let generationLock = NSLock()
     private var converter: AVAudioConverter?
     private var converterInputFormat: AVAudioFormat?
 
@@ -39,6 +57,10 @@ final class AudioCapture {
     private var spectrumBuffer: [Float] = []
     private var sinceLastSpectrum = 0
 
+    init(source: any MicrophoneStreamCapturing = MicrophoneStreamCapture()) {
+        self.source = source
+    }
+
     /// Starts capture. `onChunk` receives raw Float32 LE PCM (~100 ms each);
     /// `onLevel` receives a frequency spectrum (0…1 per band, main queue) for
     /// the HUD waveform, roughly every 32 ms.
@@ -51,6 +73,7 @@ final class AudioCapture {
             DispatchQueue.main.async { completion(.success(())) }
             return
         }
+        let requestedGeneration = nextGeneration()
         isStarting = true
 
         bufferQueue.sync {
@@ -62,10 +85,17 @@ final class AudioCapture {
         }
         source.start(
             persistedUID: AppConfig.shared.inputDeviceUID,
-            onBuffer: { [weak self] buffer in self?.convertAndAccumulate(buffer) },
-            onFailure: { [weak self] message in self?.onDeviceLost?(message) }
+            onBuffer: { [weak self] buffer in
+                self?.convertAndAccumulate(buffer, generation: requestedGeneration)
+            },
+            onFailure: { [weak self] message in
+                guard let self, self.isCurrentGeneration(requestedGeneration) else { return }
+                self.onDeviceLost?(message)
+            }
         ) { [weak self] result in
-            guard let self, self.isStarting else { return }
+            guard let self,
+                  self.isCurrentGeneration(requestedGeneration),
+                  self.isStarting else { return }
             self.isStarting = false
             switch result {
             case .success:
@@ -90,8 +120,16 @@ final class AudioCapture {
         }
         isRunning = false
         isStarting = false
+        let stoppedGeneration = currentGeneration()
         source.stop { [weak self] in
             guard let self else { completion(); return }
+            // Starting again is allowed before AVCaptureSession finishes its
+            // blocking teardown. In that case this is an old completion: the
+            // new session owns the converter, buffers, and callbacks.
+            guard self.isCurrentGeneration(stoppedGeneration) else {
+                completion()
+                return
+            }
             self.converter = nil
             self.converterInputFormat = nil
             self.bufferQueue.sync {
@@ -119,7 +157,10 @@ final class AudioCapture {
 
     /// Converts on AVCapture's serial sample queue, then copies Float32 data
     /// before handing it to Velora's existing accumulation queue.
-    private func convertAndAccumulate(_ buffer: AVAudioPCMBuffer) {
+    private func convertAndAccumulate(
+        _ buffer: AVAudioPCMBuffer, generation requestedGeneration: UInt64
+    ) {
+        guard isCurrentGeneration(requestedGeneration) else { return }
         guard let outFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Self.sampleRate, channels: 1, interleaved: false)
@@ -154,7 +195,29 @@ final class AudioCapture {
         guard conversionError == nil,
               let channel = out.floatChannelData?[0], out.frameLength > 0 else { return }
         let samples = Array(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
-        bufferQueue.async { [weak self] in self?.accumulate(samples) }
+        bufferQueue.async { [weak self] in
+            guard let self, self.isCurrentGeneration(requestedGeneration) else { return }
+            self.accumulate(samples)
+        }
+    }
+
+    private func nextGeneration() -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        generation &+= 1
+        return generation
+    }
+
+    private func currentGeneration() -> UInt64 {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return generation
+    }
+
+    private func isCurrentGeneration(_ value: UInt64) -> Bool {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return generation == value
     }
 
     // MARK: - Buffer accumulation (bufferQueue only)

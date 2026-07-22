@@ -21,7 +21,7 @@ enum TranscriptDelivery {
         to clipboard: ClipboardWriting,
         store: TranscriptStore
     ) -> String? {
-        let normalized = TranscriptFormatter.normalize(rawText)
+        let normalized = TranscriptFormatter.normalizeStructured(rawText)
         guard !normalized.isEmpty else { return nil }
         clipboard.write(normalized)
         _ = store.add(normalized)

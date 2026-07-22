@@ -40,13 +40,31 @@ final class TranscriptDeliveryTests: XCTestCase {
     }
 
     func testAppShortcutHandoffIsConsumedExactlyOnce() {
-        let router = CaptureLaunchRouter.shared
-        _ = router.consumePendingCapture()
+        let suiteName = "TranscriptDeliveryTests.Router.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("Could not create isolated user defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let router = CaptureLaunchRouter(defaults: defaults)
 
         router.requestCapture()
 
         XCTAssertTrue(router.consumePendingCapture())
         XCTAssertFalse(router.consumePendingCapture())
+    }
+
+    func testAppShortcutHandoffSurvivesColdLaunch() {
+        let suiteName = "TranscriptDeliveryTests.ColdLaunch.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suiteName) else {
+            return XCTFail("Could not create isolated user defaults")
+        }
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        CaptureLaunchRouter(defaults: defaults).requestCapture()
+        let relaunched = CaptureLaunchRouter(defaults: defaults)
+
+        XCTAssertTrue(relaunched.consumePendingCapture())
+        XCTAssertFalse(relaunched.consumePendingCapture())
     }
 }
 

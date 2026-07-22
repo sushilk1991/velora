@@ -17,7 +17,7 @@ final class TranscriptStore {
 
     @discardableResult
     func add(_ text: String) -> TranscriptEntry? {
-        let normalized = TranscriptFormatter.normalize(text)
+        let normalized = TranscriptFormatter.normalizeStructured(text)
         guard !normalized.isEmpty else { return nil }
 
         let entry = TranscriptEntry(text: normalized)

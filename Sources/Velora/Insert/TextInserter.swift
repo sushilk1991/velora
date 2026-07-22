@@ -6,7 +6,7 @@ import Foundation
 /// Inserts dictated text into the frontmost app.
 ///
 /// Default strategy: snapshot the pasteboard (all items, all representations),
-/// set the text, synthesize ⌘V, then restore the snapshot after 300 ms.
+/// set the text, synthesize ⌘V, then restore the snapshot after 800 ms.
 /// Fallback strategy: CGEvent unicode typing (chunked ≤ 20 UTF-16 units per
 /// event) for apps that block programmatic paste — used automatically for
 /// terminal-like apps (`AppConfig.typingFallbackApps`).
@@ -149,10 +149,10 @@ final class TextInserter {
 
     // MARK: - Pasteboard + ⌘V
 
-    /// Makes a final result available for manual paste before any best-effort
-    /// insertion is attempted. This write is intentionally persistent: the
-    /// synthesized Command-V path snapshots this item and therefore restores
-    /// the final dictation, not the user's older clipboard contents.
+    /// Makes a final result persistently available for manual paste. Normal
+    /// successful insertion does not call this: its temporary pasteboard write
+    /// restores the user's prior clipboard. This is the explicit fallback for
+    /// blocked/interrupted insertion and copy-only actions.
     func stageFinalOutput(_ text: String) {
         let changeCount = writeDictation(text, to: pasteboard)
         NSLog(
@@ -193,16 +193,7 @@ final class TextInserter {
         let pasteboard = self.pasteboard
         let changeCountBefore = pasteboard.changeCount
 
-        // Snapshot every item with every representation it carries.
-        let saved: [NSPasteboardItem] = (pasteboard.pasteboardItems ?? []).map { item in
-            let copy = NSPasteboardItem()
-            for type in item.types {
-                if let data = item.data(forType: type) {
-                    copy.setData(data, forType: type)
-                }
-            }
-            return copy
-        }
+        let saved = Self.snapshotItems(from: pasteboard)
 
         let ourChangeCount = writeDictation(text, to: pasteboard)
         NSLog(
@@ -217,9 +208,7 @@ final class TextInserter {
                   targetBundleID: targetBundleID, targetElement: targetElement),
               postCommandV()
         else {
-            guard pasteboard.changeCount == ourChangeCount else { return false }
-            pasteboard.clearContents()
-            if !saved.isEmpty { pasteboard.writeObjects(saved) }
+            _ = Self.restore(saved, to: pasteboard, ifUnchanged: ourChangeCount)
             NSLog("Velora: paste aborted before Command-V — clipboard restored")
             return false
         }
@@ -228,12 +217,35 @@ final class TextInserter {
             // Only restore if the pasteboard still holds our write. If the
             // user (or anything else) wrote to it during the window, restoring
             // would clobber their copy — skip entirely.
-            guard pasteboard.changeCount == ourChangeCount else { return }
-            pasteboard.clearContents()
-            if !saved.isEmpty {
-                pasteboard.writeObjects(saved)
-            }
+            _ = Self.restore(saved, to: pasteboard, ifUnchanged: ourChangeCount)
         }
+        return true
+    }
+
+    /// Copies all pasteboard items and representations. Kept internal so the
+    /// preservation contract can be tested with an isolated named pasteboard.
+    static func snapshotItems(from pasteboard: NSPasteboard) -> [NSPasteboardItem] {
+        (pasteboard.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    copy.setData(data, forType: type)
+                }
+            }
+            return copy
+        }
+    }
+
+    /// Restores only if the pasteboard still contains Velora's temporary
+    /// write. A user copy during the paste window always wins.
+    @discardableResult
+    static func restore(
+        _ items: [NSPasteboardItem], to pasteboard: NSPasteboard,
+        ifUnchanged expectedChangeCount: Int
+    ) -> Bool {
+        guard pasteboard.changeCount == expectedChangeCount else { return false }
+        pasteboard.clearContents()
+        if !items.isEmpty { pasteboard.writeObjects(items) }
         return true
     }
 

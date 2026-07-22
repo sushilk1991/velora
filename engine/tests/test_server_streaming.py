@@ -3,6 +3,8 @@ FakeBackend segment mode + a fake cleanup engine — partials per segment,
 concurrent chunk cleanup, stitched finalize, retraction merge, cancel, and the
 exact legacy behavior when streaming_cleanup is off."""
 
+# ruff: noqa: F811
+
 import asyncio
 
 import pytest

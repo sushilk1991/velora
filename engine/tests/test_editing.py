@@ -1,5 +1,7 @@
 """Safe Voice Edit: the edit_text command, its guards, and the echo backstop."""
 
+# ruff: noqa: F811
+
 from types import SimpleNamespace
 
 from test_server import connect, engine  # noqa: F401 — fixture reuse

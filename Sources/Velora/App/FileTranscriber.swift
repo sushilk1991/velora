@@ -168,6 +168,20 @@ final class FileTranscriber {
         cancel()
     }
 
+    /// Disabling local-agent access is an immediate capability revocation.
+    /// Complete locally because the engine's cancel acknowledgement may never
+    /// arrive during a reconnect window.
+    func revokeAgentAccess() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard agentRequestID != nil else { return }
+        let completion = agentCompletion
+        if let jobID {
+            supervisor.send(["cmd": "transcribe_cancel", "id": jobID])
+        }
+        reset()
+        completion?(.failure(.cancelled))
+    }
+
     /// Cancels and locally completes an in-flight job without waiting for an
     /// engine event that may never arrive during process teardown. Late events
     /// are ignored because reset clears the exact job id before completion.

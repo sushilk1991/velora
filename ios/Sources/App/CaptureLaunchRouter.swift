@@ -13,7 +13,7 @@ final class CaptureLaunchRouter {
 
     private(set) var requestID = UUID()
 
-    private init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
     }
 

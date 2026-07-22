@@ -4,8 +4,9 @@ Brief description of the change and its motivation. Link related issues.
 
 ## How it was tested
 
-- [ ] `cd engine && uv run pytest -q` passes
-- [ ] `swift build` passes
+- [ ] `make test` passes
+- [ ] `make test-coverage` passes for engine changes
+- [ ] `make test-ios` passes for iPhone changes
 - [ ] TCC-gated changes (mic/hotkeys/insertion) verified via `make app` + `build/Velora.app`
 - [ ] Latency-sensitive changes: `scripts/engine-smoke.py` numbers included below
 

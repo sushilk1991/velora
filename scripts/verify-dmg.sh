@@ -67,6 +67,29 @@ fi
 security cms -D -i "$EMBEDDED_PROFILE" > "$PROFILE_PLIST" 2>/dev/null
 validate_signing_plists "$ENTITLEMENTS_FILE" "$PROFILE_PLIST" "$APP/Contents/Info.plist"
 
+echo "Verifying bundled offline runtime and command surfaces..."
+UV="$APP/Contents/Resources/bin/uv"
+CLI="$APP/Contents/Resources/bin/velora"
+ENGINE="$APP/Contents/Resources/engine"
+test -x "$UV"
+test -x "$CLI"
+test -f "$ENGINE/pyproject.toml"
+test -f "$ENGINE/uv.lock"
+test -s "$ENGINE/.velora-build"
+test -f "$ENGINE/src/velora_engine/server.py"
+codesign --verify --strict --verbose=2 "$UV"
+"$UV" --version >/dev/null
+"$CLI" --help >/dev/null
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+  "$APP/Contents/Info.plist")"
+MCP_METADATA="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  | "$CLI" mcp)"
+if [[ "$MCP_METADATA" != *'"version":"'"$APP_VERSION"'"'* ]]; then
+  echo "bundled MCP version does not match app version $APP_VERSION" >&2
+  exit 1
+fi
+
 spctl --assess --type execute --verbose=2 "$APP"
 
-echo "OK: $DMG is provisioned for iCloud, Developer ID-signed, notarized, stapled, and Gatekeeper-approved"
+echo "OK: $DMG is complete, provisioned for iCloud, Developer ID-signed, notarized, stapled, and Gatekeeper-approved"

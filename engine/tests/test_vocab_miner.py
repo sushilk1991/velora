@@ -2,7 +2,6 @@
 nominations, ≥2-dictation promotion, checkpointing, banned-term handling
 (including a concurrent app-side ban mid-step), caps, and the server hooks."""
 
-import asyncio
 import json
 import sqlite3
 from pathlib import Path

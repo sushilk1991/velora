@@ -46,6 +46,16 @@ uv run pytest -q       # fast tests, no models needed (fake STT backend)
 uv run velora-engine   # start the engine standalone (downloads/warm-loads models)
 ```
 
+### Test gates
+
+```sh
+make test             # Mac, engine, site, and release-script checks
+make test-coverage    # Python branch coverage; minimum 80%
+make perf-test        # 100,000-row history performance check
+make test-live-audio  # real microphone/system-audio checks; requires TCC grants
+make test-ios         # iPhone unit tests; requires Xcode and a simulator
+```
+
 ### End-to-end smoke test
 
 Streams a real WAV over the socket to a running engine and prints transcript/final events with latencies (uses real models, so first run downloads ~4.4 GB):
@@ -93,9 +103,11 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing the wire proto
 
 ## Tests
 
-- `cd engine && uv run pytest -q` must pass. The suite (41 tests) runs in seconds with no model downloads, using the fake STT backend (`VELORA_FAKE_STT=1`).
+- `make test` must pass. Engine tests use the fake STT backend and do not download models.
+- Use the scenario checklist in [docs/TESTING.md](docs/TESTING.md) to select the required hardware and permission gates.
 - New engine behavior needs tests: formatting/gating logic in `test_formatting.py`, protocol changes in `test_framing.py` / `test_server.py`, cleanup guards in `test_divergence.py`.
-- Swift: XCTest is unavailable without Xcode; UI/permission paths are verified manually through the `.app` bundle and the onboarding try-it step. Describe your manual verification in the PR.
+- Deterministic Mac behavior belongs in the embedded Swift self-test. Permission-gated capture, hotkey, and insertion paths still require the signed `.app` and must be described in the PR.
+- iPhone changes must run `make test-ios`; the scheme collects code coverage.
 - Latency-sensitive changes (STT, cleanup, protocol): include smoke-script output showing stop→transcript and stop→final numbers before/after.
 
 ## Pull requests

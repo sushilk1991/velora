@@ -11,6 +11,34 @@ enum MeetingProcessingHUDPolicy {
     }
 }
 
+/// Owns the live revocation edge separately from the settings window. Keeping
+/// this tiny observer injectable makes the security boundary deterministic to
+/// test without constructing the full application graph.
+final class LocalAgentAccessRevocationObserver {
+    private let center: NotificationCenter
+    private var token: NSObjectProtocol?
+
+    init(
+        center: NotificationCenter = .default,
+        onRevoke: @escaping () -> Void
+    ) {
+        self.center = center
+        token = center.addObserver(
+            forName: .veloraLocalAgentAccessChanged, object: nil, queue: .main
+        ) { notification in
+            guard notification.object as? Bool == false else { return }
+            onRevoke()
+        }
+    }
+
+    func stop() {
+        if let token { center.removeObserver(token) }
+        token = nil
+    }
+
+    deinit { stop() }
+}
+
 /// Composition root: builds every module, wires delegates, and owns app
 /// lifecycle (engine supervision, onboarding on first launch, teardown).
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
@@ -37,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var accessibilityObserver: NSObjectProtocol?
     private var loadingObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
+    private var localAgentAccessObserver: LocalAgentAccessRevocationObserver?
     private var meetingHUDActive = false
     private var meetingEndOutcome: MeetingCoordinator.RecordingEndOutcome?
     private var meetingProcessingHUDActive = false
@@ -216,6 +245,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                             code: "app_unavailable", message: "Velora is shutting down")))
                         return
                     }
+                    guard self.config.localAgentAccess else {
+                        completion(.failure(.disabled))
+                        return
+                    }
                     guard let path = arguments["path"] as? String else {
                         completion(.failure(ControlFailure(
                             code: "invalid_file", message: "The audio path is invalid")))
@@ -264,6 +297,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                             code: "app_unavailable", message: "Velora is shutting down")))
                         return
                     }
+                    guard self.config.localAgentAccess else {
+                        completion(.failure(.disabled))
+                        return
+                    }
                     self.dictation.requestExternalDictation(
                         mode: arguments["mode"] as? String,
                         requestID: requestID
@@ -298,6 +335,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             })
         let controlServer = LocalControlServer(router: controlRouter)
         if controlServer.start() { self.controlServer = controlServer }
+
+        localAgentAccessObserver = LocalAgentAccessRevocationObserver { [weak self] in
+            self?.dictation.revokeExternalAccess()
+            self?.transcriber.revokeAgentAccess()
+        }
 
         supervisor.delegate = self
         dictation.delegate = self
@@ -467,6 +509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if let hudPrefsObserver {
             NotificationCenter.default.removeObserver(hudPrefsObserver)
         }
+        localAgentAccessObserver?.stop()
     }
 
     // MARK: - Windows

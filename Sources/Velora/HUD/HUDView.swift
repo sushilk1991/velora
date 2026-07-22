@@ -6,7 +6,8 @@ import SwiftUI
 struct HUDView: View {
     @ObservedObject var model: HUDModel
 
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     @State private var width: CGFloat
     @State private var height: CGFloat
@@ -131,29 +132,19 @@ struct HUDView: View {
     @ViewBuilder private var background: some View {
         if #available(macOS 26.0, *) {
             Color.clear.glassEffect(.regular, in: Capsule())
-            Capsule().fill(
-                colorScheme == .dark
-                    ? Color.black.opacity(0.18)
-                    : Color.white.opacity(0.12))
         } else {
             Capsule().fill(.ultraThinMaterial)
-            Capsule().fill(
-                colorScheme == .dark
-                    ? Color.black.opacity(0.30)
-                    : Color.white.opacity(0.25))
         }
-        // Hover highlight: a whisper of extra light (never a size change).
-        Capsule().fill(
-            colorScheme == .dark
-                ? Color.white.opacity(hovering ? 0.08 : 0)
-                : Color.black.opacity(hovering ? 0.05 : 0))
+        // A HUD is a control surface, not ambient content. Keep one stable,
+        // dark contrast contract regardless of the app underneath it.
+        Capsule().fill(Color.black.opacity(reduceTransparency ? 0.96 : 0.72))
+        Capsule().fill(VeloraBrand.indigo.color.opacity(0.16))
+        Capsule().fill(Color.white.opacity(hovering ? 0.07 : 0))
     }
 
     private var border: some View {
         Capsule().strokeBorder(
-            colorScheme == .dark
-                ? Color.white.opacity(hovering ? 0.30 : 0.15)
-                : Color.black.opacity(hovering ? 0.18 : 0.08),
+            Color.white.opacity(hovering ? 0.34 : 0.20),
             lineWidth: 1)
     }
 
@@ -206,7 +197,7 @@ struct HUDView: View {
             .foregroundStyle(
                 hovering && isStandby
                     ? AnyShapeStyle(VeloraBrand.iconGradient)
-                    : AnyShapeStyle(.secondary))
+                    : AnyShapeStyle(hudSecondaryText))
     }
 
     // MARK: - Listening and transcribing
@@ -251,6 +242,7 @@ struct HUDView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(meetingValue?.title ?? "Meeting")
                     .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(hudPrimaryText)
                     .lineLimit(1)
                 if meetingValue?.systemAudio == false {
                     Text("Mic only")
@@ -302,7 +294,7 @@ struct HUDView: View {
                 }
                 Text(context.modeName)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(hudSecondaryText)
                     .lineLimit(1)
                     .fixedSize()
             }
@@ -324,7 +316,7 @@ struct HUDView: View {
     private func timerLabel(at date: Date) -> some View {
         Text(elapsedString(at: date))
             .font(.system(size: 12, weight: .medium).monospacedDigit())
-            .foregroundStyle(.secondary)
+            .foregroundStyle(hudSecondaryText)
     }
 
     private func elapsedString(at date: Date) -> String {
@@ -338,7 +330,7 @@ struct HUDView: View {
     private var checkmark: some View {
         Image(systemName: "checkmark")
             .font(.system(size: 17, weight: .semibold))
-            .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+            .foregroundStyle(hudPrimaryText)
             .symbolEffect(.bounce, value: showCheck)
             .opacity(showCheck ? 1 : 0)
             .scaleEffect(showCheck ? 1 : 0.5)
@@ -359,7 +351,7 @@ struct HUDView: View {
             Text(errorMessage)
                 .font(.system(size: 12, weight: .medium))
                 .lineLimit(1)
-                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .foregroundStyle(hudPrimaryText)
             Spacer(minLength: 0)
             Button(model.retryTitle) { model.onRetry?() }
                 .buttonStyle(.borderless)
@@ -388,18 +380,18 @@ struct HUDView: View {
             Text(pair.wrong)
                 .font(.system(size: 12, weight: .medium))
                 .strikethrough(true, color: Color(nsColor: .systemRed).opacity(0.85))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(hudSecondaryText)
                 .lineLimit(1)
             Image(systemName: "arrow.right")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(hudSecondaryText)
             Text(pair.right)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .foregroundStyle(hudPrimaryText)
                 .lineLimit(1)
             Text("· Learned")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(hudSecondaryText)
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
@@ -426,7 +418,7 @@ struct HUDView: View {
                 .symbolEffect(.bounce, value: isNotice)
             Text(parts.message)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(colorScheme == .dark ? Color.white : Color.black)
+                .foregroundStyle(hudPrimaryText)
                 .lineLimit(1)
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
@@ -484,6 +476,14 @@ struct HUDView: View {
         default:
             return 0
         }
+    }
+
+    private var hudPrimaryText: Color {
+        Color.white.opacity(colorSchemeContrast == .increased ? 1 : 0.96)
+    }
+
+    private var hudSecondaryText: Color {
+        Color.white.opacity(colorSchemeContrast == .increased ? 0.92 : 0.76)
     }
 
     private var desiredListeningWidth: CGFloat {

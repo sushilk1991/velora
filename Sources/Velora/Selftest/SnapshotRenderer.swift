@@ -49,7 +49,18 @@ enum SnapshotRenderer {
             if case .meeting = state {
                 model.recordingStart = Date(timeIntervalSinceNow: -372)
             }
-            let view = NSHostingView(rootView: HUDView(model: model))
+            // Force the exact light-appearance case that previously washed the
+            // glass HUD out over pale Terminal and browser backgrounds.
+            let view = NSHostingView(
+                rootView: ZStack {
+                    // Simulate the pale Terminal/browser surface from the
+                    // reported regression; a transparent offscreen window can
+                    // otherwise render black on a dark-system Mac.
+                    Color(red: 0.95, green: 0.94, blue: 0.91)
+                    HUDView(model: model)
+                }
+                .environment(\.colorScheme, .light)
+            )
             snapshot(view, size: HUDPanel.panelSize, name: name, dir: dir)
         }
     }

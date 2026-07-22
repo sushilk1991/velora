@@ -221,3 +221,12 @@ embed_provisioning_profile() {
   cp "$raw_profile" "$app/Contents/embedded.provisionprofile" || return 1
   chmod 644 "$app/Contents/embedded.provisionprofile" || return 1
 }
+
+require_bundle_uv() {
+  local distribution="$1"
+  local uv_path="$2"
+  if [[ "$distribution" == "1" && ! -x "$uv_path" ]]; then
+    signing_error "distribution builds require an executable uv on PATH for the self-contained engine"
+    return 1
+  fi
+}

@@ -88,6 +88,7 @@ enum Selftest {
         testShareCardPrivacy()
         testControlProtocol()
         testControlRouter()
+        testLocalAgentAccessRevocationSignal()
         testCLIParsing()
         testMCPProtocol()
         testLocalControlSocket()
@@ -96,6 +97,7 @@ enum Selftest {
         testSettingsSidebar()
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
+        testAudioCaptureRapidRestart()
         testMediaPlaybackNoop()
         testMediaPlaybackUnknownStateFailsClosed()
         testMediaPlaybackPauseResume()
@@ -285,11 +287,16 @@ enum Selftest {
         let staged = sandbox.appendingPathComponent("staged.app")
         let deadPID = "999999999"
 
-        func runHelper(stagedPath: String) -> Int32 {
+        func runHelper(stagedPath: String, pathPrefix: String? = nil) -> Int32 {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/sh")
             proc.arguments = [scriptFile.path, deadPID, stagedPath, target.path,
                               "0", log.path, ""]
+            if let pathPrefix {
+                var environment = ProcessInfo.processInfo.environment
+                environment["PATH"] = pathPrefix + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
+                proc.environment = environment
+            }
             do { try proc.run() } catch { return -1 }
             proc.waitUntilExit()
             return proc.terminationStatus
@@ -316,11 +323,40 @@ enum Selftest {
         expect(marker(target) == "new", "helper installed the staged app")
         expect(!fm.fileExists(atPath: staged.path), "helper cleans up the staging copy")
 
-        // Failure path: the staged app is gone → the old app must survive.
-        try? "old".write(to: target.appendingPathComponent("marker"),
-                         atomically: true, encoding: .utf8)
-        expect(runHelper(stagedPath: staged.path) != 0, "helper fails on a missing staged app")
-        expect(marker(target) == "old", "old app is intact after a failed swap")
+        // Real rollback path: first rename succeeds, installing the new app
+        // fails, and the third rename must put the old app back. A PATH-local
+        // mv shim deterministically fails only the second invocation.
+        let shimDirectory = sandbox.appendingPathComponent("shim")
+        let mvShim = shimDirectory.appendingPathComponent("mv")
+        let mvCount = sandbox.appendingPathComponent("mv-count")
+        do {
+            try fm.createDirectory(at: staged, withIntermediateDirectories: true)
+            try "newer".write(to: staged.appendingPathComponent("marker"),
+                              atomically: true, encoding: .utf8)
+            try "old".write(to: target.appendingPathComponent("marker"),
+                            atomically: true, encoding: .utf8)
+            try fm.createDirectory(at: shimDirectory, withIntermediateDirectories: true)
+            let shim = """
+            #!/bin/sh
+            COUNT=0
+            [ ! -f "\(mvCount.path)" ] || COUNT="$(cat "\(mvCount.path)")"
+            COUNT=$((COUNT + 1))
+            echo "$COUNT" > "\(mvCount.path)"
+            [ "$COUNT" -ne 2 ] || exit 1
+            exec /bin/mv "$@"
+            """
+            try shim.write(to: mvShim, atomically: true, encoding: .utf8)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mvShim.path)
+        } catch {
+            expect(false, "helper rollback sandbox setup failed: \(error)")
+            return
+        }
+        expect(runHelper(stagedPath: staged.path, pathPrefix: shimDirectory.path) != 0,
+               "helper reports a failed new-app rename")
+        expect(marker(target) == "old",
+               "helper restores the old app after the swap itself fails")
+        expect(marker(staged) == "newer",
+               "failed swap retains the downloaded update for diagnosis or retry")
     }
 
     // MARK: - Portable settings
@@ -2922,6 +2958,22 @@ enum Selftest {
 
     // MARK: - Local CLI / MCP control plane
 
+    private static func testLocalAgentAccessRevocationSignal() {
+        let center = NotificationCenter()
+        var revocations = 0
+        let observer = LocalAgentAccessRevocationObserver(center: center) {
+            revocations += 1
+        }
+
+        center.post(name: .veloraLocalAgentAccessChanged, object: true)
+        expect(revocations == 0, "enabling local-agent access does not cancel work")
+        center.post(name: .veloraLocalAgentAccessChanged, object: false)
+        expect(revocations == 1, "disabling local-agent access revokes active capability")
+        observer.stop()
+        center.post(name: .veloraLocalAgentAccessChanged, object: false)
+        expect(revocations == 1, "stopped revocation observer receives no late events")
+    }
+
     private static func testControlProtocol() {
         let valid: [String: Any] = [
             "version": 1, "id": "request-1", "command": "recent",
@@ -3938,6 +3990,78 @@ enum Selftest {
 
     // MARK: - Dictation media pause/resume
 
+    private final class FakeMicrophoneSource: MicrophoneStreamCapturing {
+        struct StartCall {
+            let onBuffer: (AVAudioPCMBuffer) -> Void
+            let onFailure: (String) -> Void
+            let completion: (Result<Void, Error>) -> Void
+        }
+
+        var starts: [StartCall] = []
+        var stops: [() -> Void] = []
+
+        func start(
+            persistedUID: String?,
+            onBuffer: @escaping (AVAudioPCMBuffer) -> Void,
+            onFailure: @escaping (String) -> Void,
+            completion: @escaping (Result<Void, Error>) -> Void
+        ) {
+            starts.append(.init(
+                onBuffer: onBuffer, onFailure: onFailure, completion: completion))
+        }
+
+        func stop(completion: @escaping () -> Void) {
+            stops.append(completion)
+        }
+    }
+
+    private static func testAudioCaptureRapidRestart() {
+        let source = FakeMicrophoneSource()
+        let capture = AudioCapture(source: source)
+        var firstStarted = false
+        var firstStopped = false
+        var secondStarted = false
+        var secondBytes = 0
+
+        capture.start(
+            onChunk: { _ in }, onLevel: { _ in },
+            completion: { result in
+                if case .success = result { firstStarted = true }
+            })
+        source.starts[0].completion(.success(()))
+        expect(firstStarted && capture.isRunning, "first microphone session starts")
+
+        capture.stop { firstStopped = true }
+        capture.start(
+            onChunk: { secondBytes += $0.count }, onLevel: { _ in },
+            completion: { result in
+                if case .success = result { secondStarted = true }
+            })
+        expect(source.starts.count == 2 && source.stops.count == 1,
+               "a new microphone session may begin while old teardown is pending")
+
+        // AVCapture stopRunning can take long enough for this completion to
+        // arrive after the new start has installed its handlers.
+        source.stops[0]()
+        source.starts[1].completion(.success(()))
+        expect(firstStopped && secondStarted && capture.isRunning,
+               "a stale stop completion does not stop the newer session")
+
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
+            channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        buffer.frameLength = 1600
+        for index in 0..<1600 { buffer.floatChannelData![0][index] = 0.1 }
+        source.starts[1].onBuffer(buffer)
+        _ = waitUntil { secondBytes > 0 }
+        expect(secondBytes == 1600 * MemoryLayout<Float>.size,
+               "new microphone handlers still receive PCM after stale teardown")
+
+        capture.stop()
+        source.stops[1]()
+    }
+
     private static func testMediaPlaybackNoop() {
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
@@ -4498,6 +4622,31 @@ enum Selftest {
         expect(
             pasteboard.string(forType: .string) == "A final sentence.",
             "final output remains available for manual paste")
+
+        let customType = NSPasteboard.PasteboardType("com.velora.selftest.custom")
+        let original = NSPasteboardItem()
+        original.setString("Original clipboard", forType: .string)
+        original.setData(Data([0, 1, 2, 255]), forType: customType)
+        pasteboard.clearContents()
+        pasteboard.writeObjects([original])
+        let saved = TextInserter.snapshotItems(from: pasteboard)
+        inserter.stageFinalOutput("Temporary dictation")
+        let dictationChange = pasteboard.changeCount
+        expect(
+            TextInserter.restore(saved, to: pasteboard, ifUnchanged: dictationChange)
+                && pasteboard.string(forType: .string) == "Original clipboard"
+                && pasteboard.data(forType: customType) == Data([0, 1, 2, 255]),
+            "successful paste restoration preserves every clipboard representation")
+
+        let savedAgain = TextInserter.snapshotItems(from: pasteboard)
+        inserter.stageFinalOutput("Another temporary dictation")
+        let staleChange = pasteboard.changeCount
+        pasteboard.clearContents()
+        pasteboard.setString("User copied this", forType: .string)
+        expect(
+            !TextInserter.restore(savedAgain, to: pasteboard, ifUnchanged: staleChange)
+                && pasteboard.string(forType: .string) == "User copied this",
+            "clipboard restoration never overwrites a newer user copy")
         pasteboard.clearContents()
     }
 }

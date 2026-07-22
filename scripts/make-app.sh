@@ -31,6 +31,11 @@ CONFIG="${1:-release}"
 # major for big releases, none to leave VERSION untouched (throwaway dev builds).
 BUMP="${2:-patch}"
 
+# A public bundle must bootstrap its private engine on a clean Mac. Resolve
+# this before version stamping so a missing packaging dependency fails closed.
+UV_BIN="$(command -v uv || true)"
+require_bundle_uv "${VELORA_DISTRIBUTION:-0}" "$UV_BIN"
+
 # Resolve and validate distribution credentials before bumping the version or
 # doing an expensive build, so missing/mismatched provisioning cannot leave
 # release metadata in a half-finished state.
@@ -148,7 +153,6 @@ printf '%s %s\n' "$GIT_REV" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$BUNDLED_ENGINE/
 
 # Bundle uv (self-contained static binary; arm64-only app) so the engine can
 # bootstrap on machines without uv installed.
-UV_BIN="$(command -v uv || true)"
 mkdir -p "$APP/Contents/Resources/bin"
 # Default macOS volumes are case-insensitive, so `Velora` and `velora` cannot
 # coexist in Contents/MacOS. Keep the lowercase CLI in Resources/bin and point
@@ -158,7 +162,7 @@ if [[ -n "$UV_BIN" ]]; then
   cp "$UV_BIN" "$APP/Contents/Resources/bin/uv"
   chmod 755 "$APP/Contents/Resources/bin/uv"
 else
-  echo "WARNING: uv not found on PATH — bundle will not be self-contained (app falls back to a system uv)"
+  echo "WARNING: uv not found on PATH — development bundle will use a system uv"
 fi
 
 printf 'APPL????' > "$APP/Contents/PkgInfo"

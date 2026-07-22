@@ -328,6 +328,26 @@ final class DictationController: NSObject {
         if externalRequest?.requestID == requestID { cancel() }
     }
 
+    /// Revokes the capability itself, not just a socket request. Normal
+    /// user-started dictation is left alone; pending consent and an approved
+    /// agent-owned microphone session are cancelled immediately.
+    func revokeExternalAccess() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let approval = externalApproval {
+            externalApproval = nil
+            approval.completion(.failure(.cancelled))
+            VisibleAlert.dismiss(approval.alertToken)
+        }
+        if externalRequest != nil {
+            if phase != .idle {
+                cancel()
+            } else if let request = externalRequest {
+                externalRequest = nil
+                request.completion(.failure(.cancelled))
+            }
+        }
+    }
+
     /// Completes every app-owned or broker-owned dictation before teardown.
     /// Pending consent is completed immediately; dismissing its alert cannot
     /// start capture because the approval state and lifecycle gate are cleared
@@ -1254,13 +1274,6 @@ final class DictationController: NSObject {
             return
         }
 
-        // Clipboard delivery is the invariant; synthetic paste/typing is only
-        // the convenience layer. Staging here covers own-window, paste,
-        // typing, permission, secure-input, and focus-change paths while whole
-        // utterance voice commands above remain commands rather than copied
-        // prose.
-        inserter.stageFinalOutput(text)
-
         // Own-window insertion (onboarding try-it): the TextEditor lives inside
         // Velora's own window. AppContextTracker deliberately ignores Velora's
         // own activations, so `context.bundleID` is some *other* app while the
@@ -1309,6 +1322,7 @@ final class DictationController: NSObject {
 
         if let fallbackMessage {
             NSLog("Velora: insert fallback session=%@ — %@", sessionID, fallbackMessage)
+            inserter.stageFinalOutput(text)
             errorRetryAction = nil
             hud.model.retryTitle = "Retry"
             if isPermissionFallback {
@@ -1339,6 +1353,7 @@ final class DictationController: NSObject {
         ) { [weak self] inserted in
             guard let self else { return }
             guard inserted else {
+                self.inserter.stageFinalOutput(text)
                 self.phase = .idle
                 self.sounds.play(.error)
                 self.showNotice(

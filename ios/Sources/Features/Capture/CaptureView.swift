@@ -5,6 +5,8 @@ struct CaptureView: View {
     @Bindable var service: SpeechCaptureService
 
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage(VeloraPreferences.dictationStyleKey)
+    private var dictationStyleRawValue = DictationStyle.automatic.rawValue
     @State private var showingActionButtonGuide = false
 
     var body: some View {
@@ -99,6 +101,8 @@ struct CaptureView: View {
                     Label("Copied", systemImage: "checkmark.circle.fill")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.green)
+                } else {
+                    styleMenu
                 }
             }
 
@@ -186,7 +190,7 @@ struct CaptureView: View {
     private var heroSubtitle: String {
         switch service.phase {
         case .listening: "Speak naturally, then tap Finish. Your words stay on this iPhone."
-        case .finishing: "Velora is finishing the last words and punctuation."
+        case .finishing: "Velora is finishing the last words and smart formatting."
         case .copied: "Switch to any app and paste. A local copy is waiting in History."
         case .failed: "Nothing was copied. Follow the fix below and try once more."
         case .idle, .requestingPermission: "Private voice-to-text that ends exactly where you need it: the clipboard."
@@ -231,6 +235,32 @@ struct CaptureView: View {
         case .failed: .red
         default: VeloraTheme.violet
         }
+    }
+
+    private var selectedStyle: DictationStyle {
+        DictationStyle.resolve(dictationStyleRawValue)
+    }
+
+    private var styleMenu: some View {
+        Menu {
+            ForEach(DictationStyle.allCases) { style in
+                Button {
+                    dictationStyleRawValue = style.rawValue
+                } label: {
+                    Label(style.title, systemImage: style.systemImage)
+                }
+            }
+        } label: {
+            Label(selectedStyle.title, systemImage: selectedStyle.systemImage)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(VeloraTheme.violet)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 44)
+                .background(VeloraTheme.violet.opacity(0.10), in: Capsule())
+        }
+        .disabled(service.phase == .requestingPermission || service.phase == .listening || service.phase == .finishing)
+        .accessibilityLabel("Formatting style, \(selectedStyle.title)")
+        .accessibilityHint("Choose how Velora should format the finished transcript")
     }
 
     @ViewBuilder

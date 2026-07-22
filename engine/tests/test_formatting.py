@@ -1072,7 +1072,7 @@ def test_postprocess_no_period_after_trailing_break(config):
     from velora_engine.formatting import postprocess
 
     out = postprocess("Send the draft tonight and copy the design team on it. ⏎", gate)
-    assert out.endswith("\n") and not out.endswith(".\n") is False  # ends ".\n"
+    assert out.endswith(".\n")
     assert out == "Send the draft tonight and copy the design team on it.\n"
 
 

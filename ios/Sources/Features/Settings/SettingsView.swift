@@ -3,6 +3,8 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage(VeloraPreferences.speechLocaleIdentifierKey)
     private var speechLocaleIdentifier = VeloraPreferences.systemLocaleIdentifier
+    @AppStorage(VeloraPreferences.dictationStyleKey)
+    private var dictationStyleRawValue = DictationStyle.automatic.rawValue
 
     @State private var showingActionButtonGuide = false
 
@@ -42,6 +44,26 @@ struct SettingsView: View {
                     Text("Language")
                 } footer: {
                     Text("Velora only uses recognition languages available on-device. Downloaded language support is managed by iOS.")
+                }
+
+                Section {
+                    Picker("Format for", selection: $dictationStyleRawValue) {
+                        ForEach(DictationStyle.allCases) { style in
+                            Label(style.title, systemImage: style.systemImage)
+                                .tag(style.rawValue)
+                        }
+                    }
+
+                    Label(
+                        TranscriptRefiner.capability.title,
+                        systemImage: TranscriptRefiner.capability.isAvailable
+                            ? "apple.intelligence"
+                            : "textformat"
+                    )
+                } header: {
+                    Text("Smart cleanup")
+                } footer: {
+                    Text("\(TranscriptRefiner.capability.detail) iOS does not let Velora inspect the app where you will paste, so your selected format stays active until you change it.")
                 }
 
                 Section {

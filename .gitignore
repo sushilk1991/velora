@@ -28,6 +28,9 @@ spikes/
 *.log
 .yoyo/
 .pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # Editor / tool local state
 .claude/

@@ -11,8 +11,6 @@ struct WaveformView: View {
     /// Hidden HUDs stay mounted for smooth morphs; pause invisible redraws.
     let active: Bool
 
-    @Environment(\.colorScheme) private var colorScheme
-
     static let strip = HUDGeometry.waveformSize
 
     var body: some View {
@@ -30,8 +28,7 @@ struct WaveformView: View {
                     shimmerCenter = -30 + CGFloat(eased) * (size.width + 60)
                 }
 
-                let darkMode = colorScheme == .dark
-                let baseOpacity = darkMode ? 0.9 : 0.75
+                let baseOpacity = 0.92
 
                 for index in 0..<WaveformLevelStore.barCount {
                     let centerDistance = index < WaveformLevelStore.halfCount
@@ -56,7 +53,7 @@ struct WaveformView: View {
                         ? Color(nsColor: .systemGreen)
                         : VeloraBrand.barColor(
                             fraction: Double(index) / Double(WaveformLevelStore.barCount - 1),
-                            darkMode: darkMode)
+                            darkMode: true)
                     context.fill(
                         Path(roundedRect: rect, cornerRadius: 1.5),
                         with: .color(color.opacity(opacity)))

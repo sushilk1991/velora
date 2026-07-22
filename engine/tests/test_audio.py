@@ -2,7 +2,6 @@
 save-on-finalize / reprocess-from-clip flow (fake STT)."""
 
 import asyncio
-import json
 import shutil
 import tempfile
 import time
@@ -11,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from velora_engine import protocol
 from velora_engine.audio_store import AudioStore
 from velora_engine.config import Config
 from velora_engine.server import Engine
@@ -49,6 +47,39 @@ def test_audio_store_rejects_traversal(tmp_path):
 def test_audio_store_empty_is_noop(tmp_path):
     store = AudioStore(tmp_path / "audio")
     assert store.save("s", np.zeros(0, dtype=np.float32)) is None
+
+
+def test_audio_store_wav_fallback_roundtrips_and_sanitizes(tmp_path):
+    store = AudioStore(tmp_path / "audio")
+    store._sf = None
+    store.ext = "wav"
+    pcm = np.array([np.nan, np.inf, -np.inf, -0.25, 0.25], dtype=np.float32)
+
+    name = store.save("unsafe/session id", pcm)
+
+    assert name == "unsafe-session-id.wav"
+    restored = store.load(name)
+    assert restored.shape == pcm.shape
+    assert np.isfinite(restored).all()
+    assert np.max(np.abs(restored)) <= 1.0
+
+
+def test_audio_store_write_failure_does_not_break_dictation(tmp_path):
+    class BrokenSoundFile:
+        @staticmethod
+        def write(*_args, **_kwargs):
+            raise OSError("disk unavailable")
+
+    store = AudioStore(tmp_path / "audio")
+    store._sf = BrokenSoundFile()
+    store.ext = "flac"
+
+    assert store.save("session", np.ones(10, dtype=np.float32)) is None
+
+
+def test_audio_store_prune_missing_directory_is_noop(tmp_path):
+    store = AudioStore(tmp_path / "missing")
+    assert store.prune(retention_days=180, max_bytes=1024) == 0
 
 
 def test_audio_store_prune_size_cap_evicts_oldest(tmp_path):

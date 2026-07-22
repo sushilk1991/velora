@@ -15,15 +15,19 @@
 		39A2F4041AE4ED3633EE3CC9 /* CaptureLaunchRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = AC6C3F64366EC41A324B4C61 /* CaptureLaunchRouter.swift */; };
 		47351E24C2C8FD65ED82105C /* LiveWaveform.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAAD6680847BA6B8C9319D0F /* LiveWaveform.swift */; };
 		63501CEAA5B23EC9C903636C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 4EC30F3F16B17452B5A54143 /* Assets.xcassets */; };
+		683DA025BDDC20819F421127 /* ModernSpeechCaptureSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 543230DCFEF101F5B1DD5F5C /* ModernSpeechCaptureSession.swift */; };
 		893514E9913B749FF4828205 /* RecognitionFinalizationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6DB242A0CA0EB54877FC19C /* RecognitionFinalizationPolicy.swift */; };
+		8B538C9484C833E10362F482 /* TranscriptRefinerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA7B214E14498441A4497DF2 /* TranscriptRefinerTests.swift */; };
 		8D8BDCB7507AC40E18877E25 /* TranscriptStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2FD11BA6870FCF2AF631081D /* TranscriptStore.swift */; };
 		994D9B3605B1E200C89F680F /* TranscriptEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3940E9F59C32A86536E9337 /* TranscriptEntry.swift */; };
 		9BF57F8972057AE407F9BDA3 /* VeloraTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = F82320DCF86980FACF568EA0 /* VeloraTheme.swift */; };
 		B0D2E737E5FC1BC5F7E4EDEF /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06E79BBF985BC1DDD98782C /* SettingsView.swift */; };
 		BEA0F8F706DE66F72FAFDDD7 /* VeloraPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4079C9CE695B9B2C62AEC6E /* VeloraPreferences.swift */; };
 		BF23E18818A60ED0B728F35B /* SpeechCaptureService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F65119E97AF211FB0378518 /* SpeechCaptureService.swift */; };
+		C5867FB65A41623FE2F30E19 /* TranscriptRefiner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 016C5E4BD95D4DDFFF65826D /* TranscriptRefiner.swift */; };
 		CE435AB5ACECA07E11ED75E7 /* TranscriptDeliveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 40C3B7DDA15ED32ECA242140 /* TranscriptDeliveryTests.swift */; };
 		CE8CCD26C4F98B05A9C43F00 /* VeloraMobileApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 54B403017594AAF216BEE297 /* VeloraMobileApp.swift */; };
+		D01CEEBE249817ECF4C6CF9D /* DictationStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = E148EABAB92A9C36E03E6818 /* DictationStyle.swift */; };
 		D8163745A2BDC15983C9ADAC /* DictateToClipboardIntent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 01E500FF9A87BED6117C4EF9 /* DictateToClipboardIntent.swift */; };
 		DD4D6E67C3D86F824FEBAD76 /* CaptureView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5BA29D8A05F8EF1D22F4BBDD /* CaptureView.swift */; };
 		ECF7303FA11996C53446A77C /* TranscriptFormatterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 75EEDA5044847F27437446DC /* TranscriptFormatterTests.swift */; };
@@ -40,12 +44,14 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		016C5E4BD95D4DDFFF65826D /* TranscriptRefiner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptRefiner.swift; sourceTree = "<group>"; };
 		01E500FF9A87BED6117C4EF9 /* DictateToClipboardIntent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictateToClipboardIntent.swift; sourceTree = "<group>"; };
 		0F65119E97AF211FB0378518 /* SpeechCaptureService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeechCaptureService.swift; sourceTree = "<group>"; };
 		142C6CB02C48FD8A768A81FB /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		2FD11BA6870FCF2AF631081D /* TranscriptStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptStore.swift; sourceTree = "<group>"; };
 		40C3B7DDA15ED32ECA242140 /* TranscriptDeliveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDeliveryTests.swift; sourceTree = "<group>"; };
 		4EC30F3F16B17452B5A54143 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		543230DCFEF101F5B1DD5F5C /* ModernSpeechCaptureSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModernSpeechCaptureSession.swift; sourceTree = "<group>"; };
 		54B403017594AAF216BEE297 /* VeloraMobileApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VeloraMobileApp.swift; sourceTree = "<group>"; };
 		5592967F0D4CAF1529C5779F /* TranscriptDelivery.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDelivery.swift; sourceTree = "<group>"; };
 		5BA29D8A05F8EF1D22F4BBDD /* CaptureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureView.swift; sourceTree = "<group>"; };
@@ -55,8 +61,10 @@
 		A06E79BBF985BC1DDD98782C /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		AC6C3F64366EC41A324B4C61 /* CaptureLaunchRouter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureLaunchRouter.swift; sourceTree = "<group>"; };
 		B4079C9CE695B9B2C62AEC6E /* VeloraPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VeloraPreferences.swift; sourceTree = "<group>"; };
+		BA7B214E14498441A4497DF2 /* TranscriptRefinerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptRefinerTests.swift; sourceTree = "<group>"; };
 		CFE329AA6F14F012E413DF9F /* ProductLinks.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProductLinks.swift; sourceTree = "<group>"; };
 		DDEE7E80B7BEA2CAC56A972E /* Velora.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Velora.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E148EABAB92A9C36E03E6818 /* DictationStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DictationStyle.swift; sourceTree = "<group>"; };
 		E3940E9F59C32A86536E9337 /* TranscriptEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEntry.swift; sourceTree = "<group>"; };
 		E6DB242A0CA0EB54877FC19C /* RecognitionFinalizationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecognitionFinalizationPolicy.swift; sourceTree = "<group>"; };
 		EAAD6680847BA6B8C9319D0F /* LiveWaveform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveWaveform.swift; sourceTree = "<group>"; };
@@ -99,8 +107,10 @@
 		0C8B2311EF8F44890324C705 /* Speech */ = {
 			isa = PBXGroup;
 			children = (
+				543230DCFEF101F5B1DD5F5C /* ModernSpeechCaptureSession.swift */,
 				E6DB242A0CA0EB54877FC19C /* RecognitionFinalizationPolicy.swift */,
 				0F65119E97AF211FB0378518 /* SpeechCaptureService.swift */,
+				016C5E4BD95D4DDFFF65826D /* TranscriptRefiner.swift */,
 			);
 			path = Speech;
 			sourceTree = "<group>";
@@ -135,6 +145,7 @@
 		5143327B48A8016AD530E753 /* Model */ = {
 			isa = PBXGroup;
 			children = (
+				E148EABAB92A9C36E03E6818 /* DictationStyle.swift */,
 				5592967F0D4CAF1529C5779F /* TranscriptDelivery.swift */,
 				E3940E9F59C32A86536E9337 /* TranscriptEntry.swift */,
 				2FD11BA6870FCF2AF631081D /* TranscriptStore.swift */,
@@ -149,6 +160,7 @@
 				9D9291B5EF03FEAD3CED8626 /* RecognitionFinalizationPolicyTests.swift */,
 				40C3B7DDA15ED32ECA242140 /* TranscriptDeliveryTests.swift */,
 				75EEDA5044847F27437446DC /* TranscriptFormatterTests.swift */,
+				BA7B214E14498441A4497DF2 /* TranscriptRefinerTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -295,14 +307,17 @@
 				39A2F4041AE4ED3633EE3CC9 /* CaptureLaunchRouter.swift in Sources */,
 				DD4D6E67C3D86F824FEBAD76 /* CaptureView.swift in Sources */,
 				D8163745A2BDC15983C9ADAC /* DictateToClipboardIntent.swift in Sources */,
+				D01CEEBE249817ECF4C6CF9D /* DictationStyle.swift in Sources */,
 				183EFB04E65BC061F1E11D8E /* HistoryView.swift in Sources */,
 				47351E24C2C8FD65ED82105C /* LiveWaveform.swift in Sources */,
+				683DA025BDDC20819F421127 /* ModernSpeechCaptureSession.swift in Sources */,
 				2B1AA9C1C6346975D3531750 /* ProductLinks.swift in Sources */,
 				893514E9913B749FF4828205 /* RecognitionFinalizationPolicy.swift in Sources */,
 				B0D2E737E5FC1BC5F7E4EDEF /* SettingsView.swift in Sources */,
 				BF23E18818A60ED0B728F35B /* SpeechCaptureService.swift in Sources */,
 				17736D1BEEA1A4B57E2639B6 /* TranscriptDelivery.swift in Sources */,
 				994D9B3605B1E200C89F680F /* TranscriptEntry.swift in Sources */,
+				C5867FB65A41623FE2F30E19 /* TranscriptRefiner.swift in Sources */,
 				8D8BDCB7507AC40E18877E25 /* TranscriptStore.swift in Sources */,
 				CE8CCD26C4F98B05A9C43F00 /* VeloraMobileApp.swift in Sources */,
 				BEA0F8F706DE66F72FAFDDD7 /* VeloraPreferences.swift in Sources */,
@@ -317,6 +332,7 @@
 				36FF7EA5527A6052B9EEF72D /* RecognitionFinalizationPolicyTests.swift in Sources */,
 				CE435AB5ACECA07E11ED75E7 /* TranscriptDeliveryTests.swift in Sources */,
 				ECF7303FA11996C53446A77C /* TranscriptFormatterTests.swift in Sources */,
+				8B538C9484C833E10362F482 /* TranscriptRefinerTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

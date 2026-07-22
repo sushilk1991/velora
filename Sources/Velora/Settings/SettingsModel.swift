@@ -11,6 +11,10 @@ extension Notification.Name {
     /// the hotkey monitor reinstalls so a pre-grant dead event tap comes back
     /// without an app relaunch.
     static let veloraAccessibilityGranted = Notification.Name("VeloraAccessibilityGranted")
+    /// Local-agent capability changed. Disabling it is also an immediate
+    /// revocation signal for any pending consent or active agent-owned job.
+    static let veloraLocalAgentAccessChanged = Notification.Name(
+        "VeloraLocalAgentAccessChanged")
 }
 
 /// A model the running engine advertises via the `status` reply. Drives the
@@ -579,7 +583,13 @@ final class SettingsModel: ObservableObject {
     }
 
     @Published var localAgentAccess: Bool {
-        didSet { config.localAgentAccess = localAgentAccess }
+        didSet {
+            guard localAgentAccess != oldValue else { return }
+            config.localAgentAccess = localAgentAccess
+            NotificationCenter.default.post(
+                name: .veloraLocalAgentAccessChanged,
+                object: localAgentAccess)
+        }
     }
 
     // MARK: Agent integration (CLI on PATH + agent skill)

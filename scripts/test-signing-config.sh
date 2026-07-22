@@ -100,6 +100,9 @@ LOCAL_IDENTITIES='  1) AAA "Apple Development: Developer (OTHERTEAM)"
     == 'Apple Development: Developer (OTHERTEAM)' ]]
 expect_failure "local build without a stable identity" \
   select_local_signing_identity '0 valid identities found'
+require_bundle_uv 0 ''
+require_bundle_uv 1 /usr/bin/true
+expect_failure "distribution build without bundled uv" require_bundle_uv 1 ''
 
 cp "$REQUESTED" "$TMP_DIR/wrong-requested-team.plist"
 /usr/libexec/PlistBuddy -c \
@@ -191,6 +194,11 @@ grep -Fq 'validate_signed_app_team "$APP"' scripts/make-app.sh
 grep -Fq 'validate_signed_app_team "$APP"' scripts/verify-dmg.sh
 grep -Fq 'validate_signing_plists "$ENTITLEMENTS_FILE" "$PROFILE_PLIST" "$APP/Contents/Info.plist"' \
   scripts/verify-dmg.sh
+grep -Fq 'require_bundle_uv "${VELORA_DISTRIBUTION:-0}" "$UV_BIN"' scripts/make-app.sh
+grep -Fq 'test -x "$UV"' scripts/verify-dmg.sh
+grep -Fq 'test -x "$CLI"' scripts/verify-dmg.sh
+grep -Fq 'test -f "$ENGINE/src/velora_engine/server.py"' scripts/verify-dmg.sh
+grep -Fq '"$CLI" mcp' scripts/verify-dmg.sh
 
 VERSION_HASH="$(shasum VERSION Resources/Info.plist)"
 if env -u VELORA_PROVISIONING_PROFILE VELORA_DISTRIBUTION=1 \
