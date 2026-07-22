@@ -44,6 +44,7 @@ class Case:
     required_lines: tuple[str, ...] = ()
     explicit_mode: str | None = None
     required_intro: str | None = None
+    required_outside: tuple[str, ...] = ()
 
 
 CASES = (
@@ -112,6 +113,26 @@ CASES = (
         numbered_items=3,
     ),
     Case(
+        "implicit_counted_todo_list",
+        "So today the priority is three items. First is I need to buy books. Second is I "
+        "need to buy apples. Third is I need to buy eggs. Basically a dozen of eggs.",
+        bundle_id="com.sublimetext.4",
+        app_name="Sublime Text",
+        required=("buy books", "buy apples", "buy eggs", "dozen of eggs"),
+        numbered_items=3,
+        required_intro="three items",
+    ),
+    Case(
+        "mismatched_ordinal_counted_list",
+        "Okay, so I need to buy three items today. First is the books, second is three "
+        "apples, and fourth is one dozen of eggs.",
+        bundle_id="com.sublimetext.4",
+        app_name="Sublime Text",
+        required=("books", "three apples", "one dozen of eggs"),
+        numbered_items=3,
+        required_intro="three items",
+    ),
+    Case(
         "three_priorities_counterexample",
         "Just want to test out. So there are three priorities for today. First, I need to "
         "update Velora. Second, I need to post it on Hacker News. And the third important "
@@ -159,6 +180,44 @@ CASES = (
         required=("only issue", "everything else"),
         numbered_items=0,
     ),
+    Case(
+        "temporal_narrative_stays_prose",
+        "First I woke up early and made coffee. Second I walked to the station. Third I "
+        "remembered that I had left my notebook at home, so I went back for it.",
+        required=("woke up", "station", "notebook"),
+        numbered_items=0,
+    ),
+    Case(
+        "ordinal_nouns_stay_prose",
+        "This is my first time visiting the office on the second floor, and the third room "
+        "on the left is where the design team works.",
+        required=("first time", "second floor", "third room"),
+        numbered_items=0,
+    ),
+    Case(
+        "counted_narrative_becomes_list",
+        "Three things happened today. First I overslept. Second I missed the standup. Third "
+        "my badge stopped working, so I had to wait for security.",
+        required=("overslept", "standup", "badge"),
+        numbered_items=3,
+        required_intro="three things happened today",
+    ),
+    Case(
+        "ordinary_counting_stays_prose",
+        "During practice he counted one two three four five and then jumped into the pool "
+        "while everyone watched from the side.",
+        required=("counted", "jumped", "pool"),
+        numbered_items=0,
+    ),
+    Case(
+        "new_topic_follows_implicit_list",
+        "Today's shopping list has three items. First I need to buy books. Second I need to "
+        "buy apples. Third I need to buy eggs. Anyway, I will head out at noon.",
+        required=("buy books", "buy apples", "buy eggs"),
+        numbered_items=3,
+        required_intro="three items",
+        required_outside=("head out at noon",),
+    ),
 )
 
 
@@ -169,6 +228,7 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
     if not output.endswith(case.ending):
         failures.append(f"missing_ending:{case.ending}")
     lower = output.lower()
+    outside_scope = lower
     if case.numbered_items is not None:
         numbered = [
             line for line in output.splitlines()
@@ -196,11 +256,17 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
             if case.numbered_items > 0
             else lower
         )
+        outside_scope = "\n".join(
+            line for line in output.splitlines()
+            if not re.match(r"^(?:\d+[.)]|[-*])\s+", line.strip())
+        ).lower()
     else:
         required_scope = lower
     for required in case.required:
         if required.lower() not in required_scope:
             failures.append(f"missing:{required}")
+        elif case.numbered_items and required.lower() in outside_scope:
+            failures.append(f"duplicate_outside_list:{required}")
     if case.required_lines:
         lines = [line.strip() for line in output.splitlines()]
         cursor = 0
@@ -224,6 +290,11 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
         first_line = output.splitlines()[0] if output.splitlines() else ""
         if case.required_intro.lower() not in first_line.lower():
             failures.append(f"missing_intro:{case.required_intro}")
+    for required in case.required_outside:
+        if required.lower() not in outside_scope:
+            failures.append(f"missing_outside:{required}")
+        if required.lower() in required_scope:
+            failures.append(f"unexpected_inside_list:{required}")
     return failures
 
 

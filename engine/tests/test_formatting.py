@@ -135,6 +135,36 @@ def test_terminal_issue_report_allows_inferred_numbered_structure(config):
     assert "numbered list" in prompt.lower()
 
 
+def test_default_prompt_requires_counted_ordinal_items_without_a_format_command(config):
+    raw = (
+        "today the priority is three items first is i need to buy books second is i need "
+        "to buy apples third is i need to buy eggs basically a dozen of eggs"
+    )
+    gate = run_gate(raw, config, bundle_id="com.sublimetext.4")
+    prompt = gate.system_prompt or ""
+
+    assert gate.use_llm is True
+    assert "counted collection of items, tasks, priorities, requests, products, or events" in prompt
+    assert "formatting, NOT prohibited paraphrasing" in prompt
+    assert "A trailing fragment belongs inside the last item" in prompt
+
+
+def test_default_prompt_handles_misspoken_ordinal_labels_without_inventing_items(config):
+    raw = (
+        "i need to buy three items today first is the books second is three apples "
+        "and fourth is one dozen of eggs"
+    )
+    gate = run_gate(raw, config, bundle_id="com.sublimetext.4")
+    prompt = gate.system_prompt or ""
+
+    assert gate.use_llm is True
+    assert "ordinal labels are boundary cues, not item content" in prompt
+    assert "spoken ordinal label is mistaken or skips a number" in prompt
+    assert "numbered list is REQUIRED" in prompt
+    assert "invent nothing" in prompt
+    assert "sequentially by spoken order" in prompt
+
+
 def test_note_prompt_infers_structure_without_spoken_formatting_commands(config):
     raw = (
         "for friday's launch sam owns the release maya will send the notes before lunch "

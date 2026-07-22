@@ -50,3 +50,42 @@ def test_bare_line_case_requires_exact_values_and_preserved_intro():
     assert "missing_intro:different line" in validate(
         case, "Values:\n1\n2", applied=True
     )
+
+
+def test_numbered_case_rejects_duplicated_prose_before_the_list():
+    case = Case(
+        "duplicated_list",
+        "placeholder",
+        required=("buy books",),
+        numbered_items=1,
+        required_intro="shopping",
+    )
+
+    failures = validate(
+        case,
+        "Shopping means I need to buy books:\n1. I need to buy books.",
+        applied=True,
+    )
+
+    assert "duplicate_outside_list:buy books" in failures
+
+
+def test_numbered_case_can_require_a_new_topic_after_the_list():
+    case = Case(
+        "list_then_prose",
+        "placeholder",
+        required=("buy books",),
+        numbered_items=1,
+        required_outside=("head out at noon",),
+    )
+
+    assert validate(
+        case,
+        "Shopping:\n1. Buy books.\nI will head out at noon.",
+        applied=True,
+    ) == []
+    assert "unexpected_inside_list:head out at noon" in validate(
+        case,
+        "Shopping:\n1. Buy books. I will head out at noon.",
+        applied=True,
+    )
