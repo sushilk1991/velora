@@ -572,13 +572,14 @@ final class DictationController: NSObject {
     /// Pastes a completed "Reformat Last as…" result back into its origin app.
     private func applyReformat(
         id: Int64, raw: String, text: String, mode: String?,
-        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool
+        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?
     ) {
         guard let pending = pendingReformat, pending.id == id else { return }
         pendingReformat = nil
         history.updateAfterReprocess(
             id: id, raw: raw, final: text, mode: mode,
-            sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied)
+            sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+            cleanupWallMs: cleanupWallMs)
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         inserter.copyToClipboard(text)
@@ -1098,7 +1099,10 @@ final class DictationController: NSObject {
             // transcription doesn't trip the stop→final deadline.
             if phase == .transcribing { armTranscribeTimeout() }
 
-        case .final(let session, let text, let raw, let mode, let cleanupMs, let cleanupApplied, let audio):
+        case .final(
+            let session, let text, let raw, let mode, let cleanupMs,
+            let cleanupWallMs, let cleanupApplied, let totalMs, let audio
+        ):
             // Honor a valid final for the CURRENT session even if phase drifted
             // from .transcribing — a missed hotkeyUp can leave us in .recording,
             // or a timeout can have reset us to .idle. The only final we refuse
@@ -1144,11 +1148,12 @@ final class DictationController: NSObject {
             finishInsertion(
                 text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
                 mode: mode, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
-                audio: audio, allowAutomaticInsertion: !arrivedTooLate)
+                cleanupWallMs: cleanupWallMs, finalizationMs: totalMs, audio: audio,
+                allowAutomaticInsertion: !arrivedTooLate)
 
         case .reprocessed(
             let id, _, let raw, let text, let mode, _,
-            let sttMs, let cleanupMs, let cleanupApplied
+            let sttMs, let cleanupMs, let cleanupApplied, let cleanupWallMs
         ):
             // Only the menubar "Reformat Last as…" path is handled here; the
             // History tab consumes its own reprocess replies via notification.
@@ -1156,7 +1161,7 @@ final class DictationController: NSObject {
                 applyReformat(
                     id: id, raw: raw, text: text, mode: mode,
                     sttMs: sttMs, cleanupMs: cleanupMs,
-                    cleanupApplied: cleanupApplied)
+                    cleanupApplied: cleanupApplied, cleanupWallMs: cleanupWallMs)
             }
 
         case .reprocessFailed(let id, let error, _):
@@ -1221,6 +1226,8 @@ final class DictationController: NSObject {
         mode: String?,
         cleanupMs: Int?,
         cleanupApplied: Bool?,
+        cleanupWallMs: Int?,
+        finalizationMs: Int?,
         audio: String?,
         allowAutomaticInsertion: Bool = true
     ) {
@@ -1233,7 +1240,9 @@ final class DictationController: NSObject {
                 if audio != nil {
                     recordHistory(
                         text: "", raw: raw, context: context, mode: mode,
-                        cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                        cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                        cleanupWallMs: cleanupWallMs,
+                        finalizationMs: finalizationMs, audio: audio)
                 }
                 externalRequest = nil
                 phase = .idle
@@ -1242,7 +1251,9 @@ final class DictationController: NSObject {
             } else {
                 recordHistory(
                     text: text, raw: raw, context: context, mode: mode,
-                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio)
                 externalRequest = nil
                 phase = .idle
                 showNotice(symbol: "waveform.badge.checkmark", message: "Sent to local agent")
@@ -1257,14 +1268,18 @@ final class DictationController: NSObject {
                 if audio != nil {
                     recordHistory(
                         text: "", raw: raw, context: context, mode: mode,
-                        cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                        cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                        cleanupWallMs: cleanupWallMs,
+                        finalizationMs: finalizationMs, audio: audio)
                 }
                 showError(message)
             } else {
                 inserter.stageFinalOutput(text)
                 recordHistory(
                     text: text, raw: raw, context: context, mode: mode,
-                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio)
                 phase = .idle
                 showNotice(symbol: "doc.on.clipboard.fill", message: "Finished late — copied")
             }
@@ -1287,7 +1302,9 @@ final class DictationController: NSObject {
             if audio != nil {
                 recordHistory(
                     text: "", raw: raw, context: context, mode: mode,
-                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio)
             }
             showError(message)
             return
@@ -1318,7 +1335,9 @@ final class DictationController: NSObject {
             phase = .idle
             recordHistory(
                 text: text, raw: raw, context: context, mode: mode,
-                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                cleanupWallMs: cleanupWallMs,
+                finalizationMs: finalizationMs, audio: audio)
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
             scheduleInsertedHide()
             return
@@ -1364,13 +1383,17 @@ final class DictationController: NSObject {
             phase = .idle
             recordHistory(
                 text: text, raw: raw, context: context, mode: mode,
-                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                cleanupWallMs: cleanupWallMs,
+                finalizationMs: finalizationMs, audio: audio)
             return
         }
 
         recordHistory(
             text: text, raw: raw, context: context, mode: mode,
-            cleanupMs: cleanupMs, cleanupApplied: cleanupApplied, audio: audio)
+            cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+            cleanupWallMs: cleanupWallMs,
+            finalizationMs: finalizationMs, audio: audio)
 
         let session = sessionID
         inserter.insert(
@@ -1397,7 +1420,8 @@ final class DictationController: NSObject {
 
     private func recordHistory(
         text: String, raw: String, context: AppContext?, mode: String?,
-        cleanupMs: Int?, cleanupApplied: Bool?, audio: String?
+        cleanupMs: Int?, cleanupApplied: Bool?, cleanupWallMs: Int?,
+        finalizationMs: Int?, audio: String?
     ) {
         let durationMs = recordingDurationMs ?? elapsedRecordingMs
         history.insert(
@@ -1410,6 +1434,8 @@ final class DictationController: NSObject {
                 mode: mode,
                 durationMs: durationMs,
                 cleanupMs: cleanupMs,
+                cleanupWallMs: cleanupWallMs,
+                finalizationMs: finalizationMs,
                 audioPath: audio,
                 sessionID: sessionID.isEmpty ? nil : sessionID,
                 sttMs: sttMs,

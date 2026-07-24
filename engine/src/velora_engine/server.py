@@ -34,7 +34,8 @@ import numpy as np
 
 from . import __version__, diarization, editing, formatting, models, protocol
 from .audio_store import AudioStore
-from .cleanup import _RETRACTION_RE, CleanupEngine
+from .cleanup import _RETRACTION_RE
+from .cleanup_process import CleanupProcess
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import load_media, split_for_batch
@@ -266,7 +267,7 @@ class Engine:
         # deliberately stricter than stt_ready, which unlocks raw dictation as
         # soon as the speech model is usable.
         self.setup_complete = False
-        self.cleanup: CleanupEngine | None = None
+        self.cleanup: CleanupProcess | None = None
         self.session: Session | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.shutdown = asyncio.Event()
@@ -460,7 +461,7 @@ class Engine:
                     self.audio.prune, self.config.audio_retention_days, self.config.audio_max_bytes
                 )
         if self.config.cleanup_enabled and not fake_stt_enabled():
-            engine = CleanupEngine(self.config.cleanup_model)
+            engine = CleanupProcess(self.config.cleanup_model)
             try:
                 # Dictation is already available (raw text) — but the first-run
                 # download of the cleanup LLM is multi-GB, so keep the progress
@@ -477,7 +478,7 @@ class Engine:
                 if self.cleanup is None and self.config.cleanup_model == engine.model_id:
                     self.cleanup = engine
                 else:
-                    engine.close()
+                    await engine.aclose()
             except Exception:
                 log.exception("cleanup LLM failed to load; dictations will return raw text")
                 with contextlib.suppress(Exception):
@@ -523,6 +524,13 @@ class Engine:
                 await self._server.wait_closed()
             with contextlib.suppress(FileNotFoundError):
                 socket_path.unlink()
+            close_cleanup_async = getattr(self.cleanup, "aclose", None)
+            if callable(close_cleanup_async):
+                await close_cleanup_async()
+            else:
+                close_cleanup = getattr(self.cleanup, "close", None)
+                if callable(close_cleanup):
+                    close_cleanup()
             log.info("engine shut down")
 
     async def _watch_parent(self) -> None:
@@ -1064,6 +1072,7 @@ class Engine:
         # (only the tail is cleaned now → flat stop→final latency); anything
         # else — and ANY streaming failure — runs the classic whole-text path,
         # so a transcript is never lost to the new pipeline.
+        format_started = time.perf_counter()
         ctx = session.context
         result: tuple[str, str, int, bool, str] | None = None
         if session.chunk_tasks:
@@ -1082,6 +1091,7 @@ class Engine:
                 entities=ctx.get("entities"),
             )
         text, mode_name, cleanup_ms, cleanup_applied, reason = result
+        cleanup_wall_ms = int((time.perf_counter() - format_started) * 1000)
 
         # Stage 3: archive the audio clip in the BACKGROUND — the clip name is
         # deterministic, so `final` never waits on FLAC encode + disk I/O
@@ -1096,7 +1106,9 @@ class Engine:
             "raw": raw,
             "mode": mode_name,
             "cleanup_ms": cleanup_ms,
+            "cleanup_wall_ms": cleanup_wall_ms,
             "cleanup_applied": cleanup_applied,
+            "total_ms": total_ms,
         }
         if audio_name:
             final_evt["audio"] = audio_name
@@ -1104,12 +1116,14 @@ class Engine:
             final_evt["auto_stopped"] = True
         await self._send(final_evt)
         log.info(
-            "session %s done: stt_ms=%d mode=%s reason=%s cleanup_ms=%d cleanup_applied=%s total_ms=%d samples=%d audio=%s",
+            "session %s done: stt_ms=%d mode=%s reason=%s cleanup_ms=%d "
+            "cleanup_wall_ms=%d cleanup_applied=%s total_ms=%d samples=%d audio=%s",
             session.id,
             stt_ms,
             mode_name,
             reason,
             cleanup_ms,
+            cleanup_wall_ms,
             cleanup_applied,
             total_ms,
             session.samples,
@@ -1593,19 +1607,19 @@ class Engine:
             # retire the old one. A failed load (bad download, OOM) therefore
             # leaves the working engine intact instead of leaving no cleanup at
             # all. Peak memory holds both only for the load window (rare,
-            # user-initiated); close() frees the old thread + model right after.
-            engine = CleanupEngine(model_id)
+            # user-initiated); aclose() reaps the old model process before ack.
+            engine = CleanupProcess(model_id)
             if not fake_stt_enabled():
                 try:
                     await engine.load_async(STATIC_SYSTEM_PROMPT)
                 except Exception:
-                    engine.close()
+                    await engine.aclose()
                     raise  # keep self.cleanup pointing at the old, working engine
             old = self.cleanup
             self.cleanup = engine
             self.config.data["cleanup_model"] = model_id
             if old is not None:
-                old.close()
+                await old.aclose()
         self.config.save(keys={f"{kind}_model"})
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)
@@ -1778,12 +1792,14 @@ class Engine:
                 await self._reprocess_failed(msg, f"reprocess failed: {exc}")
                 return
             stt_ms = int((time.perf_counter() - t0) * 1000)
+            format_started = time.perf_counter()
             text, mode_name, cleanup_ms, cleanup_applied, _reason = await self._apply_formatting(
                 raw,
                 bundle_id=msg.get("bundle_id"),
                 app_name=msg.get("app_name"),
                 explicit_mode=msg.get("mode"),
             )
+            cleanup_wall_ms = int((time.perf_counter() - format_started) * 1000)
             evt: dict[str, Any] = {
                 "event": "reprocessed",
                 "audio": name,
@@ -1793,13 +1809,22 @@ class Engine:
                 "stt_model": model_id,
                 "stt_ms": stt_ms,
                 "cleanup_ms": cleanup_ms,
+                "cleanup_wall_ms": cleanup_wall_ms,
                 "cleanup_applied": cleanup_applied,
             }
             if msg.get("id") is not None:
                 evt["id"] = msg.get("id")
             await self._send(evt)
             self._restart_if_cleanup_unhealthy()
-            log.info("reprocess %s with %s: stt_ms=%d mode=%s", name, model_id, stt_ms, mode_name)
+            log.info(
+                "reprocess %s with %s: stt_ms=%d cleanup_ms=%d cleanup_wall_ms=%d mode=%s",
+                name,
+                model_id,
+                stt_ms,
+                cleanup_ms,
+                cleanup_wall_ms,
+                mode_name,
+            )
         except Exception as exc:  # noqa: BLE001 — always complete the row request
             log.exception("reprocess failed")
             await self._reprocess_failed(msg, f"reprocess failed: {exc}")

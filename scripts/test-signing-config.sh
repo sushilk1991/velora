@@ -198,6 +198,8 @@ grep -Fq 'require_bundle_uv "${VELORA_DISTRIBUTION:-0}" "$UV_BIN"' scripts/make-
 grep -Fq 'test -x "$UV"' scripts/verify-dmg.sh
 grep -Fq 'test -x "$CLI"' scripts/verify-dmg.sh
 grep -Fq 'test -f "$ENGINE/src/velora_engine/server.py"' scripts/verify-dmg.sh
+grep -Fq 'test -f "$ENGINE/src/velora_engine/cleanup_process.py"' scripts/verify-dmg.sh
+grep -Fq 'CleanupProcess("probe").probe_async()' scripts/verify-dmg.sh
 grep -Fq '"$CLI" mcp' scripts/verify-dmg.sh
 
 VERSION_HASH="$(shasum VERSION Resources/Info.plist)"

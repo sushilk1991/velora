@@ -77,9 +77,14 @@ test -f "$ENGINE/pyproject.toml"
 test -f "$ENGINE/uv.lock"
 test -s "$ENGINE/.velora-build"
 test -f "$ENGINE/src/velora_engine/server.py"
+test -f "$ENGINE/src/velora_engine/cleanup_process.py"
+test -f "$ENGINE/src/velora_engine/cleanup_worker.py"
 codesign --verify --strict --verbose=2 "$UV"
 "$UV" --version >/dev/null
 "$CLI" --help >/dev/null
+PROBE_PYTHON="$("$UV" python find 3.12)"
+PYTHONPATH="$ENGINE/src" "$PROBE_PYTHON" -c \
+  'import asyncio; from velora_engine.cleanup_process import CleanupProcess; asyncio.run(CleanupProcess("probe").probe_async())'
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
   "$APP/Contents/Info.plist")"
 MCP_METADATA="$(printf '%s\n' \

@@ -12,6 +12,10 @@ struct DictationRecord {
     let mode: String?
     let durationMs: Int
     let cleanupMs: Int?
+    /// Full formatting-stage wall time. Nil for pre-0.10.17 rows.
+    var cleanupWallMs: Int? = nil
+    /// Stop command to final event wall time. Nil for pre-0.10.17 rows.
+    var finalizationMs: Int? = nil
     /// Basename of the archived audio clip under `~/.velora/audio/`, if the
     /// engine saved one (`save_audio`). Nil when archiving was off.
     var audioPath: String? = nil
@@ -105,6 +109,8 @@ final class HistoryStore {
             ("stt_ms", "INTEGER"),
             ("cleanup_applied", "INTEGER"),
             ("quality_state", "INTEGER"),
+            ("finalization_ms", "INTEGER"),
+            ("cleanup_wall_ms", "INTEGER"),
         ]
         for (name, declaration) in additions where !existing.contains(name) {
             if sqlite3_exec(
@@ -145,8 +151,9 @@ final class HistoryStore {
             let sql = """
                 INSERT INTO dictations
                     (ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms,
-                     audio_path, session_id, stt_ms, cleanup_applied)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                     audio_path, session_id, stt_ms, cleanup_applied, finalization_ms,
+                     cleanup_wall_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
                 """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -178,6 +185,16 @@ final class HistoryStore {
                 sqlite3_bind_int(stmt, 12, applied ? 1 : 0)
             } else {
                 sqlite3_bind_null(stmt, 12)
+            }
+            if let finalizationMs = record.finalizationMs {
+                sqlite3_bind_int64(stmt, 13, Int64(finalizationMs))
+            } else {
+                sqlite3_bind_null(stmt, 13)
+            }
+            if let cleanupWallMs = record.cleanupWallMs {
+                sqlite3_bind_int64(stmt, 14, Int64(cleanupWallMs))
+            } else {
+                sqlite3_bind_null(stmt, 14)
             }
 
             if sqlite3_step(stmt) != SQLITE_DONE {
@@ -214,7 +231,7 @@ final class HistoryStore {
     /// synchronously so the caller can refresh the list right after.
     func updateAfterReprocess(
         id: Int64, raw: String, final: String, mode: String?,
-        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool
+        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?
     ) {
         queue.sync { [self] in
             guard db != nil else { return }
@@ -224,7 +241,8 @@ final class HistoryStore {
             let sql = """
                 UPDATE dictations
                 SET raw = ?, final = ?, mode = ?, stt_ms = ?, cleanup_ms = ?,
-                    cleanup_applied = ?, quality_state = NULL
+                    cleanup_applied = ?, cleanup_wall_ms = ?,
+                    finalization_ms = NULL, quality_state = NULL
                 WHERE id = ?;
                 """
             var stmt: OpaquePointer?
@@ -236,7 +254,12 @@ final class HistoryStore {
             sqlite3_bind_int64(stmt, 4, Int64(sttMs))
             sqlite3_bind_int64(stmt, 5, Int64(cleanupMs))
             sqlite3_bind_int(stmt, 6, cleanupApplied ? 1 : 0)
-            sqlite3_bind_int64(stmt, 7, id)
+            if let cleanupWallMs {
+                sqlite3_bind_int64(stmt, 7, Int64(cleanupWallMs))
+            } else {
+                sqlite3_bind_null(stmt, 7)
+            }
+            sqlite3_bind_int64(stmt, 8, id)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 NSLog("Velora: history update failed: %@", lastError)
             }
@@ -346,7 +369,7 @@ final class HistoryStore {
     /// Column list shared by every read so decode offsets stay in lockstep.
     private static let selectColumns =
         "id, ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms, audio_path, " +
-        "session_id, stt_ms, cleanup_applied"
+        "session_id, stt_ms, cleanup_applied, finalization_ms, cleanup_wall_ms"
 
     /// Most recent dictations, newest first. Synchronous — called on menu
     /// open with tiny result sets.
@@ -529,6 +552,10 @@ final class HistoryStore {
         var sttTotalMs = 0
         var cleanupSamples = 0
         var cleanupTotalMs = 0
+        var cleanupWallSamples = 0
+        var cleanupWallTotalMs = 0
+        var finalizationSamples = 0
+        var finalizationTotalMs = 0
         /// Rows whose cleanup_applied state is known (post-migration rows).
         var cleanupKnown = 0
         var cleanupApplied = 0
@@ -543,6 +570,12 @@ final class HistoryStore {
         }
         var averageCleanupMs: Int? {
             cleanupSamples > 0 ? cleanupTotalMs / cleanupSamples : nil
+        }
+        var averageCleanupWallMs: Int? {
+            cleanupWallSamples > 0 ? cleanupWallTotalMs / cleanupWallSamples : nil
+        }
+        var averageFinalizationMs: Int? {
+            finalizationSamples > 0 ? finalizationTotalMs / finalizationSamples : nil
         }
         /// Share of state-known dictations where cleanup produced the final.
         var cleanupAppliedRate: Double? {
@@ -628,6 +661,8 @@ final class HistoryStore {
             SELECT COUNT(*), \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0),
                 COUNT(stt_ms), COALESCE(SUM(stt_ms), 0),
                 COUNT(cleanup_ms), COALESCE(SUM(cleanup_ms), 0),
+                COUNT(cleanup_wall_ms), COALESCE(SUM(cleanup_wall_ms), 0),
+                COUNT(finalization_ms), COALESCE(SUM(finalization_ms), 0),
                 COUNT(cleanup_applied),
                 COALESCE(SUM(CASE WHEN cleanup_applied = 1 THEN 1 ELSE 0 END), 0),
                 COALESCE(SUM(CASE WHEN cleanup_applied = 1 AND raw != final THEN 1 ELSE 0 END), 0),
@@ -653,11 +688,15 @@ final class HistoryStore {
         stats.sttTotalMs = Int(sqlite3_column_int64(stmt, 4))
         stats.cleanupSamples = Int(sqlite3_column_int64(stmt, 5))
         stats.cleanupTotalMs = Int(sqlite3_column_int64(stmt, 6))
-        stats.cleanupKnown = Int(sqlite3_column_int64(stmt, 7))
-        stats.cleanupApplied = Int(sqlite3_column_int64(stmt, 8))
-        stats.cleanupChanged = Int(sqlite3_column_int64(stmt, 9))
-        stats.qualityUnchanged = Int(sqlite3_column_int64(stmt, 10))
-        stats.qualityEdited = Int(sqlite3_column_int64(stmt, 11))
+        stats.cleanupWallSamples = Int(sqlite3_column_int64(stmt, 7))
+        stats.cleanupWallTotalMs = Int(sqlite3_column_int64(stmt, 8))
+        stats.finalizationSamples = Int(sqlite3_column_int64(stmt, 9))
+        stats.finalizationTotalMs = Int(sqlite3_column_int64(stmt, 10))
+        stats.cleanupKnown = Int(sqlite3_column_int64(stmt, 11))
+        stats.cleanupApplied = Int(sqlite3_column_int64(stmt, 12))
+        stats.cleanupChanged = Int(sqlite3_column_int64(stmt, 13))
+        stats.qualityUnchanged = Int(sqlite3_column_int64(stmt, 14))
+        stats.qualityEdited = Int(sqlite3_column_int64(stmt, 15))
         return stats
     }
 
@@ -769,6 +808,10 @@ final class HistoryStore {
                 durationMs: Int(sqlite3_column_int64(stmt, 7)),
                 cleanupMs: sqlite3_column_type(stmt, 8) == SQLITE_NULL
                     ? nil : Int(sqlite3_column_int64(stmt, 8)),
+                cleanupWallMs: sqlite3_column_type(stmt, 14) == SQLITE_NULL
+                    ? nil : Int(sqlite3_column_int64(stmt, 14)),
+                finalizationMs: sqlite3_column_type(stmt, 13) == SQLITE_NULL
+                    ? nil : Int(sqlite3_column_int64(stmt, 13)),
                 audioPath: columnText(stmt, 9),
                 sessionID: columnText(stmt, 10),
                 sttMs: sqlite3_column_type(stmt, 11) == SQLITE_NULL

@@ -112,7 +112,7 @@ One dictation:
 ← {"event":"partial","session":"...","text":"..."}                        (0..n, during recording)
 ← {"event":"transcript","session":"...","raw":"...","ms":<stop→transcript ms>}
 ← {"event":"final","session":"...","text":"...","raw":"...","mode":"Note",
-   "cleanup_ms":..,"cleanup_applied":true}
+   "cleanup_ms":..,"cleanup_wall_ms":..,"cleanup_applied":true,"total_ms":..}
 ```
 
 Other commands: `cancel` (discards the session → `cancelled`), `ping` → `pong`,

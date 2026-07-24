@@ -32,14 +32,16 @@ enum EngineEvent {
     /// is on.
     case final(
         session: String, text: String, raw: String, mode: String?,
-        cleanupMs: Int?, cleanupApplied: Bool, audio: String?)
+        cleanupMs: Int?, cleanupWallMs: Int?, cleanupApplied: Bool,
+        totalMs: Int?, audio: String?)
 
     /// Result of a History `reprocess` command: a re-run of an archived clip
     /// through a (possibly different) STT model / mode. Routed to the History
     /// UI, not the live dictation flow.
     case reprocessed(
         id: Int64?, audio: String, raw: String, text: String, mode: String?,
-        sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool)
+        sttModel: String?, sttMs: Int, cleanupMs: Int, cleanupApplied: Bool,
+        cleanupWallMs: Int?)
     case reprocessFailed(id: Int64?, error: String, code: String)
 
     /// Safe Voice Edit result: the transformed selection (or the original
@@ -128,7 +130,9 @@ enum EngineEvent {
                 raw: object["raw"] as? String ?? (object["text"] as? String ?? ""),
                 mode: object["mode"] as? String,
                 cleanupMs: object["cleanup_ms"] as? Int,
+                cleanupWallMs: object["cleanup_wall_ms"] as? Int,
                 cleanupApplied: object["cleanup_applied"] as? Bool ?? false,
+                totalMs: object["total_ms"] as? Int,
                 audio: object["audio"] as? String)
         case "reprocessed":
             return .reprocessed(
@@ -140,7 +144,8 @@ enum EngineEvent {
                 sttModel: object["stt_model"] as? String,
                 sttMs: object["stt_ms"] as? Int ?? 0,
                 cleanupMs: object["cleanup_ms"] as? Int ?? 0,
-                cleanupApplied: object["cleanup_applied"] as? Bool ?? false)
+                cleanupApplied: object["cleanup_applied"] as? Bool ?? false,
+                cleanupWallMs: object["cleanup_wall_ms"] as? Int)
         case "reprocess_failed":
             return .reprocessFailed(
                 id: (object["id"] as? NSNumber)?.int64Value,

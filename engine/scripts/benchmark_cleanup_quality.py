@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import asdict, dataclass
 import json
 import os
 import re
 import tempfile
+from dataclasses import asdict, dataclass
 
-from velora_engine.cleanup import CleanupEngine
+from velora_engine.cleanup_process import CleanupProcess
 from velora_engine.config import Config
 from velora_engine.formatting import (
     STATIC_SYSTEM_PROMPT,
@@ -318,7 +318,9 @@ async def run(selected: set[str] | None) -> int:
     with tempfile.TemporaryDirectory(prefix="velora-benchmark-") as home:
         os.environ["VELORA_HOME"] = home
         config = Config()
-        engine = CleanupEngine(MODEL_ID)
+        # Match production: the exact model and cache live in the persistent,
+        # killable cleanup child rather than in the speech-engine process.
+        engine = CleanupProcess(MODEL_ID)
         await engine.load_async(STATIC_SYSTEM_PROMPT)
         failures = 0
         try:
@@ -357,6 +359,7 @@ async def run(selected: set[str] | None) -> int:
                     "model": MODEL_ID,
                     "prefix_tokens": result.prefix_tokens,
                     "cleanup_ms": result.ms,
+                    "cleanup_wall_ms": result.wall_ms,
                     "reason": result.reason,
                     "ttft_ms": result.ttft_ms,
                     "decode_ms": result.decode_ms,
@@ -365,7 +368,7 @@ async def run(selected: set[str] | None) -> int:
                     "failures": case_failures,
                 }, ensure_ascii=False))
         finally:
-            engine.close()
+            await engine.aclose()
         return 1 if failures else 0
 
 

@@ -308,6 +308,12 @@ final class LocalControlRouter {
                 result["observation_coverage"] = coverage
             }
             if let latency = value.averageSttMs { result["average_stt_ms"] = latency }
+            if let latency = value.averageCleanupWallMs {
+                result["average_cleanup_wall_ms"] = latency
+            }
+            if let latency = value.averageFinalizationMs {
+                result["average_finalization_ms"] = latency
+            }
             return result
         }
         return [

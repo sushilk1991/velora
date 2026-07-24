@@ -40,13 +40,14 @@ final class HistoryViewModel: ObservableObject {
             forName: .veloraEngineReprocessed, object: nil, queue: .main
         ) { [weak self] note in
             if case let .reprocessed(
-                id, _, raw, text, mode, _, sttMs, cleanupMs, cleanupApplied
+                id, _, raw, text, mode, _, sttMs, cleanupMs, cleanupApplied,
+                cleanupWallMs
             )? =
                 note.object as? EngineEvent {
                 self?.applyReprocessed(
                     id: id, raw: raw, text: text, mode: mode,
                     sttMs: sttMs, cleanupMs: cleanupMs,
-                    cleanupApplied: cleanupApplied)
+                    cleanupApplied: cleanupApplied, cleanupWallMs: cleanupWallMs)
             } else if case let .reprocessFailed(id, _, _)? = note.object as? EngineEvent {
                 self?.applyReprocessFailed(id: id)
             }
@@ -104,7 +105,9 @@ final class HistoryViewModel: ObservableObject {
                 id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
                 appName: old.appName, raw: old.raw, final: trimmed,
                 mode: old.mode, durationMs: old.durationMs,
-                cleanupMs: old.cleanupMs, audioPath: old.audioPath,
+                cleanupMs: old.cleanupMs, cleanupWallMs: old.cleanupWallMs,
+                finalizationMs: old.finalizationMs,
+                audioPath: old.audioPath,
                 sessionID: old.sessionID, sttMs: old.sttMs,
                 cleanupApplied: old.cleanupApplied)
         }
@@ -163,19 +166,22 @@ final class HistoryViewModel: ObservableObject {
 
     private func applyReprocessed(
         id: Int64?, raw: String, text: String, mode: String?,
-        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool
+        sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?
     ) {
         guard let id else { return }
         history.updateAfterReprocess(
             id: id, raw: raw, final: text, mode: mode,
-            sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied)
+            sttMs: sttMs, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+            cleanupWallMs: cleanupWallMs)
         if let index = records.firstIndex(where: { $0.id == id }) {
             let old = records[index]
             records[index] = DictationRecord(
                 id: old.id, timestamp: old.timestamp, bundleID: old.bundleID,
                 appName: old.appName, raw: raw, final: text,
                 mode: mode ?? old.mode, durationMs: old.durationMs,
-                cleanupMs: cleanupMs, audioPath: old.audioPath,
+                cleanupMs: cleanupMs, cleanupWallMs: cleanupWallMs,
+                finalizationMs: nil,
+                audioPath: old.audioPath,
                 sessionID: old.sessionID, sttMs: sttMs,
                 cleanupApplied: cleanupApplied)
         }

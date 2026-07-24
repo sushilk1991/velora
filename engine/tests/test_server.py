@@ -4,7 +4,9 @@
 import asyncio
 import contextlib
 import json
+import os
 import shutil
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -15,6 +17,7 @@ import pytest
 
 import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
+from velora_engine.cleanup_process import CleanupProcess
 from velora_engine import protocol
 from velora_engine.config import Config
 from velora_engine.server import Engine
@@ -291,6 +294,9 @@ async def test_full_dictation_flow(engine):
     assert final["cleanup_applied"] is False
     assert final["text"] == "hello world this is a fake transcript."
     assert isinstance(final["cleanup_ms"], int)
+    assert isinstance(final["cleanup_wall_ms"], int)
+    assert isinstance(final["total_ms"], int)
+    assert final["total_ms"] >= transcript["ms"]
     assert "auto_stopped" not in final  # only present on max-duration auto-stop
     # socket must be private to the user
     assert (sock.stat().st_mode & 0o777) == 0o600
@@ -326,6 +332,106 @@ async def test_hard_wedged_cleanup_sends_raw_final_then_restarts_engine(engine):
     assert eng.shutdown.is_set()
     await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
+    client.close()
+
+
+async def test_killed_cleanup_child_returns_raw_and_engine_serves_next_dictation(
+    engine, monkeypatch
+):
+    eng, sock = engine
+    worker = Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[sys.executable, str(worker)],
+        hard_timeout_grace_s=0.05,
+    )
+    await cleanup.load_async("warm prompt")
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    stalled_raw = (
+        "this __hang__ cleanup request has enough words to use the writing model"
+    )
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", stalled_raw)
+    await client.send_json({
+        "cmd": "start",
+        "session": "child-stall",
+        "context": {"bundle_id": "com.apple.Notes", "app_name": "Notes"},
+    })
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "child-stall"})
+    final = await client.recv_event("final")
+
+    assert final["raw"] == stalled_raw
+    assert final["cleanup_applied"] is False
+    assert final["cleanup_ms"] == 1_500
+    assert final["cleanup_wall_ms"] >= 1_500
+    assert not eng.shutdown.is_set()
+
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv_event("pong"))["event"] == "pong"
+    for _ in range(500):
+        if cleanup.loaded:
+            break
+        await asyncio.sleep(0.01)
+    assert cleanup.loaded
+
+    monkeypatch.setenv(
+        "VELORA_FAKE_STT_TEXT",
+        "the replacement writing worker completes this second dictation correctly",
+    )
+    await client.send_json({
+        "cmd": "start",
+        "session": "after-child-stall",
+        "context": {"bundle_id": "com.apple.Notes", "app_name": "Notes"},
+    })
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "after-child-stall"})
+    recovered = await client.recv_event("final")
+    assert recovered["session"] == "after-child-stall"
+    assert recovered["cleanup_applied"] is True
+    assert not eng.shutdown.is_set()
+    client.close()
+
+
+async def test_cleanup_model_swap_reaps_old_worker_before_ack(engine, monkeypatch):
+    eng, sock = engine
+    worker = Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"
+
+    def new_cleanup(model_id: str) -> CleanupProcess:
+        return CleanupProcess(
+            model_id,
+            worker_command=[sys.executable, str(worker)],
+        )
+
+    old = new_cleanup("fake-old")
+    await old.load_async("warm prompt")
+    old_pid = old.pid
+    assert old_pid is not None
+    eng.cleanup = old
+    monkeypatch.setattr(server_mod, "CleanupProcess", new_cleanup)
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "set_model",
+        "kind": "cleanup",
+        "model": "fake-new",
+    })
+    changed = await client.recv_event("model_set")
+
+    assert changed["model"] == "fake-new"
+    assert eng.cleanup is not old
+    assert eng.cleanup is not None and eng.cleanup.loaded
+    try:
+        os.kill(old_pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError("retired cleanup model survived model_set acknowledgement")
     client.close()
 
 

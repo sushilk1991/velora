@@ -86,7 +86,9 @@ app → engine  {"cmd":"stop","session":"uuid"}             # user released hotk
 engine → app  {"event":"partial","session":"...","text":"..."}       # optional, P1 HUD display
 engine → app  {"event":"transcript","session":"...","raw":"...","ms":412}
 engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode":"chat",
-               "cleanup_ms":389,"cleanup_applied":true,"audio":"uuid.flac"}   # audio present when archived
+               "cleanup_ms":389,"cleanup_wall_ms":402,"cleanup_applied":true,
+               "total_ms":811,
+               "audio":"uuid.flac"}   # audio present when archived
 ```
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
 
@@ -133,7 +135,8 @@ Reprocessing re-transcribes a saved clip, optionally with a different model:
 app → engine  {"cmd":"reprocess","audio":"uuid.flac","id":42,
                "stt_model":"mlx-community/whisper-large-v3-mlx","mode":null,"language":"hi"}
 engine → app  {"event":"reprocessed","id":42,"audio":"uuid.flac","raw":"...","text":"...",
-               "mode":"Default","stt_model":"...","stt_ms":1830,"cleanup_ms":0,"cleanup_applied":false}
+               "mode":"Default","stt_model":"...","stt_ms":1830,"cleanup_ms":0,
+               "cleanup_wall_ms":4,"cleanup_applied":false}
 ```
 A model different from the live one is loaded once and cached across reprocess calls.
 
@@ -148,7 +151,7 @@ alphabet (Hindi → natural Hinglish; the words are kept, not translated). The
 length-ratio divergence guard is disabled for that pass since transliteration
 changes length.
 
-**Latency budget:** the default Whisper model emits non-committing preview decodes after a pause or bounded interval so the HUD can show readable partial text before release. On `stop`, its authoritative final decode still covers every audio sample. Cleanup prepares the exact stable prompt prefix during recording, snapshots that immutable cache, and forks it for preview/chunk/final generation. The adaptive soft deadline begins at the first output token; a separate outer watchdog bounds stalled prefill or generation. If cleanup exceeds its budget, is cancelled, or fails, the engine emits `final` with `cleanup_applied:false` carrying the raw transcript. Raw is always retained in history.
+**Latency budget:** the default Whisper model emits non-committing preview decodes after a pause or bounded interval so the HUD can show readable partial text before release. On `stop`, its authoritative final decode still covers every audio sample. Cleanup owns one immutable static prompt-cache snapshot and forks it for chunk/final generation. The writing model runs in a persistent child process: its adaptive soft deadline begins at the first output token, while the responsive speech-engine parent enforces a true wall deadline around stalled prefill or native generation. A hard stall kills and warm-restarts only the writing worker. If cleanup exceeds its budget, is cancelled, or fails, the engine emits `final` with `cleanup_applied:false` carrying the raw transcript. Raw and measured stop-to-final time are retained in history.
 
 **Streaming segment pipeline (whisper, smartness-v2):** preview-only decoding begins at 4s after ≥0.4s silence (or at an 8s hard preview interval) and requires ≥3s of new audio before another preview. Preview decoding never advances committed sample offsets or mutates final segment state. The backend commits a segment when ≥10s of un-decoded audio meets a ≥0.7s pause (energy VAD; hard cap 25s), and the server starts that segment's LLM cleanup while the user is speaking. Superseded chunk work receives cooperative cancellation. On `stop`, dictations ≤45s re-decode the whole clip and clean once; longer ones stitch committed segments and decode/clean the tail. Any failure falls back to the whole-text path, so the fast path cannot lose transcript content. Config: `streaming_cleanup` (default true).
 

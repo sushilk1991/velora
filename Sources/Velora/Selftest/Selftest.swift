@@ -2089,11 +2089,17 @@ enum Selftest {
         }
 
         let final = EngineEvent.parse([
-            "event": "final", "session": "s1", "text": "Hello.", "cleanup_applied": true,
+            "event": "final", "session": "s1", "text": "Hello.",
+            "cleanup_applied": true, "cleanup_wall_ms": 123, "total_ms": 321,
         ])
-        if case .final(let session, let text, let raw, _, _, let applied, let audio) = final {
+        if case .final(
+            let session, let text, let raw, _, _, let cleanupWallMs,
+            let applied, let totalMs, let audio
+        ) = final {
             expect(session == "s1" && text == "Hello." && raw == "Hello.", "final fields parse")
-            expect(applied && audio == nil, "final flags parse")
+            expect(
+                applied && cleanupWallMs == 123 && totalMs == 321 && audio == nil,
+                "final flags parse")
         } else {
             expect(false, "expected .final, got \(final)")
         }
@@ -2241,13 +2247,16 @@ enum Selftest {
         app: String? = "TestApp", bundle: String? = "com.test.app",
         mode: String? = "Default", raw: String? = nil, final: String? = nil,
         session: String? = nil, sttMs: Int? = nil, cleanupMs: Int? = nil,
-        cleanupApplied: Bool? = nil
+        cleanupApplied: Bool? = nil, cleanupWallMs: Int? = nil,
+        finalizationMs: Int? = nil
     ) -> DictationRecord {
         let text = final ?? Array(repeating: "word", count: words).joined(separator: " ")
         return DictationRecord(
             timestamp: Calendar.current.date(byAdding: .day, value: -daysAgo, to: Date())!,
             bundleID: bundle, appName: app, raw: raw ?? text, final: text,
             mode: mode, durationMs: durationMs, cleanupMs: cleanupMs,
+            cleanupWallMs: cleanupWallMs,
+            finalizationMs: finalizationMs,
             audioPath: nil, sessionID: session, sttMs: sttMs,
             cleanupApplied: cleanupApplied)
     }
@@ -2323,17 +2332,23 @@ enum Selftest {
         expect(migrated.first?.final == "legacy final words",
                "legacy transcript is intact after migration")
         expect(migrated.first?.sessionID == nil && migrated.first?.sttMs == nil
-               && migrated.first?.cleanupApplied == nil,
+               && migrated.first?.cleanupApplied == nil
+               && migrated.first?.cleanupWallMs == nil
+               && migrated.first?.finalizationMs == nil,
                "legacy row's new columns decode as unknown, not fabricated values")
 
         store.insert(dictation(
             daysAgo: 0, words: 5, session: "migrated-session",
-            sttMs: 250, cleanupMs: 120, cleanupApplied: true))
+            sttMs: 250, cleanupMs: 120, cleanupApplied: true,
+            cleanupWallMs: 155, finalizationMs: 410))
         let rows = store.recent(limit: 10)
         expect(rows.count == 2, "a migrated store accepts new inserts")
         let fresh = rows.first(where: { $0.sessionID == "migrated-session" })
-        expect(fresh?.sttMs == 250 && fresh?.cleanupApplied == true,
-               "session id, stt latency, and cleanup state round-trip")
+        expect(
+            fresh?.sttMs == 250 && fresh?.cleanupApplied == true
+                && fresh?.cleanupWallMs == 155
+                && fresh?.finalizationMs == 410,
+            "session id and all finalization latency fields round-trip")
 
         // Reopen: re-running the migration on an already-migrated store must
         // be harmless.
@@ -2342,6 +2357,12 @@ enum Selftest {
         let window = reopened.insights().allTime
         expect(window.count == 2, "aggregates run over a migrated store")
         expect(window.sttSamples == 1, "legacy rows never fake latency samples")
+        expect(
+            window.cleanupWallSamples == 1 && window.averageCleanupWallMs == 155,
+            "legacy rows stay out of cleanup wall-time averages")
+        expect(
+            window.finalizationSamples == 1 && window.averageFinalizationMs == 410,
+            "legacy rows stay out of stop-to-final latency averages")
         expect(window.cleanupKnown == 1, "legacy rows never fake a cleanup state")
 
         // The schema real installs are on today: audio_path exists, none of
@@ -2383,11 +2404,13 @@ enum Selftest {
             store.insert(dictation(
                 daysAgo: 0, words: 10, durationMs: 60_000, app: "Slack",
                 bundle: "com.slack", mode: "Message", raw: "different raw",
-                session: "a", sttMs: 200, cleanupMs: 100, cleanupApplied: true))
+                session: "a", sttMs: 200, cleanupMs: 100, cleanupApplied: true,
+                cleanupWallMs: 150, finalizationMs: 350))
             store.insert(dictation(
                 daysAgo: 0, words: 20, durationMs: 30_000, app: "Notes",
                 bundle: "com.notes", mode: "Note",
-                session: "b", sttMs: 400, cleanupMs: 300, cleanupApplied: true))
+                session: "b", sttMs: 400, cleanupMs: 300, cleanupApplied: true,
+                cleanupWallMs: 450, finalizationMs: 650))
             store.insert(dictation(
                 daysAgo: 3, words: 30, app: "Slack", bundle: "com.slack",
                 mode: "Message", session: "c", cleanupApplied: false))
@@ -2414,6 +2437,14 @@ enum Selftest {
                    "rows without stt_ms don't drag the latency average")
             expect(insights.allTime.averageCleanupMs == 200,
                    "cleanup latency averages only cleanup-timed rows")
+            expect(
+                insights.allTime.cleanupWallSamples == 2
+                    && insights.allTime.averageCleanupWallMs == 300,
+                "cleanup wall latency averages only instrumented rows")
+            expect(
+                insights.allTime.finalizationSamples == 2
+                    && insights.allTime.averageFinalizationMs == 500,
+                "stop-to-final latency averages only instrumented rows")
 
             expect(insights.week.cleanupKnown == 3 && insights.week.cleanupApplied == 2,
                    "cleanup-applied rate uses only state-known rows")
@@ -2484,11 +2515,14 @@ enum Selftest {
             let fixedID = store.recent(limit: 10).first { $0.sessionID == "fixed" }!.id
             store.updateAfterReprocess(
                 id: fixedID, raw: "new raw", final: "new final",
-                mode: "Note", sttMs: 77, cleanupMs: 33, cleanupApplied: true)
+                mode: "Note", sttMs: 77, cleanupMs: 33, cleanupApplied: true,
+                cleanupWallMs: 55)
             let reprocessed = store.recent(limit: 10).first { $0.id == fixedID }
             expect(
                 reprocessed?.sttMs == 77 && reprocessed?.cleanupMs == 33
-                    && reprocessed?.cleanupApplied == true,
+                    && reprocessed?.cleanupApplied == true
+                    && reprocessed?.cleanupWallMs == 55
+                    && reprocessed?.finalizationMs == nil,
                 "reprocess replaces the run's performance measurements")
             let afterReprocess = store.insights().allTime
             expect(afterReprocess.qualityObserved == 1,

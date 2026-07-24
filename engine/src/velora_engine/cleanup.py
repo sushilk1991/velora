@@ -339,6 +339,9 @@ class CleanupResult:
     prefix_tokens: int = 0
     output_tokens: int = 0
     cache_hit: bool = False
+    # Parent-observed submission-to-result wall time. The process proxy
+    # overwrites this without changing the established `ms` inference metric.
+    wall_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -776,6 +779,7 @@ class CleanupEngine:
             return CleanupResult(raw, False, 0, "llm_unhealthy")
         if not self.loaded:
             return CleanupResult(raw, False, 0, "llm_not_loaded")
+        call_started = time.perf_counter()
         worker_cancel = cancel_event if cancel_event is not None else threading.Event()
         loop = asyncio.get_running_loop()
         started = asyncio.Event()
@@ -798,12 +802,17 @@ class CleanupEngine:
                 worker_cancel.set()
                 worker.cancel()
                 self.unhealthy = True
+                elapsed = int((time.perf_counter() - call_started) * 1000)
                 log.error(
                     "cleanup worker unavailable after %dms in queue — returning raw",
-                    int(QUEUE_TIMEOUT_S * 1000),
+                    elapsed,
                 )
                 return CleanupResult(
-                    raw, False, int(QUEUE_TIMEOUT_S * 1000), "timeout_queue"
+                    raw,
+                    False,
+                    int(QUEUE_TIMEOUT_S * 1000),
+                    "timeout_queue",
+                    wall_ms=elapsed,
                 )
 
             # In-thread deadline enforces the budget between tokens. This
@@ -816,8 +825,15 @@ class CleanupEngine:
         except asyncio.TimeoutError:
             worker_cancel.set()
             self.unhealthy = True
-            log.error("cleanup hard-wedged past %dms — returning raw", timeout_ms)
-            return CleanupResult(raw, False, timeout_ms, "timeout_hard")
+            elapsed = int((time.perf_counter() - call_started) * 1000)
+            log.error("cleanup hard-wedged after %dms — returning raw", elapsed)
+            return CleanupResult(
+                raw,
+                False,
+                timeout_ms,
+                "timeout_hard",
+                wall_ms=elapsed,
+            )
         except asyncio.CancelledError:
             worker_cancel.set()
             worker.cancel()

@@ -273,14 +273,24 @@ struct IntelligenceSettingsView: View {
                 "Speech-to-text latency (avg)",
                 value: Self.latency(stats.averageSttMs, samples: stats.sttSamples))
             LabeledContent(
-                "Cleanup latency (avg)",
+                "Model cleanup latency (avg)",
                 value: Self.latency(stats.averageCleanupMs, samples: stats.cleanupSamples))
+            LabeledContent(
+                "Cleanup wall latency (avg)",
+                value: Self.latency(
+                    stats.averageCleanupWallMs,
+                    samples: stats.cleanupWallSamples))
+            LabeledContent(
+                "Stop-to-final latency (avg)",
+                value: Self.latency(
+                    stats.averageFinalizationMs,
+                    samples: stats.finalizationSamples))
             LabeledContent("Cleanup applied", value: Self.rate(stats.cleanupAppliedRate))
             LabeledContent("Cleanup changed the raw transcript", value: Self.rate(stats.cleanupChangedRate))
         } header: {
             Text("Performance — \(window.title.lowercased())")
         } footer: {
-            SettingsFooter("Latency and cleanup state are recorded from this build on; older dictations don't carry them.")
+            SettingsFooter("Stop-to-final latency is recorded from 0.10.17; older dictations don't carry it.")
         }
     }
 
