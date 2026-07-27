@@ -6,12 +6,16 @@ exact legacy behavior when streaming_cleanup is off."""
 # ruff: noqa: F811
 
 import asyncio
+import sys
+from pathlib import Path
 
 import pytest
 
 from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 
+import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
+from velora_engine.cleanup_process import CleanupProcess
 from velora_engine.server import _join_chunks, _numbering_restarts
 
 SEG1 = "alpha one two three four five six"
@@ -29,10 +33,17 @@ class FakeCleanup:
         self.calls: list[tuple[str, str]] = []
         self.cancel_events = []
         self.allowed_terms_calls: list[list[str] | None] = []
+        self.recovery_events: list[str] = []
+
+    async def defer_recovery(self):
+        self.recovery_events.append("defer")
+
+    def resume_recovery(self):
+        self.recovery_events.append("resume")
 
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
-        cancel_event=None, allowed_terms=None,
+        cancel_event=None, allowed_terms=None, prefix_candidates=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -47,7 +58,7 @@ class RestartingListCleanup(FakeCleanup):
 
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
-        cancel_event=None, allowed_terms=None,
+        cancel_event=None, allowed_terms=None, prefix_candidates=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
@@ -63,6 +74,84 @@ class RestartingListCleanup(FakeCleanup):
                 "3. Errors give no recovery step."
             )
         return CleanupResult(text=text, applied=True, ms=7)
+
+
+class PendingLastCleanup(FakeCleanup):
+    """Keep the last live chunk pending until finalization replaces it."""
+
+    def __init__(
+        self,
+        fail_merged: bool = False,
+        merged_delay: float = 0.0,
+    ):
+        super().__init__()
+        self.last_started = asyncio.Event()
+        self.fail_merged = fail_merged
+        self.merged_delay = merged_delay
+
+    async def cleanup(
+        self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+        cancel_event=None, allowed_terms=None, prefix_candidates=None,
+    ):
+        self.calls.append((raw, system_prompt))
+        self.cancel_events.append(cancel_event)
+        self.allowed_terms_calls.append(allowed_terms)
+        if raw == SEG2:
+            self.last_started.set()
+            await asyncio.Event().wait()
+        merged = f"{SEG2} {TAIL}"
+        if raw == merged and self.merged_delay:
+            await asyncio.sleep(self.merged_delay)
+        if self.fail_merged and raw == merged:
+            return CleanupResult(text=raw, applied=False, ms=7, reason="test")
+        return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
+
+
+class FirstCallHangsCleanup(FakeCleanup):
+    def __init__(self):
+        super().__init__()
+        self.started = asyncio.Event()
+        self.call_count = 0
+
+    async def cleanup(
+        self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+        cancel_event=None, allowed_terms=None, prefix_candidates=None,
+    ):
+        self.calls.append((raw, system_prompt))
+        self.cancel_events.append(cancel_event)
+        self.allowed_terms_calls.append(allowed_terms)
+        self.call_count += 1
+        if self.call_count == 1:
+            self.started.set()
+            await asyncio.Event().wait()
+        return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
+
+
+class RecoveringCleanup(FakeCleanup):
+    def __init__(self):
+        super().__init__()
+        self.ready = asyncio.Event()
+
+    def fail_during_session(self):
+        self.loaded = False
+        self.ready.clear()
+
+    def resume_recovery(self):
+        self.recovery_events.append("resume")
+
+        async def recover():
+            await asyncio.sleep(0.02)
+            self.loaded = True
+            self.ready.set()
+
+        asyncio.create_task(recover())
+
+    async def wait_until_ready(self, timeout_s):
+        try:
+            await asyncio.wait_for(self.ready.wait(), timeout_s)
+        except TimeoutError:
+            return False
+        return self.loaded
 
 
 @pytest.fixture
@@ -114,6 +203,289 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     assert f"<{SEG1}>" in cleanup.calls[1][1]
     assert "Previous text (context only, do NOT repeat it)" in cleanup.calls[1][1]
     assert f"<{SEG2}>" in cleanup.calls[2][1]
+    assert cleanup.recovery_events == ["defer", "resume"]
+    client.close()
+
+
+async def test_mid_session_cleanup_failure_recovers_before_final_formatting(
+    engine,
+    monkeypatch,
+):
+    raw = (
+        "this longer dictation must wait for the replacement writing worker "
+        "before returning its final formatted result"
+    )
+    monkeypatch.delenv("VELORA_FAKE_STT_SEGMENTS", raising=False)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", raw)
+    eng, sock = engine
+    cleanup = RecoveringCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "recover-final", "context": {}})
+    await client.send_audio(AUDIO)
+    cleanup.fail_during_session()
+    await client.send_json({"cmd": "stop", "session": "recover-final"})
+    final = await client.recv_event("final")
+
+    assert final["cleanup_applied"] is True
+    assert final["text"] == f"<{raw}>."
+    assert cleanup.recovery_events == ["defer", "resume"]
+    client.close()
+
+
+async def test_final_tail_replaces_only_unfinished_last_chunk(engine, segments):
+    eng, sock = engine
+    cleanup = PendingLastCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "tail-priority", "context": {}})
+    for _ in range(4):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.last_started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "tail-priority"})
+    final = await client.recv_event("final")
+
+    merged = f"{SEG2} {TAIL}"
+    assert [raw for raw, _prompt in cleanup.calls] == [SEG1, SEG2, merged]
+    assert final["text"] == f"<{SEG1}> <{merged}>."
+    assert final["cleanup_applied"] is True
+    assert cleanup.cancel_events[1] is not None
+    assert cleanup.cancel_events[1].is_set()
+    assert f"<{SEG1}>" in cleanup.calls[-1][1]
+    client.close()
+
+
+async def test_priority_tail_uses_its_own_generation_budget(
+    engine,
+    segments,
+    monkeypatch,
+):
+    monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
+    eng, sock = engine
+    cleanup = PendingLastCleanup(merged_delay=0.08)
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "tail-budget", "context": {}})
+    for _ in range(4):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.last_started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "tail-budget"})
+    final = await client.recv_event("final")
+
+    merged = f"{SEG2} {TAIL}"
+    assert [raw for raw, _prompt in cleanup.calls] == [SEG1, SEG2, merged]
+    assert final["text"] == f"<{SEG1}> <{merged}>."
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_unapplied_priority_tail_uses_whole_text_fallback(engine, segments):
+    eng, sock = engine
+    cleanup = PendingLastCleanup(fail_merged=True)
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "tail-fallback", "context": {}})
+    for _ in range(4):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.last_started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "tail-fallback"})
+    final = await client.recv_event("final")
+
+    raw = f"{SEG1} {SEG2} {TAIL}"
+    assert [call[0] for call in cleanup.calls][-1] == raw
+    assert final["text"] == f"<{raw}>."
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_final_tail_cancel_then_merge_keeps_real_worker_warm(
+    engine,
+    monkeypatch,
+):
+    hanging = "__cancel__"
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{hanging}")
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", TAIL)
+    eng, sock = engine
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[
+            sys.executable,
+            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
+        ],
+        queue_timeout_s=0.2,
+        cancel_grace_s=0.2,
+    )
+    await cleanup.load_async("warm prompt")
+    original_pid = cleanup.pid
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({"cmd": "start", "session": "real-tail-priority", "context": {}})
+        for _ in range(4):
+            await client.send_audio(AUDIO)
+        # First chunk completes immediately; the fixture holds the second until
+        # it receives the production protocol's cooperative cancel.
+        for _ in range(100):
+            if cleanup._pending:
+                await asyncio.sleep(0.03)
+                if cleanup._pending:
+                    break
+            await asyncio.sleep(0.01)
+
+        await client.send_json({"cmd": "stop", "session": "real-tail-priority"})
+        final = await client.recv_event("final")
+
+        assert final["cleanup_applied"] is True
+        assert SEG1.upper() in final["text"]
+        assert f"{hanging} {TAIL}".upper() in final["text"]
+        assert cleanup.pid == original_pid
+        assert cleanup.loaded is True
+    finally:
+        client.close()
+        await cleanup.aclose()
+        eng.cleanup = None
+
+
+async def test_romanize_fallback_waits_for_real_chunk_cancellation(
+    engine,
+    monkeypatch,
+):
+    hanging = "__cancel__"
+    tail = (
+        "यह अंतिम लंबा हिस्सा है और इसे रोमन में आना चाहिए क्योंकि पूरी "
+        "बात को एक साथ समझना जरूरी है"
+    )
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{hanging}")
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", tail)
+    eng, sock = engine
+    eng.config.data["romanize_output"] = True
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[
+            sys.executable,
+            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
+        ],
+        queue_timeout_s=0.2,
+        cancel_grace_s=0.2,
+    )
+    await cleanup.load_async("warm prompt")
+    original_pid = cleanup.pid
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({"cmd": "start", "session": "romanize-cancel", "context": {}})
+        for _ in range(4):
+            await client.send_audio(AUDIO)
+        for _ in range(100):
+            if (
+                cleanup._pending
+                and eng.session is not None
+                and len(eng.session.chunk_raws) == 2
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert eng.session is not None and len(eng.session.chunk_raws) == 2
+
+        await client.send_json({"cmd": "stop", "session": "romanize-cancel"})
+        final = await client.recv_event("final")
+
+        assert final["cleanup_applied"] is True
+        assert SEG1.upper() in final["text"]
+        assert hanging.upper() in final["text"]
+        assert cleanup.pid == original_pid
+        assert cleanup.loaded is True
+    finally:
+        client.close()
+        await cleanup.aclose()
+        eng.cleanup = None
+
+
+async def test_stitch_mismatch_waits_for_real_chunk_cancellation(
+    engine,
+    monkeypatch,
+):
+    hanging = "__cancel__"
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{hanging}")
+    monkeypatch.delenv("VELORA_FAKE_STT_TEXT", raising=False)
+    eng, sock = engine
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[
+            sys.executable,
+            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
+        ],
+        queue_timeout_s=0.2,
+        cancel_grace_s=0.2,
+    )
+    await cleanup.load_async("warm prompt")
+    original_pid = cleanup.pid
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({"cmd": "start", "session": "stitch-cancel", "context": {}})
+        for _ in range(4):
+            await client.send_audio(AUDIO)
+        for _ in range(100):
+            if (
+                cleanup._pending
+                and eng.session is not None
+                and len(eng.session.chunk_raws) == 2
+            ):
+                break
+            await asyncio.sleep(0.01)
+        assert eng.session is not None and len(eng.session.chunk_raws) == 2
+        eng.session.chunk_raws[0] = "tampered integrity probe"
+
+        await client.send_json({"cmd": "stop", "session": "stitch-cancel"})
+        final = await client.recv_event("final")
+
+        assert final["cleanup_applied"] is True
+        assert SEG1.upper() in final["text"]
+        assert hanging.upper() in final["text"]
+        assert cleanup.pid == original_pid
+        assert cleanup.loaded is True
+    finally:
+        client.close()
+        await cleanup.aclose()
+        eng.cleanup = None
+
+
+async def test_stream_gather_timeout_cooperatively_cancels_before_fallback(
+    engine,
+    monkeypatch,
+):
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", SEG1)
+    monkeypatch.delenv("VELORA_FAKE_STT_TEXT", raising=False)
+    monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
+    eng, sock = engine
+    cleanup = FirstCallHangsCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "gather-timeout", "context": {}})
+    for _ in range(2):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "gather-timeout"})
+    final = await client.recv_event("final")
+
+    assert final["text"] == f"<{SEG1}>."
+    assert final["cleanup_applied"] is True
+    assert cleanup.cancel_events[0] is not None
+    assert cleanup.cancel_events[0].is_set()
+    assert [call[0] for call in cleanup.calls] == [SEG1, SEG1]
     client.close()
 
 
@@ -351,6 +723,47 @@ async def test_retraction_segment_merges_with_previous(engine, monkeypatch):
     assert cleanup.cancel_events[-1] is not None
     assert not cleanup.cancel_events[-1].is_set()
     client.close()
+
+
+async def test_retraction_merge_waits_for_real_worker_cancellation(
+    engine,
+    monkeypatch,
+):
+    hanging = "__cancel__"
+    correction = "no wait make that six pm on monday"
+    monkeypatch.setenv(
+        "VELORA_FAKE_STT_SEGMENTS",
+        f"{hanging}|{correction}",
+    )
+    monkeypatch.delenv("VELORA_FAKE_STT_TEXT", raising=False)
+    eng, sock = engine
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[
+            sys.executable,
+            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
+        ],
+        queue_timeout_s=0.2,
+        cancel_grace_s=0.2,
+    )
+    await cleanup.load_async("warm prompt")
+    original_pid = cleanup.pid
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await run_dictation(client, "real-retraction-cancel", chunks=4)
+        final = await client.recv_event("final")
+
+        merged = f"{hanging} {correction}"
+        assert merged.upper() in final["text"]
+        assert final["cleanup_applied"] is True
+        assert cleanup.pid == original_pid
+        assert cleanup.loaded is True
+    finally:
+        client.close()
+        await cleanup.aclose()
+        eng.cleanup = None
 
 
 async def test_cancel_cancels_chunk_tasks(engine, segments):

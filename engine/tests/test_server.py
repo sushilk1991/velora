@@ -399,10 +399,11 @@ async def test_cleanup_model_swap_reaps_old_worker_before_ack(engine, monkeypatc
     eng, sock = engine
     worker = Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"
 
-    def new_cleanup(model_id: str) -> CleanupProcess:
+    def new_cleanup(model_id: str, **kwargs) -> CleanupProcess:
         return CleanupProcess(
             model_id,
             worker_command=[sys.executable, str(worker)],
+            **kwargs,
         )
 
     old = new_cleanup("fake-old")
@@ -543,6 +544,70 @@ async def test_cancel_sends_confirmation_then_restarts_unhealthy_cleanup(engine)
     await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     client.close()
+
+
+async def test_detached_reap_failure_restarts_engine_without_another_request(
+    engine,
+    monkeypatch,
+):
+    eng, _sock = engine
+    cleanup = CleanupProcess(
+        "fake",
+        on_unhealthy=eng._queue_cleanup_unhealthy_restart,
+    )
+    eng.cleanup = cleanup
+
+    async def delayed_failed_reap():
+        await asyncio.sleep(0.02)
+        cleanup.loaded = False
+        cleanup._mark_unhealthy()
+
+    monkeypatch.setattr(cleanup, "_stop_worker", delayed_failed_reap)
+    cleanup._schedule_replacement("test_failed_reap")
+
+    for _ in range(100):
+        if eng.shutdown.is_set():
+            break
+        await asyncio.sleep(0.01)
+
+    assert cleanup.unhealthy is True
+    assert eng.shutdown.is_set()
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
+    await cleanup.aclose()
+
+
+async def test_unhealthy_notification_waits_for_active_dictation_fallback(engine):
+    eng, sock = engine
+    cleanup = CleanupProcess(
+        "fake",
+        on_unhealthy=eng._queue_cleanup_unhealthy_restart,
+    )
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "defer-unhealthy", "context": {}})
+    await client.send_audio(AUDIO)
+    for _ in range(100):
+        if eng.session is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert eng.session is not None
+    cleanup._mark_unhealthy()
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.02)
+    assert not eng.shutdown.is_set()
+    eng._hard_exit.assert_not_called()
+
+    await client.send_json({"cmd": "cancel", "session": "defer-unhealthy"})
+    cancelled = await client.recv_event("cancelled")
+    assert cancelled["session"] == "defer-unhealthy"
+    assert eng.shutdown.is_set()
+    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
+
+    client.close()
+    await cleanup.aclose()
 
 
 async def test_cleanup_restart_waits_for_pending_audio_archive(engine):

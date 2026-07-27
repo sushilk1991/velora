@@ -34,7 +34,12 @@ import numpy as np
 
 from . import __version__, diarization, editing, formatting, models, protocol
 from .audio_store import AudioStore
-from .cleanup import _RETRACTION_RE
+from .cleanup import (
+    HARD_TIMEOUT_GRACE_S,
+    QUEUE_TIMEOUT_S,
+    _RETRACTION_RE,
+    adaptive_timeout_ms,
+)
 from .cleanup_process import CleanupProcess
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
@@ -75,6 +80,10 @@ MAX_DROPPED_FRAMES = 50
 # nearly-finished chunk; otherwise cancel it and use the whole-text path. A
 # long wait here is pure post-hotkey latency and previously reached 15 seconds.
 STREAM_GATHER_TIMEOUT_S = 1.5
+# A replacement that was deliberately held during live STT gets one bounded
+# chance to become ready once transcription is complete. This protects final
+# output quality after a rare mid-session cleanup-worker failure.
+CLEANUP_FINAL_RECOVERY_TIMEOUT_S = 10.0
 
 # Idle gap before (and between) vocab-mining steps — mining must only ever use
 # compute nobody is waiting on, and yields the moment a session starts.
@@ -197,6 +206,10 @@ class Session:
         # at every seam — one gate, one final postprocess matches the
         # whole-text semantics (review finding).
         self.stream_prompt: str | None = None
+        # Exact stable mode/strength prompt probes. The first real cleanup
+        # extends the static cache while doing prompt work it already needed;
+        # no separate prefill job runs at session start or during recording.
+        self.stream_prefix_candidates: list[tuple[str, str]] = []
         # Divergence allow-list paired with the sticky prompt: global personal
         # dictionary plus this session's active mode vocabulary, never terms
         # from inactive modes.
@@ -275,6 +288,9 @@ class Engine:
         self._cleanup_restart_scheduled = False
         self._cleanup_restart_task: asyncio.Task[None] | None = None
         self._cleanup_restart_timer: threading.Timer | None = None
+        self._cleanup_recovery_deferred = False
+        self._cleanup_unhealthy_watch_task: asyncio.Task[None] | None = None
+        self._cancelling_session = False
         self._archive_tasks: set[asyncio.Task[None]] = set()
         self._server: asyncio.Server | None = None
         self._client_gen = 0
@@ -302,6 +318,68 @@ class Engine:
                 await self._stt_call(close)
             except Exception:  # noqa: BLE001 — replacement is already usable
                 log.exception("failed to close retired STT backend %s", backend.model_id)
+
+    async def _defer_cleanup_recovery(self) -> None:
+        defer = getattr(self.cleanup, "defer_recovery", None)
+        if callable(defer):
+            self._cleanup_recovery_deferred = True
+            await defer()
+
+    def _resume_cleanup_recovery(self) -> None:
+        if not self._cleanup_recovery_deferred:
+            return
+        self._cleanup_recovery_deferred = False
+        resume = getattr(self.cleanup, "resume_recovery", None)
+        if callable(resume):
+            resume()
+
+    async def _wait_for_cleanup_recovery(self) -> None:
+        cleanup = self.cleanup
+        if cleanup is None or cleanup.loaded:
+            return
+        wait_until_ready = getattr(cleanup, "wait_until_ready", None)
+        if callable(wait_until_ready):
+            ready = await wait_until_ready(CLEANUP_FINAL_RECOVERY_TIMEOUT_S)
+            if not ready:
+                log.warning("cleanup recovery was not ready for final formatting")
+
+    def _new_cleanup_process(self, model_id: str) -> CleanupProcess:
+        return CleanupProcess(
+            model_id,
+            on_unhealthy=self._queue_cleanup_unhealthy_restart,
+        )
+
+    def _queue_cleanup_unhealthy_restart(self) -> None:
+        """Restart only after any user-facing fallback/result is delivered."""
+        current = self._cleanup_unhealthy_watch_task
+        if current is not None and not current.done():
+            return
+
+        async def restart_when_safe() -> None:
+            while (
+                self.session is not None
+                or self._starting
+                or self._finalizing
+                or self._cancelling_session
+                or self._editing
+                or self._reprocessing
+                or self._transcribing
+                or self._meeting_notes_running
+            ):
+                if self.shutdown.is_set():
+                    return
+                await asyncio.sleep(0.02)
+            self._restart_if_cleanup_unhealthy()
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # The loop is already gone; the parent process is shutting down.
+            log.warning("cleanup became unhealthy after the event loop closed")
+            return
+        self._cleanup_unhealthy_watch_task = loop.create_task(
+            restart_when_safe()
+        )
 
     def _restart_if_cleanup_unhealthy(self) -> bool:
         """Restart the sidecar after its unkillable cleanup worker wedges.
@@ -461,7 +539,7 @@ class Engine:
                     self.audio.prune, self.config.audio_retention_days, self.config.audio_max_bytes
                 )
         if self.config.cleanup_enabled and not fake_stt_enabled():
-            engine = CleanupProcess(self.config.cleanup_model)
+            engine = self._new_cleanup_process(self.config.cleanup_model)
             try:
                 # Dictation is already available (raw text) — but the first-run
                 # download of the cleanup LLM is multi-GB, so keep the progress
@@ -781,6 +859,10 @@ class Engine:
             if self.session is not None:
                 log.warning("start while session %s active — discarding it", self.session.id)
                 await self._abort_session("superseded by new start")
+            # A timed-out cleanup may be reaping or warming a replacement.
+            # Finish/cancel that optional recovery before live STT starts, then
+            # hold future warm-up until finalize/abort releases the machine.
+            await self._defer_cleanup_recovery()
             # A dictation owns the machine: stop any pending idle mining right now,
             # AND preempt an in-flight mining generation on the cleanup thread
             # (task cancellation alone can't reach the executor).
@@ -801,6 +883,8 @@ class Engine:
             self.session = session
         finally:
             self._starting = False
+            if self.session is None:
+                self._resume_cleanup_recovery()
         log.info(
             "session %s started (bundle_id=%s app=%s mode=%s)",
             session_id,
@@ -990,11 +1074,12 @@ class Engine:
         self.session = None
         session.cancelled = True
         session.pcm_chunks = []  # discard archived audio for a cancelled session
-        self._cancel_chunk_tasks(session)
+        await self._cancel_chunk_tasks_and_wait(session)
         await self._drain_feeder(session)
         await self._drain_preview(session)
         await self._stt_call(self.stt.reset)
         log.info("session %s discarded (%s)", session.id, why)
+        self._resume_cleanup_recovery()
         # The engine is idle again after an abort too — without this, a
         # cancelled dictation left mining dead until the next FINALIZED one
         # (review finding).
@@ -1004,6 +1089,19 @@ class Engine:
     def _cancel_chunk_tasks(session: Session) -> None:
         for task in session.chunk_tasks:
             Engine._cancel_chunk_task(session, task)
+
+    @staticmethod
+    async def _cancel_chunk_tasks_and_wait(session: Session) -> None:
+        """Cooperatively cancel chunks before any authoritative fallback.
+
+        CleanupProcess keeps its operation lock until the child acknowledges
+        cancellation (or is replaced). Starting whole-text cleanup before that
+        handoff can otherwise time out in the queue and discard LLM quality.
+        """
+        tasks = list(session.chunk_tasks)
+        Engine._cancel_chunk_tasks(session)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     @staticmethod
     def _cancel_chunk_task(session: Session, task: asyncio.Task[_ChunkResult]) -> None:
@@ -1017,8 +1115,12 @@ class Engine:
         if session is None:
             await self._error("cancel: no active session", msg.get("session"))
             return
-        await self._abort_session("cancel")
-        await self._send({"event": "cancelled", "session": session.id})
+        self._cancelling_session = True
+        try:
+            await self._abort_session("cancel")
+            await self._send({"event": "cancelled", "session": session.id})
+        finally:
+            self._cancelling_session = False
         # Chunk cleanup may have hit the hard watchdog before the user
         # cancelled. Confirm cancellation first, then restart instead of
         # leaving the poisoned single-worker executor for the next dictation.
@@ -1051,6 +1153,7 @@ class Engine:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
             self._finalizing = False
+            self._resume_cleanup_recovery()
 
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
         t_stop = time.perf_counter()
@@ -1060,12 +1163,17 @@ class Engine:
             raw = await self._stt_call(self.stt.finalize)
         except Exception as exc:
             log.exception("finalize failed")
-            self._cancel_chunk_tasks(session)
+            await self._cancel_chunk_tasks_and_wait(session)
             await self._stt_call(self.stt.reset)
             await self._error(f"transcription failed: {exc}", session.id)
             return
         stt_ms = int((time.perf_counter() - t_stop) * 1000)
         await self._send({"event": "transcript", "session": session.id, "raw": raw, "ms": stt_ms})
+        # Live STT no longer owns Metal. If cleanup recovery was deferred after
+        # a mid-session failure, start it now and give it a bounded chance to
+        # preserve final-output quality before the formatting stage.
+        self._resume_cleanup_recovery()
+        await self._wait_for_cleanup_recovery()
 
         # Stage 2: formatting pipeline. Long whisper dictations whose segments
         # were already cleaned during recording assemble from those chunks
@@ -1082,7 +1190,7 @@ class Engine:
                 log.exception("streaming finalize failed — falling back to whole-text cleanup")
                 result = None
         if result is None:
-            self._cancel_chunk_tasks(session)
+            await self._cancel_chunk_tasks_and_wait(session)
             result = await self._apply_formatting(
                 raw,
                 bundle_id=ctx.get("bundle_id"),
@@ -1192,6 +1300,15 @@ class Engine:
                 return
             session.stream_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
             session.stream_allowed_terms = self._allowed_terms(gate.mode)
+            session.stream_prefix_candidates = (
+                formatting.build_prefill_prompt_candidates(
+                    self.config,
+                    bundle_id=ctx.get("bundle_id"),
+                    app_name=ctx.get("app_name"),
+                    explicit_mode=ctx.get("mode"),
+                    entities=session.start_entities,
+                )
+            )
         # Cross-boundary self-correction: a segment that BEGINS with a
         # retraction marker ("no wait…", "scratch that…") refers back across
         # the boundary — never clean it alone. Merge with the previous raw
@@ -1199,11 +1316,17 @@ class Engine:
         # result. The marker decides SCOPE only; the LLM does the edit.
         head = " ".join(seg_raw.split()[:RETRACTION_HEAD_WORDS])
         if session.chunk_raws and _RETRACTION_RE.search(head):
-            self._cancel_chunk_task(session, session.chunk_tasks[-1])
+            replaced_task = session.chunk_tasks[-1]
+            self._cancel_chunk_task(session, replaced_task)
             merged = session.chunk_raws[-1] + " " + seg_raw
             session.chunk_raws[-1] = merged
             prev = session.chunk_tasks[-2] if len(session.chunk_tasks) >= 2 else None
-            session.chunk_tasks[-1] = self._new_chunk_task(session, merged, prev)
+            session.chunk_tasks[-1] = self._new_chunk_task(
+                session,
+                merged,
+                prev,
+                replaced_task=replaced_task,
+            )
             return
         prev = session.chunk_tasks[-1] if session.chunk_tasks else None
         session.chunk_raws.append(seg_raw)
@@ -1214,10 +1337,18 @@ class Engine:
         session: Session,
         seg_raw: str,
         prev_task: asyncio.Task[_ChunkResult] | None,
+        *,
+        replaced_task: asyncio.Task[_ChunkResult] | None = None,
     ) -> asyncio.Task[_ChunkResult]:
         cancel_event = threading.Event()
         task = asyncio.create_task(
-            self._clean_chunk_task(session, seg_raw, prev_task, cancel_event)
+            self._clean_chunk_task(
+                session,
+                seg_raw,
+                prev_task,
+                cancel_event,
+                replaced_task=replaced_task,
+            )
         )
         session.chunk_cancel_events[task] = cancel_event
         return task
@@ -1228,10 +1359,16 @@ class Engine:
         seg_raw: str,
         prev_task: asyncio.Task[_ChunkResult] | None,
         cancel_event: threading.Event,
+        *,
+        replaced_task: asyncio.Task[_ChunkResult] | None = None,
     ) -> _ChunkResult:
         """Chunk cleanup that first waits for its predecessor (for the seam
         context). Waits via asyncio.wait so a cancelled/failed predecessor only
         costs us the context line, while OUR own cancellation still propagates."""
+        if replaced_task is not None:
+            # Do not admit a merged retraction while the request it replaces
+            # still owns CleanupProcess's single operation lock.
+            await asyncio.gather(replaced_task, return_exceptions=True)
         prev_text: str | None = None
         if prev_task is not None:
             await asyncio.wait([prev_task])
@@ -1277,6 +1414,7 @@ class Engine:
                 system_prompt,
                 cancel_event=cancel_event,
                 allowed_terms=session.stream_allowed_terms,
+                prefix_candidates=session.stream_prefix_candidates,
             )
             if result.applied:
                 return _ChunkResult(result.text, result.ms, applied=True)
@@ -1320,22 +1458,131 @@ class Engine:
         if gate.romanize or formatting.is_mostly_non_latin(raw):
             log.info("full transcript requires non-Latin handling — falling back to whole-text cleanup")
             return None
-        # The chunk cleanups ran during recording; this is normally instant.
-        # return_exceptions: a cancelled/failed task must surface as a value
-        # (→ fallback below), not raise CancelledError through finalize.
-        results = await asyncio.wait_for(
-            asyncio.gather(*session.chunk_tasks, return_exceptions=True),
-            timeout=STREAM_GATHER_TIMEOUT_S,
+        tail_head = " ".join(tail.split()[:RETRACTION_HEAD_WORDS])
+        tail_retracts = bool(
+            tail
+            and session.chunk_raws
+            and _RETRACTION_RE.search(tail_head)
         )
-        if any(not isinstance(r, _ChunkResult) for r in results):
+
+        # If only the last chunk is unfinished at stop, replace that pending
+        # cleanup plus the tail with one authoritative merged cleanup. This
+        # removes a serial generation while preserving every raw word and gives
+        # the model the full final seam (including a possible retraction).
+        # Earlier chunks must already be valid; otherwise retain the normal
+        # bounded wait and whole-text fallback.
+        priority_last: asyncio.Task[_ChunkResult] | None = None
+        earlier_tasks = session.chunk_tasks[:-1]
+        earlier_ready = all(
+            task.done()
+            and not task.cancelled()
+            and task.exception() is None
+            and isinstance(task.result(), _ChunkResult)
+            for task in earlier_tasks
+        )
+        last_task = session.chunk_tasks[-1]
+        if tail and not last_task.done() and earlier_ready:
+            priority_last = last_task
+            self._cancel_chunk_task(session, last_task)
+            # Cancellation owns the operation lock until the worker
+            # acknowledges or is retired. Complete that handoff before the
+            # merged request is admitted.
+            await asyncio.gather(last_task, return_exceptions=True)
+            if not last_task.cancelled():
+                log.warning("priority final-tail cancellation was suppressed — falling back")
+                return None
+            prev_text = (
+                earlier_tasks[-1].result().text
+                if earlier_tasks
+                else None
+            )
+            merged = session.chunk_raws[-1] + " " + tail
+            priority_cancel = threading.Event()
+            priority_task = asyncio.create_task(
+                self._clean_chunk_text(
+                    session,
+                    merged,
+                    prev_text,
+                    priority_cancel,
+                )
+            )
+            log.info("final tail replaced one unfinished chunk cleanup")
+            # The old 1.5-second gather limit is for a nearly-finished chunk,
+            # not this brand-new authoritative generation. Give the merged
+            # request its own production queue + hard-watchdog budget.
+            priority_timeout_s = (
+                adaptive_timeout_ms(merged) / 1000.0
+                + HARD_TIMEOUT_GRACE_S
+                + QUEUE_TIMEOUT_S
+                + 0.25
+            )
+            try:
+                _done, priority_pending = await asyncio.wait(
+                    [priority_task],
+                    timeout=priority_timeout_s,
+                )
+                if priority_pending:
+                    priority_cancel.set()
+                    priority_task.cancel()
+                    await asyncio.gather(priority_task, return_exceptions=True)
+                    log.warning("priority final-tail cleanup timed out — falling back")
+                    return None
+                if priority_task.cancelled() or priority_task.exception() is not None:
+                    log.warning("priority final-tail cleanup failed — falling back")
+                    return None
+                merged_result = priority_task.result()
+                if not isinstance(merged_result, _ChunkResult) or not merged_result.applied:
+                    log.warning("priority final-tail cleanup was not applied — falling back")
+                    return None
+                earlier_results = [task.result() for task in earlier_tasks]
+                cleaned = [result.text for result in earlier_results]
+                cleaned.append(merged_result.text)
+                applied_any = True
+                tail_ms = merged_result.ms
+                tail = ""
+            finally:
+                # A server cancellation/disconnect must not orphan the local
+                # priority task outside the session's normal bookkeeping.
+                if not priority_task.done():
+                    priority_cancel.set()
+                    priority_task.cancel()
+                    await asyncio.gather(priority_task, return_exceptions=True)
+        else:
+            # A timeout must cooperatively cancel unfinished worker requests
+            # before whole-text fallback. Bare wait_for(gather()) left native
+            # generation alive and made the fallback miss its queue deadline.
+            _done, pending = await asyncio.wait(
+                list(session.chunk_tasks),
+                timeout=STREAM_GATHER_TIMEOUT_S,
+            )
+            if pending:
+                for task in pending:
+                    self._cancel_chunk_task(session, task)
+                await asyncio.gather(*pending, return_exceptions=True)
+                log.warning("streaming chunk task did not complete — falling back")
+                return None
+            if any(
+                task.cancelled() or task.exception() is not None
+                for task in session.chunk_tasks
+            ):
+                log.warning("streaming chunk task failed — falling back")
+                return None
+            results = [task.result() for task in session.chunk_tasks]
+            if any(not isinstance(result, _ChunkResult) for result in results):
+                log.warning("streaming chunk task did not complete — falling back")
+                return None
+            cleaned = [result.text for result in results]
+            applied_any = any(result.applied for result in results)
+            tail_ms = 0
+
+        if priority_last is not None and not priority_last.cancelled():
+            # Defensive: the task was synchronously cancelled above. Never
+            # assemble both its output and the merged replacement.
             log.warning("streaming chunk task did not complete — falling back")
             return None
-        cleaned = [r.text for r in results]
-        applied_any = any(r.applied for r in results)
-        tail_ms = 0
+
         if tail:
-            tail_head = " ".join(tail.split()[:RETRACTION_HEAD_WORDS])
-            if session.chunk_raws and _RETRACTION_RE.search(tail_head):
+            if tail_retracts:
                 # A retraction spoken in the final seconds refers back across
                 # the LAST seam — the most common place for corrections
                 # (review finding). Same merge rule the live segments use:
@@ -1391,6 +1638,13 @@ class Engine:
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
         if gate.use_llm and self.cleanup is not None and self.cleanup.loaded:
+            prefix_candidates = formatting.build_prefill_prompt_candidates(
+                self.config,
+                bundle_id=bundle_id,
+                app_name=app_name,
+                explicit_mode=explicit_mode,
+                entities=entities,
+            )
             # The model gets gate.text, NOT raw: the gate already converted
             # spoken break commands ("now a new line") into real line breaks
             # and scrubbed fillers. Passing raw here (the original bug) showed
@@ -1400,6 +1654,7 @@ class Engine:
                 result = await self.cleanup.cleanup(
                     gate.text, gate.system_prompt or STATIC_SYSTEM_PROMPT,
                     timeout_ms=4000, check_ratio=False, cancel_event=cancel_event,
+                    prefix_candidates=prefix_candidates,
                 )
             else:
                 result = await self.cleanup.cleanup(
@@ -1407,6 +1662,7 @@ class Engine:
                     gate.system_prompt or STATIC_SYSTEM_PROMPT,
                     cancel_event=cancel_event,
                     allowed_terms=self._allowed_terms(gate.mode),
+                    prefix_candidates=prefix_candidates,
                 )
             if result.applied:
                 text = formatting.postprocess(result.text, gate)
@@ -1608,7 +1864,7 @@ class Engine:
             # leaves the working engine intact instead of leaving no cleanup at
             # all. Peak memory holds both only for the load window (rare,
             # user-initiated); aclose() reaps the old model process before ack.
-            engine = CleanupProcess(model_id)
+            engine = self._new_cleanup_process(model_id)
             if not fake_stt_enabled():
                 try:
                     await engine.load_async(STATIC_SYSTEM_PROMPT)

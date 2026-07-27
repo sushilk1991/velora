@@ -13,6 +13,7 @@ import pytest
 from velora_engine.cleanup import (
     CleanupEngine,
     CleanupResult,
+    _PrefixCancelled,
     _restore_prompt_cache,
     _snapshot_prompt_cache,
 )
@@ -65,6 +66,7 @@ class RecordingCleanup(CleanupEngine):
         self._model = object()
         self.loaded = True
         self.prefilled: list[int] = []
+        self.extended: list[list[int]] = []
         self.cache_creations = 0
 
     def _make_prompt_cache(self):
@@ -74,6 +76,15 @@ class RecordingCleanup(CleanupEngine):
     def _prefill_tokens_locked(self, tokens, cancel_event=None):
         self.prefilled = list(tokens)
         return [FakeCache([list(tokens)], "prepared")]
+
+    def _prefill_into_cache_locked(self, cache, tokens, cancel_event=None):
+        if cancel_event is not None and cancel_event.is_set():
+            raise _PrefixCancelled
+        self.extended.append(list(tokens))
+        if not cache[0].state:
+            cache[0].state = [[]]
+        cache[0].state[0].extend(tokens)
+        return cache
 
 
 @pytest.mark.asyncio
@@ -96,6 +107,20 @@ async def test_prepare_prefix_caches_only_exact_common_prompt_tokens():
         assert result.applied is True
         assert result.tokens == len(expected)
         assert engine.prefilled == expected
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_prefix_rejects_single_candidate_without_caching_transcript():
+    engine = RecordingCleanup()
+    try:
+        result = await engine.prepare_prefix([("stable", "private transcript")])
+
+        assert result.applied is False
+        assert result.reason == "insufficient_candidates"
+        assert engine.prefilled == []
+        assert engine._prepared_cache is None
     finally:
         engine.close()
 
@@ -198,6 +223,154 @@ def test_prepared_prefix_mismatch_uses_fresh_cache():
         assert hit is False
         assert engine.cache_creations == 1
         assert cache[0].state == []
+    finally:
+        engine.close()
+
+
+def test_runtime_prefix_extension_preserves_exact_prompt_and_static_fallback(
+    monkeypatch,
+):
+    engine = RecordingCleanup()
+    engine._warm("stable instructions")
+    static_tokens = list(engine._prepared_tokens)
+    system = "stable instructions\n\nFormatting strength: FULL."
+    raw = "raw transcript"
+    candidates = [
+        (system, "alpha transcript"),
+        (system, "zulu transcript"),
+    ]
+    expected = engine._prompt_tokens(system, raw)
+    observed: list[int] = []
+
+    def generate(*_args, prompt, prompt_cache, **_kwargs):
+        observed.extend(prompt_cache[0].state[0])
+        observed.extend(prompt)
+        yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", generate)
+    try:
+        result = engine._run(
+            raw,
+            system,
+            timeout_ms=100,
+            check_ratio=False,
+            prefix_candidates=candidates,
+        )
+
+        assert result.applied is True
+        assert result.text == "fixed"
+        assert observed == expected
+        assert len(engine._prepared_tokens) > len(static_tokens)
+        assert engine._fallback_prepared_tokens == static_tokens
+        assert engine.extended == [
+            engine._prepared_tokens[len(static_tokens):]
+        ]
+
+        other_mode = engine._prompt_tokens(
+            "stable instructions\n\nRomanize output.",
+            raw,
+        )
+        _cache, common, hit = engine._cache_for_tokens(other_mode)
+        assert hit is True
+        assert common == len(static_tokens)
+    finally:
+        engine.close()
+
+
+def test_failed_runtime_prefix_extension_restores_clean_static_snapshot(
+    monkeypatch,
+):
+    engine = RecordingCleanup()
+    engine._warm("stable instructions")
+    static_tokens = list(engine._prepared_tokens)
+    static_snapshot = engine._prepared_cache
+    system = "stable instructions\n\nFormatting strength: FULL."
+    raw = "raw transcript"
+    candidates = [
+        (system, "alpha transcript"),
+        (system, "zulu transcript"),
+    ]
+
+    def partial_then_fail(cache, tokens, cancel_event=None):
+        cache[0].state[0].extend(tokens[:3])
+        raise RuntimeError("prefill failed")
+
+    observed: list[int] = []
+
+    def generate(*_args, prompt, prompt_cache, **_kwargs):
+        observed.extend(prompt_cache[0].state[0])
+        observed.extend(prompt)
+        yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+
+    import mlx_lm
+
+    monkeypatch.setattr(
+        engine,
+        "_prefill_into_cache_locked",
+        partial_then_fail,
+    )
+    monkeypatch.setattr(mlx_lm, "stream_generate", generate)
+    try:
+        result = engine._run(
+            raw,
+            system,
+            timeout_ms=100,
+            check_ratio=False,
+            prefix_candidates=candidates,
+        )
+
+        assert result.applied is True
+        assert observed == engine._prompt_tokens(system, raw)
+        assert engine._prepared_tokens == static_tokens
+        assert engine._prepared_cache is static_snapshot
+    finally:
+        engine.close()
+
+
+def test_runtime_prefix_snapshot_failure_keeps_atomic_old_pair(
+    monkeypatch,
+):
+    import velora_engine.cleanup as cleanup_mod
+    import mlx_lm
+
+    engine = RecordingCleanup()
+    engine._warm("stable instructions")
+    static_tokens = list(engine._prepared_tokens)
+    static_snapshot = engine._prepared_cache
+    system = "stable instructions\n\nFormatting strength: FULL."
+    raw = "raw transcript"
+    candidates = [
+        (system, "alpha transcript"),
+        (system, "zulu transcript"),
+    ]
+    expected = engine._prompt_tokens(system, raw)
+    observed: list[int] = []
+
+    def snapshot_fails(_cache):
+        raise RuntimeError("snapshot failed")
+
+    def generate(*_args, prompt, prompt_cache, **_kwargs):
+        observed.extend(prompt_cache[0].state[0])
+        observed.extend(prompt)
+        yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+
+    monkeypatch.setattr(cleanup_mod, "_snapshot_prompt_cache", snapshot_fails)
+    monkeypatch.setattr(mlx_lm, "stream_generate", generate)
+    try:
+        result = engine._run(
+            raw,
+            system,
+            timeout_ms=100,
+            check_ratio=False,
+            prefix_candidates=candidates,
+        )
+
+        assert result.applied is True
+        assert observed == expected
+        assert engine._prepared_tokens == static_tokens
+        assert engine._prepared_cache is static_snapshot
     finally:
         engine.close()
 

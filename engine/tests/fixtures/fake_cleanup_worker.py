@@ -92,6 +92,18 @@ async def main(
                 "output_tokens": 0,
                 "cache_hit": False,
             }
+        elif raw == "__child_timeout__":
+            result = {
+                "text": raw,
+                "applied": False,
+                "ms": 12,
+                "reason": "timeout_hard",
+                "ttft_ms": 0,
+                "decode_ms": 0,
+                "prefix_tokens": 0,
+                "output_tokens": 0,
+                "cache_hit": False,
+            }
         else:
             result = {
                 "text": raw.upper(),

@@ -81,6 +81,12 @@ class Worker:
             if operation == "cleanup":
                 raw = str(message.get("raw") or "")
                 prompt = str(message.get("system_prompt") or "")
+                raw_candidates = message.get("prefix_candidates")
+                prefix_candidates = [
+                    (str(item[0]), str(item[1]))
+                    for item in (raw_candidates or [])
+                    if isinstance(item, (list, tuple)) and len(item) == 2
+                ]
                 result = await self.engine.cleanup(
                     raw,
                     prompt,
@@ -88,6 +94,7 @@ class Worker:
                     check_ratio=bool(message.get("check_ratio", True)),
                     cancel_event=cancel_event,
                     allowed_terms=message.get("allowed_terms"),
+                    prefix_candidates=prefix_candidates,
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return

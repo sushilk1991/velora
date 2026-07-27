@@ -439,6 +439,14 @@ class CleanupEngine:
         # consume or pollute the final-cleanup speedup.
         self._prepared_tokens: list[int] = []
         self._prepared_cache: list[tuple[type[Any], Any, Any]] | None = None
+        # Extending the cache for one active mode must not evict the static
+        # startup prefix. A later request in another mode can always fall back
+        # to this shorter exact snapshot and prepare its own stable suffix as
+        # part of work it already had to do.
+        self._fallback_prepared_tokens: list[int] = []
+        self._fallback_prepared_cache: list[
+            tuple[type[Any], Any, Any]
+        ] | None = None
         self._lock = threading.Lock()
         # MLX streams are thread-affine: load and generation must all happen
         # on this one dedicated thread.
@@ -471,6 +479,13 @@ class CleanupEngine:
 
         from .models import ensure_downloaded
 
+        # A load can replace the model/tokenizer on this object. Prompt-cache
+        # arrays are model-specific even when two models share token IDs, so
+        # never carry snapshots across a reload.
+        self._prepared_tokens = []
+        self._prepared_cache = None
+        self._fallback_prepared_tokens = []
+        self._fallback_prepared_cache = None
         t0 = time.perf_counter()
         # Local path, not repo id: a cached model must load without network.
         self._model, self._tokenizer = load(ensure_downloaded(self.model_id))
@@ -523,10 +538,21 @@ class CleanupEngine:
         cancel_event: threading.Event | None = None,
     ) -> list[Any]:
         """Process exactly `tokens` into a new cache, generating no token."""
+        return self._prefill_into_cache_locked(
+            self._make_prompt_cache(),
+            tokens,
+            cancel_event,
+        )
+
+    def _prefill_into_cache_locked(
+        self,
+        cache: list[Any],
+        tokens: list[int],
+        cancel_event: threading.Event | None = None,
+    ) -> list[Any]:
+        """Append exact prompt tokens to ``cache`` without sampling output."""
         import mlx.core as mx
         from mlx_lm.generate import generate_step
-
-        cache = self._make_prompt_cache()
 
         def progress(_processed: int, _total: int) -> None:
             if cancel_event is not None and cancel_event.is_set():
@@ -547,6 +573,27 @@ class CleanupEngine:
         mx.eval([item.state for item in cache])
         return cache
 
+    def _install_prepared_prefix(
+        self,
+        tokens: list[int],
+        cache: list[Any],
+    ) -> None:
+        """Install an exact snapshot while retaining the shorter base prefix."""
+        # Snapshot first. If copying cache metadata fails, the active
+        # token/cache pair must remain untouched; publishing the longer token
+        # count with the old shorter cache would skip real prompt tokens.
+        snapshot = _snapshot_prompt_cache(cache)
+        if (
+            self._prepared_cache is not None
+            and self._prepared_tokens
+            and len(tokens) > len(self._prepared_tokens)
+            and tokens[: len(self._prepared_tokens)] == self._prepared_tokens
+        ):
+            self._fallback_prepared_tokens = self._prepared_tokens
+            self._fallback_prepared_cache = self._prepared_cache
+        self._prepared_tokens = list(tokens)
+        self._prepared_cache = snapshot
+
     def _prepare_prefix(
         self,
         candidates: list[tuple[str, str]],
@@ -557,6 +604,13 @@ class CleanupEngine:
             with self._lock:
                 if cancel_event is not None and cancel_event.is_set():
                     raise _PrefixCancelled
+                if len(candidates) < 2:
+                    return PrefixPreparation(
+                        False,
+                        0,
+                        int((time.perf_counter() - t0) * 1000),
+                        "insufficient_candidates",
+                    )
                 sequences = [self._prompt_tokens(system, user) for system, user in candidates]
                 prefix = _longest_common_tokens(sequences)
                 if not prefix:
@@ -564,8 +618,7 @@ class CleanupEngine:
                     self._prepared_cache = None
                     return PrefixPreparation(False, 0, int((time.perf_counter() - t0) * 1000), "no_prefix")
                 cache = self._prefill_tokens_locked(prefix, cancel_event)
-                self._prepared_tokens = prefix
-                self._prepared_cache = _snapshot_prompt_cache(cache)
+                self._install_prepared_prefix(prefix, cache)
             ms = int((time.perf_counter() - t0) * 1000)
             log.info("cleanup prefix prepared tokens=%d prefill_ms=%d", len(prefix), ms)
             return PrefixPreparation(True, len(prefix), ms)
@@ -599,14 +652,75 @@ class CleanupEngine:
         )
 
     def _cache_for_tokens(self, tokens: list[int]) -> tuple[list[Any], int, bool]:
-        prepared = self._prepared_tokens
-        if (
-            self._prepared_cache is not None
-            and len(tokens) > len(prepared)
-            and tokens[: len(prepared)] == prepared
+        candidates = (
+            (self._prepared_tokens, self._prepared_cache),
+            (self._fallback_prepared_tokens, self._fallback_prepared_cache),
+        )
+        for prepared, snapshot in sorted(
+            candidates,
+            key=lambda item: len(item[0]),
+            reverse=True,
         ):
-            return _restore_prompt_cache(self._prepared_cache), len(prepared), True
+            if (
+                snapshot is not None
+                and prepared
+                and len(tokens) > len(prepared)
+                and tokens[: len(prepared)] == prepared
+            ):
+                return _restore_prompt_cache(snapshot), len(prepared), True
         return self._make_prompt_cache(), 0, False
+
+    def _extend_runtime_prefix_locked(
+        self,
+        tokens: list[int],
+        candidates: list[tuple[str, str]],
+        cache: list[Any],
+        common: int,
+        cancel_event: threading.Event | None,
+    ) -> tuple[list[Any], int, bool]:
+        """Extend the exact cache using prompt work this request already needs.
+
+        Candidate prompts differ only after the stable mode/strength material.
+        Their token LCP is accepted only when it is also an exact prefix of the
+        real request. We prefill only the uncached delta, snapshot it, and then
+        generate from the remaining user suffix. No extra model pass runs.
+        """
+        if len(candidates) < 2:
+            return cache, common, False
+        try:
+            sequences = [
+                self._prompt_tokens(system, user)
+                for system, user in candidates
+            ]
+            prefix = _longest_common_tokens(sequences)
+            if (
+                len(prefix) <= common
+                or len(tokens) <= len(prefix)
+                or tokens[: len(prefix)] != prefix
+            ):
+                return cache, common, False
+            cache = self._prefill_into_cache_locked(
+                cache,
+                prefix[common:],
+                cancel_event,
+            )
+            self._install_prepared_prefix(prefix, cache)
+            log.info(
+                "cleanup rolling prefix prepared tokens=%d added_tokens=%d",
+                len(prefix),
+                len(prefix) - common,
+            )
+            return cache, len(prefix), True
+        except _PrefixCancelled:
+            raise
+        except Exception:  # noqa: BLE001 — cache extension is optional
+            log.exception("cleanup rolling prefix preparation failed")
+            # The local cache may be partially advanced. Restore a clean,
+            # immutable snapshot before authoritative generation continues.
+            restored, restored_common, restored_hit = self._cache_for_tokens(
+                tokens
+            )
+            return restored, restored_common, restored_hit
 
     # ---- generation with common-prefix KV cache -------------------------
 
@@ -617,6 +731,7 @@ class CleanupEngine:
         max_tokens: int,
         output_timeout_s: float,
         cancel_event: threading.Event | None = None,
+        prefix_candidates: list[tuple[str, str]] | None = None,
     ) -> _GenerationResult:
         """Generate with a quality budget that begins at first output token."""
         from mlx_lm import stream_generate
@@ -627,6 +742,26 @@ class CleanupEngine:
             return _GenerationResult("", "cancelled", 0, 0, 0, 0, False)
         tokens = self._prompt_tokens(system_prompt, user_text)
         cache, common, cache_hit = self._cache_for_tokens(tokens)
+        if prefix_candidates:
+            try:
+                cache, common, extended = self._extend_runtime_prefix_locked(
+                    tokens,
+                    prefix_candidates,
+                    cache,
+                    common,
+                    cancel_event,
+                )
+                cache_hit = cache_hit or extended
+            except _PrefixCancelled:
+                return _GenerationResult(
+                    "",
+                    "cancelled",
+                    int((time.perf_counter() - started) * 1000),
+                    0,
+                    common,
+                    0,
+                    cache_hit,
+                )
 
         suffix = tokens[common:]
         out_text: list[str] = []
@@ -698,6 +833,7 @@ class CleanupEngine:
         check_ratio: bool = True,
         cancel_event: threading.Event | None = None,
         allowed_terms: list[str] | None = None,
+        prefix_candidates: list[tuple[str, str]] | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
@@ -712,6 +848,7 @@ class CleanupEngine:
                 max_tokens,
                 timeout_ms / 1000.0,
                 cancel_event,
+                prefix_candidates,
             )
         ms = int((time.perf_counter() - t0) * 1000)
         log.info(
@@ -766,6 +903,7 @@ class CleanupEngine:
         check_ratio: bool = True,
         cancel_event: threading.Event | None = None,
         allowed_terms: list[str] | None = None,
+        prefix_candidates: list[tuple[str, str]] | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
@@ -791,7 +929,7 @@ class CleanupEngine:
             loop.call_soon_threadsafe(started.set)
             return self._run(
                 raw, system_prompt, timeout_ms, check_ratio,
-                worker_cancel, allowed_terms,
+                worker_cancel, allowed_terms, prefix_candidates,
             )
 
         worker = loop.run_in_executor(self._executor, run_started)

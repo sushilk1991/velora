@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from .cleanup import (
@@ -53,6 +53,7 @@ class CleanupProcess:
         hard_timeout_grace_s: float = HARD_TIMEOUT_GRACE_S,
         queue_timeout_s: float = QUEUE_TIMEOUT_S,
         cancel_grace_s: float = CANCEL_GRACE_S,
+        on_unhealthy: Callable[[], None] | None = None,
     ) -> None:
         self.model_id = model_id
         self.loaded = False
@@ -70,12 +71,16 @@ class CleanupProcess:
         self._writer: asyncio.StreamWriter | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._recovery_task: asyncio.Task[None] | None = None
+        self._replacement_task: asyncio.Task[None] | None = None
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._operation_lock = asyncio.Lock()
         self._write_lock = asyncio.Lock()
         self._warm_system_prompt: str | None = None
         self._closed = False
         self._generation = 0
+        self._recovery_deferred = False
+        self._deferred_recovery_reason: str | None = None
+        self._on_unhealthy = on_unhealthy
 
     async def load_async(self, warm_system_prompt: str | None = None) -> None:
         self._warm_system_prompt = warm_system_prompt
@@ -248,6 +253,7 @@ class CleanupProcess:
         check_ratio: bool = True,
         cancel_event: threading.Event | None = None,
         allowed_terms: list[str] | None = None,
+        prefix_candidates: list[tuple[str, str]] | None = None,
     ) -> CleanupResult:
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
@@ -256,6 +262,7 @@ class CleanupProcess:
             return CleanupResult(raw, False, 0, reason)
 
         call_started = time.perf_counter()
+        admitted_generation = self._generation
         try:
             await asyncio.wait_for(
                 self._operation_lock.acquire(),
@@ -264,13 +271,23 @@ class CleanupProcess:
         except TimeoutError:
             elapsed = int((time.perf_counter() - call_started) * 1000)
             log.error("cleanup worker unavailable after %dms in queue", elapsed)
-            await self._replace_worker("timeout_queue")
+            self._schedule_replacement("timeout_queue")
             return CleanupResult(
                 raw,
                 False,
                 int(self._queue_timeout_s * 1000),
                 "timeout_queue",
                 wall_ms=elapsed,
+            )
+
+        if not self.loaded or self._generation != admitted_generation:
+            self._operation_lock.release()
+            reason = "llm_recovering" if self.recovering else "llm_not_loaded"
+            return CleanupResult(
+                raw,
+                False,
+                int((time.perf_counter() - call_started) * 1000),
+                reason,
             )
 
         request_id = uuid.uuid4().hex
@@ -289,6 +306,7 @@ class CleanupProcess:
                 "timeout_ms": timeout_ms,
                 "check_ratio": check_ratio,
                 "allowed_terms": allowed_terms,
+                "prefix_candidates": prefix_candidates,
             }
             async with self._write_lock:
                 writer.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
@@ -305,12 +323,22 @@ class CleanupProcess:
                 raise RuntimeError(str(response.get("error") or "cleanup failed"))
             payload = dict(response["result"])
             payload["wall_ms"] = int((time.perf_counter() - call_started) * 1000)
-            return CleanupResult(**payload)
+            result = CleanupResult(**payload)
+            if result.reason in {"timeout_hard", "timeout_queue", "llm_unhealthy"}:
+                # The child owns a thread watchdog as a second line of defence.
+                # If it wins the deadline race, its MLX thread is retired even
+                # though the protocol response itself arrived normally.
+                self._schedule_replacement(f"child_{result.reason}")
+            return result
         except TimeoutError:
             elapsed = int((time.perf_counter() - call_started) * 1000)
             log.error("cleanup process exceeded hard wall deadline after %dms", elapsed)
             future.cancel()
-            await self._replace_worker("timeout_hard")
+            # The fallback text is already selected. Block new calls
+            # synchronously, then reap and warm a replacement off the caller's
+            # critical path. `loaded=False` is the ordering barrier: no request
+            # can reach the old writer after this method returns.
+            self._schedule_replacement("timeout_hard")
             return CleanupResult(
                 raw,
                 False,
@@ -319,15 +347,29 @@ class CleanupProcess:
                 wall_ms=elapsed,
             )
         except asyncio.CancelledError:
-            await self._send_cancel(request_id)
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(future),
-                    timeout=self._cancel_grace_s,
-                )
-            except Exception:  # noqa: BLE001 - unresponsive cancellation replaces the child
-                future.cancel()
-                await self._replace_worker("cancel_unresponsive")
+            async def finish_cancellation() -> None:
+                await self._send_cancel(request_id)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(future),
+                        timeout=self._cancel_grace_s,
+                    )
+                except Exception:  # noqa: BLE001 - unresponsive cancellation replaces the child
+                    future.cancel()
+                    await self._replace_worker("cancel_unresponsive")
+
+            # A wrapper task can itself be cancelled while waiting for this
+            # cancellation handshake. Repeated Task.cancel() calls must not
+            # interrupt the bounded cancel/reap and release the operation lock
+            # while native generation is still running.
+            completion = asyncio.create_task(finish_cancellation())
+            while not completion.done():
+                try:
+                    await asyncio.shield(completion)
+                except asyncio.CancelledError:
+                    continue
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                completion.result()
             raise
         except Exception as exc:
             elapsed = int((time.perf_counter() - call_started) * 1000)
@@ -350,6 +392,8 @@ class CleanupProcess:
         if not self.loaded:
             reason = "llm_recovering" if self.recovering else "llm_not_loaded"
             return PrefixPreparation(False, 0, 0, reason)
+        if len(candidates) < 2:
+            return PrefixPreparation(False, 0, 0, "insufficient_candidates")
         # Prefix preparation is an optimization. It uses the same bounded
         # process request path but a ceiling-sized budget so it cannot wedge
         # the authoritative dictation path indefinitely.
@@ -421,13 +465,37 @@ class CleanupProcess:
             self._operation_lock.release()
 
     async def _replace_worker(self, reason: str) -> None:
-        log.warning("replacing cleanup worker reason=%s", reason)
-        await self._stop_worker()
-        if not self.unhealthy:
-            self._schedule_recovery(reason)
+        self._schedule_replacement(reason)
+        task = self._replacement_task
+        if task is not None and task is not asyncio.current_task():
+            await asyncio.shield(task)
+
+    def _schedule_replacement(self, reason: str) -> None:
+        """Retire the current worker now and reap it in a tracked task."""
+        self.loaded = False
+        self.recovering = True
+        current = self._replacement_task
+        if current is not None and not current.done():
+            return
+
+        async def replace() -> None:
+            log.warning("replacing cleanup worker asynchronously reason=%s", reason)
+            try:
+                await self._stop_worker()
+            finally:
+                self.recovering = False
+            if not self.unhealthy:
+                self._schedule_recovery(reason)
+
+        self._replacement_task = asyncio.create_task(replace())
 
     def _schedule_recovery(self, reason: str) -> None:
-        if self._closed or self.recovering or self.unhealthy:
+        if self._closed or self.unhealthy:
+            return
+        if self._recovery_deferred:
+            self._deferred_recovery_reason = reason
+            return
+        if self.recovering:
             return
         if self._recovery_task is not None and not self._recovery_task.done():
             return
@@ -442,7 +510,7 @@ class CleanupProcess:
                     raise
                 except Exception:
                     if attempt == RECOVERY_ATTEMPTS:
-                        self.unhealthy = True
+                        self._mark_unhealthy()
                         log.exception(
                             "replacement cleanup worker failed after %d attempts",
                             attempt,
@@ -457,6 +525,49 @@ class CleanupProcess:
                     await asyncio.sleep(RECOVERY_BACKOFF_S * attempt)
 
         self._recovery_task = asyncio.create_task(recover())
+
+    async def defer_recovery(self) -> None:
+        """Prevent replacement model warm-up while live dictation owns Metal."""
+        self._recovery_deferred = True
+        recovery_task = self._recovery_task
+        if recovery_task is None or recovery_task.done():
+            return
+        self._recovery_task = None
+        self._deferred_recovery_reason = "dictation_active"
+        recovery_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await recovery_task
+
+    def resume_recovery(self) -> None:
+        """Resume a deferred replacement only after dictation is fully idle."""
+        self._recovery_deferred = False
+        reason = self._deferred_recovery_reason
+        self._deferred_recovery_reason = None
+        if not self.loaded and not self._closed and not self.unhealthy:
+            self._schedule_recovery(reason or "dictation_idle")
+
+    async def wait_until_ready(self, timeout_s: float) -> bool:
+        """Wait a bounded time for deferred replacement/recovery to finish."""
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while not self.loaded:
+            if self._closed or self.unhealthy:
+                return False
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.02, remaining))
+        return True
+
+    def _mark_unhealthy(self) -> None:
+        if self.unhealthy:
+            return
+        self.unhealthy = True
+        callback = self._on_unhealthy
+        if callback is not None:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 — health escalation must not strand reap
+                log.exception("cleanup unhealthy callback failed")
 
     async def _stop_worker(self) -> None:
         self.loaded = False
@@ -482,7 +593,7 @@ class CleanupProcess:
                 try:
                     await asyncio.wait_for(process.wait(), timeout=0.5)
                 except TimeoutError:
-                    self.unhealthy = True
+                    self._mark_unhealthy()
                     log.critical("cleanup worker pid=%d could not be reaped", process.pid)
         failure = _WorkerExited("cleanup worker replaced")
         for request_id, future in list(self._pending.items()):
@@ -503,12 +614,25 @@ class CleanupProcess:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        loop.create_task(self._stop_worker())
+
+        async def finish_close() -> None:
+            replacement_task = self._replacement_task
+            if replacement_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await replacement_task
+            await self._stop_worker()
+
+        loop.create_task(finish_close())
 
     async def aclose(self) -> None:
         """Close and reap the child before the parent event loop exits."""
         self._closed = True
         self.loaded = False
+        replacement_task = self._replacement_task
+        self._replacement_task = None
+        if replacement_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await replacement_task
         recovery_task = self._recovery_task
         self._recovery_task = None
         if recovery_task is not None:

@@ -25,6 +25,7 @@ from velora_engine.cleanup_process import CleanupProcess
 from velora_engine.config import Config
 from velora_engine.formatting import (
     STATIC_SYSTEM_PROMPT,
+    build_prefill_prompt_candidates,
     postprocess,
     run_gate,
 )
@@ -347,6 +348,12 @@ async def run(selected: set[str] | None) -> int:
                     case.raw,
                     gate.system_prompt or STATIC_SYSTEM_PROMPT,
                     allowed_terms=config.global_vocabulary,
+                    prefix_candidates=build_prefill_prompt_candidates(
+                        config,
+                        bundle_id=case.bundle_id,
+                        app_name=case.app_name,
+                        explicit_mode=case.explicit_mode,
+                    ),
                 )
                 output = postprocess(result.text, gate) if result.applied else result.text
                 case_failures = validate(case, output, result.applied)
