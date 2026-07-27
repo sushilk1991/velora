@@ -27,10 +27,18 @@ Spotify and resume only the playback it paused. This avoids the audio-quality
 change that can happen when a Bluetooth microphone, including AirPods, becomes
 active.
 
-The Mac app is the main Velora product. This repository also includes a focused
+## The iPhone app is alpha — do not rely on it
+
+The Mac app is the Velora product. This repository also contains an
 [iPhone companion](ios/README.md) that uses on-device speech recognition and
-copies the result to the clipboard. The iPhone app is currently available from
-source, not the App Store.
+copies the result to the clipboard.
+
+> **The iPhone app is alpha and is not stable at all.** Expect crashes, broken
+> or half-finished behaviour, and changes that break without warning between
+> commits. It is not on the App Store, there is no TestFlight build, and it
+> receives far less testing than the Mac app. Build it only if you are
+> comfortable running unfinished software from source, and do not depend on it
+> for anything that matters.
 
 ## Install on Mac
 

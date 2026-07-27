@@ -1,5 +1,12 @@
 # Velora for iPhone
 
+> **Status: alpha. Not stable at all.** This app is an early experiment, not a
+> shipped product. Expect crashes, unfinished behaviour, and breaking changes
+> between commits. It is not on the App Store and there is no TestFlight build.
+> The Mac app is the maintained, tested product; this is not a substitute for
+> it. Build it only if you are comfortable running unfinished software from
+> source.
+
 Velora for iPhone is a focused, on-device voice-to-clipboard companion. Its
 **Dictate to Clipboard** App Shortcut can be assigned to the iPhone Action
 Button: press the button, speak, tap finish, and the transcript is copied.
