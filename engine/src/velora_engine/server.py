@@ -1967,10 +1967,11 @@ class Engine:
             result = await self.cleanup.cleanup(
                 text, editing.build_edit_prompt(instruction), timeout_ms=timeout_ms,
                 check_ratio=False, cancel_event=self._edit_cancel)
-            out = result.text.strip()
+            edited_core = result.text.strip()
+            out = editing.restore_boundary_whitespace(text, edited_core)
             applied = bool(result.applied)
             reason = result.reason or ""
-            if applied and not out:
+            if applied and not edited_core:
                 applied, out, reason = False, text, "empty_output"
             elif applied and editing.instruction_echoed(text, instruction, out):
                 # The one benchmarked failure mode (out-of-scope command

@@ -17,6 +17,13 @@ def test_prompt_embeds_instruction() -> None:
     assert prompt.index("make this formal") > prompt.index("Rules")
 
 
+def test_restore_boundary_whitespace_is_exact() -> None:
+    original = "\n  launch delayed friday  \n\n"
+    assert editing.restore_boundary_whitespace(
+        original, "  The launch is delayed until Friday. \n"
+    ) == "\n  The launch is delayed until Friday.  \n\n"
+
+
 def test_echo_guard_flags_instruction_pasted_into_document() -> None:
     original = "Remember to send the invoice by Friday."
     instruction = "open the browser and search for this"
@@ -115,6 +122,22 @@ async def test_edit_text_round_trip(engine):
     raw, prompt = eng.cleanup.calls[0]
     assert raw == "launch delayed friday"
     assert "fix the grammar" in prompt
+
+
+async def test_edit_text_preserves_selection_boundary_whitespace(engine):
+    eng, sock = engine
+    eng.cleanup = FakeCleanup("The launch is delayed until Friday.")
+    client = await connect(sock)
+    await client.recv_event("ready")
+    original = "\n  launch delayed friday  \n\n"
+    await client.send_json({
+        "cmd": "edit_text", "id": "whitespace",
+        "text": original, "instruction": "fix the grammar",
+    })
+    edited = await client.recv_event("edited")
+    assert edited["applied"] is True
+    assert edited["text"] == "\n  The launch is delayed until Friday.  \n\n"
+    assert eng.cleanup.calls[0][0] == original
 
 
 async def test_edit_text_echo_guard_returns_original(engine):

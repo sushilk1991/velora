@@ -28,11 +28,12 @@ protocol HotkeyMonitorDelegate: AnyObject {
 ///   `keyUp` regardless of modifier state, so releasing a modifier a beat
 ///   early never strands a recording.
 ///
-/// Primary path: a listen-only `CGEventTap` (session tap) for
-/// keyDown/keyUp/flagsChanged. Falls back to `NSEvent` global monitors when
-/// the tap cannot be created (Input Monitoring / Accessibility not granted
-/// to this process — see spikes/menubar/FINDINGS.md on TCC attribution).
-/// Neither path consumes events; Esc also reaches the frontmost app.
+/// Primary path: a filtering `CGEventTap` (session tap) when Accessibility is
+/// granted, so matched combo hotkeys never type into or invoke commands in the
+/// target app. Without Accessibility it uses a listen-only tap, and falls back
+/// to `NSEvent` global monitors when no tap can be created. Unsuppressible combo
+/// shortcuts fail closed instead of triggering Velora while also reaching the
+/// target app. Modifier-only hotkeys and Esc are never consumed.
 final class HotkeyMonitor {
     weak var delegate: HotkeyMonitorDelegate?
 
@@ -69,6 +70,9 @@ final class HotkeyMonitor {
     private var comboIsDown = false
     private var editModifierIsDown = false
     private var editComboIsDown = false
+    /// True only for a filtering tap whose callback may return nil to consume
+    /// a matched combo key event.
+    private var canSuppressComboEvents = false
     /// True while the settings/onboarding shortcut recorder is capturing;
     /// hotkey matching is suspended so the capture can't start dictation.
     private var suspended = false
@@ -114,6 +118,7 @@ final class HotkeyMonitor {
             NotificationCenter.default.removeObserver(observer)
             recorderObserver = nil
         }
+        canSuppressComboEvents = false
     }
 
     /// Tears down and reinstalls monitoring — call after a permission grant
@@ -137,7 +142,7 @@ final class HotkeyMonitor {
     /// eventual release sees "no change" and never emits `hotkeyUp`, stranding
     /// the recording (and the engine's `final` is then dropped downstream).
     /// Query the live modifier flags instead so the latch always matches reality.
-    private func resetLatchedState() {
+    private func resetLatchedState(preservePhysicallyHeldCombos: Bool = false) {
         if hotkey.isModifierOnly, let mask = Hotkey.modifierMask(forKeyCode: hotkey.keyCode) {
             let live = CGEventSource.flagsState(.combinedSessionState)
             modifierIsDown = live.rawValue & mask.rawValue != 0
@@ -151,11 +156,32 @@ final class HotkeyMonitor {
         } else {
             editModifierIsDown = false
         }
-        // Combos: the up edge is the key's own keyUp regardless of modifiers,
-        // and a missed keyUp is recovered by the next keyDown (comboIsDown gate),
-        // so clearing is safe.
-        comboIsDown = false
-        editComboIsDown = false
+        if preservePhysicallyHeldCombos {
+            // A tap timeout can happen while a matched key is still held.
+            // Preserve that latch until its real key-up so a modifier-release
+            // autorepeat cannot leak a plain character into the selection.
+            comboIsDown = Self.resyncedComboLatch(
+                wasLatched: comboIsDown,
+                keyCurrentlyDown: Self.keyState(hotkey.keyCode))
+            editComboIsDown = Self.resyncedComboLatch(
+                wasLatched: editComboIsDown,
+                keyCurrentlyDown: editHotkey.map { Self.keyState($0.keyCode) } ?? false)
+        } else {
+            comboIsDown = false
+            editComboIsDown = false
+        }
+    }
+
+    static func resyncedComboLatch(
+        wasLatched: Bool, keyCurrentlyDown: Bool
+    ) -> Bool {
+        wasLatched && keyCurrentlyDown
+    }
+
+    private static func keyState(_ keyCode: Int64) -> Bool {
+        guard keyCode >= 0, keyCode <= Int64(CGKeyCode.max) else { return false }
+        return CGEventSource.keyState(
+            .combinedSessionState, key: CGKeyCode(keyCode))
     }
 
     // MARK: - CGEventTap path
@@ -173,22 +199,37 @@ final class HotkeyMonitor {
         let callback: CGEventTapCallBack = { _, type, event, refcon in
             guard let refcon else { return Unmanaged.passUnretained(event) }
             let monitor = Unmanaged<HotkeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
-            monitor.handleTapEvent(type: type, event: event)
+            let matchedCombo = monitor.handleTapEvent(type: type, event: event)
+            if matchedCombo, monitor.canSuppressComboEvents {
+                return nil
+            }
             return Unmanaged.passUnretained(event)
         }
 
-        guard
-            let tap = CGEvent.tapCreate(
+        func makeTap(options: CGEventTapOptions) -> CFMachPort? {
+            CGEvent.tapCreate(
                 tap: .cgSessionEventTap,
                 place: .headInsertEventTap,
-                options: .listenOnly,
+                options: options,
                 eventsOfInterest: mask,
                 callback: callback,
                 userInfo: Unmanaged.passUnretained(self).toOpaque())
-        else {
+        }
+
+        var filtering = false
+        var tap: CFMachPort?
+        if Permissions.accessibilityGranted {
+            tap = makeTap(options: .defaultTap)
+            filtering = tap != nil
+        }
+        if tap == nil {
+            tap = makeTap(options: .listenOnly)
+        }
+        guard let tap else {
             NSLog("Velora: CGEvent tap unavailable (permission not granted); using NSEvent fallback")
             return false
         }
+        canSuppressComboEvents = filtering
 
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
@@ -203,23 +244,24 @@ final class HotkeyMonitor {
         let granted = Permissions.inputMonitoringGranted
         veloraLog(
             "Velora: hotkey CGEvent tap installed (inputMonitoring="
-            + (granted ? "granted)" : "MISSING — hotkey stays dead until granted)"))
+            + (granted ? "granted" : "MISSING — hotkey stays dead until granted")
+            + ", comboFiltering=" + (canSuppressComboEvents ? "enabled)" : "unavailable)"))
         return true
     }
 
-    private func handleTapEvent(type: CGEventType, event: CGEvent) {
+    private func handleTapEvent(type: CGEventType, event: CGEvent) -> Bool {
         // The system disables taps that stall or that fire while another
         // process synthesizes input (our own ⌘V paste triggers
-        // `.tapDisabledByUserInput`). Re-enable, and CRUCIALLY reset the
-        // latched modifier/combo state: an up-edge we missed while disabled
-        // would otherwise wedge `modifierIsDown == true` and kill the hotkey.
+        // `.tapDisabledByUserInput`). Re-enable and resync to physical state.
+        // An active combo latch is deliberately preserved while its key is
+        // still down; clearing it would let the next autorepeat reach the app.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             NSLog(
-                "Velora: hotkey tap disabled (%@) — re-enabling and resetting latched state",
+                "Velora: hotkey tap disabled (%@) — re-enabling and resyncing latched state",
                 type == .tapDisabledByTimeout ? "timeout" : "userInput")
-            resetLatchedState()
+            resetLatchedState(preservePhysicallyHeldCombos: true)
             if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
-            return
+            return false
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
@@ -230,17 +272,20 @@ final class HotkeyMonitor {
         switch type {
         case .flagsChanged:
             handleFlagsChanged(keyCode: keyCode, flags: flags)
+            return false
         case .keyDown:
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-            handleKeyDown(
+            return handleKeyDown(
                 keyCode: keyCode, flags: flags, isRepeat: isRepeat,
-                invalidateContinuation: !isVeloraEvent)
+                invalidateContinuation: !isVeloraEvent,
+                comboCanBeSuppressed: canSuppressComboEvents)
         case .keyUp:
-            handleKeyUp(keyCode: keyCode)
+            return handleKeyUp(keyCode: keyCode)
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             if !isVeloraEvent { emit { $0.nonHotkeyInput() } }
+            return false
         default:
-            break
+            return false
         }
     }
 
@@ -257,10 +302,11 @@ final class HotkeyMonitor {
             case .flagsChanged:
                 self.handleFlagsChanged(keyCode: Int64(event.keyCode), flags: flags)
             case .keyDown:
-                self.handleKeyDown(
-                    keyCode: Int64(event.keyCode), flags: flags, isRepeat: event.isARepeat)
+                _ = self.handleKeyDown(
+                    keyCode: Int64(event.keyCode), flags: flags,
+                    isRepeat: event.isARepeat, comboCanBeSuppressed: false)
             case .keyUp:
-                self.handleKeyUp(keyCode: Int64(event.keyCode))
+                _ = self.handleKeyUp(keyCode: Int64(event.keyCode))
             case .leftMouseDown, .rightMouseDown, .otherMouseDown:
                 self.emit { $0.nonHotkeyInput() }
             default:
@@ -294,56 +340,91 @@ final class HotkeyMonitor {
         }
     }
 
-    private func handleKeyDown(
+    @discardableResult
+    func handleKeyDown(
         keyCode: Int64, flags: UInt64, isRepeat: Bool,
-        invalidateContinuation: Bool = true
-    ) {
+        invalidateContinuation: Bool = true,
+        comboCanBeSuppressed: Bool = true
+    ) -> Bool {
         if keyCode == Self.escKeyCode {
             if !suspended {
                 emit { $0.escapePressed() }
             }
-            return
+            return false
         }
-        guard !suspended else { return }
-        if !hotkey.isModifierOnly,
-           keyCode == hotkey.keyCode,
-           !isRepeat, !comboIsDown,
-           // Exact match on the device-independent modifiers only.
-           flags & Hotkey.strictModifierMask == hotkey.modifiers & Hotkey.strictModifierMask {
-            comboIsDown = true
-            NSLog(
-                "Velora: hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
-                hotkey.displayLabel, keyCode, flags)
-            emitHotkey(down: true)
-            return
+        guard !suspended else { return false }
+        let hotkeyComboMatches =
+            !hotkey.isModifierOnly
+            && keyCode == hotkey.keyCode
+            && flags & Hotkey.strictModifierMask
+                == hotkey.modifiers & Hotkey.strictModifierMask
+        let editComboMatches =
+            editHotkey.map {
+                $0 != hotkey
+                    && !$0.isModifierOnly
+                    && keyCode == $0.keyCode
+                    && flags & Hotkey.strictModifierMask
+                        == $0.modifiers & Hotkey.strictModifierMask
+            } ?? false
+        if !comboCanBeSuppressed, hotkeyComboMatches || editComboMatches {
+            if !isRepeat {
+                NSLog(
+                    "Velora: combo hotkey ignored — filtering event tap unavailable")
+            }
+            return false
         }
-        if let edit = editHotkey, edit != hotkey, !edit.isModifierOnly,
-           keyCode == edit.keyCode,
-           !isRepeat, !editComboIsDown,
-           flags & Hotkey.strictModifierMask == edit.modifiers & Hotkey.strictModifierMask {
-            editComboIsDown = true
-            NSLog(
-                "Velora: edit hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
-                edit.displayLabel, keyCode, flags)
-            emitEditHotkey(down: true)
-            return
+        // Once a combo is latched, keep every event for that physical key
+        // suppressed until key-up even if the user releases a modifier first.
+        // Otherwise autorepeat can leak plain characters into the selection.
+        if !hotkey.isModifierOnly, keyCode == hotkey.keyCode, comboIsDown {
+            return true
+        }
+        if let edit = editHotkey, !edit.isModifierOnly,
+           keyCode == edit.keyCode, editComboIsDown {
+            return true
+        }
+        if hotkeyComboMatches {
+            if !isRepeat, !comboIsDown {
+                comboIsDown = true
+                NSLog(
+                    "Velora: hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
+                    hotkey.displayLabel, keyCode, flags)
+                emitHotkey(down: true)
+            }
+            // Suppress the initial down plus any autorepeat while this combo
+            // is latched, so the target app never sees part of the shortcut.
+            return comboIsDown
+        }
+        if let edit = editHotkey, editComboMatches {
+            if !isRepeat, !editComboIsDown {
+                editComboIsDown = true
+                NSLog(
+                    "Velora: edit hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
+                    edit.displayLabel, keyCode, flags)
+                emitEditHotkey(down: true)
+            }
+            return editComboIsDown
         }
         if !isRepeat, invalidateContinuation { emit { $0.nonHotkeyInput() } }
+        return false
     }
 
-    private func handleKeyUp(keyCode: Int64) {
+    @discardableResult
+    func handleKeyUp(keyCode: Int64) -> Bool {
         // Deliberately no modifier check: the up edge is the key itself, so
         // dropping a modifier before the key still ends the hold cleanly.
         if !hotkey.isModifierOnly, keyCode == hotkey.keyCode, comboIsDown {
             comboIsDown = false
             emitHotkey(down: false)
-            return
+            return true
         }
         if let edit = editHotkey, !edit.isModifierOnly, keyCode == edit.keyCode,
            editComboIsDown {
             editComboIsDown = false
             emitEditHotkey(down: false)
+            return true
         }
+        return false
     }
 
     private func emitHotkey(down: Bool) {
@@ -357,13 +438,13 @@ final class HotkeyMonitor {
     }
 
     private func emit(_ action: @escaping (HotkeyMonitorDelegate) -> Void) {
-        if Thread.isMainThread {
-            if let delegate { action(delegate) }
-        } else {
-            DispatchQueue.main.async { [weak self] in
-                guard let delegate = self?.delegate else { return }
-                action(delegate)
-            }
+        // Never execute controller work inside the CGEvent tap callback. Voice
+        // Edit begins with timeout-capped AX IPC; doing that synchronously can
+        // exceed the event-tap budget and make macOS disable the filtering tap.
+        guard let delegate else { return }
+        DispatchQueue.main.async { [weak delegate] in
+            guard let delegate else { return }
+            action(delegate)
         }
     }
 }

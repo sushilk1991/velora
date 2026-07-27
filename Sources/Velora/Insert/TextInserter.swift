@@ -40,9 +40,17 @@ final class TextInserter {
     private static let concealedType = NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")
 
     private let pasteboard: NSPasteboard
+    private let pasteDeliveryOverride: ((String?, AXUIElement?) -> Bool)?
+    private let pasteCommandOverride: (() -> Bool)?
 
-    init(pasteboard: NSPasteboard = .general) {
+    init(
+        pasteboard: NSPasteboard = .general,
+        pasteDeliveryOverride: ((String?, AXUIElement?) -> Bool)? = nil,
+        pasteCommandOverride: (() -> Bool)? = nil
+    ) {
         self.pasteboard = pasteboard
+        self.pasteDeliveryOverride = pasteDeliveryOverride
+        self.pasteCommandOverride = pasteCommandOverride
     }
 
     // MARK: - Continuation boundary (targets with no readable AX caret)
@@ -291,11 +299,17 @@ final class TextInserter {
     func insertViaPasteboard(
         _ text: String,
         targetBundleID: String? = nil,
-        targetElement: AXUIElement? = nil
+        targetElement: AXUIElement? = nil,
+        /// Optional caller-owned invariant checked both before touching the
+        /// pasteboard and again immediately before Command-V. Voice Edit uses
+        /// this for exact text + range identity, closing the window in which a
+        /// selection can move inside the same focused element.
+        additionalDeliveryCheck: (() -> Bool)? = nil
     ) -> Bool {
-        guard Self.deliveryAllowed(
-            targetBundleID: targetBundleID, targetElement: targetElement
-        ) else {
+        guard pasteDeliveryAllowed(
+            targetBundleID: targetBundleID, targetElement: targetElement),
+            additionalDeliveryCheck?() ?? true
+        else {
             NSLog("Velora: paste aborted — target no longer safe")
             return false
         }
@@ -312,9 +326,11 @@ final class TextInserter {
             changeCountBefore, ourChangeCount)
 
         // Recheck once more after the pasteboard write. If focus moved in this
-        // tiny window, restore the staged/saved clipboard and post no event.
-        guard Self.deliveryAllowed(
+        // tiny window — or Voice Edit's exact range identity changed — restore
+        // the staged/saved clipboard and post no event.
+        guard pasteDeliveryAllowed(
                   targetBundleID: targetBundleID, targetElement: targetElement),
+              additionalDeliveryCheck?() ?? true,
               postCommandV()
         else {
             _ = Self.restore(saved, to: pasteboard, ifUnchanged: ourChangeCount)
@@ -359,7 +375,18 @@ final class TextInserter {
     }
 
     private func postCommandV() -> Bool {
-        pressKey(Hotkey.keyCode(for: "v") ?? 9, flags: .maskCommand)
+        if let pasteCommandOverride { return pasteCommandOverride() }
+        return pressKey(Hotkey.keyCode(for: "v") ?? 9, flags: .maskCommand)
+    }
+
+    private func pasteDeliveryAllowed(
+        targetBundleID: String?, targetElement: AXUIElement?
+    ) -> Bool {
+        if let pasteDeliveryOverride {
+            return pasteDeliveryOverride(targetBundleID, targetElement)
+        }
+        return Self.deliveryAllowed(
+            targetBundleID: targetBundleID, targetElement: targetElement)
     }
 
     /// Posts one key press (down+up) with the given modifiers. Keycodes are

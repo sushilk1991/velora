@@ -21,6 +21,45 @@ enum DictationOutputFailure {
     }
 }
 
+/// Decides when an error makes every later engine final unsafe to consume.
+/// Normal user dictation keeps its short late-final grace period, but external
+/// requests and Voice Edit must fail closed: their final is either API output
+/// or a spoken instruction, never ordinary text to auto-paste.
+enum LateFinalPolicy {
+    static func errorCancelsSession(
+        _ failedSession: String,
+        editInstructionSession: String?,
+        externalRequestSession: String?
+    ) -> Bool {
+        editInstructionSession == failedSession
+            || externalRequestSession == failedSession
+    }
+}
+
+enum ErrorRetryIntent: Equatable {
+    case dictation
+    case voiceEdit
+
+    static func resolve(
+        explicit: ErrorRetryIntent?,
+        failedSession: String,
+        editInstructionSession: String?
+    ) -> ErrorRetryIntent {
+        if let explicit { return explicit }
+        return editInstructionSession == failedSession ? .voiceEdit : .dictation
+    }
+
+    func perform(
+        dictation: () -> Void,
+        voiceEdit: () -> Void
+    ) {
+        switch self {
+        case .dictation: dictation()
+        case .voiceEdit: voiceEdit()
+        }
+    }
+}
+
 struct ExternalDictationResult {
     let text: String
     let mode: String?
@@ -137,17 +176,19 @@ final class DictationController: NSObject {
     /// When set, the error HUD's action button runs this instead of retrying
     /// dictation (e.g. "Open Settings" for a missing Accessibility grant).
     private var errorRetryAction: (() -> Void)?
+    /// Default Retry routing when no one-off action overrides the button.
+    private var errorRetryIntent: ErrorRetryIntent = .dictation
     /// A menubar "Reformat Last as…" round-trip in flight: the history row and
     /// the app to paste the re-formatted result back into.
     private var pendingReformat: (id: Int64, bundleID: String?)?
     /// Safe Voice Edit: the recording session whose transcript is an edit
     /// INSTRUCTION for `selection`, not text to paste.
     private var editSession: (
-        session: String, selection: String, bundleID: String?, element: AXUIElement)?
+        session: String, selection: ScreenTextSelection, bundleID: String?)?
     /// The engine `edit_text` round-trip in flight after an edit session's
     /// final: verify-and-replace happens when `edited` comes back.
     private var pendingEdit: (
-        id: String, selection: String, bundleID: String?, element: AXUIElement)?
+        id: String, selection: ScreenTextSelection, bundleID: String?)?
     /// Self-contained watchdog for the edit round-trip — kept separate from
     /// the dictation transcribe timer so an unrelated failure's showError
     /// never discards a valid in-flight edit.
@@ -424,38 +465,52 @@ final class DictationController: NSObject {
         guard config.voiceEdit else { return }
         let app = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
         guard let selected = ScreenContext.selectedText(of: app) else {
-            showError("Select some text first, then speak an edit")
+            showEditStartError("Select some text first, then speak an edit")
             return
         }
         guard selected.text.count <= 8_000 else {
-            showError("Selection too long to voice-edit")
+            showEditStartError("Selection too long to voice-edit")
             return
         }
         // "Raw" mode: the instruction transcript skips the writing model —
         // the words go to the edit prompt verbatim, no cleanup needed.
         guard startRecording(locked: locked, explicitMode: "Raw", hudLabel: "Edit") else {
+            installEditStartRetry()
             return
         }
         editSession = (
-            session: sessionID, selection: selected.text,
-            bundleID: app?.bundleIdentifier, element: selected.element)
+            session: sessionID, selection: selected,
+            bundleID: app?.bundleIdentifier)
         NSLog("Velora: edit session started — %ld chars selected in %@",
               selected.text.count, app?.bundleIdentifier ?? "unknown")
     }
 
+    /// The error capsule's Retry button must retry Safe Voice Edit, not start
+    /// an unrelated normal dictation. A click is a toggle-style action, so it
+    /// always starts locked even when the configured hotkey uses hold mode.
+    private func showEditStartError(_ message: String) {
+        showError(message, retryIntent: .voiceEdit)
+    }
+
+    private func installEditStartRetry() {
+        errorRetryIntent = .voiceEdit
+    }
+
     private func sendEditCommand(
-        edit: (session: String, selection: String, bundleID: String?, element: AXUIElement),
+        edit: (session: String, selection: ScreenTextSelection, bundleID: String?),
         instruction: String
     ) {
         guard !instruction.isEmpty else {
             phase = .idle
-            showError("Didn't catch an instruction — try again")
+            showError(
+                "Didn't catch an instruction — try again",
+                retryIntent: .voiceEdit)
             return
         }
         let id = UUID().uuidString
         pendingEdit = (
             id: id, selection: edit.selection,
-            bundleID: edit.bundleID, element: edit.element)
+            bundleID: edit.bundleID)
         phase = .transcribing
         editTimer?.invalidate()
         editTimer = Timer.scheduledTimer(
@@ -465,19 +520,19 @@ final class DictationController: NSObject {
             self.pendingEdit = nil
             self.supervisor.send(["cmd": "edit_cancel", "id": id])
             if self.phase == .transcribing { self.phase = .idle }
-            self.showNotice(symbol: "pencil.slash", message: "Edit timed out")
+            self.showError("Edit timed out", retryIntent: .voiceEdit)
         }
         supervisor.send([
             "cmd": "edit_text", "id": id,
-            "text": edit.selection, "instruction": instruction,
+            "text": edit.selection.text, "instruction": instruction,
         ])
         NSLog("Velora: edit_text sent — %ld chars, instruction %ld words",
-              edit.selection.count,
+              edit.selection.text.count,
               instruction.split(separator: " ").count)
     }
 
     private func applyEdit(
-        pending: (id: String, selection: String, bundleID: String?, element: AXUIElement),
+        pending: (id: String, selection: ScreenTextSelection, bundleID: String?),
         text: String, applied: Bool, ms: Int, reason: String?
     ) {
         guard applied else {
@@ -495,6 +550,10 @@ final class DictationController: NSObject {
         // A successful result is always staged for a manual ⌘V; the same
         // delivery rails as live insertion then decide whether we may paste.
         inserter.copyToClipboard(text)
+        guard pending.selection.isEditable else {
+            showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
+            return
+        }
         guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
               !SecureInput.isActive,
               let bundleID = pending.bundleID,
@@ -504,21 +563,30 @@ final class DictationController: NSObject {
             return
         }
         // The selection must still be what we edited, in the SAME field — the
-        // same string selected in a different field of the same app (two
-        // "Approved" cells, say) must not be overwritten. If the user clicked
-        // away or typed, replacing whatever is now selected would corrupt
-        // their document. Recovery stays one step: the text is on the clipboard.
+        // same string selected elsewhere in the same field/page (two
+        // "Approved" occurrences, say) must not be overwritten. If the user
+        // clicked away or typed, replacing whatever is now selected would
+        // corrupt their document. Recovery stays one step: the text is on the
+        // clipboard.
         let app = NSWorkspace.shared.frontmostApplication
         guard let current = ScreenContext.selectedText(of: app),
-              current.text == pending.selection,
-              CFEqual(current.element, pending.element)
+              pending.selection.canReplace(with: current)
         else {
             NSLog("Velora: edit paste skipped — selection changed")
             showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
             return
         }
         guard inserter.insertViaPasteboard(
-            text, targetBundleID: bundleID, targetElement: current.element)
+            text,
+            targetBundleID: bundleID,
+            targetElement: current.element,
+            additionalDeliveryCheck: {
+                let latestApp = NSWorkspace.shared.frontmostApplication
+                guard latestApp?.bundleIdentifier == bundleID,
+                      let latest = ScreenContext.selectedText(of: latestApp)
+                else { return false }
+                return pending.selection.canReplace(with: latest)
+            })
         else {
             showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
             return
@@ -780,13 +848,22 @@ final class DictationController: NSObject {
         phase = .idle
         if let action = errorRetryAction {
             errorRetryAction = nil
+            errorRetryIntent = .dictation
             hud.model.retryTitle = "Retry"
             action()
             return
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.startRecording(locked: true)
-        }
+        let intent = errorRetryIntent
+        errorRetryIntent = .dictation
+        intent.perform(
+            dictation: {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                    self?.startRecording(locked: true)
+                }
+            },
+            voiceEdit: { [weak self] in
+                self?.beginEditSession(locked: true)
+            })
     }
 
     // MARK: - Recording lifecycle
@@ -806,6 +883,7 @@ final class DictationController: NSObject {
         // one-shot retry action so we start clean (the transition to
         // `.listening` below replaces the error visual).
         errorRetryAction = nil
+        errorRetryIntent = .dictation
         hud.model.retryTitle = "Retry"
 
         // Secure input (password fields): refuse with an error HUD.
@@ -1051,11 +1129,24 @@ final class DictationController: NSObject {
         failExternalRequest(for: sessionID, error: .cancelled)
     }
 
-    private func showError(_ message: String) {
+    private func showError(
+        _ message: String, retryIntent explicitRetryIntent: ErrorRetryIntent? = nil
+    ) {
         let failedSession = sessionID
-        if externalRequest?.session == failedSession {
+        let retryIntent = ErrorRetryIntent.resolve(
+            explicit: explicitRetryIntent,
+            failedSession: failedSession,
+            editInstructionSession: editSession?.session)
+        if LateFinalPolicy.errorCancelsSession(
+            failedSession,
+            editInstructionSession: editSession?.session,
+            externalRequestSession: externalRequest?.session
+        ) {
             // Once the requester has received a failure, a late final must not
-            // fall through into the normal paste path.
+            // fall through into the normal paste path. The same rule is
+            // critical for Voice Edit: its transcript is an instruction, so
+            // after an edit timeout/error it must never become normal dictated
+            // text merely because showError clears the captured selection.
             cancelledSessionID = failedSession
         }
         if editSession?.session == failedSession { editSession = nil }
@@ -1070,6 +1161,7 @@ final class DictationController: NSObject {
         transcribeTimer?.invalidate()
         transcribeTimer = nil
         errorRetryAction = nil
+        errorRetryIntent = retryIntent
         hud.model.retryTitle = "Retry"
         NSLog("Velora: error HUD — %@", message)
         sounds.play(.error)
@@ -1186,18 +1278,26 @@ final class DictationController: NSObject {
             if phase == .transcribing { phase = .idle }
             switch code {
             case "busy":
-                showError("Velora is busy — try the edit again")
+                showError(
+                    "Velora is busy — try the edit again",
+                    retryIntent: .voiceEdit)
             case "cleanup_unavailable":
-                showError("The writing model is still loading — try again shortly")
+                showError(
+                    "The writing model is still loading — try again shortly",
+                    retryIntent: .voiceEdit)
             default:
-                showError(error)
+                showError(error, retryIntent: .voiceEdit)
             }
 
         case .error(let session, let message):
             // Only errors scoped to the active session may end the dictation;
             // global or foreign-session errors are logged and ignored.
             if session == sessionID, phase != .idle {
-                showError(message)
+                if pendingEdit != nil {
+                    cancelPendingEditForError(message)
+                } else {
+                    showError(message)
+                }
             } else {
                 NSLog("Velora: engine error (session %@): %@", session ?? "none", message)
             }
@@ -1216,8 +1316,25 @@ final class DictationController: NSObject {
         case .ready, .connecting:
             break
         case .stopped, .launching, .degraded:
-            showError("Engine crashed — restarting")
+            if pendingEdit != nil {
+                cancelPendingEditForError("Engine crashed — restarting")
+            } else {
+                showError("Engine crashed — restarting")
+            }
         }
+    }
+
+    private func cancelPendingEditForError(_ message: String) {
+        // pendingEdit is created only after the raw instruction final has set
+        // consumedSessionID, so clearing it here blocks both a stale `.edited`
+        // response and any duplicate raw final from reaching normal insertion.
+        if let pending = pendingEdit {
+            supervisor.send(["cmd": "edit_cancel", "id": pending.id])
+            pendingEdit = nil
+        }
+        editTimer?.invalidate()
+        editTimer = nil
+        showError(message, retryIntent: .voiceEdit)
     }
 
     private func finishInsertion(
@@ -1330,6 +1447,7 @@ final class DictationController: NSObject {
            inserter.insertIntoOwnWindow(text, mode: mode) {
             NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
             errorRetryAction = nil
+            errorRetryIntent = .dictation
             hud.model.retryTitle = "Retry"
             hud.transition(to: .inserted)
             phase = .idle
@@ -1368,6 +1486,7 @@ final class DictationController: NSObject {
         if let fallbackMessage {
             NSLog("Velora: insert fallback session=%@ — %@", sessionID, fallbackMessage)
             errorRetryAction = nil
+            errorRetryIntent = .dictation
             hud.model.retryTitle = "Retry"
             if isPermissionFallback {
                 // The error HUD's action button opens the Accessibility pane

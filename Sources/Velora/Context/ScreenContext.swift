@@ -14,6 +14,42 @@ struct ContextEntity {
     var payload: [String: String] { ["type": type, "value": value] }
 }
 
+enum ScreenTextSelectionIdentity {
+    case characterRange(location: Int, length: Int)
+    case textMarkerRange(CFTypeRef)
+    case unavailable
+}
+
+/// Exact selection snapshot used by Safe Voice Edit. Text alone is not an
+/// identity: the same word can appear twice in one editor or webpage.
+struct ScreenTextSelection {
+    let text: String
+    let element: AXUIElement
+    let identity: ScreenTextSelectionIdentity
+    let isEditable: Bool
+
+    /// True only when the current selection is the exact editable range that
+    /// was captured. An unavailable identity is always clipboard-only.
+    func canReplace(with current: ScreenTextSelection) -> Bool {
+        guard isEditable, current.isEditable,
+              text == current.text,
+              CFEqual(element, current.element)
+        else { return false }
+        switch (identity, current.identity) {
+        case let (
+            .characterRange(oldLocation, oldLength),
+            .characterRange(newLocation, newLength)
+        ):
+            return oldLocation == newLocation && oldLength == newLength
+        case let (.textMarkerRange(oldRange), .textMarkerRange(newRange)):
+            return CFEqual(oldRange, newRange)
+        case (.unavailable, _), (_, .unavailable),
+             (.characterRange, .textMarkerRange), (.textMarkerRange, .characterRange):
+            return false
+        }
+    }
+}
+
 /// Extracts lightweight entities from the frontmost app using the macOS
 /// Accessibility API (already-granted permission — no Screen Recording, no
 /// screenshot). Reads only the focused window's title, so it stays cheap
@@ -100,16 +136,58 @@ enum ScreenContext {
     }
 
     /// The frontmost app's current text selection, for Safe Voice Edit.
-    /// Returns the selected string plus the element it came from so the
-    /// caller can verify focus hasn't moved before pasting the replacement.
-    /// Nil when there is no selection, the selection is empty/whitespace, or
-    /// the app exposes no AX text (some Electron surfaces).
-    static func selectedText(of app: NSRunningApplication?) -> (text: String, element: AXUIElement)? {
+    /// Returns the exact string, element, and range identity so the caller can
+    /// verify the selection has not moved before pasting the replacement.
+    /// WebKit/Electron surfaces expose document selections as text-marker
+    /// ranges rather than `AXSelectedText`, so both representations are read.
+    /// Nil when there is no selection or the selection is empty/whitespace.
+    static func selectedText(of app: NSRunningApplication?) -> ScreenTextSelection? {
         guard let focused = focusedElement(of: app) else { return nil }
-        guard let selection = axString(focused, kAXSelectedTextAttribute),
-              !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if let selection = resolvedSelectionText(
+            direct: { axRawString(focused, kAXSelectedTextAttribute) },
+            textMarker: { nil }
+        ) {
+            let range = axRange(focused, kAXSelectedTextRangeAttribute)
+            let identity = range.map {
+                ScreenTextSelectionIdentity.characterRange(
+                    location: $0.location, length: $0.length)
+            } ?? .unavailable
+            return ScreenTextSelection(
+                text: selection,
+                element: focused,
+                identity: identity,
+                isEditable: range != nil
+                    && axAttributeIsSettable(focused, kAXValueAttribute))
+        }
+        guard let marker = axSelectedTextMarkerSelection(focused),
+              let selection = resolvedSelectionText(
+                direct: { nil }, textMarker: { marker.text })
         else { return nil }
-        return (selection, focused)
+        return ScreenTextSelection(
+            text: selection,
+            element: focused,
+            identity: .textMarkerRange(marker.range),
+            // Static webpage selections are readable but not replaceable.
+            // They still enter edit mode and return the result on clipboard.
+            isEditable: axAttributeIsSettable(focused, kAXValueAttribute))
+    }
+
+    /// Resolves the native text-control representation first, then the web
+    /// text-marker representation. The closures keep the fallback lazy: a
+    /// normal NSTextView pays no extra AX IPC.
+    static func resolvedSelectionText(
+        direct: () -> String?,
+        textMarker: () -> String?
+    ) -> String? {
+        if let selection = direct(),
+           !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return selection
+        }
+        if let selection = textMarker(),
+           !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return selection
+        }
+        return nil
     }
 
     /// Characters immediately around the focused selection/caret. Used only at
@@ -273,6 +351,43 @@ enum ScreenContext {
               let string = ref as? String
         else { return nil }
         return string
+    }
+
+    /// Safari, Chromium, and Electron expose a document selection through an
+    /// opaque AX text-marker range. Passing that range back to the same
+    /// element's parameterized string attribute is the supported way to read
+    /// it; no private marker decoding or full-document read is needed.
+    private static func axSelectedTextMarkerSelection(
+        _ element: AXUIElement
+    ) -> (text: String, range: CFTypeRef)? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var markerRange: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                  element,
+                  kAXSelectedTextMarkerRangeAttribute as CFString,
+                  &markerRange) == .success,
+              let markerRange
+        else { return nil }
+        var ref: CFTypeRef?
+        guard AXUIElementCopyParameterizedAttributeValue(
+                  element,
+                  kAXStringForTextMarkerRangeParameterizedAttribute as CFString,
+                  markerRange,
+                  &ref) == .success,
+              let string = ref as? String
+        else { return nil }
+        return (string, markerRange)
+    }
+
+    private static func axAttributeIsSettable(
+        _ element: AXUIElement, _ attr: String
+    ) -> Bool {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var settable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(
+                  element, attr as CFString, &settable) == .success
+        else { return false }
+        return settable.boolValue
     }
 
     private static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {

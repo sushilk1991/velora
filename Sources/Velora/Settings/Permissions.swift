@@ -8,13 +8,14 @@ import IOKit.hid
 ///
 /// Velora needs three grants:
 /// - **Microphone** — audio capture.
-/// - **Input Monitoring** (`kIOHIDRequestTypeListenEvent`) — a *listen-only*
-///   keyboard `CGEventTap`/`NSEvent` global monitor receives key events only
-///   with this grant. Accessibility does **not** substitute for it on modern
-///   macOS: without Input Monitoring the tap is created successfully but is
-///   silently starved of events, so the hotkey looks dead in every mode while
-///   the menubar (needing no permission) still works.
-/// - **Accessibility** — posting the synthesized ⌘V that inserts text.
+/// - **Input Monitoring** (`kIOHIDRequestTypeListenEvent`) — the keyboard
+///   `CGEventTap`/`NSEvent` global monitor receives key events only with this
+///   grant. Accessibility does **not** substitute for it on modern macOS:
+///   without Input Monitoring the tap is created successfully but is silently
+///   starved of events, so the hotkey looks dead in every mode while the
+///   menubar (needing no permission) still works.
+/// - **Accessibility** — filtering matched combo hotkeys, reading selections,
+///   and posting the synthesized ⌘V that inserts text.
 ///
 /// All are requested during onboarding, never at launch (design brief §4.2).
 enum Permissions {

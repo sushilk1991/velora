@@ -4,6 +4,22 @@ import CoreAudio
 import Foundation
 import SQLite3
 
+private final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
+    var hotkeyDownCount = 0
+    var hotkeyUpCount = 0
+    var editHotkeyDownCount = 0
+    var editHotkeyUpCount = 0
+    var escapeCount = 0
+    var nonHotkeyInputCount = 0
+
+    func hotkeyDown() { hotkeyDownCount += 1 }
+    func hotkeyUp() { hotkeyUpCount += 1 }
+    func editHotkeyDown() { editHotkeyDownCount += 1 }
+    func editHotkeyUp() { editHotkeyUpCount += 1 }
+    func escapePressed() { escapeCount += 1 }
+    func nonHotkeyInput() { nonHotkeyInputCount += 1 }
+}
+
 /// Headless pure-logic tests, run with `Velora --selftest` (CommandLineTools
 /// ships no XCTest/swift-testing, so tests live in the binary). Covers the
 /// learning loop's thresholds, the correction diff, and protocol parsing —
@@ -67,6 +83,7 @@ enum Selftest {
         testEventParsing()
         testOnboardingSetup()
         testKeyboardShortcutMapping()
+        testSafeVoiceEditSelection()
         testModeCategories()
         testVoiceCommands()
         testStreak()
@@ -732,6 +749,218 @@ enum Selftest {
                 Hotkey.keyName(for: Int64(zKey)) == "Z",
                 "Undo uses the semantic Z key in the active keyboard layout")
         }
+    }
+
+    private static func testSafeVoiceEditSelection() {
+        expect(
+            LateFinalPolicy.errorCancelsSession(
+                "edit-session",
+                editInstructionSession: "edit-session",
+                externalRequestSession: nil),
+            "an errored edit session rejects its late instruction final")
+        expect(
+            LateFinalPolicy.errorCancelsSession(
+                "external-session",
+                editInstructionSession: nil,
+                externalRequestSession: "external-session"),
+            "an errored external session rejects its late API final")
+        expect(
+            !LateFinalPolicy.errorCancelsSession(
+                "normal-session",
+                editInstructionSession: nil,
+                externalRequestSession: nil),
+            "normal dictation retains its bounded late-final recovery")
+        expect(
+            ErrorRetryIntent.resolve(
+                explicit: nil,
+                failedSession: "edit-session",
+                editInstructionSession: "edit-session") == .voiceEdit,
+            "an edit capture error keeps Retry routed through Voice Edit")
+        expect(
+            ErrorRetryIntent.resolve(
+                explicit: .voiceEdit,
+                failedSession: "already-consumed-session",
+                editInstructionSession: nil) == .voiceEdit,
+            "an empty instruction or edit-engine failure keeps explicit edit intent")
+        expect(
+            ErrorRetryIntent.resolve(
+                explicit: nil,
+                failedSession: "normal-session",
+                editInstructionSession: nil) == .dictation,
+            "a normal dictation error retains normal Retry behavior")
+        var retryRoute = ""
+        ErrorRetryIntent.voiceEdit.perform(
+            dictation: { retryRoute = "dictation" },
+            voiceEdit: { retryRoute = "edit" })
+        expect(
+            retryRoute == "edit",
+            "Voice Edit Retry executes the edit route, never ordinary dictation")
+        ErrorRetryIntent.dictation.perform(
+            dictation: { retryRoute = "dictation" },
+            voiceEdit: { retryRoute = "edit" })
+        expect(
+            retryRoute == "dictation",
+            "normal Retry still executes the ordinary dictation route")
+
+        var markerReads = 0
+        let native = ScreenContext.resolvedSelectionText(
+            direct: { "  Native selection  " },
+            textMarker: {
+                markerReads += 1
+                return "Web selection"
+            })
+        expect(native == "  Native selection  " && markerReads == 0,
+               "native AX selection stays byte-exact without a web-marker IPC")
+
+        let web = ScreenContext.resolvedSelectionText(
+            direct: { nil },
+            textMarker: {
+                markerReads += 1
+                return "  Web selection  "
+            })
+        expect(web == "  Web selection  " && markerReads == 1,
+               "web text-marker fallback preserves boundary whitespace")
+
+        let whitespaceFallback = ScreenContext.resolvedSelectionText(
+            direct: { " \n " },
+            textMarker: { "Marker selection" })
+        expect(whitespaceFallback == "Marker selection",
+               "empty native selection does not hide a web selection")
+        expect(ScreenContext.resolvedSelectionText(
+            direct: { "\t" }, textMarker: { "\n" }) == nil,
+               "whitespace-only selections stay invalid")
+        let multiline = "  Hello 👨‍👩‍👧\nsecond line\n"
+        expect(ScreenContext.resolvedSelectionText(
+            direct: { multiline }, textMarker: { nil }) == multiline,
+               "multiline emoji selections stay exact")
+
+        let elementA = AXUIElementCreateApplication(1)
+        let elementB = AXUIElementCreateApplication(2)
+        let captured = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .characterRange(location: 10, length: 8),
+            isEditable: true)
+        let unchanged = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .characterRange(location: 10, length: 8),
+            isEditable: true)
+        expect(captured.canReplace(with: unchanged),
+               "the exact native selection remains replaceable")
+        let moved = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .characterRange(location: 40, length: 8),
+            isEditable: true)
+        expect(!captured.canReplace(with: moved),
+               "identical text at another range cannot be replaced")
+        let otherField = ScreenTextSelection(
+            text: "Approved", element: elementB,
+            identity: .characterRange(location: 10, length: 8),
+            isEditable: true)
+        expect(!captured.canReplace(with: otherField),
+               "the same range in another field cannot be replaced")
+        let changedWhitespace = ScreenTextSelection(
+            text: "Approved ", element: elementA,
+            identity: .characterRange(location: 10, length: 9),
+            isEditable: true)
+        expect(!captured.canReplace(with: changedWhitespace),
+               "boundary-whitespace changes invalidate replacement")
+
+        let markerA = "web-marker-a" as CFString
+        let sameMarkerA = "web-marker-a" as CFString
+        let markerB = "web-marker-b" as CFString
+        let webCaptured = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .textMarkerRange(markerA), isEditable: true)
+        let webUnchanged = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .textMarkerRange(sameMarkerA), isEditable: true)
+        let webMoved = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .textMarkerRange(markerB), isEditable: true)
+        expect(webCaptured.canReplace(with: webUnchanged),
+               "an unchanged web marker remains replaceable")
+        expect(!webCaptured.canReplace(with: webMoved),
+               "identical web text at another marker cannot be replaced")
+        let staticWebSelection = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .textMarkerRange(markerA), isEditable: false)
+        expect(!staticWebSelection.canReplace(with: webUnchanged),
+               "read-only webpage selections remain clipboard-only")
+        let unknownIdentity = ScreenTextSelection(
+            text: "Approved", element: elementA,
+            identity: .unavailable, isEditable: true)
+        expect(!unknownIdentity.canReplace(with: unchanged),
+               "a selection without a range identity cannot be replaced")
+
+        let monitor = HotkeyMonitor()
+        monitor.hotkey = .rightOption
+        let commandShiftE = Hotkey(
+            keyCode: 14,
+            modifiers: CGEventFlags.maskCommand.rawValue
+                | CGEventFlags.maskShift.rawValue,
+            isModifierOnly: false)
+        monitor.editHotkey = commandShiftE
+        expect(monitor.handleKeyDown(
+            keyCode: 14, flags: commandShiftE.modifiers,
+            isRepeat: false, invalidateContinuation: false),
+               "edit combo key-down is marked for suppression")
+        expect(monitor.handleKeyDown(
+            keyCode: 14, flags: commandShiftE.modifiers,
+            isRepeat: true, invalidateContinuation: false),
+               "latched edit combo autorepeat is marked for suppression")
+        expect(monitor.handleKeyDown(
+            keyCode: 14, flags: 0,
+            isRepeat: true, invalidateContinuation: false),
+               "latched autorepeat stays suppressed after modifier release")
+        expect(monitor.handleKeyUp(keyCode: 14),
+               "edit combo key-up is marked for suppression")
+        expect(!monitor.handleKeyUp(keyCode: 14),
+               "an unrelated edit key-up is not suppressed")
+        expect(!monitor.handleKeyDown(
+            keyCode: 14, flags: CGEventFlags.maskShift.rawValue,
+            isRepeat: false, invalidateContinuation: false),
+               "a partial modifier match remains target-app input")
+
+        expect(
+            HotkeyMonitor.resyncedComboLatch(
+                wasLatched: true, keyCurrentlyDown: true),
+            "tap re-enable preserves a latched combo while its key is held")
+        expect(
+            !HotkeyMonitor.resyncedComboLatch(
+                wasLatched: true, keyCurrentlyDown: false),
+            "tap re-enable clears a latch after the key was released")
+        expect(
+            !HotkeyMonitor.resyncedComboLatch(
+                wasLatched: false, keyCurrentlyDown: true),
+            "tap re-enable never invents a combo from key state alone")
+
+        let probe = HotkeySelftestDelegate()
+        monitor.delegate = probe
+        expect(monitor.handleKeyDown(
+            keyCode: 14, flags: commandShiftE.modifiers,
+            isRepeat: false, invalidateContinuation: false),
+               "a filtering tap suppresses the edit combo")
+        expect(
+            probe.editHotkeyDownCount == 0,
+            "event-tap interpretation never runs controller work synchronously")
+        expect(
+            waitUntil { probe.editHotkeyDownCount == 1 },
+            "the edit hotkey callback is delivered asynchronously on the main queue")
+        expect(monitor.handleKeyUp(keyCode: 14),
+               "the asynchronously delivered edit combo still suppresses key-up")
+        expect(
+            waitUntil { probe.editHotkeyUpCount == 1 },
+            "the edit key-up callback is delivered in order")
+
+        expect(!monitor.handleKeyDown(
+            keyCode: 14, flags: commandShiftE.modifiers,
+            isRepeat: false, invalidateContinuation: false,
+            comboCanBeSuppressed: false),
+               "a listen-only tap refuses to activate an unsuppressible combo")
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        expect(
+            probe.editHotkeyDownCount == 1 && !monitor.handleKeyUp(keyCode: 14),
+            "a refused listen-only combo emits nothing and creates no latch")
     }
 
     // MARK: - Onboarding setup gate
@@ -4795,6 +5024,35 @@ enum Selftest {
             !TextInserter.restore(savedAgain, to: pasteboard, ifUnchanged: staleChange)
                 && pasteboard.string(forType: .string) == "User copied this",
             "clipboard restoration never overwrites a newer user copy")
+
+        pasteboard.clearContents()
+        pasteboard.setString("Clipboard before guarded edit", forType: .string)
+        var exactSelectionChecks = 0
+        var pasteCommandPosts = 0
+        let guardedInserter = TextInserter(
+            pasteboard: pasteboard,
+            pasteDeliveryOverride: { _, _ in true },
+            pasteCommandOverride: {
+                pasteCommandPosts += 1
+                return true
+            })
+        let guardedInsert = guardedInserter.insertViaPasteboard(
+            "Edited text",
+            additionalDeliveryCheck: {
+                exactSelectionChecks += 1
+                // Stable at the first boundary, moved after the pasteboard
+                // write but before the final Command-V boundary.
+                return exactSelectionChecks == 1
+            })
+        expect(
+            !guardedInsert && exactSelectionChecks == 2,
+            "guarded paste rechecks the exact edit selection after clipboard write")
+        expect(
+            pasteCommandPosts == 0,
+            "a selection change immediately before paste posts no Command-V")
+        expect(
+            pasteboard.string(forType: .string) == "Clipboard before guarded edit",
+            "a blocked edit paste restores the pre-edit clipboard")
         pasteboard.clearContents()
     }
 }

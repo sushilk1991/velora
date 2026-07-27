@@ -39,6 +39,20 @@ def build_edit_prompt(instruction: str) -> str:
     return EDIT_SYSTEM_PROMPT_TEMPLATE.format(instruction=instruction.strip())
 
 
+def restore_boundary_whitespace(original: str, edited: str) -> str:
+    """Wrap a model edit in the selection's exact outer whitespace.
+
+    The model edits prose, while the selection boundary belongs to the
+    document. Keeping indentation/newlines deterministic prevents replacing a
+    selected paragraph with a stripped result that joins adjacent content.
+    """
+    leading = len(original) - len(original.lstrip())
+    trailing = len(original) - len(original.rstrip())
+    suffix_start = len(original) - trailing
+    suffix = original[suffix_start:] if trailing else ""
+    return original[:leading] + edited.strip() + suffix
+
+
 _WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
