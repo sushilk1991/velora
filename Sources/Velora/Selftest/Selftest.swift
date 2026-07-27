@@ -894,8 +894,8 @@ enum Selftest {
 
         let sublimeToken = SublimeTextSelectionToken(
             value: UUID().uuidString.lowercased(),
+            generation: UUID().uuidString.lowercased(),
             client: SublimeCommandClient(
-                helperURL: URL(fileURLWithPath: "/usr/bin/false"),
                 targetPID: -1))
         let sublimeSelection = ScreenTextSelection(
             text: "Approved",
@@ -907,19 +907,19 @@ enum Selftest {
             "Sublime plugin tokens never fall through to the AX paste rail")
         sublimeSelection.discardMutableIdentity()
         expect(
-            !sublimeToken.replace(with: "No"),
+            sublimeToken.replace(with: "No") == .rejected,
             "a discarded Sublime token can never replace text")
 
         let oneShotSublimeToken = SublimeTextSelectionToken(
             value: UUID().uuidString.lowercased(),
+            generation: UUID().uuidString.lowercased(),
             client: SublimeCommandClient(
-                helperURL: URL(fileURLWithPath: "/usr/bin/false"),
                 targetPID: -1))
         expect(
-            !oneShotSublimeToken.replace(with: "No"),
+            oneShotSublimeToken.replace(with: "No") == .rejected,
             "an unavailable Sublime client fails closed")
         expect(
-            !oneShotSublimeToken.replace(with: "Still no"),
+            oneShotSublimeToken.replace(with: "Still no") == .rejected,
             "a Sublime replacement token is one-shot even after transport failure")
 
         let monitor = HotkeyMonitor()

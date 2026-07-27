@@ -577,6 +577,9 @@ final class DictationController: NSObject {
                 case .failure(.multipleSelections):
                     self.showEditStartError(
                         "Select one text range, then speak an edit")
+                case .failure(.unsupportedView):
+                    self.showEditStartError(
+                        "Select text in a Sublime document, not Find or Console")
                 case .failure(.integrationNeedsRestart):
                     self.showEditStartError(
                         "Restart Sublime Text once, then retry")
@@ -696,9 +699,6 @@ final class DictationController: NSObject {
             showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
             return
         }
-        // A successful result is always staged for a manual ⌘V; the same
-        // delivery rails as live insertion then decide whether we may paste.
-        inserter.copyToClipboard(text)
         if let token = pending.selection.sublimeToken {
             applySublimeEdit(
                 pending: pending,
@@ -707,6 +707,10 @@ final class DictationController: NSObject {
                 ms: ms)
             return
         }
+        // AX-based editors keep a clipboard recovery path. Sublime performs
+        // the exact replacement inside its plugin and must never touch the
+        // user's clipboard.
+        inserter.copyToClipboard(text)
         guard pending.selection.isEditable else {
             showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
             return
@@ -766,29 +770,35 @@ final class DictationController: NSObject {
             token.discard()
             NSLog("Velora: Sublime edit skipped — target/selection/input changed")
             showNotice(
-                symbol: "doc.on.clipboard",
-                message: "Selection changed — edit on clipboard")
+                symbol: "pencil.slash",
+                message: "Selection changed — retry the edit")
             return
         }
         let applyID = UUID()
         sublimeApplyID = applyID
         sublimeApplyingToken = token
         sublimeQueue.async { [weak self] in
-            // The client rechecks the exact frontmost Sublime PID on the main
-            // queue before launching its helper, and Sublime itself validates
-            // the view/selection/revision immediately before replacement.
-            let applied = token.replace(with: text)
+            // The client rechecks the exact frontmost Sublime PID, and Sublime
+            // validates the view, selection, generation, and buffer revision
+            // immediately before replacement.
+            let result = token.replace(with: text)
             DispatchQueue.main.async {
                 guard let self, self.sublimeApplyID == applyID else { return }
                 self.sublimeApplyID = nil
                 self.sublimeApplyingToken = nil
-                if applied {
+                switch result {
+                case .applied:
                     self.finishAppliedEdit(bundleID: bundleID, ms: ms)
-                } else {
+                case .rejected:
                     NSLog("Velora: Sublime edit skipped — plugin validation failed")
                     self.showNotice(
-                        symbol: "doc.on.clipboard",
-                        message: "Selection changed — edit on clipboard")
+                        symbol: "pencil.slash",
+                        message: "Selection changed — retry the edit")
+                case .unknown:
+                    NSLog("Velora: Sublime edit result could not be confirmed")
+                    self.showNotice(
+                        symbol: "exclamationmark.triangle",
+                        message: "Couldn't confirm whether Sublime applied the edit")
                 }
             }
         }
