@@ -245,7 +245,7 @@
     };
 
     /* Cleaned result: what actually reaches your cursor. */
-    const showResult = (example, animate) => {
+    const showResult = (example, animate, onCommit = () => {}) => {
       if (example.tokens) {
         const cuts = line.querySelectorAll(".tok-cut");
         const adds = line.querySelectorAll(".tok-add");
@@ -256,6 +256,7 @@
             setTokenOut(token, false);
             token.classList.add("is-in");
           });
+          onCommit();
         };
 
         if (!animate) {
@@ -278,6 +279,7 @@
            list at opacity 0, i.e. an empty card. */
         void list.offsetWidth;
         list.classList.add("is-in");
+        onCommit();
       };
 
       if (!animate) {
@@ -320,8 +322,7 @@
 
       after(520, () => {
         setState("done");
-        announce("Pasted at your cursor");
-        showResult(example, true);
+        showResult(example, true, () => announce("Pasted at your cursor"));
       });
     };
 

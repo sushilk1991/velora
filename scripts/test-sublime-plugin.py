@@ -173,9 +173,15 @@ class SublimePluginTests(unittest.TestCase):
         ACTIVE_WINDOW[0] = Window(self.view)
         PLUGIN.plugin_loaded()
         deadline = time.time() + 1
-        while not os.path.exists(PLUGIN._socket_path()) and time.time() < deadline:
-            time.sleep(0.005)
-        self.assertTrue(os.path.exists(PLUGIN._socket_path()))
+        while time.time() < deadline:
+            try:
+                with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                    probe.connect(PLUGIN._socket_path())
+                break
+            except (FileNotFoundError, ConnectionRefusedError):
+                time.sleep(0.005)
+        else:
+            self.fail("Sublime bridge did not begin accepting connections")
 
     def tearDown(self):
         PLUGIN.plugin_unloaded()
@@ -189,19 +195,18 @@ class SublimePluginTests(unittest.TestCase):
             "request_id": str(uuid.uuid4()),
         }
         request.update(values)
-        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        client.settimeout(1)
-        client.connect(PLUGIN._socket_path())
-        client.sendall(
-            json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n"
-        )
-        response = b""
-        while not response.endswith(b"\n"):
-            chunk = client.recv(4096)
-            if not chunk:
-                break
-            response += chunk
-        client.close()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(PLUGIN._socket_path())
+            client.sendall(
+                json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n"
+            )
+            response = b""
+            while not response.endswith(b"\n"):
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
         return request, json.loads(response.decode("utf-8"))
 
     def capture(self, view=None):

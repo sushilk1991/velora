@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from html import unescape
 from html.parser import HTMLParser
+import json
 from pathlib import Path
 import re
 from urllib.parse import urlparse
@@ -143,7 +144,11 @@ def main() -> None:
     assert "html:not(.js) .demo-line" in css, (
         "the scripted demo container must stay hidden without JavaScript"
     )
-    assert "html:not(.js) .demo-controls" in css and "html:not(.js) .copy-command" in css, (
+    assert (
+        "html:not(.js) .demo-controls" in css
+        and "html:not(.js) .copy-command" in css
+        and "html:not(.js) .theme-toggle" in css
+    ), (
         "controls that only work with scripting must not be shown without it"
     )
 
@@ -257,6 +262,9 @@ def main() -> None:
     assert "void list.offsetWidth;" in script, (
         "the structured result must not depend on a frame callback to become visible"
     )
+    assert 'showResult(example, true, () => announce("Pasted at your cursor"));' in script, (
+        "the demo must announce completion only after exposing the accessible result"
+    )
     assert "pointerdown" in script and "keydown" in script and "keyup" in script, (
         "hold-to-dictate must work with a pointer and with a keyboard"
     )
@@ -284,6 +292,16 @@ def main() -> None:
         )
     assert "app store" in html.lower() and "testflight" in html.lower(), (
         "the site must be explicit that the iPhone app has no App Store or TestFlight build"
+    )
+    schema_match = re.search(
+        r'<script type="application/ld\+json">\s*(.*?)\s*</script>',
+        html,
+        flags=re.DOTALL,
+    )
+    assert schema_match, "the site must include SoftwareApplication structured data"
+    schema = json.loads(schema_match.group(1))
+    assert schema["operatingSystem"] == "macOS 14 or later", (
+        "structured data must not advertise the alpha iPhone app as a supported product"
     )
 
     truth_sources = "\n".join((readme, models))
