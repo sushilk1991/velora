@@ -17,6 +17,27 @@ protocol HotkeyMonitorDelegate: AnyObject {
     func nonHotkeyInput()
 }
 
+/// Monotonic guard for observed real clicks and key presses. The event-tap
+/// callback increments before controller work is queued, so a delivery check
+/// can fail closed even while its main-queue notification is still pending.
+/// Exact target/selection validation remains the authoritative safety check.
+enum UserInputActivity {
+    private static let lock = NSLock()
+    private static var value: UInt64 = 0
+
+    static func snapshot() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    static func mark() {
+        lock.lock()
+        value &+= 1
+        lock.unlock()
+    }
+}
+
 /// Global hotkey listener for arbitrary recorded hotkeys (`Hotkey`).
 ///
 /// Matching rules:
@@ -282,7 +303,10 @@ final class HotkeyMonitor {
         case .keyUp:
             return handleKeyUp(keyCode: keyCode)
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
-            if !isVeloraEvent { emit { $0.nonHotkeyInput() } }
+            if !isVeloraEvent {
+                UserInputActivity.mark()
+                emit { $0.nonHotkeyInput() }
+            }
             return false
         default:
             return false
@@ -308,6 +332,7 @@ final class HotkeyMonitor {
             case .keyUp:
                 _ = self.handleKeyUp(keyCode: Int64(event.keyCode))
             case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+                UserInputActivity.mark()
                 self.emit { $0.nonHotkeyInput() }
             default:
                 break
@@ -405,7 +430,10 @@ final class HotkeyMonitor {
             }
             return editComboIsDown
         }
-        if !isRepeat, invalidateContinuation { emit { $0.nonHotkeyInput() } }
+        if !isRepeat, invalidateContinuation {
+            UserInputActivity.mark()
+            emit { $0.nonHotkeyInput() }
+        }
         return false
     }
 

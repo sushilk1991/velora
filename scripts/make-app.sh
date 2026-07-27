@@ -118,6 +118,10 @@ cp "$BIN" "$APP/Contents/MacOS/Velora"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp Resources/start.caf Resources/stop.caf Resources/error.caf "$APP/Contents/Resources/"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"  # CFBundleIconFile = AppIcon
+mkdir -p "$APP/Contents/Resources/SublimeText"
+cp Resources/SublimeText/VeloraVoiceEdit.py \
+  Resources/SublimeText/.python-version \
+  "$APP/Contents/Resources/SublimeText/"
 
 # Bake the absolute engine directory into the bundle as a dev fallback
 # (the bundled Resources/engine copy below takes precedence at runtime).

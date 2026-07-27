@@ -1,8 +1,8 @@
 # Velora — build orchestration (SwiftPM + hand-rolled .app; no Xcode).
 
 .PHONY: build release app dmg verify-dmg run sounds clean test test-swift \
-	test-engine test-site test-release-scripts test-coverage test-live-audio \
-	test-ios perf-test
+	test-engine test-site test-sublime-plugin test-release-scripts test-coverage \
+	test-live-audio test-ios perf-test
 
 build:
 	swift build
@@ -28,7 +28,7 @@ sounds:
 clean:
 	rm -rf .build build
 
-test: test-swift test-engine test-site test-release-scripts
+test: test-swift test-engine test-site test-sublime-plugin test-release-scripts
 
 test-swift: build
 	.build/debug/Velora --selftest
@@ -38,6 +38,9 @@ test-engine:
 
 test-site:
 	python3 scripts/test-site.py
+
+test-sublime-plugin:
+	python3 scripts/test-sublime-plugin.py
 
 test-release-scripts:
 	./scripts/test-signing-config.sh

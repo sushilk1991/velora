@@ -17,6 +17,7 @@ struct ContextEntity {
 enum ScreenTextSelectionIdentity {
     case characterRange(location: Int, length: Int)
     case textMarkerRange(CFTypeRef)
+    case sublimeToken(SublimeTextSelectionToken)
     case unavailable
 }
 
@@ -43,10 +44,23 @@ struct ScreenTextSelection {
             return oldLocation == newLocation && oldLength == newLength
         case let (.textMarkerRange(oldRange), .textMarkerRange(newRange)):
             return CFEqual(oldRange, newRange)
+        case (.sublimeToken, _), (_, .sublimeToken):
+            // Sublime tokens are validated and replaced inside Sublime; AX
+            // cannot produce a comparable current range.
+            return false
         case (.unavailable, _), (_, .unavailable),
              (.characterRange, .textMarkerRange), (.textMarkerRange, .characterRange):
             return false
         }
+    }
+
+    var sublimeToken: SublimeTextSelectionToken? {
+        guard case .sublimeToken(let token) = identity else { return nil }
+        return token
+    }
+
+    func discardMutableIdentity() {
+        sublimeToken?.discard()
     }
 }
 

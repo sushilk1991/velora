@@ -892,6 +892,36 @@ enum Selftest {
         expect(!unknownIdentity.canReplace(with: unchanged),
                "a selection without a range identity cannot be replaced")
 
+        let sublimeToken = SublimeTextSelectionToken(
+            value: UUID().uuidString.lowercased(),
+            client: SublimeCommandClient(
+                helperURL: URL(fileURLWithPath: "/usr/bin/false"),
+                targetPID: -1))
+        let sublimeSelection = ScreenTextSelection(
+            text: "Approved",
+            element: elementA,
+            identity: .sublimeToken(sublimeToken),
+            isEditable: true)
+        expect(
+            !sublimeSelection.canReplace(with: unchanged),
+            "Sublime plugin tokens never fall through to the AX paste rail")
+        sublimeSelection.discardMutableIdentity()
+        expect(
+            !sublimeToken.replace(with: "No"),
+            "a discarded Sublime token can never replace text")
+
+        let oneShotSublimeToken = SublimeTextSelectionToken(
+            value: UUID().uuidString.lowercased(),
+            client: SublimeCommandClient(
+                helperURL: URL(fileURLWithPath: "/usr/bin/false"),
+                targetPID: -1))
+        expect(
+            !oneShotSublimeToken.replace(with: "No"),
+            "an unavailable Sublime client fails closed")
+        expect(
+            !oneShotSublimeToken.replace(with: "Still no"),
+            "a Sublime replacement token is one-shot even after transport failure")
+
         let monitor = HotkeyMonitor()
         monitor.hotkey = .rightOption
         let commandShiftE = Hotkey(
@@ -920,6 +950,30 @@ enum Selftest {
             keyCode: 14, flags: CGEventFlags.maskShift.rawValue,
             isRepeat: false, invalidateContinuation: false),
                "a partial modifier match remains target-app input")
+
+        let inputGeneration = UserInputActivity.snapshot()
+        expect(!monitor.handleKeyDown(
+            keyCode: 0, flags: 0,
+            isRepeat: false, invalidateContinuation: true),
+               "an ordinary user key remains target-app input")
+        expect(
+            UserInputActivity.snapshot() == inputGeneration &+ 1,
+            "real user input synchronously invalidates in-flight selection capture")
+        let generationAfterUserKey = UserInputActivity.snapshot()
+        _ = monitor.handleKeyDown(
+            keyCode: 0, flags: 0,
+            isRepeat: true, invalidateContinuation: true)
+        expect(
+            UserInputActivity.snapshot() == generationAfterUserKey,
+            "key autorepeat does not create redundant input generations")
+        expect(
+            DictationController.delayedEditCaptureRelease(heldFor: 0.1)
+                == .lockRecording,
+            "a quick edit-hotkey tap locks recording after async selection capture")
+        expect(
+            DictationController.delayedEditCaptureRelease(heldFor: 0.5)
+                == .cancel,
+            "a released hold never starts an unlocked recording after capture")
 
         expect(
             HotkeyMonitor.resyncedComboLatch(

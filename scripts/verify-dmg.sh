@@ -71,8 +71,17 @@ echo "Verifying bundled offline runtime and command surfaces..."
 UV="$APP/Contents/Resources/bin/uv"
 CLI="$APP/Contents/Resources/bin/velora"
 ENGINE="$APP/Contents/Resources/engine"
+SUBLIME_PLUGIN="$APP/Contents/Resources/SublimeText/VeloraVoiceEdit.py"
+SUBLIME_PYTHON="$APP/Contents/Resources/SublimeText/.python-version"
 test -x "$UV"
 test -x "$CLI"
+test -s "$SUBLIME_PLUGIN"
+test "$(cat "$SUBLIME_PYTHON")" = "3.8"
+if find "$APP/Contents/Resources/SublimeText" \
+  \( -name '__pycache__' -o -name '*.pyc' \) -print -quit | grep -q .; then
+  echo "Velora.app contains generated Sublime Python bytecode" >&2
+  exit 1
+fi
 test -f "$ENGINE/pyproject.toml"
 test -f "$ENGINE/uv.lock"
 test -s "$ENGINE/.velora-build"

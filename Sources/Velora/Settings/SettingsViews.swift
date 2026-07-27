@@ -739,6 +739,9 @@ struct ShortcutsSettingsView: View {
                 }
             } header: {
                 Text("Voice edit")
+            } footer: {
+                SettingsFooter(
+                    "Sublime Text support installs a small local Velora plugin on first use.")
             }
             Section {
                 Picker("When pressed", selection: $model.hotkeyMode) {
