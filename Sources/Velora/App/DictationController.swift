@@ -121,8 +121,32 @@ final class DictationController: NSObject {
     ) -> DelayedEditCaptureRelease {
         heldFor < tapThreshold ? .lockRecording : .cancel
     }
-    /// Give up on the engine this long after `stop`.
-    private static let transcribeTimeout: TimeInterval = 20
+    /// Short dictations keep the existing 20-second watchdog. A recovery
+    /// whole-clip decode after a long recording needs a duration-scaled budget;
+    /// otherwise the app reports a false timeout while the engine is still
+    /// preserving the transcript.
+    private static let minimumTranscribeTimeout: TimeInterval = 20
+    private static let maximumTranscribeTimeout: TimeInterval = 600
+    static func transcribeTimeout(recordingDurationMs: Int?) -> TimeInterval {
+        let recordingSeconds = Double(max(0, recordingDurationMs ?? 0)) / 1_000
+        return min(
+            maximumTranscribeTimeout,
+            max(minimumTranscribeTimeout, recordingSeconds * 0.1))
+    }
+
+    static func recordingLimitMessage(seconds: Double) -> String {
+        let total = max(1, Int(seconds.rounded()))
+        if total.isMultiple(of: 3_600) {
+            return "\(total / 3_600)-hour dictation limit reached"
+        }
+        if total >= 3_600 {
+            return "\(total / 3_600)h \((total % 3_600) / 60)m dictation limit reached"
+        }
+        if total.isMultiple(of: 60) {
+            return "\(total / 60)-minute dictation limit reached"
+        }
+        return "\(total)-second dictation limit reached"
+    }
     /// Edit round-trip ceiling — above the engine's own 20 s edit budget so
     /// the engine's `edit_failed` normally arrives first; this only fires if
     /// the reply is lost entirely.
@@ -150,6 +174,9 @@ final class DictationController: NSObject {
             guard phase != oldValue else { return }
             NSLog("Velora: phase %@ → %@", oldValue.label, phase.label)
             delegate?.dictationController(self, didChangePhase: phase)
+            if phase == .idle {
+                schedulePendingRecordingLimitNotice()
+            }
         }
     }
 
@@ -174,6 +201,10 @@ final class DictationController: NSObject {
     /// metrics must not count STT/cleanup latency as time spent speaking.
     private var recordingDurationMs: Int?
     private var transcribeStartedAt: Date?
+    private var activeTranscribeTimeout = minimumTranscribeTimeout
+    private var autoStopLimitSeconds: Double?
+    private var pendingRecordingLimitNoticeSeconds: Double?
+    private var recordingLimitNoticeScheduled = false
     private var hotkeyDownAt: Date?
     /// A hold-to-talk release can arrive while macOS is still negotiating a
     /// Bluetooth input route. Finish immediately once capture becomes ready.
@@ -1141,6 +1172,10 @@ final class DictationController: NSObject {
         sttMs = nil
         recordingStart = nil
         recordingDurationMs = nil
+        activeTranscribeTimeout = Self.minimumTranscribeTimeout
+        autoStopLimitSeconds = nil
+        pendingRecordingLimitNoticeSeconds = nil
+        recordingLimitNoticeScheduled = false
         stopAfterCaptureStarts = false
         captureStartTimer?.invalidate()
         captureStartTimer = nil
@@ -1287,11 +1322,13 @@ final class DictationController: NSObject {
     /// slow LLM cleanup after a long batch (whisper) decode doesn't trip it.
     /// A late `final` that arrives after this fires is still honored (see the
     /// `.final` handler) unless the user explicitly cancelled.
-    private func armTranscribeTimeout() {
+    private func armTranscribeTimeout(after explicitTimeout: TimeInterval? = nil) {
+        activeTranscribeTimeout = explicitTimeout
+            ?? Self.transcribeTimeout(recordingDurationMs: recordingDurationMs)
         transcribeStartedAt = Date()
         transcribeTimer?.invalidate()
         transcribeTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.transcribeTimeout, repeats: false
+            withTimeInterval: activeTranscribeTimeout, repeats: false
         ) { [weak self] _ in
             guard let self, self.phase == .transcribing else { return }
             NSLog("Velora: transcribe timeout — session=%@", self.sessionID)
@@ -1308,7 +1345,7 @@ final class DictationController: NSObject {
     private func resetIfStuckTranscribing() -> Bool {
         guard phase == .transcribing else { return false }
         let elapsed = transcribeStartedAt.map { -$0.timeIntervalSinceNow } ?? 0
-        guard elapsed >= Self.transcribeTimeout else { return false }
+        guard elapsed >= activeTranscribeTimeout else { return false }
         NSLog("Velora: hotkey while stuck transcribing %.1fs — self-resetting", elapsed)
         transcribeTimer?.invalidate()
         transcribeTimer = nil
@@ -1427,11 +1464,30 @@ final class DictationController: NSObject {
             // Progress signal: the engine has decoded and is now formatting.
             // Refresh the timeout so a slow LLM cleanup after a long batch
             // transcription doesn't trip the stop→final deadline.
-            if phase == .transcribing { armTranscribeTimeout() }
+            if phase == .transcribing {
+                armTranscribeTimeout(after: Self.minimumTranscribeTimeout)
+            }
+
+        case .recordingAutoStopped(let session, let durationS, let limitS):
+            guard session == sessionID, phase != .idle else { return }
+            recordingDurationMs = max(
+                recordingDurationMs ?? 0,
+                Int(max(0, durationS) * 1_000))
+            autoStopLimitSeconds = limitS > 0
+                ? limitS
+                : config.portableEngineSettings.maximumRecordingSeconds
+            if isRecording {
+                sounds.play(.stop)
+                stopCaptureAndRestoreMedia()
+            }
+            hud.transition(to: .transcribing)
+            phase = .transcribing
+            armTranscribeTimeout()
 
         case .final(
             let session, let text, let raw, let mode, let cleanupMs,
-            let cleanupWallMs, let cleanupApplied, let totalMs, let audio
+            let cleanupWallMs, let cleanupApplied, let totalMs, let audio,
+            let autoStopped
         ):
             // Honor a valid final for the CURRENT session even if phase drifted
             // from .transcribing — a missed hotkeyUp can leave us in .recording,
@@ -1466,6 +1522,13 @@ final class DictationController: NSObject {
                 recordingDurationMs = elapsedRecordingMs
                 stopCaptureAndRestoreMedia()
             }
+            let recordingLimitSeconds = autoStopLimitSeconds
+                ?? config.portableEngineSettings.maximumRecordingSeconds
+            autoStopLimitSeconds = nil
+            if autoStopped {
+                pendingRecordingLimitNoticeSeconds = recordingLimitSeconds
+                recordingLimitNoticeScheduled = false
+            }
             // Safe Voice Edit: this session's transcript is an INSTRUCTION for
             // the captured selection, never text to paste.
             if let edit = editSession, edit.session == session {
@@ -1480,6 +1543,7 @@ final class DictationController: NSObject {
                 mode: mode, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
                 cleanupWallMs: cleanupWallMs, finalizationMs: totalMs, audio: audio,
                 allowAutomaticInsertion: !arrivedTooLate)
+            schedulePendingRecordingLimitNotice()
 
         case .reprocessed(
             let id, _, let raw, let text, let mode, _,
@@ -1882,6 +1946,36 @@ final class DictationController: NSObject {
                   s == symbol, m == message
             else { return }
             self.hud.transition(to: .hidden(.success))
+        }
+    }
+
+    private func schedulePendingRecordingLimitNotice(attempt: Int = 0) {
+        guard phase == .idle,
+              pendingRecordingLimitNoticeSeconds != nil,
+              !recordingLimitNoticeScheduled
+        else { return }
+        recordingLimitNoticeScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + (attempt == 0 ? 1 : 0.5)) {
+            [weak self] in
+            guard let self else { return }
+            self.recordingLimitNoticeScheduled = false
+            guard self.phase == .idle,
+                  let limitSeconds = self.pendingRecordingLimitNoticeSeconds
+            else { return }
+            guard self.hud.model.state.isAvailable else {
+                // Normal insertion briefly owns the HUD's `.inserted` state,
+                // while clipboard/error notices own it for up to 2.2 seconds.
+                // Wait for those higher-priority outcomes instead of silently
+                // losing the explanation for an automatic duration stop.
+                if attempt < 6 {
+                    self.schedulePendingRecordingLimitNotice(attempt: attempt + 1)
+                }
+                return
+            }
+            self.pendingRecordingLimitNoticeSeconds = nil
+            self.showNotice(
+                symbol: "clock.badge.exclamationmark",
+                message: Self.recordingLimitMessage(seconds: limitSeconds))
         }
     }
 

@@ -201,16 +201,21 @@ def _echo_norm(word: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", word.lower())
 
 
-def strip_prompt_echo(text: str, prompt: str | None) -> str:
+def strip_prompt_echo(
+    text: str,
+    prompt: str | None,
+    *,
+    allow_trailing: bool = True,
+) -> str:
     """Remove a leaked initial_prompt from decoded text (known whisper failure:
     the glossary is echoed into the transcript, especially over silence).
 
-    Conservative on purpose (review-hardened): an echo LEADS a decode, so both
-    cases are anchored to the very start of the text (the preamble word must be
-    one of the first three words), and a matched term run must follow the
-    PROMPT'S ORDER — real dictation that happens to reuse glossary words in a
-    different order is left alone. Mid-transcript echoes without the preamble
-    are out of scope (guard_whisper_result's heuristics are the net there).
+    Conservative on purpose (review-hardened): a leading echo is anchored to
+    the start of the text, and a matched term run must follow the PROMPT'S
+    ORDER. A second guard removes an exact comma-separated run of at least two
+    glossary terms from the END of a completed sentence. Whisper sometimes
+    appends that prompt tail after long recordings without repeating the
+    "Glossary:" preamble.
     """
     if not text or not prompt:
         return text
@@ -273,6 +278,23 @@ def strip_prompt_echo(text: str, prompt: str | None) -> str:
                 text = re.sub(r"\s{2,}", " ", text)
                 continue
         break
+    if not allow_trailing:
+        return text.strip()
+
+    # Case 3: an exact prompt-tail run appended after completed dictation.
+    # Require at least two comma-separated terms, prompt order, and a sentence
+    # boundary before the run. A genuine single-term ending or ordinary prose
+    # such as "LLM and Airlearn" is untouched.
+    body = re.sub(r"^\s*Glossary:\s*", "", prompt, flags=re.IGNORECASE).strip()
+    terms = [term.strip() for term in body.rstrip(".").split(",") if term.strip()]
+    for count in range(min(6, len(terms)), 1, -1):
+        suffix = r",\s*".join(re.escape(term) for term in terms[-count:])
+        match = re.search(r"(?<!\w)" + suffix + r"[.!?]*\s*$", text, re.IGNORECASE)
+        if match is None:
+            continue
+        prefix = text[:match.start()].rstrip()
+        if prefix and prefix[-1] in ".!?":
+            return prefix
     return text.strip()
 
 
@@ -542,7 +564,11 @@ class WhisperBackend:
 
         result = self._transcribe(audio, prompt)
         guarded_text = guard_whisper_result(result)
-        text = strip_prompt_echo(guarded_text, prompt)
+        # Every segment/preview needs the leading-header guard, but applying the
+        # trailing-list guard independently at every seam creates many chances
+        # to delete a genuine spoken list. The trailing guard runs once on the
+        # assembled authoritative final in `finalize`.
+        text = strip_prompt_echo(guarded_text, prompt, allow_trailing=False)
 
         segments = result.get("segments") or []
         prompt_echo_removed = bool(guarded_text) and not text
@@ -587,6 +613,15 @@ class WhisperBackend:
             except Exception:  # noqa: BLE001 — optional recovery must not fail the session
                 log.exception("prompt-free whisper recovery decode failed")
         return text
+
+    def _strip_final_prompt_echo(self, text: str) -> str:
+        stripped = strip_prompt_echo(text, self.initial_prompt, allow_trailing=True)
+        if stripped != text.strip():
+            log.warning(
+                "whisper final prompt-tail echo removed (%d chars)",
+                len(text.strip()) - len(stripped),
+            )
+        return stripped
 
     def _audio_span(self, start_sample: int, end_sample: int) -> np.ndarray:
         """Materialize only the requested sample range from buffered chunks.
@@ -773,7 +808,7 @@ class WhisperBackend:
             else:
                 if tail or not self._span_had_speech:
                     parts = self._segments + ([tail] if tail else [])
-                    text = " ".join(parts).strip()
+                    text = self._strip_final_prompt_echo(" ".join(parts).strip())
                     self.reset()
                     self.segments_used_for_final = True
                     self.final_tail = tail
@@ -786,7 +821,9 @@ class WhisperBackend:
             log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
         audio = np.concatenate(self._chunks)
         try:
-            text = self._decode(audio, had_speech=self._session_had_speech)
+            text = self._strip_final_prompt_echo(
+                self._decode(audio, had_speech=self._session_had_speech)
+            )
         finally:
             self.reset()
         return text

@@ -425,6 +425,31 @@ enum Selftest {
             let unknownData = try JSONSerialization.data(withJSONObject: withUnknownKey)
             expect(try SettingsDocumentCodec.decode(unknownData).settings == portable.settings,
                    "same-version settings ignore unknown future fields")
+
+            var version1Root = portableRoot ?? [:]
+            version1Root["version"] = 1
+            var version1Settings = version1Root["settings"] as? [String: Any] ?? [:]
+            var version1Engine = version1Settings["engine"] as? [String: Any] ?? [:]
+            version1Engine["maximum_recording_seconds"] =
+                SettingsDocument.Engine.legacyMaximumRecordingSeconds
+            version1Settings["engine"] = version1Engine
+            version1Root["settings"] = version1Settings
+            let version1Data = try JSONSerialization.data(withJSONObject: version1Root)
+            let upgraded = try SettingsDocumentCodec.decode(version1Data)
+            expect(
+                upgraded.version == SettingsDocument.currentVersion
+                    && upgraded.settings.engine.maximumRecordingSeconds
+                        == SettingsDocument.Engine.defaultMaximumRecordingSeconds,
+                "version 1 settings migrate the legacy five-minute cap to one hour")
+
+            version1Engine["maximum_recording_seconds"] = 720
+            version1Settings["engine"] = version1Engine
+            version1Root["settings"] = version1Settings
+            let customVersion1Data = try JSONSerialization.data(withJSONObject: version1Root)
+            expect(
+                try SettingsDocumentCodec.decode(customVersion1Data)
+                    .settings.engine.maximumRecordingSeconds == 720,
+                "version 1 settings migration preserves a custom recording cap")
         } catch {
             expect(false, "valid settings document threw: \(error)")
         }
@@ -537,6 +562,36 @@ enum Selftest {
                    "settings migration preserves advanced engine preferences")
             expect(AppConfig.migratedLocalSettings(defaults: legacy).localAgentAccess,
                    "settings migration keeps security gates local")
+
+            let wireDirectory = directory.appendingPathComponent("wire-version-migration")
+            let wireSettings = wireDirectory.appendingPathComponent("settings.json")
+            let wireEngine = wireDirectory.appendingPathComponent("config.json")
+            try FileManager.default.createDirectory(
+                at: wireDirectory, withIntermediateDirectories: true)
+            var wireRoot = try JSONSerialization.jsonObject(
+                with: SettingsDocumentCodec.encode(document)) as? [String: Any] ?? [:]
+            wireRoot["version"] = 1
+            var wireSettingsRoot = wireRoot["settings"] as? [String: Any] ?? [:]
+            var wireEngineRoot = wireSettingsRoot["engine"] as? [String: Any] ?? [:]
+            wireEngineRoot["maximum_recording_seconds"] =
+                SettingsDocument.Engine.legacyMaximumRecordingSeconds
+            wireSettingsRoot["engine"] = wireEngineRoot
+            wireRoot["settings"] = wireSettingsRoot
+            try JSONSerialization.data(withJSONObject: wireRoot).write(to: wireSettings)
+            _ = AppConfig(
+                defaults: transactionDefaults,
+                settingsFileURL: wireSettings,
+                engineConfigURL: wireEngine,
+                registerDefaults: false)
+            let persistedWireData = try Data(contentsOf: wireSettings)
+            let persistedWireRoot = try JSONSerialization.jsonObject(
+                with: persistedWireData) as? [String: Any]
+            let persistedWire = try SettingsDocumentCodec.decode(persistedWireData)
+            expect(
+                persistedWireRoot?["version"] as? Int == SettingsDocument.currentVersion
+                    && persistedWire.settings.engine.maximumRecordingSeconds
+                        == SettingsDocument.Engine.defaultMaximumRecordingSeconds,
+                "AppConfig persists the version 1 recording-cap migration")
 
             legacy.set(Hotkey.optionShiftE.defaultsRepresentation, forKey: "velora.hotkey.v2")
             legacy.removeObject(forKey: "velora.editHotkey.v1")
@@ -2374,17 +2429,33 @@ enum Selftest {
         let final = EngineEvent.parse([
             "event": "final", "session": "s1", "text": "Hello.",
             "cleanup_applied": true, "cleanup_wall_ms": 123, "total_ms": 321,
+            "auto_stopped": true,
         ])
         if case .final(
             let session, let text, let raw, _, _, let cleanupWallMs,
-            let applied, let totalMs, let audio
+            let applied, let totalMs, let audio, let autoStopped
         ) = final {
             expect(session == "s1" && text == "Hello." && raw == "Hello.", "final fields parse")
             expect(
-                applied && cleanupWallMs == 123 && totalMs == 321 && audio == nil,
+                applied && cleanupWallMs == 123 && totalMs == 321 && audio == nil
+                    && autoStopped,
                 "final flags parse")
         } else {
             expect(false, "expected .final, got \(final)")
+        }
+
+        let autoStop = EngineEvent.parse([
+            "event": "recording_auto_stopped", "session": "s-cap",
+            "duration_s": 3_600.1, "limit_s": 3_600,
+        ])
+        if case .recordingAutoStopped(
+            let session, let durationS, let limitS
+        ) = autoStop {
+            expect(
+                session == "s-cap" && durationS > 3_600 && limitS == 3_600,
+                "recording_auto_stopped fields parse")
+        } else {
+            expect(false, "expected .recordingAutoStopped, got \(autoStop)")
         }
 
         let started = EngineEvent.parse(
@@ -3657,6 +3728,30 @@ enum Selftest {
         expect(
             HUDGeometry.waveformSize == CGSize(width: 120, height: 32),
             "HUD restores the original waveform footprint")
+        expect(HUDView.elapsedString(seconds: -1) == "0:00",
+               "HUD timer clamps negative elapsed time")
+        expect(HUDView.elapsedString(seconds: 3_599) == "59:59",
+               "HUD timer stays compact below one hour")
+        expect(HUDView.elapsedString(seconds: 3_600) == "1:00:00",
+               "HUD timer adds an hour field for long recordings")
+        expect(HUDView.elapsedString(seconds: 11_229) == "3:07:09",
+               "HUD timer keeps multi-hour recordings readable")
+        expect(HUDGeometry.timerWidth >= 60,
+               "HUD reserves enough width for an hour-scale timer")
+        expect(
+            DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 20,
+            "short dictations retain the 20-second finalize watchdog")
+        expect(
+            DictationController.transcribeTimeout(recordingDurationMs: 3_600_000) == 360,
+            "one-hour dictations receive a duration-scaled finalize watchdog")
+        expect(
+            DictationController.recordingLimitMessage(seconds: 720)
+                == "12-minute dictation limit reached",
+            "recording-limit notice reflects a preserved custom duration")
+        expect(
+            DictationController.recordingLimitMessage(seconds: 3_600)
+                == "1-hour dictation limit reached",
+            "recording-limit notice describes the one-hour default")
         expect(WaveformLevelStore.barCount == 24, "HUD renders 24 mirrored waveform bars")
         expect(WaveformLevelStore.halfCount == 12, "HUD uses all 12 spectrum bands")
         expect(

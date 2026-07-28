@@ -58,6 +58,14 @@ _STOPWORDS = frozenset(
     "january february march april may june july august september october "
     "november december".split()
 )
+PROMPT_ARTIFACT_WORDS = frozenset({"glossary"})
+
+
+def contains_prompt_artifact(term: str) -> bool:
+    return any(
+        word.lower().strip(".,:;!?") in PROMPT_ARTIFACT_WORDS
+        for word in term.split()
+    )
 
 
 def _term_pattern(term: str) -> re.Pattern[str]:
@@ -90,6 +98,8 @@ def validate_term(term: str, batch_text: str, banned: set[str], existing: set[st
         return False
     low = term.lower()
     if low in banned or low in existing:
+        return False
+    if contains_prompt_artifact(term):
         return False
     if any(w.lower() in _STOPWORDS for w in words) and len(words) == 1:
         return False
@@ -244,6 +254,27 @@ class VocabMiner:
             return [], False
         return fetched[:BATCH_ROWS], len(fetched) > BATCH_ROWS
 
+    def _learned_wrong_sides(self) -> set[str]:
+        """Spellings the user explicitly corrected must never be auto-learned.
+
+        Both hard and context-gated corrections carry a trusted wrong side.
+        Treating either as a vocabulary candidate would create a closed loop:
+        STT mistake -> user correction -> idle miner -> Whisper prompt.
+        """
+        path = self.home / "learned.json"
+        try:
+            data = json.loads(path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return set()
+        if not isinstance(data, dict):
+            return set()
+        return {
+            str(key).lower()
+            for field in ("replacements", "soft_replacements")
+            for key in (data.get(field) or {})
+            if str(key)
+        }
+
     # ---- the mining step --------------------------------------------------
 
     async def step(self) -> bool:
@@ -288,6 +319,7 @@ class VocabMiner:
 
         terms: list[str] = [str(t) for t in state.get("terms", []) or []]
         banned_low = {str(b).lower() for b in state.get("banned", []) or []}
+        banned_low.update(self._learned_wrong_sides())
         candidates: dict[str, dict] = {
             str(k): dict(v) for k, v in (state.get("candidates") or {}).items() if isinstance(v, dict)
         }

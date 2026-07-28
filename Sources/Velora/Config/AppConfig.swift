@@ -279,8 +279,20 @@ final class AppConfig {
         if fileExists {
             do {
                 let data = try Data(contentsOf: settingsStorageURL)
+                let sourceVersion = try SettingsDocumentCodec.sourceVersion(data)
                 let loaded = try SettingsDocumentCodec.decode(data)
                 settingsDocument = loaded
+                if sourceVersion < SettingsDocument.currentVersion {
+                    do {
+                        try persistSettingsDocument(loaded)
+                        NSLog(
+                            "Velora: migrated settings.json from version %ld to version %ld",
+                            sourceVersion, SettingsDocument.currentVersion)
+                    } catch {
+                        settingsWriteBlockError = .couldNotSave
+                        NSLog("Velora: migrated settings in memory but could not persist them: \(error)")
+                    }
+                }
                 return
             } catch let error as SettingsDocumentError {
                 if case .unsupportedVersion = error {
@@ -435,7 +447,10 @@ final class AppConfig {
             }
             if let seconds = (payload["max_recording_s"] as? NSNumber)?.doubleValue,
                seconds.isFinite, seconds > 0, seconds <= 86_400 {
-                document.settings.engine.maximumRecordingSeconds = seconds
+                document.settings.engine.maximumRecordingSeconds =
+                    seconds == SettingsDocument.Engine.legacyMaximumRecordingSeconds
+                    ? SettingsDocument.Engine.defaultMaximumRecordingSeconds
+                    : seconds
             }
             if let days = (payload["audio_retention_days"] as? NSNumber)?.doubleValue,
                days.isFinite, days > 0, days <= 36_500 {

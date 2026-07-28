@@ -69,6 +69,17 @@ async def main(
                 result={"applied": True, "tokens": 12, "ms": 3, "reason": None},
             )
             return
+        if operation == "memory":
+            await respond(
+                request_id,
+                ok=True,
+                result={
+                    "active_bytes": 500_000_000,
+                    "peak_bytes": 750_000_000,
+                    "cache_bytes": 25_000_000,
+                },
+            )
+            return
         raw = message["raw"]
         if raw == "__crash__":
             os._exit(17)

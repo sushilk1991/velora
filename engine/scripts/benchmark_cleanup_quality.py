@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
-"""Reproducible exact-model cleanup quality and latency benchmark.
+"""Reproducible cleanup-model quality, latency, and memory benchmark.
 
 Run from ``engine/``:
 
     uv run python scripts/benchmark_cleanup_quality.py
+    uv run python scripts/benchmark_cleanup_quality.py \
+      --model mlx-community/Qwen3.5-4B-MLX-8bit \
+      --model mlx-community/Qwen3.5-4B-MLX-4bit --repeats 3
     uv run python scripts/benchmark_cleanup_quality.py --list
 
-The runner fixes the model ID and uses an isolated default config. It prints
-one JSON object per case and exits non-zero if punctuation, grammar, entity, or
-meaning-preservation checks fail. It never downloads a smaller fallback model.
+Models run sequentially in separate worker processes so their allocator and
+physical-footprint measurements do not contaminate each other. The first model
+is the baseline. A candidate is accepted only when it adds no quality failures
+and meets the requested latency and memory reductions.
 """
 
 from __future__ import annotations
@@ -18,14 +22,20 @@ import asyncio
 import json
 import os
 import re
+import statistics
+import subprocess
 import tempfile
+import time
 from dataclasses import asdict, dataclass
+from typing import Any
 
 from velora_engine.cleanup_process import CleanupProcess
 from velora_engine.config import Config
 from velora_engine.formatting import (
     STATIC_SYSTEM_PROMPT,
     build_prefill_prompt_candidates,
+    encode_breaks,
+    is_mostly_non_latin,
     postprocess,
     run_gate,
 )
@@ -41,11 +51,15 @@ class Case:
     app_name: str = "Notes"
     ending: str = "."
     required: tuple[str, ...] = ()
+    forbidden: tuple[str, ...] = ()
     numbered_items: int | None = None
     required_lines: tuple[str, ...] = ()
     explicit_mode: str | None = None
     required_intro: str | None = None
     required_outside: tuple[str, ...] = ()
+    romanize: bool = False
+    mode_prompt: str | None = None
+    required_prompt: str | None = None
 
 
 CASES = (
@@ -77,6 +91,33 @@ CASES = (
         "please schedule Priya Sharma for the Q3 review at three thirty and set the budget to "
         "forty two thousand dollars",
         required=("Priya Sharma", "Q3", "3:30", "42,000"),
+    ),
+    Case(
+        "custom_mode_prompt",
+        "please keep this Velora update concise while preserving the package name and every "
+        "technical detail that I dictated here",
+        required=("Velora", "package name", "technical detail"),
+        mode_prompt="Keep the output as one concise paragraph.",
+        required_prompt="Mode instructions: Keep the output as one concise paragraph.",
+    ),
+    Case(
+        "romanize_hindi_custom_mode",
+        "नमस्ते Velora आज मौसम अच्छा है और मैं काम कर रहा हूँ",
+        ending="",
+        required=("Namaste", "Velora", "aaj"),
+        romanize=True,
+        mode_prompt="Keep this as one short, casual message.",
+        required_prompt="Keep this as one short, casual message.",
+    ),
+    Case(
+        "romanize_hindi_note_mode",
+        "मुझे आज तीन काम करने हैं पहला रिपोर्ट भेजना दूसरा मीटिंग तय करना तीसरा कोड जांचना",
+        ending="",
+        required=("Mujhe", "aaj", "teen kaam", "bhejna", "tay karna", "code"),
+        forbidden=("Maine", "Send report", "Schedule meeting", "Check code"),
+        explicit_mode="Note",
+        romanize=True,
+        required_prompt="Mode formatting preferences",
     ),
     Case(
         "long_meaning",
@@ -242,6 +283,8 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
     failures: list[str] = []
     if not applied:
         failures.append("cleanup_not_applied")
+    if case.romanize and is_mostly_non_latin(output):
+        failures.append("romanization_kept_native_script")
     if not output.endswith(case.ending):
         failures.append(f"missing_ending:{case.ending}")
     lower = output.lower()
@@ -284,6 +327,9 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
             failures.append(f"missing:{required}")
         elif case.numbered_items and required.lower() in outside_scope:
             failures.append(f"duplicate_outside_list:{required}")
+    for forbidden in case.forbidden:
+        if forbidden.lower() in lower:
+            failures.append(f"forbidden:{forbidden}")
     if case.required_lines:
         lines = [line.strip() for line in output.splitlines()]
         cursor = 0
@@ -315,19 +361,127 @@ def validate(case: Case, output: str, applied: bool) -> list[str]:
     return failures
 
 
-async def run(selected: set[str] | None) -> int:
-    with tempfile.TemporaryDirectory(prefix="velora-benchmark-") as home:
-        os.environ["VELORA_HOME"] = home
-        config = Config()
-        # Match production: the exact model and cache live in the persistent,
-        # killable cleanup child rather than in the speech-engine process.
-        engine = CleanupProcess(MODEL_ID)
-        await engine.load_async(STATIC_SYSTEM_PROMPT)
-        failures = 0
-        try:
-            for case in CASES:
-                if selected and case.name not in selected:
-                    continue
+def _percentile(values: list[float], percentile: float) -> float:
+    ordered = sorted(values)
+    if not ordered:
+        return 0.0
+    position = (len(ordered) - 1) * percentile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
+def _reduction_pct(baseline: float, candidate: float) -> float:
+    if baseline <= 0:
+        return 0.0
+    return (baseline - candidate) / baseline * 100.0
+
+
+def _physical_footprint(pid: int | None) -> dict[str, int | str]:
+    """Read macOS physical footprint; RSS omits most MLX/Metal allocations."""
+    if pid is None:
+        return {"error": "worker_not_running"}
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/footprint", "-p", str(pid), "-f", "bytes", "--noCategories"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"error": str(exc)}
+    current = re.search(r"phys_footprint:\s+(\d+)\s+B", completed.stdout)
+    peak = re.search(r"phys_footprint_peak:\s+(\d+)\s+B", completed.stdout)
+    if current is None or peak is None:
+        return {"error": "unrecognized_footprint_output"}
+    return {
+        "current_bytes": int(current.group(1)),
+        "peak_bytes": int(peak.group(1)),
+    }
+
+
+def evaluate_candidate(
+    baseline: dict[str, Any],
+    candidate: dict[str, Any],
+    *,
+    min_speedup_pct: float,
+    min_memory_reduction_pct: float,
+) -> dict[str, Any]:
+    """Compare one sequential candidate with the first-model baseline."""
+    failures: list[str] = []
+    baseline_failed = set(baseline["failed_cases"])
+    candidate_failed = set(candidate["failed_cases"])
+    new_failures = sorted(candidate_failed - baseline_failed)
+    if candidate_failed:
+        failures.append("candidate_quality_failures:" + ",".join(sorted(candidate_failed)))
+    if new_failures:
+        failures.append("new_quality_failures:" + ",".join(new_failures))
+
+    p50_speedup = _reduction_pct(
+        float(baseline["p50_wall_ms"]), float(candidate["p50_wall_ms"])
+    )
+    p95_speedup = _reduction_pct(
+        float(baseline["p95_wall_ms"]), float(candidate["p95_wall_ms"])
+    )
+    if p50_speedup < min_speedup_pct:
+        failures.append(f"p50_speedup:{p50_speedup:.1f}<{min_speedup_pct:.1f}")
+    if p95_speedup < min_speedup_pct:
+        failures.append(f"p95_speedup:{p95_speedup:.1f}<{min_speedup_pct:.1f}")
+
+    memory_reduction = _reduction_pct(
+        float(baseline["mlx_inference"]["active_bytes"]),
+        float(candidate["mlx_inference"]["active_bytes"]),
+    )
+    if memory_reduction < min_memory_reduction_pct:
+        failures.append(
+            f"active_memory_reduction:{memory_reduction:.1f}"
+            f"<{min_memory_reduction_pct:.1f}"
+        )
+    return {
+        "event": "comparison",
+        "baseline": baseline["model"],
+        "candidate": candidate["model"],
+        "accepted": not failures,
+        "p50_speedup_pct": round(p50_speedup, 1),
+        "p95_speedup_pct": round(p95_speedup, 1),
+        "active_memory_reduction_pct": round(memory_reduction, 1),
+        "failures": failures,
+    }
+
+
+async def _run_model(
+    model_id: str,
+    config: Config,
+    selected: set[str] | None,
+    repeats: int,
+) -> dict[str, Any]:
+    engine = CleanupProcess(model_id)
+    started = time.perf_counter()
+    await engine.load_async(STATIC_SYSTEM_PROMPT)
+    load_ms = int((time.perf_counter() - started) * 1000)
+    after_load = await engine.memory_metrics(reset_peak=True)
+    footprint_after_load = _physical_footprint(engine.pid)
+    case_records: list[dict[str, Any]] = []
+    try:
+        for case in CASES:
+            if selected and case.name not in selected:
+                continue
+            old_romanize = bool(config.data.get("romanize_output", False))
+            config.data["romanize_output"] = case.romanize
+            provisional = run_gate(
+                case.raw,
+                config,
+                bundle_id=case.bundle_id,
+                app_name=case.app_name,
+                explicit_mode=case.explicit_mode,
+            )
+            mode_key = provisional.mode.name.lower()
+            old_mode_prompt = config.modes[mode_key].prompt
+            if case.mode_prompt is not None:
+                config.modes[mode_key].prompt = case.mode_prompt
+            try:
                 gate = run_gate(
                     case.raw,
                     config,
@@ -335,62 +489,197 @@ async def run(selected: set[str] | None) -> int:
                     app_name=case.app_name,
                     explicit_mode=case.explicit_mode,
                 )
+                case_failures: set[str] = set()
                 if not gate.use_llm:
-                    record = {
-                        "case": case.name,
-                        "model": MODEL_ID,
-                        "failures": [f"unexpected_gate:{gate.reason}"],
-                    }
-                    print(json.dumps(record, ensure_ascii=False))
-                    failures += 1
-                    continue
-                result = await engine.cleanup(
-                    case.raw,
-                    gate.system_prompt or STATIC_SYSTEM_PROMPT,
-                    allowed_terms=config.global_vocabulary,
-                    prefix_candidates=build_prefill_prompt_candidates(
+                    case_failures.add(f"unexpected_gate:{gate.reason}")
+                    outputs: list[str] = []
+                    results = []
+                else:
+                    if (
+                        case.required_prompt
+                        and case.required_prompt not in (gate.system_prompt or "")
+                    ):
+                        case_failures.add(f"missing_prompt:{case.required_prompt}")
+                    candidates = build_prefill_prompt_candidates(
                         config,
                         bundle_id=case.bundle_id,
                         app_name=case.app_name,
                         explicit_mode=case.explicit_mode,
-                    ),
-                )
-                output = postprocess(result.text, gate) if result.applied else result.text
-                case_failures = validate(case, output, result.applied)
-                if not result.cache_hit:
-                    case_failures.append("startup_cache_miss")
-                failures += bool(case_failures)
-                print(json.dumps({
+                        romanize=gate.romanize,
+                    )
+                    results = []
+                    outputs = []
+                    for _ in range(repeats):
+                        result = await engine.cleanup(
+                            (
+                                gate.text
+                                if gate.romanize
+                                else encode_breaks(gate.text)
+                            ),
+                            gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                            timeout_ms=4000 if gate.romanize else None,
+                            check_ratio=not gate.romanize,
+                            allowed_terms=list(
+                                dict.fromkeys(
+                                    config.global_vocabulary + gate.mode.vocabulary
+                                )
+                            ),
+                            prefix_candidates=candidates,
+                        )
+                        output = (
+                            postprocess(result.text, gate)
+                            if result.applied
+                            else result.text
+                        )
+                        results.append(result)
+                        outputs.append(output)
+                        case_failures.update(validate(case, output, result.applied))
+                        if not result.cache_hit and not gate.romanize:
+                            case_failures.add("startup_cache_miss")
+                record = {
+                    "event": "case",
                     "case": case.name,
                     "words": len(case.raw.split()),
-                    "model": MODEL_ID,
-                    "prefix_tokens": result.prefix_tokens,
-                    "cleanup_ms": result.ms,
-                    "cleanup_wall_ms": result.wall_ms,
-                    "reason": result.reason,
-                    "ttft_ms": result.ttft_ms,
-                    "decode_ms": result.decode_ms,
-                    "cache_hit": result.cache_hit,
-                    "output": output,
-                    "failures": case_failures,
-                }, ensure_ascii=False))
-        finally:
-            await engine.aclose()
-        return 1 if failures else 0
+                    "model": model_id,
+                    "repeats": repeats,
+                    "prefix_tokens": max(
+                        (result.prefix_tokens for result in results), default=0
+                    ),
+                    "cleanup_ms": round(
+                        statistics.median(
+                            [result.ms for result in results]
+                        ) if results else 0,
+                        1,
+                    ),
+                    "cleanup_wall_ms": round(
+                        statistics.median(
+                            [result.wall_ms for result in results]
+                        ) if results else 0,
+                        1,
+                    ),
+                    "ttft_ms": round(
+                        statistics.median(
+                            [result.ttft_ms for result in results]
+                        ) if results else 0,
+                        1,
+                    ),
+                    "decode_ms": round(
+                        statistics.median(
+                            [result.decode_ms for result in results]
+                        ) if results else 0,
+                        1,
+                    ),
+                    "cache_hit": bool(results) and all(
+                        result.cache_hit for result in results
+                    ),
+                    "unique_outputs": len(set(outputs)),
+                    "output": outputs[0] if outputs else "",
+                    "failures": sorted(case_failures),
+                }
+                case_records.append(record)
+                print(json.dumps(record, ensure_ascii=False))
+            finally:
+                config.modes[mode_key].prompt = old_mode_prompt
+                config.data["romanize_output"] = old_romanize
+        inference_memory = await engine.memory_metrics()
+        footprint_after_inference = _physical_footprint(engine.pid)
+    finally:
+        await engine.aclose()
+
+    wall_times = [
+        float(record["cleanup_wall_ms"])
+        for record in case_records
+        if not record["failures"] or record["cleanup_wall_ms"]
+    ]
+    ttft_times = [
+        float(record["ttft_ms"])
+        for record in case_records
+        if not record["failures"] or record["ttft_ms"]
+    ]
+    summary = {
+        "event": "summary",
+        "model": model_id,
+        "cases": len(case_records),
+        "failed_cases": [
+            record["case"] for record in case_records if record["failures"]
+        ],
+        "load_ms": load_ms,
+        "p50_wall_ms": round(statistics.median(wall_times), 1) if wall_times else 0.0,
+        "p95_wall_ms": round(_percentile(wall_times, 0.95), 1),
+        "p50_ttft_ms": round(statistics.median(ttft_times), 1) if ttft_times else 0.0,
+        "p95_ttft_ms": round(_percentile(ttft_times, 0.95), 1),
+        "mlx_after_load": asdict(after_load),
+        "mlx_inference": asdict(inference_memory),
+        "footprint_after_load": footprint_after_load,
+        "footprint_after_inference": footprint_after_inference,
+    }
+    print(json.dumps(summary, ensure_ascii=False))
+    return summary
+
+
+async def run(
+    model_ids: list[str],
+    selected: set[str] | None,
+    *,
+    repeats: int,
+    min_speedup_pct: float,
+    min_memory_reduction_pct: float,
+) -> int:
+    with tempfile.TemporaryDirectory(prefix="velora-benchmark-") as home:
+        os.environ["VELORA_HOME"] = home
+        config = Config()
+        summaries = [
+            await _run_model(model_id, config, selected, repeats)
+            for model_id in model_ids
+        ]
+    comparisons = [
+        evaluate_candidate(
+            summaries[0],
+            candidate,
+            min_speedup_pct=min_speedup_pct,
+            min_memory_reduction_pct=min_memory_reduction_pct,
+        )
+        for candidate in summaries[1:]
+    ]
+    for comparison in comparisons:
+        print(json.dumps(comparison, ensure_ascii=False))
+    baseline_passed = not summaries[0]["failed_cases"]
+    return 0 if baseline_passed and all(item["accepted"] for item in comparisons) else 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--list", action="store_true", help="print fixtures without loading MLX")
     parser.add_argument("--case", action="append", choices=[case.name for case in CASES])
+    parser.add_argument(
+        "--model",
+        action="append",
+        dest="models",
+        help="repeat for candidates; the first model is the baseline",
+    )
+    parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--min-speedup-pct", type=float, default=10.0)
+    parser.add_argument("--min-memory-reduction-pct", type=float, default=10.0)
     args = parser.parse_args()
+    if args.repeats < 1:
+        parser.error("--repeats must be at least 1")
+    model_ids = args.models or [MODEL_ID]
     if args.list:
         print(json.dumps({
-            "model": MODEL_ID,
+            "default_model": MODEL_ID,
+            "models": model_ids,
             "cases": [asdict(case) for case in CASES],
         }, indent=2, ensure_ascii=False))
         return 0
-    return asyncio.run(run(set(args.case) if args.case else None))
+    return asyncio.run(
+        run(
+            model_ids,
+            set(args.case) if args.case else None,
+            repeats=args.repeats,
+            min_speedup_pct=args.min_speedup_pct,
+            min_memory_reduction_pct=args.min_memory_reduction_pct,
+        )
+    )
 
 
 if __name__ == "__main__":

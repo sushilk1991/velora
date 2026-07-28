@@ -7,7 +7,7 @@ import Foundation
 /// domain and are never decoded from this document.
 struct SettingsDocument: Codable, Equatable {
     static let formatIdentifier = "velora-settings"
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     var format: String = formatIdentifier
     var version: Int = currentVersion
@@ -95,6 +95,9 @@ extension SettingsDocument {
     /// no Settings control exposed them. Keeping them typed here makes the
     /// portable document complete without treating dictionary data as settings.
     struct Engine: Codable, Equatable {
+        static let legacyMaximumRecordingSeconds: Double = 300
+        static let defaultMaximumRecordingSeconds: Double = 3_600
+
         var cleanupEnabled: Bool
         var defaultMode: String
         var streamingCleanup: Bool
@@ -106,7 +109,7 @@ extension SettingsDocument {
             cleanupEnabled: true,
             defaultMode: "Default",
             streamingCleanup: true,
-            maximumRecordingSeconds: 300,
+            maximumRecordingSeconds: defaultMaximumRecordingSeconds,
             audioRetentionDays: 180,
             audioMaximumMegabytes: 4096)
     }
@@ -194,8 +197,16 @@ enum SettingsDocumentError: Error, LocalizedError, Equatable {
 }
 
 enum SettingsDocumentCodec {
-    static func decode(_ data: Data) throws -> SettingsDocument {
+    static func sourceVersion(_ data: Data) throws -> Int {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              root["format"] as? String == SettingsDocument.formatIdentifier,
+              let version = root["version"] as? Int
+        else { throw SettingsDocumentError.invalidFile }
+        return version
+    }
+
+    static func decode(_ data: Data) throws -> SettingsDocument {
+        guard var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               root["format"] as? String == SettingsDocument.formatIdentifier,
               let version = root["version"] as? Int
         else { throw SettingsDocumentError.invalidFile }
@@ -203,9 +214,12 @@ enum SettingsDocumentCodec {
         guard version <= SettingsDocument.currentVersion else {
             throw SettingsDocumentError.unsupportedVersion(version)
         }
-        // Before incrementing currentVersion, add and invoke an explicit wire
-        // migration here. Silently decoding an older shape as current is unsafe.
-        guard version == SettingsDocument.currentVersion else {
+        switch version {
+        case 1:
+            migrateVersion1To2(&root)
+        case SettingsDocument.currentVersion:
+            break
+        default:
             throw SettingsDocumentError.invalidFile
         }
 
@@ -213,12 +227,27 @@ enum SettingsDocumentCodec {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let document: SettingsDocument
         do {
-            document = try decoder.decode(SettingsDocument.self, from: data)
+            let migratedData = try JSONSerialization.data(withJSONObject: root)
+            document = try decoder.decode(SettingsDocument.self, from: migratedData)
         } catch {
             throw SettingsDocumentError.invalidFile
         }
         try validate(document)
         return document
+    }
+
+    private static func migrateVersion1To2(_ root: inout [String: Any]) {
+        root["version"] = SettingsDocument.currentVersion
+        guard var settings = root["settings"] as? [String: Any],
+              var engine = settings["engine"] as? [String: Any]
+        else { return }
+        if let seconds = (engine["maximum_recording_seconds"] as? NSNumber)?.doubleValue,
+           seconds == SettingsDocument.Engine.legacyMaximumRecordingSeconds {
+            engine["maximum_recording_seconds"] =
+                SettingsDocument.Engine.defaultMaximumRecordingSeconds
+        }
+        settings["engine"] = engine
+        root["settings"] = settings
     }
 
     static func encode(_ document: SettingsDocument) throws -> Data {

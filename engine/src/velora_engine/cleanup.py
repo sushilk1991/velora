@@ -363,6 +363,15 @@ class PrefixPreparation:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class CleanupMemory:
+    """MLX allocator state inside the cleanup worker process."""
+
+    active_bytes: int
+    peak_bytes: int
+    cache_bytes: int
+
+
 def _copy_cache_containers(value: Any) -> Any:
     """Copy cache state containers while sharing immutable MLX arrays.
 
@@ -649,6 +658,25 @@ class CleanupEngine:
             return PrefixPreparation(False, 0, 0, "llm_not_loaded")
         return await asyncio.get_running_loop().run_in_executor(
             self._executor, self._prepare_prefix, candidates, cancel_event
+        )
+
+    def _memory_metrics(self, reset_peak: bool) -> CleanupMemory:
+        import mlx.core as mx
+
+        with self._lock:
+            metrics = CleanupMemory(
+                active_bytes=int(mx.get_active_memory()),
+                peak_bytes=int(mx.get_peak_memory()),
+                cache_bytes=int(mx.get_cache_memory()),
+            )
+            if reset_peak:
+                mx.reset_peak_memory()
+            return metrics
+
+    async def memory_metrics(self, reset_peak: bool = False) -> CleanupMemory:
+        """Read allocator metrics on MLX's owner thread."""
+        return await asyncio.get_running_loop().run_in_executor(
+            self._executor, self._memory_metrics, reset_peak
         )
 
     def _cache_for_tokens(self, tokens: list[int]) -> tuple[list[Any], int, bool]:

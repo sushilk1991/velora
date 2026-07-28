@@ -122,7 +122,7 @@ REGISTRY: list[ModelInfo] = [
         id="mlx-community/Qwen3.5-4B-MLX-8bit",
         kind="cleanup",
         backend="mlx-lm",
-        size="4.3 GB",
+        size="4.8 GB",
         description=(
             "Quality — for 24 GB+ Macs. Qwen3.5-4B (8-bit): highest-precision "
             "cleanup and best instruction-following."

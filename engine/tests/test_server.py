@@ -924,6 +924,11 @@ async def test_queue_overflow_aborts_session(engine, monkeypatch):
 # ---- max recording duration auto-stop ----
 
 
+def test_default_max_recording_duration_is_one_hour(home):
+    config = Config()
+    assert config.max_recording_s == 3600
+
+
 async def test_auto_stop_at_max_duration(engine):
     eng, sock = engine
     eng.config.data["max_recording_s"] = 0.05  # 800 samples at 16 kHz
@@ -932,6 +937,10 @@ async def test_auto_stop_at_max_duration(engine):
     await client.send_json({"cmd": "start", "session": "s-cap", "context": {}})
     await client.send_audio(AUDIO)  # 1600 samples > cap → auto-finalize, no stop sent
 
+    auto_stop = await client.recv_event("recording_auto_stopped")
+    assert auto_stop["session"] == "s-cap"
+    assert auto_stop["limit_s"] == 0.05
+    assert auto_stop["duration_s"] == 0.1
     transcript = await client.recv_event("transcript")
     assert transcript["session"] == "s-cap"
     final = await client.recv_event("final")

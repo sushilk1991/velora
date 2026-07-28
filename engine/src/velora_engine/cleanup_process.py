@@ -24,6 +24,7 @@ from typing import Any
 from .cleanup import (
     HARD_TIMEOUT_GRACE_S,
     QUEUE_TIMEOUT_S,
+    CleanupMemory,
     CleanupResult,
     PrefixPreparation,
     adaptive_timeout_ms,
@@ -462,6 +463,30 @@ class CleanupProcess:
         finally:
             if cancel_task is not None:
                 cancel_task.cancel()
+            self._operation_lock.release()
+
+    async def memory_metrics(self, reset_peak: bool = False) -> CleanupMemory:
+        """Read MLX memory from the child that actually owns the model."""
+        if not self.loaded:
+            raise RuntimeError("cleanup worker is not loaded")
+        try:
+            await asyncio.wait_for(
+                self._operation_lock.acquire(),
+                timeout=self._queue_timeout_s,
+            )
+        except TimeoutError as exc:
+            raise RuntimeError("cleanup worker memory query timed out in queue") from exc
+        try:
+            response = await asyncio.wait_for(
+                self._request("memory", reset_peak=reset_peak),
+                timeout=5.0,
+            )
+            if not response.get("ok"):
+                raise RuntimeError(
+                    str(response.get("error") or "cleanup memory query failed")
+                )
+            return CleanupMemory(**response["result"])
+        finally:
             self._operation_lock.release()
 
     async def _replace_worker(self, reason: str) -> None:

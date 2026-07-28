@@ -22,7 +22,7 @@ log = logging.getLogger("velora.config")
 DEFAULT_STT_MODEL = "mlx-community/whisper-large-v3-turbo"
 # Qwen3.5-4B (8-bit MLX): newer generation than Qwen3-4B, higher precision than
 # the old 4-bit build. Verified to load via stock mlx-lm and clean well
-# (~0.3-0.5s/paragraph); ~4.3 GB / more RAM is the accepted tradeoff.
+# (~0.3-0.5s/paragraph); ~4.8 GiB / more RAM is the accepted tradeoff.
 DEFAULT_CLEANUP_MODEL = "mlx-community/Qwen3.5-4B-MLX-8bit"
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -49,7 +49,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # recent dictation history while nothing else is happening, growing
     # ~/.velora/auto_learned.json (all local; smartness-v2 §4).
     "vocab_mining": True,
-    "max_recording_s": 300,
+    "max_recording_s": 3600,
     # Audio archive: keep a clip of each dictation so it can be re-transcribed
     # later with a better model (history → reprocess). On by default (a core
     # feature); user-toggleable. Retained 6 months, total capped at 4 GB, and
@@ -64,7 +64,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "meeting_diarization": True,
 }
 
-DEFAULT_MAX_RECORDING_S = 300.0
+DEFAULT_MAX_RECORDING_S = 3600.0
 
 VALID_FORMATTING = ("off", "light", "full")
 
@@ -327,6 +327,8 @@ class Config:
         extracted from dictation history (vocab_miner.py owns the writes; the
         app deletes terms by moving them to `banned`). Banned terms are dropped
         here too so a mid-cycle app deletion takes effect on the next reload."""
+        from .vocab_miner import contains_prompt_artifact
+
         self._auto_vocab = []
         path = self.home / "auto_learned.json"
         if not path.exists():
@@ -334,8 +336,18 @@ class Config:
         try:
             data = json.loads(path.read_text())
             banned = {str(b).lower() for b in data.get("banned", []) or []}
+            # Auto-mined terms originate in STT output, so they are weaker
+            # evidence than explicit user corrections. Never feed a spelling
+            # the user already corrected back into Whisper/cleanup, and never
+            # promote the glossary prompt's own leaked header.
+            excluded = banned
+            excluded.update(str(k).lower() for k in self._learned_replacements)
+            excluded.update(str(k).lower() for k in self._learned_soft)
             self._auto_vocab = [
-                str(t) for t in data.get("terms", []) or [] if str(t).lower() not in banned
+                str(t)
+                for t in data.get("terms", []) or []
+                if str(t).lower() not in excluded
+                and not contains_prompt_artifact(str(t))
             ]
         except Exception as exc:  # noqa: BLE001 — never let a bad file kill reload
             log.warning("auto_learned.json unreadable (%s); ignoring", exc)

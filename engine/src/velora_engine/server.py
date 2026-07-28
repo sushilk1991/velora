@@ -265,6 +265,7 @@ class Engine:
         # ALSO wait on this, or its transcribe_clip() could reset the backend
         # between session-clear and finalize (transcript loss).
         self._finalizing = False
+        self._finalizing_session_id: str | None = None
         # Mirror-image guard for START: `self.session` is published only after
         # the (possibly queued) start_session call returns, and a transcribe
         # chunk submitted in that window would destroy the fresh live stream
@@ -1021,6 +1022,10 @@ class Engine:
         except ValueError as exc:
             await self._error(f"bad audio frame: {exc}", session.id)
             return
+        # Count every received frame, including one dropped from the bounded
+        # STT queue below. Duration enforcement is about microphone capture,
+        # not only what the decoder managed to ingest under pressure.
+        session.samples += len(chunk)
         # Archive the raw audio before queueing for STT: a frame dropped below
         # for latency reasons must still make it into the saved clip.
         if self.config.save_audio:
@@ -1041,19 +1046,34 @@ class Engine:
                     session.id,
                 )
                 await self._abort_session("audio queue overflow")
+                return
+            if session.samples > self.config.max_recording_s * SAMPLE_RATE:
+                await self._auto_finalize_at_limit(session)
             return
-        session.samples += len(chunk)
         if session.samples > self.config.max_recording_s * SAMPLE_RATE:
-            # Max-duration guard: auto-finalize as if `stop` was received, so a
-            # stuck/locked recording can't accumulate audio (and, on the whisper
-            # backend, batch-decode latency) without bound.
-            log.warning(
-                "session %s hit max recording duration (%.0fs) — auto-finalizing",
-                session.id,
-                self.config.max_recording_s,
-            )
-            self.session = None
-            await self._finalize_session(session, auto_stopped=True)
+            await self._auto_finalize_at_limit(session)
+
+    async def _auto_finalize_at_limit(self, session: Session) -> None:
+        if self.session is not session:
+            return
+        limit_s = self.config.max_recording_s
+        # Max-duration guard: auto-finalize as if `stop` was received, so a
+        # stuck/locked recording can't accumulate audio without bound. Tell the
+        # app BEFORE model work so it can stop the microphone and freeze the
+        # timer instead of streaming frames the engine must discard.
+        log.warning(
+            "session %s hit max recording duration (%.0fs) — auto-finalizing",
+            session.id,
+            limit_s,
+        )
+        self.session = None
+        await self._send({
+            "event": "recording_auto_stopped",
+            "session": session.id,
+            "duration_s": session.samples / SAMPLE_RATE,
+            "limit_s": limit_s,
+        })
+        await self._finalize_session(session, auto_stopped=True)
 
     async def _drain_feeder(self, session: Session) -> None:
         try:
@@ -1113,6 +1133,12 @@ class Engine:
     async def _cmd_cancel(self, msg: dict[str, Any]) -> None:
         session = self.session
         if session is None:
+            if msg.get("session") == self._finalizing_session_id:
+                log.info(
+                    "cancel ignored for already-finalizing session %s",
+                    self._finalizing_session_id,
+                )
+                return
             await self._error("cancel: no active session", msg.get("session"))
             return
         self._cancelling_session = True
@@ -1129,6 +1155,12 @@ class Engine:
     async def _cmd_stop(self, msg: dict[str, Any]) -> None:
         session = self.session
         if session is None:
+            if msg.get("session") == self._finalizing_session_id:
+                log.info(
+                    "stop ignored for already-finalizing session %s",
+                    self._finalizing_session_id,
+                )
+                return
             await self._error("stop: no active session", msg.get("session"))
             return
         # The app attaches richer screen-context entities (nearby AX text,
@@ -1149,10 +1181,12 @@ class Engine:
         # closes the window where a background transcribe-file chunk could
         # grab the backend before our finalize() drains it.
         self._finalizing = True
+        self._finalizing_session_id = session.id
         try:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
             self._finalizing = False
+            self._finalizing_session_id = None
             self._resume_cleanup_recovery()
 
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
@@ -1644,6 +1678,7 @@ class Engine:
                 app_name=app_name,
                 explicit_mode=explicit_mode,
                 entities=entities,
+                romanize=gate.romanize,
             )
             # The model gets gate.text, NOT raw: the gate already converted
             # spoken break commands ("now a new line") into real line breaks

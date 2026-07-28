@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Compare Velora's MLX baseline with transcribe.cpp Q8.
+"""Compare any two registered Velora STT models.
 
 The command-line runner is intentionally strict: its default gate needs at
 least 18 referenced, local clips spanning Indian English, Hindi, Hinglish,
 silence, and a long dictation. It prints metrics, never transcript text.
+
+The defaults preserve the original MLX Whisper versus transcribe.cpp Q8
+bakeoff. ``--baseline-model`` and ``--candidate-model`` make Hindi-specialist
+and lower-precision registry experiments reproducible without editing code.
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ import statistics
 import subprocess
 import time
 import unicodedata
+from typing import Any
 
 import numpy as np
 
@@ -26,13 +31,15 @@ from velora_engine.models import (
     TRANSCRIBE_CPP_Q8_MODEL,
     TRANSCRIBE_CPP_Q8_REVISION,
     TRANSCRIBE_CPP_Q8_SHA256,
+    ensure_downloaded,
+    lookup,
 )
 from velora_engine.stt import (
     SAMPLE_RATE,
     TranscribeCppWhisperBackend,
-    WhisperBackend,
     _trim_repeated_tail,
     build_glossary_prompt,
+    create_backend,
 )
 
 
@@ -60,6 +67,9 @@ class CaseResult:
     candidate_failure: bool
     baseline_ingest_rtf: float = 0.0
     candidate_ingest_rtf: float = 0.0
+    reference_characters: int = 0
+    baseline_character_errors: int = 0
+    candidate_character_errors: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,6 +146,17 @@ def evaluate(
             failures.append(
                 f"quality_regression:{cohort}:{candidate_errors}>{baseline_errors}"
             )
+        baseline_character_errors = sum(
+            result.baseline_character_errors for result in rows
+        )
+        candidate_character_errors = sum(
+            result.candidate_character_errors for result in rows
+        )
+        if candidate_character_errors > baseline_character_errors:
+            failures.append(
+                "character_quality_regression:"
+                f"{cohort}:{candidate_character_errors}>{baseline_character_errors}"
+            )
 
     baseline_hits = sum(result.baseline_glossary[0] for result in results)
     baseline_terms = sum(result.baseline_glossary[1] for result in results)
@@ -162,6 +183,15 @@ def _words(text: str) -> list[str]:
         category = unicodedata.category(char)
         normalized.append(char if category[0] in {"L", "M", "N"} else " ")
     return "".join(normalized).split()
+
+
+def _characters(text: str) -> list[str]:
+    """Unicode lexical characters for punctuation-insensitive CER."""
+    return [
+        char
+        for char in unicodedata.normalize("NFKC", text).casefold()
+        if unicodedata.category(char)[0] in {"L", "M", "N"}
+    ]
 
 
 def _edit_distance(reference: list[str], hypothesis: list[str]) -> int:
@@ -288,46 +318,74 @@ def _sysctl(name: str) -> str:
         return "unknown"
 
 
-def _candidate_identity(candidate: TranscribeCppWhisperBackend) -> dict[str, str]:
-    import transcribe_cpp
-
-    actual_sha256 = _sha256(Path(candidate._model_path))
-    if actual_sha256 != TRANSCRIBE_CPP_Q8_SHA256:
-        raise ValueError(
-            "candidate GGUF digest mismatch: "
-            f"{actual_sha256} != {TRANSCRIBE_CPP_Q8_SHA256}"
-        )
-    return {
-        "model_revision": TRANSCRIBE_CPP_Q8_REVISION,
-        "model_sha256": actual_sha256,
-        "transcribe_cpp_version": transcribe_cpp.__version__,
-        "native_version": transcribe_cpp.native_version(),
-        "native_commit": transcribe_cpp.native_commit(),
-        "native_provider": transcribe_cpp.native_provider() or "unpackaged",
+def _model_identity(model_id: str, backend: Any, role: str) -> dict[str, str]:
+    identity = {
+        f"{role}_model": model_id,
         "macos": platform.mac_ver()[0] or "unknown",
         "machine": platform.machine() or "unknown",
         "hardware_model": _sysctl("hw.model"),
     }
+    if (
+        model_id == TRANSCRIBE_CPP_Q8_MODEL
+        and isinstance(backend, TranscribeCppWhisperBackend)
+    ):
+        import transcribe_cpp
+
+        actual_sha256 = _sha256(Path(backend._model_path))
+        if actual_sha256 != TRANSCRIBE_CPP_Q8_SHA256:
+            raise ValueError(
+                f"{role} GGUF digest mismatch: "
+                f"{actual_sha256} != {TRANSCRIBE_CPP_Q8_SHA256}"
+            )
+        identity.update({
+            f"{role}_model_revision": TRANSCRIBE_CPP_Q8_REVISION,
+            f"{role}_model_sha256": actual_sha256,
+            "transcribe_cpp_version": transcribe_cpp.__version__,
+            "native_version": transcribe_cpp.native_version(),
+            "native_commit": transcribe_cpp.native_commit(),
+            "native_provider": transcribe_cpp.native_provider() or "unpackaged",
+        })
+        return identity
+    try:
+        resolved = Path(ensure_downloaded(model_id)).resolve()
+    except OSError:
+        resolved = None
+    if resolved is not None:
+        if "snapshots" in resolved.parts:
+            identity[f"{role}_model_revision"] = resolved.name
+    return identity
 
 
 def run_benchmark(
-    cases: list[BenchmarkCase], *, repeats: int, smoke: bool, min_speedup_pct: float
+    cases: list[BenchmarkCase],
+    *,
+    repeats: int,
+    smoke: bool,
+    min_speedup_pct: float,
+    baseline_model: str = DEFAULT_STT_MODEL,
+    candidate_model: str = TRANSCRIBE_CPP_Q8_MODEL,
 ) -> tuple[Verdict, list[CaseResult], list[str]]:
+    for role, model_id in (
+        ("baseline", baseline_model),
+        ("candidate", candidate_model),
+    ):
+        info = lookup(model_id)
+        if info is None or info.kind != "stt":
+            raise ValueError(f"{role} model is not a registered STT model: {model_id}")
     audio = [(case, _load_audio(case.path)) for case in cases]
     coverage_failures = [] if smoke else validate_coverage(
         cases, [len(pcm) / SAMPLE_RATE for _case, pcm in audio]
     )
-    baseline = WhisperBackend(DEFAULT_STT_MODEL)
-    candidate = TranscribeCppWhisperBackend(TRANSCRIBE_CPP_Q8_MODEL)
+    baseline = create_backend(baseline_model, "auto")
+    candidate = create_backend(candidate_model, "auto")
     baseline_load_ms = _load_backend(baseline)
     candidate_load_ms = _load_backend(candidate)
     print(json.dumps({
         "event": "models_loaded",
-        "baseline": DEFAULT_STT_MODEL,
-        "candidate": TRANSCRIBE_CPP_Q8_MODEL,
         "baseline_load_ms": round(baseline_load_ms, 1),
         "candidate_load_ms": round(candidate_load_ms, 1),
-        **_candidate_identity(candidate),
+        **_model_identity(baseline_model, baseline, "baseline"),
+        **_model_identity(candidate_model, candidate, "candidate"),
     }))
 
     if audio:
@@ -357,11 +415,20 @@ def run_benchmark(
             candidate_times.append(elapsed)
             candidate_ingest_rtfs.append(ingest_rtf)
         reference_words = _words(case.reference)
+        reference_characters = _characters(case.reference)
         baseline_error_counts = [
             _edit_distance(reference_words, _words(text)) for text in baseline_texts
         ]
         candidate_error_counts = [
             _edit_distance(reference_words, _words(text)) for text in candidate_texts
+        ]
+        baseline_character_error_counts = [
+            _edit_distance(reference_characters, _characters(text))
+            for text in baseline_texts
+        ]
+        candidate_character_error_counts = [
+            _edit_distance(reference_characters, _characters(text))
+            for text in candidate_texts
         ]
         baseline_glossary_scores = [
             _glossary_score(text, case.glossary) for text in baseline_texts
@@ -389,6 +456,9 @@ def run_benchmark(
             ),
             baseline_ingest_rtf=max(baseline_ingest_rtfs),
             candidate_ingest_rtf=max(candidate_ingest_rtfs),
+            reference_characters=len(reference_characters),
+            baseline_character_errors=max(baseline_character_error_counts),
+            candidate_character_errors=max(candidate_character_error_counts),
         )
         results.append(result)
         print(json.dumps({
@@ -403,6 +473,20 @@ def run_benchmark(
             "candidate_ingest_rtf": round(result.candidate_ingest_rtf, 3),
             "baseline_errors": result.baseline_errors,
             "candidate_errors": result.candidate_errors,
+            "baseline_wer": round(
+                result.baseline_errors / result.reference_words, 4
+            ) if result.reference_words else 0.0,
+            "candidate_wer": round(
+                result.candidate_errors / result.reference_words, 4
+            ) if result.reference_words else 0.0,
+            "baseline_character_errors": result.baseline_character_errors,
+            "candidate_character_errors": result.candidate_character_errors,
+            "baseline_cer": round(
+                result.baseline_character_errors / result.reference_characters, 4
+            ) if result.reference_characters else 0.0,
+            "candidate_cer": round(
+                result.candidate_character_errors / result.reference_characters, 4
+            ) if result.reference_characters else 0.0,
             "baseline_glossary": list(result.baseline_glossary),
             "candidate_glossary": list(result.candidate_glossary),
             "baseline_failure": result.baseline_failure,
@@ -426,6 +510,8 @@ def main() -> int:
     parser.add_argument("manifest", type=Path, help="local JSON manifest; transcript text is never printed")
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--min-speedup-pct", type=float, default=10.0)
+    parser.add_argument("--baseline-model", default=DEFAULT_STT_MODEL)
+    parser.add_argument("--candidate-model", default=TRANSCRIBE_CPP_Q8_MODEL)
     parser.add_argument(
         "--smoke",
         action="store_true",
@@ -441,6 +527,8 @@ def main() -> int:
             repeats=args.repeats,
             smoke=args.smoke,
             min_speedup_pct=args.min_speedup_pct,
+            baseline_model=args.baseline_model,
+            candidate_model=args.candidate_model,
         )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         parser.error(str(exc))

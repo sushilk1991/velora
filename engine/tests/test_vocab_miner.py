@@ -64,6 +64,8 @@ BATCH = "we shipped Velora today and Wispr Flow lost. also see main.py and authC
         ("Hallucinated", False),  # not in the text — the LLM made it up
         ("shipped", False),  # single all-lowercase dictionary word
         ("The", False),  # stopword, however capitalized
+        ("Glossary", False),  # leaked whisper prompt header
+        ("Glossary Velora", False),  # prompt artifact inside a phrase
         ("I", False),
         ("velora today and wispr flow", False),  # > 4 words
         ("x" * 41, False),  # > 40 chars
@@ -168,6 +170,22 @@ async def test_banned_term_never_readded(tmp_path):
     assert state["banned"] == ["Velora"]
 
 
+async def test_user_corrected_wrong_side_never_promotes(tmp_path):
+    home = tmp_path / "vh"
+    home.mkdir(parents=True)
+    (home / "learned.json").write_text(json.dumps({
+        "version": 1,
+        "replacements": {"Cloud Code": "Claude Code"},
+        "soft_replacements": {"lung": "Airlearn"},
+    }))
+    seed_history(home, ["Cloud Code failed", "Cloud Code restarted"])
+    miner = VocabMiner(home, make_generate(["Cloud Code"]))
+    await miner.step()
+    state = read_state(home)
+    assert state["terms"] == []
+    assert "Cloud Code" not in state["candidates"]
+
+
 async def test_concurrent_app_ban_unioned_at_write(tmp_path):
     """The app bans a term while a step is mid-flight (between the miner's read
     and its write): the ban must survive and the term must not land in terms."""
@@ -261,6 +279,21 @@ def test_auto_vocab_feeds_global_vocabulary(home):
     config.data["vocabulary"] = ["UserTerm"]
     assert config.auto_vocabulary == ["Velora"]
     assert config.global_vocabulary == ["UserTerm", "Velora"]
+
+
+def test_auto_vocab_excludes_prompt_artifacts_and_user_corrected_wrongs(home):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "learned.json").write_text(json.dumps({
+        "version": 1,
+        "replacements": {"Cloud Code": "Claude Code"},
+        "soft_replacements": {"lung": "Airlearn"},
+    }))
+    (home / "auto_learned.json").write_text(json.dumps({
+        "version": 1,
+        "terms": ["Glossary", "Glossary:", "Glossary, Velora", "Cloud Code", "lung", "Velora"],
+    }))
+    config = Config()
+    assert config.auto_vocabulary == ["Velora"]
 
 
 # ---- server hooks ---------------------------------------------------------------

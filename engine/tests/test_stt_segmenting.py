@@ -574,6 +574,31 @@ def test_strip_prompt_echo_requires_prompt_order():
     assert strip_prompt_echo(text, PROMPT) == text
 
 
+def test_strip_prompt_echo_removes_exact_prompt_tail_after_sentence():
+    prompt = "Glossary: Velora, Wispr Flow, LLM, Airlearn."
+    text = "Ship the current patch. LLM, Airlearn."
+    assert strip_prompt_echo(text, prompt) == "Ship the current patch."
+
+
+def test_strip_prompt_echo_keeps_single_or_prose_prompt_terms_at_end():
+    prompt = "Glossary: Velora, Wispr Flow, LLM, Airlearn."
+    assert strip_prompt_echo("We use Airlearn.", prompt) == "We use Airlearn."
+    text = "We compare LLM and Airlearn."
+    assert strip_prompt_echo(text, prompt) == text
+
+
+def test_strip_prompt_echo_keeps_reversed_prompt_tail():
+    prompt = "Glossary: Velora, Wispr Flow, LLM, Airlearn."
+    text = "Ship the current patch. Airlearn, LLM."
+    assert strip_prompt_echo(text, prompt) == text
+
+
+def test_strip_prompt_echo_does_not_apply_trailing_guard_to_a_segment():
+    prompt = "Glossary: Velora, Wispr Flow, Alice, Bob."
+    text = "Confirmed the attendees. Alice, Bob."
+    assert strip_prompt_echo(text, prompt, allow_trailing=False) == text
+
+
 # ---- empty-decode speech protection (review finding) ----------------------------
 
 

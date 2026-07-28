@@ -264,13 +264,16 @@ def test_custom_raw_mode_never_smart_cleaned(config):
     assert gate.reason == "formatting_off"
 
 
-def test_customized_terminal_prompt_opts_out_of_smart(config):
-    # A user who wrote their OWN Terminal prompt keeps their exact setup —
-    # smart terminal must not replace it (review finding).
-    config.modes["terminal"].prompt = "my custom terminal instructions"
+def test_customized_terminal_prompt_composes_with_smart_safety(config):
+    # Smart-terminal behavior and the user's own instructions are separate
+    # layers: both must reach the model while command safety keeps precedence.
+    custom = "Use concise paragraphs but preserve every package name."
+    config.modes["terminal"].prompt = custom
     gate = run_gate(LONG, config, bundle_id="com.apple.Terminal")
-    assert gate.use_llm is False
-    assert gate.reason == "formatting_off"
+    assert gate.use_llm is True
+    assert gate.reason == "smart_terminal"
+    assert formatting.SMART_TERMINAL_PROMPT in (gate.system_prompt or "")
+    assert f"Mode instructions: {custom}" in (gate.system_prompt or "")
 
 
 def test_first_launch_autofills_cleanup_model(home):
@@ -763,11 +766,31 @@ def test_cjk_sentence_routes_non_latin_not_short(config):
 
 def test_romanize_routes_non_latin_to_llm(config):
     config.data["romanize_output"] = True
+    custom = "Keep this as a short, casual message."
+    config.modes["default"].prompt = custom
     gate = run_gate("नमस्ते आज मौसम बहुत अच्छा है क्या आप ठीक हैं", config)
     assert gate.use_llm is True
     assert gate.romanize is True
     assert gate.reason == "romanize"
-    assert gate.system_prompt == formatting.ROMANIZE_SYSTEM_PROMPT
+    assert formatting.ROMANIZE_SYSTEM_PROMPT in (gate.system_prompt or "")
+    assert custom in (gate.system_prompt or "")
+    assert "Mode formatting preferences" in (gate.system_prompt or "")
+    assert "मुझे is Mujhe, never Maine" in (gate.system_prompt or "")
+
+
+def test_romanize_does_not_evict_normal_cleanup_prefill(config):
+    config.data["romanize_output"] = True
+    config.modes["note"].prompt = "Keep names exactly as dictated."
+
+    candidates = formatting.build_prefill_prompt_candidates(
+        config,
+        bundle_id="com.apple.Notes",
+        app_name="Notes",
+        explicit_mode=None,
+        romanize=True,
+    )
+
+    assert candidates == []
 
 
 def test_romanize_off_keeps_native_script(config):

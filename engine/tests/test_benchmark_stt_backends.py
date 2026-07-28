@@ -3,6 +3,8 @@
 from pathlib import Path
 import sys
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.benchmark_stt_backends import (  # noqa: E402
@@ -10,6 +12,7 @@ from scripts.benchmark_stt_backends import (  # noqa: E402
     CaseResult,
     _glossary_score,
     evaluate,
+    run_benchmark,
     validate_coverage,
 )
 
@@ -65,6 +68,30 @@ def test_candidate_fails_for_any_cohort_glossary_or_guard_regression():
     assert "new_guard_or_stitch_failures:1" in verdict.failures
 
 
+def test_candidate_fails_for_character_regression_even_when_wer_is_equal():
+    result = CaseResult(
+        name="hindi-spelling",
+        cohort="hindi",
+        reference_words=3,
+        baseline_errors=1,
+        candidate_errors=1,
+        baseline_glossary=(0, 0),
+        candidate_glossary=(0, 0),
+        baseline_ms=100.0,
+        candidate_ms=50.0,
+        baseline_failure=False,
+        candidate_failure=False,
+        reference_characters=15,
+        baseline_character_errors=1,
+        candidate_character_errors=4,
+    )
+
+    verdict = evaluate([result])
+
+    assert verdict.accepted is False
+    assert "character_quality_regression:hindi:4>1" in verdict.failures
+
+
 def test_full_gate_requires_target_languages_silence_and_long_audio():
     cases = [
         BenchmarkCase("english", Path("en.wav"), "hello", "indian_english", ()),
@@ -106,3 +133,14 @@ def test_glossary_recall_uses_whole_normalized_token_sequences():
     glossary = ("art", "New Delhi", "SwiftUI")
 
     assert _glossary_score("cart in new, Delhi; with SwiftUI", glossary) == (2, 3)
+
+
+def test_benchmark_rejects_unregistered_model_ids_before_loading():
+    with pytest.raises(ValueError, match="not a registered STT model"):
+        run_benchmark(
+            [],
+            repeats=1,
+            smoke=True,
+            min_speedup_pct=10.0,
+            candidate_model="unknown/not-an-stt-model",
+        )

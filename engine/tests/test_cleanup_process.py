@@ -48,6 +48,10 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         prefix = await cleanup.prepare_prefix([("system", "alpha"), ("system", "zulu")])
         assert prefix.applied is True
         assert prefix.tokens == 12
+        memory = await cleanup.memory_metrics(reset_peak=True)
+        assert memory.active_bytes == 500_000_000
+        assert memory.peak_bytes == 750_000_000
+        assert memory.cache_bytes == 25_000_000
     finally:
         await cleanup.aclose()
 

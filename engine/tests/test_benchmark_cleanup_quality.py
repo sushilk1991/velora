@@ -5,7 +5,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.benchmark_cleanup_quality import Case, validate  # noqa: E402
+from scripts.benchmark_cleanup_quality import (  # noqa: E402
+    Case,
+    evaluate_candidate,
+    validate,
+)
 
 
 def test_numbered_case_requires_expected_content_inside_list_items():
@@ -89,3 +93,60 @@ def test_numbered_case_can_require_a_new_topic_after_the_list():
         "Shopping:\n1. Buy books. I will head out at noon.",
         applied=True,
     )
+
+
+def _summary(
+    model: str,
+    *,
+    failed_cases=(),
+    p50=1000.0,
+    p95=1500.0,
+    active_bytes=4_000_000_000,
+):
+    return {
+        "model": model,
+        "failed_cases": list(failed_cases),
+        "p50_wall_ms": p50,
+        "p95_wall_ms": p95,
+        "mlx_inference": {"active_bytes": active_bytes},
+    }
+
+
+def test_candidate_requires_quality_speed_and_memory_improvements():
+    verdict = evaluate_candidate(
+        _summary("baseline"),
+        _summary(
+            "candidate",
+            p50=700.0,
+            p95=1000.0,
+            active_bytes=2_000_000_000,
+        ),
+        min_speedup_pct=10.0,
+        min_memory_reduction_pct=10.0,
+    )
+
+    assert verdict["accepted"] is True
+    assert verdict["p50_speedup_pct"] == 30.0
+    assert verdict["active_memory_reduction_pct"] == 50.0
+
+
+def test_candidate_rejects_any_absolute_quality_failure():
+    verdict = evaluate_candidate(
+        _summary("baseline", failed_cases=("old_failure",)),
+        _summary(
+            "candidate",
+            failed_cases=("old_failure", "new_failure"),
+            p50=500.0,
+            p95=700.0,
+            active_bytes=1_000_000_000,
+        ),
+        min_speedup_pct=10.0,
+        min_memory_reduction_pct=10.0,
+    )
+
+    assert verdict["accepted"] is False
+    assert any(
+        failure.startswith("candidate_quality_failures:")
+        for failure in verdict["failures"]
+    )
+    assert "new_quality_failures:new_failure" in verdict["failures"]

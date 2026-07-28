@@ -321,8 +321,17 @@ struct HUDView: View {
 
     private func elapsedString(at date: Date) -> String {
         guard let start = model.recordingStart else { return "0:00" }
-        let seconds = max(0, Int(date.timeIntervalSince(start)))
-        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+        return Self.elapsedString(seconds: Int(date.timeIntervalSince(start)))
+    }
+
+    static func elapsedString(seconds: Int) -> String {
+        let value = max(0, seconds)
+        if value >= 3_600 {
+            return String(
+                format: "%d:%02d:%02d",
+                value / 3_600, (value % 3_600) / 60, value % 60)
+        }
+        return String(format: "%d:%02d", value / 60, value % 60)
     }
 
     // MARK: - Success

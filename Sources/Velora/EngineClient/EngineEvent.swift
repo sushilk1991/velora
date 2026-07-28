@@ -26,6 +26,11 @@ enum EngineEvent {
     /// Raw transcript available (before LLM cleanup).
     case transcript(session: String, raw: String, ms: Int)
 
+    /// The engine reached its configured capture limit and has begun
+    /// finalizing. Sent before STT/cleanup so the app can stop the microphone
+    /// and freeze the timer immediately.
+    case recordingAutoStopped(session: String, durationS: Double, limitS: Double)
+
     /// Final text to insert. `cleanupApplied == false` means `text` carries the
     /// raw transcript (cleanup skipped, failed, or over budget). `audio` is the
     /// basename of the archived clip under `~/.velora/audio/`, when archiving
@@ -33,7 +38,7 @@ enum EngineEvent {
     case final(
         session: String, text: String, raw: String, mode: String?,
         cleanupMs: Int?, cleanupWallMs: Int?, cleanupApplied: Bool,
-        totalMs: Int?, audio: String?)
+        totalMs: Int?, audio: String?, autoStopped: Bool)
 
     /// Result of a History `reprocess` command: a re-run of an archived clip
     /// through a (possibly different) STT model / mode. Routed to the History
@@ -123,6 +128,11 @@ enum EngineEvent {
                 session: object["session"] as? String ?? "",
                 raw: object["raw"] as? String ?? "",
                 ms: object["ms"] as? Int ?? 0)
+        case "recording_auto_stopped":
+            return .recordingAutoStopped(
+                session: object["session"] as? String ?? "",
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
+                limitS: (object["limit_s"] as? NSNumber)?.doubleValue ?? 0)
         case "final":
             return .final(
                 session: object["session"] as? String ?? "",
@@ -133,7 +143,8 @@ enum EngineEvent {
                 cleanupWallMs: object["cleanup_wall_ms"] as? Int,
                 cleanupApplied: object["cleanup_applied"] as? Bool ?? false,
                 totalMs: object["total_ms"] as? Int,
-                audio: object["audio"] as? String)
+                audio: object["audio"] as? String,
+                autoStopped: object["auto_stopped"] as? Bool ?? false)
         case "reprocessed":
             return .reprocessed(
                 id: (object["id"] as? Int).map(Int64.init),

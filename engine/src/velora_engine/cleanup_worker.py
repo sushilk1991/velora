@@ -78,6 +78,12 @@ class Worker:
                 await self.engine.load_async(message.get("warm_system_prompt"))
                 await self._respond(request_id, ok=True)
                 return
+            if operation == "memory":
+                result = await self.engine.memory_metrics(
+                    reset_peak=bool(message.get("reset_peak", False))
+                )
+                await self._respond(request_id, ok=True, result=asdict(result))
+                return
             if operation == "cleanup":
                 raw = str(message.get("raw") or "")
                 prompt = str(message.get("system_prompt") or "")

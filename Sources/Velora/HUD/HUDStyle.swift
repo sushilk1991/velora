@@ -81,7 +81,7 @@ enum HUDGeometry {
     /// Original 24-bar waveform footprint.
     static let waveformSize = CGSize(width: 120, height: 32)
     static let dotDiameter: CGFloat = 8
-    static let timerWidth: CGFloat = 36
+    static let timerWidth: CGFloat = 60
     static let chipIconSide: CGFloat = 22
     static let chipIconCornerRadius: CGFloat = 5
 
