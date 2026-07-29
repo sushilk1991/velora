@@ -235,26 +235,48 @@ final class DictionaryRepository: ObservableObject {
         try commit(next)
     }
 
-    /// Pull newly committed edit-learning into canonical state. This is called
-    /// after DictationController observes an edit and again at launch.
+    /// Pull edit-learning into canonical state after DictationController
+    /// observes an edit.
     @discardableResult
     func observeCorrections(
         _ corrections: [(wrong: String, right: String)]
     ) -> [(wrong: String, right: String)] {
         let committed = learning.observe(corrections)
-        if !committed.isEmpty { captureLearning() }
+        let hasPending = learning.hasPending(corrections)
+        // Always reconcile the durable learned projection. If a previous
+        // canonical write/project failed, observing the pair again must repair
+        // the feed-forward path even though LearningStore no longer calls it a
+        // new commit. Only a genuinely new commit is returned for HUD feedback.
+        guard captureLearning() else {
+            // learned.json is a projection, not a second source of truth. Do
+            // not leave a newly confirmed pair ahead of canonical state: the
+            // next launch would otherwise project stale canonical data over it.
+            for correction in committed {
+                _ = learning.remove(wrong: correction.wrong)
+            }
+            return []
+        }
+        if hasPending && committed.isEmpty {
+            // No canonical row changes on the first sighting, but Config must
+            // reload counts now so the pending wrong side is removed from any
+            // already-live auto vocabulary.
+            reload()
+        }
         return committed
     }
 
-    func captureLearning() {
+    @discardableResult
+    func captureLearning() -> Bool {
         let snapshot = learning.portableSnapshot()
         var next = document
         let date = now()
+        var capturedKeys: Set<String> = []
         for (wrong, right) in snapshot.replacements {
             if let entry = try? DictionaryEntry.learned(
                 wrong: wrong, right: right, soft: false,
                 deviceID: deviceID, at: date,
                 generation: next.generation(for: .learned)) {
+                capturedKeys.insert(entry.logicalKey)
                 next = upsertingCaptured(entry, into: next, at: date)
             }
         }
@@ -263,8 +285,18 @@ final class DictionaryRepository: ObservableObject {
                 wrong: wrong, right: right, soft: true,
                 deviceID: deviceID, at: date,
                 generation: next.generation(for: .learned)) {
+                capturedKeys.insert(entry.logicalKey)
                 next = upsertingCaptured(entry, into: next, at: date)
             }
+        }
+        // LearningStore is bounded. If it evicts a confirmed correction, carry
+        // that removal into canonical state instead of leaving an old rule active
+        // forever after it disappeared from learned.json.
+        let staleLearned = next.activeEntries.filter {
+            $0.namespace == .learned && !capturedKeys.contains($0.logicalKey)
+        }
+        for entry in staleLearned {
+            next = next.upserting(entry.deleting(deviceID: deviceID, at: date))
         }
         for term in snapshot.standaloneVocabulary {
             if let entry = try? DictionaryEntry.manual(
@@ -273,8 +305,26 @@ final class DictionaryRepository: ObservableObject {
                 next = upsertingCaptured(entry, into: next, at: date)
             }
         }
-        guard next != document else { return }
-        do { try commit(next) } catch { lastError = error.localizedDescription }
+        if next == document {
+            do {
+                try ensureProjectionCurrent()
+                return true
+            } catch {
+                lastError = error.localizedDescription
+                return false
+            }
+        }
+        do {
+            // Automatic learning only earns a HUD confirmation when canonical
+            // state and its engine projections agree. Manual Settings changes
+            // deliberately remain durable on projection failure; background
+            // learning instead rolls its canonical mutation back.
+            try commit(next, rollbackOnProjectionFailure: true)
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
     }
 
     /// Pull confirmed miner terms/bans into canonical state without copying its
@@ -429,13 +479,24 @@ final class DictionaryRepository: ObservableObject {
 
     private func commit(
         _ next: DictionaryDocument,
-        preservingDeviceLearning: Bool = true
+        preservingDeviceLearning: Bool = true,
+        rollbackOnProjectionFailure: Bool = false
     ) throws {
+        let previous = document
         guard persist(next) else { throw DictionaryRepositoryError.couldNotPersist }
         document = next
         refreshRows()
         projectionIsCurrent = false
         guard project(next, preservingDeviceLearning: preservingDeviceLearning) else {
+            if rollbackOnProjectionFailure, persist(previous) {
+                document = previous
+                refreshRows()
+                projectionIsCurrent = project(
+                    previous, preservingDeviceLearning: preservingDeviceLearning)
+                if projectionIsCurrent {
+                    reload()
+                }
+            }
             lastError = DictionaryRepositoryError.couldNotProject.localizedDescription
             NotificationCenter.default.post(name: .veloraDictionaryDidChange, object: self)
             throw DictionaryRepositoryError.couldNotProject

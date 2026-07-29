@@ -35,6 +35,10 @@ final class HUDPanel: NSObject {
 
     /// Left-click on the capsule (start/stop dictation). Wired by AppDelegate.
     var onTap: (() -> Void)?
+    /// Called whenever the shared surface returns to hidden/standby. This lets
+    /// deferred feedback owned by another controller resume without coupling
+    /// every file/meeting toast back to DictationController.
+    var onAvailable: (() -> Void)?
     var menuHooks: MenuHooks?
 
     private let panel: NSPanel
@@ -414,6 +418,9 @@ final class HUDPanel: NSObject {
         // A placement change made mid-session applies once the HUD settles.
         if needsPrefsReapply, target.isAvailable {
             applyPreferences()
+        }
+        if target.isAvailable {
+            onAvailable?()
         }
     }
 

@@ -1162,11 +1162,44 @@ enum Selftest {
             expect(store.observe([("cat", "car")]).count == 1, "ordinary word commits on 2nd")
         }
         withStore { store, url in
+            try! FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let letters = Array("abcdefghijklmnopqrstuvwxyz")
+            let replacements = Dictionary(uniqueKeysWithValues: (0..<250).map { index in
+                ("qzx\(letters[index / 26])\(letters[index % 26])",
+                 String(format: "Term%03d", index))
+            })
+            try! JSONSerialization.data(withJSONObject: [
+                "replacements": replacements,
+                "soft_replacements": [:],
+                "vocabulary": Array(replacements.values),
+                "counts": [:],
+            ]).write(to: url)
+            _ = store.observe([("zzzwrong", "zzzright")])
+            expect(store.observe([("zzzwrong", "zzzright")]).isEmpty,
+                   "a correction evicted by the bounded store is not reported learned")
+            expect(tiers(url).hard["zzzwrong"] == nil,
+                   "the rejected correction is absent from the durable projection")
+        }
+        withStore { store, url in
             _ = store.observe([("lung", "Airlearn")])
             store.remove(wrong: "lung")
             expect(store.count == 0, "remove forgets the entry")
             expect(tiers(url).soft["lung"] == nil, "remove clears soft tier on disk")
         }
+        let blockedDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-learning-save-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: blockedDirectory, withIntermediateDirectories: true)
+        let blockedParent = blockedDirectory.appendingPathComponent("not-a-directory")
+        try! Data("blocked".utf8).write(to: blockedParent)
+        let blockedStore = LearningStore(
+            url: blockedParent.appendingPathComponent("learned.json"))
+        expect(blockedStore.observe([("velor", "Velora")]).isEmpty,
+               "a correction is not reported committed when atomic save fails")
+        expect(blockedStore.count == 0,
+               "a failed atomic save restores the prior in-memory learning state")
+        try? FileManager.default.removeItem(at: blockedDirectory)
     }
 
     // MARK: - Portable personal dictionary
@@ -1885,7 +1918,69 @@ enum Selftest {
             $0.writeAs == "BackgroundTerm" && $0.source == .automatic
         }), "background miner promotion is captured while Settings is closed")
         expect(reloads == 3, "learned promotion and miner capture each request one reload")
+        expect(repository.observeCorrections([("vercel", "Netlify")]).isEmpty,
+               "first unconfirmed correction remains pending")
+        expect(reloads == 4,
+               "pending wrong side requests an immediate live Config reload")
         fixture.remove()
+
+        let persistenceFixture = DictionaryRepositoryFixture()
+        let stateDirectory = persistenceFixture.directory.appendingPathComponent("canonical")
+        let persistenceRepository = DictionaryRepository(
+            stateURL: stateDirectory.appendingPathComponent("dictionary.json"),
+            configURL: persistenceFixture.config,
+            learnedURL: persistenceFixture.learned,
+            autoURL: persistenceFixture.auto,
+            deviceID: "persistence-failure")
+        try! FileManager.default.removeItem(at: stateDirectory)
+        try! Data("blocked".utf8).write(to: stateDirectory)
+        expect(persistenceRepository.observeCorrections([("velor", "Velora")]).isEmpty,
+               "edit learning is not reported committed when canonical persistence fails")
+        expect(tiers(persistenceFixture.learned).hard["velor"] == nil,
+               "canonical failure rolls back the learned projection before restart")
+        try! FileManager.default.removeItem(at: stateDirectory)
+        try! FileManager.default.createDirectory(
+            at: stateDirectory, withIntermediateDirectories: true)
+        expect(persistenceRepository.observeCorrections([("velor", "Velora")]).count == 1,
+               "the correction can commit normally after canonical persistence recovers")
+        expect(persistenceRepository.rows.contains(where: {
+            $0.writeAs == "Velora" && $0.source == .learned
+        }), "a later observation repairs a previously failed learning capture")
+        persistenceFixture.remove()
+
+        let boundedFixture = DictionaryRepositoryFixture()
+        let boundedLetters = Array("abcdefghijklmnopqrstuvwxyz")
+        var boundedReplacements = Dictionary(uniqueKeysWithValues: (0..<249).map { index in
+            ("qzx\(boundedLetters[index / 26])\(boundedLetters[index % 26])",
+             String(format: "Term%03d", index))
+        })
+        boundedReplacements["zzzwrong"] = "Zzzright"
+        try! JSONSerialization.data(withJSONObject: [
+            "replacements": boundedReplacements,
+            "soft_replacements": [:],
+            "vocabulary": Array(boundedReplacements.values),
+            "counts": [:],
+        ]).write(to: boundedFixture.learned)
+        let boundedRepository = DictionaryRepository(
+            stateURL: boundedFixture.state,
+            configURL: boundedFixture.config,
+            learnedURL: boundedFixture.learned,
+            autoURL: boundedFixture.auto,
+            deviceID: "bounded-learning",
+            now: { Date(timeIntervalSince1970: 200) })
+        expect(boundedRepository.rows.contains(where: { $0.writeAs == "Zzzright" }),
+               "bounded fixture starts with the alphabetically-last learned rule")
+        let boundedCommitted = boundedRepository.observeCorrections([("aaanew", "Aaanew")])
+        expect(boundedCommitted.count == 1,
+               "a surviving correction at capacity is reported learned")
+        expect(!boundedRepository.rows.contains(where: { $0.writeAs == "Zzzright" })
+               && boundedRepository.rows.contains(where: { $0.writeAs == "Aaanew" }),
+               "bounded-store eviction removes stale canonical learning")
+        let boundedPersisted = try! DictionaryDocument.decode(
+            Data(contentsOf: boundedFixture.state))
+        expect(!boundedPersisted.activeEntries.contains(where: { $0.writeAs == "Zzzright" }),
+               "bounded-store eviction survives repository relaunch")
+        boundedFixture.remove()
     }
 
     private static func testDictionaryRepositoryRelearnAfterClear() {
@@ -1918,6 +2013,23 @@ enum Selftest {
             learnedURL: fixture.learned,
             autoURL: fixture.auto,
             deviceID: "projection-failure")
+        expect(repository.observeCorrections([("velor", "Velora")]).isEmpty,
+               "edit learning is not reported committed when engine projection fails")
+        expect(!repository.rows.contains(where: { $0.writeAs == "Velora" }),
+               "failed automatic learning rolls canonical UI state back")
+        let learningFailureDocument = try! DictionaryDocument.decode(
+            Data(contentsOf: fixture.state))
+        expect(!learningFailureDocument.activeEntries.contains(where: {
+            $0.writeAs == "Velora"
+        }), "failed automatic learning rolls canonical persistence back")
+        let recoveredRepository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.directory.appendingPathComponent("recovered-config.json"),
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "projection-relaunch")
+        expect(!recoveredRepository.rows.contains(where: { $0.writeAs == "Velora" }),
+               "a relaunch cannot resurrect learning that was reported uncommitted")
         do {
             _ = try repository.add(writeAs: "SavedDespiteProjectionFailure")
             expect(false, "projection failure is surfaced to the caller")
@@ -2393,12 +2505,48 @@ enum Selftest {
     // MARK: - CorrectionDiff
 
     private static func testCorrectionDiff() {
+        expect(
+            CorrectionDiff.normalizedTokens("  Valora, valora! ...  ")
+                == ["valora", "valora"],
+            "baseline membership reuses punctuation-trimmed lowercase tokens without deduplicating")
+
         let nameFix = CorrectionDiff.corrections(
             baseline: "i met airline at the office today",
             edited: "i met Airlearn at the office today")
         expect(
             nameFix == [CorrectionDiff.Correction(wrong: "airline", right: "Airlearn")],
             "1:1 name fix detected")
+
+        for (baseline, edited) in [
+            ("velor,", "Velora."),
+            ("meet velor,", "meet Velora."),
+            ("please meet velor,", "please meet Velora."),
+            ("velor Velora", "Velora Velora"),
+        ] {
+            expect(
+                CorrectionDiff.corrections(baseline: baseline, edited: edited)
+                    == [CorrectionDiff.Correction(wrong: "velor", right: "Velora")],
+                "one clean substitution is accepted in a \(baseline.split(separator: " ").count)-token utterance")
+        }
+        expect(
+            CorrectionDiff.corrections(
+                baseline: "send status now", edited: "buy groceries tomorrow").isEmpty,
+            "an unrelated short rewrite is not learned")
+        expect(
+            CorrectionDiff.corrections(
+                baseline: "Frobnitz deploy", edited: "QuuxCorp deploy").isEmpty,
+            "a capitalized short content swap is not learned")
+        expect(
+            CorrectionDiff.corrections(
+                baseline: "meet airline", edited: "meet Airlearn")
+                == [CorrectionDiff.Correction(wrong: "airline", right: "Airlearn")],
+            "a plausible short name mishearing remains learnable")
+        expect(
+            CorrectionDiff.corrections(
+                baseline: "please keep velor, exactly as written today",
+                edited: "please keep Velora. exactly as written today")
+                == [CorrectionDiff.Correction(wrong: "velor", right: "Velora")],
+            "longer text keeps the 70-percent anchor with punctuation-normalized tokens")
 
         let insertion = CorrectionDiff.corrections(
             baseline: "hello world how are you",
@@ -2409,6 +2557,29 @@ enum Selftest {
             baseline: "the quarterly numbers look strong this week",
             edited: "remember to buy milk and call the plumber")
         expect(unrelated.isEmpty, "wholesale replacement learns nothing")
+
+        let acceptedBaseline = Array(repeating: "velor", count: 500).joined(separator: " ")
+        let acceptedEdited = (
+            Array(repeating: "velor", count: 499) + ["Velora"]
+        ).joined(separator: " ")
+        expect(
+            CorrectionDiff.corrections(baseline: acceptedBaseline, edited: acceptedEdited)
+                == [CorrectionDiff.Correction(wrong: "velor", right: "Velora")],
+            "the aligned 500-token cap is accepted")
+        let rejectedBaseline = Array(repeating: "velor", count: 501).joined(separator: " ")
+        let rejectedEdited = (
+            Array(repeating: "velor", count: 500) + ["Velora"]
+        ).joined(separator: " ")
+        expect(
+            CorrectionDiff.corrections(baseline: rejectedBaseline, edited: rejectedEdited).isEmpty,
+            "token 501 is rejected before diffing")
+        expect(
+            CorrectionDiff.normalizedTokens(String(repeating: "!", count: 61)) == nil,
+            "a punctuation-only token cannot bypass the per-token work bound")
+        expect(
+            CorrectionDiff.corrections(
+                baseline: String(repeating: "a", count: 61), edited: "Velora").isEmpty,
+            "an oversized single token is rejected before edit-distance work")
     }
 
     // MARK: - EngineEvent parsing

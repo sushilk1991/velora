@@ -43,6 +43,7 @@ enum SnapshotRenderer {
             ("hud-meeting-hour", .meeting(title: "Design review", systemAudio: true)),
             ("hud-meeting-mic-only", .meeting(title: "Design review", systemAudio: false)),
             ("hud-inserted", .inserted),
+            ("hud-learned", .learned(wrong: "valora", right: "Velora")),
             ("hud-error", .error("Microphone disconnected")),
         ]
         for (name, state) in cases {

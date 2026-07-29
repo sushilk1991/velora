@@ -15,16 +15,18 @@ enum CorrectionDiff {
     /// word-for-word correction (added sentences, deletions, big rewrites).
     /// Hard cap: never diff more than this many tokens (backstop against a
     /// pathological field slipping past the caller's size guard).
-    private static let maxTokens = 200
+    static let maxTokens = 500
+    private static let maxTokenCharacters = DictionaryValue.maximumLength
+    private static let maxInputCharacters = maxTokens * (maxTokenCharacters + 1)
 
-    /// A field bigger than this is never scanned (a real document; the window
-    /// search would be meaningless and the diff misleading).
-    private static let maxScanTokens = 400
+    private struct Token {
+        let raw: String
+        let normalized: String
+    }
 
     static func corrections(baseline: String, edited: String) -> [Correction] {
-        let a = tokenize(baseline)
-        var b = tokenize(edited)
-        guard !a.isEmpty, !b.isEmpty, a.count <= maxTokens else { return [] }
+        guard let a = tokenize(baseline), var b = tokenize(edited),
+              !a.isEmpty, !b.isEmpty else { return [] }
         // The field may hold MORE than we inserted — a document accumulating
         // several dictations (TextEdit, Notes). Isolate the window that best
         // matches the inserted text and diff against that, instead of bailing.
@@ -32,11 +34,13 @@ enum CorrectionDiff {
             guard let window = bestWindow(for: a, in: b) else { return [] }
             b = window
         }
-        guard b.count <= maxTokens else { return [] }
         // Ignore edits that changed the length a lot — that's rewriting, not a
         // spelling fix, and word alignment gets unreliable.
         if abs(a.count - b.count) > max(2, a.count / 5) { return [] }
 
+        if a.count <= 3 {
+            return shortCorrection(baseline: a, edited: b)
+        }
         let ops = diff(a, b)
         // Anchor: a genuine spelling fix leaves the sentence mostly intact.
         // Without this, diffing two UNRELATED texts (window match gone wrong,
@@ -72,9 +76,13 @@ enum CorrectionDiff {
     /// close edit distance, actually different), else nil. Trimming here means
     /// the learned entry is "wrold"→"world", not "wrold,"→"world," — so it fixes
     /// the word regardless of trailing punctuation next time.
-    private static func correctionPair(wrong: String, right: String) -> (wrong: String, right: String)? {
-        let w = wrong.trimmingCharacters(in: .punctuationCharacters)
-        let r = right.trimmingCharacters(in: .punctuationCharacters)
+    private static func correctionPair(
+        wrong: String,
+        right: String,
+        allowDistantNameFix: Bool = true
+    ) -> (wrong: String, right: String)? {
+        let w = trimmedToken(wrong)
+        let r = trimmedToken(right)
         guard w.count >= 3, r.count >= 2, w.lowercased() != r.lowercased() else { return nil }
         guard w.allSatisfy({ $0.isLetter }), r.allSatisfy({ $0.isLetter }) else { return nil }
         // A misheard NAME is usually a *different-sounding* word — "Shubhi" →
@@ -85,7 +93,9 @@ enum CorrectionDiff {
         // act is itself the correction signal; LearningStore's stopwords
         // still veto common capitalized words ("Hello", "Okay", …).
         let nameFix = r.first?.isUppercase == true
-        if !nameFix {
+        if nameFix && !allowDistantNameFix {
+            guard LearningStore.likelyMishearing(w, r) else { return nil }
+        } else if !nameFix {
             let distance = editDistance(w.lowercased(), r.lowercased())
             // Similar enough to be a correction of the same intended word (not
             // a wholly different word swapped in).
@@ -94,18 +104,66 @@ enum CorrectionDiff {
         return (w, r)
     }
 
-    private static func tokenize(_ text: String) -> [String] {
-        text.split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init)
+    static func normalizedToken(_ token: String) -> String? {
+        let normalized = trimmedToken(token)
+            .lowercased(with: Locale(identifier: "en_US_POSIX"))
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    static func normalizedTokens(_ text: String) -> [String]? {
+        tokenize(text)?.map(\.normalized)
+    }
+
+    private static func trimmedToken(_ token: String) -> String {
+        token.trimmingCharacters(in: .punctuationCharacters)
+    }
+
+    /// Tokenizes at most `maxTokens` normalized words, with the same 60-character
+    /// per-token bound as the Personal Dictionary and a derived whole-input cap.
+    /// These rails bound punctuation-only and single-token AX values too.
+    private static func tokenize(_ text: String) -> [Token]? {
+        var result: [Token] = []
+        result.reserveCapacity(min(64, maxTokens))
+        var start: String.Index?
+        var scannedCharacters = 0
+        var tokenCharacters = 0
+
+        func appendToken(endingAt end: String.Index) -> Bool {
+            guard let tokenStart = start else { return true }
+            let raw = String(text[tokenStart..<end])
+            guard let normalized = normalizedToken(raw) else { return true }
+            result.append(Token(raw: raw, normalized: normalized))
+            return result.count <= maxTokens
+        }
+
+        var index = text.startIndex
+        while index < text.endIndex {
+            scannedCharacters += 1
+            guard scannedCharacters <= maxInputCharacters else { return nil }
+            if text[index].isWhitespace {
+                guard appendToken(endingAt: index) else { return nil }
+                start = nil
+                tokenCharacters = 0
+            } else if start == nil {
+                start = index
+                tokenCharacters = 1
+            } else {
+                tokenCharacters += 1
+            }
+            guard tokenCharacters <= maxTokenCharacters else { return nil }
+            index = text.index(after: index)
+        }
+        guard appendToken(endingAt: text.endIndex) else { return nil }
+        return result
     }
 
     /// Finds the contiguous token window in `b` that best matches the inserted
     /// tokens `a` (±2 length slack), requiring ≥70% of `a`'s tokens present.
     /// Cheap (offsets a running score instead of rescoring each window) and
-    /// bounded by `maxScanTokens`, and it runs off the main thread.
-    private static func bestWindow(for a: [String], in b: [String]) -> [String]? {
-        guard b.count <= maxScanTokens else { return nil }
-        let aSet = Set(a.map { $0.lowercased() })
-        let hits = b.map { aSet.contains($0.lowercased()) ? 1 : 0 }
+    /// bounded by `maxTokens`, and it runs off the main thread.
+    private static func bestWindow(for a: [Token], in b: [Token]) -> [Token]? {
+        let aSet = Set(a.map(\.normalized))
+        let hits = b.map { aSet.contains($0.normalized) ? 1 : 0 }
         var best: (score: Int, range: Range<Int>)?
         for delta in -2...2 {
             let len = a.count + delta
@@ -133,13 +191,34 @@ enum CorrectionDiff {
         case insert(String)
     }
 
-    private static func diff(_ a: [String], _ b: [String]) -> [Op] {
+    private static func shortCorrection(
+        baseline: [Token], edited: [Token]
+    ) -> [Correction] {
+        guard baseline.count == edited.count else { return [] }
+        var result: Correction?
+        for (before, after) in zip(baseline, edited)
+            where before.normalized != after.normalized {
+            guard result == nil,
+                  let pair = correctionPair(
+                    wrong: before.raw,
+                    right: after.raw,
+                    // A one-word field is itself a strong correction signal.
+                    // With surrounding words, require the name replacement to
+                    // retain a plausible speech/misspelling shape.
+                    allowDistantNameFix: baseline.count == 1)
+            else { return [] }
+            result = Correction(wrong: pair.wrong, right: pair.right)
+        }
+        return result.map { [$0] } ?? []
+    }
+
+    private static func diff(_ a: [Token], _ b: [Token]) -> [Op] {
         let n = a.count, m = b.count
-        // LCS length table on lowercased tokens.
+        // LCS length table on punctuation-trimmed lowercase tokens.
         var lcs = [[Int]](repeating: [Int](repeating: 0, count: m + 1), count: n + 1)
         for i in stride(from: n - 1, through: 0, by: -1) {
             for j in stride(from: m - 1, through: 0, by: -1) {
-                if a[i].lowercased() == b[j].lowercased() {
+                if a[i].normalized == b[j].normalized {
                     lcs[i][j] = lcs[i + 1][j + 1] + 1
                 } else {
                     lcs[i][j] = max(lcs[i + 1][j], lcs[i][j + 1])
@@ -149,16 +228,16 @@ enum CorrectionDiff {
         var ops: [Op] = []
         var i = 0, j = 0
         while i < n, j < m {
-            if a[i].lowercased() == b[j].lowercased() {
-                ops.append(.keep(a[i])); i += 1; j += 1
+            if a[i].normalized == b[j].normalized {
+                ops.append(.keep(a[i].raw)); i += 1; j += 1
             } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-                ops.append(.delete(a[i])); i += 1
+                ops.append(.delete(a[i].raw)); i += 1
             } else {
-                ops.append(.insert(b[j])); j += 1
+                ops.append(.insert(b[j].raw)); j += 1
             }
         }
-        while i < n { ops.append(.delete(a[i])); i += 1 }
-        while j < m { ops.append(.insert(b[j])); j += 1 }
+        while i < n { ops.append(.delete(a[i].raw)); i += 1 }
+        while j < m { ops.append(.insert(b[j].raw)); j += 1 }
         return ops
     }
 

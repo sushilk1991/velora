@@ -3,7 +3,7 @@ import ApplicationServices
 
 /// Watches ONE AX element — the field Velora just pasted into — for value
 /// changes, so an edit the user makes right away is learned right away
-/// instead of at the 45s re-check or the next dictation.
+/// instead of waiting for the 60-second fallback re-check.
 ///
 /// Main-thread only: the AXObserver's run-loop source lives on the main run
 /// loop and callbacks arrive there. Fails soft (some apps/fields don't emit

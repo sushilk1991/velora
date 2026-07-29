@@ -703,7 +703,8 @@ def _append_contextual_prompt_parts(
         # Real-word mishearings the user has fixed before. Deliberately NOT a
         # deterministic replacement (the owner's steer): "lung" in a sentence
         # about lungs must survive — only the LLM's context call flips it.
-        pairs = "; ".join(f"'{w}' (sometimes actually {r})" for w, r in list(soft.items())[:20])
+        selected = sorted(soft.items(), key=lambda pair: (pair[0].casefold(), pair[0]))[:20]
+        pairs = "; ".join(f"'{w}' (sometimes actually {r})" for w, r in selected)
         parts.append(
             "Caution words — speech-to-text has previously mistaken these words "
             "for a term the user meant: " + pairs + ". THE DEFAULT IS TO KEEP "

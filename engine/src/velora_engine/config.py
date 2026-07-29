@@ -297,6 +297,7 @@ class Config:
         self._learned_vocab: list[str] = []
         self._learned_replacements: dict[str, str] = {}
         self._learned_soft: dict[str, str] = {}
+        self._learned_pending_wrong: set[str] = set()
         path = self.home / "learned.json"
         if not path.exists():
             return
@@ -309,6 +310,10 @@ class Config:
             self._learned_soft = {
                 str(k): str(v) for k, v in (data.get("soft_replacements") or {}).items()
             }
+            for key in (data.get("counts") or {}):
+                wrong, separator, right = str(key).partition("\u2192")
+                if separator and wrong and right:
+                    self._learned_pending_wrong.add(wrong.lower())
             # Defense in depth (review finding): the Swift app demotes
             # real-word wrongs to soft on ITS load, but a standalone engine or
             # a restored pre-0.3.4 learned.json could still carry
@@ -343,6 +348,7 @@ class Config:
             excluded = banned
             excluded.update(str(k).lower() for k in self._learned_replacements)
             excluded.update(str(k).lower() for k in self._learned_soft)
+            excluded.update(self._learned_pending_wrong)
             self._auto_vocab = [
                 str(t)
                 for t in data.get("terms", []) or []

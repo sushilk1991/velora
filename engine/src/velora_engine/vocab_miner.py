@@ -268,12 +268,17 @@ class VocabMiner:
             return set()
         if not isinstance(data, dict):
             return set()
-        return {
+        wrong_sides = {
             str(key).lower()
             for field in ("replacements", "soft_replacements")
             for key in (data.get(field) or {})
             if str(key)
         }
+        for key in (data.get("counts") or {}):
+            wrong, separator, right = str(key).partition("\u2192")
+            if separator and wrong and right:
+                wrong_sides.add(wrong.lower())
+        return wrong_sides
 
     # ---- the mining step --------------------------------------------------
 

@@ -1069,6 +1069,50 @@ def test_soft_corrections_in_prompt_not_replacements(config, home):
     assert "KEEP THE WORD EXACTLY AS TRANSCRIBED" in prompt
 
 
+def test_soft_correction_prompt_cap_is_deterministic(config, home):
+    import json as _json
+
+    soft = {
+        f"soft{i:02d}": f"Term{i:02d}"
+        for i in reversed(range(25))
+    }
+    (home / "learned.json").write_text(_json.dumps({
+        "soft_replacements": soft,
+        "vocabulary": list(soft.values()),
+    }))
+    config.reload()
+    prompt = formatting.build_system_prompt(config.default_mode(), config, None, None)
+
+    for i in range(20):
+        assert f"'soft{i:02d}' (sometimes actually Term{i:02d})" in prompt
+    for i in range(20, 25):
+        assert f"'soft{i:02d}' (sometimes actually Term{i:02d})" not in prompt
+
+
+def test_soft_correction_prompt_casefold_tie_is_deterministic(config, home):
+    import json as _json
+
+    common = {f"before{i:02d}": f"Term{i:02d}" for i in range(19)}
+    prompts = []
+    for tied in (
+        {"straße": "Street", "strasse": "Road"},
+        {"strasse": "Road", "straße": "Street"},
+    ):
+        soft = {**common, **tied}
+        (home / "learned.json").write_text(_json.dumps({
+            "soft_replacements": soft,
+            "vocabulary": sorted(soft.values()),
+        }))
+        config.reload()
+        prompts.append(
+            formatting.build_system_prompt(config.default_mode(), config, None, None)
+        )
+
+    assert prompts[0] == prompts[1]
+    assert "'strasse' (sometimes actually Road)" in prompts[0]
+    assert "'straße' (sometimes actually Street)" not in prompts[0]
+
+
 def test_volatile_screen_context_follows_stable_vocabulary_hints(config, home):
     import json as _json
 

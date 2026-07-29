@@ -108,6 +108,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             history: history,
             sounds: sounds,
             dictionary: dictionary)
+        hud.onAvailable = { [weak self] in
+            self?.dictation.hudDidBecomeAvailable()
+        }
         statusController = StatusItemController(history: history)
         transcriber = FileTranscriber(
             supervisor: supervisor, hud: hud,

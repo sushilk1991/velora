@@ -217,6 +217,7 @@ final class LearningStore {
     @discardableResult
     func observe(_ corrections: [(wrong: String, right: String)]) -> [(wrong: String, right: String)] {
         load()  // pick up any external change (e.g. a Settings "Clear") first
+        let previous = learned
         var committed: [(wrong: String, right: String)] = []
         for correction in corrections {
             let wrong = correction.wrong.lowercased()
@@ -258,7 +259,18 @@ final class LearningStore {
             }
         }
         prune()
-        save()
+        // A correction is only "committed" if it survived the bounded store.
+        // At capacity, deterministic pruning may reject the new alphabetically
+        // last key; never tell the HUD that an entry exists when it does not.
+        committed.removeAll { correction in
+            let wrong = correction.wrong.lowercased()
+            return learned.replacements[wrong] != correction.right
+                && learned.softReplacements[wrong] != correction.right
+        }
+        guard save() else {
+            learned = previous
+            return []
+        }
         return committed
     }
 
@@ -272,11 +284,14 @@ final class LearningStore {
     /// `maxReplacements` (stable, not the random dictionary order), trim vocab to
     /// match, and cap the pending-counts map.
     private func prune() {
+        var evictedVocabulary: Set<String> = []
         for keyPath in [\Learned.replacements, \Learned.softReplacements] {
             if learned[keyPath: keyPath].count > Self.maxReplacements {
                 let overflow = learned[keyPath: keyPath].count - Self.maxReplacements
                 for key in learned[keyPath: keyPath].keys.sorted().suffix(overflow) {
-                    learned[keyPath: keyPath].removeValue(forKey: key)
+                    if let removed = learned[keyPath: keyPath].removeValue(forKey: key) {
+                        evictedVocabulary.insert(Self.normalized(removed))
+                    }
                 }
             }
         }
@@ -284,12 +299,17 @@ final class LearningStore {
         // STANDALONE terms (hand-curated imports) are legitimate too — the
         // old unconditional filter silently deleted them right after import
         // (review finding) — but capped, evicting oldest-first.
-        let kept = Set(learned.replacements.values).union(learned.softReplacements.values)
+        let kept = Set(
+            learned.replacements.values.map(Self.normalized)
+                + learned.softReplacements.values.map(Self.normalized))
         var standalone = 0
         var survivors: [String] = []
         for term in learned.vocabulary.reversed() {  // newest first
-            if kept.contains(term) {
+            let normalized = Self.normalized(term)
+            if kept.contains(normalized) {
                 survivors.append(term)
+            } else if evictedVocabulary.contains(normalized) {
+                continue
             } else if standalone < Self.maxStandaloneVocabulary {
                 standalone += 1
                 survivors.append(term)
@@ -325,12 +345,14 @@ final class LearningStore {
     }
 
     /// Forgets a single learned correction (and any pending counts toward it).
-    func remove(wrong: String) {
+    @discardableResult
+    func remove(wrong: String) -> Bool {
         load()
+        let previous = learned
         let key = wrong.lowercased()
         let hard = learned.replacements.removeValue(forKey: key)
         let soft = learned.softReplacements.removeValue(forKey: key)
-        guard let removedRight = hard ?? soft else { return }
+        guard let removedRight = hard ?? soft else { return true }
         // Preserve vocabulary order; only drop the removed value if nothing else
         // maps to it.
         if !learned.replacements.values.contains(removedRight),
@@ -338,7 +360,21 @@ final class LearningStore {
             learned.vocabulary.removeAll { $0 == removedRight }
         }
         learned.counts = learned.counts.filter { !$0.key.hasPrefix("\(key)\u{2192}") }
-        save()
+        guard save() else {
+            learned = previous
+            return false
+        }
+        return true
+    }
+
+    /// True when this observation remains below the confirmation threshold.
+    /// DictionaryRepository uses it to reload Config immediately so an
+    /// auto-mined wrong spelling stops feeding the live engine on first edit.
+    func hasPending(_ corrections: [(wrong: String, right: String)]) -> Bool {
+        load()
+        return corrections.contains { correction in
+            learned.counts["\(correction.wrong.lowercased())\u{2192}\(correction.right)"] != nil
+        }
     }
 
     /// Forget confirmed/pending corrections while preserving terms the user

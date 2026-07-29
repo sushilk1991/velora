@@ -186,6 +186,24 @@ async def test_user_corrected_wrong_side_never_promotes(tmp_path):
     assert "Cloud Code" not in state["candidates"]
 
 
+async def test_pending_corrected_wrong_side_never_promotes(tmp_path):
+    home = tmp_path / "vh"
+    home.mkdir(parents=True)
+    (home / "learned.json").write_text(json.dumps({
+        "version": 1,
+        "counts": {
+            "Cloud Code\u2192Claude Code": 1,
+            "malformed pending key": 1,
+        },
+    }))
+    seed_history(home, ["Cloud Code failed", "Cloud Code restarted"])
+    miner = VocabMiner(home, make_generate(["Cloud Code"]))
+    await miner.step()
+    state = read_state(home)
+    assert state["terms"] == []
+    assert "Cloud Code" not in state["candidates"]
+
+
 async def test_concurrent_app_ban_unioned_at_write(tmp_path):
     """The app bans a term while a step is mid-flight (between the miner's read
     and its write): the ban must survive and the term must not land in terms."""
@@ -287,10 +305,14 @@ def test_auto_vocab_excludes_prompt_artifacts_and_user_corrected_wrongs(home):
         "version": 1,
         "replacements": {"Cloud Code": "Claude Code"},
         "soft_replacements": {"lung": "Airlearn"},
+        "counts": {"Whisper Flow\u2192Whisperflow": 1},
     }))
     (home / "auto_learned.json").write_text(json.dumps({
         "version": 1,
-        "terms": ["Glossary", "Glossary:", "Glossary, Velora", "Cloud Code", "lung", "Velora"],
+        "terms": [
+            "Glossary", "Glossary:", "Glossary, Velora",
+            "Cloud Code", "lung", "Whisper Flow", "Velora",
+        ],
     }))
     config = Config()
     assert config.auto_vocabulary == ["Velora"]

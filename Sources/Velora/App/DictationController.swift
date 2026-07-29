@@ -176,6 +176,7 @@ final class DictationController: NSObject {
             delegate?.dictationController(self, didChangePhase: phase)
             if phase == .idle {
                 schedulePendingRecordingLimitNotice()
+                flushDeferredLearnedToastIfPossible()
             }
         }
     }
@@ -261,14 +262,12 @@ final class DictationController: NSObject {
     /// a learned correction. `session` keys the history row's quality
     /// observation (the async insert never reports a rowid).
     private var pendingLearning: (
-        element: AXUIElement, inserted: String, insertedWords: Set<String>, session: String)?
-    /// Deferred re-check: `checkPendingLearning` normally runs when the NEXT
-    /// dictation starts, so an edit made after the *last* dictation of a sitting
-    /// would never be learned. This one-shot timer closes that gap.
+        element: AXUIElement, inserted: String, insertedTokens: Set<String>, session: String)?
+    /// Deferred re-check for apps whose fields do not emit AX value changes.
     private var learningRecheckTimer: Timer?
     /// Long enough for the user to notice and fix a misheard word; short enough
     /// that the field usually still exists when we re-read it.
-    private static let learningRecheckDelay: TimeInterval = 45
+    private static let learningRecheckDelay: TimeInterval = 60
     /// Real-time path: an AX value-change watch on the pasted-into field, so an
     /// edit is learned seconds after the user makes it (the timer above stays
     /// as the fallback for apps whose fields don't emit value changes).
@@ -277,9 +276,12 @@ final class DictationController: NSObject {
     /// Quiet period after the last observed keystroke before diffing — the
     /// user has likely finished fixing the word.
     private static let editDebounce: TimeInterval = 2.0
-    /// Learning is scoped to compose-box-sized fields: we never diff a large
-    /// document (can't isolate our span; would freeze on the hot path).
-    private static let learningMaxWords = 60
+    /// Learning is scoped to bounded fields: both the controller and diff stop
+    /// after the same number of normalized tokens.
+    private static let learningMaxTokens = CorrectionDiff.maxTokens
+    /// A committed correction may arrive while recording or while a higher
+    /// priority HUD result is visible. Keep only the newest deferred toast.
+    private var deferredLearnedToast: (wrong: String, right: String)?
     /// One externally requested dictation may be active at a time. It remains
     /// tied to the exact engine session approved by the user, so a late or
     /// foreign event can never satisfy the requester.
@@ -931,12 +933,13 @@ final class DictationController: NSObject {
     private func captureLearningBaseline(text: String, bundleID: String?, session: String) {
         guard config.learnFromEdits else { return }
         let inserted = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let insertedWords = Set(
-            inserted.lowercased().split { $0 == " " || $0 == "\n" || $0 == "\t" }.map(String.init))
-        guard insertedWords.count >= 1, insertedWords.count <= Self.learningMaxWords else {
-            veloraLog("Velora: learning — baseline skipped (\(insertedWords.count) words)")
+        guard let normalizedTokens = CorrectionDiff.normalizedTokens(inserted),
+              !normalizedTokens.isEmpty else {
+            veloraLog(
+                "Velora: learning — baseline skipped (empty or >\(Self.learningMaxTokens) tokens)")
             return
         }
+        let insertedTokens = Set(normalizedTokens)
         // Let the ⌘V paste settle, then grab the focused element (main thread —
         // just a couple of timeout-capped AX calls).
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
@@ -948,13 +951,19 @@ final class DictationController: NSObject {
                 veloraLog("Velora: learning — no focused AX element (app=\(app?.bundleIdentifier ?? "nil")), cannot watch edits")
                 return
             }
-            self.pendingLearning = (element, inserted, insertedWords, session)
+            // A completed next insertion supersedes the single retained
+            // baseline. Give the prior field one final timer-style read first
+            // so timer-only AX surfaces do not silently drop an edit.
+            if self.pendingLearning != nil {
+                self.evaluatePendingLearning(consume: true)
+            }
+            self.pendingLearning = (element, inserted, insertedTokens, session)
             self.scheduleLearningRecheck()
             // Real-time: watch the field itself; edits evaluate a debounce
-            // after the last keystroke instead of waiting for the 45s timer.
+            // after the last keystroke instead of waiting for the 60s timer.
             self.editWatcher.onChange = { [weak self] in self?.scheduleEditEvaluation() }
             let watching = self.editWatcher.watch(element)
-            veloraLog("Velora: learning — baseline set (\(insertedWords.count) words, watch=\(watching ? "live" : "timer-only"))")
+            veloraLog("Velora: learning — baseline set (\(normalizedTokens.count) tokens, watch=\(watching ? "live" : "timer-only"))")
         }
     }
 
@@ -979,7 +988,7 @@ final class DictationController: NSObject {
         editWatcher.stop()
     }
 
-    /// Arms the one-shot deferred re-check (~45 s after insert). Main thread,
+    /// Arms the one-shot deferred re-check (~60 s after insert). Main thread,
     /// like the rest of this class; superseding a previous timer keeps at most
     /// one re-check pending — always for the newest baseline.
     private func scheduleLearningRecheck() {
@@ -991,7 +1000,7 @@ final class DictationController: NSObject {
         }
     }
 
-    /// Consume-now entry point (next dictation start / 45s fallback timer).
+    /// Consume-now entry point for the 60-second fallback timer.
     private func checkPendingLearning() {
         evaluatePendingLearning(consume: true)
     }
@@ -1031,15 +1040,18 @@ final class DictationController: NSObject {
             // Fields BIGGER than the insertion are fine below the cap:
             // CorrectionDiff isolates the best-matching window itself, so a
             // TextEdit/Notes doc accumulating several dictations still learns.
-            let editedWords = edited.split { $0 == " " || $0 == "\n" || $0 == "\t" }.count
-            guard editedWords <= 400 else {
+            guard CorrectionDiff.normalizedTokens(edited) != nil else {
                 // Unsupported (oversized field) — no observation either way.
-                veloraLog("Velora: learning — field too large to diff (\(editedWords) words)")
+                veloraLog(
+                    "Velora: learning — field too large to diff (>\(Self.learningMaxTokens) tokens)")
                 return
             }
 
             let corrections = CorrectionDiff.corrections(baseline: pending.inserted, edited: edited)
-                .filter { pending.insertedWords.contains($0.wrong.lowercased()) }
+                .filter {
+                    CorrectionDiff.normalizedToken($0.wrong)
+                        .map(pending.insertedTokens.contains) ?? false
+                }
             guard !corrections.isEmpty else {
                 // The field changed but nothing learnable was isolated. If our
                 // inserted span survives verbatim inside the larger text, the
@@ -1084,11 +1096,33 @@ final class DictationController: NSObject {
     /// struck through and the fix next to it. Only when nothing else is using
     /// the HUD — a toast must never stomp an active dictation.
     private func showLearnedToast(_ pair: (wrong: String, right: String)) {
-        guard phase == .idle, hud.model.state.isAvailable else { return }
+        guard phase == .idle, hud.model.state.isAvailable else {
+            deferredLearnedToast = pair
+            return
+        }
+        presentLearnedToast(pair)
+    }
+
+    private func flushDeferredLearnedToastIfPossible() {
+        guard let pair = deferredLearnedToast,
+              phase == .idle, hud.model.state.isAvailable else { return }
+        deferredLearnedToast = nil
+        presentLearnedToast(pair)
+    }
+
+    /// The HUD is shared with file transcription and meeting capture. Their
+    /// notices can finish while dictation is already idle, so phase changes
+    /// alone cannot release deferred learned feedback.
+    func hudDidBecomeAvailable() {
+        flushDeferredLearnedToastIfPossible()
+    }
+
+    private func presentLearnedToast(_ pair: (wrong: String, right: String)) {
         hud.transition(to: .learned(wrong: pair.wrong, right: pair.right))
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.6) { [weak self] in
             guard let self, case .learned = self.hud.model.state else { return }
             self.hud.transition(to: .hidden(.success))
+            self.flushDeferredLearnedToastIfPossible()
         }
     }
 
@@ -1097,6 +1131,11 @@ final class DictationController: NSObject {
     private func retryFromError() {
         hud.transition(to: .hidden(.cancel))
         phase = .idle
+        // Retry may immediately start another session. Wait until that decision
+        // has settled; the flush keeps the toast deferred if the HUD is busy.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            self?.flushDeferredLearnedToastIfPossible()
+        }
         if let action = errorRetryAction {
             errorRetryAction = nil
             errorRetryIntent = .dictation
@@ -1162,10 +1201,6 @@ final class DictationController: NSObject {
         // headphones this prevents music from playing through the lower-quality
         // two-way headset route while Velora captures speech.
         mediaPlayback.pauseForDictation()
-
-        // Learn from any edits the user made to the previous dictation before
-        // starting a new one (they've clearly finished with it).
-        checkPendingLearning()
 
         sessionID = UUID().uuidString
         rawTranscript = nil
@@ -1946,6 +1981,7 @@ final class DictationController: NSObject {
                   s == symbol, m == message
             else { return }
             self.hud.transition(to: .hidden(.success))
+            self.flushDeferredLearnedToastIfPossible()
         }
     }
 
@@ -1985,6 +2021,7 @@ final class DictationController: NSObject {
             guard let self, self.hud.model.state == .inserted else { return }
             self.hud.model.recordingStart = nil
             self.hud.transition(to: .hidden(.success))
+            self.flushDeferredLearnedToastIfPossible()
         }
     }
 }
@@ -2139,6 +2176,7 @@ extension DictationController: HotkeyMonitorDelegate {
             // Dismiss a lingering error HUD.
             if case .error = hud.model.state {
                 hud.transition(to: .hidden(.cancel))
+                flushDeferredLearnedToastIfPossible()
             }
         }
     }
