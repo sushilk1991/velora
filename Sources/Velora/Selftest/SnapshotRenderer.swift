@@ -30,7 +30,9 @@ enum SnapshotRenderer {
         let cases: [(String, HUDState)] = [
             ("hud-standby", .standby),
             ("hud-listening", .listening),
+            ("hud-listening-hour", .listening),
             ("hud-meeting", .meeting(title: "Design review", systemAudio: true)),
+            ("hud-meeting-hour", .meeting(title: "Design review", systemAudio: true)),
             ("hud-meeting-mic-only", .meeting(title: "Design review", systemAudio: false)),
             ("hud-inserted", .inserted),
             ("hud-error", .error("Microphone disconnected")),
@@ -40,14 +42,16 @@ enum SnapshotRenderer {
             model.state = state
             model.edge = .trailing
             if state == .listening {
-                model.recordingStart = Date(timeIntervalSinceNow: -6)
+                model.recordingStart = Date(
+                    timeIntervalSinceNow: name == "hud-listening-hour" ? -3_723 : -15)
                 model.sessionContext = HUDSessionContext(
                     appIcon: NSWorkspace.shared.icon(
                         forFile: "/System/Applications/Utilities/Terminal.app"),
                     modeName: "Terminal")
             }
             if case .meeting = state {
-                model.recordingStart = Date(timeIntervalSinceNow: -372)
+                model.recordingStart = Date(
+                    timeIntervalSinceNow: name == "hud-meeting-hour" ? -14_400 : -372)
             }
             // Force the exact light-appearance case that previously washed the
             // glass HUD out over pale Terminal and browser backgrounds.

@@ -67,7 +67,6 @@ enum HUDGeometry {
     static let height: CGFloat = 56
     static let minListeningWidth: CGFloat = 280
     static let maxListeningWidth: CGFloat = 420
-    static let meetingWidth: CGFloat = 268
     static let insertedDiameter: CGFloat = height
 
     /// Error pill width (icon + one-line message + action button).
@@ -76,12 +75,25 @@ enum HUDGeometry {
     /// Capsule content insets and gaps.
     static let contentInsetH: CGFloat = VeloraSpacing.l
     static let contentInsetV: CGFloat = VeloraSpacing.m
-    static let elementGap: CGFloat = VeloraSpacing.m
+    static let elementGap: CGFloat = VeloraSpacing.s
 
     /// Original 24-bar waveform footprint.
     static let waveformSize = CGSize(width: 120, height: 32)
     static let dotDiameter: CGFloat = 8
-    static let timerWidth: CGFloat = 60
+    static let timerWidth: CGFloat = 52
+    static let timerFont = NSFont.monospacedDigitSystemFont(
+        ofSize: 11, weight: .regular)
+    static let meetingTitleWidth: CGFloat = 112
+    static let meetingStopButtonSide: CGFloat = 22
+    static let meetingContentSlack: CGFloat = 10
+    static let meetingWidth: CGFloat =
+        contentInsetH * 2
+        + dotDiameter
+        + meetingTitleWidth
+        + timerWidth
+        + meetingStopButtonSide
+        + VeloraSpacing.s * 3
+        + meetingContentSlack
     static let chipIconSide: CGFloat = 22
     static let chipIconCornerRadius: CGFloat = 5
 

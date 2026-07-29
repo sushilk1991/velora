@@ -250,13 +250,15 @@ struct HUDView: View {
                         .foregroundStyle(Color(nsColor: .systemOrange))
                 }
             }
-            .frame(width: 112, alignment: .leading)
+            .frame(width: HUDGeometry.meetingTitleWidth, alignment: .leading)
             Spacer(minLength: 0)
             timerText
             Button { model.onMeetingStop?() } label: {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 10, weight: .bold))
-                    .frame(width: 22, height: 22)
+                    .frame(
+                        width: HUDGeometry.meetingStopButtonSide,
+                        height: HUDGeometry.meetingStopButtonSide)
             }
             .buttonStyle(.borderless)
             .help("Stop meeting recording")
@@ -315,8 +317,10 @@ struct HUDView: View {
 
     private func timerLabel(at date: Date) -> some View {
         Text(elapsedString(at: date))
-            .font(.system(size: 12, weight: .medium).monospacedDigit())
+            .font(Font(HUDGeometry.timerFont))
             .foregroundStyle(hudSecondaryText)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
     }
 
     private func elapsedString(at date: Date) -> String {

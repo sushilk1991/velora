@@ -3736,8 +3736,16 @@ enum Selftest {
                "HUD timer adds an hour field for long recordings")
         expect(HUDView.elapsedString(seconds: 11_229) == "3:07:09",
                "HUD timer keeps multi-hour recordings readable")
-        expect(HUDGeometry.timerWidth >= 60,
-               "HUD reserves enough width for an hour-scale timer")
+        expect(HUDView.elapsedString(seconds: 86_400) == "24:00:00",
+               "HUD timer represents the maximum custom recording duration")
+        let longestSupportedTimer = HUDGeometry.textWidth(
+            "24:00:00", font: HUDGeometry.timerFont)
+        expect(HUDGeometry.timerWidth == 52,
+               "HUD uses a compact fixed-width timer column")
+        expect(longestSupportedTimer <= HUDGeometry.timerWidth,
+               "HUD compact timer still fits the maximum custom duration")
+        expect(HUDGeometry.meetingWidth == 260,
+               "meeting HUD shrinks with the compact timer instead of adding dead space")
         expect(
             DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 20,
             "short dictations retain the 20-second finalize watchdog")
