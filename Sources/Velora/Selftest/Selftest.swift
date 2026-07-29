@@ -3746,6 +3746,8 @@ enum Selftest {
                "HUD compact timer still fits the maximum custom duration")
         expect(HUDGeometry.meetingWidth == 260,
                "meeting HUD shrinks with the compact timer instead of adding dead space")
+        expect(HUDGeometry.controlRowWidth(chipWidth: 72) == 320,
+               "recording HUD keeps timer reserve out of the waveform-to-timer gap")
         expect(
             DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 20,
             "short dictations retain the 20-second finalize watchdog")

@@ -216,7 +216,6 @@ struct HUDView: View {
                     active: isRecordingActive)
             }
 
-            Spacer(minLength: VeloraSpacing.xs)
             timerText
                 .opacity(isListening ? 1 : 0)
         }
@@ -253,6 +252,7 @@ struct HUDView: View {
             .frame(width: HUDGeometry.meetingTitleWidth, alignment: .leading)
             Spacer(minLength: 0)
             timerText
+                .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
             Button { model.onMeetingStop?() } label: {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 10, weight: .bold))
@@ -308,10 +308,8 @@ struct HUDView: View {
             TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
                 timerLabel(at: timeline.date)
             }
-            .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
         } else {
             timerLabel(at: Date())
-                .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
         }
     }
 

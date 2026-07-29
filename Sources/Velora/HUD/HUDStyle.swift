@@ -111,12 +111,15 @@ enum HUDGeometry {
     /// Exact minimum width of the stable control row.
     static func controlRowWidth(chipWidth: CGFloat) -> CGFloat {
         let safeChipWidth = max(0, chipWidth)
-        let outerGapCount: CGFloat = safeChipWidth > 0 ? 4 : 3
+        // Recording uses one flexible spacer before the waveform. It absorbs
+        // the timer column's unused reserve without opening a visible gap
+        // between the waveform and the intrinsic timer label.
+        let outerGapCount: CGFloat = safeChipWidth > 0 ? 3 : 2
         return contentInsetH * 2
             + safeChipWidth
             + dotDiameter + VeloraSpacing.s + waveformSize.width
             + timerWidth
-            + VeloraSpacing.xs * 2
+            + VeloraSpacing.xs
             + elementGap * outerGapCount
     }
 
