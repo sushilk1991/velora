@@ -73,6 +73,18 @@ struct HUDSessionContext: Equatable {
     let appIcon: NSImage?
     let modeName: String
 
+    init(appIcon: NSImage?, modeName: String) {
+        if let source = appIcon, let normalized = source.copy() as? NSImage {
+            normalized.size = NSSize(
+                width: HUDGeometry.chipIconSide,
+                height: HUDGeometry.chipIconSide)
+            self.appIcon = normalized
+        } else {
+            self.appIcon = nil
+        }
+        self.modeName = modeName
+    }
+
     static func == (lhs: HUDSessionContext, rhs: HUDSessionContext) -> Bool {
         lhs.appIcon === rhs.appIcon && lhs.modeName == rhs.modeName
     }
@@ -85,7 +97,11 @@ final class HUDModel: ObservableObject {
     /// from the position preference).
     @Published var edge: HUDEdge = .center
     /// Set when recording starts; drives the m:ss timer text.
-    @Published var recordingStart: Date?
+    @Published var recordingStart: Date? {
+        didSet { resetElapsedTimer() }
+    }
+    @Published private(set) var displayedElapsedSeconds = 0
+    private var elapsedTimer: Timer?
     /// Context chip contents for the active session (nil until a session
     /// begins; the chip is simply absent then).
     @Published var sessionContext: HUDSessionContext?
@@ -104,6 +120,32 @@ final class HUDModel: ObservableObject {
     /// Resets per-session UI state as a new recording starts.
     func beginSession(context: HUDSessionContext?) {
         sessionContext = context
+    }
+
+    private func resetElapsedTimer() {
+        elapsedTimer?.invalidate()
+        elapsedTimer = nil
+        refreshElapsedSeconds()
+        guard recordingStart != nil else { return }
+
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshElapsedSeconds()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        elapsedTimer = timer
+    }
+
+    private func refreshElapsedSeconds(at date: Date = Date()) {
+        let elapsed = recordingStart.map {
+            max(0, Int(date.timeIntervalSince($0)))
+        } ?? 0
+        if displayedElapsedSeconds != elapsed {
+            displayedElapsedSeconds = elapsed
+        }
+    }
+
+    deinit {
+        elapsedTimer?.invalidate()
     }
 }
 

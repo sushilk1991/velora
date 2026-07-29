@@ -203,15 +203,15 @@ struct HUDView: View {
     // MARK: - Listening and transcribing
 
     private var recordingContent: some View {
-        ZStack {
-            HStack {
-                contextChip
-                    .frame(
-                        maxWidth: HUDGeometry.maximumChipWidth,
-                        alignment: .leading)
-                Spacer(minLength: 0)
-            }
-
+        ZStack(alignment: .topLeading) {
+            contextChip
+                .frame(
+                    width: contextChipWidth,
+                    height: HUDGeometry.waveformSize.height,
+                    alignment: .leading)
+                .position(
+                    x: HUDGeometry.contentInsetH + contextChipWidth / 2,
+                    y: HUDGeometry.waveformSize.height / 2)
             HStack(spacing: VeloraSpacing.s) {
                 recordingDot
                 WaveformView(
@@ -220,17 +220,28 @@ struct HUDView: View {
                     flashGreen: flashGreen,
                     active: isRecordingActive)
             }
-
+            .frame(
+                width: HUDGeometry.recordingClusterWidth,
+                height: HUDGeometry.waveformSize.height)
+            .position(
+                x: recordingClusterCenterX,
+                y: HUDGeometry.waveformSize.height / 2)
             timerText
-                .frame(width: HUDGeometry.recordingTimerWidth, alignment: .leading)
-                .offset(x: HUDGeometry.recordingTimerOffset(
-                    chipWidth: Self.chipWidth(for: model.sessionContext)))
+                .frame(
+                    width: currentTimerWidth,
+                    height: HUDGeometry.waveformSize.height,
+                    alignment: .trailing)
+                .position(
+                    x: desiredListeningWidth
+                        - HUDGeometry.contentInsetH
+                        - currentTimerWidth / 2,
+                    y: HUDGeometry.waveformSize.height / 2)
                 .opacity(isListening ? 1 : 0)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .frame(
+            width: desiredListeningWidth,
+            height: HUDGeometry.waveformSize.height)
         .padding(.vertical, HUDGeometry.contentInsetV)
-        .animation(.easeOut(duration: 0.2), value: isListening)
     }
 
     // MARK: - Meeting recording
@@ -290,12 +301,34 @@ struct HUDView: View {
         .frame(width: HUDGeometry.dotDiameter, height: HUDGeometry.dotDiameter)
     }
 
+    private var contextChipWidth: CGFloat {
+        min(
+            Self.chipWidth(for: model.sessionContext),
+            HUDGeometry.maximumChipWidth)
+    }
+
+    private var recordingInnerWidth: CGFloat {
+        desiredListeningWidth - HUDGeometry.contentInsetH * 2
+    }
+
+    private var currentTimerWidth: CGFloat {
+        HUDGeometry.textWidth(
+            Self.elapsedString(seconds: model.displayedElapsedSeconds),
+            font: HUDGeometry.timerFont)
+    }
+
+    private var recordingClusterCenterX: CGFloat {
+        HUDGeometry.contentInsetH + HUDGeometry.recordingClusterCenterX(
+            innerWidth: recordingInnerWidth,
+            chipWidth: contextChipWidth,
+            timerWidth: currentTimerWidth)
+    }
+
     @ViewBuilder private var contextChip: some View {
         if let context = model.sessionContext {
             HStack(spacing: VeloraSpacing.xs) {
                 if let icon = context.appIcon {
                     Image(nsImage: icon)
-                        .resizable()
                         .frame(
                             width: HUDGeometry.chipIconSide,
                             height: HUDGeometry.chipIconSide)
@@ -312,27 +345,12 @@ struct HUDView: View {
         }
     }
 
-    @ViewBuilder private var timerText: some View {
-        if isListening || isMeeting {
-            TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
-                timerLabel(at: timeline.date)
-            }
-        } else {
-            timerLabel(at: Date())
-        }
-    }
-
-    private func timerLabel(at date: Date) -> some View {
-        Text(elapsedString(at: date))
+    private var timerText: some View {
+        Text(Self.elapsedString(seconds: model.displayedElapsedSeconds))
             .font(Font(HUDGeometry.timerFont))
             .foregroundStyle(hudSecondaryText)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
-    }
-
-    private func elapsedString(at date: Date) -> String {
-        guard let start = model.recordingStart else { return "0:00" }
-        return Self.elapsedString(seconds: Int(date.timeIntervalSince(start)))
     }
 
     static func elapsedString(seconds: Int) -> String {

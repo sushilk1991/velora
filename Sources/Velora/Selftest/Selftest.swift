@@ -3748,14 +3748,17 @@ enum Selftest {
                "normal dictation timer reserves only enough room for 59:59")
         expect(HUDGeometry.maximumTimerWidth == 49,
                "recording layout still accounts for the 24-hour custom limit")
-        expect(HUDGeometry.recordingTimerOffset(chipWidth: 72) == 112,
-               "Terminal timer centers within the lane opposite its context chip")
-        expect(HUDGeometry.recordingTimerOffset(chipWidth: 55) == 103.5,
-               "Code timer centers within its smaller context lane")
-        expect(HUDGeometry.recordingTimerOffset(chipWidth: 49) == 100.5,
-               "Text timer centers within a lane that still fits custom hours")
         expect(HUDGeometry.maximumChipWidth == 118,
                "long mode labels cannot enter the centered recording cluster")
+        let oversizedIcon = NSImage(size: NSSize(width: 512, height: 512))
+        let normalizedContext = HUDSessionContext(
+            appIcon: oversizedIcon, modeName: "Text")
+        expect(
+            normalizedContext.appIcon?.size == NSSize(width: 22, height: 22),
+            "HUD normalizes lazy app icons before they participate in layout")
+        expect(
+            oversizedIcon.size == NSSize(width: 512, height: 512),
+            "HUD icon normalization does not mutate the source app icon")
         expect(HUDGeometry.meetingTimerWidth == 52,
                "meeting timer retains its fixed multi-hour column")
         expect(HUDGeometry.meetingWidth == 260,
@@ -3768,6 +3771,31 @@ enum Selftest {
                "Text HUD stays compact around the same centered controls")
         expect(HUDGeometry.controlRowWidth(chipWidth: 0) == 248,
                "context-free recording content fits within the 280-point minimum")
+        let terminalInnerGap = (
+            HUDGeometry.controlRowWidth(chipWidth: 72)
+                - HUDGeometry.contentInsetH * 2
+                - 72
+                - HUDGeometry.recordingClusterWidth
+                - HUDGeometry.recordingTimerWidth
+        ) / 2
+        expect(terminalInnerGap == 28,
+               "Terminal recording cluster has equal 28-point inner gaps")
+        let terminalShortCenter = HUDGeometry.recordingClusterCenterX(
+            innerWidth: 296, chipWidth: 72, timerWidth: 25)
+        expect(
+            terminalShortCenter - HUDGeometry.recordingClusterWidth / 2 - 72
+                == 296 - 25
+                    - (terminalShortCenter + HUDGeometry.recordingClusterWidth / 2),
+            "recording cluster is centered between the rendered context and timer")
+        let textMaximumTimerGap = (
+            HUDGeometry.controlRowWidth(chipWidth: 49)
+                - HUDGeometry.contentInsetH * 2
+                - 49
+                - HUDGeometry.recordingClusterWidth
+                - HUDGeometry.maximumTimerWidth
+        ) / 2
+        expect(textMaximumTimerGap == VeloraSpacing.s,
+               "small app labels retain equal gaps around a 24-hour timer")
         let terminalHalfWidth = HUDGeometry.controlRowWidth(chipWidth: 72) / 2
         expect(
             HUDGeometry.recordingClusterWidth / 2

@@ -30,6 +30,7 @@ enum SnapshotRenderer {
         let cases: [(String, HUDState)] = [
             ("hud-standby", .standby),
             ("hud-listening", .listening),
+            ("hud-listening-text", .listening),
             ("hud-listening-9m", .listening),
             ("hud-listening-10m", .listening),
             ("hud-listening-max", .listening),
@@ -51,6 +52,7 @@ enum SnapshotRenderer {
             if state == .listening {
                 let elapsed: TimeInterval
                 switch name {
+                case "hud-listening-text": elapsed = 5
                 case "hud-listening-9m": elapsed = 599
                 case "hud-listening-10m": elapsed = 600
                 case "hud-listening-max",
@@ -65,6 +67,8 @@ enum SnapshotRenderer {
                 model.recordingStart = Date(timeIntervalSinceNow: -elapsed)
                 let context: (appPath: String, modeName: String)
                 switch name {
+                case "hud-listening-text":
+                    context = ("/Applications/ChatGPT.app", "Text")
                 case "hud-listening-max-code":
                     context = ("/Applications/Xcode.app", "Code")
                 case "hud-listening-max-text":
@@ -78,8 +82,13 @@ enum SnapshotRenderer {
                         "/System/Applications/Utilities/Terminal.app",
                         "Terminal")
                 }
+                let appIcon = name == "hud-listening-text"
+                    ? NSRunningApplication.runningApplications(
+                        withBundleIdentifier: "com.openai.codex").first?.icon
+                    : nil
                 model.sessionContext = HUDSessionContext(
-                    appIcon: NSWorkspace.shared.icon(forFile: context.appPath),
+                    appIcon: appIcon
+                        ?? NSWorkspace.shared.icon(forFile: context.appPath),
                     modeName: context.modeName)
             }
             if case .meeting = state {

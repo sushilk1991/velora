@@ -117,8 +117,8 @@ enum HUDGeometry {
     static let bodyFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
-    /// Exact minimum width of a recording row whose dot + waveform cluster is
-    /// centered independently from both the app context and timer.
+    /// Exact minimum width of a recording row with enough room to balance the
+    /// dot + waveform cluster between the app context and timer.
     static func controlRowWidth(chipWidth: CGFloat) -> CGFloat {
         let safeChipWidth = min(max(0, chipWidth), maximumChipWidth)
         let clusterHalf = recordingClusterWidth / 2
@@ -129,14 +129,12 @@ enum HUDGeometry {
         return contentInsetH * 2 + max(leadingHalf, trailingHalf) * 2
     }
 
-    /// Centers the normal timer inside a right-side lane that mirrors the
-    /// context chip, while keeping the recording cluster itself at x = 0.
-    static func recordingTimerOffset(chipWidth: CGFloat) -> CGFloat {
-        let safeChipWidth = min(max(0, chipWidth), maximumChipWidth)
-        let sideLaneWidth = max(safeChipWidth, maximumTimerWidth)
-        return recordingClusterWidth / 2
-            + VeloraSpacing.s
-            + sideLaneWidth / 2
+    static func recordingClusterCenterX(
+        innerWidth: CGFloat, chipWidth: CGFloat, timerWidth: CGFloat
+    ) -> CGFloat {
+        let intervalStart = min(max(0, chipWidth), maximumChipWidth)
+        let intervalEnd = innerWidth - max(0, timerWidth)
+        return (intervalStart + intervalEnd) / 2
     }
 
     /// Width of a single-line string in `font`, rounded up to whole points.
