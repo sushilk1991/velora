@@ -203,9 +203,14 @@ struct HUDView: View {
     // MARK: - Listening and transcribing
 
     private var recordingContent: some View {
-        HStack(spacing: HUDGeometry.elementGap) {
-            contextChip
-            Spacer(minLength: VeloraSpacing.xs)
+        ZStack {
+            HStack {
+                contextChip
+                    .frame(
+                        maxWidth: HUDGeometry.maximumChipWidth,
+                        alignment: .leading)
+                Spacer(minLength: 0)
+            }
 
             HStack(spacing: VeloraSpacing.s) {
                 recordingDot
@@ -217,8 +222,12 @@ struct HUDView: View {
             }
 
             timerText
+                .frame(width: HUDGeometry.recordingTimerWidth, alignment: .leading)
+                .offset(x: HUDGeometry.recordingTimerOffset(
+                    chipWidth: Self.chipWidth(for: model.sessionContext)))
                 .opacity(isListening ? 1 : 0)
         }
+        .frame(maxWidth: .infinity)
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
         .animation(.easeOut(duration: 0.2), value: isListening)
@@ -252,7 +261,7 @@ struct HUDView: View {
             .frame(width: HUDGeometry.meetingTitleWidth, alignment: .leading)
             Spacer(minLength: 0)
             timerText
-                .frame(width: HUDGeometry.timerWidth, alignment: .trailing)
+                .frame(width: HUDGeometry.meetingTimerWidth, alignment: .trailing)
             Button { model.onMeetingStop?() } label: {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 10, weight: .bold))
@@ -298,7 +307,7 @@ struct HUDView: View {
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(hudSecondaryText)
                     .lineLimit(1)
-                    .fixedSize()
+                    .truncationMode(.tail)
             }
         }
     }

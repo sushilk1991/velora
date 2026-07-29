@@ -3730,6 +3730,10 @@ enum Selftest {
             "HUD restores the original waveform footprint")
         expect(HUDView.elapsedString(seconds: -1) == "0:00",
                "HUD timer clamps negative elapsed time")
+        expect(HUDView.elapsedString(seconds: 599) == "9:59",
+               "HUD timer stays in its four-character form through nine minutes")
+        expect(HUDView.elapsedString(seconds: 600) == "10:00",
+               "HUD timer expands rightward at ten minutes")
         expect(HUDView.elapsedString(seconds: 3_599) == "59:59",
                "HUD timer stays compact below one hour")
         expect(HUDView.elapsedString(seconds: 3_600) == "1:00:00",
@@ -3738,16 +3742,38 @@ enum Selftest {
                "HUD timer keeps multi-hour recordings readable")
         expect(HUDView.elapsedString(seconds: 86_400) == "24:00:00",
                "HUD timer represents the maximum custom recording duration")
-        let longestSupportedTimer = HUDGeometry.textWidth(
-            "24:00:00", font: HUDGeometry.timerFont)
-        expect(HUDGeometry.timerWidth == 52,
-               "HUD uses a compact fixed-width timer column")
-        expect(longestSupportedTimer <= HUDGeometry.timerWidth,
-               "HUD compact timer still fits the maximum custom duration")
+        expect(HUDGeometry.recordingClusterWidth == 136,
+               "recording dot and waveform form a stable centered cluster")
+        expect(HUDGeometry.recordingTimerWidth == 32,
+               "normal dictation timer reserves only enough room for 59:59")
+        expect(HUDGeometry.maximumTimerWidth == 49,
+               "recording layout still accounts for the 24-hour custom limit")
+        expect(HUDGeometry.recordingTimerOffset(chipWidth: 72) == 112,
+               "Terminal timer centers within the lane opposite its context chip")
+        expect(HUDGeometry.recordingTimerOffset(chipWidth: 55) == 103.5,
+               "Code timer centers within its smaller context lane")
+        expect(HUDGeometry.recordingTimerOffset(chipWidth: 49) == 100.5,
+               "Text timer centers within a lane that still fits custom hours")
+        expect(HUDGeometry.maximumChipWidth == 118,
+               "long mode labels cannot enter the centered recording cluster")
+        expect(HUDGeometry.meetingTimerWidth == 52,
+               "meeting timer retains its fixed multi-hour column")
         expect(HUDGeometry.meetingWidth == 260,
                "meeting HUD shrinks with the compact timer instead of adding dead space")
-        expect(HUDGeometry.controlRowWidth(chipWidth: 72) == 320,
-               "recording HUD keeps timer reserve out of the waveform-to-timer gap")
+        expect(HUDGeometry.controlRowWidth(chipWidth: 72) == 328,
+               "Terminal HUD keeps eight points around its centered controls")
+        expect(HUDGeometry.controlRowWidth(chipWidth: 55) == 294,
+               "Code HUD stays compact around the same centered controls")
+        expect(HUDGeometry.controlRowWidth(chipWidth: 49) == 282,
+               "Text HUD stays compact around the same centered controls")
+        expect(HUDGeometry.controlRowWidth(chipWidth: 0) == 248,
+               "context-free recording content fits within the 280-point minimum")
+        let terminalHalfWidth = HUDGeometry.controlRowWidth(chipWidth: 72) / 2
+        expect(
+            HUDGeometry.recordingClusterWidth / 2
+                + VeloraSpacing.s + HUDGeometry.maximumTimerWidth
+                <= terminalHalfWidth - HUDGeometry.contentInsetH,
+            "Terminal HUD leaves room for an intrinsic 24-hour custom timer")
         expect(
             DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 20,
             "short dictations retain the 20-second finalize watchdog")

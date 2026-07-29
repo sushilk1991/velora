@@ -80,9 +80,13 @@ enum HUDGeometry {
     /// Original 24-bar waveform footprint.
     static let waveformSize = CGSize(width: 120, height: 32)
     static let dotDiameter: CGFloat = 8
-    static let timerWidth: CGFloat = 52
     static let timerFont = NSFont.monospacedDigitSystemFont(
         ofSize: 11, weight: .regular)
+    static let recordingClusterWidth =
+        dotDiameter + VeloraSpacing.s + waveformSize.width
+    static let recordingTimerWidth = textWidth("59:59", font: timerFont)
+    static let maximumTimerWidth = textWidth("24:00:00", font: timerFont)
+    static let meetingTimerWidth: CGFloat = 52
     static let meetingTitleWidth: CGFloat = 112
     static let meetingStopButtonSide: CGFloat = 22
     static let meetingContentSlack: CGFloat = 10
@@ -90,12 +94,17 @@ enum HUDGeometry {
         contentInsetH * 2
         + dotDiameter
         + meetingTitleWidth
-        + timerWidth
+        + meetingTimerWidth
         + meetingStopButtonSide
         + VeloraSpacing.s * 3
         + meetingContentSlack
     static let chipIconSide: CGFloat = 22
     static let chipIconCornerRadius: CGFloat = 5
+    static let maximumChipWidth =
+        maxListeningWidth / 2
+        - contentInsetH
+        - recordingClusterWidth / 2
+        - VeloraSpacing.s
 
     /// Idle standby pill (persistent HUD): a small capsule that morphs into
     /// the full listening capsule on click.
@@ -108,19 +117,26 @@ enum HUDGeometry {
     static let bodyFont = NSFont.systemFont(ofSize: 13, weight: .medium)
     static let chipFont = NSFont.systemFont(ofSize: 11, weight: .medium)
 
-    /// Exact minimum width of the stable control row.
+    /// Exact minimum width of a recording row whose dot + waveform cluster is
+    /// centered independently from both the app context and timer.
     static func controlRowWidth(chipWidth: CGFloat) -> CGFloat {
-        let safeChipWidth = max(0, chipWidth)
-        // Recording uses one flexible spacer before the waveform. It absorbs
-        // the timer column's unused reserve without opening a visible gap
-        // between the waveform and the intrinsic timer label.
-        let outerGapCount: CGFloat = safeChipWidth > 0 ? 3 : 2
-        return contentInsetH * 2
-            + safeChipWidth
-            + dotDiameter + VeloraSpacing.s + waveformSize.width
-            + timerWidth
-            + VeloraSpacing.xs
-            + elementGap * outerGapCount
+        let safeChipWidth = min(max(0, chipWidth), maximumChipWidth)
+        let clusterHalf = recordingClusterWidth / 2
+        let leadingHalf = safeChipWidth > 0
+            ? safeChipWidth + VeloraSpacing.s + clusterHalf
+            : clusterHalf
+        let trailingHalf = clusterHalf + VeloraSpacing.s + recordingTimerWidth
+        return contentInsetH * 2 + max(leadingHalf, trailingHalf) * 2
+    }
+
+    /// Centers the normal timer inside a right-side lane that mirrors the
+    /// context chip, while keeping the recording cluster itself at x = 0.
+    static func recordingTimerOffset(chipWidth: CGFloat) -> CGFloat {
+        let safeChipWidth = min(max(0, chipWidth), maximumChipWidth)
+        let sideLaneWidth = max(safeChipWidth, maximumTimerWidth)
+        return recordingClusterWidth / 2
+            + VeloraSpacing.s
+            + sideLaneWidth / 2
     }
 
     /// Width of a single-line string in `font`, rounded up to whole points.

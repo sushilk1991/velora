@@ -30,7 +30,14 @@ enum SnapshotRenderer {
         let cases: [(String, HUDState)] = [
             ("hud-standby", .standby),
             ("hud-listening", .listening),
+            ("hud-listening-9m", .listening),
+            ("hud-listening-10m", .listening),
+            ("hud-listening-max", .listening),
+            ("hud-listening-max-code", .listening),
+            ("hud-listening-max-text", .listening),
+            ("hud-listening-long-mode", .listening),
             ("hud-listening-hour", .listening),
+            ("hud-listening-day", .listening),
             ("hud-meeting", .meeting(title: "Design review", systemAudio: true)),
             ("hud-meeting-hour", .meeting(title: "Design review", systemAudio: true)),
             ("hud-meeting-mic-only", .meeting(title: "Design review", systemAudio: false)),
@@ -42,12 +49,38 @@ enum SnapshotRenderer {
             model.state = state
             model.edge = .trailing
             if state == .listening {
-                model.recordingStart = Date(
-                    timeIntervalSinceNow: name == "hud-listening-hour" ? -3_723 : -15)
+                let elapsed: TimeInterval
+                switch name {
+                case "hud-listening-9m": elapsed = 599
+                case "hud-listening-10m": elapsed = 600
+                case "hud-listening-max",
+                     "hud-listening-max-code",
+                     "hud-listening-max-text",
+                     "hud-listening-long-mode":
+                    elapsed = 3_599
+                case "hud-listening-hour": elapsed = 3_723
+                case "hud-listening-day": elapsed = 86_400
+                default: elapsed = 15
+                }
+                model.recordingStart = Date(timeIntervalSinceNow: -elapsed)
+                let context: (appPath: String, modeName: String)
+                switch name {
+                case "hud-listening-max-code":
+                    context = ("/Applications/Xcode.app", "Code")
+                case "hud-listening-max-text":
+                    context = ("/System/Applications/TextEdit.app", "Text")
+                case "hud-listening-long-mode":
+                    context = (
+                        "/System/Applications/Utilities/Terminal.app",
+                        "A Very Long Custom Mode Name")
+                default:
+                    context = (
+                        "/System/Applications/Utilities/Terminal.app",
+                        "Terminal")
+                }
                 model.sessionContext = HUDSessionContext(
-                    appIcon: NSWorkspace.shared.icon(
-                        forFile: "/System/Applications/Utilities/Terminal.app"),
-                    modeName: "Terminal")
+                    appIcon: NSWorkspace.shared.icon(forFile: context.appPath),
+                    modeName: context.modeName)
             }
             if case .meeting = state {
                 model.recordingStart = Date(
