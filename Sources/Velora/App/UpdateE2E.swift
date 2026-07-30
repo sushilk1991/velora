@@ -3,17 +3,16 @@ import Foundation
 
 /// Headless updater end-to-end (`Velora --update-e2e [--install]`): checks
 /// the feed (point VELORA_UPDATE_FEED_URL at a local JSON to control it),
-/// downloads + verifies + stages the release DMG, and with --install spawns
-/// the swap helper and exits so the helper replaces the bundle this binary
-/// ran from — run it on a COPY of the app, never the installed one. The app
-/// itself never starts (no engine, menubar, or hotkeys). The harness cannot
-/// observe the swap (the helper waits for this very process to exit), so
-/// after --install returns, check the bundle's version + codesign yourself.
+/// downloads + verifies + stages the release DMG, and with --install exercises
+/// the production one-click path: reverify → helper → quit → swap → relaunch.
+/// Run it on a COPY of the app, never the installed one. The original process
+/// cannot observe work that intentionally starts after it exits, so the parent
+/// test must verify the copy's new version/signature and the relaunched process.
 enum UpdateE2E {
     static func run(install: Bool) -> Int32 {
         print("update-e2e: running \(UpdateChecker.currentVersion ?? "<no version — bare binary>") from \(Bundle.main.bundleURL.path)")
         var outcome: UpdateChecker.Outcome?
-        UpdateChecker.shared.check { outcome = $0 }
+        UpdateChecker.shared.check(origin: .manual) { outcome = $0 }
         while outcome == nil {
             RunLoop.main.run(until: Date().addingTimeInterval(0.1))
         }
@@ -30,8 +29,14 @@ enum UpdateE2E {
                 print("update-e2e: cannot install in place — \(blocker)")
                 return 1
             }
-            UpdateInstaller.shared.begin(update)
+            if install {
+                UpdateInstaller.shared.terminationHandler = { exit(0) }
+                UpdateInstaller.shared.beginAndInstall(update)
+            } else {
+                UpdateInstaller.shared.begin(update)
+            }
             var lastLogged = -1
+            var loggedInstall = false
             while true {
                 RunLoop.main.run(until: Date().addingTimeInterval(0.2))
                 switch UpdateInstaller.shared.state {
@@ -45,15 +50,16 @@ enum UpdateE2E {
                     break
                 case .ready(let version):
                     print("update-e2e: \(version) verified and staged")
-                    if install {
-                        print("update-e2e: spawning swap helper and exiting")
-                        UpdateInstaller.shared.installOnExit()
-                    }
-                    return 0
+                    if !install { return 0 }
                 case .failed(let reason):
                     print("update-e2e: failed — \(reason)")
                     return 1
-                case .idle, .installing:
+                case .installing:
+                    if !loggedInstall {
+                        print("update-e2e: reverified; spawning swap helper and exiting")
+                        loggedInstall = true
+                    }
+                case .idle:
                     break
                 }
             }

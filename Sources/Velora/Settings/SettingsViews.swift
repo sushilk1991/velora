@@ -212,6 +212,7 @@ struct SettingsSearchBox: View {
 
 struct GeneralSettingsView: View {
     @ObservedObject var model: SettingsModel
+    @State private var releaseNotesExpanded = false
 
     var body: some View {
         Form {
@@ -317,6 +318,14 @@ struct GeneralSettingsView: View {
                 Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
                     .disabled(!model.updateChecks)
                 updateStatusRow
+                if let release = model.latestRelease {
+                    SettingsReleaseNotesDisclosure(
+                        release: release,
+                        isExpanded: $releaseNotesExpanded,
+                        openFullNotes: model.showLatestReleaseNotes)
+                } else {
+                    Button("View Release History…") { model.openReleasesPage() }
+                }
             } header: {
                 Text("Updates")
             } footer: {
@@ -345,6 +354,31 @@ struct GeneralSettingsView: View {
             }
             Spacer()
             Button(buttonTitle, action: action)
+        }
+    }
+}
+
+/// The inline changelog in Settings. Kept as a standalone production view so
+/// the snapshot harness can verify its expanded layout without driving a long
+/// Form's scroll position.
+struct SettingsReleaseNotesDisclosure: View {
+    let release: UpdateChecker.Release
+    @Binding var isExpanded: Bool
+    let openFullNotes: () -> Void
+
+    var body: some View {
+        DisclosureGroup(
+            "What’s new in Velora \(release.version)",
+            isExpanded: $isExpanded
+        ) {
+            VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+                ScrollView {
+                    ReleaseNotesContentView(notes: release.notes)
+                        .padding(.vertical, VeloraSpacing.xs)
+                }
+                .frame(maxHeight: 180)
+                Button("Open Full Release Notes…", action: openFullNotes)
+            }
         }
     }
 }
@@ -386,7 +420,9 @@ struct UpdateActionRow: View {
         case .ready(let version):
             HStack {
                 Button("Restart to Update") { model.installStagedUpdate() }
-                Button("Discard") { model.discardStagedUpdate() }
+                if model.availableUpdate != nil {
+                    Button("View Release Notes…") { model.startUpdateInstall() }
+                }
                 Text(model.autoInstallUpdates
                      ? "Velora \(version) is ready — it installs when the app restarts or quits."
                      : "Velora \(version) is downloaded and verified.")
@@ -396,7 +432,7 @@ struct UpdateActionRow: View {
         case .failed(let reason):
             HStack {
                 if model.canInstallUpdateInPlace {
-                    Button("Try Again") { model.startUpdateInstall() }
+                    Button("View Update…") { model.startUpdateInstall() }
                 } else {
                     Button("Open Releases Page") { model.openReleasesPage() }
                 }
@@ -409,7 +445,7 @@ struct UpdateActionRow: View {
                 Button(checkLabel) { model.checkForUpdatesNow() }
                 if let update = model.availableUpdate {
                     if model.canInstallUpdateInPlace {
-                        Button("Install Velora \(update.version)") { model.startUpdateInstall() }
+                        Button("View Velora \(update.version)…") { model.startUpdateInstall() }
                     } else {
                         Button("Open Releases Page") { model.openReleasesPage() }
                     }

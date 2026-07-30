@@ -153,6 +153,16 @@ extension SettingsDocument {
         var meetingCalendar: Bool
         var launchAtLogin: Bool
         var lastUpdateCheck: Double
+        var skippedUpdateVersion: String?
+        var deferredUpdateVersion: String?
+        var deferredUpdateUntil: Double
+        var cachedReleaseVersion: String?
+        var cachedReleasePage: String?
+        var cachedReleaseNotes: String?
+        var cachedReleasePublishedAt: Double
+        var cachedReleaseAssetName: String?
+        var cachedReleaseAssetURL: String?
+        var cachedReleaseAssetSize: Int
 
         static let defaults = MachineLocalSettings(
             onboardingComplete: false,
@@ -161,7 +171,17 @@ extension SettingsDocument {
             localAgentAccess: false,
             meetingCalendar: false,
             launchAtLogin: false,
-            lastUpdateCheck: 0)
+            lastUpdateCheck: 0,
+            skippedUpdateVersion: nil,
+            deferredUpdateVersion: nil,
+            deferredUpdateUntil: 0,
+            cachedReleaseVersion: nil,
+            cachedReleasePage: nil,
+            cachedReleaseNotes: nil,
+            cachedReleasePublishedAt: 0,
+            cachedReleaseAssetName: nil,
+            cachedReleaseAssetURL: nil,
+            cachedReleaseAssetSize: 0)
     }
 
     struct NormalizedPoint: Codable, Equatable {

@@ -66,6 +66,33 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// Set once a swap helper has been spawned so quit-time install never
     /// races a restart-time install.
     private var helperSpawned = false
+    /// Set by the explicit "Install Update" action. Verification still
+    /// completes first; reaching `.ready` then immediately enters the existing
+    /// reverify → swap-helper → quit → relaunch path instead of asking again.
+    private var installAndRelaunchWhenReady = false {
+        didSet {
+            guard installAndRelaunchWhenReady != oldValue else { return }
+            NotificationCenter.default.post(
+                name: .veloraUpdateStateChanged, object: nil)
+        }
+    }
+    /// Shared truth for every install surface. The update window must reflect
+    /// an explicit restart requested from Settings or the status menu too, so
+    /// closing that window cannot reinterpret the request as Remind Me Later.
+    var explicitInstallRequested: Bool {
+        if installAndRelaunchWhenReady || helperSpawned { return true }
+        if case .installing = state { return true }
+        return false
+    }
+    /// Main-queue safety gate supplied by the composition root. A one-click
+    /// install waits for user-owned foreground work instead of cancelling it
+    /// when a slow download happens to finish.
+    var relaunchBlockReason: (() -> String?)?
+    /// Headless update E2E exits directly after the helper starts; the app
+    /// default requests normal AppKit termination so lifecycle cleanup runs.
+    var terminationHandler: (() -> Void)?
+    private var installRetryWorkItem: DispatchWorkItem?
+    private var lastRelaunchBlockReason: String?
 
     static var updatesDirectory: URL {
         ResourceLocator.applicationSupportDirectory
@@ -110,19 +137,49 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
 
     // MARK: - Download
 
-    /// Starts the download → verify → stage pipeline. No-op while a download
-    /// or install is in flight, or when this version is already staged; a
-    /// failed attempt retries from scratch.
+    /// Starts the download → verify → stage pipeline. A newer discovered
+    /// release supersedes an older in-flight attempt; repeated requests for
+    /// the same release coalesce.
     func begin(_ update: UpdateChecker.Update) {
+        begin(update, installAfterStaging: false)
+    }
+
+    /// One user decision drives the complete safe pipeline. If an automatic
+    /// background download is already in flight, this upgrades that attempt to
+    /// install and relaunch as soon as verification succeeds.
+    func beginAndInstall(_ update: UpdateChecker.Update) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        clearPromptSuppression(for: update.version)
+        begin(update, installAfterStaging: true)
+    }
+
+    private func begin(_ update: UpdateChecker.Update, installAfterStaging: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
         switch state {
-        case .downloading, .verifying, .installing:
-            return
+        case .downloading(let version, _):
+            if version == update.version {
+                if installAfterStaging { installAndRelaunchWhenReady = true }
+                return
+            }
+            cancelDownload()
+        case .verifying(let version):
+            if version == update.version {
+                if installAfterStaging { installAndRelaunchWhenReady = true }
+                return
+            }
+            abandonVerification(version: version)
         case .ready(let version) where version == update.version:
+            if installAfterStaging { installAndRelaunch() }
             return
-        case .idle, .ready, .failed:
+        case .installing:
+            return
+        case .ready(let version):
+            let stale = Self.stagedURL(for: version)
+            workQueue.async { try? FileManager.default.removeItem(at: stale) }
+        case .idle, .failed:
             break
         }
+        cancelInstallRetry()
         if let blocker = Self.installBlocker() {
             state = .failed(blocker)
             return
@@ -152,6 +209,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         }
         veloraLog("Velora: update \(update.version) — downloading \(asset.url.absoluteString)")
         generation += 1
+        installAndRelaunchWhenReady = installAfterStaging
         pendingUpdate = update
         state = .downloading(version: update.version, progress: 0)
         let task = session.downloadTask(with: asset.url)
@@ -170,6 +228,8 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         downloadTask?.cancel()
         downloadTask = nil
         pendingUpdate = nil
+        installAndRelaunchWhenReady = false
+        cancelInstallRetry()
         state = .idle
         if let dmg {
             workQueue.async { try? FileManager.default.removeItem(at: dmg) }
@@ -182,6 +242,8 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         dispatchPrecondition(condition: .onQueue(.main))
         guard case .ready(let version) = state else { return }
         generation += 1
+        installAndRelaunchWhenReady = false
+        cancelInstallRetry()
         state = .idle
         let staged = Self.stagedURL(for: version)
         workQueue.async { try? FileManager.default.removeItem(at: staged) }
@@ -264,6 +326,8 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         veloraLog("Velora: update failed — \(reason)")
         downloadTask = nil
         pendingUpdate = nil
+        installAndRelaunchWhenReady = false
+        cancelInstallRetry()
         state = .failed(reason)
     }
 
@@ -278,6 +342,15 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                 veloraLog("Velora: update failed — \(reason)")
             }
             self.state = outcome
+            switch outcome {
+            case .ready where self.installAndRelaunchWhenReady:
+                self.installWhenSafe()
+            case .failed:
+                self.installAndRelaunchWhenReady = false
+                self.cancelInstallRetry()
+            case .idle, .downloading, .verifying, .ready, .installing:
+                break
+            }
         }
     }
 
@@ -400,9 +473,71 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     func installAndRelaunch() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard case .ready(let version) = state, !helperSpawned else { return }
+        clearPromptSuppression(for: version)
+        installAndRelaunchWhenReady = true
+        installWhenSafe()
+    }
+
+    private func clearPromptSuppression(for version: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        // The disposable-copy E2E deliberately shares the production bundle
+        // identifier. A local feed must never mutate the installed app's real
+        // Skip/Later choices.
+        guard UpdateChecker.persistentStateAllowed else { return }
+        let config = AppConfig.shared
+        var skippedVersion = config.skippedUpdateVersion
+        var deferredVersion = config.deferredUpdateVersion
+        var deferredUntil = config.deferredUpdateUntil
+        UpdatePromptPolicy.clearSuppression(
+            for: version,
+            skippedVersion: &skippedVersion,
+            deferredVersion: &deferredVersion,
+            deferredUntil: &deferredUntil)
+        if skippedVersion != config.skippedUpdateVersion {
+            config.skippedUpdateVersion = skippedVersion
+        }
+        if deferredVersion != config.deferredUpdateVersion {
+            config.deferredUpdateVersion = deferredVersion
+        }
+        if deferredUntil != config.deferredUpdateUntil {
+            config.deferredUpdateUntil = deferredUntil
+        }
+    }
+
+    private func installWhenSafe() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard installAndRelaunchWhenReady,
+              case .ready = state, !helperSpawned
+        else {
+            cancelInstallRetry()
+            return
+        }
+        if let reason = relaunchBlockReason?() {
+            if reason != lastRelaunchBlockReason {
+                veloraLog("Velora: update ready — \(reason.lowercased())")
+                lastRelaunchBlockReason = reason
+            }
+            guard installRetryWorkItem == nil else { return }
+            let retry = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.installRetryWorkItem = nil
+                self.installWhenSafe()
+            }
+            installRetryWorkItem = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: retry)
+            return
+        }
+        cancelInstallRetry()
+        performInstallAndRelaunch()
+    }
+
+    private func performInstallAndRelaunch() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard case .ready(let version) = state, !helperSpawned else { return }
         // The bundle location or its permissions may have changed since the
         // update was staged (Claude review: adopted updates especially).
         if let blocker = Self.installBlocker() {
+            installAndRelaunchWhenReady = false
             state = .failed(blocker)
             return
         }
@@ -421,7 +556,6 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             }
             DispatchQueue.main.async {
                 guard gen == self.generation, case .installing = self.state else { return }
-                guard self.spawnHelper(staged: staged, relaunch: true) else { return }
                 // Quit from a run-loop turn, NOT synchronously inside this
                 // main-dispatch-queue block. -[NSApplication terminate:]
                 // answers a .terminateLater delegate by spinning a nested
@@ -436,22 +570,99 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                 // this block returns with the main queue free — the same
                 // context a menubar Quit uses, where the reply is serviced and
                 // the app quits cleanly.
-                let quit = Timer(timeInterval: 0, repeats: false) { _ in
-                    NSApp.terminate(nil)
+                let quit = Timer(timeInterval: 0, repeats: false) { [weak self] _ in
+                    guard let self, gen == self.generation,
+                          case .installing = self.state, !self.helperSpawned
+                    else { return }
+                    // Foreground work may have started during the final
+                    // signature/Gatekeeper pass or in the run-loop turn above.
+                    // Gate and spawn in this same callback, so no AppKit event
+                    // can start user work between the last check and quit.
+                    if self.relaunchBlockReason?() != nil {
+                        self.state = .ready(version: version)
+                        self.installAndRelaunchWhenReady = true
+                        self.installWhenSafe()
+                        return
+                    }
+                    self.installAndRelaunchWhenReady = false
+                    guard self.spawnHelper(
+                        staged: staged, version: version, relaunch: true)
+                    else { return }
+                    if let terminationHandler = self.terminationHandler {
+                        terminationHandler()
+                    } else {
+                        NSApp.terminate(nil)
+                    }
+                    // Last-resort guarantee on a queue the main-thread quit
+                    // cannot starve: if graceful termination still stalls,
+                    // hard-exit so the swap helper (which re-verifies the exact
+                    // bytes it installs) can finish. The engine self-exits via
+                    // --parent-pid, so a hard exit loses nothing. 75s clears
+                    // the 60s a meeting finalize may legitimately hold the
+                    // quit (AppDelegate's watchdog), so this never clips a real
+                    // finalize — only a genuine hang.
+                    DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                        deadline: .now() + 75
+                    ) {
+                        veloraLog(
+                            "Velora: update quit stalled >75s — forcing exit for the swap helper")
+                        exit(0)
+                    }
                 }
                 RunLoop.main.add(quit, forMode: .common)
-                // Last-resort guarantee on a queue the main-thread quit cannot
-                // starve: if graceful termination still stalls, hard-exit so the
-                // swap helper (which re-verifies the exact bytes it installs)
-                // can finish. The engine self-exits via --parent-pid, so a hard
-                // exit loses nothing. 75s clears the 60s a meeting finalize may
-                // legitimately hold the quit (AppDelegate's watchdog), so this
-                // never clips a real finalize — only a genuine hang.
-                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 75) {
-                    veloraLog("Velora: update quit stalled >75s — forcing exit for the swap helper")
-                    exit(0)
-                }
             }
+        }
+    }
+
+    private func cancelInstallRetry() {
+        installRetryWorkItem?.cancel()
+        installRetryWorkItem = nil
+        lastRelaunchBlockReason = nil
+    }
+
+    private func abandonVerification(version: String) {
+        generation += 1
+        pendingUpdate = nil
+        downloadTask = nil
+        installAndRelaunchWhenReady = false
+        cancelInstallRetry()
+        state = .idle
+        // Queued on the same serial worker as verification, so it runs after
+        // any current mount/copy finishes and cannot race a replacement
+        // version's later verification.
+        let staged = Self.stagedURL(for: version)
+        workQueue.async { try? FileManager.default.removeItem(at: staged) }
+    }
+
+    func cancelPendingInstall() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard installAndRelaunchWhenReady else { return }
+        switch state {
+        case .downloading, .verifying, .ready:
+            installAndRelaunchWhenReady = false
+            cancelInstallRetry()
+            // Intent changed while the public state stayed the same.
+            NotificationCenter.default.post(
+                name: .veloraUpdateStateChanged, object: nil)
+        case .idle, .installing, .failed:
+            break
+        }
+    }
+
+    /// Skip/Later suppress automatic work for the exact release. Explicit
+    /// install intent never exposes those controls, so this cannot cancel a
+    /// user-committed install.
+    func suppressAutomaticAttempt(for version: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        switch state {
+        case .downloading(let active, _) where active == version:
+            cancelDownload()
+        case .verifying(let active) where active == version:
+            abandonVerification(version: version)
+        case .ready(let active) where active == version:
+            discardStagedUpdate()
+        case .idle, .downloading, .verifying, .ready, .installing, .failed:
+            break
         }
     }
 
@@ -461,7 +672,17 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// the helper itself re-validates the signature of the exact bytes it
     /// installs, so no slow verification happens on the quit path.
     func installOnQuitIfReady() {
-        guard AppConfig.shared.autoInstallUpdates else { return }
+        guard case .ready(let version) = state else { return }
+        let config = AppConfig.shared
+        let explicitlyRequested = installAndRelaunchWhenReady
+        guard explicitlyRequested || (
+            config.autoInstallUpdates
+                && UpdatePromptPolicy.allowsAutomaticAction(
+                    version: version,
+                    skippedVersion: config.skippedUpdateVersion,
+                    deferredVersion: config.deferredUpdateVersion,
+                    deferredUntil: config.deferredUpdateUntil))
+        else { return }
         installOnExit()
     }
 
@@ -472,11 +693,11 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
               Self.installBlocker() == nil else { return }
         let staged = Self.stagedURL(for: version)
         guard FileManager.default.fileExists(atPath: staged.path) else { return }
-        _ = spawnHelper(staged: staged, relaunch: false)
+        _ = spawnHelper(staged: staged, version: version, relaunch: false)
     }
 
     @discardableResult
-    private func spawnHelper(staged: URL, relaunch: Bool) -> Bool {
+    private func spawnHelper(staged: URL, version: String, relaunch: Bool) -> Bool {
         let dir = Self.updatesDirectory
         let script = dir.appendingPathComponent("install.sh")
         let log = dir.appendingPathComponent("install.log")
@@ -498,6 +719,8 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             relaunch ? "1" : "0",
             log.path,
             Self.requiredTeamID,
+            Self.requiredBundleID,
+            version,
         ]
         proc.standardInput = FileHandle.nullDevice
         proc.standardOutput = FileHandle.nullDevice
@@ -520,9 +743,9 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// - copies the staged app onto the target's volume first, so both `mv`s
     ///   below are atomic same-device renames — a cross-volume `mv` of a
     ///   directory can die half-copied;
-    /// - re-validates the copy's code signature and team AFTER the app has
-    ///   exited, on the exact bytes about to be installed ($6 empty skips
-    ///   this — selftest dry-runs only, the app always passes the team);
+    /// - re-validates signature, team, bundle ID, version, and Gatekeeper
+    ///   acceptance AFTER the app has exited, on the exact bytes about to be
+    ///   installed ($6 empty skips this — selftest dry-runs only);
     /// - restore path removes any partial target before putting the old
     ///   bundle back, and checks that the restore actually worked;
     /// - on any failure with relaunch requested, reopens whatever bundle is
@@ -531,8 +754,10 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     #!/bin/sh
     # Velora update helper — spawned by the app right before it exits.
     # $1 app pid   $2 staged .app   $3 target .app   $4 relaunch (0/1)
-    # $5 log   $6 required TeamIdentifier ("" skips signature re-check)
+    # $5 log   $6 TeamIdentifier ("" skips dry-run checks)
+    # $7 bundle identifier   $8 expected marketing version
     PID="$1"; STAGED="$2"; TARGET="$3"; RELAUNCH="$4"; LOG="$5"; TEAM="$6"
+    BUNDLE_ID="$7"; VERSION="$8"
     exec >> "$LOG" 2>&1
 
     # Reopen an app for the user on failure: the target if it survived,
@@ -588,9 +813,26 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         rm -rf "$PRE"
         fail "update failed signature validation"
       fi
-      if ! run_to /usr/bin/codesign -dvv "$PRE" 2>&1 | grep -q "^TeamIdentifier=$TEAM$"; then
+      if ! run_to /usr/bin/codesign -dvv "$PRE" 2>&1 | /usr/bin/grep -Fqx "TeamIdentifier=$TEAM"; then
         rm -rf "$PRE"
         fail "update signed by the wrong team"
+      fi
+      if ! run_to /usr/bin/codesign -dvv "$PRE" 2>&1 | /usr/bin/grep -Fqx "Identifier=$BUNDLE_ID"; then
+        rm -rf "$PRE"
+        fail "update signed for a different app"
+      fi
+      INFO="$PRE/Contents/Info.plist"
+      if [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INFO" 2>/dev/null)" != "$BUNDLE_ID" ]; then
+        rm -rf "$PRE"
+        fail "update bundle identifier does not match"
+      fi
+      if [ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO" 2>/dev/null)" != "$VERSION" ]; then
+        rm -rf "$PRE"
+        fail "update version does not match"
+      fi
+      if ! run_to /usr/sbin/spctl --assess --type execute "$PRE"; then
+        rm -rf "$PRE"
+        fail "Gatekeeper rejected the update"
       fi
     fi
 
@@ -610,7 +852,9 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     rm -rf "$OLD" "$STAGED"
     echo "$(date) helper: installed $TARGET"
     if [ "$RELAUNCH" = "1" ]; then
-      /usr/bin/open "$TARGET"
+      if ! /usr/bin/open "$TARGET"; then
+        fail "update installed but relaunch failed"
+      fi
     fi
     exit 0
     """
@@ -629,6 +873,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             else { return }
             let current = UpdateChecker.currentVersion
             let canInstall = Self.canInstallInPlace
+            let config = AppConfig.shared
             var adopted: (version: String, url: URL)?
             for entry in entries {
                 let name = entry.lastPathComponent
@@ -637,6 +882,11 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                    name.hasPrefix("Velora-"), entry.pathExtension == "app" {
                     let version = String(name.dropFirst("Velora-".count).dropLast(".app".count))
                     if UpdateChecker.isNewer(version, than: current),
+                       UpdatePromptPolicy.allowsAutomaticAction(
+                            version: version,
+                            skippedVersion: config.skippedUpdateVersion,
+                            deferredVersion: config.deferredUpdateVersion,
+                            deferredUntil: config.deferredUpdateUntil),
                        UpdateChecker.isNewer(version, than: adopted?.version ?? current),
                        Self.verifyStagedApp(at: entry, expectedVersion: version) == nil {
                         if let previous = adopted { try? fm.removeItem(at: previous.url) }
@@ -649,7 +899,27 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             guard let adopted else { return }
             veloraLog("Velora: found verified staged update \(adopted.version) from a previous run")
             DispatchQueue.main.async {
-                if case .idle = self.state { self.state = .ready(version: adopted.version) }
+                let config = AppConfig.shared
+                // A download/verification that started while launch adoption
+                // was checking may now own this version's staging path. Leave
+                // cleanup to that pipeline (or the next launch) rather than
+                // deleting bytes out from under it.
+                guard case .idle = self.state else { return }
+                guard UpdatePromptPolicy.allowsAutomaticAction(
+                        version: adopted.version,
+                        skippedVersion: config.skippedUpdateVersion,
+                        deferredVersion: config.deferredUpdateVersion,
+                        deferredUntil: config.deferredUpdateUntil)
+                else {
+                    // Skip/Later may have been chosen while the slow
+                    // signature/Gatekeeper pass above was in flight. Do not
+                    // publish stale ready state or leave the suppressed bundle.
+                    self.workQueue.async {
+                        try? FileManager.default.removeItem(at: adopted.url)
+                    }
+                    return
+                }
+                self.state = .ready(version: adopted.version)
             }
         }
     }

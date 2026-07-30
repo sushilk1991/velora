@@ -348,6 +348,18 @@ final class DictationController: NSObject {
         return false
     }
 
+    /// User-owned foreground work that an updater relaunch must not cancel.
+    /// Edit-learning timers are intentionally excluded: their durable input
+    /// is already saved and they are safe to resume on a later edit.
+    var hasUserOperationInFlight: Bool {
+        phase != .idle
+            || pendingReformat != nil
+            || pendingEdit != nil
+            || sublimeCaptureID != nil
+            || sublimeApplyID != nil
+            || externalApproval != nil
+    }
+
     // MARK: - Menubar entry point
 
     /// Menubar "Start/Stop Dictation" — always toggle semantics.

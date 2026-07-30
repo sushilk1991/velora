@@ -139,6 +139,7 @@ enum Selftest {
         testEmptyFinalFeedback()
         testClipboardStaging()
         testUpdateChecker()
+        testStatusMenuUpdateEntry()
         if ProcessInfo.processInfo.environment["VELORA_LIVE_AUDIO_SELFTEST"] == "1" {
             testLiveMicrophoneCapture()
             testLiveSystemAudioCapture()
@@ -152,6 +153,23 @@ enum Selftest {
 
     // MARK: - Update checker
 
+    private static func testStatusMenuUpdateEntry() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-status-menu-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let history = HistoryStore(url: directory.appendingPathComponent("history.sqlite3"))
+        let controller = StatusItemController(history: history)
+        let menu = NSMenu()
+        controller.menuNeedsUpdate(menu)
+
+        expect(
+            menu.items.contains { $0.title == "Check for Updates…" && $0.isEnabled },
+            "the status menu always exposes a manual update check")
+    }
+
     private static func testUpdateChecker() {
         expect(UpdateChecker.isNewer("0.8.0", than: "0.7.2"), "minor bump is newer")
         expect(UpdateChecker.isNewer("0.10.0", than: "0.9.9"), "numeric not lexicographic")
@@ -164,7 +182,9 @@ enum Selftest {
                "junk suffix compares by numeric prefix")
 
         let ok = """
-        {"tag_name": "v9.9.9", "html_url": "https://github.com/x/y/releases/tag/v9.9.9",
+        {"tag_name": "v9.9.9", "html_url": "https://github.com/sushilk1991/velora/releases/tag/v9.9.9",
+         "body": "## Improvements\\n\\n- One-click updates\\n- Full release notes",
+         "published_at": "2026-07-30T01:02:03Z",
          "assets": [
            {"name": "Velora-9.9.9.zip", "size": 5,
             "browser_download_url": "https://github.com/x/y/releases/download/v9.9.9/Velora-9.9.9.zip"},
@@ -184,6 +204,9 @@ enum Selftest {
             expect(update.asset?.name == "Velora-9.9.9.dmg",
                    "prefers the canonical versioned DMG over other assets")
             expect(update.asset?.size == 42, "carries the asset size")
+            expect(update.notes.contains("One-click updates"),
+                   "carries the complete GitHub release body")
+            expect(update.publishedAt != nil, "parses the release publication date")
         } else {
             expect(false, "release feed with newer tag parses as updateAvailable")
         }
@@ -193,6 +216,8 @@ enum Selftest {
         if case .updateAvailable(let update) = UpdateChecker.parse(
             current: "0.7.2", data: noAssets, response: http, error: nil) {
             expect(update.asset == nil, "release without a DMG still surfaces, without an asset")
+            expect(update.notes == "No release notes were provided for this version.",
+                   "missing release notes get an honest fallback")
         } else {
             expect(false, "release without assets parses as updateAvailable")
         }
@@ -217,8 +242,83 @@ enum Selftest {
         expect(UpdateChecker.assetURLAllowed(
             URL(string: "https://objects.githubusercontent.com/x")!),
             "the release-asset CDN host is allowed")
-        if case .upToDate = UpdateChecker.parse(
-            current: "9.9.9", data: ok, response: http, error: nil) {} else {
+        let restoredAsset = UpdateChecker.restoredAsset(
+            name: "Velora-1.2.3.dmg",
+            rawURL:
+                "https://github.com/sushilk1991/velora/releases/download/v1.2.3/Velora-1.2.3.dmg",
+            size: 12_345)
+        expect(
+            restoredAsset?.name == "Velora-1.2.3.dmg"
+                && restoredAsset?.size == 12_345,
+            "validated cached DMG metadata restores the one-click update asset")
+        expect(
+            UpdateChecker.restoredAsset(
+                name: "Velora-1.2.3.dmg",
+                rawURL: "https://example.com/Velora-1.2.3.dmg",
+                size: 12_345) == nil,
+            "cached DMG metadata from an untrusted host is rejected")
+        let restoredState = UpdateChecker.restoredState(
+            currentVersion: "1.2.2",
+            version: "1.2.3",
+            rawPage:
+                "https://github.com/sushilk1991/velora/releases/tag/v1.2.3",
+            notes: "## Saved notes",
+            publishedAt: Date(timeIntervalSince1970: 10_000),
+            name: "Velora-1.2.3.dmg",
+            rawURL:
+                "https://github.com/sushilk1991/velora/releases/download/v1.2.3/Velora-1.2.3.dmg",
+            size: 12_345)
+        expect(
+            restoredState?.latest.notes == "## Saved notes"
+                && restoredState?.available?.asset?.size == 12_345,
+            "cache rehydration restores both changelog and actionable update state")
+        let currentCachedState = UpdateChecker.restoredState(
+            currentVersion: "1.2.3",
+            version: "1.2.3",
+            rawPage:
+                "https://github.com/sushilk1991/velora/releases/tag/v1.2.3",
+            notes: "Current notes",
+            publishedAt: nil,
+            name: "Velora-1.2.3.dmg",
+            rawURL:
+                "https://github.com/sushilk1991/velora/releases/download/v1.2.3/Velora-1.2.3.dmg",
+            size: 12_345)
+        expect(
+            currentCachedState?.latest.notes == "Current notes"
+                && currentCachedState?.available == nil,
+            "current-version cache restores changelog without a phantom update")
+        expect(
+            UpdateChecker.restoredState(
+                currentVersion: "1.2.4",
+                version: "1.2.3",
+                rawPage:
+                    "https://github.com/sushilk1991/velora/releases/tag/v1.2.3",
+                notes: "Old notes",
+                publishedAt: nil,
+                name: nil,
+                rawURL: nil,
+                size: 0) == nil,
+            "cache older than the running app is discarded")
+        expect(
+            UpdateChecker.restoredState(
+                currentVersion: "1.2.2",
+                version: "1.2.3",
+                rawPage: "https://example.com/releases/tag/v1.2.3",
+                notes: "Untrusted notes",
+                publishedAt: nil,
+                name: nil,
+                rawURL: nil,
+                size: 0) == nil,
+            "cache with an untrusted release page is discarded")
+        expect(
+            UpdateChecker.allowsPersistentState(feedOverridden: false)
+                && !UpdateChecker.allowsPersistentState(feedOverridden: true),
+            "a local update E2E feed cannot mutate persistent update preferences")
+        if case .upToDate(let release) = UpdateChecker.parse(
+            current: "9.9.9", data: ok, response: http, error: nil) {
+            expect(release.notes.contains("Full release notes"),
+                   "an up-to-date check still returns changelog content")
+        } else {
             expect(false, "same-version feed parses as upToDate")
         }
         let rateLimited = HTTPURLResponse(
@@ -233,6 +333,174 @@ enum Selftest {
             response: http, error: nil) {} else {
             expect(false, "garbage body parses as failed")
         }
+        expect(UpdateChecker.releasePageAllowed(
+            URL(string: "https://github.com/sushilk1991/velora/releases/tag/v1.2.3")!),
+            "the official Velora release page is allowed")
+        expect(!UpdateChecker.releasePageAllowed(
+            URL(string: "https://example.com/fake-release")!),
+            "an off-site release page is never trusted by the update window")
+        let oversizedNotes = String(
+            repeating: "a", count: UpdateChecker.maximumReleaseNotesBytes + 100)
+        let boundedNotes = UpdateChecker.boundedReleaseNotes(oversizedNotes)
+        expect(
+            boundedNotes.utf8.count <= UpdateChecker.maximumReleaseNotesBytes
+                && boundedNotes.contains("View the complete notes on GitHub"),
+            "oversized release notes are bounded with an honest GitHub fallback")
+        let inertLink = ReleaseNotesContentView.inertInlineMarkdown(
+            "[Install now](https://example.com/phishing)")
+        expect(
+            !inertLink.runs.contains(where: { $0.link != nil }),
+            "release-note Markdown links render as inert labels")
+
+        let now = Date(timeIntervalSince1970: 10_000)
+        expect(!UpdatePromptPolicy.shouldPresent(
+            version: "1.2.3", skippedVersion: "1.2.3",
+            deferredVersion: nil, deferredUntil: .distantPast, now: now),
+            "skip suppresses only the exact automatic update prompt")
+        expect(UpdatePromptPolicy.shouldPresent(
+            version: "1.2.4", skippedVersion: "1.2.3",
+            deferredVersion: nil, deferredUntil: .distantPast, now: now),
+            "a newer release bypasses the previously skipped version")
+        expect(!UpdatePromptPolicy.shouldPresent(
+            version: "1.2.3", skippedVersion: nil,
+            deferredVersion: "1.2.3", deferredUntil: now.addingTimeInterval(60), now: now),
+            "remind-later suppresses the exact version until its deadline")
+        expect(UpdatePromptPolicy.shouldPresent(
+            version: "1.2.4", skippedVersion: nil,
+            deferredVersion: "1.2.3", deferredUntil: now.addingTimeInterval(60), now: now),
+            "a new release bypasses an older version's reminder")
+        expect(UpdatePromptPolicy.shouldPresent(
+            version: "1.2.3", skippedVersion: nil,
+            deferredVersion: "1.2.3", deferredUntil: now, now: now),
+            "the automatic prompt returns when the reminder deadline arrives")
+        var skippedVersion: String? = "1.2.3"
+        var deferredVersion: String? = "1.2.3"
+        var deferredUntil = now.addingTimeInterval(60)
+        UpdatePromptPolicy.clearSuppression(
+            for: "1.2.3",
+            skippedVersion: &skippedVersion,
+            deferredVersion: &deferredVersion,
+            deferredUntil: &deferredUntil)
+        expect(
+            skippedVersion == nil && deferredVersion == nil
+                && deferredUntil == .distantPast,
+            "an explicit install clears exact-version Skip and Later suppression")
+        skippedVersion = "1.2.4"
+        deferredVersion = "1.2.4"
+        deferredUntil = now.addingTimeInterval(60)
+        UpdatePromptPolicy.clearSuppression(
+            for: "1.2.3",
+            skippedVersion: &skippedVersion,
+            deferredVersion: &deferredVersion,
+            deferredUntil: &deferredUntil)
+        expect(
+            skippedVersion == "1.2.4" && deferredVersion == "1.2.4"
+                && deferredUntil > now,
+            "an explicit install preserves suppression for a different release")
+        skippedVersion = "1.2.3"
+        deferredVersion = nil
+        deferredUntil = .distantPast
+        UpdatePromptPolicy.setReminder(
+            for: "1.2.3",
+            skippedVersion: &skippedVersion,
+            deferredVersion: &deferredVersion,
+            deferredUntil: &deferredUntil,
+            now: now)
+        expect(
+            skippedVersion == nil && deferredVersion == "1.2.3"
+                && deferredUntil == now.addingTimeInterval(
+                    UpdatePromptPolicy.reminderInterval),
+            "Remind Me Later replaces an earlier Skip for the exact release")
+        expect(
+            !UpdateWindowPresentation.manual.defersOnClose
+                && UpdateWindowPresentation.automatic.defersOnClose,
+            "only an automatically presented update treats window close as Remind Me Later")
+        expect(
+            UpdateWindowPresentation.resolved(
+                current: .manual,
+                incoming: .automatic,
+                windowIsVisible: true) == .manual,
+            "an automatic check cannot reclassify an already-visible manual changelog")
+        expect(
+            !UpdateWindowController.shouldDeferOnClose(
+                presentation: .manual,
+                closingProgrammatically: false)
+                && UpdateWindowController.shouldDeferOnClose(
+                    presentation: .automatic,
+                    closingProgrammatically: false)
+                && !UpdateWindowController.shouldDeferOnClose(
+                    presentation: .automatic,
+                    closingProgrammatically: true),
+            "window-close wiring defers only a user-closed automatic prompt")
+
+        let backgroundDownloadAction = UpdateWindowModel.primaryAction(
+            releaseVersion: "1.2.3", isUpdateAvailable: true,
+            canInstallInPlace: true,
+            installerState: .downloading(version: "1.2.3", progress: 0.4),
+            userRequestedInstall: false)
+        expect(
+            backgroundDownloadAction
+                == .init(title: "Install Update", disabled: false),
+            "an automatic download still accepts the user's one-click install intent")
+        let committedDownloadAction = UpdateWindowModel.primaryAction(
+            releaseVersion: "1.2.3", isUpdateAvailable: true,
+            canInstallInPlace: true,
+            installerState: .verifying(version: "1.2.3"),
+            userRequestedInstall: true)
+        expect(
+            committedDownloadAction
+                == .init(title: "Installing…", disabled: true),
+            "an explicit install intent cannot be submitted twice while verification runs")
+        let waitingAction = UpdateWindowModel.primaryAction(
+            releaseVersion: "1.2.3", isUpdateAvailable: true,
+            canInstallInPlace: true,
+            installerState: .ready(version: "1.2.3"),
+            userRequestedInstall: true)
+        expect(
+            waitingAction
+                == .init(title: "Waiting to Install…", disabled: true),
+            "a verified update shows that it is waiting for foreground work")
+        expect(
+            UpdateWindowModel.installIntentApplies(
+                to: "1.2.3",
+                installerState: .ready(version: "1.2.3"),
+                explicitInstallRequested: true),
+            "the update window adopts explicit restart intent from another surface")
+        expect(
+            !UpdateWindowModel.installIntentApplies(
+                to: "1.2.4",
+                installerState: .ready(version: "1.2.3"),
+                explicitInstallRequested: true),
+            "external install intent does not leak onto a different release")
+        let differentDownloadAction = UpdateWindowModel.primaryAction(
+            releaseVersion: "1.2.4", isUpdateAvailable: true,
+            canInstallInPlace: true,
+            installerState: .downloading(version: "1.2.3", progress: 0.4),
+            userRequestedInstall: false)
+        expect(
+            differentDownloadAction.disabled
+                && differentDownloadAction.title.contains("1.2.3"),
+            "a different in-flight release is identified instead of accepting a no-op install")
+        expect(UpdateRelaunchSafety.blockReason(
+            dictationBusy: false,
+            fileTranscriptionBusy: false,
+            meetingCaptureBusy: false) == nil,
+            "a one-click update may relaunch when foreground work is idle")
+        expect(UpdateRelaunchSafety.blockReason(
+            dictationBusy: true,
+            fileTranscriptionBusy: false,
+            meetingCaptureBusy: false)?.contains("dictation") == true,
+            "a one-click update waits for active dictation")
+        expect(UpdateRelaunchSafety.blockReason(
+            dictationBusy: false,
+            fileTranscriptionBusy: true,
+            meetingCaptureBusy: false)?.contains("audio-file") == true,
+            "a one-click update waits for active file transcription")
+        expect(UpdateRelaunchSafety.blockReason(
+            dictationBusy: false,
+            fileTranscriptionBusy: false,
+            meetingCaptureBusy: true)?.contains("meeting") == true,
+            "a one-click update waits for meeting capture or finalization")
 
         testUpdateInstaller()
     }
@@ -270,15 +538,27 @@ enum Selftest {
                "helper can relaunch the swapped-in app")
         expect(script.contains("codesign --verify --deep --strict"),
                "helper re-validates the signature of the bytes it installs")
+        expect(script.contains("CFBundleIdentifier"),
+               "helper re-validates the exact bundle identifier")
+        expect(script.contains("CFBundleShortVersionString"),
+               "helper re-validates the exact release version")
+        expect(script.contains("spctl --assess --type execute"),
+               "helper re-runs Gatekeeper on the exact bytes it installs")
         expect(!script.contains("/Applications"),
                "helper hard-codes no paths — everything arrives as arguments")
 
         testHelperScriptDryRun(script)
 
-        // A bare `swift build` binary (what runs this selftest) must never
-        // think it can swap itself.
-        expect(UpdateInstaller.installBlocker() != nil,
-               "bare binaries are blocked from in-place installs")
+        // Exercise the eligibility branch for the artifact actually running
+        // the selftest: debug binaries cannot swap themselves, while the
+        // packaged app produced by make-app is writable and installable.
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            expect(UpdateInstaller.installBlocker() == nil,
+                   "a writable packaged app can install updates in place")
+        } else {
+            expect(UpdateInstaller.installBlocker() != nil,
+                   "bare binaries are blocked from in-place installs")
+        }
 
         // The verify gate rejects an unsigned bundle outright.
         let fake = FileManager.default.temporaryDirectory
@@ -310,7 +590,7 @@ enum Selftest {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/sh")
             proc.arguments = [scriptFile.path, deadPID, stagedPath, target.path,
-                              "0", log.path, ""]
+                              "0", log.path, "", "", ""]
             if let pathPrefix {
                 var environment = ProcessInfo.processInfo.environment
                 environment["PATH"] = pathPrefix + ":" + (environment["PATH"] ?? "/usr/bin:/bin")
@@ -547,6 +827,17 @@ enum Selftest {
         legacy.set(Hotkey.f19.defaultsRepresentation, forKey: "velora.hotkey.v2")
         legacy.set("hi", forKey: "velora.language")
         legacy.set(true, forKey: "velora.localAgentAccess")
+        legacy.set("1.2.3", forKey: "velora.cachedReleaseVersion")
+        legacy.set(
+            "https://github.com/sushilk1991/velora/releases/tag/v1.2.3",
+            forKey: "velora.cachedReleasePage")
+        legacy.set("## Saved notes", forKey: "velora.cachedReleaseNotes")
+        legacy.set(10_000.0, forKey: "velora.cachedReleasePublishedAt")
+        legacy.set("Velora-1.2.3.dmg", forKey: "velora.cachedReleaseAssetName")
+        legacy.set(
+            "https://github.com/sushilk1991/velora/releases/download/v1.2.3/Velora-1.2.3.dmg",
+            forKey: "velora.cachedReleaseAssetURL")
+        legacy.set(12_345, forKey: "velora.cachedReleaseAssetSize")
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try Data("{\"cleanup_model\":\"mlx-community/Test-Cleanup\",\"streaming_cleanup\":false,\"audio_max_mb\":2048}".utf8)
@@ -562,6 +853,13 @@ enum Selftest {
                    "settings migration preserves advanced engine preferences")
             expect(AppConfig.migratedLocalSettings(defaults: legacy).localAgentAccess,
                    "settings migration keeps security gates local")
+            let local = AppConfig.migratedLocalSettings(defaults: legacy)
+            expect(local.cachedReleaseVersion == "1.2.3"
+                   && local.cachedReleaseNotes == "## Saved notes"
+                   && local.cachedReleasePublishedAt == 10_000
+                   && local.cachedReleaseAssetName == "Velora-1.2.3.dmg"
+                   && local.cachedReleaseAssetSize == 12_345,
+                   "the machine-local changelog and DMG metadata survive relaunch")
 
             let wireDirectory = directory.appendingPathComponent("wire-version-migration")
             let wireSettings = wireDirectory.appendingPathComponent("settings.json")

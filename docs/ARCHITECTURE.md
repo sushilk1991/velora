@@ -212,6 +212,34 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 
 Spike finding: grants must be earned by the signed .app bundle (stable ad-hoc identity), not the bare binary; bare-binary tests mislead due to responsible-process attribution.
 
+## Software updates
+
+`UpdateChecker` reads the latest GitHub release, including its complete release
+body and publication date. Automatic discoveries, manual checks, the menubar,
+and Settings all converge on one native release window. Skip and Remind Me
+Later are machine-local and scoped to the exact version, so a newer release is
+never hidden by an older decision. That policy gates every automatic path:
+prompting, background staging, staged-update adoption, and quit-time install.
+Settings exposes a bounded machine-local cache of the latest fetched notes and
+the public release history. A cached update remains actionable during the
+daily-check interval only when its DMG metadata still points to an allowed
+GitHub host; the normal size, signature, identity, version, and Gatekeeper
+checks remain mandatory. Remote Markdown links are inert inside Velora, with
+the separately validated GitHub release-page button as the only navigation
+action.
+
+An explicit **Install Update** is one decision: `UpdateInstaller` downloads,
+mounts, stages, verifies, swaps, and relaunches without a second Install or
+Discard prompt. The existing security boundary remains mandatory: exact asset
+size and version, strict code-signature validation, pinned team and bundle
+identifiers, Gatekeeper/notarization assessment, and a detached swap helper
+that re-verifies the staged bytes after the current process exits. Automatic
+installation may stage a verified release in the background and apply it on
+quit; clicking Install while that work is in flight upgrades the same attempt
+to install and relaunch as soon as verification completes. The relaunch waits
+for dictation, voice editing, file transcription, or meeting capture/finalize
+to become idle, and rechecks that gate after the final signature pass.
+
 ## Repo layout
 
 ```

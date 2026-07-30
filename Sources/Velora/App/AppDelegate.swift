@@ -11,6 +11,25 @@ enum MeetingProcessingHUDPolicy {
     }
 }
 
+enum UpdateRelaunchSafety {
+    static func blockReason(
+        dictationBusy: Bool,
+        fileTranscriptionBusy: Bool,
+        meetingCaptureBusy: Bool
+    ) -> String? {
+        if dictationBusy {
+            return "Waiting for dictation or voice editing to finish"
+        }
+        if fileTranscriptionBusy {
+            return "Waiting for audio-file transcription to finish"
+        }
+        if meetingCaptureBusy {
+            return "Waiting for the meeting recording to finish"
+        }
+        return nil
+    }
+}
+
 /// Owns the live revocation edge separately from the settings window. Keeping
 /// this tiny observer injectable makes the security boundary deterministic to
 /// test without constructing the full application graph.
@@ -378,18 +397,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             config.hotkey.displayLabel,
             config.hotkeyMode == .toggle ? "toggle" : "hold"))
 
+        // A validated cached release remains actionable across relaunches even
+        // while the daily network check is still within its 20-hour gate.
+        statusController.updateAvailable = UpdateChecker.shared.available
         statusController.install()
         contextTracker.start()
         hotkeyMonitor.start()
 
-        UpdateChecker.shared.onUpdate = { [weak self] update in
+        UpdateInstaller.shared.relaunchBlockReason = { [weak self] in
+            guard let self else { return nil }
+            return UpdateRelaunchSafety.blockReason(
+                dictationBusy: self.dictation.hasUserOperationInFlight,
+                fileTranscriptionBusy: self.transcriber.isTranscribing,
+                meetingCaptureBusy: self.meetingCoordinator.foregroundCaptureActive
+                    || self.meetingCoordinator.terminationWorkInFlight)
+        }
+
+        UpdateChecker.shared.onUpdate = { [weak self] update, origin in
             guard let self else { return }
             self.statusController.updateAvailable = update
+            let automaticAllowed = UpdatePromptPolicy.allowsAutomaticAction(
+                version: update.version,
+                skippedVersion: self.config.skippedUpdateVersion,
+                deferredVersion: self.config.deferredUpdateVersion,
+                deferredUntil: self.config.deferredUpdateUntil)
             // Opt-in autoupdate: fetch + verify + stage silently; the swap
             // happens on the next quit or via "Restart to Update". begin()
             // no-ops while busy or when this version is already staged.
-            if self.config.autoInstallUpdates, UpdateInstaller.canInstallInPlace {
+            if self.config.autoInstallUpdates, automaticAllowed,
+               UpdateInstaller.canInstallInPlace {
                 UpdateInstaller.shared.begin(update)
+            }
+            // A daily check surfaces the full release notes without taking
+            // keyboard focus from the app the user is working in. Manual
+            // checks always reopen the release window even when this exact
+            // version's automatic path is skipped or deferred.
+            if origin == .automatic {
+                UpdateWindowController.shared.showAutomatically(update)
             }
         }
         UpdateChecker.shared.startPeriodicChecks()
@@ -692,6 +736,27 @@ extension AppDelegate: StatusItemControllerDelegate {
 
     func statusItemOpenSetupAssistant() {
         showOnboarding(startingAt: firstMissingPermissionStep)
+    }
+
+    func statusItemCheckForUpdates() {
+        UpdateChecker.shared.check(origin: .manual) { [weak self] outcome in
+            guard let self else { return }
+            switch outcome {
+            case .upToDate(let release):
+                self.statusController.updateAvailable = nil
+                UpdateWindowController.shared.show(release)
+            case .updateAvailable(let update):
+                self.statusController.updateAvailable = update
+                UpdateWindowController.shared.show(update)
+            case .failed(let reason):
+                let alert = NSAlert()
+                alert.alertStyle = .warning
+                alert.messageText = "Couldn’t Check for Updates"
+                alert.informativeText = reason
+                alert.addButton(withTitle: "OK")
+                VisibleAlert.present(alert) { _ in }
+            }
+        }
     }
 
     func statusItemCheckPermissions() {

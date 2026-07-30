@@ -62,6 +62,8 @@ final class SettingsModel: ObservableObject {
     private var statusObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
     private var updateStateObserver: NSObjectProtocol?
+    private var updateCheckObserver: NSObjectProtocol?
+    private var updatePreferencesObserver: NSObjectProtocol?
     let dictionary: DictionaryRepository
     let dictionarySync: ICloudDictionarySync
     private var dictionaryRowsObserver: AnyCancellable?
@@ -304,6 +306,7 @@ final class SettingsModel: ObservableObject {
         autoInstallUpdates = config.autoInstallUpdates
         updateState = UpdateInstaller.shared.state
         availableUpdate = UpdateChecker.shared.available
+        latestRelease = UpdateChecker.shared.latestRelease
         meetingSuggestions = config.meetingSuggestions
         meetingCalendar = config.meetingCalendar
         meetingAudioRetentionDays = config.meetingAudioRetentionDays
@@ -350,6 +353,23 @@ final class SettingsModel: ObservableObject {
             self.updateState = UpdateInstaller.shared.state
             self.availableUpdate = UpdateChecker.shared.available
         }
+        updateCheckObserver = NotificationCenter.default.addObserver(
+            forName: .veloraUpdateCheckCompleted, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.availableUpdate = UpdateChecker.shared.available
+            self.latestRelease = UpdateChecker.shared.latestRelease
+        }
+        updatePreferencesObserver = NotificationCenter.default.addObserver(
+            forName: .veloraUpdatePreferencesChanged, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self else { return }
+            let current = self.config.autoInstallUpdates
+            guard self.autoInstallUpdates != current else { return }
+            self.syncingUpdatePreferences = true
+            self.autoInstallUpdates = current
+            self.syncingUpdatePreferences = false
+        }
         requestStatus()
     }
 
@@ -357,6 +377,10 @@ final class SettingsModel: ObservableObject {
         if let statusObserver { NotificationCenter.default.removeObserver(statusObserver) }
         if let hudPrefsObserver { NotificationCenter.default.removeObserver(hudPrefsObserver) }
         if let updateStateObserver { NotificationCenter.default.removeObserver(updateStateObserver) }
+        if let updateCheckObserver { NotificationCenter.default.removeObserver(updateCheckObserver) }
+        if let updatePreferencesObserver {
+            NotificationCenter.default.removeObserver(updatePreferencesObserver)
+        }
     }
 
     /// Asks the engine for its current status (models, retention, …). Cheap;
@@ -448,6 +472,7 @@ final class SettingsModel: ObservableObject {
     /// prevents published-property observers from writing it dozens more times
     /// or starting unrelated work such as an updater download.
     private var applyingImportedSettings = false
+    private var syncingUpdatePreferences = false
 
     // MARK: - General
 
@@ -631,11 +656,18 @@ final class SettingsModel: ObservableObject {
 
     @Published var autoInstallUpdates: Bool {
         didSet {
-            guard !applyingImportedSettings else { return }
+            guard !applyingImportedSettings, !syncingUpdatePreferences else { return }
             config.autoInstallUpdates = autoInstallUpdates
+            NotificationCenter.default.post(
+                name: .veloraUpdatePreferencesChanged, object: nil)
             // Flipping the toggle on with an update already discovered should
             // act on it now, not wait for tomorrow's check.
             if autoInstallUpdates, let update = availableUpdate,
+               UpdatePromptPolicy.allowsAutomaticAction(
+                    version: update.version,
+                    skippedVersion: config.skippedUpdateVersion,
+                    deferredVersion: config.deferredUpdateVersion,
+                    deferredUntil: config.deferredUpdateUntil),
                UpdateInstaller.canInstallInPlace {
                 UpdateInstaller.shared.begin(update)
             }
@@ -649,17 +681,22 @@ final class SettingsModel: ObservableObject {
     /// for the Updates section (kept fresh by the state-change observer).
     @Published var updateState: UpdateInstaller.State
     @Published var availableUpdate: UpdateChecker.Update?
+    @Published var latestRelease: UpdateChecker.Release?
 
     func checkForUpdatesNow() {
         updateCheckStatus = "Checking…"
-        UpdateChecker.shared.check { [weak self] outcome in
+        UpdateChecker.shared.check(origin: .manual) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
-            case .upToDate:
+            case .upToDate(let release):
                 self.updateCheckStatus = "You're on the latest version."
+                self.latestRelease = release
+                UpdateWindowController.shared.show(release)
             case .updateAvailable(let update):
                 self.updateCheckStatus = "Velora \(update.version) is available."
                 self.availableUpdate = update
+                self.latestRelease = update
+                UpdateWindowController.shared.show(update)
             case .failed(let reason):
                 self.updateCheckStatus = reason
             }
@@ -673,7 +710,7 @@ final class SettingsModel: ObservableObject {
 
     func startUpdateInstall() {
         guard let update = availableUpdate else { return }
-        UpdateInstaller.shared.begin(update)
+        UpdateWindowController.shared.show(update)
     }
 
     func installStagedUpdate() {
@@ -692,6 +729,14 @@ final class SettingsModel: ObservableObject {
         let url = availableUpdate?.page
             ?? URL(string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest")!
         NSWorkspace.shared.open(url)
+    }
+
+    func showLatestReleaseNotes() {
+        guard let release = latestRelease else {
+            openReleasesPage()
+            return
+        }
+        UpdateWindowController.shared.show(release)
     }
 
     @Published var meetingSuggestions: Bool {

@@ -16,6 +16,8 @@ enum SnapshotRenderer {
         DispatchQueue.main.async {
             renderHUDStates(into: dir)
             renderSidebarRows(into: dir)
+            renderUpdateWindow(into: dir)
+            renderSettingsUpdateChangelog(into: dir)
             renderSettingsPanes(into: dir)
             exit(0)
         }
@@ -110,6 +112,85 @@ enum SnapshotRenderer {
             )
             snapshot(view, size: HUDPanel.panelSize, name: name, dir: dir)
         }
+    }
+
+    // MARK: - Update window
+
+    @MainActor
+    private static func renderUpdateWindow(into dir: URL) {
+        renderUpdateWindow(
+            state: .idle, userRequestedInstall: false,
+            name: "software-update", into: dir)
+        renderUpdateWindow(
+            state: .downloading(version: "9.9.9", progress: 0.42),
+            userRequestedInstall: false,
+            name: "software-update-auto-downloading", into: dir)
+        renderUpdateWindow(
+            state: .ready(version: "9.9.9"),
+            userRequestedInstall: true,
+            name: "software-update-waiting", into: dir)
+    }
+
+    @MainActor
+    private static func renderUpdateWindow(
+        state: UpdateInstaller.State,
+        userRequestedInstall: Bool,
+        name: String,
+        into dir: URL
+    ) {
+        let model = UpdateWindowModel(
+            installBlockerOverride: nil, usesInstallBlockerOverride: true)
+        model.present(sampleUpdateRelease)
+        model.configureSnapshot(
+            installerState: state,
+            userRequestedInstall: userRequestedInstall)
+        let view = NSHostingView(rootView: UpdateWindowView(model: model))
+        snapshot(
+            view, size: NSSize(width: 760, height: 600),
+            name: name, dir: dir)
+    }
+
+    @MainActor
+    private static func renderSettingsUpdateChangelog(into dir: URL) {
+        let view = NSHostingView(rootView:
+            Form {
+                Section {
+                    SettingsReleaseNotesDisclosure(
+                        release: sampleUpdateRelease,
+                        isExpanded: .constant(true),
+                        openFullNotes: {})
+                } header: {
+                    Text("Updates")
+                }
+            }
+            .formStyle(.grouped)
+            .frame(width: 600, height: 360)
+        )
+        snapshot(
+            view, size: NSSize(width: 600, height: 360),
+            name: "settings-update-changelog", dir: dir)
+    }
+
+    private static var sampleUpdateRelease: UpdateChecker.Release {
+        UpdateChecker.Release(
+            version: "9.9.9",
+            page: URL(string: "https://github.com/sushilk1991/velora/releases/tag/v9.9.9")!,
+            notes: """
+            ## Features & Improvements
+
+            - Added a complete release-notes window for every update.
+            - Install Update now downloads, verifies, installs, and relaunches in one step.
+
+            ## Fixes
+
+            - Removed the duplicate Install or Discard decision after verification.
+            - Added version-scoped Skip and Remind Me Later controls.
+            """,
+            publishedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            asset: .init(
+                name: "Velora-9.9.9.dmg",
+                url: URL(string: "https://github.com/sushilk1991/velora/releases/download/v9.9.9/Velora-9.9.9.dmg")!,
+                size: 42))
     }
 
     // MARK: - Sidebar rows

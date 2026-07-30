@@ -222,6 +222,16 @@ final class AppConfig {
         static let updateChecks = "velora.updateChecks"
         static let autoInstallUpdates = "velora.autoInstallUpdates"
         static let lastUpdateCheckAt = "velora.lastUpdateCheckAt"
+        static let skippedUpdateVersion = "velora.skippedUpdateVersion"
+        static let deferredUpdateVersion = "velora.deferredUpdateVersion"
+        static let deferredUpdateUntil = "velora.deferredUpdateUntil"
+        static let cachedReleaseVersion = "velora.cachedReleaseVersion"
+        static let cachedReleasePage = "velora.cachedReleasePage"
+        static let cachedReleaseNotes = "velora.cachedReleaseNotes"
+        static let cachedReleasePublishedAt = "velora.cachedReleasePublishedAt"
+        static let cachedReleaseAssetName = "velora.cachedReleaseAssetName"
+        static let cachedReleaseAssetURL = "velora.cachedReleaseAssetURL"
+        static let cachedReleaseAssetSize = "velora.cachedReleaseAssetSize"
         static let launchAtLogin = "velora.launchAtLogin"
     }
 
@@ -484,6 +494,13 @@ final class AppConfig {
     static func migratedLocalSettings(
         defaults: UserDefaults
     ) -> SettingsDocument.MachineLocalSettings {
+        func validUpdateVersion(_ raw: String?) -> String? {
+            guard let raw, !raw.isEmpty, raw.count <= 64,
+                  raw.range(
+                    of: "^[0-9A-Za-z.-]+$", options: .regularExpression) != nil
+            else { return nil }
+            return raw
+        }
         let inputDevice = defaults.string(forKey: Key.inputDeviceUID)
         let validInputDevice = inputDevice.flatMap { value in
             !value.isEmpty && value.count <= 1024
@@ -492,6 +509,39 @@ final class AppConfig {
                 }) ? value : nil
         }
         let lastUpdateCheck = defaults.double(forKey: Key.lastUpdateCheckAt)
+        let deferredUpdateUntil = defaults.double(forKey: Key.deferredUpdateUntil)
+        let cachedReleasePage = defaults.string(forKey: Key.cachedReleasePage)
+            .flatMap { value in
+                !value.isEmpty && value.count <= 2_048
+                    && value.unicodeScalars.allSatisfy {
+                        !CharacterSet.controlCharacters.contains($0)
+                    } ? value : nil
+            }
+        let cachedReleaseNotes = defaults.string(forKey: Key.cachedReleaseNotes)
+            .flatMap { value in
+                !value.isEmpty && value.utf8.count <= 524_288 ? value : nil
+            }
+        let cachedReleasePublishedAt =
+            defaults.double(forKey: Key.cachedReleasePublishedAt)
+        let cachedReleaseAssetName = defaults.string(
+            forKey: Key.cachedReleaseAssetName
+        ).flatMap { value in
+            !value.isEmpty && value.count <= 255 && value.hasSuffix(".dmg")
+                && !value.contains("/") && !value.contains("\\")
+                && value.unicodeScalars.allSatisfy {
+                    !CharacterSet.controlCharacters.contains($0)
+                } ? value : nil
+        }
+        let cachedReleaseAssetURL = defaults.string(
+            forKey: Key.cachedReleaseAssetURL
+        ).flatMap { value in
+            !value.isEmpty && value.count <= 2_048
+                && value.unicodeScalars.allSatisfy {
+                    !CharacterSet.controlCharacters.contains($0)
+                } ? value : nil
+        }
+        let cachedReleaseAssetSize = defaults.integer(
+            forKey: Key.cachedReleaseAssetSize)
         return .init(
             onboardingComplete: defaults.bool(forKey: Key.onboardingComplete),
             settingsSidebarCollapsed: defaults.bool(forKey: Key.settingsSidebarCollapsed),
@@ -499,7 +549,22 @@ final class AppConfig {
             localAgentAccess: defaults.bool(forKey: Key.localAgentAccess),
             meetingCalendar: defaults.bool(forKey: Key.meetingCalendar),
             launchAtLogin: defaults.bool(forKey: Key.launchAtLogin),
-            lastUpdateCheck: lastUpdateCheck.isFinite ? max(0, lastUpdateCheck) : 0)
+            lastUpdateCheck: lastUpdateCheck.isFinite ? max(0, lastUpdateCheck) : 0,
+            skippedUpdateVersion: validUpdateVersion(
+                defaults.string(forKey: Key.skippedUpdateVersion)),
+            deferredUpdateVersion: validUpdateVersion(
+                defaults.string(forKey: Key.deferredUpdateVersion)),
+            deferredUpdateUntil: deferredUpdateUntil.isFinite
+                ? max(0, deferredUpdateUntil) : 0,
+            cachedReleaseVersion: validUpdateVersion(
+                defaults.string(forKey: Key.cachedReleaseVersion)),
+            cachedReleasePage: cachedReleasePage,
+            cachedReleaseNotes: cachedReleaseNotes,
+            cachedReleasePublishedAt: cachedReleasePublishedAt.isFinite
+                ? max(0, cachedReleasePublishedAt) : 0,
+            cachedReleaseAssetName: cachedReleaseAssetName,
+            cachedReleaseAssetURL: cachedReleaseAssetURL,
+            cachedReleaseAssetSize: max(0, cachedReleaseAssetSize))
     }
 
     @discardableResult
@@ -617,6 +682,45 @@ final class AppConfig {
         defaults.set(local.meetingCalendar, forKey: Key.meetingCalendar)
         defaults.set(local.launchAtLogin, forKey: Key.launchAtLogin)
         defaults.set(local.lastUpdateCheck, forKey: Key.lastUpdateCheckAt)
+        if let version = local.skippedUpdateVersion {
+            defaults.set(version, forKey: Key.skippedUpdateVersion)
+        } else {
+            defaults.removeObject(forKey: Key.skippedUpdateVersion)
+        }
+        if let version = local.deferredUpdateVersion {
+            defaults.set(version, forKey: Key.deferredUpdateVersion)
+        } else {
+            defaults.removeObject(forKey: Key.deferredUpdateVersion)
+        }
+        defaults.set(local.deferredUpdateUntil, forKey: Key.deferredUpdateUntil)
+        if let version = local.cachedReleaseVersion {
+            defaults.set(version, forKey: Key.cachedReleaseVersion)
+        } else {
+            defaults.removeObject(forKey: Key.cachedReleaseVersion)
+        }
+        if let page = local.cachedReleasePage {
+            defaults.set(page, forKey: Key.cachedReleasePage)
+        } else {
+            defaults.removeObject(forKey: Key.cachedReleasePage)
+        }
+        if let notes = local.cachedReleaseNotes {
+            defaults.set(notes, forKey: Key.cachedReleaseNotes)
+        } else {
+            defaults.removeObject(forKey: Key.cachedReleaseNotes)
+        }
+        defaults.set(
+            local.cachedReleasePublishedAt, forKey: Key.cachedReleasePublishedAt)
+        if let name = local.cachedReleaseAssetName {
+            defaults.set(name, forKey: Key.cachedReleaseAssetName)
+        } else {
+            defaults.removeObject(forKey: Key.cachedReleaseAssetName)
+        }
+        if let url = local.cachedReleaseAssetURL {
+            defaults.set(url, forKey: Key.cachedReleaseAssetURL)
+        } else {
+            defaults.removeObject(forKey: Key.cachedReleaseAssetURL)
+        }
+        defaults.set(local.cachedReleaseAssetSize, forKey: Key.cachedReleaseAssetSize)
     }
 
     // MARK: - App-side preferences
@@ -846,6 +950,89 @@ final class AppConfig {
     var lastUpdateCheck: Date {
         get { Date(timeIntervalSince1970: readLocalSetting(\.lastUpdateCheck)) }
         set { updateLocalSettings { $0.lastUpdateCheck = max(0, newValue.timeIntervalSince1970) } }
+    }
+
+    var skippedUpdateVersion: String? {
+        get { readLocalSetting(\.skippedUpdateVersion) }
+        set { updateLocalSettings { $0.skippedUpdateVersion = newValue } }
+    }
+
+    var deferredUpdateVersion: String? {
+        get { readLocalSetting(\.deferredUpdateVersion) }
+        set { updateLocalSettings { $0.deferredUpdateVersion = newValue } }
+    }
+
+    var deferredUpdateUntil: Date {
+        get { Date(timeIntervalSince1970: readLocalSetting(\.deferredUpdateUntil)) }
+        set {
+            updateLocalSettings {
+                $0.deferredUpdateUntil = max(0, newValue.timeIntervalSince1970)
+            }
+        }
+    }
+
+    var cachedReleaseVersion: String? {
+        get { readLocalSetting(\.cachedReleaseVersion) }
+        set { updateLocalSettings { $0.cachedReleaseVersion = newValue } }
+    }
+
+    var cachedReleasePage: String? {
+        get { readLocalSetting(\.cachedReleasePage) }
+        set { updateLocalSettings { $0.cachedReleasePage = newValue } }
+    }
+
+    var cachedReleaseNotes: String? {
+        get { readLocalSetting(\.cachedReleaseNotes) }
+        set { updateLocalSettings { $0.cachedReleaseNotes = newValue } }
+    }
+
+    var cachedReleasePublishedAt: Date? {
+        get {
+            let timestamp = readLocalSetting(\.cachedReleasePublishedAt)
+            return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
+        }
+        set {
+            updateLocalSettings {
+                $0.cachedReleasePublishedAt = max(
+                    0, newValue?.timeIntervalSince1970 ?? 0)
+            }
+        }
+    }
+
+    var cachedReleaseAssetName: String? {
+        get { readLocalSetting(\.cachedReleaseAssetName) }
+        set { updateLocalSettings { $0.cachedReleaseAssetName = newValue } }
+    }
+
+    var cachedReleaseAssetURL: String? {
+        get { readLocalSetting(\.cachedReleaseAssetURL) }
+        set { updateLocalSettings { $0.cachedReleaseAssetURL = newValue } }
+    }
+
+    var cachedReleaseAssetSize: Int {
+        get { readLocalSetting(\.cachedReleaseAssetSize) }
+        set { updateLocalSettings { $0.cachedReleaseAssetSize = max(0, newValue) } }
+    }
+
+    func cacheRelease(
+        version: String,
+        page: String,
+        notes: String,
+        publishedAt: Date?,
+        assetName: String?,
+        assetURL: String?,
+        assetSize: Int
+    ) {
+        updateLocalSettings {
+            $0.cachedReleaseVersion = version
+            $0.cachedReleasePage = page
+            $0.cachedReleaseNotes = notes
+            $0.cachedReleasePublishedAt = max(
+                0, publishedAt?.timeIntervalSince1970 ?? 0)
+            $0.cachedReleaseAssetName = assetName
+            $0.cachedReleaseAssetURL = assetURL
+            $0.cachedReleaseAssetSize = max(0, assetSize)
+        }
     }
 
     /// Voice commands: an utterance that IS a command ("scratch that",

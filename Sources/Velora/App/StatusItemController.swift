@@ -16,6 +16,7 @@ protocol StatusItemControllerDelegate: AnyObject {
     func statusItemOpenHistory()
     func statusItemOpenSetupAssistant()
     func statusItemCheckPermissions()
+    func statusItemCheckForUpdates()
 }
 
 /// The menubar presence (design brief §3): template SF Symbol that swaps per
@@ -304,6 +305,16 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
         menu.addItem(assistant)
 
+        let checkForUpdates = NSMenuItem(
+            title: "Check for Updates…",
+            action: #selector(checkForUpdates),
+            keyEquivalent: "")
+        checkForUpdates.target = self
+        checkForUpdates.image = NSImage(
+            systemSymbolName: "arrow.triangle.2.circlepath",
+            accessibilityDescription: nil)
+        menu.addItem(checkForUpdates)
+
         if degradedReason != nil || Permissions.anyMissing {
             let check = NSMenuItem(
                 title: "Check Permissions…", action: #selector(checkPermissions), keyEquivalent: "")
@@ -444,7 +455,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func startUpdate(_ sender: NSMenuItem) {
         guard let update = sender.representedObject as? UpdateChecker.Update else { return }
-        UpdateInstaller.shared.begin(update)
+        UpdateWindowController.shared.show(update)
     }
 
     @objc private func installStagedUpdate() {
@@ -453,6 +464,10 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func openSetupAssistant() {
         delegate?.statusItemOpenSetupAssistant()
+    }
+
+    @objc private func checkForUpdates() {
+        delegate?.statusItemCheckForUpdates()
     }
 
     @objc private func checkPermissions() {
