@@ -19,7 +19,7 @@ enum SnapshotRenderer {
             renderUpdateWindow(into: dir)
             renderSettingsUpdateChangelog(into: dir)
             renderSettingsPanes(into: dir)
-            exit(0)
+            renderMeetingNotes(into: dir) { exit(0) }
         }
         app.run()
         exit(1)  // app.run never returns; keep the signature honest
@@ -282,6 +282,54 @@ enum SnapshotRenderer {
             write(view: content, to: dir.appendingPathComponent("settings-general-collapsed.png"))
         }
         selection.sidebarCollapsed = userCollapsed
+    }
+
+    @MainActor
+    private static func renderMeetingNotes(
+        into dir: URL, completion: @escaping () -> Void
+    ) {
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-snapshot-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(
+            url: fixtureRoot.appendingPathComponent("meetings.sqlite3"),
+            filesRoot: fixtureRoot)
+        let id = UUID().uuidString
+        let started = Date(timeIntervalSince1970: 1_700_000_000)
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Product review", startedAt: started,
+            endedAt: started.addingTimeInterval(2_400), sourceApp: "Slack Huddle",
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 30_000,
+            text: "I will prepare the implementation plan."))
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .them, chunkIndex: 0,
+            startMs: 2_000, endMs: 32_000,
+            text: "Please include the acceptance criteria."))
+        store.complete(meetingID: id, notes: MeetingNotes(
+            summary: "The review aligned on a focused implementation plan and clear acceptance criteria.",
+            decisions: ["Keep the experience local and single-player"],
+            actionItems: ["Me: prepare the implementation plan"]))
+
+        let model = MeetingNotesWindowModel(store: store)
+        model.show(meetingID: id)
+        let deadline = Date().addingTimeInterval(2)
+        func renderWhenLoaded() {
+            guard model.record != nil || Date() >= deadline else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) {
+                    renderWhenLoaded()
+                }
+                return
+            }
+            let view = NSHostingView(rootView: MeetingNotesWindowView(model: model))
+            snapshot(
+                view, size: NSSize(width: 760, height: 680),
+                name: "meeting-notes-focused", dir: dir)
+            try? FileManager.default.removeItem(at: fixtureRoot)
+            completion()
+        }
+        renderWhenLoaded()
     }
 
     // MARK: - Rendering

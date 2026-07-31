@@ -1,8 +1,8 @@
-"""Offline speaker diarization for the meeting pipeline (sherpa-onnx).
+"""Offline speech-region detection for the meeting pipeline (sherpa-onnx).
 
-Splits the remote/system-audio track of a meeting into per-speaker turns so a
-multi-person call reads "Speaker 1 / Speaker 2" instead of one monolithic
-"Them". Everything runs on-device: pyannote segmentation-3.0 + NeMo titanet
+Clusters the remote/system-audio track into speech turns, then callers collapse
+the unverified identities to stable "Them" chunks. Everything runs on-device:
+pyannote segmentation-3.0 + NeMo titanet
 (both ONNX, CPU) — chosen by a measured spike over the alternatives because
 titanet keeps peak RSS flat (~530 MB on meeting-length audio) where the
 3D-Speaker embedding models grow past 4 GB, which would sink a 16 GB Mac.
@@ -60,6 +60,8 @@ _MIN_DURATION_ON = 0.5
 _MIN_DURATION_OFF = 0.5
 _NUM_THREADS = 2
 
+_COLLAPSED_MERGE_GAP_S = 15.0
+
 
 @dataclass(frozen=True)
 class Turn:
@@ -68,6 +70,28 @@ class Turn:
     start: float
     end: float
     speaker: str  # "s1", "s2", … numbered by order of first appearance
+
+
+def plain_speaker_plan(
+    turns: list[Turn],
+    total_samples: int,
+    sample_rate: int = 16_000,
+    label: str = "them",
+) -> list[tuple[int, int, str]]:
+    """Use diarization's speech regions without trusting its speaker count.
+
+    A generous merge gap keeps normal conversational pauses inside
+    minute-scale chunks. That preserves Whisper context and avoids turning
+    every pause or clustering wobble into another model call, while still
+    skipping long silent stretches.
+    """
+    collapsed = [Turn(turn.start, turn.end, label) for turn in turns]
+    return plan_chunks(
+        collapsed,
+        total_samples=total_samples,
+        sample_rate=sample_rate,
+        merge_gap_s=_COLLAPSED_MERGE_GAP_S,
+    )
 
 
 def available() -> bool:

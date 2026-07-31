@@ -9,11 +9,11 @@ enum MeetingStatus: String {
     case failed
 }
 
-/// A transcript channel: the mic ("me"), the remote mix ("them"), or one
-/// diarized remote voice ("s1", "s2", … — the engine splits the system track
-/// when it hears more than one person). RawRepresentable keeps the DB and
-/// wire formats stable; unknown labels fail the initializer and callers
-/// default to .them, so an old app reading new rows still renders.
+/// A transcript channel: the mic ("me"), the remote mix ("them"), or a legacy
+/// diarized remote label ("s1", "s2", …). New audio-only meetings stay
+/// Me/Them because clustering cannot verify identity. RawRepresentable keeps
+/// old database rows readable; unknown labels fail the initializer and callers
+/// default to .them.
 enum MeetingSpeaker: RawRepresentable, Equatable, Hashable {
     case me
     case them
@@ -192,6 +192,21 @@ final class MeetingStore {
             );
             CREATE INDEX IF NOT EXISTS idx_meeting_segments_order
                 ON meeting_segments(meeting_id, start_ms, speaker, chunk_index);
+            CREATE TABLE IF NOT EXISTS meeting_reprocess_jobs (
+                meeting_id TEXT PRIMARY KEY REFERENCES meetings(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS meeting_reprocess_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                speaker TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                UNIQUE(meeting_id, speaker, chunk_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_meeting_reprocess_segments_order
+                ON meeting_reprocess_segments(meeting_id, start_ms, speaker, chunk_index);
             CREATE INDEX IF NOT EXISTS idx_meetings_started ON meetings(started_at DESC);
             """
         guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else {
@@ -255,7 +270,7 @@ final class MeetingStore {
         sqlite3_finalize(stmt)
 
         for (id, mic, system) in recoverable {
-            func recoveredTrack(_ relative: String?, allowFlushedBytes: Bool) -> String? {
+            func recoveredTrack(_ relative: String?) -> String? {
                 guard let relative,
                       let url = audioURL(relativePath: relative) else { return nil }
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
@@ -266,18 +281,14 @@ final class MeetingStore {
                 if let audio = try? AVAudioFile(forReading: url), audio.length > 0 {
                     return relative
                 }
-                // The microphone CAF's data chunk can extend to EOF, and a
-                // decoder may still reject partially flushed metadata after a
-                // power loss. Preserve its bytes for an explicit retry. AAC
-                // system audio, however, needs a finalized container; keeping
-                // an unreadable .m4a would make a healthy recovered mic track
-                // fail every retry after it had already transcribed.
-                if allowFlushedBytes { return relative }
+                // Retrying an unreadable container only creates a predictable
+                // engine failure. Keep recovery and the Retry affordance on
+                // the same contract: Core Audio must observe real frames.
                 try? FileManager.default.removeItem(at: url)
                 return nil
             }
-            let recoveredMic = recoveredTrack(mic, allowFlushedBytes: true)
-            let recoveredSystem = recoveredTrack(system, allowFlushedBytes: false)
+            let recoveredMic = recoveredTrack(mic)
+            let recoveredSystem = recoveredTrack(system)
             if recoveredMic == nil && recoveredSystem == nil {
                 var remove: OpaquePointer?
                 if sqlite3_prepare_v2(db, "DELETE FROM meetings WHERE id = ?;", -1, &remove, nil)
@@ -351,25 +362,79 @@ final class MeetingStore {
 
     func appendSegment(_ segment: MeetingSegment) {
         queue.sync { [self] in
-            guard db != nil, !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            else { return }
-            let sql = """
-                INSERT OR REPLACE INTO meeting_segments
-                    (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
-                VALUES (?, ?, ?, ?, ?, ?);
-                """
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, segment.meetingID)
-            bindText(stmt, 2, segment.speaker.rawValue)
-            sqlite3_bind_int64(stmt, 3, Int64(segment.chunkIndex))
-            sqlite3_bind_int64(stmt, 4, Int64(segment.startMs))
-            sqlite3_bind_int64(stmt, 5, Int64(segment.endMs))
-            bindText(stmt, 6, segment.text)
-            if sqlite3_step(stmt) != SQLITE_DONE {
-                NSLog("Velora: meeting segment insert failed: %@", lastError)
+            appendSegmentOnQueue(segment, table: "meeting_segments")
+        }
+    }
+
+    /// Recreate writes into a shadow transcript. The committed transcript
+    /// remains readable until fresh notes are also ready and both swap in one
+    /// SQLite transaction.
+    func beginReprocess(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            transactionOnQueue {
+                executeOnQueue(
+                    "DELETE FROM meeting_reprocess_segments WHERE meeting_id = ?;",
+                    meetingID: meetingID)
+                    && executeOnQueue(
+                        "INSERT OR IGNORE INTO meeting_reprocess_jobs (meeting_id) VALUES (?);",
+                        meetingID: meetingID)
+                    && executeOnQueue(
+                        "UPDATE meetings SET status = 'processing', error = NULL WHERE id = ?;",
+                        meetingID: meetingID)
             }
+        }
+    }
+
+    func isReprocessing(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "SELECT 1 FROM meeting_reprocess_jobs WHERE meeting_id = ? LIMIT 1;",
+                -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, meetingID)
+            return sqlite3_step(stmt) == SQLITE_ROW
+        }
+    }
+
+    func appendReprocessSegment(_ segment: MeetingSegment) {
+        queue.sync { [self] in
+            appendSegmentOnQueue(segment, table: "meeting_reprocess_segments")
+        }
+    }
+
+    func nextReprocessChunk(meetingID: String, speaker: MeetingSpeaker) -> Int {
+        queue.sync { [self] in
+            nextChunkOnQueue(
+                meetingID: meetingID, speaker: speaker,
+                table: "meeting_reprocess_segments")
+        }
+    }
+
+    func deleteReprocessSegments(meetingID: String, remoteTrack: Bool) {
+        queue.sync { [self] in
+            deleteSegmentsOnQueue(
+                meetingID: meetingID, remoteTrack: remoteTrack,
+                table: "meeting_reprocess_segments")
+        }
+    }
+
+    func reprocessRecord(id: String) -> MeetingRecord? {
+        queue.sync { [self] in
+            guard var record = recordsOnQueue(
+                whereClause: "WHERE id = ?", bindings: [id], limit: 1,
+                includeSegments: false).first else { return nil }
+            record.segments = segmentsOnQueue(
+                meetingID: id, table: "meeting_reprocess_segments")
+            return record
+        }
+    }
+
+    func hasReprocessSegments(meetingID: String, speaker: MeetingSpeaker) -> Bool {
+        queue.sync { [self] in
+            hasSegmentsOnQueue(
+                meetingID: meetingID, speaker: speaker,
+                table: "meeting_reprocess_segments")
         }
     }
 
@@ -382,15 +447,8 @@ final class MeetingStore {
     /// a wedged meeting.)
     func nextChunk(meetingID: String, speaker: MeetingSpeaker) -> Int {
         queue.sync { [self] in
-            var stmt: OpaquePointer?
-            let condition = speaker.isRemote ? "speaker != 'me'" : "speaker = 'me'"
-            guard sqlite3_prepare_v2(db, """
-                SELECT COALESCE(MAX(chunk_index) + 1, 0) FROM meeting_segments
-                WHERE meeting_id = ? AND \(condition);
-                """, -1, &stmt, nil) == SQLITE_OK else { return 0 }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, meetingID)
-            return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
+            nextChunkOnQueue(
+                meetingID: meetingID, speaker: speaker, table: "meeting_segments")
         }
     }
 
@@ -399,16 +457,9 @@ final class MeetingStore {
     /// duplicate or mislabel lines once the fresh segments arrive.
     func deleteSegments(meetingID: String, remoteTrack: Bool) {
         queue.sync { [self] in
-            var stmt: OpaquePointer?
-            let condition = remoteTrack ? "speaker != 'me'" : "speaker = 'me'"
-            guard sqlite3_prepare_v2(db, """
-                DELETE FROM meeting_segments WHERE meeting_id = ? AND \(condition);
-                """, -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, meetingID)
-            if sqlite3_step(stmt) != SQLITE_DONE {
-                NSLog("Velora: meeting segment reset failed: %@", lastError)
-            }
+            deleteSegmentsOnQueue(
+                meetingID: meetingID, remoteTrack: remoteTrack,
+                table: "meeting_segments")
         }
     }
 
@@ -427,6 +478,86 @@ final class MeetingStore {
             bindText(stmt, 4, notes.actionItems.joined(separator: "\n"))
             bindText(stmt, 5, meetingID)
             if sqlite3_step(stmt) == SQLITE_DONE { refreshSearchOnQueue(meetingID: meetingID) }
+        }
+    }
+
+    /// Commits the shadow transcript and its notes together. Any failure rolls
+    /// back to the previously completed transcript and notes.
+    func completeReprocess(
+        meetingID: String,
+        notes: MeetingNotes,
+        requiredSpeakers: [MeetingSpeaker]
+    ) -> Bool {
+        queue.sync { [self] in
+            let committed = transactionOnQueue {
+                for speaker in requiredSpeakers {
+                    guard hasSegmentsOnQueue(
+                        meetingID: meetingID, speaker: speaker,
+                        table: "meeting_reprocess_segments")
+                    else { return false }
+                }
+                guard executeOnQueue(
+                    "DELETE FROM meeting_segments WHERE meeting_id = ?;",
+                    meetingID: meetingID)
+                else { return false }
+                var copy: OpaquePointer?
+                guard sqlite3_prepare_v2(db, """
+                    INSERT INTO meeting_segments
+                        (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
+                    SELECT meeting_id, speaker, chunk_index, start_ms, end_ms, text
+                    FROM meeting_reprocess_segments WHERE meeting_id = ?;
+                    """, -1, &copy, nil) == SQLITE_OK else { return false }
+                bindText(copy, 1, meetingID)
+                let copied = sqlite3_step(copy) == SQLITE_DONE
+                sqlite3_finalize(copy)
+                guard copied else { return false }
+
+                var update: OpaquePointer?
+                guard sqlite3_prepare_v2(db, """
+                    UPDATE meetings SET status = ?, summary = ?, decisions = ?,
+                        action_items = ?, error = NULL WHERE id = ?;
+                    """, -1, &update, nil) == SQLITE_OK else { return false }
+                bindText(update, 1, MeetingStatus.ready.rawValue)
+                bindText(update, 2, notes.summary)
+                bindText(update, 3, notes.decisions.joined(separator: "\n"))
+                bindText(update, 4, notes.actionItems.joined(separator: "\n"))
+                bindText(update, 5, meetingID)
+                let updated = sqlite3_step(update) == SQLITE_DONE
+                sqlite3_finalize(update)
+                guard updated else { return false }
+                return executeOnQueue(
+                    "DELETE FROM meeting_reprocess_segments WHERE meeting_id = ?;",
+                    meetingID: meetingID)
+                    && executeOnQueue(
+                        "DELETE FROM meeting_reprocess_jobs WHERE meeting_id = ?;",
+                        meetingID: meetingID)
+            }
+            if committed { refreshSearchOnQueue(meetingID: meetingID) }
+            return committed
+        }
+    }
+
+    /// A failed Recreate must not hide the last committed meeting from search.
+    /// Keep its staging cursor for Retry, and restore `ready` only when real
+    /// committed content exists; a first-time failure remains `failed`.
+    func markReprocessFailed(meetingID: String, error: String) {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, """
+                UPDATE meetings SET
+                    status = CASE
+                        WHEN summary != '' OR decisions != '' OR action_items != ''
+                             OR EXISTS (
+                                 SELECT 1 FROM meeting_segments
+                                 WHERE meeting_id = meetings.id LIMIT 1)
+                        THEN 'ready' ELSE 'failed' END,
+                    error = ?
+                WHERE id = ?;
+                """, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, String(error.prefix(1_000)))
+            bindText(stmt, 2, meetingID)
+            sqlite3_step(stmt)
         }
     }
 
@@ -527,6 +658,12 @@ final class MeetingStore {
                 }
                 sqlite3_finalize(update)
             }
+            if !ids.isEmpty {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .veloraMeetingsChanged, object: nil)
+                }
+            }
         }
     }
 
@@ -552,6 +689,16 @@ final class MeetingStore {
     func record(id: String) -> MeetingRecord? {
         queue.sync { [self] in
             recordsOnQueue(whereClause: "WHERE id = ?", bindings: [id], limit: 1).first
+        }
+    }
+
+    /// Notes/status without transcript rows. Window shells use this first so
+    /// a long selectable transcript never blocks tab or window presentation.
+    func recordMetadata(id: String) -> MeetingRecord? {
+        queue.sync { [self] in
+            recordsOnQueue(
+                whereClause: "WHERE id = ?", bindings: [id], limit: 1,
+                includeSegments: false).first
         }
     }
 
@@ -632,6 +779,27 @@ final class MeetingStore {
         return candidate
     }
 
+    /// A prepared CAF header exists even when capture wrote zero frames, and
+    /// random/corrupt bytes can also exceed a size threshold. Retry is offered
+    /// only when Core Audio can open the container and observe real frames.
+    func hasUsableAudio(relativePath: String?) -> Bool {
+        guard let url = audioURL(relativePath: relativePath),
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 4_096,
+              let audio = try? AVAudioFile(forReading: url)
+        else { return false }
+        return audio.length > 0
+    }
+
+    /// Recreate must retain every side that was originally captured. A single
+    /// readable track is sufficient for a first pass, but not for replacing an
+    /// existing two-sided transcript.
+    func hasAllCapturedAudio(for record: MeetingRecord) -> Bool {
+        let captured = [record.micPath, record.systemPath].compactMap { $0 }
+        guard !captured.isEmpty else { return false }
+        return captured.allSatisfy { hasUsableAudio(relativePath: $0) }
+    }
+
     private func meetingDirectoryURL(id: String) -> URL? {
         guard UUID(uuidString: id) != nil else { return nil }
         let root = filesRoot.standardizedFileURL.resolvingSymlinksInPath()
@@ -680,11 +848,108 @@ final class MeetingStore {
         return output
     }
 
-    private func segmentsOnQueue(meetingID: String) -> [MeetingSegment] {
+    private func appendSegmentOnQueue(_ segment: MeetingSegment, table: String) {
+        guard db != nil,
+              table == "meeting_segments" || table == "meeting_reprocess_segments",
+              !segment.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        let sql = """
+            INSERT OR REPLACE INTO \(table)
+                (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
+            VALUES (?, ?, ?, ?, ?, ?);
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, segment.meetingID)
+        bindText(stmt, 2, segment.speaker.rawValue)
+        sqlite3_bind_int64(stmt, 3, Int64(segment.chunkIndex))
+        sqlite3_bind_int64(stmt, 4, Int64(segment.startMs))
+        sqlite3_bind_int64(stmt, 5, Int64(segment.endMs))
+        bindText(stmt, 6, segment.text)
+        if sqlite3_step(stmt) != SQLITE_DONE {
+            NSLog("Velora: meeting segment insert failed: %@", lastError)
+        }
+    }
+
+    private func nextChunkOnQueue(
+        meetingID: String, speaker: MeetingSpeaker, table: String
+    ) -> Int {
+        guard table == "meeting_segments" || table == "meeting_reprocess_segments"
+        else { return 0 }
+        var stmt: OpaquePointer?
+        let condition = speaker.isRemote ? "speaker != 'me'" : "speaker = 'me'"
+        guard sqlite3_prepare_v2(db, """
+            SELECT COALESCE(MAX(chunk_index) + 1, 0) FROM \(table)
+            WHERE meeting_id = ? AND \(condition);
+            """, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, meetingID)
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
+    }
+
+    private func deleteSegmentsOnQueue(
+        meetingID: String, remoteTrack: Bool, table: String
+    ) {
+        guard table == "meeting_segments" || table == "meeting_reprocess_segments"
+        else { return }
+        var stmt: OpaquePointer?
+        let condition = remoteTrack ? "speaker != 'me'" : "speaker = 'me'"
+        guard sqlite3_prepare_v2(db, """
+            DELETE FROM \(table) WHERE meeting_id = ? AND \(condition);
+            """, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, meetingID)
+        if sqlite3_step(stmt) != SQLITE_DONE {
+            NSLog("Velora: meeting segment reset failed: %@", lastError)
+        }
+    }
+
+    private func hasSegmentsOnQueue(
+        meetingID: String, speaker: MeetingSpeaker, table: String
+    ) -> Bool {
+        guard table == "meeting_segments" || table == "meeting_reprocess_segments"
+        else { return false }
+        let condition = speaker.isRemote ? "speaker != 'me'" : "speaker = 'me'"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, """
+            SELECT 1 FROM \(table)
+            WHERE meeting_id = ? AND \(condition) LIMIT 1;
+            """, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, meetingID)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func executeOnQueue(_ sql: String, meetingID: String) -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, meetingID)
+        return sqlite3_step(stmt) == SQLITE_DONE
+    }
+
+    private func transactionOnQueue(_ body: () -> Bool) -> Bool {
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else {
+            return false
+        }
+        guard body(),
+              sqlite3_exec(db, "COMMIT;", nil, nil, nil) == SQLITE_OK else {
+            sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            return false
+        }
+        return true
+    }
+
+    private func segmentsOnQueue(
+        meetingID: String, table: String = "meeting_segments"
+    ) -> [MeetingSegment] {
+        guard table == "meeting_segments" || table == "meeting_reprocess_segments"
+        else { return [] }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, """
             SELECT id, speaker, chunk_index, start_ms, end_ms, text
-            FROM meeting_segments WHERE meeting_id = ?
+            FROM \(table) WHERE meeting_id = ?
             ORDER BY start_ms, speaker, chunk_index;
             """, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }

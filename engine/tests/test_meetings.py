@@ -77,9 +77,10 @@ async def test_meeting_transcribe_emits_durable_segment_cursor(engine, tmp_path,
     assert done["id"] == "resume"
 
 
-async def test_meeting_transcribe_diarizes_system_track(engine, tmp_path, monkeypatch):
-    """A multi-speaker system track emits per-speaker s1/s2 segments with
-    turn-level timestamps; job-level events keep the track speaker 'them'."""
+async def test_meeting_transcribe_keeps_audio_only_clusters_labeled_them(
+    engine, tmp_path, monkeypatch
+):
+    """Audio clusters improve speech chunking but cannot establish identity."""
     from velora_engine import diarization as diar_mod
     from velora_engine.diarization import Turn
 
@@ -100,25 +101,17 @@ async def test_meeting_transcribe_diarizes_system_track(engine, tmp_path, monkey
     })
     await client.recv_event("meeting_transcribe_accepted")
     started = await client.recv_event("meeting_transcribe_started")
-    assert started["chunks"] == 2
+    assert started["chunks"] == 1
     assert started["speaker"] == "them"
 
-    first = await client.recv_event("meeting_segment")
-    assert first["speaker"] == "s1"
-    assert first["chunk_index"] == 0
-    assert first["start_ms"] == 0
-    # padded by 0.2 s but clamped to the next turn's start
-    assert 4000 <= first["end_ms"] <= 4600
-    progress = await client.recv_event("meeting_transcribe_progress")
-    assert progress["speaker"] == "them"
-
-    second = await client.recv_event("meeting_segment")
-    assert second["speaker"] == "s2"
-    assert second["chunk_index"] == 1
-    assert 4000 <= second["start_ms"] <= 4600
+    segment = await client.recv_event("meeting_segment")
+    assert segment["speaker"] == "them"
+    assert segment["chunk_index"] == 0
+    assert segment["start_ms"] == 0
+    assert segment["end_ms"] >= 9500
     await client.recv_event("meeting_transcribe_progress")
     done = await client.recv_event("meeting_transcribed")
-    assert done["chunks"] == 2
+    assert done["chunks"] == 1
 
 
 async def test_meeting_transcribe_single_speaker_falls_back_to_them(
@@ -144,6 +137,76 @@ async def test_meeting_transcribe_single_speaker_falls_back_to_them(
     await client.recv_event("meeting_transcribe_started")
     segment = await client.recv_event("meeting_segment")
     assert segment["speaker"] == "them"  # 1:1 call reads as plain Them
+
+
+async def test_meeting_transcribe_five_clusters_still_uses_stable_them(
+    engine, tmp_path, monkeypatch
+):
+    """Plausible-looking cluster counts still do not establish identity."""
+    from velora_engine import diarization as diar_mod
+    from velora_engine.diarization import Turn
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "stable five-cluster words")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(
+        diar_mod,
+        "diarize",
+        lambda pcm: [
+            Turn(float(index * 2), float(index * 2) + 1.5, f"s{index + 1}")
+            for index in range(5)
+        ],
+    )
+    _eng, sock = engine
+    clip = tmp_path / "five-clusters.wav"
+    _write_wav(clip, seconds=10.0)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "five", "meeting_id": "meeting-five",
+        "speaker": "them", "path": str(clip), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    started = await client.recv_event("meeting_transcribe_started")
+    assert started["chunks"] == 1
+    segment = await client.recv_event("meeting_segment")
+    assert segment["speaker"] == "them"
+    assert segment["text"] == "stable five-cluster words"
+
+
+async def test_meeting_transcribe_implausible_clusters_fall_back_to_them(
+    engine, tmp_path, monkeypatch
+):
+    """Cluster explosions must not become hundreds of tiny speaker chunks."""
+    from velora_engine import diarization as diar_mod
+    from velora_engine.diarization import Turn
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "stable words")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(
+        diar_mod,
+        "diarize",
+        lambda pcm: [
+            Turn(float(index), float(index) + 0.8, f"s{index + 1}")
+            for index in range(12)
+        ],
+    )
+    _eng, sock = engine
+    clip = tmp_path / "clustered.wav"
+    _write_wav(clip, seconds=12.0)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "cjob", "meeting_id": "meeting-c",
+        "speaker": "them", "path": str(clip), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    started = await client.recv_event("meeting_transcribe_started")
+    assert started["chunks"] == 1
+    segment = await client.recv_event("meeting_segment")
+    assert segment["speaker"] == "them"
+    assert segment["text"] == "stable words"
 
 
 async def test_meeting_transcribe_diarization_failure_falls_back(
@@ -172,6 +235,27 @@ async def test_meeting_transcribe_diarization_failure_falls_back(
     segment = await client.recv_event("meeting_segment")
     assert segment["speaker"] == "them"
     assert segment["text"] == "still transcribed"
+
+
+async def test_meeting_glossary_excludes_auto_mined_terms(engine) -> None:
+    eng, _sock = engine
+    eng.config.data["vocabulary"] = ["Velora"]
+    eng.config._learned_vocab = ["Sushil"]
+    eng.config._auto_vocab = ["random-hallucination"]
+    prompt = eng._meeting_glossary()
+    assert prompt is not None
+    assert "Velora" in prompt and "Sushil" in prompt
+    assert "random-hallucination" not in prompt
+
+
+async def test_old_meeting_plan_version_is_rejected(engine, tmp_path) -> None:
+    eng, _sock = engine
+    plan = tmp_path / "old-plan.json"
+    plan.write_text(json.dumps({
+        "version": 2,
+        "spans": [[0, 16_000, "s1"]],
+    }))
+    assert eng._load_meeting_plan(plan, 32_000) is None
 
 
 async def test_meeting_resume_without_cached_plan_restarts_track(

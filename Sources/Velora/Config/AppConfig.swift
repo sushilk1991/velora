@@ -925,9 +925,10 @@ final class AppConfig {
         set { updateSettings { $0.meetings.audioRetentionDays = min(365, max(1, newValue)) } }
     }
 
-    /// Split the meeting system-audio track into per-speaker turns
-    /// ("Speaker 1/2/…"). Mirrored as `meeting_diarization`; the engine
-    /// downloads its ~46 MB of ONNX models on first use, all local.
+    /// Detect speech regions in meeting system audio so long silences can be
+    /// skipped without inventing participant identities. Mirrored as
+    /// `meeting_diarization`; the engine downloads its ~46 MB of ONNX models
+    /// on first use, all local.
     var meetingDiarization: Bool {
         get { readSetting(\.meetings.diarization) }
         set { updateSettings { $0.meetings.diarization = newValue }; writeEngineConfig() }

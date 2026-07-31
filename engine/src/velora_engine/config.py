@@ -57,10 +57,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "save_audio": True,
     "audio_retention_days": 180,
     "audio_max_mb": 4096,
-    # Speaker diarization for meeting recordings: split the remote/system
-    # track into "Speaker 1 / Speaker 2 / …" turns (sherpa-onnx, ~46 MB of
-    # ONNX models downloaded on first use, all local). Falls back to the
-    # single "Them" label whenever the backend or models are unavailable.
+    # Speech-region detection for meeting system audio (sherpa-onnx, ~46 MB of
+    # ONNX models downloaded on first use, all local). Audio-only clusters have
+    # no trustworthy identity, so transcript labels remain stable Me/Them.
     "meeting_diarization": True,
 }
 
@@ -204,7 +203,7 @@ class Config:
 
     @property
     def meeting_diarization(self) -> bool:
-        """Split the meeting system-audio track into per-speaker turns."""
+        """Use local clustering to find meeting system-audio speech regions."""
         return bool(self.data.get("meeting_diarization", True))
 
     @property

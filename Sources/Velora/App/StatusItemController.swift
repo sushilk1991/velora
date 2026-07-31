@@ -34,10 +34,20 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     private var imageView: NSImageView?
     private let history: HistoryStore
     private var iconState: IconState = .idle
-    /// Engine/permission degradation reason, shown in the menu when set.
+    /// Engine degradation reason, shown in the menu when set.
     var degradedReason: String? {
         didSet { updateIcon() }
     }
+    /// Cached by AppDelegate when permission state is evaluated. TCC's
+    /// microphone and Input Monitoring probes are synchronous and can each
+    /// take a full frame; never run them from AppKit's menu-population pass.
+    var permissionsMissing = false {
+        didSet {
+            guard permissionsMissing != oldValue else { return }
+            updateIcon()
+        }
+    }
+    private var permissionRefreshInFlight = false
 
     /// Non-nil while a file transcription runs ("Transcribing… 45%"); the
     /// menu shows progress + cancel instead of the transcribe action.
@@ -114,7 +124,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         guard let imageView else { return }
 
         let effectiveState: IconState =
-            (degradedReason != nil && iconState == .idle) ? .error : iconState
+            ((degradedReason != nil || permissionsMissing) && iconState == .idle)
+                ? .error : iconState
 
         let symbolName: String
         if meetingRecordingTitle != nil {
@@ -315,7 +326,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             accessibilityDescription: nil)
         menu.addItem(checkForUpdates)
 
-        if degradedReason != nil || Permissions.anyMissing {
+        if degradedReason != nil || permissionsMissing {
             let check = NSMenuItem(
                 title: "Check Permissions…", action: #selector(checkPermissions), keyEquivalent: "")
             check.target = self
@@ -326,6 +337,24 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit Velora", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+
+        refreshPermissionCache()
+    }
+
+    /// Preserve the old "notice a permission revoked while Velora is
+    /// running" behavior without blocking menu presentation. A changed result
+    /// updates the icon immediately and the row on the next menu opening.
+    private func refreshPermissionCache() {
+        guard !permissionRefreshInFlight else { return }
+        permissionRefreshInFlight = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let missing = Permissions.anyMissing
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.permissionRefreshInFlight = false
+                self.permissionsMissing = missing
+            }
+        }
     }
 
     /// One menu line reflecting the updater's state: an offer to update

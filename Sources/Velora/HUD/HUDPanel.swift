@@ -48,6 +48,13 @@ final class HUDPanel: NSObject {
     /// low latency plus a slow timer safety net, running only while visible.
     private var mouseMonitors: [Any] = []
     private var mouseSyncTimer: Timer?
+    /// AppKit tracks menus in a nested run-loop mode. The HUD's local
+    /// mouse-move monitor and `.common` timer otherwise keep doing hit tests
+    /// in that same loop while the user moves through a menu, competing with
+    /// native highlight tracking. Nested submenus can send their own begin/end
+    /// notifications, so use a depth rather than a Boolean.
+    private(set) var menuTrackingDepth = 0
+    private var menuTrackingObservers: [NSObjectProtocol] = []
     /// Set when a placement/visibility preference changes while a session is
     /// on screen — moving the capsule mid-recording would yank it out from
     /// under the user's eyes. Applied when the HUD settles back to idle.
@@ -125,10 +132,28 @@ final class HUDPanel: NSObject {
                 self.needsPrefsReapply = true
             }
         }
+
+        menuTrackingObservers = [
+            NotificationCenter.default.addObserver(
+                forName: NSMenu.didBeginTrackingNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                self?.menuTrackingDidBegin()
+            },
+            NotificationCenter.default.addObserver(
+                forName: NSMenu.didEndTrackingNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                self?.menuTrackingDidEnd()
+            },
+        ]
     }
 
     deinit {
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        for observer in menuTrackingObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         stopMouseSync()
     }
 
@@ -164,6 +189,10 @@ final class HUDPanel: NSObject {
     /// capsule. Never flips mid-press: changing `ignoresMouseEvents` during a
     /// click or drag would yank the event stream out from under AppKit.
     private func syncMouseInteractivity() {
+        guard menuTrackingDepth == 0 else {
+            panel.ignoresMouseEvents = true
+            return
+        }
         guard NSEvent.pressedMouseButtons == 0 else { return }
         let interactive = interactiveRect().contains(NSEvent.mouseLocation)
         if panel.ignoresMouseEvents != !interactive {
@@ -176,6 +205,10 @@ final class HUDPanel: NSObject {
     /// system only generates move events some windows asked for). Runs only
     /// while the panel is on screen.
     private func startMouseSync() {
+        guard menuTrackingDepth == 0 else {
+            panel.ignoresMouseEvents = true
+            return
+        }
         if mouseSyncTimer == nil {
             let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
                 self?.syncMouseInteractivity()
@@ -208,6 +241,24 @@ final class HUDPanel: NSObject {
             }
         }
         syncMouseInteractivity()
+    }
+
+    private func menuTrackingDidBegin() {
+        menuTrackingDepth += 1
+        guard menuTrackingDepth == 1 else { return }
+        // Remove the local event monitor and the common-mode timer instead of
+        // merely making their callbacks no-op. AppKit should own every
+        // mouse-moved event until the root menu and all submenus have closed.
+        stopMouseSync()
+    }
+
+    private func menuTrackingDidEnd() {
+        guard menuTrackingDepth > 0 else { return }
+        menuTrackingDepth -= 1
+        guard menuTrackingDepth == 0,
+              panel.isVisible, !model.state.isHidden
+        else { return }
+        startMouseSync()
     }
 
     /// A click can land in the instant between the cursor reaching the pill

@@ -90,6 +90,11 @@ CLEANUP_FINAL_RECOVERY_TIMEOUT_S = 10.0
 MINE_IDLE_S = 20.0
 MINE_STARTUP_DELAY_S = 60.0
 
+# Resume cursors are indexes into this exact cached plan. Bump whenever plan
+# semantics change so an upgraded app restarts the track instead of mixing old
+# fragmented labels with the corrected plan.
+MEETING_PLAN_VERSION = 3
+
 # Seam context for per-segment cleanup: the tail of the previous cleaned chunk
 # rides along in the system prompt so seams punctuate/capitalize correctly.
 CHUNK_CONTEXT_WORDS = 15
@@ -1747,6 +1752,21 @@ class Engine:
             entity_names,
         )
 
+    def _meeting_glossary(self) -> str | None:
+        """Conservative prompt for long-form meeting transcription.
+
+        Explicit vocabulary and corrections are durable user signals.
+        Auto-mined terms are guesses derived from prior STT output; repeating
+        them across hundreds of meeting chunks amplified bad spellings and
+        triggered costly prompt-free retries in real runs.
+        """
+        return build_glossary_prompt(
+            self.config.user_vocabulary,
+            self.config.learned_vocabulary,
+            [],
+            [],
+        )
+
     def _schedule_mining(self, delay: float = MINE_IDLE_S) -> None:
         """(Re)arm the idle miner: cancel any pending run and wait again from
         now. Called after every final and once after startup model load."""
@@ -2355,6 +2375,8 @@ class Engine:
         """
         try:
             data = json.loads(path.read_text())
+            if data.get("version") != MEETING_PLAN_VERSION:
+                return None
             spans = [
                 (int(a), int(b), str(label))
                 for a, b, label in data["spans"]
@@ -2374,7 +2396,10 @@ class Engine:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"spans": spans}))
+            tmp.write_text(json.dumps({
+                "version": MEETING_PLAN_VERSION,
+                "spans": spans,
+            }))
             tmp.replace(path)
             # Opportunistic prune: plans are tiny, but deleted meetings leave
             # orphans behind — drop anything older than a week.
@@ -2394,8 +2419,9 @@ class Engine:
         """Diarized transcription plan for a system-audio track, or None.
 
         None means "use the classic single-speaker path" — backend missing,
-        model download failed, diarization errored, or only one voice found
-        (a 1:1 call reads better as plain "Them" than as "Speaker 1").
+        model download failed, or diarization errored. Audio-only clustering
+        has no participant identity to validate against, so every result uses
+        its useful speech regions but keeps the honest, stable "Them" label.
         """
         try:
             if not diarization.available():
@@ -2412,16 +2438,16 @@ class Engine:
                 return None
             turns = await asyncio.to_thread(diarization.diarize, pcm)
             speakers = {t.speaker for t in turns}
-            if len(speakers) < 2:
-                log.info("diarization: %d speaker(s) on %s — using plain labels",
-                         len(speakers), meeting_id)
+            speaker_count = len(speakers)
+            if speaker_count == 0:
                 return None
-            spans = diarization.plan_chunks(turns, total_samples=len(pcm))
-            if not spans:
-                return None
-            log.info("diarization: %s → %d speakers, %d chunks",
-                     meeting_id, len(speakers), len(spans))
-            return spans
+            spans = diarization.plain_speaker_plan(
+                turns, total_samples=len(pcm))
+            log.info(
+                "diarization: %s detected %d audio cluster(s); using %d "
+                "speech-region chunks with stable Them labels",
+                meeting_id, speaker_count, len(spans))
+            return spans or None
         except Exception:  # noqa: BLE001 — diarization must never sink a meeting
             log.exception("diarization failed — falling back to single speaker")
             return None
@@ -2456,11 +2482,11 @@ class Engine:
             if duration_s < 0.2:
                 await fail("no audio in file")
                 return
-            # The remote/system track may carry several people. Diarize it
-            # into per-speaker turns and transcribe turn-by-turn ("s1"/"s2"
-            # labels); anything short of a confident multi-speaker result
-            # falls back to the classic single-"them" silence chunking. The
-            # mic track is one person by construction — never diarized.
+            # The remote/system track may carry several people. Audio-only
+            # clustering supplies speech regions, but without participant
+            # metadata it cannot assign trustworthy identities. Keep every
+            # remote chunk labeled "them"; the mic track is "me" by
+            # construction and is never diarized.
             #
             # The chunk plan is committed to a cache file on first computation
             # and a resume (start_chunk > 0) must run the CACHED plan: the
@@ -2510,7 +2536,7 @@ class Engine:
                     await fail("cancelled", "cancelled")
                     return
                 sample_a, sample_b, chunk_speaker = spans[index]
-                self.stt.initial_prompt = self._glossary()
+                self.stt.initial_prompt = self._meeting_glossary()
                 text = await self._stt_call(
                     transcribe_clip, self.stt, pcm[sample_a:sample_b])
                 if self.shutdown.is_set():
@@ -2596,8 +2622,9 @@ class Engine:
             "Create faithful meeting notes from this transcript chunk. Return JSON only with "
             "exact keys summary (string), decisions (array of strings), and action_items "
             "(array of strings). Do not invent owners, deadlines, decisions, or facts. "
-            "The labels Me, Them, and Speaker 1/2/… are audio channels, not "
-            "identities — never guess who a speaker is."
+            "Me and Them are audio channels, not verified identities. If a legacy "
+            "transcript contains Speaker-number labels, treat those the same way. "
+            "Never guess who a speaker is."
         )
         reduce_prompt = (
             "Merge these partial meeting notes without inventing facts or duplicates. Return "

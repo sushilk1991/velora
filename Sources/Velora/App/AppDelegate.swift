@@ -79,6 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var controlServer: LocalControlServer?
     private var statusController: StatusItemController!
     private var settingsController: SettingsWindowController?
+    private var meetingNotesController: MeetingNotesWindowController?
     private var onboardingController: OnboardingWindowController?
     private var hotkeyObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
@@ -253,6 +254,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 }
             }
         }
+        meetingProcessor.onNotesReady = { [weak self] meetingID in
+            self?.showMeetingNotes(meetingID: meetingID)
+        }
 
         let controlRouter = LocalControlRouter(
             history: history,
@@ -401,6 +405,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // while the daily network check is still within its 20-hour gate.
         statusController.updateAvailable = UpdateChecker.shared.available
         statusController.install()
+        refreshDegradedState()
         contextTracker.start()
         hotkeyMonitor.start()
 
@@ -439,6 +444,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         UpdateChecker.shared.startPeriodicChecks()
         UpdateInstaller.shared.resumeOrCleanOnLaunch()
         veloraLog("Velora: hotkey monitor started (usingEventTap=\(hotkeyMonitor.usingEventTap))")
+        // Repair unreadable interrupted rows even if engine startup later
+        // degrades. Valid rows are queued now and begin once `.ready` arrives.
+        meetingProcessor.resumeRecoverable()
         supervisor.start()
         dictionarySync.start()
         meetingCoordinator.start()
@@ -591,6 +599,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         settingsController?.show(selecting: tab)
     }
 
+    private func showMeetingNotes(meetingID: String) {
+        if meetingNotesController == nil {
+            meetingNotesController = MeetingNotesWindowController(store: meetings)
+        }
+        meetingNotesController?.show(meetingID: meetingID)
+        veloraLog("Velora: opened focused meeting notes id=\(meetingID)")
+    }
+
     // MARK: - Main menu actions
 
     @objc func menuOpenSettings() {
@@ -650,11 +666,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     // MARK: - Degraded state (menubar error icon + Check Permissions…)
 
     private func refreshDegradedState() {
+        let permissionsMissing = Permissions.anyMissing
+        statusController.permissionsMissing = permissionsMissing
         var reason: String?
         if case .degraded(let message) = supervisor.state {
             reason = message
-        } else if Permissions.anyMissing {
-            reason = "Permissions missing"
         }
         statusController.degradedReason = reason
     }

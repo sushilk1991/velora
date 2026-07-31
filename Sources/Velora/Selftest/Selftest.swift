@@ -96,6 +96,7 @@ enum Selftest {
         }
         testQualityObservationMetrics()
         testMeetingStore()
+        testMeetingProcessingPipeline()
         testMeetingCaptureReadiness()
         testMeetingSystemAudioBackendPolicy()
         testMeetingSystemAudioFrameMath()
@@ -168,6 +169,36 @@ enum Selftest {
         expect(
             menu.items.contains { $0.title == "Check for Updates…" && $0.isEnabled },
             "the status menu always exposes a manual update check")
+        expect(
+            !menu.items.contains { $0.title == "Check Permissions…" },
+            "the status menu uses cached granted permission state")
+
+        controller.permissionsMissing = true
+        controller.menuNeedsUpdate(menu)
+        expect(
+            menu.items.contains { $0.title == "Check Permissions…" },
+            "the status menu uses cached missing permission state")
+
+        let hud = HUDPanel()
+        let rootMenu = NSMenu()
+        let submenu = NSMenu()
+        NotificationCenter.default.post(
+            name: NSMenu.didBeginTrackingNotification, object: rootMenu)
+        NotificationCenter.default.post(
+            name: NSMenu.didBeginTrackingNotification, object: submenu)
+        expect(
+            hud.menuTrackingDepth == 2,
+            "HUD mouse tracking stays suspended through nested menu tracking")
+        NotificationCenter.default.post(
+            name: NSMenu.didEndTrackingNotification, object: submenu)
+        expect(
+            hud.menuTrackingDepth == 1,
+            "closing a submenu does not resume HUD mouse tracking early")
+        NotificationCenter.default.post(
+            name: NSMenu.didEndTrackingNotification, object: rootMenu)
+        expect(
+            hud.menuTrackingDepth == 0,
+            "HUD mouse tracking resumes only after the root menu closes")
     }
 
     private static func testUpdateChecker() {
@@ -3507,9 +3538,9 @@ enum Selftest {
         expect(store.nextChunk(meetingID: id, speaker: .me) == 1,
                "meeting segment cursor resumes after the last committed chunk")
 
-        // Diarized labels: the engine may split the system track into
-        // s1/s2/… — parsing, display, and the TRACK-level resume cursor.
-        // A separate meeting so the fixture above keeps its segment counts.
+        // Backward compatibility: releases before stable Me/Them could persist
+        // s1/s2 labels. Keep parsing, display, and the track-level cursor so
+        // those existing transcripts remain readable.
         expect(MeetingSpeaker(rawValue: "s1") == .remote(1)
                && MeetingSpeaker(rawValue: "s2")?.displayName == "Speaker 2"
                && MeetingSpeaker(rawValue: "s2")?.rawValue == "s2"
@@ -3567,6 +3598,10 @@ enum Selftest {
         let metadata = store.recentMetadata(limit: 10)
         expect(metadata.first?.id == id && metadata.first?.segments.isEmpty == true,
                "meeting picker rows never load full transcripts")
+        expect(store.recordMetadata(id: id)?.segments.isEmpty == true,
+               "focused meeting windows load notes before transcript rows")
+        expect(!store.hasUsableAudio(relativePath: "\(id)/me.caf"),
+               "header-only or tiny meeting captures are not offered for Retry")
         expect(store.audioURL(relativePath: "../outside.wav") == nil
                && store.audioURL(relativePath: "/tmp/outside.wav") == nil
                && store.audioURL(relativePath: "\(id)/../outside.wav") == nil
@@ -3624,19 +3659,23 @@ enum Selftest {
         let recoveredDirectory = recoveryRoot.appendingPathComponent(recoveredID, isDirectory: true)
         MeetingStore.ensurePrivateDirectory(recoveredDirectory)
         let recoveredMic = recoveredDirectory.appendingPathComponent("me.caf")
-        if let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1) {
-            autoreleasepool {
-                _ = try? AVAudioFile(forWriting: recoveredMic, settings: format.settings)
+        let recoveredSystem = recoveredDirectory.appendingPathComponent("them.caf")
+        if let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 9_600) {
+            buffer.frameLength = 9_600
+            if let samples = buffer.floatChannelData?[0] {
+                for index in 0..<Int(buffer.frameLength) {
+                    samples[index] = sin(Float(index) * 0.04) * 0.1
+                }
             }
-            if let handle = try? FileHandle(forWritingTo: recoveredMic) {
-                _ = try? handle.seekToEnd()
-                try? handle.write(contentsOf: Data(repeating: 1, count: 4_096))
-                try? handle.close()
+            for url in [recoveredMic, recoveredSystem] {
+                autoreleasepool {
+                    if let file = try? AVAudioFile(forWriting: url, settings: format.settings) {
+                        try? file.write(from: buffer)
+                    }
+                }
             }
         }
-        let recoveredSystem = recoveredDirectory.appendingPathComponent("them.m4a")
-        FileManager.default.createFile(
-            atPath: recoveredSystem.path, contents: Data(repeating: 0xA5, count: 8_192))
         let recoveredSize = (try? recoveredMic.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let recoveredProbe = try? AVAudioFile(forReading: recoveredMic)
         expect((recoveredProbe?.length ?? 0) > 0 && recoveredSize > 4_096,
@@ -3646,7 +3685,7 @@ enum Selftest {
             id: recoveredID, title: "Interrupted meeting",
             startedAt: interruptedAt, endedAt: interruptedAt,
             status: .recording, micPath: "\(recoveredID)/me.caf",
-            systemPath: "\(recoveredID)/them.m4a"))
+            systemPath: "\(recoveredID)/them.caf"))
         interrupted?.insertRecording(MeetingRecord(
             id: emptyID, title: "Empty preparation",
             startedAt: interruptedAt, endedAt: interruptedAt,
@@ -3658,11 +3697,428 @@ enum Selftest {
                && recoveredRecord?.micPath == "\(recoveredID)/me.caf"
                && FileManager.default.fileExists(atPath: recoveredMic.path),
                "relaunch retains interrupted microphone audio as recoverable work")
-        expect(recoveredRecord?.systemPath == nil
-               && !FileManager.default.fileExists(atPath: recoveredSystem.path),
-               "relaunch drops an unfinalized system track so mic-only retry can succeed")
+        expect(recoveredRecord?.systemPath == "\(recoveredID)/them.caf"
+               && FileManager.default.fileExists(atPath: recoveredSystem.path),
+               "relaunch retains readable interrupted system CAF audio for Retry")
         expect(reopened.record(id: emptyID) == nil,
                "relaunch removes an interrupted preparation that captured no audio")
+        let pruneID = UUID().uuidString
+        let pruneDirectory = recoveryRoot.appendingPathComponent(pruneID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(pruneDirectory)
+        try? FileManager.default.copyItem(
+            at: recoveredMic, to: pruneDirectory.appendingPathComponent("me.caf"))
+        try? FileManager.default.copyItem(
+            at: recoveredSystem, to: pruneDirectory.appendingPathComponent("them.caf"))
+        reopened.insertProcessing(MeetingRecord(
+            id: pruneID, title: "Old retained meeting",
+            startedAt: interruptedAt, endedAt: interruptedAt,
+            status: .processing, micPath: "\(pruneID)/me.caf",
+            systemPath: "\(pruneID)/them.caf"))
+        reopened.complete(
+            meetingID: pruneID, notes: MeetingNotes(summary: "Old notes"))
+        var pruneNotificationReceived = false
+        let pruneObserver = NotificationCenter.default.addObserver(
+            forName: .veloraMeetingsChanged, object: nil, queue: .main
+        ) { _ in
+            pruneNotificationReceived = true
+        }
+        reopened.pruneAudio(olderThanDays: 7)
+        expect(waitUntil {
+            reopened.recordMetadata(id: pruneID)?.micPath == nil
+                && pruneNotificationReceived
+        }, "audio pruning refreshes cached Retry/Recreate eligibility")
+        NotificationCenter.default.removeObserver(pruneObserver)
+    }
+
+    private static func testMeetingProcessingPipeline() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-pipeline-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(
+            url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let id = UUID().uuidString
+        let audioDir = root.appendingPathComponent(id, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(audioDir)
+        let audioFormat = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)
+        for name in ["me.caf", "them.caf"] {
+            if let audioFormat,
+               let buffer = AVAudioPCMBuffer(
+                    pcmFormat: audioFormat, frameCapacity: 9_600) {
+                buffer.frameLength = 9_600
+                if let samples = buffer.floatChannelData?[0] {
+                    for index in 0..<Int(buffer.frameLength) {
+                        samples[index] = sin(Float(index) * 0.04) * 0.1
+                    }
+                }
+                autoreleasepool {
+                    if let file = try? AVAudioFile(
+                        forWriting: audioDir.appendingPathComponent(name),
+                        settings: audioFormat.settings) {
+                        try? file.write(from: buffer)
+                    }
+                }
+            }
+        }
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Two-person review",
+            startedAt: Date(timeIntervalSince1970: 1_700_002_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_002_120),
+            status: .processing, micPath: "\(id)/me.caf",
+            systemPath: "\(id)/them.caf"))
+        expect(store.hasUsableAudio(relativePath: "\(id)/me.caf")
+               && store.hasUsableAudio(relativePath: "\(id)/them.caf"),
+               "meeting Retry accepts retained tracks with captured payload bytes")
+        expect(store.recordMetadata(id: id).map {
+            store.hasAllCapturedAudio(for: $0)
+        } == true, "Recreate is available only when every captured side remains readable")
+        let corruptID = UUID().uuidString
+        let corruptDir = root.appendingPathComponent(corruptID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(corruptDir)
+        FileManager.default.createFile(
+            atPath: corruptDir.appendingPathComponent("me.caf").path,
+            contents: Data(repeating: 0xA5, count: 8_192))
+        expect(!store.hasUsableAudio(relativePath: "\(corruptID)/me.caf"),
+               "meeting Retry rejects corrupt bytes even when the file exceeds the size threshold")
+        store.insertProcessing(MeetingRecord(
+            id: corruptID, title: "Unreadable interrupted meeting",
+            startedAt: Date(timeIntervalSince1970: 1_700_001_500),
+            endedAt: Date(timeIntervalSince1970: 1_700_001_510),
+            status: .processing, micPath: "\(corruptID)/me.caf"))
+        let recoveryProcessor = MeetingProcessor(
+            store: store, engineIsReady: { false },
+            sendToEngine: { _ in })
+        recoveryProcessor.resumeRecoverable()
+        expect(store.recordMetadata(id: corruptID)?.status == .failed,
+               "launch recovery fails unreadable processing rows instead of leaving them stuck")
+
+        var commands: [[String: Any]] = []
+        var processorEngineReady = true
+        let processor = MeetingProcessor(
+            store: store, engineIsReady: { processorEngineReady },
+            sendToEngine: { commands.append($0) })
+        var presentedMeetingID: String?
+        processor.onNotesReady = { presentedMeetingID = $0 }
+
+        let missingTrackID = UUID().uuidString
+        let missingTrackDir = root.appendingPathComponent(
+            missingTrackID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(missingTrackDir)
+        try? FileManager.default.copyItem(
+            at: audioDir.appendingPathComponent("me.caf"),
+            to: missingTrackDir.appendingPathComponent("me.caf"))
+        store.insertProcessing(MeetingRecord(
+            id: missingTrackID, title: "Two-sided retained meeting",
+            startedAt: Date(timeIntervalSince1970: 1_700_001_700),
+            endedAt: Date(timeIntervalSince1970: 1_700_001_760),
+            status: .processing, micPath: "\(missingTrackID)/me.caf",
+            systemPath: "\(missingTrackID)/them.caf"))
+        store.appendSegment(MeetingSegment(
+            meetingID: missingTrackID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 10_000, text: "Existing microphone side."))
+        store.appendSegment(MeetingSegment(
+            meetingID: missingTrackID, speaker: .them, chunkIndex: 0,
+            startMs: 500, endMs: 10_500, text: "Existing remote side."))
+        store.complete(
+            meetingID: missingTrackID,
+            notes: MeetingNotes(summary: "Existing two-sided notes."))
+        expect(store.recordMetadata(id: missingTrackID).map {
+            store.hasAllCapturedAudio(for: $0)
+        } == false, "Recreate availability rejects a missing side before presenting Retry")
+        processor.reprocess(meetingID: missingTrackID)
+        expect(commands.isEmpty
+               && store.recordMetadata(id: missingTrackID)?.status == .ready
+               && store.record(id: missingTrackID)?.segments.count == 2
+               && store.search("Existing two-sided", limit: 10)
+                    .contains(where: { $0.meetingID == missingTrackID })
+               && !store.isReprocessing(meetingID: missingTrackID),
+               "Recreate preflight preserves searchable two-sided notes when one captured track is missing")
+
+        processor.enqueue(meetingID: id)
+
+        expect(commands.count == 1
+               && commands[0]["cmd"] as? String == "meeting_transcribe"
+               && commands[0]["speaker"] as? String == "me",
+               "two-track meeting processing starts with the microphone track")
+        guard let micJob = commands.first?["id"] as? String else {
+            expect(false, "microphone meeting command carries a job id")
+            return
+        }
+        processor.handle(.meetingSegment(
+            id: micJob,
+            segment: MeetingSegment(
+                meetingID: id, speaker: .me, chunkIndex: 0,
+                startMs: 0, endMs: 60_000, text: "I will send the proposal.")))
+        processor.handle(.meetingTranscribed(
+            id: micJob, meetingID: id, speaker: .me, durationS: 120, chunks: 1))
+
+        expect(commands.count == 2
+               && commands[1]["cmd"] as? String == "meeting_transcribe"
+               && commands[1]["speaker"] as? String == "them",
+               "two-track meeting processing continues with computer audio")
+        guard let systemJob = commands.last?["id"] as? String else {
+            expect(false, "system-audio meeting command carries a job id")
+            return
+        }
+        processor.handle(.meetingSegment(
+            id: systemJob,
+            segment: MeetingSegment(
+                meetingID: id, speaker: .them, chunkIndex: 0,
+                startMs: 1_000, endMs: 61_000, text: "Please send it tomorrow.")))
+        processor.handle(.meetingTranscribed(
+            id: systemJob, meetingID: id, speaker: .them, durationS: 120, chunks: 1))
+
+        let notesCommand = commands.last
+        let notesTranscript = notesCommand?["transcript"] as? String
+        expect(commands.count == 3
+               && notesCommand?["cmd"] as? String == "meeting_notes"
+               && notesTranscript?.contains("Me: I will send") == true
+               && notesTranscript?.contains("Them: Please send") == true,
+               "meeting notes receive the complete chronological Me/Them transcript")
+        guard let notesJob = notesCommand?["id"] as? String else {
+            expect(false, "meeting notes command carries a job id")
+            return
+        }
+        let notes = MeetingNotes(
+            summary: "The proposal will be sent tomorrow.",
+            decisions: ["Send tomorrow"],
+            actionItems: ["Me: send the proposal"])
+        processor.handle(.meetingNotesReady(id: notesJob, meetingID: id, notes: notes))
+
+        expect(store.record(id: id)?.status == .ready
+               && store.record(id: id)?.segments.count == 2,
+               "notes-ready atomically exposes the completed two-track meeting")
+        expect(presentedMeetingID == id,
+               "notes-ready publishes the meeting id for automatic focused-window presentation")
+
+        let model = MeetingNotesWindowModel(store: store)
+        let start = Date()
+        model.show(meetingID: id)
+        expect(Date().timeIntervalSince(start) < 0.1 && model.loading,
+               "focused meeting presentation returns immediately while metadata loads")
+        expect(waitUntil { model.record?.id == id },
+               "focused meeting presentation loads completed notes asynchronously")
+        expect(model.record?.notes == notes && model.record?.segments.isEmpty == true,
+               "focused meeting presentation renders notes without eagerly loading transcript rows")
+        model.loadTranscript()
+        expect(waitUntil { model.transcript?.count == 2 },
+               "focused meeting transcript loads only after explicit expansion")
+        let firstPresentation = model.presentationToken
+        model.show(meetingID: id)
+        expect(model.presentationToken != firstPresentation && model.transcript == nil,
+               "showing the same finished meeting resets lazy transcript presentation")
+
+        model.show(meetingID: UUID().uuidString)
+        model.show(meetingID: id)
+        expect(waitUntil { model.record?.id == id },
+               "a stale async meeting load cannot replace the latest selection")
+
+        commands.removeAll()
+        processor.reprocess(meetingID: id)
+        let rebuilding = store.record(id: id)
+        expect(commands.first?["speaker"] as? String == "me"
+               && rebuilding?.status == .processing
+               && rebuilding?.segments.count == 2
+               && store.reprocessRecord(id: id)?.segments.isEmpty == true
+               && rebuilding?.notes == notes,
+               "explicit Recreate stages replacement while preserving the committed transcript and notes")
+
+        guard let replacementMicJob = commands.first?["id"] as? String else {
+            expect(false, "replacement microphone command carries a job id")
+            return
+        }
+        processor.handle(.meetingSegment(
+            id: replacementMicJob,
+            segment: MeetingSegment(
+                meetingID: id, speaker: .me, chunkIndex: 0,
+                startMs: 0, endMs: 50_000, text: "Replacement microphone text.")))
+        processor.handle(.meetingTranscribed(
+            id: replacementMicJob, meetingID: id, speaker: .me,
+            durationS: 120, chunks: 1))
+        guard let replacementSystemJob = commands.last?["id"] as? String else {
+            expect(false, "replacement system command carries a job id")
+            return
+        }
+        processor.handle(.meetingSegment(
+            id: replacementSystemJob,
+            segment: MeetingSegment(
+                meetingID: id, speaker: .them, chunkIndex: 0,
+                startMs: 1_000, endMs: 51_000, text: "Replacement system text.")))
+        processor.handle(.meetingTranscribed(
+            id: replacementSystemJob, meetingID: id, speaker: .them,
+            durationS: 120, chunks: 1))
+        guard let replacementNotesJob = commands.last?["id"] as? String else {
+            expect(false, "replacement notes command carries a job id")
+            return
+        }
+        let replacementNotes = MeetingNotes(summary: "Replacement summary.")
+        processor.handle(.meetingNotesReady(
+            id: replacementNotesJob, meetingID: id, notes: replacementNotes))
+        let replaced = store.record(id: id)
+        expect(replaced?.status == .ready
+               && replaced?.segments.map(\.text) == [
+                    "Replacement microphone text.", "Replacement system text."]
+               && replaced?.notes == replacementNotes
+               && !store.isReprocessing(meetingID: id),
+               "Recreate atomically swaps the staged transcript and notes only after success")
+
+        commands.removeAll()
+        processor.reprocess(meetingID: id)
+        guard let failingJob = commands.first?["id"] as? String else {
+            expect(false, "failing replacement command carries a job id")
+            return
+        }
+        processor.handle(.meetingSegment(
+            id: failingJob,
+            segment: MeetingSegment(
+                meetingID: id, speaker: .me, chunkIndex: 0,
+                startMs: 0, endMs: 10_000, text: "Uncommitted replacement.")))
+        processor.handle(.meetingTranscribeFailed(
+            id: failingJob, meetingID: id, speaker: .me,
+            error: "decode failed", code: "invalid_file"))
+        expect(store.record(id: id)?.segments.map(\.text) == [
+                    "Replacement microphone text.", "Replacement system text."]
+               && store.record(id: id)?.notes == replacementNotes
+               && store.recordMetadata(id: id)?.status == .ready
+               && store.search("Replacement", limit: 10).contains(where: { $0.meetingID == id })
+               && store.isReprocessing(meetingID: id),
+               "a failed Recreate keeps the committed meeting visible and searchable for Retry")
+        commands.removeAll()
+        processor.enqueue(meetingID: id)
+        expect(commands.first?["speaker"] as? String == "me"
+               && commands.first?["start_chunk"] as? Int == 1,
+               "Retry resumes the staged Recreate cursor instead of touching committed rows")
+        guard let resumedMicJob = commands.first?["id"] as? String else {
+            expect(false, "resumed replacement microphone command carries a job id")
+            return
+        }
+        processor.handle(.meetingTranscribed(
+            id: resumedMicJob, meetingID: id, speaker: .me,
+            durationS: 120, chunks: 1))
+        guard let emptySystemJob = commands.last?["id"] as? String else {
+            expect(false, "empty replacement system command carries a job id")
+            return
+        }
+        processor.handle(.meetingTranscribed(
+            id: emptySystemJob, meetingID: id, speaker: .them,
+            durationS: 120, chunks: 0))
+        expect(commands.last?["cmd"] as? String == "meeting_transcribe"
+               && store.record(id: id)?.segments.map(\.text) == [
+                    "Replacement microphone text.", "Replacement system text."]
+               && store.recordMetadata(id: id)?.status == .ready,
+               "Recreate refuses an incomplete captured track and preserves both committed sides")
+
+        commands.removeAll()
+        processor.reprocess(meetingID: id)
+        processor.cancelCurrent()
+        expect(store.recordMetadata(id: id)?.status == .ready
+               && store.record(id: id)?.segments.count == 2
+               && store.isReprocessing(meetingID: id),
+               "cancelling Recreate preserves the last good meeting and a resumable retry")
+
+        commands.removeAll()
+        processor.enqueue(meetingID: id)
+        guard let busyJob = commands.first?["id"] as? String else {
+            expect(false, "busy retry carries a job id")
+            return
+        }
+        processor.handle(.meetingTranscribeFailed(
+            id: busyJob, meetingID: id, speaker: .me,
+            error: "engine busy", code: "busy"))
+        expect(processor.isPending(meetingID: id),
+               "busy backoff remains cancellable while active work is cleared")
+        processor.cancelCurrent()
+        let commandsAfterBusyCancel = commands.count
+        processor.handleEngineStateChange(.ready)
+        expect(processor.state == .failed(
+                    meetingID: id, message: "Processing cancelled")
+               && store.recordMetadata(id: id)?.status == .ready
+               && store.isReprocessing(meetingID: id)
+               && !processor.isPending(meetingID: id)
+               && commands.count == commandsAfterBusyCancel,
+               "Cancel stops a queued busy retry instead of silently restarting it")
+
+        commands.removeAll()
+        processor.enqueue(meetingID: id)
+        expect(!commands.isEmpty, "engine-restart retry begins before interruption")
+        processorEngineReady = false
+        processor.handleEngineStateChange(.launching)
+        let interveningID = UUID().uuidString
+        let interveningDirectory = root.appendingPathComponent(
+            interveningID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(interveningDirectory)
+        try? FileManager.default.copyItem(
+            at: audioDir.appendingPathComponent("me.caf"),
+            to: interveningDirectory.appendingPathComponent("me.caf"))
+        store.insertProcessing(MeetingRecord(
+            id: interveningID, title: "Intervening queued meeting",
+            startedAt: Date(timeIntervalSince1970: 1_700_002_500),
+            endedAt: Date(timeIntervalSince1970: 1_700_002_560),
+            status: .processing, micPath: "\(interveningID)/me.caf"))
+        processor.enqueue(meetingID: interveningID)
+        expect(processor.isPending(meetingID: id)
+               && processor.isPending(meetingID: interveningID)
+               && processor.state == .processing(
+                    meetingID: id,
+                    label: "Waiting for speech engine…", fraction: 0),
+               "new queued work cannot displace an engine-interrupted meeting")
+        processor.cancel(meetingID: id)
+        let commandsAfterRestartCancel = commands.count
+        expect(!processor.isPending(meetingID: id)
+               && processor.isPending(meetingID: interveningID)
+               && processor.state == .processing(
+                    meetingID: interveningID,
+                    label: "Waiting for speech engine…", fraction: 0),
+               "targeted Cancel advances to the next queued meeting")
+        processorEngineReady = true
+        processor.handleEngineStateChange(.ready)
+        expect(store.recordMetadata(id: id)?.status == .ready
+               && store.isReprocessing(meetingID: id)
+               && !processor.isPending(meetingID: id)
+               && commands.count == commandsAfterRestartCancel + 1
+               && commands.last?["meeting_id"] as? String == interveningID,
+               "engine recovery cannot resurrect the cancelled interrupted meeting")
+        processor.cancel(meetingID: interveningID)
+
+        let firstQueuedID = UUID().uuidString
+        let secondQueuedID = UUID().uuidString
+        for queuedID in [firstQueuedID, secondQueuedID] {
+            let directory = root.appendingPathComponent(queuedID, isDirectory: true)
+            MeetingStore.ensurePrivateDirectory(directory)
+            try? FileManager.default.copyItem(
+                at: audioDir.appendingPathComponent("me.caf"),
+                to: directory.appendingPathComponent("me.caf"))
+            store.insertProcessing(MeetingRecord(
+                id: queuedID, title: "Queued meeting",
+                startedAt: Date(timeIntervalSince1970: 1_700_003_000),
+                endedAt: Date(timeIntervalSince1970: 1_700_003_060),
+                status: .processing, micPath: "\(queuedID)/me.caf"))
+        }
+        let waitingProcessor = MeetingProcessor(
+            store: store, engineIsReady: { false },
+            sendToEngine: { _ in
+                expect(false, "engine-unavailable queued work never sends a command")
+            })
+        waitingProcessor.enqueue(meetingID: firstQueuedID)
+        waitingProcessor.enqueue(meetingID: secondQueuedID)
+        expect(waitingProcessor.isPending(meetingID: firstQueuedID)
+               && waitingProcessor.isPending(meetingID: secondQueuedID)
+               && waitingProcessor.state == .processing(
+                    meetingID: firstQueuedID,
+                    label: "Waiting for speech engine…", fraction: 0),
+               "prelaunch recovery exposes every queued meeting as pending")
+        waitingProcessor.cancel(meetingID: secondQueuedID)
+        expect(waitingProcessor.isPending(meetingID: firstQueuedID)
+               && !waitingProcessor.isPending(meetingID: secondQueuedID)
+               && waitingProcessor.state == .processing(
+                    meetingID: firstQueuedID,
+                    label: "Waiting for speech engine…", fraction: 0),
+               "targeted Cancel removes a queued meeting without cancelling the head")
+        waitingProcessor.cancelAndForget(meetingID: firstQueuedID)
+        store.delete(meetingID: firstQueuedID)
+        expect(waitingProcessor.state == .idle
+               && !waitingProcessor.isPending(meetingID: firstQueuedID),
+               "deleting workless processing clears the processor presentation state")
     }
 
     private static func testMeetingDetection() {

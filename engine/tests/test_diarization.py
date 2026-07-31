@@ -1,6 +1,6 @@
 """plan_chunks + config behavior for meeting diarization (no models needed)."""
 from velora_engine.config import Config
-from velora_engine.diarization import Turn, plan_chunks
+from velora_engine.diarization import Turn, plain_speaker_plan, plan_chunks
 
 SR = 16_000
 
@@ -81,6 +81,22 @@ def test_plan_is_deterministic() -> None:
     a = plan_chunks(turns, total_samples=SR * 32)
     b = plan_chunks(turns, total_samples=SR * 32)
     assert a == b
+
+
+def test_plain_speaker_plan_collapses_cluster_churn_and_keeps_long_silence_out() -> None:
+    # A broken auto-clusterer can assign every turn a fresh identity. The
+    # fallback must recover stable labels and useful minute-scale context.
+    turns = [
+        Turn(0.0, 2.0, "s1"),
+        Turn(4.0, 8.0, "s2"),
+        Turn(10.0, 14.0, "s3"),
+        Turn(40.0, 45.0, "s4"),
+    ]
+    chunks = plain_speaker_plan(turns, total_samples=SR * 60)
+    assert [label for _, _, label in chunks] == ["them", "them"]
+    assert chunks[0][0] == 0
+    assert chunks[0][1] < int(20 * SR)
+    assert chunks[1][0] > int(35 * SR)
 
 
 def test_chunk_bounds_stay_inside_track() -> None:

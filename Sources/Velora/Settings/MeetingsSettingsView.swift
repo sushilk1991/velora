@@ -13,6 +13,15 @@ struct MeetingsSettingsView: View {
     @State private var hits: [MeetingSearchHit] = []
     @State private var selectedID: String?
     @State private var selectedRecord: MeetingRecord?
+    @State private var selectedHasRecoverableAudio = false
+    @State private var selectedCanRecreate = false
+    @State private var selectedIsReprocessing = false
+    @State private var transcriptExpanded = false
+    @State private var transcript: [MeetingSegment]?
+    @State private var transcriptLoading = false
+    @State private var metadataLoadToken = UUID()
+    @State private var transcriptLoadToken = UUID()
+    @State private var searchLoadToken = UUID()
 
     private var selected: MeetingRecord? { selectedRecord }
 
@@ -42,8 +51,8 @@ struct MeetingsSettingsView: View {
                 }
                 Toggle(isOn: $model.meetingDiarization) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Identify different speakers")
-                        Text("Splits the other side of a call into Speaker 1, Speaker 2, … in the transcript. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.")
+                        Text("Improve remote speech detection")
+                        Text("Skips long silences while keeping the transcript honestly labeled Me and Them. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -234,7 +243,8 @@ struct MeetingsSettingsView: View {
     }
 
     private func meetingDetail(_ record: MeetingRecord) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let processing = processor.isPending(meetingID: record.id)
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(record.title).font(.title3.weight(.semibold))
@@ -242,12 +252,27 @@ struct MeetingsSettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                if record.status == .failed {
+                if selectedIsReprocessing {
+                    if selectedCanRecreate && !processing {
+                        Button("Retry Recreate") { processor.enqueue(meetingID: record.id) }
+                    }
+                } else if record.status == .failed && selectedHasRecoverableAudio
+                    && !processing {
                     Button("Retry") { processor.enqueue(meetingID: record.id) }
                 }
+                if processing {
+                    Button("Cancel processing") {
+                        processor.cancel(meetingID: record.id)
+                    }
+                }
                 Menu("More") {
-                    Button("Copy notes and transcript") { copy(record.exportText) }
+                    Button("Copy notes and transcript") { copy(recordID: record.id) }
                     Button("Export Markdown…") { export(record) }
+                    if record.status == .ready && selectedCanRecreate
+                        && !selectedIsReprocessing && !processing {
+                        Divider()
+                        Button("Recreate transcript and notes…") { reprocess(record) }
+                    }
                     if let url = store.audioURL(relativePath: record.micPath),
                        FileManager.default.fileExists(atPath: url.path) {
                         Button("Play my audio") { NSWorkspace.shared.open(url) }
@@ -269,6 +294,16 @@ struct MeetingsSettingsView: View {
             } else if record.status == .failed {
                 Label(record.error ?? "Processing failed", systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.orange)
+                if !selectedHasRecoverableAudio {
+                    Text("No usable audio was captured, so this meeting cannot be transcribed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let error = record.error {
+                Label(
+                    "Recreate did not finish; the previous notes were kept. \(error)",
+                    systemImage: "exclamationmark.triangle")
+                    .font(.callout).foregroundStyle(.orange)
             }
 
             // No inner ScrollView: a same-axis nested scroller inside the
@@ -284,12 +319,59 @@ struct MeetingsSettingsView: View {
                 if !record.notes.actionItems.isEmpty {
                     detailSection("Action items", text: record.notes.actionItems.map { "☐ \($0)" }.joined(separator: "\n"))
                 }
-                if !record.formattedTranscript.isEmpty {
-                    detailSection("Transcript", text: record.formattedTranscript)
-                }
+                transcriptSection(record)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func transcriptSection(_ record: MeetingRecord) -> some View {
+        DisclosureGroup(isExpanded: $transcriptExpanded) {
+            Group {
+                if transcriptLoading {
+                    ProgressView("Loading transcript…")
+                        .padding(.vertical, VeloraSpacing.s)
+                } else if let transcript {
+                    if transcript.isEmpty {
+                        Text("No transcript is available.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        LazyVStack(alignment: .leading, spacing: VeloraSpacing.s) {
+                            ForEach(transcript) { segment in
+                                transcriptRow(segment)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, VeloraSpacing.xs)
+        } label: {
+            Text("Transcript")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .onChange(of: transcriptExpanded) { _, expanded in
+            if expanded { loadTranscript(meetingID: record.id) }
+        }
+    }
+
+    private func transcriptRow(_ segment: MeetingSegment) -> some View {
+        HStack(alignment: .top, spacing: VeloraSpacing.s) {
+            Text(Self.clock(segment.startMs))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 42, alignment: .leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(segment.speaker.displayName)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(segment.text)
+                    .font(.callout)
+                    .textSelection(.enabled)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func detailSection(_ title: String, text: String) -> some View {
@@ -300,39 +382,160 @@ struct MeetingsSettingsView: View {
     }
 
     private func reload() {
-        records = store.recentMetadata(limit: 100)
-        if selectedID == nil || !records.contains(where: { $0.id == selectedID }) {
-            selectedID = records.first?.id
+        let token = UUID()
+        metadataLoadToken = token
+        let requestedID = selectedID
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fresh = store.recentMetadata(limit: 100)
+            let resolvedID = requestedID.flatMap { id in
+                fresh.contains(where: { $0.id == id }) ? id : nil
+            } ?? fresh.first?.id
+            let selected = resolvedID.flatMap { store.recordMetadata(id: $0) }
+            let recoverable = selected.map {
+                store.hasUsableAudio(relativePath: $0.micPath)
+                    || store.hasUsableAudio(relativePath: $0.systemPath)
+            } ?? false
+            let canRecreate = selected.map {
+                store.hasAllCapturedAudio(for: $0)
+            } ?? false
+            let reprocessing = resolvedID.map {
+                store.isReprocessing(meetingID: $0)
+            } ?? false
+            DispatchQueue.main.async {
+                guard metadataLoadToken == token else { return }
+                let selectionChanged = selectedID != resolvedID
+                let recordChanged = selectedRecord != selected
+                records = fresh
+                selectedID = resolvedID
+                selectedRecord = selected
+                selectedHasRecoverableAudio = recoverable
+                selectedCanRecreate = canRecreate
+                selectedIsReprocessing = reprocessing
+                if selectionChanged || recordChanged { resetTranscript() }
+            }
         }
-        selectedRecord = selectedID.flatMap { store.record(id: $0) }
         refreshSearch()
     }
 
     private func select(_ id: String) {
+        guard selectedID != id else { return }
         selectedID = id
-        selectedRecord = store.record(id: id)
+        selectedRecord = records.first(where: { $0.id == id })
+        selectedHasRecoverableAudio = false
+        selectedCanRecreate = false
+        selectedIsReprocessing = false
+        resetTranscript()
+        let token = UUID()
+        metadataLoadToken = token
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let selected = store.recordMetadata(id: id)
+            let recoverable = selected.map {
+                store.hasUsableAudio(relativePath: $0.micPath)
+                    || store.hasUsableAudio(relativePath: $0.systemPath)
+            } ?? false
+            let canRecreate = selected.map {
+                store.hasAllCapturedAudio(for: $0)
+            } ?? false
+            let reprocessing = store.isReprocessing(meetingID: id)
+            DispatchQueue.main.async {
+                guard metadataLoadToken == token, selectedID == id else { return }
+                selectedRecord = selected
+                selectedHasRecoverableAudio = recoverable
+                selectedCanRecreate = canRecreate
+                selectedIsReprocessing = reprocessing
+            }
+        }
     }
 
     private func refreshSearch() {
         guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            searchLoadToken = UUID()
             hits = []
             return
         }
-        hits = store.search(query, limit: 30)
+        let token = UUID()
+        searchLoadToken = token
+        let requestedQuery = query
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let fresh = store.search(requestedQuery, limit: 30)
+            DispatchQueue.main.async {
+                guard searchLoadToken == token, query == requestedQuery else { return }
+                hits = fresh
+            }
+        }
     }
 
-    private func copy(_ text: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+    private func loadTranscript(meetingID: String) {
+        guard transcript == nil, !transcriptLoading else { return }
+        let token = UUID()
+        transcriptLoadToken = token
+        transcriptLoading = true
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let segments = store.record(id: meetingID)?.segments ?? []
+            DispatchQueue.main.async {
+                guard transcriptLoadToken == token, selectedID == meetingID else { return }
+                transcript = segments
+                transcriptLoading = false
+            }
+        }
+    }
+
+    private func resetTranscript() {
+        transcriptLoadToken = UUID()
+        transcriptExpanded = false
+        transcript = nil
+        transcriptLoading = false
+    }
+
+    private func copy(recordID: String) {
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let text = store.record(id: recordID)?.exportText ?? ""
+            DispatchQueue.main.async {
+                guard !text.isEmpty else { return }
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
+        }
     }
 
     private func export(_ record: MeetingRecord) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = "\(record.title.replacingOccurrences(of: "/", with: "-")) notes.md"
-        panel.begin { response in
-            guard response == .OK, let url = panel.url else { return }
-            try? record.exportText.write(to: url, atomically: true, encoding: .utf8)
+        let store = store
+        DispatchQueue.global(qos: .userInitiated).async {
+            let text = store.record(id: record.id)?.exportText ?? ""
+            DispatchQueue.main.async {
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue =
+                    "\(record.title.replacingOccurrences(of: "/", with: "-")) notes.md"
+                panel.begin { response in
+                    guard response == .OK, let url = panel.url else { return }
+                    try? text.write(to: url, atomically: true, encoding: .utf8)
+                }
+            }
         }
+    }
+
+    private func reprocess(_ record: MeetingRecord) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Recreate this transcript and its notes?"
+        alert.informativeText =
+            "Velora will use the retained audio and the current transcription pipeline. "
+            + "The existing notes stay visible until the replacement is ready."
+        alert.addButton(withTitle: "Recreate")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        resetTranscript()
+        processor.reprocess(meetingID: record.id)
+    }
+
+    private static func clock(_ milliseconds: Int) -> String {
+        let seconds = max(0, milliseconds / 1_000)
+        return String(format: "%02d:%02d", seconds / 60, seconds % 60)
     }
 
     private func delete(_ record: MeetingRecord) {
