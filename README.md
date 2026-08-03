@@ -18,6 +18,12 @@ transcripts, and history are not sent to a transcription service.
   Dictionary teaches Velora names and terms you use often.
 - **Edits selected text.** Select text, describe the change, and undo normally
   if the result is not right.
+- **Carries out spoken actions.** Hold ⌥⇧A and say what you want done — "search
+  YouTube for the match highlights", "message Priya on Slack that I'm running
+  late" — and Velora opens the app and does it. Say "draft" instead and it stops
+  with the message written but unsent. Planning happens on your Mac, like
+  everything else, and Velora stops rather than guess whenever the window it
+  expects is not the one in front.
 - **Remembers meetings—with permission.** After you confirm, Velora records
   microphone and computer audio, then creates a local transcript and notes.
   It captures audio only, never the screen.

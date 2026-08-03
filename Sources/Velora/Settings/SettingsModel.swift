@@ -283,6 +283,8 @@ final class SettingsModel: ObservableObject {
         launchAtLogin = Self.launchAtLoginEnabled
         hotkey = config.hotkey
         editHotkey = config.editHotkey
+        actionHotkey = config.actionHotkey
+        actionsEnabled = config.actionsEnabled
         voiceEdit = config.voiceEdit
         hotkeyMode = config.hotkeyMode
         inputDeviceUID = config.inputDeviceUID
@@ -415,6 +417,8 @@ final class SettingsModel: ObservableObject {
 
         hotkey = imported.shortcuts.dictation
         editHotkey = imported.shortcuts.editSelection
+        actionHotkey = imported.shortcuts.action
+        actionsEnabled = imported.shortcuts.actionsEnabled
         voiceEdit = imported.shortcuts.voiceEdit
         hotkeyMode = imported.shortcuts.behavior
 
@@ -885,7 +889,13 @@ final class SettingsModel: ObservableObject {
                 hotkey = oldValue
                 return
             }
+            guard hotkey != actionHotkey else {
+                actionHotkeyConflict = true
+                hotkey = oldValue
+                return
+            }
             editHotkeyConflict = false
+            actionHotkeyConflict = false
             config.hotkey = hotkey
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
@@ -896,8 +906,10 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, editHotkey != oldValue else { return }
             // The monitor deliberately ignores an edit hotkey equal to the
             // dictation hotkey (dictation wins) — accepting the recording
-            // would silently disable Voice Edit, so reject it visibly.
-            guard editHotkey != hotkey else {
+            // would silently disable Voice Edit, so reject it visibly. The same
+            // applies to a collision with Action Mode, where the first role in
+            // the table would silently win.
+            guard editHotkey != hotkey, editHotkey != actionHotkey else {
                 editHotkeyConflict = true
                 editHotkey = oldValue
                 return
@@ -908,8 +920,31 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// Set when either recorder would make the two shortcuts collide.
+    @Published var actionHotkey: Hotkey {
+        didSet {
+            guard !applyingImportedSettings, actionHotkey != oldValue else { return }
+            guard actionHotkey != hotkey, actionHotkey != editHotkey else {
+                actionHotkeyConflict = true
+                actionHotkey = oldValue
+                return
+            }
+            actionHotkeyConflict = false
+            config.actionHotkey = actionHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var actionsEnabled: Bool {
+        didSet {
+            guard !applyingImportedSettings, actionsEnabled != oldValue else { return }
+            config.actionsEnabled = actionsEnabled
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    /// Set when a recorder would make two shortcuts collide.
     @Published var editHotkeyConflict = false
+    @Published var actionHotkeyConflict = false
 
     @Published var voiceEdit: Bool {
         didSet {

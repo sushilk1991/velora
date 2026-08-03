@@ -32,7 +32,10 @@ from typing import Any, Callable, TypeVar
 
 import numpy as np
 
-from . import __version__, batch_priority, diarization, editing, formatting, models, protocol
+from . import (
+    __version__, actions, batch_priority, diarization, editing, formatting,
+    models, protocol,
+)
 from .audio_store import AudioStore
 from .cleanup import (
     HARD_TIMEOUT_GRACE_S,
@@ -259,6 +262,10 @@ class Engine:
         # than being refused — the hotkey always wins.
         self._editing = False
         self._edit_cancel = threading.Event()
+        # Action Mode planning: same model, same preemption contract as an edit
+        # — the user is waiting on it, and a dictation hotkey outranks it.
+        self._planning = False
+        self._action_cancel = threading.Event()
         # Meeting notes share the cleanup model but are chunked and
         # cooperatively preempted whenever live dictation starts.
         self._meeting_notes_running = False
@@ -872,6 +879,11 @@ class Engine:
             elif cmd == "edit_cancel":
                 if self._editing:
                     self._edit_cancel.set()
+            elif cmd == "action_plan":
+                await self._cmd_action_plan(msg)
+            elif cmd == "action_cancel":
+                if self._planning:
+                    self._action_cancel.set()
             elif cmd == "meeting_notes":
                 await self._cmd_meeting_notes(msg)
             elif cmd == "meeting_notes_cancel":
@@ -906,6 +918,16 @@ class Engine:
                 # The wedge-restart backstop will catch a truly stuck worker;
                 # log so the rare fall-through is visible rather than silent.
                 log.warning("edit did not yield within 2s of a dictation start")
+        if self._planning:
+            # Same contract as an edit: an action plan is a short foreground
+            # model job, and pressing the dictation hotkey abandons it.
+            self._action_cancel.set()
+            for _ in range(20):
+                if not self._planning:
+                    break
+                await asyncio.sleep(0.1)
+            if self._planning:
+                log.warning("action plan did not yield within 2s of a dictation start")
         if self._reprocessing:
             # A background reprocess may be using the live STT backend; starting
             # now would corrupt its stream state. Ask the app to retry.
@@ -2125,6 +2147,111 @@ class Engine:
             })
         finally:
             self._editing = False
+            self._schedule_mining()
+
+    async def _cmd_action_plan(self, msg: dict[str, Any]) -> None:
+        """Action Mode: turn one spoken command into a validated action plan.
+
+        The transcript arrives RAW — cleanup would rewrite the very words that
+        identify a person or an app. Safety lives in `actions.validate_plan`,
+        which the app re-checks independently before executing anything.
+        """
+        async def fail(error: str, code: str = "failed") -> None:
+            await self._send({
+                "event": "action_failed", "id": msg.get("id"),
+                "code": code, "error": error,
+            })
+
+        if self.session is not None or self._starting or self._finalizing:
+            await fail("action: busy (dictation in progress)", "busy")
+            return
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing or self._planning):
+            await fail("action: busy (another job in progress)", "busy")
+            return
+        transcript = msg.get("transcript")
+        if not isinstance(transcript, str) or not transcript.strip():
+            await fail("action: missing 'transcript'", "invalid_arguments")
+            return
+        if len(transcript) > actions.MAX_TRANSCRIPT_CHARS:
+            await fail(
+                f"action: command over {actions.MAX_TRANSCRIPT_CHARS} characters",
+                "too_large")
+            return
+        if self.cleanup is None:
+            await fail("action: writing model unavailable", "cleanup_unavailable")
+            return
+        if self._miner_task is not None:
+            self._miner_task.cancel()
+        self._mine_cancel.set()
+        self._planning = True
+        self._action_cancel.clear()
+        asyncio.create_task(self._run_action_plan(dict(msg), transcript))
+
+    async def _run_action_plan(self, msg: dict[str, Any], transcript: str) -> None:
+        try:
+            t0 = time.perf_counter()
+            context = actions.ActionContext.from_dict(msg.get("context"))
+            context.transcript = transcript
+            attempts: list[str] = []
+            plan: dict[str, Any] | None = None
+            last_error = ""
+            for attempt in range(2):
+                prompt = (actions.build_action_prompt(context) if attempt == 0
+                          else actions.build_repair_prompt(context))
+                result = await self.cleanup.cleanup(
+                    transcript, prompt,
+                    timeout_ms=actions.PLAN_TIMEOUT_MS,
+                    check_ratio=False,
+                    cancel_event=self._action_cancel,
+                    max_tokens=actions.PLAN_MAX_TOKENS,
+                )
+                if self._action_cancel.is_set():
+                    await self._send({"event": "action_failed", "id": msg.get("id"),
+                                      "code": "cancelled", "error": "action: cancelled"})
+                    return
+                if not result.applied:
+                    last_error = f"model unavailable ({result.reason or 'no output'})"
+                    attempts.append(last_error)
+                    continue
+                attempts.append(result.text[:200])
+                try:
+                    plan = actions.plan_from_reply(result.text)
+                    break
+                except actions.PlanError as exc:
+                    last_error = str(exc)
+                    log.warning("action plan attempt %d rejected: %s", attempt + 1, exc)
+
+            ms = int((time.perf_counter() - t0) * 1000)
+            if plan is None:
+                await self._send({
+                    "event": "action_failed", "id": msg.get("id"),
+                    "code": "plan_invalid",
+                    "error": f"could not plan that action: {last_error}",
+                    "ms": ms,
+                })
+                return
+            if plan.get("unsupported"):
+                await self._send({
+                    "event": "action_failed", "id": msg.get("id"),
+                    "code": "unsupported", "error": plan["unsupported"], "ms": ms,
+                })
+                return
+            evt: dict[str, Any] = {"event": "action_plan", "plan": plan, "ms": ms}
+            if msg.get("id") is not None:
+                evt["id"] = msg.get("id")
+            await self._send(evt)
+            self._restart_if_cleanup_unhealthy()
+            log.info("action_plan: %d steps sends=%s ms=%d",
+                     len(plan["steps"]), plan["sends"], ms)
+        except Exception as exc:  # noqa: BLE001 — the app is waiting on an answer
+            log.exception("action_plan failed")
+            await self._send({
+                "event": "action_failed", "id": msg.get("id"),
+                "code": "failed", "error": f"action planning failed: {exc}",
+            })
+        finally:
+            self._planning = False
             self._schedule_mining()
 
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:

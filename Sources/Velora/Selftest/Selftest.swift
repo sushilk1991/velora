@@ -4,18 +4,32 @@ import CoreAudio
 import Foundation
 import SQLite3
 
-private final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
+final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     var hotkeyDownCount = 0
     var hotkeyUpCount = 0
     var editHotkeyDownCount = 0
     var editHotkeyUpCount = 0
+    var actionHotkeyDownCount = 0
+    var actionHotkeyUpCount = 0
     var escapeCount = 0
     var nonHotkeyInputCount = 0
 
     func hotkeyDown() { hotkeyDownCount += 1 }
     func hotkeyUp() { hotkeyUpCount += 1 }
-    func editHotkeyDown() { editHotkeyDownCount += 1 }
-    func editHotkeyUp() { editHotkeyUpCount += 1 }
+
+    func secondaryHotkeyDown(_ role: SecondaryHotkeyRole) {
+        switch role {
+        case .edit: editHotkeyDownCount += 1
+        case .action: actionHotkeyDownCount += 1
+        }
+    }
+
+    func secondaryHotkeyUp(_ role: SecondaryHotkeyRole) {
+        switch role {
+        case .edit: editHotkeyUpCount += 1
+        case .action: actionHotkeyUpCount += 1
+        }
+    }
     func escapePressed() { escapeCount += 1 }
     func nonHotkeyInput() { nonHotkeyInputCount += 1 }
 }
@@ -28,7 +42,9 @@ enum Selftest {
     private static var failures = 0
     private static var checks = 0
 
-    private static func expect(
+    // Internal (not private) so suites can live in their own files —
+    // ActionSelftest.swift is the first.
+    static func expect(
         _ condition: Bool, _ message: String,
         file: String = #fileID, line: Int = #line
     ) {
@@ -40,7 +56,7 @@ enum Selftest {
     }
 
     @discardableResult
-    private static func waitUntil(
+    static func waitUntil(
         timeout: TimeInterval = 2,
         _ condition: () -> Bool
     ) -> Bool {
@@ -140,6 +156,7 @@ enum Selftest {
         testEngineRestartDelay()
         testEmptyFinalFeedback()
         testClipboardStaging()
+        testActionMode()
         testUpdateChecker()
         testStatusMenuUpdateEntry()
         if ProcessInfo.processInfo.environment["VELORA_LIVE_AUDIO_SELFTEST"] == "1" {

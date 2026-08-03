@@ -7,6 +7,8 @@ enum CLICommand: Equatable {
     case stats
     case transcribe(path: String, mode: String?)
     case listen(mode: String?)
+    /// Plan a spoken-style command; `execute` actually carries it out.
+    case action(text: String, execute: Bool, allowSend: Bool)
     case mcp
 }
 
@@ -19,6 +21,7 @@ struct CLIInvocation: Equatable {
         case unknownCommand(String)
         case missingQuery
         case missingPath
+        case missingActionText
         case missingOptionValue(String)
         case invalidOption(String)
         case invalidLimit
@@ -29,6 +32,7 @@ struct CLIInvocation: Equatable {
             case .unknownCommand(let value): return "Unknown command: \(value)"
             case .missingQuery: return "search requires a query"
             case .missingPath: return "transcribe requires an audio file path"
+            case .missingActionText: return "action requires a command to carry out"
             case .missingOptionValue(let value): return "\(value) requires a value"
             case .invalidOption(let value): return "Unknown option: \(value)"
             case .invalidLimit: return "--limit requires a positive integer"
@@ -116,6 +120,22 @@ struct CLIInvocation: Equatable {
                 mode = arguments[1]
             }
             return CLIInvocation(command: .listen(mode: mode), json: json)
+        case "action":
+            var execute = false
+            var allowSend = false
+            var words: [String] = []
+            for argument in arguments {
+                if argument == "--execute" { execute = true }
+                else if argument == "--allow-send" { execute = true; allowSend = true }
+                else if argument.hasPrefix("--") { throw ParseError.invalidOption(argument) }
+                else { words.append(argument) }
+            }
+            let text = words.joined(separator: " ")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty else { throw ParseError.missingActionText }
+            return CLIInvocation(
+                command: .action(text: text, execute: execute, allowSend: allowSend),
+                json: json)
         default:
             throw ParseError.unknownCommand(name)
         }
@@ -147,6 +167,10 @@ enum VeloraCLI {
           transcribe FILE [--mode NAME]
                                   Transcribe an audio file locally
           listen [--mode NAME]    Request one visibly approved dictation
+          action TEXT [--execute] [--allow-send]
+                                  Plan a spoken command. --execute runs it;
+                                  --allow-send also permits plans that message
+                                  someone (implies --execute)
           mcp                     Run the MCP stdio server
 
         Add --json to any command except mcp for JSON output.
@@ -197,13 +221,18 @@ enum VeloraCLI {
         case .listen(let mode):
             command = "listen"
             if let mode { payload["mode"] = mode }
+        case .action(let text, let execute, let allowSend):
+            command = "action"
+            payload["text"] = text
+            payload["execute"] = execute
+            payload["allow_send"] = allowSend
         case .mcp: return 0
         }
 
         do {
             let result = try LocalControlClient.send(
                 command: command, arguments: payload,
-                timeoutSeconds: command == "listen" || command == "transcribe" ? 360 : 30)
+                timeoutSeconds: ["listen", "transcribe", "action"].contains(command) ? 360 : 30)
             if invocation.json {
                 writeOutput(json(result, pretty: true) + "\n")
             } else {

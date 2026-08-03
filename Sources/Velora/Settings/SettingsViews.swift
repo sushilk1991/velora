@@ -746,6 +746,29 @@ struct ShortcutsSettingsView: View {
                 Text("Voice edit")
             }
             Section {
+                Toggle(isOn: $model.actionsEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Voice actions")
+                        Text("Hold the shortcut and say what you want done — \u{201C}search YouTube for the match highlights\u{201D}, \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora opens the app and carries it out. Say \u{201C}draft\u{201D} to stop before sending.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                LabeledContent("Run an action") {
+                    HotkeyRecorderView(hotkey: $model.actionHotkey)
+                }
+                .disabled(!model.actionsEnabled)
+                if model.actionHotkeyConflict {
+                    Text("Voice actions need a shortcut of their own.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Voice actions")
+            } footer: {
+                SettingsFooter("Actions need Accessibility permission, and run entirely on this Mac.")
+            }
+            Section {
                 Picker("When pressed", selection: $model.hotkeyMode) {
                     ForEach(HotkeyMode.allCases) { mode in
                         Text(mode.displayName).tag(mode)

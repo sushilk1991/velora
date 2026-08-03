@@ -367,6 +367,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                         self?.dictation.cancelExternalRequest(requestID)
                     }
                 }
+            },
+            action: { [weak self] arguments, completion in
+                // Scoped like the sibling capabilities: without an identity, a
+                // second client's disconnect would cancel the FIRST client's
+                // (or the user's) running plan.
+                let requestID = UUID()
+                DispatchQueue.main.async {
+                    guard let self else {
+                        completion(.failure(ControlFailure(
+                            code: "app_unavailable", message: "Velora is shutting down")))
+                        return
+                    }
+                    guard self.config.localAgentAccess else {
+                        completion(.failure(.disabled))
+                        return
+                    }
+                    guard let text = arguments["text"] as? String else {
+                        completion(.failure(ControlFailure(
+                            code: "invalid_arguments", message: "action requires a command")))
+                        return
+                    }
+                    self.dictation.performAction(
+                        command: text,
+                        execute: arguments["execute"] as? Bool ?? false,
+                        allowSend: arguments["allow_send"] as? Bool ?? false,
+                        requestID: requestID,
+                        completion: completion)
+                }
+                return { [weak self] in
+                    DispatchQueue.main.async {
+                        self?.dictation.cancelAction(requestID: requestID)
+                    }
+                }
             })
         let controlServer = LocalControlServer(router: controlRouter)
         if controlServer.start() { self.controlServer = controlServer }
@@ -465,7 +498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         ) { [weak self] _ in
             guard let self else { return }
             self.hotkeyMonitor.hotkey = self.config.hotkey
-            self.hotkeyMonitor.editHotkey = self.config.activeEditHotkey
+            self.hotkeyMonitor.secondaryHotkeys = self.config.activeSecondaryHotkeys
         }
 
         // First-run setup progress (venv bootstrap, model downloads) →

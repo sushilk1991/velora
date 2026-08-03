@@ -92,6 +92,72 @@ engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode"
 ```
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
 
+## Action Mode
+
+Hold the Action hotkey (⌥⇧A by default), speak a command, and Velora carries it
+out: opens the app, navigates, types. The command is transcribed in **Raw** mode
+— cleanup would rewrite the names that identify a person or an app — and sent to
+the planner:
+
+```
+app → engine  {"cmd":"action_plan","id":"uuid","transcript":"message Priya on Slack that I'm late",
+               "context":{"frontmost_app":"Sublime Text","frontmost_bundle":"com.sublimetext.4",
+                          "frontmost_window":"notes.md","running_apps":["Slack","Google Chrome"],
+                          "selection":""}}
+engine → app  {"event":"action_plan","id":"uuid","ms":1580,
+               "plan":{"version":1,"goal":"…","sends":true,"steps":[…]}}
+engine → app  {"event":"action_failed","id":"uuid","code":"plan_invalid|unsupported|busy|…"}
+```
+
+The planner is the same on-device Qwen that cleans dictation, prompted for JSON
+(`actions.py`), with one repair retry when the reply is not a single JSON object.
+It shares the model with dictation under the same preemption contract as Safe
+Voice Edit: pressing the dictation hotkey cancels an in-flight plan.
+
+**Step vocabulary** (closed by design — no shell, no scripts, no raw
+coordinates): `open_app`, `open_url`, `wait_frontmost`, `verify_context`,
+`type_text`, `key`, `pause`.
+
+**The safety gate is implemented twice**, in `velora_engine/actions.py` and again
+in `Sources/Velora/Actions/ActionPlan.swift`. That is deliberate: the engine
+guards what the model may propose, the app guards what the machine will do, and
+only the app holds the Accessibility grant. Its rules:
+
+- URL schemes are allow-listed down to seven whose worst case is a window
+  opening (`https`, `http`, `slack`, `mailto`, `tel`, `facetime`, `sms`).
+  `file:`, `javascript:` and `data:` are rejected, and so are app deeplinks such
+  as `shortcuts://run-shortcut`, which would reach a scripting bridge.
+- No `type_text` or `key` step may run before a `wait_frontmost` or
+  `verify_context` step, so typed text can never land in whatever window happened
+  to be in front.
+- `type_text` may not contain a newline — in a chat composer a bare Return is a
+  send, and the app owns that decision through an explicit `key` step.
+- An unmodified Return that would commit typed text must be preceded by a
+  `verify_context` since that text was typed. Verifying afterwards is too late:
+  if the quick switcher never opened, the recipient's name went into the
+  conversation already on screen and that Return sends it to the wrong person.
+- `verify_context` requires ALL its terms, matched whole-word, each at least
+  three characters and never the target app's own name — "Slack" appears in
+  every Slack window title and would prove nothing.
+- Every budget is capped (24 steps, 4 000 typed characters, 12 s of pauses).
+- `sends` marks a plan that delivers something to another person. A plan that
+  omits the field is treated as sending.
+
+At execution time (`ActionExecutor`) each step re-checks reality: the frontmost
+app must still be the one focus was established on, secure input must be absent,
+the screen must not be locked, and `verify_context` brackets its screen reads
+with frontmost checks so a focus change mid-check cannot let the plan verify one
+window and type into another. Verification reads only app-authored strings —
+window title, element description/placeholder, the highlighted row's label —
+never a field's value, which would just be the plan's own typed text confirming
+itself. Any failure stops the plan where it stands rather
+than continuing blind.
+
+Recipes for Slack and WhatsApp live in the planner prompt (quick switcher →
+name → verify → message), not in Swift, so a new app is a prompt change. Web
+searches resolve to a single `open_url`, which is faster and far more reliable
+than walking a UI.
+
 ## Local control protocol (CLI and MCP)
 
 The installed `Resources/bin/velora` executable is a symlink to the app binary. Only that exact bundle-relative `Resources/bin/velora` location (or an explicit `--cli`) selects headless one-shot/MCP mode rather than AppKit; merely renaming a copy of the app binary does not. It connects to `~/.velora/control.sock`; the running app remains the authority for every request.
@@ -100,10 +166,11 @@ The installed `Resources/bin/velora` executable is a symlink to the app binary. 
 - `~/.velora` is forced to mode `0700`; the socket is `0600`; `getpeereid` must equal the app's effective UID.
 - One newline-delimited JSON request (maximum 1 MiB) and one bounded response per connection. The client keeps the connection open until that response; a full disconnect cancels only that request's in-flight action. Eight client workers cap concurrent work without blocking the accept loop.
 - App shutdown closes the listener and every accepted client, revokes pending microphone consent, and locally completes active listen/file jobs before engine teardown. An approval response can never reopen capture after the lifecycle gate closes.
-- `status` works while access is disabled so clients can explain how to opt in. `recent`, `search`, `stats`, `transcribe`, and `listen` require **Allow local CLI and agents**.
+- `status` works while access is disabled so clients can explain how to opt in. `recent`, `search`, `stats`, `transcribe`, `listen`, and `action` require **Allow local CLI and agents**.
 - History/search responses are projected to an explicit schema. They omit raw transcript, bundle id, audio/session paths, screen context, contacts, quality-learning state, and internal identifiers.
 - `transcribe` returns cleaned text to that client only: it does not touch clipboard, write a sidecar, display the dictation HUD, or paste into an app.
 - `listen` requires a visible approval for each call. It captures no AX screen context and never pastes. Cancellation or failure completes the external request and cannot fall through into the normal insertion path.
+- `action` plans by default and returns the plan as text; carrying it out requires an explicit `execute: true`, and a plan marked `sends` requires a second, separate `allow_send: true`. Execution additionally requires Accessibility, no secure input, and an unlocked screen. The voice hotkey supplies both consents itself — holding a dedicated key and speaking the command is the instruction.
 - MCP uses protocol version `2025-06-18` over stdin/stdout and exposes the same six allow-listed operations; it does not widen the broker's authority.
 
 The control socket is deliberately separate from `engine.sock`. The engine socket carries PCM and privileged model controls for one app-owned connection; exposing it would bypass the app's policy and lifecycle checks.
@@ -181,6 +248,7 @@ Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|f
 | `EngineClient/` | socket client, framing, request/event routing |
 | `Settings/` | SwiftUI settings tabs + onboarding flow, permission checks |
 | `History/` | SQLite (raw SQL, no deps) store + menubar recents |
+| `Actions/` | Action Mode: plan validation (mirror of the engine gate), step executor with per-step focus re-verification, macOS host (NSWorkspace/AX/CGEvent), app-name matching |
 | `Control/` | owner-only local broker, CLI, MCP stdio server, response projection |
 | `Meetings/` | candidate detection, explicit-consent orchestration, two-track capture, private store, resumable processing |
 | `Config/` | app config + mode file loading/watching |
@@ -199,6 +267,7 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 | `config.py` | modes/vocab loading shared with app via ~/.velora/ |
 | `media.py` | audio decode and exact-coverage meeting chunk planning |
 | `meeting_notes.py` | schema-checked chunk/map-reduce meeting summaries, decisions, and actions |
+| `actions.py` | Action Mode planner prompt, plan parsing, and the safety validator |
 
 ## Permissions (TCC)
 

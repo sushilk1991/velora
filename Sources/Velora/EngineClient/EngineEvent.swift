@@ -54,6 +54,12 @@ enum EngineEvent {
     case edited(id: String?, text: String, applied: Bool, ms: Int, reason: String?)
     case editFailed(id: String?, error: String, code: String)
 
+    /// Action Mode: a validated plan for the spoken command, and its failures.
+    /// The plan arrives as raw JSON so `ActionPlan.decode` — the app's own copy
+    /// of the safety gate — is the only thing that turns it into steps.
+    case actionPlan(id: String?, plan: [String: Any], ms: Int)
+    case actionFailed(id: String?, error: String, code: String)
+
     /// File-transcription command reached the engine (sent before decoding —
     /// distinguishes "working" from "command dropped while disconnected").
     case transcribeAccepted(id: String?)
@@ -173,6 +179,16 @@ enum EngineEvent {
             return .editFailed(
                 id: object["id"] as? String,
                 error: object["error"] as? String ?? "edit failed",
+                code: object["code"] as? String ?? "failed")
+        case "action_plan":
+            return .actionPlan(
+                id: object["id"] as? String,
+                plan: object["plan"] as? [String: Any] ?? [:],
+                ms: object["ms"] as? Int ?? 0)
+        case "action_failed":
+            return .actionFailed(
+                id: object["id"] as? String,
+                error: object["error"] as? String ?? "action failed",
                 code: object["code"] as? String ?? "failed")
         case "transcribe_accepted":
             return .transcribeAccepted(id: object["id"] as? String)

@@ -125,6 +125,7 @@ final class LocalControlRouter {
     private let typingWPM: () -> Int
     private let transcribeFile: AsyncCapability?
     private let listen: AsyncCapability?
+    private let action: AsyncCapability?
 
     init(
         history: HistoryStore,
@@ -132,7 +133,8 @@ final class LocalControlRouter {
         engineReady: @escaping () -> Bool,
         typingWPM: @escaping () -> Int,
         transcribeFile: AsyncCapability? = nil,
-        listen: AsyncCapability? = nil
+        listen: AsyncCapability? = nil,
+        action: AsyncCapability? = nil
     ) {
         self.history = history
         self.accessEnabled = accessEnabled
@@ -140,7 +142,10 @@ final class LocalControlRouter {
         self.typingWPM = typingWPM
         self.transcribeFile = transcribeFile
         self.listen = listen
+        self.action = action
     }
+
+    static let maxActionCommandCharacters = 1_200
 
     /// Async facade used by the socket server. Read-only commands complete
     /// immediately; long-running capabilities retain the one client request
@@ -150,13 +155,48 @@ final class LocalControlRouter {
         _ request: ControlRequest,
         completion: @escaping (ControlResponse) -> Void
     ) -> (() -> Void)? {
-        guard request.command == "transcribe" || request.command == "listen" else {
+        guard ["transcribe", "listen", "action"].contains(request.command) else {
             completion(handle(request))
             return nil
         }
         guard accessEnabled() else {
             completion(.error(id: request.id, .disabled))
             return nil
+        }
+
+        if request.command == "action" {
+            guard let text = (request.arguments["text"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty, text.count <= Self.maxActionCommandCharacters else {
+                completion(.error(id: request.id, ControlFailure(
+                    code: "invalid_arguments",
+                    message: "action requires a command of at most "
+                        + "\(Self.maxActionCommandCharacters) characters")))
+                return nil
+            }
+            guard let action else {
+                completion(.error(id: request.id, ControlFailure(
+                    code: "capability_unavailable", message: "Capability is unavailable")))
+                return nil
+            }
+            // Planning is always allowed; carrying the plan out is opt-in per
+            // request, so an agent (or a test) can inspect a plan without the
+            // machine doing anything.
+            let execute = request.arguments["execute"] as? Bool ?? false
+            // Sending is a second, separate opt-in: "run this" and "it is fine
+            // for this to message someone" are different decisions, and the
+            // one global access toggle cannot express the second.
+            let allowSend = request.arguments["allow_send"] as? Bool ?? false
+            return action([
+                "text": text, "execute": execute, "allow_send": allowSend,
+            ]) { result in
+                switch result {
+                case .success(let payload):
+                    completion(.success(id: request.id, result: payload))
+                case .failure(let failure):
+                    completion(.error(id: request.id, failure))
+                }
+            }
         }
         guard let mode = validatedMode(request.arguments) else {
             completion(.error(id: request.id, ControlFailure(
@@ -240,6 +280,7 @@ final class LocalControlRouter {
         var values = ["recent", "search", "stats"]
         if transcribeFile != nil { values.append("transcribe") }
         if listen != nil { values.append("listen") }
+        if action != nil { values.append("action") }
         return values
     }
 

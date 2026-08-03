@@ -105,6 +105,7 @@ class Worker:
                     cancel_event=cancel_event,
                     allowed_terms=message.get("allowed_terms"),
                     prefix_candidates=prefix_candidates,
+                    max_tokens=message.get("max_tokens"),
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return

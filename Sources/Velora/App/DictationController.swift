@@ -169,6 +169,20 @@ final class DictationController: NSObject {
     private let dictionary: DictionaryRepository
     private var externalInsertionObserver: NSObjectProtocol?
 
+    /// Action Mode. Lazy because it needs `self`'s engine client and inserter,
+    /// and because a user who never runs an action never pays for it.
+    private lazy var actions = ActionCoordinator(
+        client: supervisor.client,
+        host: SystemActionHost(inserter: inserter))
+    /// The dictation session whose transcript is a command, not text to insert.
+    private var actionSession: String?
+    /// Identity of the CLI request that owns the running action, if any.
+    private var actionRequestID: UUID?
+    /// The app that was frontmost when the command was spoken. Captured at
+    /// session start because Velora's own HUD may take focus afterwards, and
+    /// "this window" in a command means the user's window, not ours.
+    private var actionOriginApp: NSRunningApplication?
+
     private(set) var phase: Phase = .idle {
         didSet {
             guard phase != oldValue else { return }
@@ -358,6 +372,9 @@ final class DictationController: NSObject {
             || sublimeCaptureID != nil
             || sublimeApplyID != nil
             || externalApproval != nil
+            // An action drives other apps' windows; relaunching Velora
+            // underneath a half-run plan would strand it mid-message.
+            || actions.isRunning
     }
 
     // MARK: - Menubar entry point
@@ -373,6 +390,130 @@ final class DictationController: NSObject {
             stopAndTranscribe()
         case .transcribing:
             break
+        }
+    }
+
+    // MARK: - Action Mode
+
+    /// Plan (and optionally carry out) one spoken command.
+    ///
+    /// The frontmost app is snapshotted BEFORE anything of Velora's can take
+    /// focus: the planner's whole job is deciding what "this window" and "the
+    /// app I'm in" mean, and by the time a plan comes back the answer may have
+    /// changed.
+    func performAction(
+        command: String,
+        execute: Bool,
+        allowSend: Bool = false,
+        requestID: UUID? = nil,
+        completion: @escaping (Result<[String: Any], ControlFailure>) -> Void
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !terminating else {
+            completion(.failure(ControlFailure(
+                code: "app_unavailable", message: "Velora is shutting down")))
+            return
+        }
+        guard phase == .idle, !actions.isRunning else {
+            completion(.failure(ControlFailure(
+                code: "busy", message: "Velora is busy right now")))
+            return
+        }
+        if execute {
+            guard Permissions.accessibilityGranted, TextInserter.canPostEvents else {
+                completion(.failure(ControlFailure(
+                    code: "permission_required",
+                    message: "Action Mode needs Accessibility permission to control apps")))
+                return
+            }
+            guard !SecureInput.isActive else {
+                completion(.failure(ControlFailure(
+                    code: "secure_input",
+                    message: "A password field is active; keystrokes are blocked")))
+                return
+            }
+        }
+        let frontmost = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        let context = ActionContextSnapshot.capture(
+            frontmost: frontmost,
+            windowTitle: ScreenContext.windowTitle(of: frontmost),
+            selection: ScreenContext.selectedText(of: frontmost)?.text ?? "")
+
+        actionRequestID = requestID
+        actions.perform(
+            transcript: command, context: context, execute: execute, allowSend: allowSend
+        ) { [weak self] result in
+            self?.actionRequestID = nil
+            switch result {
+            case .planned(let plan):
+                completion(.success(["ok": true, "executed": false, "plan": plan.payload]))
+            case .needsSendApproval(let plan):
+                completion(.failure(ControlFailure(
+                    code: "send_not_allowed",
+                    message: "This plan sends a message. Re-run with --allow-send if "
+                        + "that is what you want: " + plan.describedSteps.joined(separator: " → "))))
+            case .completed(let goal, let trace):
+                completion(.success([
+                    "ok": true, "executed": execute, "goal": goal, "trace": trace,
+                ]))
+            case .cancelled:
+                completion(.failure(ControlFailure(
+                    code: "cancelled", message: "The action was cancelled")))
+            case .failed(let reason, let trace):
+                completion(.failure(ControlFailure(
+                    code: "action_failed",
+                    message: trace.isEmpty ? reason
+                        : "\(reason) [\(trace.joined(separator: " → "))]")))
+            }
+        }
+    }
+
+    /// Cancels the running action. With a `requestID`, only the action that
+    /// request started — a client that was refused as busy must not be able to
+    /// cancel the plan it lost the race to.
+    func cancelAction(requestID: UUID? = nil) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        if let requestID, actionRequestID != requestID { return }
+        actions.cancel()
+    }
+
+    /// Runs a command spoken through the Action hotkey. Unlike the CLI path
+    /// this always executes — the user held a dedicated key and spoke an
+    /// instruction, which is the consent.
+    private func runVoiceAction(_ command: String) {
+        let origin = actionOriginApp
+        actionOriginApp = nil
+        guard !command.isEmpty else {
+            showError("Didn't catch a command")
+            return
+        }
+        guard !SecureInput.isActive else {
+            showError("A password field is active — actions are blocked")
+            return
+        }
+        let context = ActionContextSnapshot.capture(
+            frontmost: origin,
+            windowTitle: ScreenContext.windowTitle(of: origin),
+            selection: ScreenContext.selectedText(of: origin)?.text ?? "")
+        showNotice(symbol: "wand.and.stars", message: "Working on it…")
+        NSLog("Velora: voice action — %@", command)
+        // allowSend: holding the Action hotkey and speaking the command is the
+        // consent. Esc aborts while it runs.
+        actions.perform(transcript: command, context: context,
+                        execute: true, allowSend: true) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .completed(let goal, _):
+                self.showNotice(
+                    symbol: "checkmark.circle",
+                    message: goal.isEmpty ? "Done" : String(goal.prefix(60)))
+            case .planned, .needsSendApproval:
+                self.showNotice(symbol: "checkmark.circle", message: "Planned")
+            case .cancelled:
+                self.showNotice(symbol: "xmark.circle", message: "Action cancelled")
+            case .failed(let reason, _):
+                self.showError(String(reason.prefix(80)))
+            }
         }
     }
 
@@ -1497,6 +1638,15 @@ final class DictationController: NSObject {
 
     /// Routed here by the AppDelegate from the supervisor.
     func handleEngineEvent(_ event: EngineEvent) {
+        // Action Mode replies are addressed by their own request id and never
+        // belong to a dictation session.
+        switch event {
+        case .actionPlan, .actionFailed:
+            actions.handle(event)
+            return
+        default:
+            break
+        }
         switch event {
         case .partial(let session, _):
             // Protocol-compatible progress only. Whisper partials are
@@ -1727,6 +1877,24 @@ final class DictationController: NSObject {
                 request.completion(.success(ExternalDictationResult(
                     text: text, mode: mode, durationMs: durationMs)))
             }
+            return
+        }
+
+        if let session = actionSession, session == sessionID {
+            actionSession = nil
+            // Raw mode: `raw` is what the user said, before any formatting. The
+            // planner is matching names and app names, so verbatim wins.
+            let command = (raw.isEmpty ? trimmed : raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if audio != nil {
+                recordHistory(
+                    text: command, raw: raw, context: context, mode: "Action",
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio)
+            }
+            phase = .idle
+            runVoiceAction(command)
             return
         }
 
@@ -2110,10 +2278,88 @@ extension DictationController: HotkeyMonitorDelegate {
         }
     }
 
+    func secondaryHotkeyDown(_ role: SecondaryHotkeyRole) {
+        switch role {
+        case .edit: editHotkeyDown()
+        case .action: actionHotkeyDown()
+        }
+    }
+
+    func secondaryHotkeyUp(_ role: SecondaryHotkeyRole) {
+        switch role {
+        case .edit: editHotkeyUp()
+        case .action: actionHotkeyUp()
+        }
+    }
+
+    /// Action Mode hotkey: hold, speak a command, release. Shares the dictation
+    /// hold/toggle semantics, and like Safe Voice Edit only ever starts from
+    /// idle — it never interrupts a dictation that is already running.
+    private func actionHotkeyDown() {
+        if phase == .transcribing { resetIfStuckTranscribing() }
+        let isActionRecording = actionSession == sessionID && isRecording
+
+        switch (config.hotkeyMode, phase) {
+        case (.toggle, .idle):
+            beginActionSession(locked: true)
+        case (.toggle, .starting) where isActionRecording:
+            cancel()
+        case (.toggle, .recording) where isActionRecording:
+            stopAndTranscribe()
+        case (.hold, .idle):
+            hotkeyDownAt = Date()
+            beginActionSession(locked: false)
+        case (.hold, .starting(locked: true)) where isActionRecording:
+            cancel()
+        case (.hold, .recording(locked: true)) where isActionRecording:
+            stopAndTranscribe()
+        default:
+            break
+        }
+    }
+
+    private func actionHotkeyUp() {
+        guard config.hotkeyMode == .hold, actionSession == sessionID else { return }
+        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+        if case .starting(locked: false) = phase {
+            if heldFor >= Self.tapThreshold {
+                stopAfterCaptureStarts = true
+            } else {
+                phase = .starting(locked: true)
+            }
+            return
+        }
+        guard case .recording(locked: false) = phase else { return }
+        if heldFor >= Self.tapThreshold {
+            stopAndTranscribe()
+        } else {
+            NSLog("Velora: action tap (%.0f ms) — recording locked on", heldFor * 1000)
+            phase = .recording(locked: true)
+        }
+    }
+
+    /// Starts recording a command. "Raw" mode: the planner needs the words as
+    /// spoken — cleanup would rewrite the very names that identify a person or
+    /// an app ("Himesh" → "Hi, mesh").
+    private func beginActionSession(locked: Bool) {
+        guard Permissions.accessibilityGranted, TextInserter.canPostEvents else {
+            showError("Action Mode needs Accessibility permission")
+            return
+        }
+        let origin = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        guard startRecording(locked: locked, explicitMode: "Raw", hudLabel: "Action") else {
+            return
+        }
+        actionSession = sessionID
+        actionOriginApp = origin
+        NSLog("Velora: action session started (from %@)",
+              origin?.localizedName ?? "unknown")
+    }
+
     /// Safe Voice Edit hotkey: same hold/toggle semantics as dictation, but
     /// only ever starts when idle with a selection — it never interrupts a
     /// dictation in progress.
-    func editHotkeyDown() {
+    private func editHotkeyDown() {
         guard sublimeApplyID == nil else {
             showNotice(symbol: "hourglass", message: "Finishing edit")
             return
@@ -2144,7 +2390,7 @@ extension DictationController: HotkeyMonitorDelegate {
         }
     }
 
-    func editHotkeyUp() {
+    private func editHotkeyUp() {
         guard config.hotkeyMode == .hold else { return }
         if phase == .idle, sublimeCaptureID != nil {
             let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
@@ -2177,6 +2423,17 @@ extension DictationController: HotkeyMonitorDelegate {
     }
 
     func escapePressed() {
+        // Esc is the universal abort. A running plan is driving other apps'
+        // windows, so it is the thing the user most urgently wants stopped —
+        // and it runs while `phase` is idle, so it must be checked first.
+        if actions.isRunning {
+            actions.cancel()
+            NSLog("Velora: action cancelled by Esc")
+            // Only swallow Esc while steps are actually running. While a plan is
+            // merely being planned nothing is touching the machine, and Esc
+            // still belongs to whatever else is on screen.
+            if actions.isExecuting { return }
+        }
         switch phase {
         case .starting, .recording, .transcribing:
             cancel()

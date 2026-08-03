@@ -144,12 +144,44 @@ extension SettingsDocument {
         var editSelection: Hotkey
         var voiceEdit: Bool
         var behavior: HotkeyMode
+        /// Action Mode: hold, speak a command, Velora carries it out.
+        var action: Hotkey
+        var actionsEnabled: Bool
 
         static let defaults = Shortcuts(
             dictation: .rightOption,
             editSelection: .optionShiftE,
             voiceEdit: true,
-            behavior: .hold)
+            behavior: .hold,
+            action: .controlShiftA,
+            actionsEnabled: true)
+
+        // Settings files written before Action Mode existed have no `action`
+        // keys; decoding must fill them in rather than fail the whole document
+        // and reset every unrelated preference.
+        init(dictation: Hotkey, editSelection: Hotkey, voiceEdit: Bool,
+             behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool) {
+            self.dictation = dictation
+            self.editSelection = editSelection
+            self.voiceEdit = voiceEdit
+            self.behavior = behavior
+            self.action = action
+            self.actionsEnabled = actionsEnabled
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            dictation = try container.decode(Hotkey.self, forKey: .dictation)
+            editSelection = try container.decode(Hotkey.self, forKey: .editSelection)
+            voiceEdit = try container.decode(Bool.self, forKey: .voiceEdit)
+            behavior = try container.decode(HotkeyMode.self, forKey: .behavior)
+            action = try container.decodeIfPresent(Hotkey.self, forKey: .action)
+                ?? Shortcuts.defaultActionHotkey
+            actionsEnabled = try container.decodeIfPresent(
+                Bool.self, forKey: .actionsEnabled) ?? true
+        }
+
+        static let defaultActionHotkey = Hotkey.controlShiftA
     }
 
     struct Updates: Codable, Equatable {
@@ -378,10 +410,17 @@ enum SettingsDocumentCodec {
             throw SettingsDocumentError.invalidValue("meeting notes prompt")
         }
         guard value.shortcuts.dictation.isValidSettingsHotkey,
-              value.shortcuts.editSelection.isValidSettingsHotkey else {
+              value.shortcuts.editSelection.isValidSettingsHotkey,
+              value.shortcuts.action.isValidSettingsHotkey else {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
         }
-        guard value.shortcuts.dictation != value.shortcuts.editSelection else {
+        // All three must differ. The monitor resolves a collision by
+        // first-match, so a duplicate binding is not an error the user would
+        // ever see — it is a shortcut that silently does something else.
+        let bindings = [value.shortcuts.dictation, value.shortcuts.editSelection,
+                        value.shortcuts.action]
+        for (index, binding) in bindings.enumerated()
+        where bindings[(index + 1)...].contains(binding) {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
         }
     }

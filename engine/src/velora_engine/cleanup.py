@@ -880,6 +880,7 @@ class CleanupEngine:
         cancel_event: threading.Event | None = None,
         allowed_terms: list[str] | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
+        max_tokens_override: int | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
@@ -887,7 +888,11 @@ class CleanupEngine:
             # Romanization (check_ratio off) expands length, so give the
             # generator more headroom than the usual 1.8x cleanup budget.
             factor = OUTPUT_TOKEN_FACTOR if check_ratio else 3.0
-            max_tokens = max(MIN_MAX_TOKENS, int(input_tokens * factor))
+            budget = max(MIN_MAX_TOKENS, int(input_tokens * factor))
+            # An action plan's output bears no relation to its input length —
+            # "message Priya" is 3 tokens in and a ~300-token plan out — so the
+            # caller sets the ceiling directly.
+            max_tokens = max_tokens_override or budget
             generated = self._generate_locked(
                 system_prompt,
                 raw,
@@ -950,6 +955,7 @@ class CleanupEngine:
         cancel_event: threading.Event | None = None,
         allowed_terms: list[str] | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
+        max_tokens: int | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
@@ -975,7 +981,7 @@ class CleanupEngine:
             loop.call_soon_threadsafe(started.set)
             return self._run(
                 raw, system_prompt, timeout_ms, check_ratio,
-                worker_cancel, allowed_terms, prefix_candidates,
+                worker_cancel, allowed_terms, prefix_candidates, max_tokens,
             )
 
         worker = loop.run_in_executor(self._executor, run_started)

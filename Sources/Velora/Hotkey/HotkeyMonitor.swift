@@ -6,11 +6,22 @@ import Foundation
 /// tap-to-lock) lives in `DictationController`; this type only reports
 /// clean down/up edges for the configured hotkey plus Esc presses.
 /// All callbacks are on the main queue.
+/// A hotkey other than the dictation one. Each role is an independent slot with
+/// its own latch state; the dictation hotkey always wins a collision.
+enum SecondaryHotkeyRole: String, CaseIterable {
+    /// Safe Voice Edit: select text, hold, speak an instruction.
+    case edit
+    /// Action Mode: hold, speak a command, Velora carries it out.
+    case action
+
+    var label: String { rawValue }
+}
+
 protocol HotkeyMonitorDelegate: AnyObject {
     func hotkeyDown()
     func hotkeyUp()
-    func editHotkeyDown()
-    func editHotkeyUp()
+    func secondaryHotkeyDown(_ role: SecondaryHotkeyRole)
+    func secondaryHotkeyUp(_ role: SecondaryHotkeyRole)
     func escapePressed()
     /// A real user keystroke or click happened between dictations. Callers use
     /// this to discard any AX-opaque insertion boundary they had to remember.
@@ -68,17 +79,28 @@ final class HotkeyMonitor {
         }
     }
 
-    /// Optional second hotkey: Safe Voice Edit (speak an instruction for the
-    /// current selection). Nil disables it; a value equal to the dictation
-    /// hotkey is ignored at match time so the main hotkey always wins.
-    var editHotkey: Hotkey? = AppConfig.shared.activeEditHotkey {
+    /// Optional extra hotkeys by role (Safe Voice Edit, Action Mode). A missing
+    /// entry disables that role; a value equal to the dictation hotkey is
+    /// ignored at match time so the main hotkey always wins.
+    var secondaryHotkeys: [SecondaryHotkeyRole: Hotkey] = AppConfig.shared.activeSecondaryHotkeys {
         didSet {
-            guard editHotkey != oldValue else { return }
-            editModifierIsDown = false
-            editComboIsDown = false
-            NSLog("Velora: edit hotkey now %@",
-                  editHotkey.map(\.displayLabel) ?? "off")
+            guard secondaryHotkeys != oldValue else { return }
+            // Only clear the latches of roles that actually changed: rebinding
+            // Action Mode must not strand an Edit hold that is in progress.
+            for role in SecondaryHotkeyRole.allCases
+            where secondaryHotkeys[role] != oldValue[role] {
+                secondaryModifierIsDown[role] = false
+                secondaryComboIsDown[role] = false
+                NSLog("Velora: %@ hotkey now %@", role.label,
+                      secondaryHotkeys[role].map(\.displayLabel) ?? "off")
+            }
         }
+    }
+
+    /// Convenience for the Safe Voice Edit slot, which predates the role table.
+    var editHotkey: Hotkey? {
+        get { secondaryHotkeys[.edit] }
+        set { secondaryHotkeys[.edit] = newValue }
     }
 
     private var eventTap: CFMachPort?
@@ -89,8 +111,8 @@ final class HotkeyMonitor {
     /// Tracks an active combo press so keyUp matches even after the user
     /// releases the modifiers first.
     private var comboIsDown = false
-    private var editModifierIsDown = false
-    private var editComboIsDown = false
+    private var secondaryModifierIsDown: [SecondaryHotkeyRole: Bool] = [:]
+    private var secondaryComboIsDown: [SecondaryHotkeyRole: Bool] = [:]
     /// True only for a filtering tap whose callback may return nil to consume
     /// a matched combo key event.
     private var canSuppressComboEvents = false
@@ -170,12 +192,14 @@ final class HotkeyMonitor {
         } else {
             modifierIsDown = false
         }
-        if let edit = editHotkey, edit.isModifierOnly,
-           let mask = Hotkey.modifierMask(forKeyCode: edit.keyCode) {
-            let live = CGEventSource.flagsState(.combinedSessionState)
-            editModifierIsDown = live.rawValue & mask.rawValue != 0
-        } else {
-            editModifierIsDown = false
+        for role in SecondaryHotkeyRole.allCases {
+            if let secondary = secondaryHotkeys[role], secondary.isModifierOnly,
+               let mask = Hotkey.modifierMask(forKeyCode: secondary.keyCode) {
+                let live = CGEventSource.flagsState(.combinedSessionState)
+                secondaryModifierIsDown[role] = live.rawValue & mask.rawValue != 0
+            } else {
+                secondaryModifierIsDown[role] = false
+            }
         }
         if preservePhysicallyHeldCombos {
             // A tap timeout can happen while a matched key is still held.
@@ -184,12 +208,15 @@ final class HotkeyMonitor {
             comboIsDown = Self.resyncedComboLatch(
                 wasLatched: comboIsDown,
                 keyCurrentlyDown: Self.keyState(hotkey.keyCode))
-            editComboIsDown = Self.resyncedComboLatch(
-                wasLatched: editComboIsDown,
-                keyCurrentlyDown: editHotkey.map { Self.keyState($0.keyCode) } ?? false)
+            for role in SecondaryHotkeyRole.allCases {
+                secondaryComboIsDown[role] = Self.resyncedComboLatch(
+                    wasLatched: secondaryComboIsDown[role] ?? false,
+                    keyCurrentlyDown: secondaryHotkeys[role]
+                        .map { Self.keyState($0.keyCode) } ?? false)
+            }
         } else {
             comboIsDown = false
-            editComboIsDown = false
+            for role in SecondaryHotkeyRole.allCases { secondaryComboIsDown[role] = false }
         }
     }
 
@@ -355,13 +382,17 @@ final class HotkeyMonitor {
             emitHotkey(down: isDown)
             return
         }
-        if let edit = editHotkey, edit != hotkey, edit.isModifierOnly,
-           keyCode == edit.keyCode,
-           let mask = Hotkey.modifierMask(forKeyCode: keyCode) {
+        // Roles are checked in a fixed order, so two roles bound to the same
+        // modifier resolve deterministically instead of both firing.
+        for role in SecondaryHotkeyRole.allCases {
+            guard let secondary = secondaryHotkeys[role], secondary != hotkey,
+                  secondary.isModifierOnly, keyCode == secondary.keyCode,
+                  let mask = Hotkey.modifierMask(forKeyCode: keyCode) else { continue }
             let isDown = flags & mask.rawValue != 0
-            guard isDown != editModifierIsDown else { return }
-            editModifierIsDown = isDown
-            emitEditHotkey(down: isDown)
+            guard isDown != (secondaryModifierIsDown[role] ?? false) else { return }
+            secondaryModifierIsDown[role] = isDown
+            emitSecondaryHotkey(role, down: isDown)
+            return
         }
     }
 
@@ -383,15 +414,17 @@ final class HotkeyMonitor {
             && keyCode == hotkey.keyCode
             && flags & Hotkey.strictModifierMask
                 == hotkey.modifiers & Hotkey.strictModifierMask
-        let editComboMatches =
-            editHotkey.map {
-                $0 != hotkey
-                    && !$0.isModifierOnly
-                    && keyCode == $0.keyCode
-                    && flags & Hotkey.strictModifierMask
-                        == $0.modifiers & Hotkey.strictModifierMask
-            } ?? false
-        if !comboCanBeSuppressed, hotkeyComboMatches || editComboMatches {
+        func comboMatches(_ role: SecondaryHotkeyRole) -> Bool {
+            guard let secondary = secondaryHotkeys[role] else { return false }
+            return secondary != hotkey
+                && !secondary.isModifierOnly
+                && keyCode == secondary.keyCode
+                && flags & Hotkey.strictModifierMask
+                    == secondary.modifiers & Hotkey.strictModifierMask
+        }
+        // First matching role wins, so one chord never triggers two features.
+        let matchedRole = SecondaryHotkeyRole.allCases.first(where: comboMatches)
+        if !comboCanBeSuppressed, hotkeyComboMatches || matchedRole != nil {
             if !isRepeat {
                 NSLog(
                     "Velora: combo hotkey ignored — filtering event tap unavailable")
@@ -404,9 +437,11 @@ final class HotkeyMonitor {
         if !hotkey.isModifierOnly, keyCode == hotkey.keyCode, comboIsDown {
             return true
         }
-        if let edit = editHotkey, !edit.isModifierOnly,
-           keyCode == edit.keyCode, editComboIsDown {
-            return true
+        for role in SecondaryHotkeyRole.allCases {
+            if let secondary = secondaryHotkeys[role], !secondary.isModifierOnly,
+               keyCode == secondary.keyCode, secondaryComboIsDown[role] == true {
+                return true
+            }
         }
         if hotkeyComboMatches {
             if !isRepeat, !comboIsDown {
@@ -420,15 +455,15 @@ final class HotkeyMonitor {
             // is latched, so the target app never sees part of the shortcut.
             return comboIsDown
         }
-        if let edit = editHotkey, editComboMatches {
-            if !isRepeat, !editComboIsDown {
-                editComboIsDown = true
+        if let matchedRole, let secondary = secondaryHotkeys[matchedRole] {
+            if !isRepeat, secondaryComboIsDown[matchedRole] != true {
+                secondaryComboIsDown[matchedRole] = true
                 NSLog(
-                    "Velora: edit hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
-                    edit.displayLabel, keyCode, flags)
-                emitEditHotkey(down: true)
+                    "Velora: %@ hotkey combo matched %@ (keyCode=%lld flags=0x%llx)",
+                    matchedRole.label, secondary.displayLabel, keyCode, flags)
+                emitSecondaryHotkey(matchedRole, down: true)
             }
-            return editComboIsDown
+            return secondaryComboIsDown[matchedRole] ?? false
         }
         if !isRepeat, invalidateContinuation {
             UserInputActivity.mark()
@@ -446,11 +481,13 @@ final class HotkeyMonitor {
             emitHotkey(down: false)
             return true
         }
-        if let edit = editHotkey, !edit.isModifierOnly, keyCode == edit.keyCode,
-           editComboIsDown {
-            editComboIsDown = false
-            emitEditHotkey(down: false)
-            return true
+        for role in SecondaryHotkeyRole.allCases {
+            if let secondary = secondaryHotkeys[role], !secondary.isModifierOnly,
+               keyCode == secondary.keyCode, secondaryComboIsDown[role] == true {
+                secondaryComboIsDown[role] = false
+                emitSecondaryHotkey(role, down: false)
+                return true
+            }
         }
         return false
     }
@@ -460,9 +497,10 @@ final class HotkeyMonitor {
         emit(down ? { $0.hotkeyDown() } : { $0.hotkeyUp() })
     }
 
-    private func emitEditHotkey(down: Bool) {
-        veloraLog("Velora: edit hotkey \(down ? "down" : "up") (source=\(usingEventTap ? "tap" : "nsevent"))")
-        emit(down ? { $0.editHotkeyDown() } : { $0.editHotkeyUp() })
+    private func emitSecondaryHotkey(_ role: SecondaryHotkeyRole, down: Bool) {
+        veloraLog("Velora: \(role.label) hotkey \(down ? "down" : "up") "
+                  + "(source=\(usingEventTap ? "tap" : "nsevent"))")
+        emit(down ? { $0.secondaryHotkeyDown(role) } : { $0.secondaryHotkeyUp(role) })
     }
 
     private func emit(_ action: @escaping (HotkeyMonitorDelegate) -> Void) {

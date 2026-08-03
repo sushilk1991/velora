@@ -255,6 +255,7 @@ class CleanupProcess:
         cancel_event: threading.Event | None = None,
         allowed_terms: list[str] | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
+        max_tokens: int | None = None,
     ) -> CleanupResult:
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
@@ -308,6 +309,7 @@ class CleanupProcess:
                 "check_ratio": check_ratio,
                 "allowed_terms": allowed_terms,
                 "prefix_candidates": prefix_candidates,
+                "max_tokens": max_tokens,
             }
             async with self._write_lock:
                 writer.write((json.dumps(message, ensure_ascii=False) + "\n").encode())

@@ -68,6 +68,21 @@ extension Hotkey {
         keyCode: 14,
         modifiers: CGEventFlags.maskAlternate.rawValue | CGEventFlags.maskShift.rawValue,
         isModifierOnly: false)
+    /// Default Action Mode hotkey: ⌃⇧A (A for action).
+    ///
+    /// Deliberately NOT ⌥⇧A. Dictation defaults to Right Option, and a
+    /// modifier-only hotkey fires on its flag transition — so pressing ⌥⇧A with
+    /// the right Option key starts a normal dictation on the ⌥ down-edge, and
+    /// the spoken command gets pasted as text instead of run.
+    static let controlShiftA = Hotkey(
+        keyCode: 0,
+        modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
+        isModifierOnly: false)
+    /// Kept for the tests that exercise the collision this default avoids.
+    static let optionShiftA = Hotkey(
+        keyCode: 0,
+        modifiers: CGEventFlags.maskAlternate.rawValue | CGEventFlags.maskShift.rawValue,
+        isModifierOnly: false)
 
     /// Curated one-click choices shown next to the recorder.
     static let quickPicks: [(name: String, hotkey: Hotkey)] = [

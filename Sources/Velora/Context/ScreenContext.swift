@@ -104,6 +104,14 @@ enum ScreenContext {
         return result
     }
 
+    /// The raw title of an app's focused window, unparsed. Action Mode sends it
+    /// to the planner as-is: "which window am I in" is the question, and the
+    /// entity parser answers a different one.
+    static func windowTitle(of app: NSRunningApplication?) -> String? {
+        guard let app, app.processIdentifier > 0 else { return nil }
+        return focusedWindowTitle(pid: app.processIdentifier)
+    }
+
     // MARK: - AX read
 
     private static func focusedWindowTitle(pid: pid_t) -> String? {

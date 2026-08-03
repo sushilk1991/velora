@@ -481,7 +481,9 @@ final class AppConfig {
             editSelection: storedEditHotkey,
             voiceEdit: defaults.bool(forKey: Key.voiceEdit),
             behavior: HotkeyMode(
-                rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold)
+                rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold,
+            action: SettingsDocument.Shortcuts.defaultActionHotkey,
+            actionsEnabled: true)
         document.settings.updates = .init(
             checkAutomatically: defaults.bool(forKey: Key.updateChecks),
             installAutomatically: defaults.bool(forKey: Key.autoInstallUpdates))
@@ -749,6 +751,37 @@ final class AppConfig {
 
     /// What the monitor should listen for — nil when the feature is off.
     var activeEditHotkey: Hotkey? { voiceEdit ? editHotkey : nil }
+
+    /// Action Mode: hold this, speak a command, Velora carries it out.
+    var actionHotkey: Hotkey {
+        get { readSetting(\.shortcuts.action) }
+        set { updateSettings { $0.shortcuts.action = newValue } }
+    }
+
+    var actionsEnabled: Bool {
+        get { readSetting(\.shortcuts.actionsEnabled) }
+        set { updateSettings { $0.shortcuts.actionsEnabled = newValue } }
+    }
+
+    var activeActionHotkey: Hotkey? { actionsEnabled ? actionHotkey : nil }
+
+    /// Every non-dictation hotkey the monitor should watch, by role.
+    ///
+    /// A role whose binding collides with dictation or with an earlier role is
+    /// dropped rather than registered: the monitor resolves collisions by
+    /// first-match, so registering it would leave the user with a shortcut that
+    /// silently does something else. An upgrade can create exactly this — a user
+    /// who had bound Voice Edit to the new Action default gets both on one chord.
+    var activeSecondaryHotkeys: [SecondaryHotkeyRole: Hotkey] {
+        var table: [SecondaryHotkeyRole: Hotkey] = [:]
+        let dictation = hotkey
+        if let edit = activeEditHotkey, edit != dictation { table[.edit] = edit }
+        if let action = activeActionHotkey, action != dictation,
+           action != table[.edit] {
+            table[.action] = action
+        }
+        return table
+    }
 
     var hotkeyMode: HotkeyMode {
         get { readSetting(\.shortcuts.behavior) }
