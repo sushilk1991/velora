@@ -758,12 +758,17 @@ extension AppDelegate: StatusItemControllerDelegate {
         UpdateChecker.shared.check(origin: .manual) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
-            case .upToDate(let release):
+            case .upToDate:
                 self.statusController.updateAvailable = nil
-                UpdateWindowController.shared.show(release)
+                let alert = NSAlert()
+                alert.alertStyle = .informational
+                alert.messageText = "Velora is up to date"
+                alert.informativeText =
+                    "You’re using Velora \(VeloraAppInfo.shortVersion), the latest version."
+                alert.addButton(withTitle: "OK")
+                VisibleAlert.present(alert) { _ in }
             case .updateAvailable(let update):
                 self.statusController.updateAvailable = update
-                UpdateWindowController.shared.show(update)
             case .failed(let reason):
                 let alert = NSAlert()
                 alert.alertStyle = .warning
@@ -771,6 +776,10 @@ extension AppDelegate: StatusItemControllerDelegate {
                 alert.informativeText = reason
                 alert.addButton(withTitle: "OK")
                 VisibleAlert.present(alert) { _ in }
+            }
+            if outcome.shouldOpenUpdateWindow,
+               case .updateAvailable(let update) = outcome {
+                UpdateWindowController.shared.show(update)
             }
         }
     }

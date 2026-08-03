@@ -303,15 +303,17 @@ struct HistorySettingsView: View {
                             ForEach(section.records, id: \.id) { record in
                                 HistoryCard(
                                     record: record,
-                                    isPlaying: vm.playing == record.audioPath,
+                                    isPlaying: record.audioPath != nil
+                                        && vm.playing == record.audioPath,
                                     isReprocessing: vm.inFlight.contains(record.id),
                                     reprocessFailed: vm.failed.contains(record.id),
+                                    hasAudio: vm.canPlay(record),
                                     sttModels: model.sttEngineModels,
                                     onCopy: { vm.copy(record) },
                                     onPaste: { vm.pasteAgain(record) },
                                     onEdit: { text in vm.saveEdit(record, newText: text) },
                                     onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
-                                    onPlay: vm.canPlay(record) ? { vm.togglePlayback(record) } : nil,
+                                    onPlay: { vm.togglePlayback(record) },
                                     onDelete: { vm.delete(record) })
                                 .onAppear {
                                     if record.id == vm.records.last?.id { vm.loadMore() }
@@ -421,12 +423,13 @@ private struct HistoryCard: View {
     let isPlaying: Bool
     let isReprocessing: Bool
     let reprocessFailed: Bool
+    let hasAudio: Bool
     let sttModels: [EngineModel]
     let onCopy: () -> Void
     let onPaste: () -> Void
     let onEdit: (String) -> Void
     let onReprocess: (_ sttModel: String?, _ mode: String?) -> Void
-    let onPlay: (() -> Void)?
+    let onPlay: () -> Void
     let onDelete: () -> Void
 
     @State private var expanded = false
@@ -435,9 +438,14 @@ private struct HistoryCard: View {
     @State private var copied = false
     @State private var editing = false
     @State private var editDraft = ""
+    @State private var hoveredAction: Action?
 
     /// Built-in modes offered in the reprocess menu (mirrors the Modes editor).
     private static let builtInModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
+
+    private enum Action {
+        case copy, paste, edit, reprocess, play, delete
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.s) {
@@ -603,8 +611,9 @@ private struct HistoryCard: View {
         HStack(spacing: VeloraSpacing.s) {
             if hasTranscript {
                 actionButton(
+                    .copy,
                     copied ? "checkmark" : "doc.on.doc",
-                    copied ? "Copied" : "Copy",
+                    actionHelp(.copy),
                     tint: copied ? Color(nsColor: .systemGreen) : nil
                 ) {
                     onCopy()
@@ -612,9 +621,12 @@ private struct HistoryCard: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
                 }
 
-                actionButton("arrow.uturn.left", "Paste again", action: onPaste)
+                actionButton(
+                    .paste, "arrow.uturn.left",
+                    actionHelp(.paste),
+                    action: onPaste)
 
-                actionButton("pencil", "Edit transcript") {
+                actionButton(.edit, "pencil", actionHelp(.edit)) {
                     editDraft = record.final
                     editing = true
                 }
@@ -622,16 +634,18 @@ private struct HistoryCard: View {
 
             reprocessMenu
 
-            if let onPlay {
-                actionButton(isPlaying ? "stop.fill" : "play.fill",
-                             isPlaying ? "Stop" : "Play audio",
-                             tint: isPlaying ? VeloraBrand.violet.color : nil,
-                             action: onPlay)
-            }
+            actionButton(.play,
+                         isPlaying ? "stop.fill" : "play.fill",
+                         actionHelp(.play),
+                         tint: isPlaying ? VeloraBrand.violet.color : nil,
+                         isDisabled: !hasAudio,
+                         action: onPlay)
 
             Spacer()
 
-            actionButton("trash", "Delete", tint: .secondary, hoverTint: .red, action: onDelete)
+            actionButton(
+                .delete, "trash", actionHelp(.delete),
+                tint: .secondary, hoverTint: .red, action: onDelete)
         }
     }
 
@@ -657,28 +671,37 @@ private struct HistoryCard: View {
             } else {
                 Image(systemName: "arrow.triangle.2.circlepath")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(record.audioPath == nil ? Color.secondary.opacity(0.5) : .secondary)
+                    .foregroundStyle(!hasAudio ? Color.secondary.opacity(0.5) : .secondary)
             }
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
         .frame(width: 22)
-        .disabled(record.audioPath == nil || isReprocessing)
-        .help(record.audioPath == nil
-              ? "No audio archived for this dictation"
-              : "Re-run with a different model or mode")
+        .contentShape(Rectangle())
+        .disabled(!hasAudio || isReprocessing)
+        .accessibilityLabel(actionHelp(.reprocess))
+        .overlay(alignment: .topLeading) {
+            if hoveredAction == .reprocess {
+                tooltipBubble(actionHelp(.reprocess))
+                    .offset(y: -32)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.08), value: hoveredAction == .reprocess)
+        .onHover { updateHover(.reprocess, isHovering: $0) }
     }
 
-    @State private var hoveredButton: String?
-
     private func actionButton(
-        _ symbol: String, _ help: String,
+        _ id: Action, _ symbol: String, _ help: String,
         tint: Color? = nil, hoverTint: Color? = nil,
+        isDisabled: Bool = false,
         action: @escaping () -> Void
     ) -> some View {
-        let isHovered = hoveredButton == help
-        let color = isHovered ? (hoverTint ?? tint ?? .primary) : (tint ?? .secondary)
+        let isHovered = hoveredAction == id
+        let color = isDisabled
+            ? Color.secondary.opacity(0.5)
+            : (isHovered ? (hoverTint ?? tint ?? .primary) : (tint ?? .secondary))
         return Button(action: action) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
@@ -689,8 +712,68 @@ private struct HistoryCard: View {
                         .fill(isHovered ? Color(.separatorColor).opacity(0.35) : .clear))
         }
         .buttonStyle(.plain)
-        .help(help)
-        .onHover { hoveredButton = $0 ? help : (hoveredButton == help ? nil : hoveredButton) }
+        .contentShape(Rectangle())
+        .disabled(isDisabled)
+        .accessibilityLabel(help)
+        .overlay(alignment: id == .delete ? .topTrailing : .topLeading) {
+            if isHovered {
+                tooltipBubble(help)
+                    .offset(y: -32)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.08), value: isHovered)
+        .onHover { updateHover(id, isHovering: $0) }
+    }
+
+    private func actionHelp(_ action: Action) -> String {
+        switch action {
+        case .copy:
+            return copied ? "Copied to the clipboard" : "Copy transcript to the clipboard"
+        case .paste:
+            return "Copy; if the original app is open, switch there and try to paste"
+        case .edit:
+            return "Edit the saved transcript"
+        case .reprocess:
+            if !hasAudio {
+                return "Reprocessing unavailable — no saved audio for this dictation"
+            }
+            if isReprocessing {
+                return "Re-transcribing the saved audio…"
+            }
+            return "Re-transcribe the saved audio with another model or mode"
+        case .play:
+            if !hasAudio {
+                return "Playback unavailable — no saved audio for this dictation"
+            }
+            return isPlaying ? "Stop audio playback" : "Play the saved audio"
+        case .delete:
+            return "Delete this transcript permanently"
+        }
+    }
+
+    private func tooltipBubble(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.primary)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8)))
+            .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
+            .allowsHitTesting(false)
+    }
+
+    private func updateHover(_ action: Action, isHovering: Bool) {
+        if isHovering {
+            hoveredAction = action
+        } else if hoveredAction == action {
+            hoveredAction = nil
+        }
     }
 
     // MARK: Helpers

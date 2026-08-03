@@ -3,8 +3,8 @@ import Foundation
 
 extension Notification.Name {
     /// Posted on the main queue after a successful release-feed check, including
-    /// when the running build is already current. Settings uses this to expose
-    /// the latest release notes without maintaining a second network request.
+    /// when the running build is already current. Settings uses this to refresh
+    /// its actionable update state without maintaining a second network request.
     static let veloraUpdateCheckCompleted = Notification.Name("VeloraUpdateCheckCompleted")
 }
 
@@ -47,6 +47,14 @@ final class UpdateChecker {
         case upToDate(Release)
         case updateAvailable(Update)
         case failed(String)
+
+        /// Only a newer release belongs in the software-update window.
+        /// Up-to-date checks stay on their initiating surface; release history
+        /// is exposed separately.
+        var shouldOpenUpdateWindow: Bool {
+            if case .updateAvailable = self { return true }
+            return false
+        }
     }
 
     static let shared = UpdateChecker()
@@ -61,10 +69,6 @@ final class UpdateChecker {
     /// The most recent discovery, for surfaces that appear after the check ran
     /// (the menubar menu rebuilds on every open; Settings opens late).
     private(set) var available: Update?
-
-    /// Latest published release even when this build is already current. This
-    /// is the changelog source for Settings after any successful check.
-    private(set) var latestRelease: Release?
 
     private struct PendingCheck {
         let origin: CheckOrigin
@@ -94,6 +98,10 @@ final class UpdateChecker {
         }
         return URL(string: "https://api.github.com/repos/\(repoSlug)/releases/latest")
     }
+
+    private static var publicLatestReleaseURL: URL? {
+        URL(string: "https://github.com/\(repoSlug)/releases/latest")
+    }
     /// 20h, not 24: a "same time every morning" launch pattern still checks
     /// daily instead of skipping every other day.
     private static let interval: TimeInterval = 20 * 60 * 60
@@ -114,7 +122,6 @@ final class UpdateChecker {
             rawURL: config.cachedReleaseAssetURL,
             size: config.cachedReleaseAssetSize)
         else { return }
-        latestRelease = restored.latest
         available = restored.available
     }
 
@@ -177,49 +184,103 @@ final class UpdateChecker {
         guard pendingChecks.count == 1 else { return }
         var request = URLRequest(url: apiURL, timeoutInterval: 15)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        URLSession.shared.dataTask(with: request) { data, response, error in
-            let outcome = Self.parse(
-                current: current, data: data, response: response, error: error)
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                let checks = self.pendingChecks
-                self.pendingChecks.removeAll()
-                // Stamp only reachable checks; an offline launch retries next
-                // launch instead of going quiet for a day. Never stamp under
-                // a feed override — the e2e harness shares this defaults
-                // domain with the real app and must not eat its daily check.
-                switch outcome {
-                case .failed:
-                    break
-                case .upToDate(let release):
-                    if Self.persistentStateAllowed {
-                        self.config.lastUpdateCheck = Date()
-                        self.persist(release)
-                    }
-                    self.latestRelease = release
-                    self.available = nil
-                    NotificationCenter.default.post(
-                        name: .veloraUpdateCheckCompleted, object: nil)
-                case .updateAvailable(let update):
-                    if Self.persistentStateAllowed {
-                        self.config.lastUpdateCheck = Date()
-                        self.persist(update)
-                    }
-                    self.latestRelease = update
-                    if update != self.available {
-                        veloraLog("Velora: update available — \(update.version) (running \(current))")
-                    }
-                    self.available = update
-                    NotificationCenter.default.post(
-                        name: .veloraUpdateCheckCompleted, object: nil)
-                    let origin: CheckOrigin = checks.contains {
-                        $0.origin == .automatic
-                    } ? .automatic : .manual
-                    self.onUpdate?(update, origin)
-                }
-                checks.forEach { $0.completion(outcome) }
+        request.setValue("Velora/\(current)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            guard let self else { return }
+            if !Self.feedOverridden,
+               Self.isRateLimited(response: response, data: data),
+               let rateLimitResponse = response as? HTTPURLResponse {
+                self.checkPublicReleasePage(
+                    current: current, rateLimitResponse: rateLimitResponse)
+                return
+            }
+            self.complete(
+                Self.parse(
+                    current: current, data: data,
+                    response: response, error: error),
+                current: current)
+        }.resume()
+    }
+
+    /// GitHub's anonymous REST allowance is shared by public IP. VPN and NAT
+    /// users can therefore exhaust it without Velora making unusual traffic.
+    /// The normal public release redirect is outside that API quota and still
+    /// identifies the official tag; the installer independently verifies the
+    /// downloaded app's signer, bundle, version, notarization, and Gatekeeper.
+    private func checkPublicReleasePage(
+        current: String,
+        rateLimitResponse: HTTPURLResponse
+    ) {
+        guard let url = Self.publicLatestReleaseURL else {
+            complete(
+                .failed(Self.rateLimitMessage(response: rateLimitResponse)),
+                current: current)
+            return
+        }
+        var request = URLRequest(url: url, timeoutInterval: 15)
+        request.httpMethod = "HEAD"
+        request.setValue("Velora/\(current)", forHTTPHeaderField: "User-Agent")
+        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+            guard let self else { return }
+            let fallback = Self.parsePublicReleasePage(
+                current: current, response: response, error: error)
+            if case .failed = fallback {
+                self.complete(
+                    .failed(Self.rateLimitMessage(response: rateLimitResponse)),
+                    current: current)
+            } else {
+                // A current-version fallback proves reachability but has no
+                // notes or asset-size metadata. Keep any richer API cache.
+                self.complete(
+                    fallback, current: current,
+                    persistRelease: fallback.shouldOpenUpdateWindow)
             }
         }.resume()
+    }
+
+    /// Completes every coalesced manual/automatic check on the main queue.
+    private func complete(
+        _ outcome: Outcome,
+        current: String,
+        persistRelease: Bool = true
+    ) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let checks = self.pendingChecks
+            self.pendingChecks.removeAll()
+            // Stamp only reachable checks; an offline launch retries next
+            // launch instead of going quiet for a day. Never stamp under a
+            // feed override — the e2e harness shares this defaults domain.
+            switch outcome {
+            case .failed:
+                break
+            case .upToDate(let release):
+                if Self.persistentStateAllowed {
+                    self.config.lastUpdateCheck = Date()
+                    if persistRelease { self.persist(release) }
+                }
+                self.available = nil
+                NotificationCenter.default.post(
+                    name: .veloraUpdateCheckCompleted, object: nil)
+            case .updateAvailable(let update):
+                if Self.persistentStateAllowed {
+                    self.config.lastUpdateCheck = Date()
+                    self.persist(update)
+                }
+                if update != self.available {
+                    veloraLog(
+                        "Velora: update available — \(update.version) (running \(current))")
+                }
+                self.available = update
+                NotificationCenter.default.post(
+                    name: .veloraUpdateCheckCompleted, object: nil)
+                let origin: CheckOrigin = checks.contains {
+                    $0.origin == .automatic
+                } ? .automatic : .manual
+                self.onUpdate?(update, origin)
+            }
+            checks.forEach { $0.completion(outcome) }
+        }
     }
 
     private func persist(_ release: Release) {
@@ -233,6 +294,72 @@ final class UpdateChecker {
             assetSize: release.asset?.size ?? 0)
     }
 
+    static func isRateLimited(response: URLResponse?, data: Data?) -> Bool {
+        guard let http = response as? HTTPURLResponse,
+              http.statusCode == 403 || http.statusCode == 429
+        else { return false }
+        if http.statusCode == 429
+            || http.value(forHTTPHeaderField: "X-RateLimit-Remaining") == "0"
+            || http.value(forHTTPHeaderField: "Retry-After") != nil {
+            return true
+        }
+        guard let data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = json["message"] as? String
+        else { return false }
+        return message.localizedCaseInsensitiveContains("rate limit")
+    }
+
+    static func rateLimitMessage(
+        response: HTTPURLResponse,
+        now: Date = Date(),
+        locale: Locale = .current,
+        timeZone: TimeZone = .current
+    ) -> String {
+        let prefix = "GitHub temporarily limited update checks."
+        guard let raw = response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+              let seconds = TimeInterval(raw),
+              seconds > now.timeIntervalSince1970
+        else { return "\(prefix) Try again in a few minutes." }
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return "\(prefix) Try again after \(formatter.string(from: Date(timeIntervalSince1970: seconds)))."
+    }
+
+    /// Parses the final URL after GitHub's public `/releases/latest` redirect.
+    /// No HTML is trusted or scraped. A canonical DMG URL is constructed, and
+    /// UpdateInstaller remains the authority on whether its contents are safe.
+    static func parsePublicReleasePage(
+        current: String,
+        response: URLResponse?,
+        error: Error?
+    ) -> Outcome {
+        if let error { return .failed(error.localizedDescription) }
+        guard let http = response as? HTTPURLResponse,
+              http.statusCode == 200,
+              let page = http.url,
+              let tag = releaseTag(from: page),
+              let remote = validatedVersion(from: tag)
+        else { return .failed("Could not read the public release page") }
+        let assetName = "Velora-\(remote).dmg"
+        guard let assetURL = URL(
+            string: "https://github.com/\(repoSlug)/releases/download/\(tag)/\(assetName)"),
+              assetURLAllowed(assetURL)
+        else { return .failed("The release download URL is invalid") }
+        let release = Release(
+            version: remote,
+            page: page,
+            notes: "Detailed release notes are temporarily unavailable. View them on GitHub.",
+            publishedAt: nil,
+            asset: Asset(name: assetName, url: assetURL, size: 0))
+        return isNewer(remote, than: current)
+            ? .updateAvailable(release)
+            : .upToDate(release)
+    }
+
     static func parse(
         current: String, data: Data?, response: URLResponse?, error: Error?
     ) -> Outcome {
@@ -240,17 +367,18 @@ final class UpdateChecker {
         // Non-HTTP responses stay allowed: the VELORA_UPDATE_FEED_URL test
         // hook serves the feed from a file:// URL.
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
-            return .failed("Could not read the releases feed")
+            if isRateLimited(response: response, data: data) {
+                return .failed(rateLimitMessage(response: http))
+            }
+            return .failed(
+                "GitHub's update service returned HTTP \(http.statusCode). Try again later.")
         }
         guard let data,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tag = json["tag_name"] as? String
         else { return .failed("Could not read the releases feed") }
 
-        let remote = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
-        guard !remote.isEmpty, remote.count <= 64,
-              remote.range(
-                of: "^[0-9A-Za-z.-]+$", options: .regularExpression) != nil
+        guard let remote = validatedVersion(from: tag)
         else { return .failed("The release version is invalid") }
         let feedPage = (json["html_url"] as? String).flatMap(URL.init(string:))
         let page = feedPage.flatMap { releasePageAllowed($0) ? $0 : nil }
@@ -270,6 +398,27 @@ final class UpdateChecker {
         return isNewer(remote, than: current)
             ? .updateAvailable(release)
             : .upToDate(release)
+    }
+
+    static func releaseTag(from page: URL) -> String? {
+        guard releasePageAllowed(page) else { return nil }
+        let prefix = "/\(repoSlug)/releases/tag/"
+        guard page.path.hasPrefix(prefix) else { return nil }
+        let encoded = String(page.path.dropFirst(prefix.count))
+        guard !encoded.isEmpty, !encoded.contains("/"),
+              let tag = encoded.removingPercentEncoding,
+              validatedVersion(from: tag) != nil
+        else { return nil }
+        return tag
+    }
+
+    static func validatedVersion(from tag: String) -> String? {
+        let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
+        guard !version.isEmpty, version.count <= 64,
+              version.range(
+                of: "^[0-9A-Za-z.-]+$", options: .regularExpression) != nil
+        else { return nil }
+        return version
     }
 
     static func boundedReleaseNotes(_ raw: String?) -> String {

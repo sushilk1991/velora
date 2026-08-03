@@ -17,7 +17,6 @@ enum SnapshotRenderer {
             renderHUDStates(into: dir)
             renderSidebarRows(into: dir)
             renderUpdateWindow(into: dir)
-            renderSettingsUpdateChangelog(into: dir)
             renderSettingsPanes(into: dir)
             renderMeetingNotes(into: dir) { exit(0) }
         }
@@ -150,27 +149,6 @@ enum SnapshotRenderer {
             name: name, dir: dir)
     }
 
-    @MainActor
-    private static func renderSettingsUpdateChangelog(into dir: URL) {
-        let view = NSHostingView(rootView:
-            Form {
-                Section {
-                    SettingsReleaseNotesDisclosure(
-                        release: sampleUpdateRelease,
-                        isExpanded: .constant(true),
-                        openFullNotes: {})
-                } header: {
-                    Text("Updates")
-                }
-            }
-            .formStyle(.grouped)
-            .frame(width: 600, height: 360)
-        )
-        snapshot(
-            view, size: NSSize(width: 600, height: 360),
-            name: "settings-update-changelog", dir: dir)
-    }
-
     private static var sampleUpdateRelease: UpdateChecker.Release {
         UpdateChecker.Release(
             version: "9.9.9",
@@ -234,6 +212,8 @@ enum SnapshotRenderer {
             foregroundBusy: { true })
         let model = SettingsModel(
             supervisor: nil, dictionary: dictionary, dictionarySync: sync)
+        model.updateCheckStatus =
+            "Velora \(VeloraAppInfo.shortVersion) is up to date."
         NSLog("Velora: snapshot prefs — config.alwaysVisible=%d model.alwaysVisible=%d position=%@",
               AppConfig.shared.hudAlwaysVisible ? 1 : 0,
               model.hudAlwaysVisible ? 1 : 0,

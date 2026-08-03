@@ -306,7 +306,6 @@ final class SettingsModel: ObservableObject {
         autoInstallUpdates = config.autoInstallUpdates
         updateState = UpdateInstaller.shared.state
         availableUpdate = UpdateChecker.shared.available
-        latestRelease = UpdateChecker.shared.latestRelease
         meetingSuggestions = config.meetingSuggestions
         meetingCalendar = config.meetingCalendar
         meetingAudioRetentionDays = config.meetingAudioRetentionDays
@@ -351,14 +350,26 @@ final class SettingsModel: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             self.updateState = UpdateInstaller.shared.state
-            self.availableUpdate = UpdateChecker.shared.available
+            let available = UpdateChecker.shared.available
+            self.availableUpdate = available
+            // Installer transitions can arrive after the check notification.
+            // Never let an actionable update inherit an older "up to date"
+            // caption, regardless of notification ordering.
+            if available != nil {
+                self.updateCheckStatus = Self.statusAfterSuccessfulUpdateCheck(
+                    availableUpdate: available,
+                    currentVersion: VeloraAppInfo.shortVersion)
+            }
         }
         updateCheckObserver = NotificationCenter.default.addObserver(
             forName: .veloraUpdateCheckCompleted, object: nil, queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            self.availableUpdate = UpdateChecker.shared.available
-            self.latestRelease = UpdateChecker.shared.latestRelease
+            let available = UpdateChecker.shared.available
+            self.availableUpdate = available
+            self.updateCheckStatus = Self.statusAfterSuccessfulUpdateCheck(
+                availableUpdate: available,
+                currentVersion: VeloraAppInfo.shortVersion)
         }
         updatePreferencesObserver = NotificationCenter.default.addObserver(
             forName: .veloraUpdatePreferencesChanged, object: nil, queue: .main
@@ -681,24 +692,38 @@ final class SettingsModel: ObservableObject {
     /// for the Updates section (kept fresh by the state-change observer).
     @Published var updateState: UpdateInstaller.State
     @Published var availableUpdate: UpdateChecker.Update?
-    @Published var latestRelease: UpdateChecker.Release?
+
+    static func statusAfterSuccessfulUpdateCheck(
+        availableUpdate: UpdateChecker.Update?,
+        currentVersion: String
+    ) -> String {
+        if let availableUpdate {
+            return "Velora \(availableUpdate.version) is available."
+        }
+        return "Velora \(currentVersion) is up to date."
+    }
 
     func checkForUpdatesNow() {
         updateCheckStatus = "Checking…"
         UpdateChecker.shared.check(origin: .manual) { [weak self] outcome in
             guard let self else { return }
             switch outcome {
-            case .upToDate(let release):
-                self.updateCheckStatus = "You're on the latest version."
-                self.latestRelease = release
-                UpdateWindowController.shared.show(release)
+            case .upToDate:
+                self.availableUpdate = nil
+                self.updateCheckStatus = Self.statusAfterSuccessfulUpdateCheck(
+                    availableUpdate: nil,
+                    currentVersion: VeloraAppInfo.shortVersion)
             case .updateAvailable(let update):
-                self.updateCheckStatus = "Velora \(update.version) is available."
                 self.availableUpdate = update
-                self.latestRelease = update
-                UpdateWindowController.shared.show(update)
+                self.updateCheckStatus = Self.statusAfterSuccessfulUpdateCheck(
+                    availableUpdate: update,
+                    currentVersion: VeloraAppInfo.shortVersion)
             case .failed(let reason):
                 self.updateCheckStatus = reason
+            }
+            if outcome.shouldOpenUpdateWindow,
+               case .updateAvailable(let update) = outcome {
+                UpdateWindowController.shared.show(update)
             }
         }
     }
@@ -731,12 +756,10 @@ final class SettingsModel: ObservableObject {
         NSWorkspace.shared.open(url)
     }
 
-    func showLatestReleaseNotes() {
-        guard let release = latestRelease else {
-            openReleasesPage()
-            return
-        }
-        UpdateWindowController.shared.show(release)
+    func openReleaseHistory() {
+        let url = URL(
+            string: "https://github.com/\(UpdateChecker.repoSlug)/releases")!
+        NSWorkspace.shared.open(url)
     }
 
     @Published var meetingSuggestions: Bool {

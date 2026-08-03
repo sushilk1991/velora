@@ -101,9 +101,9 @@ enum UpdateWindowPresentation: Equatable {
     }
 }
 
-/// One reusable release window for automatic discoveries, manual checks, and
-/// Settings changelog viewing. Automatic presentation deliberately does not
-/// activate the app or steal keyboard focus from the user's current app.
+/// One reusable window for actionable updates discovered automatically or by
+/// a manual check. Automatic presentation deliberately does not activate the
+/// app or steal keyboard focus from the user's current app.
 final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     static let shared = UpdateWindowController()
 
@@ -157,6 +157,10 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         presentation: UpdateWindowPresentation
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard Self.shouldPresent(
+            releaseVersion: release.version,
+            currentVersion: VeloraAppInfo.shortVersion)
+        else { return }
         let resolvedPresentation = UpdateWindowPresentation.resolved(
             current: self.presentation,
             incoming: presentation,
@@ -175,6 +179,13 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         } else if resolvedPresentation == .automatic {
             window?.orderFrontRegardless()
         }
+    }
+
+    static func shouldPresent(
+        releaseVersion: String,
+        currentVersion: String
+    ) -> Bool {
+        UpdateChecker.isNewer(releaseVersion, than: currentVersion)
     }
 
     private func dismissWindow() {
@@ -511,13 +522,9 @@ struct UpdateWindowView: View {
                     .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
 
                 VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                    Text(model.isUpdateAvailable
-                         ? "A new version of Velora is available"
-                         : "What’s new in Velora \(release.version)")
+                    Text("A new version of Velora is available")
                         .font(.title2.weight(.semibold))
-                    Text(model.isUpdateAvailable
-                         ? "Velora \(release.version) is available — you have \(model.currentVersion)."
-                         : "You’re using the latest version.")
+                    Text("Velora \(release.version) is available — you have \(model.currentVersion).")
                         .font(.body)
                         .foregroundStyle(.secondary)
                     if let publishedAt = release.publishedAt {
@@ -560,11 +567,9 @@ struct UpdateWindowView: View {
             VStack(alignment: .leading, spacing: VeloraSpacing.m) {
                 installerStatus
 
-                if model.isUpdateAvailable {
-                    Toggle(
-                        "Automatically download and install updates in the future",
-                        isOn: $model.installsAutomatically)
-                }
+                Toggle(
+                    "Automatically download and install updates in the future",
+                    isOn: $model.installsAutomatically)
 
                 HStack(spacing: VeloraSpacing.m) {
                     if model.canDefer {

@@ -349,16 +349,139 @@ enum Selftest {
             current: "9.9.9", data: ok, response: http, error: nil) {
             expect(release.notes.contains("Full release notes"),
                    "an up-to-date check still returns changelog content")
+            expect(
+                !UpdateChecker.Outcome.upToDate(release).shouldOpenUpdateWindow,
+                "an up-to-date manual check does not open the release-notes window")
+            expect(
+                !UpdateWindowController.shouldPresent(
+                    releaseVersion: release.version, currentVersion: "9.9.9"),
+                "the software-update controller rejects a current release")
         } else {
             expect(false, "same-version feed parses as upToDate")
         }
+        if case .updateAvailable(let update) = UpdateChecker.parse(
+            current: "0.7.2", data: ok, response: http, error: nil) {
+            expect(
+                UpdateChecker.Outcome.updateAvailable(update).shouldOpenUpdateWindow,
+                "a newer release opens the actionable software-update window")
+            expect(
+                UpdateWindowController.shouldPresent(
+                    releaseVersion: update.version, currentVersion: "0.7.2"),
+                "the software-update controller accepts a newer release")
+            expect(
+                SettingsModel.statusAfterSuccessfulUpdateCheck(
+                    availableUpdate: nil, currentVersion: "0.7.2")
+                    == "Velora 0.7.2 is up to date."
+                    && SettingsModel.statusAfterSuccessfulUpdateCheck(
+                        availableUpdate: update, currentVersion: "0.7.2")
+                        == "Velora 9.9.9 is available.",
+                "a later automatic discovery replaces a stale up-to-date status")
+        }
+        expect(
+            !UpdateChecker.Outcome.failed("offline").shouldOpenUpdateWindow,
+            "a failed update check stays on its initiating surface")
+        let rateLimitBody = """
+        {"message":"API rate limit exceeded"}
+        """.data(using: .utf8)!
         let rateLimited = HTTPURLResponse(
             url: URL(string: "https://api.github.com")!, statusCode: 403,
-            httpVersion: nil, headerFields: nil)
-        if case .failed = UpdateChecker.parse(
-            current: "0.7.2", data: ok, response: rateLimited, error: nil) {} else {
-            expect(false, "non-200 parses as failed, never as an update")
+            httpVersion: nil,
+            headerFields: [
+                "X-RateLimit-Remaining": "0",
+                "X-RateLimit-Reset": "1800000000",
+            ])!
+        expect(
+            UpdateChecker.isRateLimited(
+                response: rateLimited, data: rateLimitBody),
+            "an exhausted GitHub API allowance is recognized as rate limiting")
+        if case .failed(let reason) = UpdateChecker.parse(
+            current: "0.7.2", data: rateLimitBody,
+            response: rateLimited, error: nil) {
+            expect(
+                reason.contains("temporarily limited"),
+                "rate-limit failures explain the temporary condition")
+        } else {
+            expect(false, "a rate-limited feed never parses as an update")
         }
+        let deterministicRateLimitMessage = UpdateChecker.rateLimitMessage(
+            response: rateLimited,
+            now: Date(timeIntervalSince1970: 1_700_000_000),
+            locale: Locale(identifier: "en_US_POSIX"),
+            timeZone: TimeZone(secondsFromGMT: 0)!)
+        expect(
+            deterministicRateLimitMessage.contains("Try again after"),
+            "a known reset timestamp produces an actionable retry time")
+        let ordinaryForbidden = HTTPURLResponse(
+            url: URL(string: "https://api.github.com")!, statusCode: 403,
+            httpVersion: nil, headerFields: nil)!
+        expect(
+            !UpdateChecker.isRateLimited(
+                response: ordinaryForbidden,
+                data: "{\"message\":\"Forbidden\"}".data(using: .utf8)),
+            "an unrelated GitHub 403 does not trigger the release-page fallback")
+        let tooManyRequests = HTTPURLResponse(
+            url: URL(string: "https://api.github.com")!, statusCode: 429,
+            httpVersion: nil, headerFields: nil)!
+        expect(
+            UpdateChecker.isRateLimited(
+                response: tooManyRequests, data: nil),
+            "HTTP 429 always triggers the public release-page fallback")
+        let unavailable = HTTPURLResponse(
+            url: URL(string: "https://api.github.com")!, statusCode: 503,
+            httpVersion: nil, headerFields: nil)!
+        if case .failed(let reason) = UpdateChecker.parse(
+            current: "0.7.2", data: nil,
+            response: unavailable, error: nil) {
+            expect(
+                reason.contains("HTTP 503"),
+                "non-rate-limit feed failures retain their exact HTTP status")
+        } else {
+            expect(false, "an unavailable feed never parses as an update")
+        }
+        let publicReleasePage = URL(
+            string: "https://github.com/sushilk1991/velora/releases/tag/v9.9.9")!
+        let publicReleaseResponse = HTTPURLResponse(
+            url: publicReleasePage, statusCode: 200,
+            httpVersion: nil, headerFields: nil)!
+        if case .updateAvailable(let fallback) = UpdateChecker.parsePublicReleasePage(
+            current: "0.10.30", response: publicReleaseResponse, error: nil) {
+            expect(
+                fallback.version == "9.9.9"
+                    && fallback.page == publicReleasePage
+                    && fallback.asset?.name == "Velora-9.9.9.dmg"
+                    && fallback.asset?.url.absoluteString
+                        == "https://github.com/sushilk1991/velora/releases/download/v9.9.9/Velora-9.9.9.dmg"
+                    && fallback.asset?.size == 0,
+                "the public redirect constructs the canonical official update asset")
+            expect(
+                fallback.asset.map { UpdateChecker.assetURLAllowed($0.url) } == true,
+                "the fallback asset still passes the installer's GitHub-host gate")
+        } else {
+            expect(false, "a newer public release redirect remains installable")
+        }
+        if case .upToDate = UpdateChecker.parsePublicReleasePage(
+            current: "9.9.9", response: publicReleaseResponse, error: nil) {} else {
+            expect(false, "a current public release redirect reports up to date")
+        }
+        let offSiteResponse = HTTPURLResponse(
+            url: URL(string: "https://example.com/releases/tag/v99.0.0")!,
+            statusCode: 200, httpVersion: nil, headerFields: nil)!
+        if case .failed = UpdateChecker.parsePublicReleasePage(
+            current: "0.7.2", response: offSiteResponse, error: nil) {} else {
+            expect(false, "an off-site fallback redirect is rejected")
+        }
+        let unredirectedResponse = HTTPURLResponse(
+            url: URL(string: "https://github.com/sushilk1991/velora/releases/latest")!,
+            statusCode: 200, httpVersion: nil, headerFields: nil)!
+        if case .failed = UpdateChecker.parsePublicReleasePage(
+            current: "0.7.2", response: unredirectedResponse, error: nil) {} else {
+            expect(false, "the fallback requires an exact official release tag")
+        }
+        expect(
+            UpdateChecker.releaseTag(from: publicReleasePage) == "v9.9.9"
+                && UpdateChecker.releaseTag(from: URL(
+                    string: "https://github.com/sushilk1991/velora/releases/tag/v9.9.9%2Fevil")!) == nil,
+            "release tags are exact safe path components")
         if case .failed = UpdateChecker.parse(
             current: "0.7.2", data: "not json".data(using: .utf8),
             response: http, error: nil) {} else {
