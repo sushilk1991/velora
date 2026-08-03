@@ -569,8 +569,19 @@ struct HUDView: View {
             }
 
         case .transcribing:
-            // The waveform settles and shimmers; dot, timer, and ring fade.
-            break
+            // Normal entry (from .listening): the waveform settles and
+            // shimmers; dot, timer, and ring fade — no geometry change.
+            // A mis-driven entry (the capsule was hidden or reshaped under a
+            // live session, e.g. by a stale toast dismissal) must restore the
+            // session capsule rather than stay invisible.
+            if old != .listening && old != .transcribing {
+                resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            }
 
         case .meeting:
             let target = HUDGeometry.meetingWidth
@@ -590,6 +601,17 @@ struct HUDView: View {
             }
 
         case .inserted:
+            // Same self-healing rule as .transcribing: entered from a
+            // non-session state, the capsule must become visible again
+            // before it shrinks into the checkmark circle.
+            if old != .listening && old != .transcribing {
+                resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            }
             flashGreen = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 guard case .inserted = model.state else { return }

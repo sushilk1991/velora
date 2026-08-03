@@ -489,6 +489,31 @@ class CleanupProcess:
         finally:
             self._operation_lock.release()
 
+    async def release_cache(self) -> None:
+        """Ask the child to return its MLX buffer cache to the OS.
+
+        Best-effort memory hygiene after batch note generation: a busy or
+        replacing worker simply skips the release rather than queueing behind
+        interactive work.
+        """
+        if not self.loaded:
+            return
+        if not self._operation_lock.locked():
+            await self._operation_lock.acquire()
+        else:
+            return
+        try:
+            response = await asyncio.wait_for(
+                self._request("release_cache"), timeout=5.0)
+            if not response.get("ok"):
+                log.debug(
+                    "cleanup cache release failed: %s",
+                    response.get("error") or "unknown")
+        except (TimeoutError, OSError, RuntimeError):
+            log.debug("cleanup cache release skipped", exc_info=True)
+        finally:
+            self._operation_lock.release()
+
     async def _replace_worker(self, reason: str) -> None:
         self._schedule_replacement(reason)
         task = self._replacement_task

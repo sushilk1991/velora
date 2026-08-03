@@ -345,13 +345,14 @@ class Engine:
             and not self._starting
             and not self._finalizing
         )
-        pids: set[int] = set()
-        if want_background:
-            pids.add(os.getpid())
-            cleanup_pid = getattr(self.cleanup, "pid", None)
-            if cleanup_pid:
-                pids.add(cleanup_pid)
-        for pid in self._backgrounded_pids - pids:
+        cleanup_pid = getattr(self.cleanup, "pid", None)
+        live = {os.getpid()} | ({cleanup_pid} if cleanup_pid else set())
+        pids: set[int] = live if want_background else set()
+        # Restore everything we demoted PLUS every live pid: a cleanup child
+        # spawned while the parent was demoted inherits Darwin background
+        # without ever being tracked (review P1), and a transiently failed
+        # restore must be retried on the next refresh, not recorded as done.
+        for pid in (self._backgrounded_pids | live) - pids:
             batch_priority.set_background(pid, False)
         for pid in pids - self._backgrounded_pids:
             batch_priority.set_background(pid, True)
@@ -2794,6 +2795,14 @@ class Engine:
             self._meeting_notes_preempt.clear()
             self._meeting_notes_job_id = None
             self._end_batch_job()
+            # Notes generate inside the cleanup child — the parent-side cache
+            # clear cannot reach that allocator, so ask the child directly.
+            release = getattr(self.cleanup, "release_cache", None)
+            if callable(release):
+                try:
+                    await release()
+                except Exception:  # noqa: BLE001 — hygiene must never fail the job
+                    log.debug("cleanup cache release failed", exc_info=True)
             self._schedule_mining()
 
 

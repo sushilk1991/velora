@@ -84,6 +84,10 @@ class Worker:
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return
+            if operation == "release_cache":
+                await self.engine.release_cache()
+                await self._respond(request_id, ok=True)
+                return
             if operation == "cleanup":
                 raw = str(message.get("raw") or "")
                 prompt = str(message.get("system_prompt") or "")

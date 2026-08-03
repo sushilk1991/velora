@@ -81,3 +81,17 @@ def test_refresh_tracks_respawned_cleanup_child(recording_engine):
     eng._refresh_batch_priority()
     assert (4242, False) in calls
     assert (4343, True) in calls
+
+
+def test_refresh_restores_child_spawned_while_demoted(recording_engine):
+    # A cleanup child spawned while the parent was demoted inherits Darwin
+    # background without ever entering the tracked set (review P1). Leaving
+    # background must restore it anyway.
+    eng, calls = recording_engine
+    eng._begin_batch_job()  # no cleanup child yet — only the engine demotes
+
+    calls.clear()
+    eng.cleanup = Mock(pid=5151)  # spawned mid-batch, inherited background
+    eng._end_batch_job()
+    assert (5151, False) in calls
+    assert (os.getpid(), False) in calls

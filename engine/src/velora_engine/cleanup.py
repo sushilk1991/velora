@@ -679,6 +679,24 @@ class CleanupEngine:
             self._executor, self._memory_metrics, reset_peak
         )
 
+    def _release_cache(self) -> None:
+        import mlx.core as mx
+
+        with self._lock:
+            mx.clear_cache()
+
+    async def release_cache(self) -> None:
+        """Return MLX's Metal buffer cache on the model's owner thread.
+
+        Frees only unused cached buffers — live allocations (weights, the
+        prepared prefix KV snapshots) are untouched. Called after batch note
+        generation so a long meeting doesn't leave the sidecar's footprint
+        pinned at its largest generation working set.
+        """
+        await asyncio.get_running_loop().run_in_executor(
+            self._executor, self._release_cache
+        )
+
     def _cache_for_tokens(self, tokens: list[int]) -> tuple[list[Any], int, bool]:
         candidates = (
             (self._prepared_tokens, self._prepared_cache),

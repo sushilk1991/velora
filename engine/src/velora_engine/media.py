@@ -37,14 +37,22 @@ def _read_wav_16k(path: Path) -> np.ndarray:
                 or w.getnchannels() != 1):
             raise ValueError(f"unexpected wav format from converter: {w.getframerate()}Hz")
         total = w.getnframes()
+        # The frame count is header-declared, untrusted data — check the
+        # duration cap BEFORE allocating a buffer sized from it.
+        if total > MAX_DURATION_S * SAMPLE_RATE:
+            raise ValueError("audio longer than 4 hours")
         pcm = np.empty(total, dtype=np.float32)
         filled = 0
         block = 10 * 60 * SAMPLE_RATE  # ~18 MB of int16 per read
         while filled < total:
             frames = w.readframes(min(block, total - filled))
-            if not frames:
-                break  # truncated container: keep what decoded
-            chunk = np.frombuffer(frames, dtype="<i2")
+            # Truncated container: a cut mid-sample yields an odd byte count
+            # that frombuffer would reject — drop the half sample and keep
+            # every fully decoded one.
+            usable = len(frames) - (len(frames) % 2)
+            if not usable:
+                break
+            chunk = np.frombuffer(frames[:usable], dtype="<i2")
             pcm[filled : filled + len(chunk)] = chunk
             filled += len(chunk)
     pcm = pcm[:filled]

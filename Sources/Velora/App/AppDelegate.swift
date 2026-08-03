@@ -179,10 +179,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                         notice = ("exclamationmark.triangle.fill", "Meeting could not be saved", .cancel)
                     }
                     self.meetingEndOutcome = nil
-                    self.hud.transition(to: .notice(
-                        symbol: notice.symbol, message: notice.message))
+                    let toast = HUDState.notice(
+                        symbol: notice.symbol, message: notice.message)
+                    self.hud.transition(to: toast)
                     let item = DispatchWorkItem { [weak self] in
-                        self?.hud.transition(to: .hidden(notice.exit))
+                        // Hide only OUR toast. A dictation can start inside
+                        // this 2s window; blindly hiding would blank a live
+                        // recording capsule (review P1).
+                        guard let self, self.hud.model.state == toast else { return }
+                        self.hud.transition(to: .hidden(notice.exit))
                     }
                     self.meetingHUDDismiss = item
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: item)
@@ -224,10 +229,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     self.meetingProcessingHUDActive = false
                     guard canShow else { return }
                     self.meetingHUDDismiss?.cancel()
-                    self.hud.transition(to: .notice(
-                        symbol: "checkmark.circle.fill", message: "Meeting notes ready"))
+                    let toast = HUDState.notice(
+                        symbol: "checkmark.circle.fill", message: "Meeting notes ready")
+                    self.hud.transition(to: toast)
                     let item = DispatchWorkItem { [weak self] in
-                        self?.hud.transition(to: .hidden(.success))
+                        // Same guard as the meeting-saved toast: never hide a
+                        // capsule that has since become a live session.
+                        guard let self, self.hud.model.state == toast else { return }
+                        self.hud.transition(to: .hidden(.success))
                     }
                     self.meetingHUDDismiss = item
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: item)

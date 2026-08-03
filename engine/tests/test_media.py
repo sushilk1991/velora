@@ -104,3 +104,36 @@ def test_load_media_rejects_garbage(tmp_path):
     src.write_bytes(b"this is not audio at all" * 100)
     with pytest.raises(ValueError):
         load_media(str(src))
+
+
+def test_read_wav_16k_keeps_decoded_samples_from_truncated_container(tmp_path):
+    # A crash mid-write can cut the payload mid-sample. The reader must keep
+    # every fully decoded sample instead of raising on the odd trailing byte.
+    from velora_engine.media import _read_wav_16k
+
+    src = tmp_path / "whole.wav"
+    _write_wav(src, _tone(1.0), rate=SAMPLE_RATE)
+    data = src.read_bytes()
+    truncated = tmp_path / "truncated.wav"
+    truncated.write_bytes(data[: len(data) - 3])  # odd byte count in payload
+
+    pcm = _read_wav_16k(truncated)
+    assert pcm.dtype == np.float32
+    # All but the last (half-cut) sample survive.
+    assert len(pcm) >= SAMPLE_RATE - 2
+    assert float(np.max(np.abs(pcm))) > 0.1
+
+
+def test_read_wav_16k_rejects_absurd_declared_length_before_allocating(tmp_path):
+    from velora_engine.media import _read_wav_16k
+
+    src = tmp_path / "huge.wav"
+    _write_wav(src, _tone(0.1), rate=SAMPLE_RATE)
+    data = bytearray(src.read_bytes())
+    # Patch the data-chunk size to declare ~5 hours of frames.
+    absurd = 5 * 3600 * SAMPLE_RATE * 2
+    data[4:8] = (absurd + 36).to_bytes(4, "little")
+    data[40:44] = absurd.to_bytes(4, "little")
+    src.write_bytes(bytes(data))
+    with pytest.raises(ValueError):
+        _read_wav_16k(src)
