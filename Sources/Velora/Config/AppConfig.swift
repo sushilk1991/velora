@@ -925,13 +925,6 @@ final class AppConfig {
         set { updateSettings { $0.meetings.audioRetentionDays = min(365, max(1, newValue)) } }
     }
 
-    /// What to do when the detected call disappears mid-recording. Stored as
-    /// a raw string in the document; unknown values fall back to asking.
-    var meetingEndAction: MeetingEndAction {
-        get { MeetingEndAction(rawValue: readSetting(\.meetings.endAction)) ?? .ask }
-        set { updateSettings { $0.meetings.endAction = newValue.rawValue } }
-    }
-
     /// Custom guidance for meeting-note generation; empty uses the engine's
     /// built-in prompt. The engine always enforces the JSON notes schema on
     /// top of whatever is written here.

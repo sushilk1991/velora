@@ -57,20 +57,8 @@ struct MeetingsSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Picker(selection: $model.meetingEndAction) {
-                    Text("Ask to stop").tag(MeetingEndAction.ask)
-                    Text("Stop and create notes").tag(MeetingEndAction.stop)
-                    Text("Keep recording").tag(MeetingEndAction.off)
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("When the call ends")
-                        Text("While recording, Velora keeps watching the detected call (Huddle, Zoom, Meet, Teams) and reacts when it disappears.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
             } footer: {
-                SettingsFooter("Detection only suggests. Every recording still needs a Start Recording confirmation. macOS asks for computer-audio access after that confirmation on the first meeting. Transcripts and notes stay until you delete them; this setting removes only audio.")
+                SettingsFooter("Detection only suggests. Every recording still needs a Start Recording confirmation, and Velora stops for you when the call's microphone goes quiet. macOS asks for computer-audio access after that confirmation on the first meeting. Transcripts and notes stay until you delete them; this setting removes only audio.")
             }
 
             Section("Notes style") {

@@ -310,7 +310,6 @@ final class SettingsModel: ObservableObject {
         meetingCalendar = config.meetingCalendar
         meetingAudioRetentionDays = config.meetingAudioRetentionDays
         meetingDiarization = config.meetingDiarization
-        meetingEndAction = config.meetingEndAction
         meetingNotesPrompt = config.meetingNotesPrompt
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
@@ -433,7 +432,6 @@ final class SettingsModel: ObservableObject {
         meetingSuggestions = imported.meetings.suggestions
         meetingAudioRetentionDays = imported.meetings.audioRetentionDays
         meetingDiarization = imported.meetings.diarization
-        meetingEndAction = MeetingEndAction(rawValue: imported.meetings.endAction) ?? .ask
         meetingNotesPrompt = imported.meetings.notesPrompt
         updateChecks = imported.updates.checkAutomatically
         autoInstallUpdates = imported.updates.installAutomatically
@@ -789,13 +787,6 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, meetingDiarization != oldValue else { return }
             config.meetingDiarization = meetingDiarization
             supervisor?.send(["cmd": "reload_config"])
-        }
-    }
-
-    @Published var meetingEndAction: MeetingEndAction {
-        didSet {
-            guard !applyingImportedSettings, meetingEndAction != oldValue else { return }
-            config.meetingEndAction = meetingEndAction
         }
     }
 

@@ -9,6 +9,10 @@ struct MeetingDetectionInput {
     let calendarTitle: String?
     let calendarEventID: String?
     let calendarHasConferenceLink: Bool
+    /// Bundle IDs holding an active microphone input stream (CoreAudio
+    /// process objects), Velora's own capture excluded. nil means the probe
+    /// failed — unknown, which is never the same as "nobody".
+    var micCapturingBundleIDs: Set<String>? = []
 }
 
 struct MeetingCandidate: Equatable {
@@ -17,10 +21,20 @@ struct MeetingCandidate: Equatable {
     let sourceApp: String?
     let calendarEventID: String?
     let confidence: Int
-    /// True when a window title confirmed a live call (score >= 80), as
-    /// opposed to "the app is merely running" or calendar-only evidence.
-    /// Only title-confirmed candidates can seed end-of-meeting watching.
-    let titleConfirmed: Bool
+    /// True when a live call was confirmed by hard evidence — a call-specific
+    /// window title (score >= 80) or the app holding the microphone — rather
+    /// than "the app is merely running" or calendar-only inference. Only
+    /// call-confirmed candidates can seed end-of-meeting watching.
+    let callConfirmed: Bool
+    /// True when the microphone confirmed the call. Mic-backed recordings can
+    /// end automatically: the mic releasing is definitive, titles are not.
+    let micBacked: Bool
+}
+
+/// One poll's answer to "is a call happening right now, and how do we know".
+struct MeetingPresence: Equatable {
+    let source: String
+    let micBacked: Bool
 }
 
 /// Polls only local process/window metadata plus optional EventKit. Detection
@@ -36,10 +50,12 @@ final class MeetingDetector {
     private var pollInFlight = false
     private var lastCandidateKey: String?
     private var endWatchActive = false
+    private var micProbeFailureLogged = false
+    private var lastLoggedMicSet: Set<String>?
     var onCandidate: ((MeetingCandidate) -> Void)?
-    /// Reports the window-title-confirmed call source (nil when none) on every
-    /// poll while an end watch is armed. Consumers own the debounce.
-    var onActivity: ((String?) -> Void)?
+    /// Reports call presence (nil when none) on every poll while an end
+    /// watch is armed. Consumers own the debounce.
+    var onActivity: ((MeetingPresence?) -> Void)?
 
     init(
         calendarEnabled: @escaping () -> Bool,
@@ -72,6 +88,13 @@ final class MeetingDetector {
         dispatchPrecondition(condition: .onQueue(.main))
         guard endWatchActive != active else { return }
         endWatchActive = active
+        // New watch lifecycle: a snapshot collected before this transition
+        // must not be delivered into it (it could latch stale mic evidence
+        // or consume the first absence).
+        generation += 1
+        pollInFlight = false
+        micProbeFailureLogged = false
+        lastLoggedMicSet = nil
         guard timer != nil else { return }
         scheduleTimer()
         if active { poll() }
@@ -81,7 +104,9 @@ final class MeetingDetector {
 
     private func scheduleTimer() {
         timer?.invalidate()
-        let interval: TimeInterval = endWatchActive ? 10 : 20
+        // Watching a live recording rides the cheap CoreAudio mic probe, so
+        // it can afford a tight cadence; idle discovery stays relaxed.
+        let interval: TimeInterval = endWatchActive ? 5 : 20
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             self?.poll()
         }
@@ -123,11 +148,30 @@ final class MeetingDetector {
             guard let self else { return }
             let input = self.collectInput(calendarEnabled: calendarEnabled)
             let candidate = Self.candidate(from: input)
-            let activeSource = Self.activeMeetingSource(from: input)
+            let presence = Self.activePresence(from: input)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
                 self.pollInFlight = false
-                if self.endWatchActive { self.onActivity?(activeSource) }
+                if self.endWatchActive {
+                    // Field-falsifiable attribution: which processes actually
+                    // hold the mic is version-dependent per app, so log the
+                    // set whenever it changes during a watch.
+                    if let micSet = input.micCapturingBundleIDs,
+                       micSet != self.lastLoggedMicSet {
+                        self.lastLoggedMicSet = micSet
+                        veloraLog("Velora: mic capture set: [\(micSet.sorted().joined(separator: ", "))]")
+                    }
+                    if presence == nil, input.micCapturingBundleIDs == nil {
+                        // Absence built on a failed mic probe is not
+                        // evidence; skip this poll rather than accrue it.
+                        if !self.micProbeFailureLogged {
+                            self.micProbeFailureLogged = true
+                            veloraLog("Velora: mic probe unavailable — end-watch poll skipped")
+                        }
+                    } else {
+                        self.onActivity?(presence)
+                    }
+                }
                 guard self.suggestionsEnabled() else {
                     self.lastCandidateKey = nil
                     return
@@ -162,7 +206,8 @@ final class MeetingDetector {
             windowTitles: titles,
             calendarTitle: calendar?.title,
             calendarEventID: calendar?.eventIdentifier,
-            calendarHasConferenceLink: calendar.map(Self.hasConferenceLink) ?? false)
+            calendarHasConferenceLink: calendar.map(Self.hasConferenceLink) ?? false,
+            micCapturingBundleIDs: MeetingMicActivity.bundleIDsCapturingMicrophone())
     }
 
     private func activeCalendarEvent(enabled: Bool) -> EKEvent? {
@@ -178,14 +223,37 @@ final class MeetingDetector {
             .first(where: Self.hasConferenceLink)
     }
 
-    /// App-only evidence: (score, source, matched title). A window title match
-    /// always scores >= 80; a merely-running meeting app keeps its low base.
+    static let zoomBundles = ["us.zoom.xos"]
+    static let teamsBundles = ["com.microsoft.teams2", "com.microsoft.teams"]
+    static let slackBundles = ["com.tinyspeck.slackmacgap", "com.slack.Slack"]
+    /// Processes that hold the mic on a browser's behalf. Chromium/Electron
+    /// capture in "<app>.helper*" children (prefix-matched); Safari captures
+    /// in the shared WebKit GPU process and Firefox in its plugin container.
+    static let browserMicBundles = browserBundles
+        + ["com.apple.WebKit.GPU", "org.mozilla.plugincontainer"]
+
+    /// True when any of `targets` (or one of their helper children, e.g.
+    /// "com.google.Chrome.helper") appears in the capturing set. The process
+    /// on the mic is routinely a helper, not the main app. A failed probe
+    /// (nil) matches nothing.
+    static func anyMicMatch(_ targets: [String], _ captured: Set<String>?) -> Bool {
+        guard let captured else { return false }
+        return targets.contains { target in
+            captured.contains { $0 == target || $0.hasPrefix(target + ".") }
+        }
+    }
+
+    /// App-only evidence: (score, source, matched title, micBacked). A window
+    /// title match scores >= 80; the app actually holding the microphone
+    /// scores 95 and is the only evidence strong enough to end a recording
+    /// automatically. A merely-running meeting app keeps its low base.
     static func appSignal(
         from input: MeetingDetectionInput
-    ) -> (score: Int, source: String?, title: String?) {
+    ) -> (score: Int, source: String?, title: String?, micBacked: Bool) {
         var appScore = 0
         var source: String?
         var appTitle: String?
+        var micBacked = false
 
         func inspect(_ bundle: String, sourceName: String, base: Int, terms: [String]) {
             guard input.runningBundleIDs.contains(bundle) else { return }
@@ -230,7 +298,38 @@ final class MeetingDetector {
             }
         }
 
-        return (appScore, source, appTitle)
+        // Microphone evidence outranks titles. The dedicated apps hold an
+        // input stream exactly for the duration of a call — mute included,
+        // windows hidden or not.
+        func micUpgrade(_ bundles: [String], sourceName: String) {
+            guard Self.anyMicMatch(bundles, input.micCapturingBundleIDs) else { return }
+            micBacked = true
+            if appScore < 95 {
+                if source != sourceName { appTitle = nil }
+                appScore = 95
+                source = sourceName
+            }
+        }
+        micUpgrade(slackBundles, sourceName: "Slack Huddle")
+        micUpgrade(zoomBundles, sourceName: "Zoom")
+        micUpgrade(teamsBundles, sourceName: "Microsoft Teams")
+
+        if !micBacked, Self.anyMicMatch(browserMicBundles, input.micCapturingBundleIDs) {
+            if source == "Google Meet" || source == "Browser meeting" {
+                micBacked = true
+                appScore = max(appScore, 95)
+            } else if appScore < 45 {
+                // Any website can hold the mic, so alone this is a hint, not
+                // a meeting — but paired with a conference-link calendar
+                // event it crosses the suggestion threshold even though the
+                // call tab's title is hidden behind another tab.
+                appScore = 45
+                source = "Browser meeting"
+                micBacked = true
+            }
+        }
+
+        return (appScore, source, appTitle, micBacked)
     }
 
     static let browserBundles = [
@@ -254,13 +353,28 @@ final class MeetingDetector {
         return false
     }
 
-    /// A window-title-confirmed live call, used for end-of-meeting watching.
-    /// Presence terms are deliberately stricter than suggestion scoring: a
-    /// Teams window sitting on its Calls tab or a Zoom "Schedule Meeting"
-    /// sheet contains "call"/"meeting" yet is not a call, and would pin every
-    /// recording to "still in a meeting" forever. Calendar evidence never
-    /// counts — an event cannot see a call that ended early.
-    static func activeMeetingSource(from input: MeetingDetectionInput) -> String? {
+    /// Live-call presence for end-of-meeting watching. The microphone is
+    /// authoritative and checked first; title fallbacks are deliberately
+    /// stricter than suggestion scoring — a Teams window sitting on its
+    /// Calls tab or a Zoom "Schedule Meeting" sheet contains "call"/"meeting"
+    /// yet is not a call, and would pin every recording to "still in a
+    /// meeting" forever. Calendar evidence never counts — an event cannot
+    /// see a call that ended early.
+    static func activePresence(from input: MeetingDetectionInput) -> MeetingPresence? {
+        for (bundles, name) in [
+            (slackBundles, "Slack Huddle"),
+            (zoomBundles, "Zoom"),
+            (teamsBundles, "Microsoft Teams"),
+        ] where anyMicMatch(bundles, input.micCapturingBundleIDs) {
+            return MeetingPresence(source: name, micBacked: true)
+        }
+        if anyMicMatch(browserMicBundles, input.micCapturingBundleIDs) {
+            // Which site holds the mic is unknowable, so this sustains a
+            // watch that stronger evidence armed; arming is the candidate
+            // scorer's job.
+            return MeetingPresence(source: "Browser meeting", micBacked: true)
+        }
+
         func firstTitle(_ bundle: String, where matches: (String) -> Bool) -> String? {
             guard input.runningBundleIDs.contains(bundle) else { return nil }
             return (input.windowTitles[bundle] ?? []).first { matches($0.lowercased()) }
@@ -269,32 +383,33 @@ final class MeetingDetector {
             { lower in terms.contains { lower.contains($0) } }
         }
 
-        for bundle in ["com.tinyspeck.slackmacgap", "com.slack.Slack"]
+        for bundle in slackBundles
         where firstTitle(bundle, where: containsAny(["huddle", "slack call"])) != nil {
-            return "Slack Huddle"
+            return MeetingPresence(source: "Slack Huddle", micBacked: false)
         }
         if firstTitle(
             "us.zoom.xos",
             where: containsAny(["zoom meeting", "zoom webinar", "waiting room"])) != nil {
-            return "Zoom"
+            return MeetingPresence(source: "Zoom", micBacked: false)
         }
-        for bundle in ["com.microsoft.teams2", "com.microsoft.teams"]
+        for bundle in teamsBundles
         where firstTitle(bundle, where: containsAny(
             ["meeting with", "meeting in", "call with", "call in progress"])) != nil {
-            return "Microsoft Teams"
+            return MeetingPresence(source: "Microsoft Teams", micBacked: false)
         }
         for bundle in browserBundles {
             if let title = firstTitle(bundle, where: Self.titleIndicatesBrowserMeeting) {
                 let lower = title.lowercased()
-                return (lower.contains("google") || Self.hasMeetTabPrefix(lower))
+                let source = (lower.contains("google") || Self.hasMeetTabPrefix(lower))
                     ? "Google Meet" : "Browser meeting"
+                return MeetingPresence(source: source, micBacked: false)
             }
         }
         return nil
     }
 
     static func candidate(from input: MeetingDetectionInput) -> MeetingCandidate? {
-        let (appScore, source, appTitle) = appSignal(from: input)
+        let (appScore, source, appTitle, micBacked) = appSignal(from: input)
         let calendarScore = input.calendarHasConferenceLink ? 70 : 0
         let confidence = max(appScore, calendarScore)
             + (appScore > 0 && calendarScore > 0 ? 15 : 0)
@@ -308,7 +423,8 @@ final class MeetingDetector {
         return MeetingCandidate(
             key: key, title: chosenTitle, sourceApp: source,
             calendarEventID: input.calendarEventID, confidence: min(100, confidence),
-            titleConfirmed: appScore >= 80)
+            callConfirmed: appScore >= 80 || micBacked,
+            micBacked: micBacked)
     }
 
     private static func interestingBundle(_ bundle: String?) -> Bool {

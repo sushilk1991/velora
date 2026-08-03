@@ -1,11 +1,53 @@
 import Foundation
 
-/// What Velora does when the detected call disappears while a meeting
-/// recording is still running.
-enum MeetingEndAction: String, Codable, CaseIterable {
-    case ask
-    case stop
-    case off
+/// Which call a watch is bound to. Presence from an unrelated source must
+/// neither sustain the watch nor arm automatic stopping — a website grabbing
+/// the mic mid-way through a manual recording is not "the meeting".
+enum MeetingWatchScope: Equatable {
+    case native(String)
+    case browser
+    case unknown
+
+    static func forSource(_ source: String?) -> MeetingWatchScope {
+        switch source {
+        case "Slack Huddle", "Zoom", "Microsoft Teams":
+            return .native(source ?? "")
+        case "Google Meet", "Browser meeting":
+            return .browser
+        default:
+            return .unknown
+        }
+    }
+
+    /// Presence that counts for this watch. A manual recording has no known
+    /// call, so mic activity elsewhere cannot be attributed to it — titles
+    /// only, and those lead to the ask flow, never auto-stop.
+    func matches(_ presence: MeetingPresence) -> Bool {
+        switch self {
+        case .native(let name):
+            return presence.source == name
+        case .browser:
+            return presence.source == "Google Meet" || presence.source == "Browser meeting"
+        case .unknown:
+            return !presence.micBacked
+        }
+    }
+
+    /// Only an attributable call may arm automatic stopping.
+    func mayLatchMicEvidence(_ presence: MeetingPresence) -> Bool {
+        guard presence.micBacked, matches(presence) else { return false }
+        if case .unknown = self { return false }
+        return true
+    }
+
+    /// Native apps keep their window titles and their input stream through
+    /// mutes and device switches — fast streak. Browser calls hide titles
+    /// behind tabs and some web apps release the mic on mute; manual
+    /// recordings have nothing attributable — both need the long streak.
+    var endThreshold: Int {
+        if case .native = self { return 2 }
+        return 4
+    }
 }
 
 /// Pure poll-fed state machine deciding when a recording's meeting has ended.
