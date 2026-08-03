@@ -2,7 +2,6 @@ import SwiftUI
 
 enum VeloraTheme {
     static let violet = Color(red: 0.39, green: 0.18, blue: 0.90)
-    static let violetDark = Color(red: 0.20, green: 0.08, blue: 0.50)
     static let warmAccent = Color(red: 0.98, green: 0.55, blue: 0.27)
 
     static func canvas(for colorScheme: ColorScheme) -> Color {

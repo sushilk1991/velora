@@ -925,6 +925,24 @@ final class AppConfig {
         set { updateSettings { $0.meetings.audioRetentionDays = min(365, max(1, newValue)) } }
     }
 
+    /// What to do when the detected call disappears mid-recording. Stored as
+    /// a raw string in the document; unknown values fall back to asking.
+    var meetingEndAction: MeetingEndAction {
+        get { MeetingEndAction(rawValue: readSetting(\.meetings.endAction)) ?? .ask }
+        set { updateSettings { $0.meetings.endAction = newValue.rawValue } }
+    }
+
+    /// Custom guidance for meeting-note generation; empty uses the engine's
+    /// built-in prompt. The engine always enforces the JSON notes schema on
+    /// top of whatever is written here.
+    var meetingNotesPrompt: String {
+        get { readSetting(\.meetings.notesPrompt) }
+        set {
+            let bounded = SettingsDocument.Meetings.boundedNotesPrompt(newValue)
+            updateSettings { $0.meetings.notesPrompt = bounded }
+        }
+    }
+
     /// Detect speech regions in meeting system audio so long silences can be
     /// skipped without inventing participant identities. Mirrored as
     /// `meeting_diarization`; the engine downloads its ~46 MB of ONNX models

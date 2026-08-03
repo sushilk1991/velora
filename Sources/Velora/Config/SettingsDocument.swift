@@ -115,12 +115,31 @@ extension SettingsDocument {
     }
 
     struct Meetings: Codable, Equatable {
+        /// Counted in Unicode scalars, matching Python's `len()` on the
+        /// engine side — a grapheme count would let emoji/Indic text pass
+        /// here and overrun the wire contract.
+        static let notesPromptMaximumLength = 8_000
+
+        static func boundedNotesPrompt(_ value: String) -> String {
+            guard value.unicodeScalars.count > notesPromptMaximumLength else { return value }
+            var view = String.UnicodeScalarView()
+            view.append(contentsOf: value.unicodeScalars.prefix(notesPromptMaximumLength))
+            return String(view)
+        }
+
         var suggestions: Bool
         var audioRetentionDays: Int
         var diarization: Bool
+        /// `MeetingEndAction` raw value; a string here keeps the document
+        /// readable and forward-compatible.
+        var endAction: String
+        /// Custom meeting-notes guidance sent to the engine; empty means the
+        /// built-in prompt.
+        var notesPrompt: String
 
         static let defaults = Meetings(
-            suggestions: true, audioRetentionDays: 30, diarization: true)
+            suggestions: true, audioRetentionDays: 30, diarization: true,
+            endAction: MeetingEndAction.ask.rawValue, notesPrompt: "")
     }
 
     struct Shortcuts: Codable, Equatable {
@@ -187,6 +206,24 @@ extension SettingsDocument {
     struct NormalizedPoint: Codable, Equatable {
         var x: Double
         var y: Double
+    }
+}
+
+extension SettingsDocument.Meetings {
+    private enum CodingKeys: String, CodingKey {
+        case suggestions, audioRetentionDays, diarization, endAction, notesPrompt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        suggestions = try container.decode(Bool.self, forKey: .suggestions)
+        audioRetentionDays = try container.decode(Int.self, forKey: .audioRetentionDays)
+        diarization = try container.decode(Bool.self, forKey: .diarization)
+        // Added after 0.11 — settings.json files written by older builds
+        // lack these keys and must keep importing cleanly.
+        endAction = try container.decodeIfPresent(String.self, forKey: .endAction)
+            ?? MeetingEndAction.ask.rawValue
+        notesPrompt = try container.decodeIfPresent(String.self, forKey: .notesPrompt) ?? ""
     }
 }
 
@@ -337,6 +374,16 @@ enum SettingsDocumentCodec {
 
         guard (1...365).contains(value.meetings.audioRetentionDays) else {
             throw SettingsDocumentError.invalidValue("meeting audio retention")
+        }
+        // Unknown endAction values are tolerated (the runtime getter falls
+        // back to .ask) so a future build's new case doesn't make its
+        // documents un-importable here; only shape is validated.
+        guard isPrintableNonempty(value.meetings.endAction, maximumLength: 32) else {
+            throw SettingsDocumentError.invalidValue("meeting end action")
+        }
+        guard value.meetings.notesPrompt.unicodeScalars.count
+            <= SettingsDocument.Meetings.notesPromptMaximumLength else {
+            throw SettingsDocumentError.invalidValue("meeting notes prompt")
         }
         guard value.shortcuts.dictation.isValidSettingsHotkey,
               value.shortcuts.editSelection.isValidSettingsHotkey else {

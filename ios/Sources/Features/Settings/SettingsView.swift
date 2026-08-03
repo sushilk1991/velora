@@ -20,6 +20,9 @@ struct SettingsView: View {
     ]
 
     var body: some View {
+        // One capability probe per body pass — each access re-queries
+        // SystemLanguageModel availability synchronously.
+        let capability = TranscriptRefiner.capability
         NavigationStack {
             Form {
                 Section {
@@ -55,15 +58,15 @@ struct SettingsView: View {
                     }
 
                     Label(
-                        TranscriptRefiner.capability.title,
-                        systemImage: TranscriptRefiner.capability.isAvailable
+                        capability.title,
+                        systemImage: capability.isAvailable
                             ? "apple.intelligence"
                             : "textformat"
                     )
                 } header: {
                     Text("Smart cleanup")
                 } footer: {
-                    Text("\(TranscriptRefiner.capability.detail) iOS does not let Velora inspect the app where you will paste, so your selected format stays active until you change it.")
+                    Text("\(capability.detail) iOS does not let Velora inspect the app where you will paste, so your selected format stays active until you change it.")
                 }
 
                 Section {
@@ -78,7 +81,6 @@ struct SettingsView: View {
                     optionalLink("Email Support", systemImage: "envelope.fill", destination: VeloraMobileLinks.supportEmail)
                     optionalLink("Velora Website", systemImage: "safari.fill", destination: VeloraMobileLinks.website)
                     optionalLink("View on GitHub", systemImage: "chevron.left.forwardslash.chevron.right", destination: VeloraMobileLinks.repository)
-                    optionalLink("Star Velora on GitHub", systemImage: "star.fill", destination: VeloraMobileLinks.star)
                 } header: {
                     Text("Velora")
                 } footer: {
@@ -87,7 +89,7 @@ struct SettingsView: View {
 
                 Section {
                     LabeledContent("Version", value: appVersion)
-                    LabeledContent("Minimum iOS", value: "17.0")
+                    LabeledContent("Minimum iOS", value: minimumOSVersion)
                 } header: {
                     Text("About")
                 }
@@ -106,6 +108,10 @@ struct SettingsView: View {
             return "\(version) (\(build))"
         }
         return version ?? "Development build"
+    }
+
+    private var minimumOSVersion: String {
+        Bundle.main.object(forInfoDictionaryKey: "MinimumOSVersion") as? String ?? "17.0"
     }
 
     @ViewBuilder

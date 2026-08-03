@@ -102,6 +102,7 @@ enum Selftest {
         testMeetingSystemAudioFrameMath()
         testMeetingSystemAudioWarnings()
         testMeetingDetection()
+        testMeetingEndWatch()
         testMinutesSavedDefinition()
         testShareCardPrivacy()
         testControlProtocol()
@@ -859,6 +860,22 @@ enum Selftest {
             let unknownData = try JSONSerialization.data(withJSONObject: withUnknownKey)
             expect(try SettingsDocumentCodec.decode(unknownData).settings == portable.settings,
                    "same-version settings ignore unknown future fields")
+
+            // Documents written before end_action/notes_prompt existed must
+            // keep decoding — existing installs upgrade through this path.
+            var legacyMeetingsRoot = portableRoot ?? [:]
+            var legacySettings = legacyMeetingsRoot["settings"] as? [String: Any] ?? [:]
+            var legacyMeetings = legacySettings["meetings"] as? [String: Any] ?? [:]
+            legacyMeetings.removeValue(forKey: "end_action")
+            legacyMeetings.removeValue(forKey: "notes_prompt")
+            legacySettings["meetings"] = legacyMeetings
+            legacyMeetingsRoot["settings"] = legacySettings
+            let legacyMeetingsData = try JSONSerialization.data(withJSONObject: legacyMeetingsRoot)
+            let legacyDecoded = try SettingsDocumentCodec.decode(legacyMeetingsData)
+            expect(
+                legacyDecoded.settings.meetings.endAction == MeetingEndAction.ask.rawValue
+                    && legacyDecoded.settings.meetings.notesPrompt.isEmpty,
+                "pre-0.12 settings without meeting end/prompt keys decode to defaults")
 
             var version1Root = portableRoot ?? [:]
             version1Root["version"] = 1
@@ -4244,6 +4261,42 @@ enum Selftest {
                "deleting workless processing clears the processor presentation state")
     }
 
+    private static func testMeetingEndWatch() {
+        var watch = MeetingEndWatch(threshold: 2)
+        expect(watch.observe(present: false) == .none
+               && watch.observe(present: false) == .none
+               && watch.observe(present: false) == .none,
+               "a manual recording with no detectable call never fires an end event")
+
+        watch = MeetingEndWatch(threshold: 2)
+        _ = watch.observe(present: true)
+        expect(watch.observe(present: false) == .none,
+               "one absent poll (minimized window, flaky AX read) never ends a meeting")
+        expect(watch.observe(present: false) == .ended,
+               "two consecutive absent polls after a confirmed call fire the end event")
+        expect(watch.observe(present: false) == .none,
+               "the end event fires once; Keep Recording stays honored while absent")
+
+        _ = watch.observe(present: true)
+        _ = watch.observe(present: false)
+        expect(watch.observe(present: false) == .ended,
+               "after the call demonstrably resumes, its next end fires again")
+
+        watch = MeetingEndWatch(threshold: 2)
+        _ = watch.observe(present: true)
+        _ = watch.observe(present: false)
+        _ = watch.observe(present: true)
+        expect(watch.observe(present: false) == .none,
+               "a present poll resets the absence streak")
+
+        // A capture born from a title-confirmed call is pre-confirmed, so a
+        // call that dies before the first watch poll still ends the meeting.
+        watch = MeetingEndWatch(threshold: 2, confirmed: true)
+        _ = watch.observe(present: false)
+        expect(watch.observe(present: false) == .ended,
+               "a seeded watch detects a call that ended before its first poll")
+    }
+
     private static func testMeetingDetection() {
         let slackOnly = MeetingDetectionInput(
             runningBundleIDs: ["com.tinyspeck.slackmacgap"],
@@ -4273,6 +4326,77 @@ enum Selftest {
             calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
         expect(MeetingDetector.candidate(from: browserMeet)?.sourceApp == "Google Meet",
                "Google Meet is detected from bounded browser window metadata")
+
+        // Chrome titles an active Meet tab with the meeting code, never the
+        // words "Google Meet" — the dash-prefix form must be recognized.
+        let meetCodeTab = MeetingDetectionInput(
+            runningBundleIDs: ["com.google.Chrome"],
+            windowTitles: ["com.google.Chrome": ["Meet – abc-defg-hij"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.candidate(from: meetCodeTab)?.sourceApp == "Google Meet",
+               "an active Meet tab titled with only the meeting code is detected")
+
+        let unrelatedTab = MeetingDetectionInput(
+            runningBundleIDs: ["com.google.Chrome"],
+            windowTitles: ["com.google.Chrome": ["Meetups near me – Eventbrite"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.candidate(from: unrelatedTab) == nil,
+               "a tab merely starting with 'meet' never reads as a call")
+
+        let zoomWebinar = MeetingDetectionInput(
+            runningBundleIDs: ["us.zoom.xos"],
+            windowTitles: ["us.zoom.xos": ["Zoom Webinar"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.candidate(from: zoomWebinar)?.sourceApp == "Zoom",
+               "a Zoom webinar window is meeting evidence")
+
+        // End-watch presence: only call-specific window titles count. Zoom
+        // idling in the dock must not pin a recording to "still in a meeting",
+        // and calendar events cannot see a call that ended early.
+        expect(MeetingDetector.activeMeetingSource(from: huddle) == "Slack Huddle",
+               "a live huddle window reads as an active call")
+        expect(MeetingDetector.activeMeetingSource(from: zoomCalendar) == nil,
+               "calendar plus an idle Zoom process is not an active call")
+        expect(MeetingDetector.activeMeetingSource(from: meetCodeTab) == "Google Meet",
+               "an active Meet tab reads as an active call")
+        expect(MeetingDetector.activeMeetingSource(from: slackOnly) == nil,
+               "Slack without a huddle window is not an active call")
+
+        // Presence terms are stricter than suggestion scoring: windows whose
+        // titles merely contain "call"/"meeting" (Teams Calls tab, Zoom
+        // scheduling sheet) would otherwise pin presence forever and end
+        // detection would silently never fire.
+        let teamsCallsTab = MeetingDetectionInput(
+            runningBundleIDs: ["com.microsoft.teams2"],
+            windowTitles: ["com.microsoft.teams2": ["Calls | Microsoft Teams"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.activeMeetingSource(from: teamsCallsTab) == nil,
+               "the Teams Calls tab is not an active call")
+        let teamsLiveMeeting = MeetingDetectionInput(
+            runningBundleIDs: ["com.microsoft.teams2"],
+            windowTitles: ["com.microsoft.teams2": ["Meeting with Design | Microsoft Teams"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.activeMeetingSource(from: teamsLiveMeeting) == "Microsoft Teams",
+               "a live Teams meeting window is an active call")
+        let zoomScheduling = MeetingDetectionInput(
+            runningBundleIDs: ["us.zoom.xos"],
+            windowTitles: ["us.zoom.xos": ["Schedule Meeting"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.activeMeetingSource(from: zoomScheduling) == nil,
+               "a Zoom scheduling sheet is not an active call")
+        let zoomLive = MeetingDetectionInput(
+            runningBundleIDs: ["us.zoom.xos"],
+            windowTitles: ["us.zoom.xos": ["Zoom Meeting"]],
+            calendarTitle: nil, calendarEventID: nil, calendarHasConferenceLink: false)
+        expect(MeetingDetector.activeMeetingSource(from: zoomLive) == "Zoom",
+               "an in-call Zoom window is an active call")
+
+        // Only title-confirmed candidates may seed end watching; calendar
+        // plus an idle app must not (its absence would fire a false end).
+        expect(MeetingDetector.candidate(from: huddle)?.titleConfirmed == true,
+               "a huddle window candidate is title-confirmed")
+        expect(MeetingDetector.candidate(from: zoomCalendar)?.titleConfirmed == false,
+               "a calendar-plus-idle-app candidate is not title-confirmed")
 
         let segmentEvent = EngineEvent.parse([
             "event": "meeting_segment", "id": "job", "meeting_id": "m1",

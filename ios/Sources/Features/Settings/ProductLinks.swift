@@ -11,10 +11,6 @@ enum VeloraMobileLinks {
         URL(string: "https://github.com/sushilk1991/velora")
     }
 
-    static var star: URL? {
-        repository
-    }
-
     static var actionButtonGuide: URL? {
         URL(string: "https://support.apple.com/guide/shortcuts/apdfea15680b/ios")
     }

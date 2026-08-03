@@ -2676,6 +2676,14 @@ class Engine:
                 "error": "transcript is too large",
             })
             return
+        prompt = msg.get("prompt")
+        if prompt is not None and not isinstance(prompt, str):
+            await self._send({
+                "event": "meeting_notes_failed", "id": msg.get("id"),
+                "meeting_id": meeting_id, "code": "invalid_arguments",
+                "error": "custom notes prompt must be a string",
+            })
+            return
         if (self._reprocessing or self._transcribing
                 or self._meeting_notes_running or self._editing):
             await self._send({
@@ -2698,17 +2706,33 @@ class Engine:
         meeting_id = str(msg["meeting_id"])
         transcript = str(msg["transcript"])
         job_id = msg.get("id")
-        map_prompt = (
-            "Create faithful meeting notes from this transcript chunk. Return JSON only with "
-            "exact keys summary (string), decisions (array of strings), and action_items "
-            "(array of strings). Do not invent owners, deadlines, decisions, or facts. "
+        # The schema clause is appended outside the editable guidance so a
+        # custom prompt can change tone and focus but never break the JSON
+        # contract parse_notes_json() enforces.
+        schema_clause = (
+            "Return JSON only with exact keys summary (string), decisions (array of "
+            "strings), and action_items (array of strings)."
+        )
+        default_guidance = (
+            "Create faithful meeting notes from this transcript chunk. "
+            "Do not invent owners, deadlines, decisions, or facts. "
             "Me and Them are audio channels, not verified identities. If a legacy "
             "transcript contains Speaker-number labels, treat those the same way. "
             "Never guess who a speaker is."
         )
+        # Truncate rather than reject: Swift counts the same Unicode scalars,
+        # but a completed meeting must never fail over prompt length skew.
+        custom_guidance = str(msg.get("prompt") or "").strip()[:8_000]
+        guidance = custom_guidance or default_guidance
+        map_prompt = f"{guidance}\n\n{schema_clause}"
         reduce_prompt = (
-            "Merge these partial meeting notes without inventing facts or duplicates. Return "
-            "JSON only with exact keys summary, decisions, and action_items."
+            "Merge these partial meeting notes without inventing facts or duplicates. "
+            + (
+                f"Follow these notes instructions where they apply: {custom_guidance}\n\n"
+                if custom_guidance
+                else ""
+            )
+            + schema_clause
         )
 
         async def fail(error: str, code: str = "failed") -> None:

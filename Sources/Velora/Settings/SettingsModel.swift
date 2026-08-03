@@ -310,6 +310,8 @@ final class SettingsModel: ObservableObject {
         meetingCalendar = config.meetingCalendar
         meetingAudioRetentionDays = config.meetingAudioRetentionDays
         meetingDiarization = config.meetingDiarization
+        meetingEndAction = config.meetingEndAction
+        meetingNotesPrompt = config.meetingNotesPrompt
         // Seed the active cleanup model from config.json so the model-cache
         // "in use" delete-guard holds even before the engine's status reply
         // lands (the engine owns this key; status refreshes it).
@@ -431,6 +433,8 @@ final class SettingsModel: ObservableObject {
         meetingSuggestions = imported.meetings.suggestions
         meetingAudioRetentionDays = imported.meetings.audioRetentionDays
         meetingDiarization = imported.meetings.diarization
+        meetingEndAction = MeetingEndAction(rawValue: imported.meetings.endAction) ?? .ask
+        meetingNotesPrompt = imported.meetings.notesPrompt
         updateChecks = imported.updates.checkAutomatically
         autoInstallUpdates = imported.updates.installAutomatically
 
@@ -786,6 +790,42 @@ final class SettingsModel: ObservableObject {
             config.meetingDiarization = meetingDiarization
             supervisor?.send(["cmd": "reload_config"])
         }
+    }
+
+    @Published var meetingEndAction: MeetingEndAction {
+        didSet {
+            guard !applyingImportedSettings, meetingEndAction != oldValue else { return }
+            config.meetingEndAction = meetingEndAction
+        }
+    }
+
+    /// Free text bound to a TextEditor — persisting settings.json on every
+    /// keystroke would thrash the disk, so writes coalesce briefly.
+    @Published var meetingNotesPrompt: String {
+        didSet {
+            guard !applyingImportedSettings, meetingNotesPrompt != oldValue else { return }
+            let bounded = SettingsDocument.Meetings.boundedNotesPrompt(meetingNotesPrompt)
+            if bounded != meetingNotesPrompt {
+                meetingNotesPrompt = bounded
+                return
+            }
+            notesPromptSaveWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.config.meetingNotesPrompt = self.meetingNotesPrompt
+            }
+            notesPromptSaveWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+        }
+    }
+    private var notesPromptSaveWork: DispatchWorkItem?
+
+    /// Flushes the coalesced prompt write immediately (window close, quit).
+    func flushMeetingNotesPrompt() {
+        guard let work = notesPromptSaveWork else { return }
+        notesPromptSaveWork = nil
+        work.cancel()
+        config.meetingNotesPrompt = meetingNotesPrompt
     }
 
     @Published var vocabMining: Bool {

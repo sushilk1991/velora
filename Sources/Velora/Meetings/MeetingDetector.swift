@@ -17,6 +17,10 @@ struct MeetingCandidate: Equatable {
     let sourceApp: String?
     let calendarEventID: String?
     let confidence: Int
+    /// True when a window title confirmed a live call (score >= 80), as
+    /// opposed to "the app is merely running" or calendar-only evidence.
+    /// Only title-confirmed candidates can seed end-of-meeting watching.
+    let titleConfirmed: Bool
 }
 
 /// Polls only local process/window metadata plus optional EventKit. Detection
@@ -31,7 +35,11 @@ final class MeetingDetector {
     private var generation = 0
     private var pollInFlight = false
     private var lastCandidateKey: String?
+    private var endWatchActive = false
     var onCandidate: ((MeetingCandidate) -> Void)?
+    /// Reports the window-title-confirmed call source (nil when none) on every
+    /// poll while an end watch is armed. Consumers own the debounce.
+    var onActivity: ((String?) -> Void)?
 
     init(
         calendarEnabled: @escaping () -> Bool,
@@ -44,9 +52,7 @@ final class MeetingDetector {
     func start() {
         guard timer == nil else { return }
         poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
-            self?.poll()
-        }
+        scheduleTimer()
     }
 
     func stop() {
@@ -54,9 +60,32 @@ final class MeetingDetector {
         timer = nil
         generation += 1
         pollInFlight = false
+        // A stale armed flag would make a future start() poll at the watch
+        // cadence and report activity into an idle coordinator.
+        endWatchActive = false
+    }
+
+    /// While armed, polls run more often and report call presence even when
+    /// suggestions are disabled — ending a recording the user already
+    /// consented to is a separate concern from suggesting new ones.
+    func setEndWatch(_ active: Bool) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard endWatchActive != active else { return }
+        endWatchActive = active
+        guard timer != nil else { return }
+        scheduleTimer()
+        if active { poll() }
     }
 
     func resetSuggestionDebounce() { lastCandidateKey = nil }
+
+    private func scheduleTimer() {
+        timer?.invalidate()
+        let interval: TimeInterval = endWatchActive ? 10 : 20
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.poll()
+        }
+    }
 
     static var calendarAuthorization: EKAuthorizationStatus {
         EKEventStore.authorizationStatus(for: .event)
@@ -82,10 +111,9 @@ final class MeetingDetector {
 
     private func poll() {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard suggestionsEnabled() else {
-            lastCandidateKey = nil
-            return
-        }
+        let wantSuggestions = suggestionsEnabled()
+        if !wantSuggestions { lastCandidateKey = nil }
+        guard wantSuggestions || endWatchActive else { return }
         guard !pollInFlight else { return }
         pollInFlight = true
         generation += 1
@@ -95,9 +123,11 @@ final class MeetingDetector {
             guard let self else { return }
             let input = self.collectInput(calendarEnabled: calendarEnabled)
             let candidate = Self.candidate(from: input)
+            let activeSource = Self.activeMeetingSource(from: input)
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.generation == currentGeneration else { return }
                 self.pollInFlight = false
+                if self.endWatchActive { self.onActivity?(activeSource) }
                 guard self.suggestionsEnabled() else {
                     self.lastCandidateKey = nil
                     return
@@ -148,7 +178,11 @@ final class MeetingDetector {
             .first(where: Self.hasConferenceLink)
     }
 
-    static func candidate(from input: MeetingDetectionInput) -> MeetingCandidate? {
+    /// App-only evidence: (score, source, matched title). A window title match
+    /// always scores >= 80; a merely-running meeting app keeps its low base.
+    static func appSignal(
+        from input: MeetingDetectionInput
+    ) -> (score: Int, source: String?, title: String?) {
         var appScore = 0
         var source: String?
         var appTitle: String?
@@ -168,7 +202,7 @@ final class MeetingDetector {
         }
 
         inspect("us.zoom.xos", sourceName: "Zoom", base: 40,
-                terms: ["zoom meeting", "meeting", "waiting room"])
+                terms: ["zoom meeting", "zoom webinar", "meeting", "waiting room"])
         inspect("com.microsoft.teams2", sourceName: "Microsoft Teams", base: 35,
                 terms: ["meeting", "call"])
         inspect("com.microsoft.teams", sourceName: "Microsoft Teams", base: 35,
@@ -184,22 +218,83 @@ final class MeetingDetector {
             }
         }
 
-        let browsers = [
-            "com.apple.Safari", "com.google.Chrome", "company.thebrowser.Browser",
-            "com.microsoft.edgemac", "org.mozilla.firefox",
-        ]
-        for bundle in browsers where input.runningBundleIDs.contains(bundle) {
+        for bundle in browserBundles where input.runningBundleIDs.contains(bundle) {
             if let title = (input.windowTitles[bundle] ?? []).first(where: {
-                let value = $0.lowercased()
-                return value.contains("google meet") || value.contains("meet.google")
-                    || value.contains("zoom meeting") || value.contains("microsoft teams")
+                Self.titleIndicatesBrowserMeeting($0.lowercased())
             }), appScore < 90 {
                 appScore = 90
-                source = title.lowercased().contains("google") ? "Google Meet" : "Browser meeting"
+                let lower = title.lowercased()
+                source = (lower.contains("google") || Self.hasMeetTabPrefix(lower))
+                    ? "Google Meet" : "Browser meeting"
                 appTitle = title
             }
         }
 
+        return (appScore, source, appTitle)
+    }
+
+    static let browserBundles = [
+        "com.apple.Safari", "com.google.Chrome", "company.thebrowser.Browser",
+        "com.microsoft.edgemac", "org.mozilla.firefox",
+    ]
+
+    static func titleIndicatesBrowserMeeting(_ lower: String) -> Bool {
+        lower.contains("google meet") || lower.contains("meet.google")
+            || lower.contains("zoom meeting") || lower.contains("microsoft teams")
+            || hasMeetTabPrefix(lower)
+    }
+
+    /// Chrome/Safari title an active Meet tab "Meet – abc-defg-hij" (or the
+    /// meeting name) — the bare product name never appears with "google" in
+    /// it, so the dash separator is the stable signal.
+    static func hasMeetTabPrefix(_ lower: String) -> Bool {
+        for dash in ["–", "—", "-"] where lower.hasPrefix("meet \(dash) ") {
+            return true
+        }
+        return false
+    }
+
+    /// A window-title-confirmed live call, used for end-of-meeting watching.
+    /// Presence terms are deliberately stricter than suggestion scoring: a
+    /// Teams window sitting on its Calls tab or a Zoom "Schedule Meeting"
+    /// sheet contains "call"/"meeting" yet is not a call, and would pin every
+    /// recording to "still in a meeting" forever. Calendar evidence never
+    /// counts — an event cannot see a call that ended early.
+    static func activeMeetingSource(from input: MeetingDetectionInput) -> String? {
+        func firstTitle(_ bundle: String, where matches: (String) -> Bool) -> String? {
+            guard input.runningBundleIDs.contains(bundle) else { return nil }
+            return (input.windowTitles[bundle] ?? []).first { matches($0.lowercased()) }
+        }
+        func containsAny(_ terms: [String]) -> (String) -> Bool {
+            { lower in terms.contains { lower.contains($0) } }
+        }
+
+        for bundle in ["com.tinyspeck.slackmacgap", "com.slack.Slack"]
+        where firstTitle(bundle, where: containsAny(["huddle", "slack call"])) != nil {
+            return "Slack Huddle"
+        }
+        if firstTitle(
+            "us.zoom.xos",
+            where: containsAny(["zoom meeting", "zoom webinar", "waiting room"])) != nil {
+            return "Zoom"
+        }
+        for bundle in ["com.microsoft.teams2", "com.microsoft.teams"]
+        where firstTitle(bundle, where: containsAny(
+            ["meeting with", "meeting in", "call with", "call in progress"])) != nil {
+            return "Microsoft Teams"
+        }
+        for bundle in browserBundles {
+            if let title = firstTitle(bundle, where: Self.titleIndicatesBrowserMeeting) {
+                let lower = title.lowercased()
+                return (lower.contains("google") || Self.hasMeetTabPrefix(lower))
+                    ? "Google Meet" : "Browser meeting"
+            }
+        }
+        return nil
+    }
+
+    static func candidate(from input: MeetingDetectionInput) -> MeetingCandidate? {
+        let (appScore, source, appTitle) = appSignal(from: input)
         let calendarScore = input.calendarHasConferenceLink ? 70 : 0
         let confidence = max(appScore, calendarScore)
             + (appScore > 0 && calendarScore > 0 ? 15 : 0)
@@ -212,7 +307,8 @@ final class MeetingDetector {
             ?? "\(source ?? "meeting"):\(chosenTitle.lowercased())"
         return MeetingCandidate(
             key: key, title: chosenTitle, sourceApp: source,
-            calendarEventID: input.calendarEventID, confidence: min(100, confidence))
+            calendarEventID: input.calendarEventID, confidence: min(100, confidence),
+            titleConfirmed: appScore >= 80)
     }
 
     private static func interestingBundle(_ bundle: String?) -> Bool {

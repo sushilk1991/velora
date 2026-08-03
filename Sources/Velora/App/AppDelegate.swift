@@ -510,6 +510,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // mid-flight .m4a finalize loses the system track — review catch);
         // anything else wedged is forced at 8s.
         scheduleTerminationWatchdog(after: 8, allowMeetingExtension: true)
+        // A debounced Settings edit (notes prompt) must not die with the
+        // process; windowWillClose is not guaranteed during terminate.
+        settingsController?.flushPendingEdits()
         // Stop accepting new long-running work, then wait for meeting audio to
         // finalize before allowing AppKit to tear down the engine and process.
         controlServer?.stop()

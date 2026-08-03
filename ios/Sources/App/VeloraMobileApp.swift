@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 @main
 struct VeloraMobileApp: App {
@@ -56,7 +57,20 @@ struct AppRootView: View {
     private func handlePendingShortcut() async {
         guard shortcutRouter.consumePendingCapture() else { return }
         selectedTab = .dictate
-        try? await Task.sleep(for: .milliseconds(250))
+        // AVAudioSession activation throws unless the app is foreground-
+        // active; on a slow warm launch a fixed sleep raced that transition
+        // and stranded the user on the generic microphone error.
+        await waitUntilForegroundActive()
         await speech.start()
+    }
+
+    @MainActor
+    private func waitUntilForegroundActive() async {
+        for _ in 0..<50 where UIApplication.shared.applicationState != .active {
+            try? await Task.sleep(for: .milliseconds(100))
+            if Task.isCancelled { return }
+        }
+        // One extra beat lets the tab switch land before the mic UI takes over.
+        try? await Task.sleep(for: .milliseconds(100))
     }
 }

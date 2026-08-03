@@ -392,6 +392,111 @@ async def test_meeting_notes_return_strict_structured_output(engine):
     assert ready["action_items"] == ["Me: run release QA"]
 
 
+async def test_meeting_notes_custom_prompt_keeps_schema_clause(engine):
+    eng, sock = engine
+    seen_prompts: list[str] = []
+
+    class CapturingCleanup:
+        loaded = True
+        unhealthy = False
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            seen_prompts.append(system_prompt)
+            return SimpleNamespace(
+                applied=True,
+                text='{"summary":"Styled notes","decisions":[],"action_items":[]}',
+            )
+
+    eng.cleanup = CapturingCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "styled", "meeting_id": "m3",
+        "transcript": "[00:00] Me: Keep the roadmap focused on retention.",
+        "prompt": "Write terse, bullet-first notes aimed at a founder.",
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+    assert ready["summary"] == "Styled notes"
+    # The custom guidance leads the prompt, and the non-editable JSON schema
+    # clause still rides along so parsing cannot be broken from Settings.
+    assert seen_prompts, "the cleanup model never saw a prompt"
+    assert seen_prompts[0].startswith("Write terse, bullet-first notes")
+    assert "Return JSON only with exact keys summary" in seen_prompts[0]
+
+
+async def test_meeting_notes_default_prompt_used_when_absent(engine):
+    eng, sock = engine
+    seen_prompts: list[str] = []
+
+    class CapturingCleanup:
+        loaded = True
+        unhealthy = False
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            seen_prompts.append(system_prompt)
+            return SimpleNamespace(
+                applied=True,
+                text='{"summary":"Default notes","decisions":[],"action_items":[]}',
+            )
+
+    eng.cleanup = CapturingCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "plain", "meeting_id": "m4",
+        "transcript": "[00:00] Me: Nothing custom here.",
+    })
+    await client.recv_event("meeting_notes_accepted")
+    await client.recv_event("meeting_notes_ready")
+    assert seen_prompts[0].startswith("Create faithful meeting notes")
+    assert "Return JSON only with exact keys summary" in seen_prompts[0]
+
+
+async def test_meeting_notes_truncates_oversized_prompt(engine):
+    eng, sock = engine
+    seen_prompts: list[str] = []
+
+    class CapturingCleanup:
+        loaded = True
+        unhealthy = False
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            seen_prompts.append(system_prompt)
+            return SimpleNamespace(
+                applied=True,
+                text='{"summary":"Trimmed","decisions":[],"action_items":[]}',
+            )
+
+    eng.cleanup = CapturingCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    # A completed meeting must never fail over prompt length: Swift bounds by
+    # unicode scalars, but any skew (emoji, combining marks) gets truncated
+    # here instead of rejected.
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "too-big", "meeting_id": "m5",
+        "transcript": "[00:00] Me: hi.", "prompt": "x" * 9_000,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+    assert ready["summary"] == "Trimmed"
+    assert seen_prompts and len(seen_prompts[0]) < 8_200
+
+
+async def test_meeting_notes_rejects_non_string_prompt(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "not-a-string", "meeting_id": "m5",
+        "transcript": "[00:00] Me: hi.", "prompt": 42,
+    })
+    failed = await client.recv_event("meeting_notes_failed")
+    assert failed["code"] == "invalid_arguments"
+    assert not eng._meeting_notes_running
+
+
 async def test_live_dictation_preempts_and_then_resumes_meeting_notes(engine, monkeypatch):
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "foreground dictation")
     eng, sock = engine

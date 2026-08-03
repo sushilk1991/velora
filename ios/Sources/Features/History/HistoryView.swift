@@ -68,7 +68,8 @@ struct HistoryView: View {
     }
 
     private func copy(_ entry: TranscriptEntry) {
-        UIPasteboard.general.string = entry.text
+        // Same chokepoint as delivery — the one pasteboard seam stays testable.
+        SystemClipboard().write(entry.text)
         copiedEntryID = entry.id
     }
 }

@@ -195,7 +195,7 @@ final class ModernSpeechCaptureSession: ActiveSpeechCaptureSession {
             audioEngine.inputNode.removeTap(onBus: 0)
             inputTapInstalled = false
         }
-        onLevel(0.08)
+        onLevel(SpeechCaptureService.idleAudioLevel)
     }
 
     private func observeResults() {

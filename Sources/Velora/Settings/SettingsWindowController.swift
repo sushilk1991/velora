@@ -106,7 +106,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         window?.makeKeyAndOrderFront(nil)
     }
 
+    /// Persists debounced free-text edits immediately (app termination).
+    func flushPendingEdits() {
+        model.flushMeetingNotesPrompt()
+    }
+
     func windowWillClose(_ notification: Notification) {
+        model.flushMeetingNotesPrompt()
         if holdsActivation {
             holdsActivation = false
             AppActivation.releaseRegular()

@@ -57,8 +57,54 @@ struct MeetingsSettingsView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                Picker(selection: $model.meetingEndAction) {
+                    Text("Ask to stop").tag(MeetingEndAction.ask)
+                    Text("Stop and create notes").tag(MeetingEndAction.stop)
+                    Text("Keep recording").tag(MeetingEndAction.off)
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("When the call ends")
+                        Text("While recording, Velora keeps watching the detected call (Huddle, Zoom, Meet, Teams) and reacts when it disappears.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             } footer: {
                 SettingsFooter("Detection only suggests. Every recording still needs a Start Recording confirmation. macOS asks for computer-audio access after that confirmation on the first meeting. Transcripts and notes stay until you delete them; this setting removes only audio.")
+            }
+
+            Section("Notes style") {
+                VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                    ZStack(alignment: .topLeading) {
+                        if model.meetingNotesPrompt.isEmpty {
+                            Text(MeetingNotesPrompt.builtinGuidance)
+                                .font(.callout)
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 8)
+                                .padding(.leading, 5)
+                                .allowsHitTesting(false)
+                        }
+                        TextEditor(text: $model.meetingNotesPrompt)
+                            .font(.callout)
+                            .frame(minHeight: 72, maxHeight: 160)
+                            .scrollContentBackground(.hidden)
+                    }
+                    HStack(alignment: .top) {
+                        Text("Shapes how notes read — tone, focus, structure. Notes always come back as a summary, decisions, and action items, generated on this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if model.meetingNotesPrompt.isEmpty {
+                            Button("Customize") {
+                                model.meetingNotesPrompt = MeetingNotesPrompt.builtinGuidance
+                            }
+                            .controlSize(.small)
+                        } else {
+                            Button("Use Default") { model.meetingNotesPrompt = "" }
+                                .controlSize(.small)
+                        }
+                    }
+                }
             }
 
             Section("Meeting memory") {

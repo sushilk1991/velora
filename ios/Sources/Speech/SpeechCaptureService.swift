@@ -27,24 +27,34 @@ final class SpeechCaptureService {
     private var refinementTask: Task<Void, Never>?
     private var activeSessionID: UUID?
     private var refinementSessionID: UUID?
+    /// Session the watchdog force-finalized with a stale partial. When the
+    /// recognizer's authoritative final arrives moments later, it may
+    /// supersede the in-flight refinement instead of being dropped.
+    private var fallbackFinalizedSessionID: UUID?
+    /// Recognition kept alive after a watchdog fallback. Cancelling it with
+    /// the normal teardown would abort the very finalize whose result the
+    /// supersede path exists to accept; it gets a deadline instead.
+    private var detachedSpeechSession: ActiveSpeechCaptureSession?
+    private var detachedRecognitionTask: SFSpeechRecognitionTask?
+    private var detachedSessionDeadline: Task<Void, Never>?
+    private var refinementSourceText: String?
+    private var deliveryProtection: UIBackgroundTaskIdentifier = .invalid
     private var inputTapInstalled = false
     private var finalizationStartedAt: Date?
     private var lastTranscriptUpdateAt: Date?
 
+    static let idleAudioLevel = 0.08
+
     private(set) var phase: Phase = .idle
     private(set) var transcript = ""
-    private(set) var audioLevel = 0.08
+    private(set) var audioLevel = SpeechCaptureService.idleAudioLevel
     private(set) var errorMessage: String?
     private(set) var copiedPulse = 0
 
-    init(store: TranscriptStore) {
+    init(store: TranscriptStore, clipboard: ClipboardWriting? = nil) {
         self.store = store
-        clipboard = SystemClipboard()
-    }
-
-    init(store: TranscriptStore, clipboard: ClipboardWriting) {
-        self.store = store
-        self.clipboard = clipboard
+        self.clipboard = clipboard ?? SystemClipboard()
+        observeAudioInterruptions()
     }
 
     func start() async {
@@ -55,7 +65,10 @@ final class SpeechCaptureService {
         phase = .requestingPermission
         transcript = ""
         errorMessage = nil
-        audioLevel = 0.08
+        audioLevel = Self.idleAudioLevel
+        fallbackFinalizedSessionID = nil
+        refinementSourceText = nil
+        releaseDetachedSession()
 
         guard await requestMicrophonePermission() else {
             fail("Microphone access is off. Open Settings and allow Velora to listen while you dictate.")
@@ -97,11 +110,33 @@ final class SpeechCaptureService {
                         self.audioLevel = level
                     },
                     onFinished: { [weak self] finalTranscript in
-                        guard let self, self.activeSessionID == sessionID else { return }
-                        self.beginRefinement(with: finalTranscript)
+                        guard let self else { return }
+                        if self.activeSessionID == sessionID {
+                            self.beginRefinement(with: finalTranscript)
+                        } else if self.fallbackFinalizedSessionID == sessionID {
+                            // The watchdog delivered a stale partial while the
+                            // real finalize kept running detached; the
+                            // authoritative final supersedes it while the copy
+                            // is still pending.
+                            self.fallbackFinalizedSessionID = nil
+                            self.releaseDetachedSession()
+                            let authoritative = TranscriptFormatter.normalize(finalTranscript)
+                            if self.phase == .finishing, !authoritative.isEmpty,
+                               authoritative != self.refinementSourceText {
+                                self.beginRefinement(with: finalTranscript)
+                            }
+                        }
                     },
                     onFailure: { [weak self] in
-                        guard let self, self.activeSessionID == sessionID else { return }
+                        guard let self else { return }
+                        if self.fallbackFinalizedSessionID == sessionID {
+                            // The detached finalize died; the fallback text
+                            // already being refined is the best we have.
+                            self.fallbackFinalizedSessionID = nil
+                            self.releaseDetachedSession()
+                            return
+                        }
+                        guard self.activeSessionID == sessionID else { return }
                         if self.phase == .finishing, !self.transcript.isEmpty {
                             self.beginRefinement(with: self.transcript)
                         } else {
@@ -150,6 +185,7 @@ final class SpeechCaptureService {
         guard phase == .listening else { return }
         phase = .finishing
         finalizationStartedAt = Date()
+        beginDeliveryProtection()
 
         if let activeSpeechSession {
             activeSpeechSession.finish()
@@ -181,6 +217,8 @@ final class SpeechCaptureService {
                 case .wait:
                     continue
                 case .deliverFallback:
+                    self.fallbackFinalizedSessionID = self.activeSessionID
+                    self.detachSessionForLateFinal()
                     self.beginRefinement(with: self.transcript)
                     return
                 case .fail:
@@ -196,7 +234,11 @@ final class SpeechCaptureService {
         refinementTask?.cancel()
         refinementTask = nil
         refinementSessionID = nil
+        fallbackFinalizedSessionID = nil
+        refinementSourceText = nil
+        releaseDetachedSession()
         tearDownSession(cancelRecognition: true)
+        endDeliveryProtection()
         transcript = ""
         errorMessage = nil
         phase = .idle
@@ -214,9 +256,11 @@ final class SpeechCaptureService {
         refinementTask?.cancel()
         refinementTask = nil
         refinementSessionID = nil
+        fallbackFinalizedSessionID = nil
+        refinementSourceText = nil
         transcript = ""
         errorMessage = nil
-        audioLevel = 0.08
+        audioLevel = Self.idleAudioLevel
         phase = .idle
     }
 
@@ -241,7 +285,9 @@ final class SpeechCaptureService {
             throw CaptureError.microphoneUnavailable
         }
 
-        inputNode.installTap(onBus: 0, bufferSize: 1_024, format: format) { [weak self] buffer, _ in
+        // 4096 frames ≈ 85 ms per callback. 1024 spawned ~47 main-actor tasks
+        // a second just to move a level number the waveform samples at 20 Hz.
+        inputNode.installTap(onBus: 0, bufferSize: 4_096, format: format) { [weak self] buffer, _ in
             request.append(buffer)
             let level = Self.normalizedLevel(from: buffer)
             Task { @MainActor [weak self] in
@@ -253,7 +299,26 @@ final class SpeechCaptureService {
 
         recognitionTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor [weak self] in
-                guard let self, self.activeSessionID == sessionID else { return }
+                guard let self else { return }
+                guard self.activeSessionID == sessionID else {
+                    guard self.fallbackFinalizedSessionID == sessionID else { return }
+                    if let result, result.isFinal {
+                        // Same race as the modern path: a watchdog fallback
+                        // must not outrank the recognizer's real final.
+                        self.fallbackFinalizedSessionID = nil
+                        self.releaseDetachedSession()
+                        let text = result.bestTranscription.formattedString
+                        let authoritative = TranscriptFormatter.normalize(text)
+                        if self.phase == .finishing, !authoritative.isEmpty,
+                           authoritative != self.refinementSourceText {
+                            self.beginRefinement(with: text)
+                        }
+                    } else if error != nil {
+                        self.fallbackFinalizedSessionID = nil
+                        self.releaseDetachedSession()
+                    }
+                    return
+                }
 
                 if let result {
                     let updatedTranscript = result.bestTranscription.formattedString
@@ -283,6 +348,7 @@ final class SpeechCaptureService {
     private func beginRefinement(with rawText: String) {
         guard phase == .listening || phase == .finishing else { return }
         let basic = TranscriptFormatter.normalize(rawText)
+        refinementSourceText = basic
         tearDownSession(cancelRecognition: true)
 
         guard !basic.isEmpty else {
@@ -291,6 +357,7 @@ final class SpeechCaptureService {
         }
 
         phase = .finishing
+        beginDeliveryProtection()
         let sessionID = UUID()
         refinementSessionID = sessionID
         let style = DictationStyle.resolve(
@@ -327,6 +394,9 @@ final class SpeechCaptureService {
             self.transcript = normalized
             self.phase = .copied
             self.copiedPulse += 1
+            self.refinementSourceText = nil
+            self.fallbackFinalizedSessionID = nil
+            self.endDeliveryProtection()
         }
     }
 
@@ -334,9 +404,112 @@ final class SpeechCaptureService {
         refinementTask?.cancel()
         refinementTask = nil
         refinementSessionID = nil
+        fallbackFinalizedSessionID = nil
+        refinementSourceText = nil
+        releaseDetachedSession()
         tearDownSession(cancelRecognition: true)
+        endDeliveryProtection()
         errorMessage = message
         phase = .failed
+    }
+
+    /// Moves the live recognition out of `activeSpeechSession` (or the
+    /// legacy task) so the coming teardown does not cancel the finalize whose
+    /// authoritative result the supersede path wants. A deadline bounds it.
+    private func detachSessionForLateFinal() {
+        if let session = activeSpeechSession {
+            activeSpeechSession = nil
+            detachedSpeechSession = session
+        } else if let task = recognitionTask {
+            recognitionTask = nil
+            detachedRecognitionTask = task
+        } else {
+            return
+        }
+        detachedSessionDeadline?.cancel()
+        detachedSessionDeadline = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            self?.releaseDetachedSession()
+        }
+    }
+
+    private func releaseDetachedSession() {
+        detachedSessionDeadline?.cancel()
+        detachedSessionDeadline = nil
+        detachedSpeechSession?.cancel()
+        detachedSpeechSession = nil
+        detachedRecognitionTask?.cancel()
+        detachedRecognitionTask = nil
+    }
+
+    /// The Action Button flow is press → speak → finish → switch apps →
+    /// paste. Without a background assertion, iOS can suspend Velora during
+    /// the finishing window right after the user leaves, silently losing the
+    /// clipboard write.
+    private func beginDeliveryProtection() {
+        guard deliveryProtection == .invalid else { return }
+        deliveryProtection = UIApplication.shared.beginBackgroundTask(
+            withName: "VeloraTranscriptDelivery"
+        ) { [weak self] in
+            // Called on the main thread moments before suspension. Deliver
+            // the already-normalized text NOW — the user is typically in the
+            // target app about to paste, and the frozen refinement task
+            // cannot beat them there.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.deliverPendingFallbackBeforeSuspension()
+                self.endDeliveryProtection()
+            }
+        }
+    }
+
+    private func deliverPendingFallbackBeforeSuspension() {
+        guard phase == .finishing,
+              let pending = refinementSourceText, !pending.isEmpty else { return }
+        refinementTask?.cancel()
+        refinementTask = nil
+        refinementSessionID = nil
+        refinementSourceText = nil
+        fallbackFinalizedSessionID = nil
+        releaseDetachedSession()
+        guard let normalized = TranscriptDelivery.deliver(
+            pending, to: clipboard, store: store
+        ) else { return }
+        transcript = normalized
+        phase = .copied
+        copiedPulse += 1
+    }
+
+    private func endDeliveryProtection() {
+        guard deliveryProtection != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(deliveryProtection)
+        deliveryProtection = .invalid
+    }
+
+    /// An incoming call or Siri kills the audio session mid-dictation;
+    /// without this the UI sits on "Listening" until the hard watchdog cap.
+    /// Finish with whatever was heard instead of hanging.
+    private func observeAudioInterruptions() {
+        NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: nil, queue: .main
+        ) { [weak self] note in
+            guard let info = note.userInfo,
+                  let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: rawType) == .began
+            else { return }
+            Task { @MainActor [weak self] in self?.handleAudioInterruption() }
+        }
+    }
+
+    private func handleAudioInterruption() {
+        guard phase == .listening else { return }
+        if transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            fail("Dictation was interrupted before Velora heard any words. Try again.")
+        } else {
+            stopAndCopy()
+        }
     }
 
     private func stopAudioInput(endingRecognition: Bool) {
@@ -350,7 +523,7 @@ final class SpeechCaptureService {
         if endingRecognition {
             recognitionRequest?.endAudio()
         }
-        audioLevel = 0.08
+        audioLevel = Self.idleAudioLevel
     }
 
     private func tearDownSession(cancelRecognition: Bool) {
@@ -408,9 +581,9 @@ final class SpeechCaptureService {
     }
 
     nonisolated static func normalizedLevel(from buffer: AVAudioPCMBuffer) -> Double {
-        guard let channel = buffer.floatChannelData?.pointee else { return 0.08 }
+        guard let channel = buffer.floatChannelData?.pointee else { return idleAudioLevel }
         let frameCount = Int(buffer.frameLength)
-        guard frameCount > 0 else { return 0.08 }
+        guard frameCount > 0 else { return idleAudioLevel }
 
         var sum: Float = 0
         for index in 0..<frameCount {
@@ -419,7 +592,7 @@ final class SpeechCaptureService {
         }
         let rms = sqrt(sum / Float(frameCount))
         let decibels = 20 * log10(max(rms, 0.000_01))
-        return min(1, max(0.08, Double((decibels + 52) / 52)))
+        return min(1, max(idleAudioLevel, Double((decibels + 52) / 52)))
     }
 }
 

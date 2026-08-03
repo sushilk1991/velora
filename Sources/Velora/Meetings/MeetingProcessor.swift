@@ -5,6 +5,19 @@ extension Notification.Name {
     static let veloraMeetingsChanged = Notification.Name("VeloraMeetingsChanged")
 }
 
+/// Mirrors the engine's built-in meeting-notes guidance (server.py,
+/// `_run_meeting_notes`) so Settings can show what "default" means and seed
+/// customization from it. The JSON schema clause is enforced engine-side and
+/// is never part of the editable text.
+enum MeetingNotesPrompt {
+    static let builtinGuidance =
+        "Create faithful meeting notes from this transcript chunk. "
+        + "Do not invent owners, deadlines, decisions, or facts. "
+        + "Me and Them are audio channels, not verified identities. "
+        + "If a legacy transcript contains Speaker-number labels, treat those "
+        + "the same way. Never guess who a speaker is."
+}
+
 /// Resumable post-capture pipeline. Each engine chunk is committed before the
 /// next one is requested; relaunch resumes from `MAX(chunk_index) + 1`.
 final class MeetingProcessor: ObservableObject {
@@ -38,6 +51,7 @@ final class MeetingProcessor: ObservableObject {
     private let store: MeetingStore
     private let engineIsReady: () -> Bool
     private let sendToEngine: ([String: Any]) -> Void
+    private let notesPrompt: () -> String
     private var queued: [QueueItem] = []
     private var work: Work?
     /// A corrupt/resource-exhausting track must not create an endless
@@ -54,6 +68,7 @@ final class MeetingProcessor: ObservableObject {
         self.store = store
         engineIsReady = { supervisor.isReady }
         sendToEngine = { supervisor.send($0) }
+        notesPrompt = { AppConfig.shared.meetingNotesPrompt }
     }
 
     /// Deterministic app-side pipeline seam. Production always uses the
@@ -62,11 +77,13 @@ final class MeetingProcessor: ObservableObject {
     init(
         store: MeetingStore,
         engineIsReady: @escaping () -> Bool,
-        sendToEngine: @escaping ([String: Any]) -> Void
+        sendToEngine: @escaping ([String: Any]) -> Void,
+        notesPrompt: @escaping () -> String = { "" }
     ) {
         self.store = store
         self.engineIsReady = engineIsReady
         self.sendToEngine = sendToEngine
+        self.notesPrompt = notesPrompt
     }
 
     func enqueue(meetingID: String) {
@@ -423,10 +440,13 @@ final class MeetingProcessor: ObservableObject {
         self.work = work
         state = .processing(
             meetingID: work.meetingID, label: "Creating notes…", fraction: 0.75)
-        sendToEngine([
+        var message: [String: Any] = [
             "cmd": "meeting_notes", "id": work.jobID,
             "meeting_id": work.meetingID, "transcript": transcript,
-        ])
+        ]
+        let custom = notesPrompt().trimmingCharacters(in: .whitespacesAndNewlines)
+        if !custom.isEmpty { message["prompt"] = custom }
+        sendToEngine(message)
     }
 
     private func failActive(_ message: String, code: String? = nil) {

@@ -152,14 +152,16 @@ enum TranscriptRefiner {
         text.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
     }
 
+    private static let numberExpression = try? NSRegularExpression(
+        pattern: #"\d+(?:[.,:/-]\d+)*"#)
+
     private static func numberTokens(in text: String) -> [String] {
         let content = text.replacingOccurrences(
             of: #"(?m)^\s*\d+[.)]\s+"#,
             with: "",
             options: .regularExpression
         )
-        let pattern = #"\d+(?:[.,:/-]\d+)*"#
-        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+        guard let expression = numberExpression else { return [] }
         let range = NSRange(content.startIndex..<content.endIndex, in: content)
         return expression.matches(in: content, range: range).compactMap { match in
             guard let swiftRange = Range(match.range, in: content) else { return nil }
