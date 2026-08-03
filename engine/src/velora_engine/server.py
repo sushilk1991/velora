@@ -32,7 +32,7 @@ from typing import Any, Callable, TypeVar
 
 import numpy as np
 
-from . import __version__, diarization, editing, formatting, models, protocol
+from . import __version__, batch_priority, diarization, editing, formatting, models, protocol
 from .audio_store import AudioStore
 from .cleanup import (
     HARD_TIMEOUT_GRACE_S,
@@ -313,9 +313,68 @@ class Engine:
         self._miner: VocabMiner | None = None
         self._miner_task: asyncio.Task[None] | None = None
         self._mine_cancel = threading.Event()
+        # Batch scheduling: while these jobs run with no dictation active, the
+        # engine + cleanup sidecar are demoted to Darwin background so they
+        # never fight the user's foreground apps (see batch_priority module).
+        self._batch_jobs = 0
+        self._backgrounded_pids: set[int] = set()
 
     async def _stt_call(self, fn: Callable[..., T], *args: Any) -> T:
         return await asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
+
+    # ---------------- batch scheduling + memory ----------------
+
+    def _begin_batch_job(self) -> None:
+        self._batch_jobs += 1
+        self._refresh_batch_priority()
+
+    def _end_batch_job(self) -> None:
+        self._batch_jobs = max(0, self._batch_jobs - 1)
+        self._refresh_batch_priority()
+
+    def _refresh_batch_priority(self) -> None:
+        """Apply the demote-while-batching policy to self + cleanup child.
+
+        Recomputed from live state on every call (cheap syscalls, only on
+        change) because the cleanup child can respawn mid-job and a restored
+        pid set must track it, not the pid we demoted originally.
+        """
+        want_background = (
+            self._batch_jobs > 0
+            and self.session is None
+            and not self._starting
+            and not self._finalizing
+        )
+        pids: set[int] = set()
+        if want_background:
+            pids.add(os.getpid())
+            cleanup_pid = getattr(self.cleanup, "pid", None)
+            if cleanup_pid:
+                pids.add(cleanup_pid)
+        for pid in self._backgrounded_pids - pids:
+            batch_priority.set_background(pid, False)
+        for pid in pids - self._backgrounded_pids:
+            batch_priority.set_background(pid, True)
+        if pids != self._backgrounded_pids:
+            log.info(
+                "batch priority: %s",
+                f"background pids={sorted(pids)}" if pids else "normal")
+        self._backgrounded_pids = pids
+
+    def _release_stt_memory(self) -> None:
+        """Return MLX's Metal buffer cache to the OS after a batch job.
+
+        The cache grows to the largest decode working set and is otherwise
+        retained for the life of the process — after an hour-long meeting the
+        engine's footprint stayed hundreds of MB high. Runs on the STT
+        executor via _stt_call; never between chunks (reallocation churn).
+        """
+        try:
+            import mlx.core as mx
+
+            mx.clear_cache()
+        except Exception:  # noqa: BLE001 — memory hygiene must never fail a job
+            log.debug("mlx cache clear failed", exc_info=True)
 
     async def _close_stt_backend(self, backend: STTBackend) -> None:
         close = getattr(backend, "close", None)
@@ -857,6 +916,9 @@ class Engine:
         # returns — without this flag the job would slip its next chunk in
         # between and wipe the just-started live stream (review P0).
         self._starting = True
+        # A dictation owns the machine: lift the batch-job Darwin-background
+        # demotion right now, before any model work queues behind it.
+        self._refresh_batch_priority()
         # Background note generation yields immediately; its cleanup worker
         # sees this event between output tokens, then the note job retries the
         # same chunk after dictation releases the model.
@@ -1797,7 +1859,13 @@ class Engine:
                     return
                 if self._miner is None:
                     self._miner = VocabMiner(self.config.home, self._mine_generate)
-                more = await self._miner.step()
+                # Idle mining is the definition of interruptible batch work —
+                # run it demoted so an "idle" machine stays cool and quiet.
+                self._begin_batch_job()
+                try:
+                    more = await self._miner.step()
+                finally:
+                    self._end_batch_job()
                 if self._miner.last_step_new_terms:
                     # Make the new terms live (cleanup vocab + next glossary).
                     # Counts only — never term values — in the log.
@@ -2144,6 +2212,8 @@ class Engine:
             if saved_language is not None and hasattr(self.stt, "language"):
                 self.stt.language = saved_language
             self._reprocessing = False
+            with contextlib.suppress(RuntimeError):  # executor gone at shutdown
+                await self._stt_call(self._release_stt_memory)
             # Idle again — without this, a reprocess that landed during the
             # mining delay window left mining dead until the next dictation
             # (review finding).
@@ -2320,6 +2390,8 @@ class Engine:
             self._transcribe_cancel = False
             self._transcribe_preempt.clear()
             self._file_transcribe_job_id = None
+            with contextlib.suppress(RuntimeError):  # executor gone at shutdown
+                await self._stt_call(self._release_stt_memory)
             self._schedule_mining()
 
     # ---------------- resumable meeting transcription + notes ----------------
@@ -2466,6 +2538,7 @@ class Engine:
                 "code": code, "error": error,
             })
 
+        self._begin_batch_job()
         try:
             try:
                 pcm = await asyncio.to_thread(load_media, path)
@@ -2535,6 +2608,9 @@ class Engine:
                 if self._meeting_transcribe_cancel:
                     await fail("cancelled", "cancelled")
                     return
+                # Re-demote after a dictation released the machine (the wait
+                # loop above), and pick up a respawned cleanup child.
+                self._refresh_batch_priority()
                 sample_a, sample_b, chunk_speaker = spans[index]
                 self.stt.initial_prompt = self._meeting_glossary()
                 text = await self._stt_call(
@@ -2578,6 +2654,9 @@ class Engine:
             self._transcribing = False
             self._meeting_transcribe_cancel = False
             self._meeting_transcribe_job_id = None
+            self._end_batch_job()
+            with contextlib.suppress(RuntimeError):  # executor gone at shutdown
+                await self._stt_call(self._release_stt_memory)
             self._schedule_mining()
 
     async def _cmd_meeting_notes(self, msg: dict[str, Any]) -> None:
@@ -2646,6 +2725,9 @@ class Engine:
                     if self._meeting_notes_cancel or self.shutdown.is_set():
                         return None
                 self._meeting_notes_preempt.clear()
+                # Dictation just released the machine (wait loop above), or a
+                # cleanup child respawned — recompute who gets demoted.
+                self._refresh_batch_priority()
                 cleanup = self.cleanup
                 if cleanup is None or not cleanup.loaded:
                     return None
@@ -2665,6 +2747,7 @@ class Engine:
                 return parse_notes_json(result.text)
             return None
 
+        self._begin_batch_job()
         try:
             chunks = chunk_transcript(transcript)
             partials: list[dict[str, Any]] = []
@@ -2710,6 +2793,7 @@ class Engine:
             self._meeting_notes_cancel = False
             self._meeting_notes_preempt.clear()
             self._meeting_notes_job_id = None
+            self._end_batch_job()
             self._schedule_mining()
 
 

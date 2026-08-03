@@ -632,7 +632,14 @@ struct HUDView: View {
             }
 
         case .notice:
-            if old == .standby {
+            if case .notice = old {
+                // Same surface, new text (meeting progress ticks every few
+                // seconds). A full exit/enter reset here blanked the capsule
+                // on every update; resize in place instead.
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = noticeWidth
+                }
+            } else if old == .standby {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
                     width = noticeWidth
                     height = HUDGeometry.height

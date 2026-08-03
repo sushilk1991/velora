@@ -27,12 +27,29 @@ _AFCONVERT_TIMEOUT_S = 600
 
 
 def _read_wav_16k(path: Path) -> np.ndarray:
+    """Stream-decode the converter's WAV into one float32 buffer.
+
+    An hour of audio is ~115 MB of int16; reading it whole and then
+    converting held ~3× the track in transient copies on every meeting.
+    Block reads bound the overhead to one block."""
     with wave.open(str(path), "rb") as w:
-        if w.getframerate() != SAMPLE_RATE or w.getsampwidth() != 2:
+        if (w.getframerate() != SAMPLE_RATE or w.getsampwidth() != 2
+                or w.getnchannels() != 1):
             raise ValueError(f"unexpected wav format from converter: {w.getframerate()}Hz")
-        frames = w.readframes(w.getnframes())
-    pcm16 = np.frombuffer(frames, dtype="<i2")
-    return (pcm16.astype(np.float32) / 32768.0).astype(np.float32)
+        total = w.getnframes()
+        pcm = np.empty(total, dtype=np.float32)
+        filled = 0
+        block = 10 * 60 * SAMPLE_RATE  # ~18 MB of int16 per read
+        while filled < total:
+            frames = w.readframes(min(block, total - filled))
+            if not frames:
+                break  # truncated container: keep what decoded
+            chunk = np.frombuffer(frames, dtype="<i2")
+            pcm[filled : filled + len(chunk)] = chunk
+            filled += len(chunk)
+    pcm = pcm[:filled]
+    pcm /= 32768.0
+    return pcm
 
 
 def _load_via_afconvert(src: Path) -> np.ndarray:
