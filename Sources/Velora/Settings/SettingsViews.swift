@@ -176,6 +176,23 @@ struct SettingsFooter: View {
     }
 }
 
+/// Small capsule marking a feature that ships behind lowered expectations —
+/// it works, it is tested, and it is still earning trust.
+struct ExperimentalBadge: View {
+    var body: some View {
+        Text("EXPERIMENTAL")
+            .font(.system(size: 9, weight: .semibold))
+            .kerning(0.5)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .foregroundStyle(.orange)
+            .background(
+                Capsule().fill(Color.orange.opacity(0.15))
+            )
+            .accessibilityLabel("Experimental feature")
+    }
+}
+
 /// The bordered search field used by list-style panes (History, Dictionary) —
 /// one look for in-pane search everywhere.
 struct SettingsSearchBox: View {
@@ -748,7 +765,10 @@ struct ShortcutsSettingsView: View {
             Section {
                 Toggle(isOn: $model.actionsEnabled) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Voice actions")
+                        HStack(spacing: 6) {
+                            Text("Voice actions")
+                            ExperimentalBadge()
+                        }
                         Text("Hold the shortcut and say what you want done — \u{201C}search YouTube for the match highlights\u{201D}, \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora opens the app and carries it out. Say \u{201C}draft\u{201D} to stop before sending.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
