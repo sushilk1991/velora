@@ -329,7 +329,7 @@ def test_preview_does_not_change_short_whole_clip_final(whisper):
 def test_preview_does_not_change_long_committed_stitch(whisper):
     backend, _fake = whisper(["unused"], previews=True)
 
-    def by_span(audio):
+    def by_span(audio, **_kwargs):
         seconds = len(audio) / SAMPLE_RATE
         if seconds == pytest.approx(HARD_SEGMENT_S):
             return "committed segment"
@@ -396,14 +396,25 @@ def test_long_dictation_finalize_stitches_segments(whisper):
 
 def test_long_segmented_finalize_does_not_join_the_whole_recording(whisper, monkeypatch):
     backend, fake = whisper(["tail"])
-    total_samples = int((LONG_DICTATION_S + 1) * SAMPLE_RATE)
-    backend._chunks = [np.zeros(total_samples, dtype=np.float32)]
-    backend._samples = total_samples
-    backend._decoded_samples = int(LONG_DICTATION_S * SAMPLE_RATE)
+    body_samples = int(LONG_DICTATION_S * SAMPLE_RATE)
+    # The tail must carry real speech (built before np.concatenate is
+    # patched) or the speechless-tail guard rightly skips its decode.
+    tail_audio = np.concatenate([speechy() for _ in range(10)])
+    backend._chunks = [np.zeros(body_samples, dtype=np.float32), tail_audio]
+    backend._samples = body_samples + len(tail_audio)
+    backend._decoded_samples = body_samples
     backend._segments = ["committed"]
 
-    def reject_whole_join(_parts):
-        raise AssertionError("segmented finalize must materialize only its tail")
+    real_concatenate = np.concatenate
+
+    def reject_whole_join(parts, *args, **kwargs):
+        # numpy uses concatenate internally (np.percentile in the tail
+        # evidence gate) — only the join of the WHOLE recording is the bug.
+        sizes = [len(part) for part in parts]
+        if sum(sizes) >= backend._samples:
+            raise AssertionError(
+                "segmented finalize must materialize only its tail")
+        return real_concatenate(parts, *args, **kwargs)
 
     monkeypatch.setattr(np, "concatenate", reject_whole_join)
     assert backend.finalize() == "committed tail"
@@ -802,3 +813,61 @@ def test_true_silence_span_is_consumed(whisper):
     feed_seconds(backend, MIN_SEGMENT_S + 1, chunk=quiet())
     assert len(fake.calls) == 1
     assert backend._decoded_samples > 0  # noqa: SLF001 — silence consumed
+
+
+# ---- speechless-span hallucination guard (field bug, 2026-08-04) -------------
+# Two ~50s dictations came back with "Closed Captioning by ..." credits and a
+# trailing "Thank you." fabricated from the stop pause / stop-key click. The
+# segments carried confident metadata (no_speech_prob=0.00, clean logprob and
+# compression), so only audio evidence can catch the class.
+
+
+def test_speechless_tail_is_never_decoded(whisper):
+    backend, fake = whisper(["segment one", "segment two", "Thank you."])
+    feed_seconds(backend, HARD_SEGMENT_S)
+    feed_seconds(backend, HARD_SEGMENT_S)
+    # Trailing pause at room-tone level, then the stop-key click itself.
+    feed_seconds(backend, 0.6, chunk=np.full(CHUNK, 0.006, dtype=np.float32))
+    backend.feed_chunk(loud())
+    text = backend.finalize()
+    assert text == "segment one segment two"
+    assert backend.final_tail == ""
+    assert len(fake.calls) == 2  # the tail decode never ran
+
+
+def test_speech_bearing_tail_still_decodes(whisper):
+    backend, fake = whisper(["segment one", "segment two", "and that is it"])
+    feed_seconds(backend, HARD_SEGMENT_S)
+    feed_seconds(backend, HARD_SEGMENT_S)
+    feed_seconds(backend, 0.5, chunk=speechy())
+    feed_seconds(backend, 0.5, chunk=quiet())
+    text = backend.finalize()
+    assert text == "segment one segment two and that is it"
+    assert backend.final_tail == "and that is it"
+    assert len(fake.calls) == 3
+
+
+def test_tail_speech_evidence_gates():
+    level = 0.1
+    room_tone = np.full(SAMPLE_RATE, 0.006, dtype=np.float32)
+    assert not stt_mod._tail_speech_evidence(room_tone, level)
+    # A click confined to the final 0.3s (the stop keypress) is not evidence.
+    click = room_tone.copy()
+    click[-int(0.25 * SAMPLE_RATE):] = 0.08
+    assert not stt_mod._tail_speech_evidence(click, level)
+    # A real trailing phrase before the stop is evidence.
+    phrase = room_tone.copy()
+    phrase[: int(0.4 * SAMPLE_RATE)] = 0.06
+    assert stt_mod._tail_speech_evidence(phrase, level)
+
+
+def test_single_blip_span_does_not_count_as_speech(whisper):
+    # One 100ms room-tone blip over the adaptive threshold used to arm the
+    # tail decode; a span needs a sustained 0.2s run to count.
+    backend, _fake = whisper(["unused"])
+    feed_seconds(backend, 1, chunk=quiet())
+    backend.feed_chunk(loud())
+    assert backend._span_had_speech is False  # noqa: SLF001 — single blip
+    backend.feed_chunk(loud())
+    backend.feed_chunk(loud())
+    assert backend._span_had_speech is True  # noqa: SLF001 — sustained run

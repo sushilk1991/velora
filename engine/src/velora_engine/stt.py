@@ -105,6 +105,11 @@ class SilenceTracker:
     def trailing_silence_s(self) -> float:
         return self._trailing_silence_samples / SAMPLE_RATE
 
+    @property
+    def speech_level(self) -> float:
+        """The adapted per-session speech RMS (EMA over speechy chunks)."""
+        return self._speech_ema
+
     def consume_pause(self) -> None:
         """Zero the trailing-silence run (a segment consumed this pause) while
         KEEPING the adapted speech level — a full reset per segment would throw
@@ -382,6 +387,58 @@ _LOGPROB_THRESHOLD = -1.2
 _SPEECH_MODULATION_RATIO = 1.6
 _SPEECH_FRAME_SAMPLES = SAMPLE_RATE // 50  # 20 ms
 _SPEECH_ACTIVE_RMS = 0.003
+# Minimum tracker-flagged speech for a span to be worth decoding at all.
+_MIN_SPAN_SPEECH_SAMPLES = int(0.2 * SAMPLE_RATE)
+# A decoded span must also REACH speaking level: its loudest frames (p95)
+# at least this fraction of the session's adapted speech RMS. Breath and
+# room-tone bumps measured 28-42% of speaking level in the field clips;
+# deliberate trailing words reach well past half. Below this, decoded text
+# is treated as fabricated — inserting a made-up sentence is strictly worse
+# for dictation than dropping an inaudible trail-off.
+_SPAN_SPEECH_LEVEL_RATIO = 0.5
+
+
+def _reaches_speech_level(audio: np.ndarray, speech_level: float) -> bool:
+    """True when the span's loudest 20 ms frames approach speaking level."""
+    frame_count = len(audio) // _SPEECH_FRAME_SAMPLES
+    if frame_count < 3:
+        return False
+    framed = np.asarray(
+        audio[: frame_count * _SPEECH_FRAME_SAMPLES], dtype=np.float32
+    ).reshape(frame_count, _SPEECH_FRAME_SAMPLES)
+    rms = np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
+    p95 = float(np.percentile(rms, 95))
+    return p95 >= max(_SPEECH_ACTIVE_RMS, _SPAN_SPEECH_LEVEL_RATIO * speech_level)
+
+
+# The final ~0.3s of a recording is mechanically suspect: it holds the sound
+# of the stop keypress itself, a loud transient that passes every energy gate
+# and that Whisper happily decodes as "Thank you." (field bug, 2026-08-04).
+_STOP_NOISE_SAMPLES = int(0.3 * SAMPLE_RATE)
+
+
+def _tail_speech_evidence(audio: np.ndarray, speech_level: float) -> bool:
+    """Does the recording tail carry real speech, ignoring stop-key noise?
+
+    Evidence must be sustained (≥0.2s of frames over the tracker's silence
+    threshold) AND reach speaking level (p95 ≥ 35% of the session's speech
+    RMS) — measured on the tail minus its final 0.3s. A genuine trailing
+    phrase sits earlier in the tail at full level; a keypress click lives
+    exactly in that final window, and a word that started inside it was
+    clipped by the stop anyway. Both cuts are relative to the session's own
+    adapted speech level, never absolute."""
+    evidence = audio[:-_STOP_NOISE_SAMPLES] if len(audio) > _STOP_NOISE_SAMPLES else audio[:0]
+    frame_count = len(evidence) // _SPEECH_FRAME_SAMPLES
+    if frame_count < 3:
+        return False
+    framed = np.asarray(
+        evidence[: frame_count * _SPEECH_FRAME_SAMPLES], dtype=np.float32
+    ).reshape(frame_count, _SPEECH_FRAME_SAMPLES)
+    rms = np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
+    threshold = max(_SPEECH_ACTIVE_RMS, 0.15 * speech_level)
+    sustained = float((rms >= threshold).sum()) * _SPEECH_FRAME_SAMPLES
+    return (sustained >= _MIN_SPAN_SPEECH_SAMPLES
+            and _reaches_speech_level(evidence, speech_level))
 
 
 def _has_speech_like_modulation(audio: np.ndarray) -> bool:
@@ -495,7 +552,12 @@ class WhisperBackend:
         self._segments: list[str] = []
         self._new_segments: list[str] = []
         self._silence = SilenceTracker()
-        self._span_had_speech = False  # speech seen since the last decode point
+        # Samples of tracker-flagged speech since the last decode point. A
+        # span only counts as speech-bearing past a sustained run — a single
+        # 100 ms room-tone blip over the adaptive threshold used to arm the
+        # tail decode, and Whisper turned that pause into "Thank you." /
+        # "Closed Captioning by ..." credits (field bug, 2026-08-04).
+        self._span_speech_samples = 0
         self._session_had_speech = False  # speech seen anywhere in the buffered clip
         self._retry_at_samples = 0  # backoff cursor after an empty speech-span decode
         self.preview_enabled = False
@@ -529,6 +591,41 @@ class WhisperBackend:
         self.reset()
         self.segments_used_for_final = False
         self.final_tail = ""
+
+    @property
+    def _span_had_speech(self) -> bool:
+        """Speech-bearing span = a sustained run, not one borderline chunk.
+
+        0.2 s is far below any real word's above-threshold footprint in a
+        ≥10 s segment span or a pause tail, but above the isolated breath /
+        room-tone blips that sit just over the adaptive silence threshold."""
+        return self._span_speech_samples >= _MIN_SPAN_SPEECH_SAMPLES
+
+    def _speech_reference(self) -> float:
+        """Speaking-level reference for the fabrication gates.
+
+        The tracker's EMA alone cannot be trusted here: quiet speech walks it
+        down, then the absolute floor lets breath and room tone keep feeding
+        it, and it ratchets to the noise floor (measured 0.009 after a 50 s
+        dictation whose speech ran 0.02-0.15). The p90 of 20 ms frame RMS
+        over the whole buffered recording sits inside actual speech for any
+        real dictation, so the gates key off the louder of the two."""
+        rms_parts: list[np.ndarray] = []
+        for chunk in self._chunks:
+            frame_count = len(chunk) // _SPEECH_FRAME_SAMPLES
+            if frame_count:
+                framed = np.asarray(
+                    chunk[: frame_count * _SPEECH_FRAME_SAMPLES],
+                    dtype=np.float32,
+                ).reshape(frame_count, _SPEECH_FRAME_SAMPLES)
+                rms_parts.append(
+                    np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
+                )
+        if not rms_parts:
+            return self._silence.speech_level
+        # Tiny arrays (one float per 20 ms), never the recording itself.
+        all_rms = np.concatenate(rms_parts)
+        return max(self._silence.speech_level, float(np.percentile(all_rms, 90)))
 
     def _transcribe(
         self,
@@ -612,6 +709,22 @@ class WhisperBackend:
                 )
             except Exception:  # noqa: BLE001 — optional recovery must not fail the session
                 log.exception("prompt-free whisper recovery decode failed")
+        if text and (
+            not had_speech
+            or not _reaches_speech_level(audio, self._speech_reference())
+        ):
+            # The dual of the empty-speech-span integrity rule below: text
+            # decoded from a span that never carried sustained, speaking-level
+            # audio is fabricated. This is where "Thank you." / "Closed
+            # Captioning by ..." credits enter — Whisper decoding a trailing
+            # pause or breath bump with confident metadata (nsp=0.00, clean
+            # logprob/compression), so no metadata threshold can catch it
+            # (field bug, 2026-08-04). Both gates are relative to the
+            # session's own adapted speech level, never absolute.
+            log.info(
+                "whisper guard: dropped text decoded from a speechless span "
+                "(%d chars, %.1fs audio)", len(text), len(audio) / SAMPLE_RATE)
+            return ""
         return text
 
     def _strip_final_prompt_echo(self, text: str) -> str:
@@ -661,7 +774,7 @@ class WhisperBackend:
         self._chunks.append(chunk)
         self._samples += len(chunk)
         if self._silence.feed(chunk):
-            self._span_had_speech = True
+            self._span_speech_samples += len(chunk)
             self._session_had_speech = True
             self._preview_had_new_speech = True
         if not self._loaded or not self.segmenting_enabled or self._segment_decode_failed:
@@ -697,7 +810,7 @@ class WhisperBackend:
             return None
         self._decoded_samples = self._samples
         self._silence.consume_pause()  # the pause that closed this segment is consumed
-        self._span_had_speech = False
+        self._span_speech_samples = 0
         self._last_preview_samples = self._samples
         self._preview_had_new_speech = False
         if not text:
@@ -759,7 +872,11 @@ class WhisperBackend:
         """Decode one immutable HUD request without touching final STT state."""
         started = time.perf_counter()
         try:
-            text = self._decode(request.audio)
+            # Previews are queued only after the tracker heard new speech, but
+            # by decode time a committed segment may have consumed the span
+            # flag — pass True so the HUD lane never loses a frame to the
+            # speechless-span guard (it is display-only, never stitched).
+            text = self._decode(request.audio, had_speech=True)
         except Exception:  # noqa: BLE001 — optional preview must not affect final STT
             log.exception("preview decode failed — final transcription remains available")
             return None
@@ -802,11 +919,21 @@ class WhisperBackend:
         if duration_s > LONG_DICTATION_S and self._segments and not self._segment_decode_failed:
             try:
                 tail_audio = self._audio_span(self._decoded_samples, self._samples)
-                tail = self._decode(tail_audio) if len(tail_audio) else ""
+                # A tail without real speech evidence is the pause the user
+                # stopped on plus the stop-key transient — decoding it is
+                # where trailing hallucinations came from, and skipping it
+                # saves the decode.
+                tail_worth_decoding = bool(len(tail_audio)) and _tail_speech_evidence(
+                    tail_audio, self._speech_reference())
+                # had_speech=True: the audio evidence above is the stronger,
+                # stop-noise-aware form of the same judgment — re-applying the
+                # chunk counter inside _decode could only contradict it.
+                tail = (self._decode(tail_audio, had_speech=True)
+                        if tail_worth_decoding else "")
             except Exception:  # noqa: BLE001 — fall through to the whole-clip decode
                 log.exception("tail decode failed — re-decoding the whole clip")
             else:
-                if tail or not self._span_had_speech:
+                if tail or not tail_worth_decoding:
                     parts = self._segments + ([tail] if tail else [])
                     text = self._strip_final_prompt_echo(" ".join(parts).strip())
                     self.reset()
@@ -836,7 +963,7 @@ class WhisperBackend:
         self._new_segments = []
         self._silence.reset()
         self._segment_decode_failed = False
-        self._span_had_speech = False
+        self._span_speech_samples = 0
         self._session_had_speech = False
         self._retry_at_samples = 0
         self._last_preview_samples = 0
