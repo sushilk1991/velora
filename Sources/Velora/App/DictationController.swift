@@ -178,6 +178,8 @@ final class DictationController: NSObject {
     private var actionSession: String?
     /// Identity of the CLI request that owns the running action, if any.
     private var actionRequestID: UUID?
+    /// Names harvested off the screen while the command was being spoken.
+    private var actionScreenNames: [String] = []
     /// The app that was frontmost when the command was spoken. Captured at
     /// session start because Velora's own HUD may take focus afterwards, and
     /// "this window" in a command means the user's window, not ours.
@@ -437,7 +439,8 @@ final class DictationController: NSObject {
         let context = ActionContextSnapshot.capture(
             frontmost: frontmost,
             windowTitle: ScreenContext.windowTitle(of: frontmost),
-            selection: ScreenContext.selectedText(of: frontmost)?.text ?? "")
+            selection: ScreenContext.selectedText(of: frontmost)?.text ?? "",
+            screenNames: ScreenContext.visibleNames(of: frontmost))
 
         actionRequestID = requestID
         actions.perform(
@@ -491,10 +494,13 @@ final class DictationController: NSObject {
             showError("A password field is active — actions are blocked")
             return
         }
+        let names = actionScreenNames
+        actionScreenNames = []
         let context = ActionContextSnapshot.capture(
             frontmost: origin,
             windowTitle: ScreenContext.windowTitle(of: origin),
-            selection: ScreenContext.selectedText(of: origin)?.text ?? "")
+            selection: ScreenContext.selectedText(of: origin)?.text ?? "",
+            screenNames: names)
         showNotice(symbol: "wand.and.stars", message: "Working on it…")
         NSLog("Velora: voice action — %@", command)
         // allowSend: holding the Action hotkey and speaking the command is the
@@ -2352,6 +2358,18 @@ extension DictationController: HotkeyMonitorDelegate {
         }
         actionSession = sessionID
         actionOriginApp = origin
+        actionScreenNames = []
+        // Harvested while the user is still speaking: the walk is bounded but
+        // not instant, and the hotkey path must not wait on Electron's AX tree.
+        let harvestSession = sessionID
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let names = ScreenContext.visibleNames(of: origin)
+            DispatchQueue.main.async {
+                guard let self, self.actionSession == harvestSession else { return }
+                self.actionScreenNames = names
+                NSLog("Velora: action screen names — %ld found", names.count)
+            }
+        }
         NSLog("Velora: action session started (from %@)",
               origin?.localizedName ?? "unknown")
     }

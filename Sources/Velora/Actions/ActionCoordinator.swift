@@ -12,6 +12,9 @@ struct ActionContextSnapshot {
     var frontmostWindow: String = ""
     var runningApps: [String] = []
     var selection: String = ""
+    /// Name-like labels visible in the front window — the correct spellings of
+    /// the people and channels the user is about to name out loud.
+    var screenNames: [String] = []
 
     var payload: [String: Any] {
         [
@@ -20,6 +23,7 @@ struct ActionContextSnapshot {
             "frontmost_window": frontmostWindow,
             "running_apps": runningApps,
             "selection": selection,
+            "screen_names": screenNames,
         ]
     }
 
@@ -28,7 +32,8 @@ struct ActionContextSnapshot {
     static func capture(
         frontmost: NSRunningApplication?,
         windowTitle: String? = nil,
-        selection: String = ""
+        selection: String = "",
+        screenNames: [String] = []
     ) -> ActionContextSnapshot {
         var snapshot = ActionContextSnapshot()
         let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -44,6 +49,7 @@ struct ActionContextSnapshot {
         // Bounded: a whole selected document would swamp a 4B model's context
         // and push the actual command out of view.
         snapshot.selection = String(selection.prefix(400))
+        snapshot.screenNames = screenNames
         return snapshot
     }
 }

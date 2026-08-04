@@ -442,6 +442,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             Permissions.accessibilityGranted ? "yes" : "no",
             config.hotkey.displayLabel,
             config.hotkeyMode == .toggle ? "toggle" : "hold"))
+        // The secondary bindings decide whether Voice Edit and Action Mode fire
+        // at all; without them in the log, "my shortcut does nothing" is
+        // unanswerable from a bug report.
+        veloraLog("Velora: secondary hotkeys — "
+            + SecondaryHotkeyRole.allCases.map { role in
+                "\(role.label)=\(hotkeyMonitor.secondaryHotkeys[role]?.displayLabel ?? "off")"
+            }.joined(separator: " "))
 
         // A validated cached release remains actionable across relaunches even
         // while the daily network check is still within its 20-hour gate.

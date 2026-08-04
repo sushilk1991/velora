@@ -14,6 +14,8 @@ final class FakeActionHost: ActionHost {
     var selectionLabel: String?
     var canPostInput = true
     var screenIsLocked = false
+    /// Whether anything on screen can receive typed characters.
+    var hasTextTarget = true
     var typingSucceeds = true
     var keyPressSucceeds = true
     var openURLSucceeds = true
@@ -54,6 +56,7 @@ final class FakeActionHost: ActionHost {
     func frontmostWindowTitle() -> String? { windowTitle }
     func focusedElementLabel() -> String? { elementLabel }
     func focusedSelectionLabel() -> String? { selectionLabel }
+    var hasFocusedTextTarget: Bool { hasTextTarget }
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
         log.append("type(\(text))")
@@ -411,25 +414,38 @@ extension Selftest {
           {"do":"key","key":"k","mods":["cmd"]}]}
         """) == nil, "a MODIFIED key after typing is a shortcut, not a send")
 
-        // A one- or two-character term matches nearly any window title.
+        // A one- or two-character term matches nearly any window title, and
+        // "Slack" is in every Slack window: neither can carry a verification.
         for weak in ["a", "Jo", "-"] {
             expect(decodePlanError("""
             {"steps":[{"do":"wait_frontmost","app":"Slack"},
               {"do":"verify_context","expect":["\(weak)"]},
               {"do":"type_text","text":"hi"}]}
             """) == .weakVerifyTerm(weak),
-            "'\(weak)' is too weak to be a verification")
+            "'\(weak)' alone is too weak to be a verification")
         }
-
-        // "Slack" is in every Slack window title: it proves the app is open,
-        // not that the right conversation is.
         expect(decodePlanError("""
         {"steps":[{"do":"open_app","app":"Slack"},
           {"do":"wait_frontmost","app":"Slack"},
           {"do":"verify_context","expect":["Slack"]},
           {"do":"type_text","text":"hi"}]}
         """) == .weakVerifyTerm("Slack"),
-        "the app's own name cannot serve as the verification")
+        "the app's own name alone cannot serve as the verification")
+
+        // But a weak term BESIDE a real one is dropped, not fatal. Found in the
+        // field: "draft a message to Himesh on Slack, say Hi" planned correctly
+        // and was then thrown away over the "Hi".
+        if let mixed = decodePlan("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Slack"},
+          {"do":"wait_frontmost","app":"Slack"},
+          {"do":"verify_context","expect":["Himesh","Hi","Slack"]},
+          {"do":"type_text","text":"Hi"}]}
+        """) {
+            expect(mixed.steps[2] == .verifyContext(anyOf: ["Himesh"]),
+                   "the weak terms are dropped and the identifying one survives")
+        } else {
+            expect(false, "a plan mixing weak and strong verify terms still decodes")
+        }
 
         // `shortcuts://run-shortcut` runs a user Shortcut, which can contain a
         // Run Shell Script action — a shell step by another name.
@@ -645,6 +661,20 @@ extension Selftest {
         expect(lockedResult.outcome == .failed(step: 0, reason: "the screen is locked"),
                "a locked screen fails the plan with an honest reason")
         expect(locked.log.isEmpty, "a locked screen stops the plan before it opens anything")
+
+        // 4c. Nothing focused to type into. Found in the field: "open TextEdit
+        // and type hello" reported COMPLETED with "type_text 17 chars" while
+        // TextEdit had zero documents — the characters went nowhere and the run
+        // claimed success. A step that cannot land must fail.
+        let noTarget = FakeActionHost()
+        noTarget.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        noTarget.windowTitle = "Himesh Singh (DM) - Slack"
+        noTarget.hasTextTarget = false
+        let noTargetResult = ActionExecutor(host: noTarget).run(plan)
+        expect(!noTargetResult.outcome.isSuccess,
+               "typing with nothing focused fails instead of reporting success")
+        expect(noTarget.typed.isEmpty,
+               "no characters are sent when there is nowhere for them to land")
 
         // 5. Cancel is honoured between steps.
         let cancelHost = FakeActionHost()

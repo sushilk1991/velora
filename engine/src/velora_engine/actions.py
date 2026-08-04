@@ -113,6 +113,9 @@ class ActionContext:
     frontmost_window: str = ""
     running_apps: list[str] = field(default_factory=list)
     selection: str = ""
+    # Name-like labels read off the front window: the correct spellings of the
+    # people and channels the user just said out loud.
+    screen_names: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "ActionContext":
@@ -125,6 +128,10 @@ class ActionContext:
             frontmost_window=str(data.get("frontmost_window") or ""),
             running_apps=[str(a) for a in apps if isinstance(a, (str, int))],
             selection=str(data.get("selection") or ""),
+            screen_names=[
+                str(n) for n in (data.get("screen_names") or [])
+                if isinstance(n, (str, int))
+            ],
         )
 
 
@@ -133,6 +140,7 @@ class ActionContext:
 _MAX_APPS = 40
 _MAX_TITLE_CHARS = 160
 _MAX_SELECTION_CHARS = 400
+_MAX_SCREEN_NAMES = 40
 
 PLANNER_RULES = """You are the action planner of a macOS dictation app. The user spoke one command. Reply with ONE JSON object describing how to carry it out on this Mac, and nothing else — no prose, no markdown fences, no explanation.
 
@@ -160,10 +168,18 @@ Hard rules:
 6. "sends" is true if the plan delivers something to another person (a message, an email, a post) and false if it only opens, searches, or drafts. When the user says draft, write, or prepare, leave the text in the composer and do NOT press return at the end: that is sends=false.
 7. Use only apps in the running or installed list, or a URL. If the command needs something you cannot do with these steps, reply {"unsupported":"<one short sentence saying why>"} instead.
 8. Keep plans short — under 14 steps.
+9. Speech recognition mishears names. If the command names a person, chat, or channel and the visible-names list below contains a name that sounds like it but is spelled differently ("Hermes" heard for "Himesh", "Pria" for "Priya"), use the SPELLING FROM THE SCREEN in both type_text and verify_context — that spelling is what the app will actually match. Only do this when the two clearly sound alike; never swap in an unrelated name.
 
-Recipes that work on this Mac:
-- Slack message: open_app Slack → wait_frontmost Slack → key k with cmd (quick switcher) → type_text <person or channel name> → pause 600 → verify_context [<person>] → key return → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return (omit that last verify_context and return when drafting).
-- WhatsApp message: open_app WhatsApp → wait_frontmost WhatsApp → key f with cmd (search) → type_text <person> → pause 600 → verify_context [<person>] → key return → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return (omit the last two when drafting).
+Recipes that work on this Mac. Follow them step for step; the only thing that ever changes is the LAST step.
+- Slack message (sends=true):
+  open_app Slack → wait_frontmost Slack → key k with cmd → type_text <person> → pause 600 → verify_context [<person>] → key return → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return
+- Slack DRAFT (sends=false): exactly the same steps, minus the FINAL key return only.
+- WhatsApp message (sends=true):
+  open_app WhatsApp → wait_frontmost WhatsApp → key f with cmd → type_text <person> → pause 600 → verify_context [<person>] → key return → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return
+- WhatsApp DRAFT (sends=false): the same, minus the FINAL key return only.
+
+The middle "key return" is NOT the send — it opens the conversation from the search list, and drafting still needs it. Without it the message is typed into the search box. Drop only the very last return.
+verify_context terms should be the person's name only. Never put the message text in them.
 - Web search: open_url with the search URL. No typing needed.
 - Open a site: open_url https://...
 - Email: open_url mailto:<address>?subject=... when you know the address, otherwise open the mail app and use its compose shortcut (key n with cmd).
@@ -206,6 +222,10 @@ def build_action_prompt(context: ActionContext) -> str:
                                                         _MAX_TITLE_CHARS))
     if context.selection:
         lines.append("Selected text: " + _clip(context.selection, _MAX_SELECTION_CHARS))
+    if context.screen_names:
+        lines.append(
+            "Names visible on screen right now (people, channels, chats): "
+            + ", ".join(_clip(n, 40) for n in context.screen_names[:_MAX_SCREEN_NAMES]))
     lines.append("")
     lines.append("Reply with the JSON object only.")
     return "\n".join(lines)
@@ -374,18 +394,21 @@ def _validate_verify(step: dict, app_names: list[str]) -> list[str]:
             continue
         cleaned = _clip(_sanitize_text(term), 80)
         normalized = normalized_term(cleaned)
-        if len(normalized) < MIN_VERIFY_TERM_CHARS:
-            raise PlanError(
-                f"verify_context: 'expect' term {term!r} is too short to identify "
-                "anything")
-        if normalized in forbidden:
-            # Every Slack window title contains "Slack"; verifying it proves the
-            # app is open, not that the right conversation is.
-            raise PlanError(
-                f"verify_context: 'expect' term {term!r} is just the app name")
+        # Weak terms are DROPPED, not fatal. A two-letter word or the app's own
+        # name matches almost any window, so it must never satisfy a check — but
+        # vetoing the whole plan over one also throws away the terms that do
+        # identify the target. Observed in the field: "message Himesh, say Hi"
+        # produced ["Himesh", "Hi"] and lost a good plan to the "Hi".
+        # Dropping leaves the check strictly stronger than no verification.
+        if len(normalized) < MIN_VERIFY_TERM_CHARS or normalized in forbidden:
+            continue
         terms.append(cleaned)
     if not terms:
-        raise PlanError("verify_context: no usable 'expect' terms")
+        # Nothing identifying survived, so this check would prove nothing and
+        # anything typed after it would be typed unverified.
+        raise PlanError(
+            "verify_context: no 'expect' term identifies anything specific "
+            "(terms must be 3+ characters and not the app's own name)")
     return terms
 
 

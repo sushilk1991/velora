@@ -112,6 +112,72 @@ enum ScreenContext {
         return focusedWindowTitle(pid: app.processIdentifier)
     }
 
+    /// Short, name-like labels visible in the app's front window — the sidebar
+    /// rows in Slack, the chat list in WhatsApp.
+    ///
+    /// Speech recognition mishears names constantly ("Himesh" came back as
+    /// "Hermes"), and a name the planner spells wrong is a name the quick
+    /// switcher never finds. The correct spellings are usually right there on
+    /// screen, so this hands the planner the actual candidates.
+    ///
+    /// A bounded breadth-first walk: Electron trees are enormous and every read
+    /// is IPC, so this caps nodes, depth, and wall time rather than trusting the
+    /// tree to be small. Runs off the hotkey path.
+    static func visibleNames(
+        of app: NSRunningApplication?,
+        limit: Int = 40,
+        nodeBudget: Int = 700,
+        deadline: TimeInterval = 1.2
+    ) -> [String] {
+        guard let app, app.processIdentifier > 0, Permissions.accessibilityGranted else {
+            return []
+        }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        guard let window = axElement(appElement, kAXFocusedWindowAttribute)
+            ?? axElements(appElement, kAXWindowsAttribute).first else { return [] }
+
+        let stopAt = Date().addingTimeInterval(deadline)
+        var names: [String] = []
+        var seen = Set<String>()
+        var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
+        var visited = 0
+
+        while !queue.isEmpty, visited < nodeBudget, names.count < limit, Date() < stopAt {
+            let (element, depth) = queue.removeFirst()
+            visited += 1
+            AXUIElementSetMessagingTimeout(element, 0.2)
+            for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
+                var ref: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(
+                        element, attribute as CFString, &ref) == .success,
+                      let text = ref as? String else { continue }
+                guard let candidate = nameCandidate(text) else { continue }
+                let key = candidate.lowercased()
+                if seen.insert(key).inserted { names.append(candidate) }
+            }
+            guard depth < 8 else { continue }
+            for child in (axChildren(element) ?? []).prefix(40) {
+                queue.append((child, depth + 1))
+            }
+        }
+        return names
+    }
+
+    /// Keeps strings that could plausibly be a person, channel, or app name and
+    /// drops UI prose. A sentence is not a name, and neither is a single letter.
+    private static func nameCandidate(_ raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count >= 2, text.count <= 40 else { return nil }
+        let words = text.split(separator: " ")
+        guard words.count <= 4 else { return nil }
+        guard text.rangeOfCharacter(from: .letters) != nil else { return nil }
+        // Punctuation-heavy strings are labels and glyphs, not names.
+        let letters = text.unicodeScalars.filter { CharacterSet.letters.contains($0) }.count
+        guard letters * 2 >= text.count else { return nil }
+        return text
+    }
+
     // MARK: - AX read
 
     private static func focusedWindowTitle(pid: pid_t) -> String? {
@@ -410,6 +476,17 @@ enum ScreenContext {
                   element, attr as CFString, &settable) == .success
         else { return false }
         return settable.boolValue
+    }
+
+    /// Elements held by an arbitrary array-valued attribute (windows, rows).
+    private static func axElements(
+        _ element: AXUIElement, _ attribute: String
+    ) -> [AXUIElement] {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element, attribute as CFString, &ref) == .success,
+              let array = ref as? [AXUIElement] else { return [] }
+        return array
     }
 
     private static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {

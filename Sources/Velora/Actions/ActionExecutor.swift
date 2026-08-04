@@ -28,6 +28,10 @@ protocol ActionHost: AnyObject {
     /// False when a keystroke must not be synthesized right now (permission
     /// missing, or a password field has secure input up).
     var canPostInput: Bool { get }
+    /// True when something on screen can actually receive typed characters.
+    /// A frontmost app with no focused element (TextEdit with no open document,
+    /// an app showing only a toolbar) swallows synthesized text silently.
+    var hasFocusedTextTarget: Bool { get }
     /// True when the login window owns the screen. Nothing can be driven then,
     /// and the generic "app didn't come to the front" failure would send the
     /// user hunting for a bug that is really just a locked Mac.
@@ -207,6 +211,20 @@ final class ActionExecutor {
                 trace.append("verify_context ok")
 
             case .typeText(let text), .pasteText(let text):
+                // Synthesized characters go to whatever holds focus; with
+                // nothing focused they are simply dropped. Observed in the
+                // field: "open TextEdit and type hello" reported success while
+                // TextEdit had no document, so the text went nowhere and the
+                // run still claimed it had typed 17 characters.
+                guard host.hasFocusedTextTarget else {
+                    trace.append("type_text: nothing focused to type into")
+                    return ActionRunResult(
+                        outcome: .failed(
+                            step: index,
+                            reason: "\(expectedAppName ?? "that app") has no text field "
+                                + "focused to type into"),
+                        trace: trace)
+                }
                 guard focusStillHeld() else {
                     trace.append("type_text: focus lost")
                     return ActionRunResult(

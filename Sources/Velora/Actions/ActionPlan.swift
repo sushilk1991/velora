@@ -199,18 +199,20 @@ extension ActionPlan {
                     throw ActionPlanError.missingField(step: index, field: "expect")
                 }
                 let appTerms = Set(appNames.map(AppMatcher.normalize))
-                for term in terms {
+                // Weak terms are dropped, not fatal: a two-letter word or the
+                // app's own name must never SATISFY a check, but it must not
+                // veto the terms that do identify the target either. ("message
+                // Himesh, say Hi" yields ["Himesh", "Hi"].) What remains is
+                // strictly stronger than no verification.
+                let usable = terms.filter { term in
                     let normalized = AppMatcher.normalize(term)
-                    guard normalized.count >= Limits.minVerifyTermCharacters else {
-                        throw ActionPlanError.weakVerifyTerm(term)
-                    }
-                    // "Slack" is in every Slack window title: verifying it
-                    // proves the app is open, not that the conversation is right.
-                    guard !appTerms.contains(normalized) else {
-                        throw ActionPlanError.weakVerifyTerm(term)
-                    }
+                    return normalized.count >= Limits.minVerifyTermCharacters
+                        && !appTerms.contains(normalized)
                 }
-                steps.append(.verifyContext(anyOf: terms))
+                guard !usable.isEmpty else {
+                    throw ActionPlanError.weakVerifyTerm(terms.joined(separator: ", "))
+                }
+                steps.append(.verifyContext(anyOf: usable))
                 focusEstablished = true
                 unverifiedText = false
 

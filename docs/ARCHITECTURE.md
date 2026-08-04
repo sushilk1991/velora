@@ -94,7 +94,7 @@ Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed
 
 ## Action Mode
 
-Hold the Action hotkey (⌥⇧A by default), speak a command, and Velora carries it
+Hold the Action hotkey (⌃⇧A by default), speak a command, and Velora carries it
 out: opens the app, navigates, types. The command is transcribed in **Raw** mode
 — cleanup would rewrite the names that identify a person or an app — and sent to
 the planner:

@@ -154,28 +154,55 @@ final class SystemActionHost: ActionHost {
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               let focused = ScreenContext.focusedElement(of: app) else { return nil }
         AXUIElementSetMessagingTimeout(focused, 0.5)
-        // Chromium/Electron hangs the selected row off the input element via
-        // this relation, which is how a quick switcher's highlighted result is
-        // exposed to VoiceOver.
+        // Chromium hangs the results list off the input element via these
+        // relations. Slack's quick switcher was observed exposing the list
+        // itself as "Suggestions", so stopping at the first labelled element
+        // yields the container's name and never the highlighted row — the row
+        // is one selection hop further in.
+        var containers: [AXUIElement] = []
+        for attribute in ["AXSelectedRows", "AXSelectedChildren", "AXSelectedCells",
+                          "AXLinkedUIElements", "AXOwns"] {
+            containers.append(contentsOf: Self.elements(of: focused, attribute)
+                .prefix(3))
+        }
+        // Also try the row Chromium marks with aria-activedescendant, which is
+        // how a combobox names its highlighted option without moving focus.
+        containers.append(contentsOf: Self.elements(of: focused, "AXActiveDescendant"))
+
         var labels: [String] = []
-        for attribute in ["AXSelectedRows", "AXSelectedChildren",
-                          "AXLinkedUIElements", "AXSelectedCells"] {
-            var ref: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(
-                    focused, attribute as CFString, &ref) == .success,
-                  let elements = ref as? [AXUIElement] else { continue }
-            for element in elements.prefix(3) {
-                AXUIElementSetMessagingTimeout(element, 0.3)
-                labels.append(contentsOf: Self.textOf(element, depth: 2))
+        for container in containers.prefix(6) {
+            AXUIElementSetMessagingTimeout(container, 0.3)
+            // Prefer the container's SELECTED descendants; fall back to the
+            // container itself when it is already the row.
+            var rows = Self.elements(of: container, "AXSelectedRows")
+                + Self.elements(of: container, "AXSelectedChildren")
+                + Self.elements(of: container, "AXActiveDescendant")
+            if rows.isEmpty { rows = [container] }
+            for row in rows.prefix(2) {
+                AXUIElementSetMessagingTimeout(row, 0.3)
+                labels.append(contentsOf: Self.textOf(row, depth: 4))
             }
-            if !labels.isEmpty { break }
+            if labels.count >= 4 { break }
         }
         return labels.isEmpty ? nil : String(labels.joined(separator: " ").prefix(400))
     }
 
-    /// App-authored text of an element and, briefly, its children. Row labels in
-    /// Electron lists usually sit on a child static-text node rather than the
-    /// row itself.
+    private static func elements(
+        of element: AXUIElement, _ attribute: String
+    ) -> [AXUIElement] {
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element, attribute as CFString, &ref) == .success, let ref else { return [] }
+        if let list = ref as? [AXUIElement] { return list }
+        if CFGetTypeID(ref) == AXUIElementGetTypeID() {
+            return [(ref as! AXUIElement)]  // type-checked above
+        }
+        return []
+    }
+
+    /// App-authored text of an element and its descendants. Row labels in
+    /// Electron lists sit on child static-text nodes, so this keeps descending
+    /// past a labelled container instead of stopping at the first hit.
     private static func textOf(_ element: AXUIElement, depth: Int) -> [String] {
         var found: [String] = []
         for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
@@ -186,22 +213,40 @@ final class SystemActionHost: ActionHost {
                 found.append(String(text.prefix(120)))
             }
         }
-        guard depth > 0, found.isEmpty else { return found }
+        guard depth > 0 else { return found }
         var childrenRef: CFTypeRef?
         if AXUIElementCopyAttributeValue(
             element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
            let children = childrenRef as? [AXUIElement] {
-            // Bounded: a Slack row's subtree is small, but an unbounded walk of
-            // an Electron tree is seconds of IPC.
-            for child in children.prefix(6) {
+            // Bounded: an unbounded walk of an Electron tree is seconds of IPC.
+            for child in children.prefix(8) {
                 found.append(contentsOf: textOf(child, depth: depth - 1))
-                if found.count >= 4 { break }
+                if found.count >= 12 { break }
             }
         }
         return found
     }
 
     // MARK: - Input
+
+    /// Whether the frontmost app currently has a focused element at all. When
+    /// AX is unreadable we answer true: refusing to type because we could not
+    /// read the tree would break apps that expose nothing, and the frontmost +
+    /// secure-input checks still stand.
+    var hasFocusedTextTarget: Bool {
+        guard Permissions.accessibilityGranted,
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.processIdentifier > 0 else { return true }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.5)
+        var focused: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedUIElementAttribute as CFString, &focused)
+        // Only a definitive "there is no focused element" blocks typing; an
+        // error (busy app, no AX server) is not evidence of absence.
+        if status == .noValue || (status == .success && focused == nil) { return false }
+        return true
+    }
 
     var canPostInput: Bool {
         Permissions.accessibilityGranted
