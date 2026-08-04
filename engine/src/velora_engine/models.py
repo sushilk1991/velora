@@ -206,14 +206,6 @@ def ensure_downloaded(model_id: str) -> str:
     from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
-    # An absolute path is a local model directory (benchmarking a conversion
-    # that isn't on the Hub yet). Anything else is a Hub repo id.
-    if model_id.startswith(("/", "~")):
-        local = Path(model_id).expanduser()
-        if local.is_dir():
-            return str(local)
-        raise OSError(f"local model directory not found: {model_id}")
-
     filename = _SINGLE_FILE_MODELS.get(model_id)
     if filename is not None:
         revision = _SINGLE_FILE_REVISIONS[model_id]

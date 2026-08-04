@@ -512,24 +512,13 @@ class CleanupEngine:
             {"role": "user", "content": neutralize_control_tokens(user_text)},
         ]
         try:
-            text = self._tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False,
-                enable_thinking=False,
+            return list(
+                self._tokenizer.apply_chat_template(
+                    messages, add_generation_prompt=True, enable_thinking=False
+                )
             )
         except TypeError:  # tokenizer without enable_thinking support
-            text = self._tokenizer.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=False,
-            )
-        if not isinstance(text, str):
-            return list(text)  # tokenizer ignored tokenize=False
-        # Reasoning-first templates (LFM2.5) ignore enable_thinking and leave
-        # the generation prompt inside an open <think> block. Close it, or the
-        # whole token budget goes to reasoning and the ratio guard rejects the
-        # truncated answer. Closed-out blocks (Qwen's "<think>\n\n</think>")
-        # don't end with the open tag, so this only fires on forced thinking.
-        if text.rstrip().endswith("<think>"):
-            text += "\n\n</think>\n\n"
-        return list(self._tokenizer.encode(text, add_special_tokens=False))
+            return list(self._tokenizer.apply_chat_template(messages, add_generation_prompt=True))
 
     def _warm(self, system_prompt: str) -> None:
         """Prefill the KV cache with the static system prefix.
