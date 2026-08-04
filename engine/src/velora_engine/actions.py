@@ -172,10 +172,11 @@ Hard rules:
 
 Recipes that work on this Mac. Follow them step for step; the only thing that ever changes is the LAST step.
 - Slack message (sends=true):
-  open_app Slack → wait_frontmost Slack → key k with cmd → type_text <person> → pause 600 → verify_context [<person>] → key return → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return
+  open_app Slack → wait_frontmost Slack → pause 700 → key k with cmd → pause 500 → verify_context ["Query"] → type_text <person> → pause 700 → verify_context ["Query"] → key return → pause 1000 → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return
+  Why those checks, in that order: "Query" is what Slack's quick-switcher field calls itself. Checking it BEFORE typing proves the switcher actually opened, so the person's name cannot land in whatever channel was already on screen. Checking it again after typing proves we are still in the switcher, so the return that follows picks a search result instead of sending a message. The person's name is only checkable AFTER that return, once their conversation is open and named in the window title.
 - Slack DRAFT (sends=false): exactly the same steps, minus the FINAL key return only.
 - WhatsApp message (sends=true):
-  open_app WhatsApp → wait_frontmost WhatsApp → key f with cmd → type_text <person> → pause 600 → verify_context [<person>] → key return → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return
+  open_app WhatsApp → wait_frontmost WhatsApp → pause 700 → key f with cmd → pause 500 → verify_context ["Search"] → type_text <person> → pause 700 → verify_context ["Search"] → key return → pause 1000 → verify_context [<person>] → type_text <message> → verify_context [<person>] → key return
 - WhatsApp DRAFT (sends=false): the same, minus the FINAL key return only.
 
 The middle "key return" is NOT the send — it opens the conversation from the search list, and drafting still needs it. Without it the message is typed into the search box. Drop only the very last return.

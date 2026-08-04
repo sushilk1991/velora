@@ -9,6 +9,8 @@ enum CLICommand: Equatable {
     case listen(mode: String?)
     /// Plan a spoken-style command; `execute` actually carries it out.
     case action(text: String, execute: Bool, allowSend: Bool)
+    /// Diagnostic: dump the frontmost app's accessibility tree.
+    case axProbe
     case mcp
 }
 
@@ -120,6 +122,9 @@ struct CLIInvocation: Equatable {
                 mode = arguments[1]
             }
             return CLIInvocation(command: .listen(mode: mode), json: json)
+        case "ax-probe":
+            guard arguments.isEmpty else { throw ParseError.invalidOption(arguments[0]) }
+            return CLIInvocation(command: .axProbe, json: true)
         case "action":
             var execute = false
             var allowSend = false
@@ -226,13 +231,15 @@ enum VeloraCLI {
             payload["text"] = text
             payload["execute"] = execute
             payload["allow_send"] = allowSend
+        case .axProbe:
+            command = "ax_probe"
         case .mcp: return 0
         }
 
         do {
             let result = try LocalControlClient.send(
                 command: command, arguments: payload,
-                timeoutSeconds: ["listen", "transcribe", "action"].contains(command) ? 360 : 30)
+                timeoutSeconds: ["listen", "transcribe", "action"].contains(command) ? 360 : 60)
             if invocation.json {
                 writeOutput(json(result, pretty: true) + "\n")
             } else {

@@ -208,7 +208,12 @@ final class ActionExecutor {
                 // what the following steps may type into.
                 expectedAppName = after.name
                 expectedBundleID = after.bundleID
-                trace.append("verify_context ok")
+                // Record WHAT satisfied the check, not just that it did. A
+                // check that passes for the wrong reason is invisible
+                // otherwise, and this one guards a message to a human.
+                trace.append("verify_context ok [\(terms.joined(separator: "+"))] "
+                             + "title='\(title ?? "")' label='\(label ?? "")' "
+                             + "selection='\(selection ?? "")'")
 
             case .typeText(let text), .pasteText(let text):
                 // Synthesized characters go to whatever holds focus; with

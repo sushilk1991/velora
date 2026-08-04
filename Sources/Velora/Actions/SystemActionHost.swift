@@ -75,6 +75,11 @@ final class SystemActionHost: ActionHost {
         onMain {
             guard let app = NSWorkspace.shared.frontmostApplication,
                   let name = app.localizedName else { return nil }
+            // Every time we notice an app, make sure its tree is being built.
+            // Chromium/Electron expose nothing until asked, and enabling this
+            // only when we launched the app meant a plan run against an
+            // already-frontmost Slack never enabled it at all.
+            self.enableAccessibility(for: app)
             return (name, app.bundleIdentifier ?? "")  // "" == unknown; never matched
         }
     }
@@ -145,86 +150,40 @@ final class SystemActionHost: ActionHost {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
-    /// Titles of the currently selected rows near the focused element — the
-    /// highlighted entry in a quick switcher, for instance. These strings are
-    /// written by the target app, not by us, so unlike a field's value they are
-    /// real evidence about what the user is about to act on.
+    /// The label of the ONE element the app says is active — a quick
+    /// switcher's highlighted row.
+    ///
+    /// This deliberately reads a single element and never flattens a subtree.
+    /// The previous version walked the results list and joined everything it
+    /// found, which against real Slack produced "Suggestions … Here are some
+    /// recent conversations: …" — a blob containing every recent contact. Any
+    /// name in the list then satisfied a check meant to confirm one specific
+    /// recipient, and a plan typed into the wrong window while reporting that
+    /// it had verified the right one. A verification that matches too much is
+    /// worse than no verification, because it manufactures confidence.
+    ///
+    /// Chromium maps `role=listbox`/`option` to AXList/AXStaticText, so
+    /// `AXSelectedRows` never resolves on web content; what it does do is fold
+    /// `aria-activedescendant` into the app's `AXFocusedUIElement`.
     func focusedSelectionLabel() -> String? {
         guard Permissions.accessibilityGranted,
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
-              let focused = ScreenContext.focusedElement(of: app) else { return nil }
-        AXUIElementSetMessagingTimeout(focused, 0.5)
-        // Chromium hangs the results list off the input element via these
-        // relations. Slack's quick switcher was observed exposing the list
-        // itself as "Suggestions", so stopping at the first labelled element
-        // yields the container's name and never the highlighted row — the row
-        // is one selection hop further in.
-        var containers: [AXUIElement] = []
-        for attribute in ["AXSelectedRows", "AXSelectedChildren", "AXSelectedCells",
-                          "AXLinkedUIElements", "AXOwns"] {
-            containers.append(contentsOf: Self.elements(of: focused, attribute)
-                .prefix(3))
-        }
-        // Also try the row Chromium marks with aria-activedescendant, which is
-        // how a combobox names its highlighted option without moving focus.
-        containers.append(contentsOf: Self.elements(of: focused, "AXActiveDescendant"))
-
-        var labels: [String] = []
-        for container in containers.prefix(6) {
-            AXUIElementSetMessagingTimeout(container, 0.3)
-            // Prefer the container's SELECTED descendants; fall back to the
-            // container itself when it is already the row.
-            var rows = Self.elements(of: container, "AXSelectedRows")
-                + Self.elements(of: container, "AXSelectedChildren")
-                + Self.elements(of: container, "AXActiveDescendant")
-            if rows.isEmpty { rows = [container] }
-            for row in rows.prefix(2) {
-                AXUIElementSetMessagingTimeout(row, 0.3)
-                labels.append(contentsOf: Self.textOf(row, depth: 4))
-            }
-            if labels.count >= 4 { break }
-        }
-        return labels.isEmpty ? nil : String(labels.joined(separator: " ").prefix(400))
-    }
-
-    private static func elements(
-        of element: AXUIElement, _ attribute: String
-    ) -> [AXUIElement] {
-        var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element, attribute as CFString, &ref) == .success, let ref else { return [] }
-        if let list = ref as? [AXUIElement] { return list }
-        if CFGetTypeID(ref) == AXUIElementGetTypeID() {
-            return [(ref as! AXUIElement)]  // type-checked above
-        }
-        return []
-    }
-
-    /// App-authored text of an element and its descendants. Row labels in
-    /// Electron lists sit on child static-text nodes, so this keeps descending
-    /// past a labelled container instead of stopping at the first hit.
-    private static func textOf(_ element: AXUIElement, depth: Int) -> [String] {
-        var found: [String] = []
-        for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
-            var ref: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, attribute as CFString, &ref) == .success,
-               let text = ref as? String,
+              app.processIdentifier > 0 else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.5)
+        guard let active = ScreenContext.axElement(
+            appElement, kAXFocusedUIElementAttribute) else { return nil }
+        AXUIElementSetMessagingTimeout(active, 0.3)
+        // The element's own words only. Its value is excluded for the same
+        // reason as in `focusedElementLabel`: it is the text we just typed.
+        var parts: [String] = []
+        for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
+            if let text = ScreenContext.axString(active, attribute),
                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                found.append(String(text.prefix(120)))
+                parts.append(String(text.prefix(160)))
             }
         }
-        guard depth > 0 else { return found }
-        var childrenRef: CFTypeRef?
-        if AXUIElementCopyAttributeValue(
-            element, kAXChildrenAttribute as CFString, &childrenRef) == .success,
-           let children = childrenRef as? [AXUIElement] {
-            // Bounded: an unbounded walk of an Electron tree is seconds of IPC.
-            for child in children.prefix(8) {
-                found.append(contentsOf: textOf(child, depth: depth - 1))
-                if found.count >= 12 { break }
-            }
-        }
-        return found
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
     // MARK: - Input

@@ -400,6 +400,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                         self?.dictation.cancelAction(requestID: requestID)
                     }
                 }
+            },
+            axProbe: { [weak self] _, completion in
+                DispatchQueue.main.async {
+                    guard let self, self.config.localAgentAccess else {
+                        completion(.failure(.disabled))
+                        return
+                    }
+                    let front = self.contextTracker.frontmost
+                        ?? NSWorkspace.shared.frontmostApplication
+                    completion(.success(ScreenContext.axDump(of: front)))
+                }
+                return {}
             })
         let controlServer = LocalControlServer(router: controlRouter)
         if controlServer.start() { self.controlServer = controlServer }

@@ -379,7 +379,7 @@ enum ScreenContext {
     /// for the ~6 s system default per call.
     private static let axTimeout: Float = 0.25
 
-    private static func axElement(_ element: AXUIElement, _ attr: String) -> AXUIElement? {
+    static func axElement(_ element: AXUIElement, _ attr: String) -> AXUIElement? {
         AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
@@ -387,7 +387,7 @@ enum ScreenContext {
         return (ref as! AXUIElement)  // checked
     }
 
-    private static func axString(_ element: AXUIElement, _ attr: String) -> String? {
+    static func axString(_ element: AXUIElement, _ attr: String) -> String? {
         guard let s = axRawString(element, attr) else { return nil }
         let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
         return t.isEmpty ? nil : t
@@ -479,7 +479,7 @@ enum ScreenContext {
     }
 
     /// Elements held by an arbitrary array-valued attribute (windows, rows).
-    private static func axElements(
+    static func axElements(
         _ element: AXUIElement, _ attribute: String
     ) -> [AXUIElement] {
         var ref: CFTypeRef?
@@ -489,7 +489,7 @@ enum ScreenContext {
         return array
     }
 
-    private static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {
+    static func axChildren(_ element: AXUIElement) -> [AXUIElement]? {
         AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &ref) == .success,
@@ -578,5 +578,89 @@ enum ScreenContext {
             return token
         }
         return nil
+    }
+}
+
+// MARK: - Diagnostics
+
+extension ScreenContext {
+    /// Dumps what the accessibility tree actually says around the focused
+    /// element, for `velora ax-probe`.
+    ///
+    /// This exists because the verification step kept reading the wrong node in
+    /// Slack's quick switcher, and guessing attribute names from documentation
+    /// was costing whole build/install cycles per guess. Read the tree, then
+    /// write the code.
+    static func axDump(of app: NSRunningApplication?) -> [String: Any] {
+        guard let app, app.processIdentifier > 0, Permissions.accessibilityGranted else {
+            return ["error": "no app or no accessibility permission"]
+        }
+        var out: [String: Any] = [
+            "app": app.localizedName ?? "?",
+            "bundle": app.bundleIdentifier ?? "?",
+        ]
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 1.0)
+        if let window = axElement(appElement, kAXFocusedWindowAttribute) {
+            out["window_title"] = axString(window, kAXTitleAttribute) ?? ""
+        }
+        guard let focused = axElement(appElement, kAXFocusedUIElementAttribute) else {
+            out["focused"] = "none"
+            return out
+        }
+        AXUIElementSetMessagingTimeout(focused, 1.0)
+        out["focused"] = describe(focused)
+
+        // Every attribute the focused element actually exposes, so relation
+        // names never have to be guessed again.
+        var namesRef: CFArray?
+        if AXUIElementCopyAttributeNames(focused, &namesRef) == .success,
+           let names = namesRef as? [String] {
+            out["focused_attributes"] = names
+            var relations: [String: Any] = [:]
+            for name in names where name.hasPrefix("AX") {
+                let related = axElements(focused, name)
+                guard !related.isEmpty else { continue }
+                relations[name] = related.prefix(4).map { element -> [String: Any] in
+                    var entry = describe(element)
+                    entry["subtree_text"] = subtreeText(element, depth: 4)
+                    return entry
+                }
+            }
+            out["focused_relations"] = relations
+        }
+        return out
+    }
+
+    private static func describe(_ element: AXUIElement) -> [String: Any] {
+        AXUIElementSetMessagingTimeout(element, 0.5)
+        var entry: [String: Any] = [:]
+        for attribute in [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute,
+                          kAXDescriptionAttribute, kAXValueAttribute,
+                          kAXPlaceholderValueAttribute, kAXRoleDescriptionAttribute] {
+            if let value = axString(element, attribute), !value.isEmpty {
+                entry[attribute] = String(value.prefix(120))
+            }
+        }
+        entry["children"] = (axChildren(element) ?? []).count
+        return entry
+    }
+
+    /// Flattened app-authored text under an element, so a row's real label is
+    /// visible even when it lives several nodes down.
+    private static func subtreeText(_ element: AXUIElement, depth: Int) -> [String] {
+        var found: [String] = []
+        for attribute in [kAXTitleAttribute, kAXDescriptionAttribute, kAXValueAttribute] {
+            if let value = axString(element, attribute),
+               !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                found.append(String(value.prefix(80)))
+            }
+        }
+        guard depth > 0 else { return found }
+        for child in (axChildren(element) ?? []).prefix(10) {
+            found.append(contentsOf: subtreeText(child, depth: depth - 1))
+            if found.count >= 25 { break }
+        }
+        return found
     }
 }

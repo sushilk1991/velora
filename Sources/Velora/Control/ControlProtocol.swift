@@ -126,6 +126,7 @@ final class LocalControlRouter {
     private let transcribeFile: AsyncCapability?
     private let listen: AsyncCapability?
     private let action: AsyncCapability?
+    private let axProbe: AsyncCapability?
 
     init(
         history: HistoryStore,
@@ -134,7 +135,8 @@ final class LocalControlRouter {
         typingWPM: @escaping () -> Int,
         transcribeFile: AsyncCapability? = nil,
         listen: AsyncCapability? = nil,
-        action: AsyncCapability? = nil
+        action: AsyncCapability? = nil,
+        axProbe: AsyncCapability? = nil
     ) {
         self.history = history
         self.accessEnabled = accessEnabled
@@ -143,6 +145,7 @@ final class LocalControlRouter {
         self.transcribeFile = transcribeFile
         self.listen = listen
         self.action = action
+        self.axProbe = axProbe
     }
 
     static let maxActionCommandCharacters = 1_200
@@ -155,13 +158,29 @@ final class LocalControlRouter {
         _ request: ControlRequest,
         completion: @escaping (ControlResponse) -> Void
     ) -> (() -> Void)? {
-        guard ["transcribe", "listen", "action"].contains(request.command) else {
+        guard ["transcribe", "listen", "action", "ax_probe"].contains(request.command) else {
             completion(handle(request))
             return nil
         }
         guard accessEnabled() else {
             completion(.error(id: request.id, .disabled))
             return nil
+        }
+
+        if request.command == "ax_probe" {
+            guard let axProbe else {
+                completion(.error(id: request.id, ControlFailure(
+                    code: "capability_unavailable", message: "Capability is unavailable")))
+                return nil
+            }
+            return axProbe([:]) { result in
+                switch result {
+                case .success(let payload):
+                    completion(.success(id: request.id, result: payload))
+                case .failure(let failure):
+                    completion(.error(id: request.id, failure))
+                }
+            }
         }
 
         if request.command == "action" {
@@ -281,6 +300,7 @@ final class LocalControlRouter {
         if transcribeFile != nil { values.append("transcribe") }
         if listen != nil { values.append("listen") }
         if action != nil { values.append("action") }
+        if axProbe != nil { values.append("ax_probe") }
         return values
     }
 

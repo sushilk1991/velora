@@ -230,8 +230,8 @@ final class ActionCoordinator {
             finish(.planned(plan))
             return
         }
-        NSLog("Velora: action plan ready in %dms — %d steps, sends=%@, goal=%@",
-              planMs, plan.steps.count, plan.sends ? "yes" : "no", plan.goal)
+        veloraLog("Velora: action plan ready in \(planMs)ms — \(plan.steps.count) steps, "
+                  + "sends=\(plan.sends ? "yes" : "no"), goal=\(plan.goal)")
 
         let executor = ActionExecutor(host: host)
         self.executor = executor
@@ -242,14 +242,14 @@ final class ActionCoordinator {
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.executor = nil
-                for line in result.trace { NSLog("Velora: action · %@", line) }
+                for line in result.trace { veloraLog("Velora: action · \(line)") }
                 switch result.outcome {
                 case .completed:
                     self.finish(.completed(goal: plan.goal, trace: result.trace))
                 case .cancelled:
                     self.finish(.cancelled)
                 case .failed(let step, let reason):
-                    NSLog("Velora: action failed at step %d — %@", step, reason)
+                    veloraLog("Velora: action failed at step \(step) — \(reason)")
                     self.finish(.failed(reason: reason, trace: result.trace))
                 }
             }
