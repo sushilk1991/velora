@@ -383,6 +383,108 @@ def test_newline_in_typed_text_is_rejected():
         ]))
 
 
+def test_modified_return_is_still_a_send():
+    """⌘Return is Send in Gmail, Slack (enter-newline mode), GitHub, Linear.
+    Review finding: treating only UNMODIFIED Return as committing let a plan
+    type into an unverified window and commit it with ⌘Return, no verify
+    anywhere. Return/Enter commits regardless of modifiers; ⌘K stays a
+    shortcut because its key is k, not return."""
+    with pytest.raises(actions.PlanError, match="commit"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "hello"},
+            {"do": "key", "key": "return", "mods": ["cmd"]},
+        ]))
+
+
+def test_printable_keys_and_paste_shortcut_arm_the_send_gate():
+    """Review finding: `key v with cmd` (paste) and bare printable keys put
+    text into the field without type_text, leaving the send gate disarmed —
+    a later bare Return then committed clipboard contents unverified."""
+    with pytest.raises(actions.PlanError, match="commit"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "key", "key": "v", "mods": ["cmd"]},
+            {"do": "key", "key": "return"},
+        ]))
+    with pytest.raises(actions.PlanError, match="commit"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "key", "key": "h"},
+            {"do": "key", "key": "return"},
+        ]))
+    # Still fine once verified — the gate wants a check, not a ban.
+    out = actions.validate_plan(plan(steps=[
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "key", "key": "v", "mods": ["cmd"]},
+        {"do": "verify_context", "expect": ["Himesh"]},
+        {"do": "key", "key": "return"},
+    ]))
+    assert out["steps"][-1]["key"] == "return"
+
+
+def test_navigation_rearms_the_send_gate_while_text_is_pending():
+    """Review finding: type → verify → press_element (wrong row) → Return
+    sent verified-for-another-window text into whatever the press opened.
+    Navigation (press/open_app/open_url) must re-arm the gate whenever typed
+    text is still pending."""
+    for nav in ({"do": "press_element", "label": "Priya Sharma"},
+                {"do": "open_app", "app": "Slack"},
+                {"do": "open_url", "url": "https://example.com"}):
+        with pytest.raises(actions.PlanError, match="commit"):
+            actions.validate_plan(plan(steps=[
+                {"do": "wait_frontmost", "app": "WhatsApp"},
+                {"do": "type_text", "text": "running late"},
+                {"do": "verify_context", "expect": ["Priya"]},
+                nav,
+                {"do": "wait_frontmost", "app": "WhatsApp"},
+                {"do": "key", "key": "return"},
+            ]))
+
+
+def test_a_draft_session_never_commits_typed_text():
+    """sends=false was consent-level only — the review showed a sends=false
+    session could still type+verify+Return, which IS a send. A draft now
+    refuses committing keys outright once text is pending; navigation happens
+    via press_element instead of the switcher's Return."""
+    with pytest.raises(actions.PlanError, match="draft"):
+        actions.validate_plan(plan(sends=False, steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "Himesh"},
+            {"do": "verify_context", "expect": ["Himesh"]},
+            {"do": "key", "key": "return"},
+        ]))
+    # With nothing pending a Return is navigation, not delivery.
+    out = actions.validate_plan(plan(sends=False, steps=[
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "verify_context", "expect": ["Himesh"]},
+        {"do": "key", "key": "return"},
+    ]))
+    assert out["steps"][-1]["key"] == "return"
+
+
+def test_committing_keys_cannot_repeat():
+    """One validated Return must not become twelve at execution time."""
+    with pytest.raises(actions.PlanError, match="repeat"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "verify_context", "expect": ["Himesh"]},
+            {"do": "key", "key": "return", "repeat": 3},
+        ]))
+
+
+def test_rejected_first_turn_does_not_lock_sends():
+    """Review finding: accept_reply set sends/goal BEFORE validating, so a
+    rejected turn 1 could rewrite the lock on retry — declare sends=true,
+    fail validation, then re-declare sends=false and slip past --allow-send."""
+    sess = session()
+    with pytest.raises(actions.PlanError):
+        accept(sess, [{"do": "type_text", "text": "x"}], goal="g", sends=True)
+    assert sess.sends is None, "a rejected turn must not have locked anything"
+    accept(sess, [{"do": "wait_frontmost", "app": "Slack"}], goal="g", sends=True)
+    assert sess.sends is True
+
+
 def test_key_chord_and_swapped_modifiers_normalize():
     """Seen live, twice at temperature 0: the model writes ⌘K as
     {"key":"cmd","mods":["k"]} or "cmd+k". Rejecting a systematic spelling
@@ -924,6 +1026,21 @@ def test_press_element_invalidates_focus():
         ]))
 
 
+def test_printable_keys_match_the_swift_mirror():
+    """Both validators must agree on which bare keys count as typing, or one
+    side's send gate stays disarmed where the other's fires."""
+    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
+    if not swift.exists():
+        pytest.skip("swift sources not available (installed engine)")
+    source = swift.read_text()
+    marker = "// printable_keys: "
+    line = next(ln for ln in source.splitlines() if marker in ln)
+    mirrored = set(line.split(marker, 1)[1].split())
+    assert mirrored == set(actions.PRINTABLE_KEYS), (
+        f"engine-only: {set(actions.PRINTABLE_KEYS) - mirrored}, "
+        f"swift-only: {mirrored - set(actions.PRINTABLE_KEYS)}")
+
+
 def test_press_denylist_matches_the_swift_mirror():
     """Same contract test as the key names: both validators must refuse the
     same committing labels or the engine would propose what the app rejects."""
@@ -992,11 +1109,13 @@ def test_session_carries_unverified_text_across_turns():
 
 
 def test_session_verify_in_a_later_turn_clears_the_carried_text():
+    # sends=true: a draft session refuses committing keys with text pending
+    # no matter what (see test_a_draft_session_never_commits_typed_text).
     sess = session()
     accept(sess, [
         {"do": "wait_frontmost", "app": "Slack"},
         {"do": "type_text", "text": "hello there"},
-    ], goal="g", sends=False)
+    ], goal="g", sends=True)
     out = accept(sess, [
         {"do": "verify_context", "expect": ["Himesh"]},
         {"do": "key", "key": "return"},

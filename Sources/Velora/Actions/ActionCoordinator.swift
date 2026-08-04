@@ -99,17 +99,23 @@ extension ActionPlan {
 /// Lives for exactly one action: send a command, wait for that action's turn
 /// event, hand it back as a value.
 final class EngineTurnPlanner: ActionTurnPlanner {
-    /// The engine's own per-turn budget is 20 s (35 s for a cold first
-    /// turn); this is the app-side backstop for a reply that never arrives
-    /// at all (engine crash, restart mid-request). Without it the loop's
-    /// thread would wait forever and every later action would be refused as
-    /// "already running".
-    static let turnTimeout: TimeInterval = 45
+    /// The engine's worst case per ask is 35 s (cold first attempt) + 20 s
+    /// (repair); this backstop sits above that so it only ever fires for a
+    /// reply that will truly never arrive (engine crash, restart
+    /// mid-request). Without it the loop's thread would wait forever and
+    /// every later action would be refused as "already running".
+    static let turnTimeout: TimeInterval = 65
 
     let id = UUID().uuidString
     private let client: EngineClient
     private let lock = NSLock()
     private var slot: PlannedTurn?
+    /// True only between a request going out and its reply being consumed. An
+    /// event that lands outside that window (a stale answer after a timeout)
+    /// is dropped instead of being smuggled in as the reply to the NEXT
+    /// request — without this the loop would desync one turn for the rest of
+    /// the action, executing steps chosen for a previous screen state.
+    private var awaiting = false
     private let semaphore = DispatchSemaphore(value: 0)
 
     init(client: EngineClient) {
@@ -139,9 +145,8 @@ final class EngineTurnPlanner: ActionTurnPlanner {
 
     private func deliver(_ turn: PlannedTurn) {
         lock.lock()
-        // First answer wins; a stale event after a timeout or cancel is
-        // dropped rather than smuggled in as the reply to a later request.
-        guard slot == nil else {
+        // Only an answer someone is waiting for counts; first answer wins.
+        guard awaiting, slot == nil else {
             lock.unlock()
             return
         }
@@ -156,7 +161,22 @@ final class EngineTurnPlanner: ActionTurnPlanner {
         }
     }
 
+    private func beginRequest() {
+        lock.lock()
+        awaiting = true
+        slot = nil
+        lock.unlock()
+        // Drain any leftover signal from an answer that arrived after its
+        // request had already timed out.
+        while semaphore.wait(timeout: .now()) == .success {}
+    }
+
     private func awaitReply() -> PlannedTurn {
+        defer {
+            lock.lock()
+            awaiting = false
+            lock.unlock()
+        }
         guard semaphore.wait(timeout: .now() + Self.turnTimeout) != .timedOut else {
             send(["cmd": "action_cancel", "id": id])
             return .failure(reason: "planning timed out", code: "timeout")
@@ -169,12 +189,14 @@ final class EngineTurnPlanner: ActionTurnPlanner {
     }
 
     func start(transcript: String, context: ActionContextSnapshot) -> PlannedTurn {
+        beginRequest()
         send(["cmd": "action_start", "id": id,
               "transcript": transcript, "context": context.payload])
         return awaitReply()
     }
 
     func observe(_ observation: [String: Any]) -> PlannedTurn {
+        beginRequest()
         send(["cmd": "action_observe", "id": id, "observation": observation])
         return awaitReply()
     }

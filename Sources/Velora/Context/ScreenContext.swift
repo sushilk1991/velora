@@ -200,11 +200,25 @@ enum ScreenContext {
             for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
                 guard let text = axString(element, attribute),
                       AppMatcher.contextMatches([label], in: [text]) else { continue }
+                // The denylist must judge the element's FULL text, not the
+                // label the model asked for (review finding): "Priya Sharma"
+                // matches an element titled "Delete chat with Priya Sharma",
+                // and only the real title reveals what pressing it does.
+                guard !ActionPlan.pressLabelIsCommitting(text) else { continue }
                 if press(element) { return true }
                 // The text lives on a child; the pressable thing is the row.
+                // An ancestor that carries its OWN label gets the same
+                // judgment — an unlabeled container (the typical Electron
+                // row) is what this walk exists for.
                 var ancestor = axElement(element, kAXParentAttribute)
                 for _ in 0..<3 {
                     guard let candidate = ancestor else { break }
+                    let ancestorText = [
+                        axString(candidate, kAXTitleAttribute),
+                        axString(candidate, kAXDescriptionAttribute),
+                    ].compactMap { $0 }.joined(separator: " ")
+                    if !ancestorText.isEmpty,
+                       ActionPlan.pressLabelIsCommitting(ancestorText) { break }
                     if press(candidate) { return true }
                     ancestor = axElement(candidate, kAXParentAttribute)
                 }

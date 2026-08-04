@@ -148,6 +148,7 @@ extension Selftest {
         testActionPlanRejectsUnsafePlans()
         testPressElementDecoding()
         testBatchStateCarriesAcrossTurns()
+        testSendGateHardening()
         testActionKeyVocabulary()
         testAppMatching()
         testActionExecutorHappyPath()
@@ -228,10 +229,10 @@ extension Selftest {
         """, state: &state) == .unverifiedSend(step: 1),
         "a bare Return in the NEXT turn cannot commit last turn's text")
         expect(decodeBatch("""
-        {"sends":false,"steps":[{"do":"verify_context","expect":["Himesh"]},
+        {"steps":[{"do":"verify_context","expect":["Himesh"]},
           {"do":"key","key":"return"}]}
         """, state: &state) != nil,
-        "verifying first makes the same Return acceptable")
+        "verifying first makes the same Return acceptable (in a sending action)")
 
         // The text budget is for the whole action, not per turn.
         var textState = ActionPlan.BatchState()
@@ -267,6 +268,66 @@ extension Selftest {
         """, state: &cleanState)
         expect(cleanState == ActionPlan.BatchState(),
                "a rejected batch leaves the carried state untouched")
+    }
+
+    // MARK: - Send-gate hardening (adversarial review round 2)
+
+    private static func testSendGateHardening() {
+        // ⌘Return is Send in Gmail/Slack/GitHub/Linear — it must be as
+        // committing as bare Return, not a free pass.
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"},
+          {"do":"key","key":"return","mods":["cmd"]}]}
+        """) == .unverifiedSend(step: 2),
+        "a modified Return is still a send and still needs the verify")
+
+        // ⌘V pastes and bare printable keys type: both arm the gate.
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"key","key":"v","mods":["cmd"]},
+          {"do":"key","key":"return"}]}
+        """) == .unverifiedSend(step: 2),
+        "pasted clipboard contents cannot be committed unverified")
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"key","key":"h"},
+          {"do":"key","key":"return"}]}
+        """) == .unverifiedSend(step: 2),
+        "characters typed via bare key steps cannot be committed unverified")
+
+        // A draft refuses committing keys outright once text is pending —
+        // even verified. Navigation goes through press_element.
+        expect(decodePlanError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"Himesh"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"return"}]}
+        """) == .sendInDraft(step: 3),
+        "a draft never commits typed text, verified or not")
+
+        // Navigation between the verify and the Return re-arms the gate: the
+        // check described a screen the press/open just replaced.
+        var state = ActionPlan.BatchState()
+        expect(decodeBatch("""
+        {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"type_text","text":"running late"},
+          {"do":"verify_context","expect":["Priya"]},
+          {"do":"press_element","label":"Priya Sharma"}]}
+        """, state: &state) != nil, "the navigation batch itself is fine")
+        expect(decodeBatchError("""
+        {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"key","key":"return"}]}
+        """, state: &state) == .unverifiedSend(step: 1),
+        "after a press, pending text must be re-verified before any Return")
+
+        // One validated Return must not become twelve at execution time.
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"return","repeat":3}]}
+        """) == .committingKeyRepeats(step: 2),
+        "committing keys never repeat")
     }
 
     // MARK: - Executor: press_element
@@ -335,8 +396,7 @@ extension Selftest {
              {"do":"wait_frontmost","app":"WhatsApp"},
              {"do":"key","key":"f","mods":["cmd"]},
              {"do":"type_text","text":"Shivangi"},
-             {"do":"verify_context","expect":["Shivangi"]},
-             {"do":"key","key":"return"}]
+             {"do":"verify_context","expect":["Shivangi"]}]
             """), done: false),
             .turn(sends: false, goal: "", steps: jsonSteps("""
             [{"do":"wait_frontmost","app":"WhatsApp"},
@@ -1036,16 +1096,20 @@ extension Selftest {
         expect(host.keys.count == 3, "⌘K plus two Returns are pressed")
         expect(host.keys.first?.1 == .maskCommand, "the first keystroke carries ⌘")
 
-        // A draft plan is the same shape minus the final Return.
+        // A draft opens the conversation by pressing the row — the only
+        // Return-free path, because a draft may never commit pending text.
         let draftJSON = slackDraftPlanJSON
         let draftHost = FakeActionHost()
         draftHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
         draftHost.windowTitle = "Himesh Singh (DM) - Slack"
+        draftHost.pressableLabels = ["Himesh Singh"]
         if let draft = decodePlan(draftJSON) {
             let draftResult = ActionExecutor(host: draftHost).run(draft)
             expect(draftResult.outcome == .completed, "the draft plan completes")
-            expect(draftHost.keys.count == 2,
-                   "a draft leaves the message in the composer (no final Return)")
+            expect(draftHost.keys.count == 1,
+                   "a draft presses only ⌘K — no Return anywhere")
+            expect(draftHost.pressedLabels == ["Himesh Singh"],
+                   "the conversation opens via the pressed row")
         } else {
             expect(false, "the draft plan decodes")
         }
@@ -1275,7 +1339,8 @@ extension Selftest {
     ]}
     """
 
-    /// The same plan in draft form: everything up to the message, no send.
+    /// The same flow in draft form: a draft NEVER presses Return once text
+    /// is pending — it opens the conversation by pressing the person's row.
     static let slackDraftPlanJSON = """
     {"goal":"draft a message to Himesh","sends":false,"steps":[
       {"do":"open_app","app":"Slack"},
@@ -1284,7 +1349,7 @@ extension Selftest {
       {"do":"type_text","text":"Himesh"},
       {"do":"pause","ms":600},
       {"do":"verify_context","expect":["Himesh"]},
-      {"do":"key","key":"return"},
+      {"do":"press_element","label":"Himesh Singh"},
       {"do":"verify_context","expect":["Himesh"]},
       {"do":"type_text","text":"running five late"}
     ]}

@@ -308,6 +308,13 @@ final class ActionExecutor {
                              + (repeatCount > 1 ? " x\(repeatCount)" : ""))
 
             case .pressElement(let label):
+                // AXPress is not a synthesized keystroke, so `canPostInput`
+                // (secure input) deliberately does not apply — but a screen
+                // that locked mid-batch must still stop it.
+                guard !host.screenIsLocked else {
+                    trace.append("press_element \(label): screen locked")
+                    return failed(index, "the screen is locked", recoverable: false)
+                }
                 guard focusStillHeld() else {
                     trace.append("press_element \(label): focus lost")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",

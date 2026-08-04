@@ -2279,8 +2279,12 @@ class Engine:
                                + actions.turn_repair_note(last_error))
                 result = await self.cleanup.cleanup(
                     message, prompt,
+                    # The cold-start budget covers the FIRST attempt only; the
+                    # repair rides the now-warm prefix. Without this the worst
+                    # case (2×35s) outran the app's backstop and a healthy
+                    # engine got cancelled mid-answer (review finding).
                     timeout_ms=(actions.FIRST_TURN_TIMEOUT_MS
-                                if session.turns_used == 0
+                                if session.turns_used == 0 and attempt == 0
                                 else actions.PLAN_TIMEOUT_MS),
                     check_ratio=False,
                     cancel_event=self._action_cancel,

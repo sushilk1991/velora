@@ -70,6 +70,8 @@ enum ActionPlanError: Error, Equatable {
     case unverifiedSend(step: Int)
     case weakPressLabel(String)
     case committingPressLabel(String)
+    case sendInDraft(step: Int)
+    case committingKeyRepeats(step: Int)
 
     var message: String {
         switch self {
@@ -96,6 +98,10 @@ enum ActionPlanError: Error, Equatable {
             return "'\(label)' is too short to identify one control to press"
         case .committingPressLabel(let label):
             return "'\(label)' names a committing control — pressing is for navigation only"
+        case .sendInDraft(let step):
+            return "step \(step) would commit typed text, but this is a draft"
+        case .committingKeyRepeats(let step):
+            return "step \(step) repeats a committing key"
         }
     }
 }
@@ -123,8 +129,23 @@ extension ActionPlan {
         static let allowedURLSchemes: Set<String> = [
             "https", "http", "slack", "mailto", "tel", "facetime", "sms",
         ]
-        /// Keys that commit whatever is currently typed, when unmodified.
+        /// Keys that commit whatever is currently typed — WITH OR WITHOUT
+        /// modifiers. ⌘Return is Send in Gmail, Slack (enter-newline mode),
+        /// GitHub, Linear; treating only bare Return as committing was a
+        /// reviewed bypass. ⌘K stays a shortcut: its key is k, not return.
         static let committingKeys: Set<String> = ["return", "enter"]
+        /// Unmodified keys that put a character into the focused field; a
+        /// `key` step with one of these (or ⌘V, which pastes) arms the send
+        /// gate exactly like type_text. Mirrored from the engine; the pytest
+        /// contract test reads the marker line below.
+        // printable_keys: a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 space comma period slash minus equal semicolon quote left_bracket right_bracket backslash grave
+        static let printableKeys: Set<String> = [
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+            "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "space",
+            "comma", "period", "slash", "minus", "equal", "semicolon", "quote",
+            "left_bracket", "right_bracket", "backslash", "grave",
+        ]
         /// press_element label bounds, mirrored from the engine.
         static let minPressLabelCharacters = 3
         static let maxPressLabelCharacters = 80
@@ -135,12 +156,14 @@ extension ActionPlan {
         /// Mirrored from `velora_engine/actions.py`; the engine test
         /// `test_press_denylist_matches_the_swift_mirror` reads the marker
         /// line below, so keep it in sync with this set.
-        // press_denylist: send submit post publish reply delete remove discard pay buy purchase order checkout confirm accept agree call transfer forward share tweet block leave archive unsubscribe logout signout
+        // press_denylist: send submit post publish reply delete remove discard pay buy purchase order checkout confirm accept agree call transfer forward share tweet block leave archive unsubscribe logout signout trash erase reset approve withdraw report mute unfollow subscribe
         static let pressDenyWords: Set<String> = [
             "send", "submit", "post", "publish", "reply", "delete", "remove",
             "discard", "pay", "buy", "purchase", "order", "checkout", "confirm",
             "accept", "agree", "call", "transfer", "forward", "share", "tweet",
             "block", "leave", "archive", "unsubscribe", "logout", "signout",
+            "trash", "erase", "reset", "approve", "withdraw", "report", "mute",
+            "unfollow", "subscribe",
         ]
     }
 
@@ -154,7 +177,14 @@ extension ActionPlan {
     struct BatchState: Equatable {
         var stepsUsed = 0
         var totalText = 0
+        /// "Has a check covered the pending text since it changed or the
+        /// screen moved" — distinct from `pendingText` on purpose (review
+        /// finding): conflating them let type → verify → press-the-wrong-row
+        /// → Return deliver text into whatever the press opened.
         var unverifiedText = false
+        /// "Is there typed text a committing key would deliver." Cleared
+        /// only by the committing key itself.
+        var pendingText = false
     }
 
     /// True when the label names a control that would commit something.
@@ -195,9 +225,14 @@ extension ActionPlan {
         var totalText = state.totalText
         var totalPause = 0  // per batch: pauses bound UI settling, not the action
         var appNames: [String] = []
-        /// True once text has been typed that a bare Return would commit, with
-        /// no verify_context since. Seeded from the previous turns.
+        /// True once text has been typed that a Return would commit, with no
+        /// verify_context since it changed or the screen moved. Seeded from
+        /// the previous turns.
         var unverifiedText = state.unverifiedText
+        /// True while typed text sits where a committing key could deliver it.
+        var pendingText = state.pendingText
+        /// Drafts refuse committing keys once text is pending, outright.
+        let isDraft = (plan["sends"] as? Bool) == false
 
         for (index, raw) in rawSteps.enumerated() {
             guard let step = raw as? [String: Any],
@@ -219,8 +254,11 @@ extension ActionPlan {
                 appNames.append(app)
                 steps.append(.openApp(app))
                 // Switching apps invalidates any earlier checkpoint: the plan
-                // must confirm the app actually came forward before typing.
+                // must confirm the app actually came forward before typing —
+                // and pending text is unverified again, because its check
+                // described a screen this step just left.
                 focusEstablished = false
+                if pendingText { unverifiedText = true }
 
             case "open_url":
                 let raw = try string("url")
@@ -231,6 +269,7 @@ extension ActionPlan {
                       })
                 else { throw ActionPlanError.badURL(String(raw.prefix(120))) }
                 steps.append(.openURL(url))
+                if pendingText { unverifiedText = true }
 
             case "wait_frontmost":
                 let requested = step["timeout_ms"] as? Int ?? Limits.defaultWaitMs
@@ -296,6 +335,7 @@ extension ActionPlan {
                 }
                 steps.append(verb == "type_text" ? .typeText(cleaned) : .pasteText(cleaned))
                 unverifiedText = true
+                pendingText = true
 
             case "key":
                 guard focusEstablished else {
@@ -324,15 +364,36 @@ extension ActionPlan {
                 guard repeatCount >= 1, repeatCount <= Limits.maxKeyRepeat else {
                     throw ActionPlanError.repeatOutOfRange(repeatCount)
                 }
-                let committing = Limits.committingKeys.contains(name) && mods.isEmpty
-                if committing, unverifiedText {
-                    // The failure this prevents: a swallowed ⌘K meant the
-                    // recipient's name went into the conversation already on
-                    // screen, and this Return sends it to the wrong person.
-                    throw ActionPlanError.unverifiedSend(step: index)
+                let committing = Limits.committingKeys.contains(name)
+                if committing {
+                    guard repeatCount == 1 else {
+                        // One validated Return must not become twelve.
+                        throw ActionPlanError.committingKeyRepeats(step: index)
+                    }
+                    if isDraft, pendingText {
+                        // A draft never commits — navigation goes through
+                        // press_element, never a Return that might deliver.
+                        throw ActionPlanError.sendInDraft(step: index)
+                    }
+                    if unverifiedText {
+                        // The failure this prevents: a swallowed ⌘K meant the
+                        // recipient's name went into the conversation already
+                        // on screen, and this Return sends it to the wrong
+                        // person.
+                        throw ActionPlanError.unverifiedSend(step: index)
+                    }
                 }
                 steps.append(.key(name: name, mods: mods, repeatCount: repeatCount))
-                if committing { unverifiedText = false }
+                if committing {
+                    unverifiedText = false
+                    pendingText = false
+                } else if (mods.isEmpty && Limits.printableKeys.contains(name))
+                            || (name == "v" && mods.contains("cmd")) {
+                    // A bare printable key types a character; ⌘V pastes. Text
+                    // is now pending exactly as if type_text had run.
+                    unverifiedText = true
+                    pendingText = true
+                }
 
             case "pause":
                 let ms = step["ms"] as? Int ?? 300
@@ -360,8 +421,11 @@ extension ActionPlan {
                 }
                 steps.append(.pressElement(label: label))
                 // The press changed what is on screen; whatever follows must
-                // re-establish focus before it may type or press again.
+                // re-establish focus before it may type or press again — and
+                // pending text is unverified again, because its check
+                // described a screen the press just replaced.
                 focusEstablished = false
+                if pendingText { unverifiedText = true }
 
             default:
                 throw ActionPlanError.unknownVerb(verb)
@@ -371,6 +435,7 @@ extension ActionPlan {
         state.stepsUsed += steps.count
         state.totalText = totalText
         state.unverifiedText = unverifiedText
+        state.pendingText = pendingText
 
         let goal = (plan["goal"] as? String).map { String(ActionPlan.sanitize($0).prefix(200)) }
         return ActionPlan(goal: goal ?? "",
@@ -399,12 +464,23 @@ extension ActionPlan {
             case .typeText(let text), .pasteText(let text):
                 next.totalText += text.count
                 next.unverifiedText = true
+                next.pendingText = true
             case .verifyContext:
                 next.unverifiedText = false
             case .key(let name, let mods, _):
-                if Limits.committingKeys.contains(name), mods.isEmpty {
+                if Limits.committingKeys.contains(name) {
                     next.unverifiedText = false
+                    next.pendingText = false
+                } else if (mods.isEmpty && Limits.printableKeys.contains(name))
+                            || (name == "v" && mods.contains("cmd")) {
+                    next.unverifiedText = true
+                    next.pendingText = true
                 }
+            case .pressElement, .openApp, .openURL:
+                // Navigation that executed moved the screen out from under
+                // any pending text; its verification no longer describes
+                // where a Return would land.
+                if next.pendingText { next.unverifiedText = true }
             default:
                 break
             }

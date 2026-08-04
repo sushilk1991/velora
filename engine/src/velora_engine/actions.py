@@ -59,9 +59,24 @@ MAX_VERIFY_TERMS = 6
 # the check that authorises a send into a formality.
 MIN_VERIFY_TERM_CHARS = 3
 
-# Keys that commit whatever is currently typed. Unmodified only: ⌘K is a
-# shortcut, a bare Return in a composer is a send.
+# Keys that commit whatever is currently typed — WITH OR WITHOUT modifiers.
+# ⌘Return is Send in Gmail, Slack (enter-newline mode), GitHub, and Linear;
+# treating only bare Return as committing was a reviewed bypass. ⌘K stays a
+# shortcut because its key is k, not return.
 COMMITTING_KEYS = ("return", "enter")
+
+# Unmodified keys that put a character into the focused field. A `key` step
+# with one of these arms the send gate exactly like type_text — as does ⌘V,
+# which pastes the clipboard. Reviewed bypass: `key v with cmd` then Return
+# committed clipboard contents no verify_context had ever covered.
+# Mirrored in ActionPlan.swift (`// printable_keys:` line).
+PRINTABLE_KEYS = frozenset((
+    "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+    "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "space",
+    "comma", "period", "slash", "minus", "equal", "semicolon", "quote",
+    "left_bracket", "right_bracket", "backslash", "grave",
+))
 
 # The loop: how many times the model may look and decide within one action.
 MAX_TURNS = 8
@@ -84,6 +99,8 @@ PRESS_DENY_WORDS = frozenset((
     "discard", "pay", "buy", "purchase", "order", "checkout", "confirm",
     "accept", "agree", "call", "transfer", "forward", "share", "tweet",
     "block", "leave", "archive", "unsubscribe", "logout", "signout",
+    "trash", "erase", "reset", "approve", "withdraw", "report", "mute",
+    "unfollow", "subscribe",
 ))
 
 # Plans are ~200-600 tokens; the dictation-cleanup ceiling (input * 1.8) would
@@ -212,7 +229,7 @@ Hard rules:
 4. A plain {"key":"return"} commits whatever is typed. Between typing text and pressing return there MUST be a verify_context confirming the right conversation or window is on screen. Never verify after the return — by then it has already been sent.
 5. verify_context terms must name the specific thing you are looking for — the person's or channel's name. Never the app's own name ("Slack", "WhatsApp"): that word is in every window of that app and proves nothing. Terms shorter than three letters are rejected.
 6. press_element is for NAVIGATION only — opening a chat row, a search result, a link you can see in the observation. Labels that name a committing control (send, delete, pay, confirm, sign out…) are refused. Delivering a message goes through the keyboard path and its verify gate, never through pressing a Send button.
-7. "sends" is true if carrying the command out delivers something to another person (a message, an email, a post) and false if it only opens, searches, or drafts. When the user says draft, write, or prepare: leave the text in the composer and never press the final return — that is sends=false. A draft still needs every OTHER return (opening a chat from a search list is not sending).
+7. "sends" is true if carrying the command out delivers something to another person (a message, an email, a post) and false if it only opens, searches, or drafts. When the user says draft, write, or prepare: sends=false, leave the text in the composer, and NEVER press return once anything has been typed — in a draft, open chats and results with press_element, not return. (Return-after-typing is rejected outright in a draft.)
 8. Keep each batch SHORT — at most 6 steps, then look at the screen again. Small steps and a fresh look beat a long blind script.
 9. Speech recognition mishears names. If the observation shows a name spelled differently from what you heard and the two clearly sound alike ("Hermes" heard for "Himesh"), use the SCREEN'S spelling in type_text, press_element, and verify_context. Never swap in an unrelated name.
 10. When a step failed, the observation says exactly what the screen showed instead. Do something DIFFERENT from last turn: press_element the row you can actually see instead of pressing return again, search another way, or reply {"fail": "..."} with the reason. Repeating the failed step wastes the turn.
@@ -227,7 +244,7 @@ Examples of good replies:
   {"done":true}
 
 What you know about this Mac's apps — hints, not scripts; when the observation disagrees with a hint, trust the observation:
-- Slack: {"do":"key","key":"k","mods":["cmd"]} opens its search; that field labels itself "Query". Type the person's name, wait for results, then {"do":"key","key":"return"} picks the top hit — or press_element the person's row when the observation shows it. An open conversation puts the name in the window title and "Message to <name>" on the composer.
+- Slack: {"do":"key","key":"k","mods":["cmd"]} opens its search; that field labels itself "Query". Type the person's name, wait for results, then press_element the person's row (in a send, {"do":"key","key":"return"} also picks the top hit — never in a draft). An open conversation puts the name in the window title and "Message to <name>" on the composer.
 - WhatsApp: {"do":"key","key":"f","mods":["cmd"]} focuses search. Type the name, then press_element the person's row in the result list — return in the search field does NOT open a chat.
 - Browsers (Chrome, Safari): go straight to a search URL with open_url. To open a result on the page, press_element the link text the observation shows.
 - Email: open_url mailto:<address>?subject=... when you know the address; otherwise open the mail app and compose with key n with cmd.
@@ -480,7 +497,11 @@ def press_label_words(label: str) -> list[str]:
 
 def _validate_press(step: dict) -> str:
     label = _require_str(step, "label", "press_element", 200)
-    label = _clip(_sanitize_text(label), MAX_PRESS_LABEL_CHARS)
+    # Hard truncation, no ellipsis: `_clip` appends "…", which would make the
+    # engine emit an 81-char label the Swift side truncates differently — the
+    # two validators must search for the same string.
+    label = " ".join(defang_context(_sanitize_text(label)).split())
+    label = label[:MAX_PRESS_LABEL_CHARS].strip()
     if len(normalized_term(label)) < MIN_PRESS_LABEL_CHARS:
         raise PlanError(
             "press_element: label too short to identify one control "
@@ -534,14 +555,19 @@ class SessionState:
 
     `focus_established` is deliberately absent: every batch starts unverified,
     because between turns the model spends seconds thinking and the user may
-    have clicked anywhere. `unverified_text` deliberately IS here: text typed
-    in turn N must not become committable in turn N+1 just because a fresh
-    batch started with a clean flag.
+    have clicked anywhere. The two text flags deliberately ARE here — and they
+    are two flags on purpose (review finding): `unverified_text` answers "has
+    a check covered the pending text since it changed or the screen moved",
+    `pending_text` answers "is there typed text a committing key would
+    deliver". Conflating them let type → verify → press-the-wrong-row →
+    Return send verified-for-another-window text into whatever the press
+    opened.
     """
 
     steps_used: int = 0
     total_text: int = 0
     unverified_text: bool = False
+    pending_text: bool = False
 
 
 def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
@@ -572,9 +598,16 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
     total_text = state.total_text if state else 0
     total_pause = 0  # per batch: pauses bound UI settling, not the session
     app_names: list[str] = []
-    # True once text has been typed that a bare Return would commit, and no
-    # verify_context has run since.
+    # True once text has been typed that a Return would commit, and no
+    # verify_context has run since it last changed or the screen moved.
     unverified_text = state.unverified_text if state else False
+    # True while typed text is sitting somewhere a committing key could
+    # deliver it. Cleared only by the committing key itself.
+    pending_text = state.pending_text if state else False
+    # False ONLY when the plan explicitly says so: drafts refuse committing
+    # keys outright once text is pending — navigation goes through
+    # press_element, never through a Return that might deliver.
+    plan_sends = plan.get("sends")
 
     for index, raw in enumerate(raw_steps):
         if not isinstance(raw, dict):
@@ -597,8 +630,14 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             # Switching apps invalidates any earlier checkpoint: activation is
             # advisory, so the plan must confirm the app arrived before typing.
             focus_established = False
+            # And it moves the screen out from under any pending text — the
+            # old verification no longer describes where a Return would land.
+            if pending_text:
+                unverified_text = True
         elif verb == "open_url":
             steps.append({"do": verb, "url": _validate_url(raw)})
+            if pending_text:
+                unverified_text = True
         elif verb == "wait_frontmost":
             timeout = raw.get("timeout_ms", DEFAULT_WAIT_MS)
             if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
@@ -620,22 +659,43 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                     f"plan types more than {MAX_TOTAL_TEXT_CHARS} characters in total")
             steps.append({"do": verb, "text": text})
             unverified_text = True
+            pending_text = True
         elif verb == "key":
             name, mods, repeat = _validate_key(raw)
-            if name in COMMITTING_KEYS and not mods and unverified_text:
-                # The failure this prevents: the quick switcher never opened (a
-                # swallowed ⌘K), so the recipient's name was typed into the
-                # conversation already on screen — and this Return sends it to
-                # the wrong person. Checking afterwards is checking too late.
-                raise PlanError(
-                    f"step {index}: '{name}' would commit typed text that no "
-                    "verify_context step has confirmed")
+            committing = name in COMMITTING_KEYS
+            if committing:
+                if repeat > 1:
+                    # One validated Return must not become twelve at
+                    # execution time.
+                    raise PlanError("key: a committing key must not repeat")
+                if plan_sends is False and pending_text:
+                    raise PlanError(
+                        f"step {index}: '{name}' would commit typed text, but "
+                        "this is a draft — leave it in the composer and use "
+                        "press_element to navigate")
+                if unverified_text:
+                    # The failure this prevents: the quick switcher never
+                    # opened (a swallowed ⌘K), so the recipient's name was
+                    # typed into the conversation already on screen — and this
+                    # Return sends it to the wrong person. Checking afterwards
+                    # is checking too late.
+                    raise PlanError(
+                        f"step {index}: '{name}' would commit typed text that "
+                        "no verify_context step has confirmed")
             step = {"do": verb, "key": name, "mods": mods}
             if repeat > 1:
                 step["repeat"] = repeat
             steps.append(step)
-            if name in COMMITTING_KEYS and not mods:
+            if committing:
                 unverified_text = False
+                pending_text = False
+            elif (not mods and name in PRINTABLE_KEYS) or (
+                    name == "v" and "cmd" in mods):
+                # A bare printable key types a character; ⌘V pastes the
+                # clipboard. Either way there is now text a Return would
+                # deliver, exactly as if type_text had run.
+                unverified_text = True
+                pending_text = True
         elif verb == "pause":
             ms = raw.get("ms", 300)
             if not isinstance(ms, int) or isinstance(ms, bool) or ms <= 0:
@@ -649,13 +709,18 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
         elif verb == "press_element":
             steps.append({"do": verb, "label": _validate_press(raw)})
             # The press changed what is on screen; whatever follows must
-            # re-establish focus before it may type or press again.
+            # re-establish focus before it may type or press again — and any
+            # pending text is unverified again, because the check that
+            # covered it described a screen the press just replaced.
             focus_established = False
+            if pending_text:
+                unverified_text = True
 
     if state is not None:
         state.steps_used += len(steps)
         state.total_text = total_text
         state.unverified_text = unverified_text
+        state.pending_text = pending_text
 
     goal = plan.get("goal")
     sends = plan.get("sends")
@@ -811,22 +876,29 @@ class ActionSession:
             self.finished = True
             return {"fail": parsed["fail"]}
 
+        # Candidates only until the whole reply validates: a rejected turn 1
+        # must not have locked anything, or a retry could re-declare sends and
+        # rewrite the lock (review finding — the docstring's "without mutating
+        # state" has to include these two).
+        sends = self.sends
+        goal = self.goal
         if self.turns_used == 0:
-            # sends is decided HERE and never again. Fail safe: an unmarked
-            # first turn counts as one that delivers.
-            sends = parsed.get("sends")
-            self.sends = sends if isinstance(sends, bool) else True
-            goal = parsed.get("goal")
-            if isinstance(goal, str):
-                self.goal = _clip(_sanitize_text(goal), MAX_GOAL_CHARS)
+            # sends is decided on the first ACCEPTED turn and never again.
+            # Fail safe: an unmarked first turn counts as one that delivers.
+            raw_sends = parsed.get("sends")
+            sends = raw_sends if isinstance(raw_sends, bool) else True
+            raw_goal = parsed.get("goal")
+            if isinstance(raw_goal, str):
+                goal = _clip(_sanitize_text(raw_goal), MAX_GOAL_CHARS)
 
         steps: list[dict] = []
         if parsed["steps"]:
             normalized = validate_plan(
-                {"goal": self.goal, "sends": bool(self.sends),
-                 "steps": parsed["steps"]},
+                {"goal": goal, "sends": bool(sends), "steps": parsed["steps"]},
                 state=self.state)
             steps = normalized["steps"]
+        self.sends = sends
+        self.goal = goal
         self.turns_used += 1
         if parsed["done"]:
             self.finished = True
