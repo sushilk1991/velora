@@ -282,6 +282,7 @@ class Config:
         self._load_auto_vocab()
         self._ensure_builtin_modes()
         self._migrate_stale_builtins()
+        self._migrate_superseded_cleanup_model()
         self._load_modes()
 
     def _load_learned(self) -> None:
@@ -451,6 +452,38 @@ class Config:
         "com.microsoft.VSCode", "com.todesktop.230313mzl4w4u92", "com.apple.Terminal",
         "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "dev.zed.Zed",
     })
+
+    def _migrate_superseded_cleanup_model(self) -> None:
+        """One-time move off a writing model an older build shipped as a
+        RAM-tier default.
+
+        Only the exact ids in `models.SUPERSEDED_CLEANUP_MODELS` are rewritten,
+        and only to their same-size-class replacement, so someone who chose a
+        small model for speed or disk keeps a small one. Guarded by a config
+        marker so a user who deliberately re-selects the old model afterwards
+        is never overridden again — the same contract as the mode migration
+        above. The engine's normal startup path then downloads the replacement
+        with the usual progress UI.
+        """
+        # Never write over a config we couldn't parse: the marker save would
+        # clobber the file the user can still hand-recover.
+        if self._config_corrupt or self.data.get("cleanup_model_gen35_migrated"):
+            return
+        keys = {"cleanup_model_gen35_migrated"}
+        try:
+            from .models import SUPERSEDED_CLEANUP_MODELS
+
+            replacement = SUPERSEDED_CLEANUP_MODELS.get(str(self.data.get("cleanup_model")))
+        except Exception as exc:  # noqa: BLE001 — never block startup on the registry
+            log.warning("writing-model migration skipped (%s)", exc)
+            return
+        if replacement:
+            log.info("migrating writing model %s -> %s",
+                     self.data.get("cleanup_model"), replacement)
+            self.data["cleanup_model"] = replacement
+            keys.add("cleanup_model")
+        self.data["cleanup_model_gen35_migrated"] = True
+        self.save(keys=keys)
 
     def _migrate_stale_builtins(self) -> None:
         """One-time upgrade fixup: earlier versions shipped Code mode as

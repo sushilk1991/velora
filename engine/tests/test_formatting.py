@@ -298,11 +298,89 @@ def test_explicit_cleanup_model_not_overridden(home):
     import json as _json
 
     from velora_engine.config import Config
+    from velora_engine import models
 
     home.mkdir(parents=True, exist_ok=True)
-    chosen = "mlx-community/Qwen3-1.7B-8bit"
+    # A currently-shipped model: the RAM tiers must never override a deliberate
+    # pick, on this or any later start.
+    chosen = "mlx-community/Qwen3.5-4B-MLX-8bit"
+    assert chosen not in models.SUPERSEDED_CLEANUP_MODELS
     (home / "config.json").write_text(_json.dumps({"cleanup_model": chosen}))
     assert Config().cleanup_model == chosen
+    assert Config().cleanup_model == chosen
+
+
+# ---- one-time writing-model upgrade ------------------------------------------
+
+
+def _superseded_pair():
+    from velora_engine import models
+
+    return next(iter(models.SUPERSEDED_CLEANUP_MODELS.items()))
+
+
+def test_superseded_cleanup_model_is_migrated_once_and_marked(home):
+    import json as _json
+
+    from velora_engine.config import Config
+
+    old_id, new_id = _superseded_pair()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text(_json.dumps({
+        "cleanup_model": old_id, "language": "auto",
+    }))
+
+    assert Config().cleanup_model == new_id
+    on_disk = _json.loads((home / "config.json").read_text())
+    assert on_disk["cleanup_model"] == new_id
+    assert on_disk["cleanup_model_gen35_migrated"] is True
+    # Unrelated keys survive the migration's targeted save.
+    assert on_disk["language"] == "auto"
+
+
+def test_migration_runs_only_once_so_a_deliberate_revert_sticks(home):
+    import json as _json
+
+    from velora_engine.config import Config
+
+    old_id, new_id = _superseded_pair()
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text(_json.dumps({"cleanup_model": old_id}))
+    assert Config().cleanup_model == new_id
+
+    # The user goes back to the old model on purpose; the marker is already set,
+    # so no later start may drag them forward again.
+    config = _json.loads((home / "config.json").read_text())
+    config["cleanup_model"] = old_id
+    (home / "config.json").write_text(_json.dumps(config))
+    assert Config().cleanup_model == old_id
+
+
+def test_migration_leaves_a_current_model_alone_but_still_marks(home):
+    import json as _json
+
+    from velora_engine.config import Config
+
+    home.mkdir(parents=True, exist_ok=True)
+    kept = "mlx-community/Qwen3.5-4B-MLX-8bit"
+    (home / "config.json").write_text(_json.dumps({"cleanup_model": kept}))
+
+    assert Config().cleanup_model == kept
+    on_disk = _json.loads((home / "config.json").read_text())
+    assert on_disk["cleanup_model"] == kept
+    assert on_disk["cleanup_model_gen35_migrated"] is True
+
+
+def test_migration_never_writes_over_a_corrupt_config(home):
+    from velora_engine.config import Config
+
+    home.mkdir(parents=True, exist_ok=True)
+    corrupt = '{"cleanup_model": "mlx-community/Qwen3-1.7B-8bit"'  # truncated
+    (home / "config.json").write_text(corrupt)
+
+    Config()
+    # The file the user can still hand-recover is untouched.
+    assert (home / "config.json").read_text() == corrupt
 
 
 _OLD_CODE_APPS = [

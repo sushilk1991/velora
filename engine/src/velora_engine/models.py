@@ -6,6 +6,7 @@ import functools
 import hashlib
 import logging
 import re
+import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -99,23 +100,23 @@ REGISTRY: list[ModelInfo] = [
     ),
     # --- cleanup / formatting LLMs, smallest first ---
     ModelInfo(
-        id="mlx-community/Qwen3-1.7B-8bit",
+        id="mlx-community/Qwen3.5-2B-MLX-4bit",
         kind="cleanup",
         backend="mlx-lm",
-        size="1.9 GB",
+        size="1.6 GB",
         description=(
-            "Compact — for 8 GB Macs. Qwen3-1.7B (8-bit): lightest RAM/disk, still "
-            "handles punctuation and filler cleanup well. Recommended on low-memory Macs."
+            "Compact — for 8 GB Macs. Qwen3.5-2B (4-bit): lightest RAM/disk, and a "
+            "model generation ahead of the 1.7B it replaces."
         ),
     ),
     ModelInfo(
-        id="mlx-community/Qwen3-4B-Instruct-2507-4bit",
+        id="mlx-community/Qwen3.5-4B-MLX-4bit",
         kind="cleanup",
         backend="mlx-lm",
-        size="2.3 GB",
+        size="2.8 GB",
         description=(
-            "Balanced — for 16 GB Macs. Qwen3-4B (4-bit): strong cleanup at about "
-            "half the memory of the 8-bit build."
+            "Balanced — for 16 GB Macs. Qwen3.5-4B (4-bit): the same model as the "
+            "Quality tier at roughly half the memory."
         ),
     ),
     ModelInfo(
@@ -136,9 +137,20 @@ _BY_ID = {m.id: m for m in REGISTRY}
 # STT default stays whisper-turbo regardless — it's the same 1.5 GB everywhere.
 _CLEANUP_TIERS: list[tuple[int, str]] = [
     (24, "mlx-community/Qwen3.5-4B-MLX-8bit"),
-    (14, "mlx-community/Qwen3-4B-Instruct-2507-4bit"),
-    (0, "mlx-community/Qwen3-1.7B-8bit"),
+    (14, "mlx-community/Qwen3.5-4B-MLX-4bit"),
+    (0, "mlx-community/Qwen3.5-2B-MLX-4bit"),
 ]
+
+# Writing models a previous build shipped as a RAM-tier default, each mapped to
+# its replacement in the SAME size class — a user who took a small model for
+# speed and disk keeps a small model. `Config` rewrites a matching
+# `cleanup_model` once (guarded by a config marker), the server's normal
+# startup path downloads the replacement with the usual progress UI, and the
+# old weights are pruned only after the replacement has actually loaded.
+SUPERSEDED_CLEANUP_MODELS: dict[str, str] = {
+    "mlx-community/Qwen3-1.7B-8bit": "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "mlx-community/Qwen3-4B-Instruct-2507-4bit": "mlx-community/Qwen3.5-4B-MLX-4bit",
+}
 
 
 @functools.lru_cache(maxsize=1)
@@ -279,15 +291,41 @@ def expected_bytes(model_id: str) -> int | None:
     return int(float(m.group(1)) * 1024**3) if m else None
 
 
+def _repo_cache_dir(model_id: str) -> Path | None:
+    """Hub cache directory for a repo id, or None if the constant moved."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+    except ImportError:  # pragma: no cover — constant moved
+        return None
+    return Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
+
+
+def remove_from_cache(model_id: str) -> int:
+    """Delete a superseded model's Hub cache dir; returns bytes reclaimed.
+
+    Hard-gated to `SUPERSEDED_CLEANUP_MODELS`: this deletes multi-GB weights,
+    so it must be impossible to point at an arbitrary repo — including the
+    model the user is currently running. Callers must additionally wait until
+    the replacement has loaded (see `_prune_superseded_models`), so a failed
+    upgrade never leaves a user with no writing model at all.
+    """
+    if model_id not in SUPERSEDED_CLEANUP_MODELS:
+        raise ValueError(f"not a superseded model, refusing to delete: {model_id}")
+    repo_dir = _repo_cache_dir(model_id)
+    if repo_dir is None or not repo_dir.is_dir():
+        return 0
+    freed = cached_bytes(model_id)
+    shutil.rmtree(repo_dir, ignore_errors=True)
+    return 0 if repo_dir.is_dir() else freed
+
+
 def cached_bytes(model_id: str) -> int:
     """Bytes currently on disk in the hub cache for this repo — includes
     in-flight `.incomplete` blobs, so it grows during a download and drives
     the first-run progress UI."""
-    try:
-        from huggingface_hub.constants import HF_HUB_CACHE
-    except ImportError:  # pragma: no cover — constant moved
+    repo_dir = _repo_cache_dir(model_id)
+    if repo_dir is None:
         return 0
-    repo_dir = Path(HF_HUB_CACHE) / f"models--{model_id.replace('/', '--')}"
     total = 0
     if repo_dir.is_dir():
         for p in repo_dir.rglob("*"):

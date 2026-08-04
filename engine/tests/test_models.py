@@ -166,8 +166,8 @@ def test_snapshot_model_download_is_offline_first(monkeypatch):
 
 
 def test_model_helpers_cover_tiers_sizes_and_probe_failures(monkeypatch):
-    assert models.recommended_cleanup_model(8).endswith("Qwen3-1.7B-8bit")
-    assert models.recommended_cleanup_model(16).endswith("Qwen3-4B-Instruct-2507-4bit")
+    assert models.recommended_cleanup_model(8).endswith("Qwen3.5-2B-MLX-4bit")
+    assert models.recommended_cleanup_model(16).endswith("Qwen3.5-4B-MLX-4bit")
     assert models.recommended_cleanup_model(32).endswith("Qwen3.5-4B-MLX-8bit")
     assert models.expected_bytes("missing/model") is None
     assert models.expected_bytes(models.TRANSCRIBE_CPP_Q8_MODEL) == int(0.85 * 1024**3)
@@ -177,3 +177,57 @@ def test_model_helpers_cover_tiers_sizes_and_probe_failures(monkeypatch):
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", unavailable_cache)
     assert models.is_cached("mlx-community/whisper-large-v3-turbo") is False
+
+
+# ---- superseded-model upgrade path -------------------------------------------
+
+
+def test_superseded_map_points_at_real_registry_entries():
+    for old_id, new_id in models.SUPERSEDED_CLEANUP_MODELS.items():
+        info = models.lookup(new_id)
+        assert info is not None, f"{new_id} is not in the registry"
+        assert info.kind == "cleanup"
+        # An old id must be gone from the picker, or users could re-select the
+        # model the upgrade just deleted from disk.
+        assert models.lookup(old_id) is None
+        # No chains: a replacement that is itself superseded would need two
+        # passes, but the migration marker only lets it run once.
+        assert new_id not in models.SUPERSEDED_CLEANUP_MODELS
+
+
+def test_every_tier_default_is_a_current_registry_entry():
+    for _min_gb, model_id in models._CLEANUP_TIERS:
+        assert models.lookup(model_id) is not None
+        assert model_id not in models.SUPERSEDED_CLEANUP_MODELS
+
+
+def test_remove_from_cache_refuses_models_outside_the_superseded_map(tmp_path,
+                                                                    monkeypatch):
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path))
+    for protected in ("mlx-community/Qwen3.5-4B-MLX-8bit",
+                      "mlx-community/whisper-large-v3-turbo",
+                      "../../etc"):
+        victim = tmp_path / f"models--{protected.replace('/', '--')}"
+        victim.mkdir(parents=True, exist_ok=True)
+        (victim / "weights.bin").write_bytes(b"x" * 32)
+        with pytest.raises(ValueError):
+            models.remove_from_cache(protected)
+        assert (victim / "weights.bin").exists()
+
+
+def test_remove_from_cache_deletes_a_superseded_model_and_reports_bytes(
+        tmp_path, monkeypatch):
+    import huggingface_hub.constants as hub_constants
+
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path))
+    old_id = next(iter(models.SUPERSEDED_CLEANUP_MODELS))
+    repo = tmp_path / f"models--{old_id.replace('/', '--')}"
+    (repo / "blobs").mkdir(parents=True)
+    (repo / "blobs" / "weights.bin").write_bytes(b"x" * 4096)
+
+    assert models.remove_from_cache(old_id) == 4096
+    assert not repo.exists()
+    # Idempotent: a second pass (or a fresh install) reclaims nothing quietly.
+    assert models.remove_from_cache(old_id) == 0

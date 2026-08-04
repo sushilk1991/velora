@@ -559,6 +559,28 @@ class Engine:
             await asyncio.wait([task], timeout=1.0)
         await task  # propagate download errors
 
+    async def _prune_superseded_models(self) -> None:
+        """Reclaim disk from writing models an upgrade replaced.
+
+        Called ONLY after the replacement has loaded and been adopted, so a
+        user whose download failed keeps a working model. Skips whatever is
+        currently configured, and `models.remove_from_cache` independently
+        refuses anything outside the superseded map — deleting multi-GB
+        weights deserves two locks, not one.
+        """
+        current = self.config.cleanup_model
+        for old_id in models.SUPERSEDED_CLEANUP_MODELS:
+            if old_id == current:
+                continue
+            try:
+                freed = await asyncio.to_thread(models.remove_from_cache, old_id)
+            except Exception:  # noqa: BLE001 — reclaiming disk is best-effort
+                log.exception("could not remove superseded writing model %s", old_id)
+                continue
+            if freed:
+                log.info("removed superseded writing model %s (reclaimed %.1f GB)",
+                         old_id, freed / 1024**3)
+
     async def _load_models(self) -> None:
         try:
             t0 = time.perf_counter()
@@ -633,6 +655,9 @@ class Engine:
                 # nothing newer took its place.
                 if self.cleanup is None and self.config.cleanup_model == engine.model_id:
                     self.cleanup = engine
+                    # Only now — with a loaded, adopted replacement — is it safe
+                    # to reclaim the old weights.
+                    await self._prune_superseded_models()
                 else:
                     await engine.aclose()
             except Exception:
