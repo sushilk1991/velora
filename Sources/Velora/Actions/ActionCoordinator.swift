@@ -85,6 +85,7 @@ extension ActionPlan {
                 let chord = (mods + [name]).joined(separator: "+")
                 return count > 1 ? "press \(chord) x\(count)" : "press \(chord)"
             case .pause(let ms): return "pause \(ms)ms"
+            case .pressElement(let label): return "press \"\(label)\" on screen"
             }
         }
     }
@@ -94,46 +95,127 @@ extension ActionPlan {
     }
 }
 
-/// Owns one action from transcript to outcome: ask the engine for a plan,
-/// re-validate it locally, execute it, report.
+/// Blocking bridge from the loop's background queue to the engine socket.
+/// Lives for exactly one action: send a command, wait for that action's turn
+/// event, hand it back as a value.
+final class EngineTurnPlanner: ActionTurnPlanner {
+    /// The engine's own per-turn budget is 20 s (35 s for a cold first
+    /// turn); this is the app-side backstop for a reply that never arrives
+    /// at all (engine crash, restart mid-request). Without it the loop's
+    /// thread would wait forever and every later action would be refused as
+    /// "already running".
+    static let turnTimeout: TimeInterval = 45
+
+    let id = UUID().uuidString
+    private let client: EngineClient
+    private let lock = NSLock()
+    private var slot: PlannedTurn?
+    private let semaphore = DispatchSemaphore(value: 0)
+
+    init(client: EngineClient) {
+        self.client = client
+    }
+
+    /// Called on the main queue with every engine event; keeps this action's.
+    func handle(_ event: EngineEvent) {
+        switch event {
+        case .actionTurn(let id, _, let sends, let goal, let steps, let done, _):
+            guard id == self.id else { return }
+            deliver(.turn(sends: sends, goal: goal, steps: steps, done: done))
+        case .actionFailed(let id, let error, let code):
+            guard id == self.id else { return }
+            deliver(.failure(reason: error, code: code))
+        default:
+            break
+        }
+    }
+
+    /// Unblocks a waiting turn with "cancelled" — what Esc resolves to when
+    /// it lands between batches, while the model is thinking.
+    func cancelPending() {
+        deliver(.failure(reason: "the action was cancelled", code: "cancelled"))
+        send(["cmd": "action_cancel", "id": id])
+    }
+
+    private func deliver(_ turn: PlannedTurn) {
+        lock.lock()
+        // First answer wins; a stale event after a timeout or cancel is
+        // dropped rather than smuggled in as the reply to a later request.
+        guard slot == nil else {
+            lock.unlock()
+            return
+        }
+        slot = turn
+        lock.unlock()
+        semaphore.signal()
+    }
+
+    private func send(_ json: [String: Any]) {
+        DispatchQueue.main.async { [client] in
+            client.send(json: json)
+        }
+    }
+
+    private func awaitReply() -> PlannedTurn {
+        guard semaphore.wait(timeout: .now() + Self.turnTimeout) != .timedOut else {
+            send(["cmd": "action_cancel", "id": id])
+            return .failure(reason: "planning timed out", code: "timeout")
+        }
+        lock.lock()
+        let value = slot
+        slot = nil
+        lock.unlock()
+        return value ?? .failure(reason: "the engine returned nothing", code: "failed")
+    }
+
+    func start(transcript: String, context: ActionContextSnapshot) -> PlannedTurn {
+        send(["cmd": "action_start", "id": id,
+              "transcript": transcript, "context": context.payload])
+        return awaitReply()
+    }
+
+    func observe(_ observation: [String: Any]) -> PlannedTurn {
+        send(["cmd": "action_observe", "id": id, "observation": observation])
+        return awaitReply()
+    }
+
+    func end() {
+        send(["cmd": "action_end", "id": id])
+    }
+}
+
+/// Owns one action from transcript to outcome: run the observe→decide→act
+/// loop against the engine, report the result on the main queue.
 ///
-/// The engine already validated the plan; this decodes it through
-/// `ActionPlan.decode` anyway. Two independent implementations of one contract
-/// is the point — the engine guards what the model may propose, the app guards
-/// what the machine will do, and only the app holds the Accessibility grant.
+/// The engine validates every batch before proposing it; the loop decodes it
+/// through `ActionPlan.decode` anyway. Two independent implementations of one
+/// contract is the point — the engine guards what the model may propose, the
+/// app guards what the machine will do, and only the app holds the
+/// Accessibility grant.
 final class ActionCoordinator {
     private let client: EngineClient
     private let host: ActionHost
-    private var executor: ActionExecutor?
-    private var pendingID: String?
+    private var runner: ActionLoopRunner?
+    private var planner: EngineTurnPlanner?
     private var completion: ((ActionResult) -> Void)?
-    private var cancelled = false
+    private var executing = false
     private var executeRequested = false
-    /// Whether this caller accepted that the plan may deliver something to
-    /// another person. The voice hotkey is itself that consent; the CLI has to
-    /// say so per request.
-    private var sendAllowed = true
-    private var planTimer: Timer?
-
-    /// The engine's own plan budget is 20 s; this is the app-side backstop for
-    /// a reply that never arrives at all (engine crash, restart mid-request).
-    /// Without it `pendingID` stays set and every later action is refused as
-    /// "already running".
-    private static let planTimeout: TimeInterval = 30
 
     init(client: EngineClient, host: ActionHost) {
         self.client = client
         self.host = host
     }
 
-    var isRunning: Bool { pendingID != nil || executor != nil }
-    /// True only while steps are being carried out — planning does not touch
-    /// the machine, so it must not swallow Esc from the rest of the app.
-    var isExecuting: Bool { executor != nil }
+    var isRunning: Bool { runner != nil }
+    /// True once the loop has begun driving the machine. Until the first turn
+    /// arrives nothing has been touched, so Esc still belongs to whatever
+    /// else is on screen.
+    var isExecuting: Bool { executing }
 
-    /// Send a spoken command off for planning. `completion` fires once. With
-    /// `execute: false` the plan comes back untouched and nothing happens to the
-    /// machine — the safe way to inspect what a command would do.
+    /// Send a spoken command into the loop. `completion` fires once, on the
+    /// main queue. With `execute: false` the first batch comes back untouched
+    /// and nothing happens to the machine — the safe way to inspect what a
+    /// command would do.
     func perform(
         transcript: String,
         context: ActionContextSnapshot,
@@ -145,126 +227,68 @@ final class ActionCoordinator {
             completion(.failed(reason: "another action is already running", trace: []))
             return
         }
-        cancelled = false
-        executeRequested = execute
-        sendAllowed = allowSend
-        let id = UUID().uuidString
-        pendingID = id
+        let planner = EngineTurnPlanner(client: client)
+        let runner = ActionLoopRunner(host: host, planner: planner,
+                                      execute: execute, allowSend: allowSend)
+        self.planner = planner
+        self.runner = runner
         self.completion = completion
-        client.send(json: [
-            "cmd": "action_plan",
-            "id": id,
-            "transcript": transcript,
-            "context": context.payload,
-        ])
-        planTimer?.invalidate()
-        planTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.planTimeout, repeats: false
-        ) { [weak self] _ in
-            guard let self, self.pendingID == id else { return }
-            self.client.send(json: ["cmd": "action_cancel", "id": id])
-            self.pendingID = nil
-            self.finish(.failed(reason: "planning timed out", trace: []))
-        }
-    }
-
-    func cancel() {
-        cancelled = true
-        executor?.cancel()
-        if let pendingID {
-            client.send(json: ["cmd": "action_cancel", "id": pendingID])
-        }
-    }
-
-    /// Feed engine events here. Ignores anything that isn't this action's reply.
-    func handle(_ event: EngineEvent) {
-        switch event {
-        case .actionPlan(let id, let planJSON, let ms):
-            guard let id, id == pendingID else { return }
-            pendingID = nil
-            run(planJSON: planJSON, planMs: ms)
-        case .actionFailed(let id, let error, let code):
-            guard let id, id == pendingID else { return }
-            pendingID = nil
-            finish(code == "cancelled" ? .cancelled : .failed(reason: error, trace: []))
-        default:
-            break
-        }
-    }
-
-    private func run(planJSON: [String: Any], planMs: Int) {
-        let plan: ActionPlan
-        do {
-            plan = try ActionPlan.decode(planJSON)
-        } catch let error as ActionPlanError {
-            NSLog("Velora: action plan rejected locally — %@", error.message)
-            finish(.failed(reason: "that plan didn't look safe to run", trace: []))
-            return
-        } catch {
-            finish(.failed(reason: "that plan didn't look safe to run", trace: []))
-            return
-        }
-        if let unsupported = plan.unsupported {
-            finish(.failed(reason: unsupported, trace: []))
-            return
-        }
-        guard plan.isExecutable else {
-            finish(.failed(reason: "there was nothing to do", trace: []))
-            return
-        }
-        if cancelled {
-            finish(.cancelled)
-            return
-        }
-        if plan.sends, !sendAllowed {
-            // The plan would message someone and this caller never said that
-            // was acceptable. Report it as a refusal with the plan attached, so
-            // the caller can look at it and ask again deliberately.
-            NSLog("Velora: action refused — plan sends and the caller did not allow it")
-            finish(.needsSendApproval(plan))
-            return
-        }
-        guard executeRequested else {
-            NSLog("Velora: action dry run — %d steps, sends=%@",
-                  plan.steps.count, plan.sends ? "yes" : "no")
-            finish(.planned(plan))
-            return
-        }
-        veloraLog("Velora: action plan ready in \(planMs)ms — \(plan.steps.count) steps, "
-                  + "sends=\(plan.sends ? "yes" : "no"), goal=\(plan.goal)")
-
-        let executor = ActionExecutor(host: host)
-        self.executor = executor
-        // Steps block on real UI (activation polling, per-chunk typing), so the
-        // run never touches the main thread.
+        executeRequested = execute
+        executing = false
+        // The loop blocks on real UI (activation polling, per-chunk typing)
+        // and on the model between batches; it never touches the main thread.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let result = executor.run(plan)
+            let result = runner.run(transcript: transcript, context: context)
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.executor = nil
-                for line in result.trace { veloraLog("Velora: action · \(line)") }
-                switch result.outcome {
-                case .completed:
-                    self.finish(.completed(goal: plan.goal, trace: result.trace))
-                case .cancelled:
-                    self.finish(.cancelled)
-                case .failed(let step, let reason):
-                    veloraLog("Velora: action failed at step \(step) — \(reason)")
-                    self.finish(.failed(reason: reason, trace: result.trace))
-                }
+                self?.finish(result)
             }
         }
     }
 
+    func cancel() {
+        runner?.cancel()
+        // Whichever state the loop is in — mid-batch or waiting on the model —
+        // one of these two reaches it.
+        planner?.cancelPending()
+    }
+
+    /// Feed engine events here. Ignores anything that isn't this action's.
+    func handle(_ event: EngineEvent) {
+        guard let planner else { return }
+        if case .actionTurn(let id, let turn, let sends, let goal, _, _, let ms) = event,
+           id == planner.id {
+            if executeRequested { executing = true }
+            if turn == 1 {
+                veloraLog("Velora: action turn 1 ready in \(ms)ms — "
+                          + "sends=\(sends ? "yes" : "no"), goal=\(goal)")
+            } else {
+                veloraLog("Velora: action turn \(turn) ready in \(ms)ms")
+            }
+        }
+        planner.handle(event)
+    }
+
     private func finish(_ result: ActionResult) {
-        planTimer?.invalidate()
-        planTimer = nil
+        switch result {
+        case .completed(let goal, let trace):
+            for line in trace { veloraLog("Velora: action · \(line)") }
+            veloraLog("Velora: action completed — \(goal)")
+        case .failed(let reason, let trace):
+            for line in trace { veloraLog("Velora: action · \(line)") }
+            veloraLog("Velora: action failed — \(reason)")
+        case .cancelled:
+            veloraLog("Velora: action cancelled")
+        case .planned, .needsSendApproval:
+            break
+        }
+        runner = nil
+        planner = nil
+        executing = false
         // Cleared before the callback: `completion` is nilled first so a
         // callback that starts another action cannot be mistaken for a second
         // completion of this one.
         let callback = completion
         completion = nil
-        pendingID = nil
         callback?(result)
     }
 }

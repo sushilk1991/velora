@@ -1653,7 +1653,7 @@ final class DictationController: NSObject {
         // Action Mode replies are addressed by their own request id and never
         // belong to a dictation session.
         switch event {
-        case .actionPlan, .actionFailed:
+        case .actionTurn, .actionFailed:
             actions.handle(event)
             return
         default:

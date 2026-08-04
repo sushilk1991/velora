@@ -54,10 +54,11 @@ enum EngineEvent {
     case edited(id: String?, text: String, applied: Bool, ms: Int, reason: String?)
     case editFailed(id: String?, error: String, code: String)
 
-    /// Action Mode: a validated plan for the spoken command, and its failures.
-    /// The plan arrives as raw JSON so `ActionPlan.decode` — the app's own copy
-    /// of the safety gate — is the only thing that turns it into steps.
-    case actionPlan(id: String?, plan: [String: Any], ms: Int)
+    /// Action Mode: one turn of the observe→decide→act loop. Steps arrive as
+    /// raw JSON so `ActionPlan.decode` — the app's own copy of the safety
+    /// gate — is the only thing that turns them into executable steps.
+    case actionTurn(id: String?, turn: Int, sends: Bool, goal: String,
+                    steps: [Any], done: Bool, ms: Int)
     case actionFailed(id: String?, error: String, code: String)
 
     /// File-transcription command reached the engine (sent before decoding —
@@ -180,10 +181,15 @@ enum EngineEvent {
                 id: object["id"] as? String,
                 error: object["error"] as? String ?? "edit failed",
                 code: object["code"] as? String ?? "failed")
-        case "action_plan":
-            return .actionPlan(
+        case "action_turn":
+            return .actionTurn(
                 id: object["id"] as? String,
-                plan: object["plan"] as? [String: Any] ?? [:],
+                turn: object["turn"] as? Int ?? 0,
+                // Fail safe, matching the engine: an unmarked turn sends.
+                sends: object["sends"] as? Bool ?? true,
+                goal: object["goal"] as? String ?? "",
+                steps: object["steps"] as? [Any] ?? [],
+                done: object["done"] as? Bool ?? false,
                 ms: object["ms"] as? Int ?? 0)
         case "action_failed":
             return .actionFailed(

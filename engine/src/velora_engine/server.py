@@ -266,6 +266,11 @@ class Engine:
         # — the user is waiting on it, and a dictation hotkey outranks it.
         self._planning = False
         self._action_cancel = threading.Event()
+        # The one live observe→decide→act session (None between actions). One
+        # at a time by design: it holds budgets the app must not be able to
+        # reset by opening a second loop.
+        self._action_session: actions.ActionSession | None = None
+        self._action_id: Any = None
         # Meeting notes share the cleanup model but are chunked and
         # cooperatively preempted whenever live dictation starts.
         self._meeting_notes_running = False
@@ -879,11 +884,16 @@ class Engine:
             elif cmd == "edit_cancel":
                 if self._editing:
                     self._edit_cancel.set()
-            elif cmd == "action_plan":
-                await self._cmd_action_plan(msg)
+            elif cmd == "action_start":
+                await self._cmd_action_start(msg)
+            elif cmd == "action_observe":
+                await self._cmd_action_observe(msg)
+            elif cmd == "action_end":
+                self._drop_action_session(msg.get("id"))
             elif cmd == "action_cancel":
                 if self._planning:
                     self._action_cancel.set()
+                self._drop_action_session(msg.get("id"))
             elif cmd == "meeting_notes":
                 await self._cmd_meeting_notes(msg)
             elif cmd == "meeting_notes_cancel":
@@ -2149,12 +2159,35 @@ class Engine:
             self._editing = False
             self._schedule_mining()
 
-    async def _cmd_action_plan(self, msg: dict[str, Any]) -> None:
-        """Action Mode: turn one spoken command into a validated action plan.
+    def _drop_action_session(self, requested: Any) -> None:
+        """Forget the live action session (loop finished, cancelled, or the
+        app gave up). A mismatched id is ignored so a stale `action_end` from
+        a previous action cannot kill its successor's session."""
+        if self._action_session is None:
+            return
+        if requested is not None and requested != self._action_id:
+            return
+        self._action_session = None
+        self._action_id = None
+
+    async def _action_busy_reason(self) -> tuple[str, str] | None:
+        if self.session is not None or self._starting or self._finalizing:
+            return ("action: busy (dictation in progress)", "busy")
+        if (self._reprocessing or self._transcribing
+                or self._meeting_notes_running or self._editing or self._planning):
+            return ("action: busy (another job in progress)", "busy")
+        if self.cleanup is None:
+            return ("action: writing model unavailable", "cleanup_unavailable")
+        return None
+
+    async def _cmd_action_start(self, msg: dict[str, Any]) -> None:
+        """Action Mode, turn 1: open an observe→decide→act session.
 
         The transcript arrives RAW — cleanup would rewrite the very words that
-        identify a person or an app. Safety lives in `actions.validate_plan`,
-        which the app re-checks independently before executing anything.
+        identify a person or an app. Safety lives in `actions.ActionSession`
+        (budgets that span turns, the locked `sends` bit) plus the same
+        `validate_plan` gate per batch, all re-checked independently by the
+        app before anything touches the machine.
         """
         async def fail(error: str, code: str = "failed") -> None:
             await self._send({
@@ -2162,13 +2195,6 @@ class Engine:
                 "code": code, "error": error,
             })
 
-        if self.session is not None or self._starting or self._finalizing:
-            await fail("action: busy (dictation in progress)", "busy")
-            return
-        if (self._reprocessing or self._transcribing
-                or self._meeting_notes_running or self._editing or self._planning):
-            await fail("action: busy (another job in progress)", "busy")
-            return
         transcript = msg.get("transcript")
         if not isinstance(transcript, str) or not transcript.strip():
             await fail("action: missing 'transcript'", "invalid_arguments")
@@ -2178,52 +2204,123 @@ class Engine:
                 f"action: command over {actions.MAX_TRANSCRIPT_CHARS} characters",
                 "too_large")
             return
-        if self.cleanup is None:
-            await fail("action: writing model unavailable", "cleanup_unavailable")
+        busy = await self._action_busy_reason()
+        if busy is not None:
+            await fail(*busy)
             return
+        # A new action unconditionally replaces any live session: the only way
+        # a session is still here is that the app abandoned it (crash, kill
+        # mid-loop), and wedging Action Mode until an engine restart would be
+        # a worse failure than dropping a loop nobody is driving.
+        if self._action_session is not None:
+            log.info("action_start: replacing an abandoned session %s", self._action_id)
+        context = actions.ActionContext.from_dict(msg.get("context"))
+        context.transcript = transcript
+        session = actions.ActionSession(transcript, context)
+        self._action_session = session
+        self._action_id = msg.get("id")
         if self._miner_task is not None:
             self._miner_task.cancel()
         self._mine_cancel.set()
         self._planning = True
         self._action_cancel.clear()
-        asyncio.create_task(self._run_action_plan(dict(msg), transcript))
+        asyncio.create_task(self._run_action_turn(dict(msg), session,
+                                                  session.first_message()))
 
-    async def _run_action_plan(self, msg: dict[str, Any], transcript: str) -> None:
+    async def _cmd_action_observe(self, msg: dict[str, Any]) -> None:
+        """Action Mode, turns 2+: the app reports what actually happened and
+        what the screen says now; the session decides the next steps."""
+        async def fail(error: str, code: str = "failed") -> None:
+            await self._send({
+                "event": "action_failed", "id": msg.get("id"),
+                "code": code, "error": error,
+            })
+
+        session = self._action_session
+        if session is None or msg.get("id") != self._action_id:
+            await fail("action: no session with that id", "no_session")
+            return
+        busy = await self._action_busy_reason()
+        if busy is not None:
+            await fail(*busy)
+            return
+        if session.finished:
+            self._drop_action_session(self._action_id)
+            await fail("action: session already finished", "no_session")
+            return
+        if session.turns_used >= actions.MAX_TURNS:
+            self._drop_action_session(self._action_id)
+            await fail(f"action: ran out of turns (max {actions.MAX_TURNS})",
+                       "turn_limit")
+            return
+        observation = msg.get("observation")
+        if not isinstance(observation, dict):
+            await fail("action: missing 'observation'", "invalid_arguments")
+            return
+        self._planning = True
+        self._action_cancel.clear()
+        asyncio.create_task(self._run_action_turn(
+            dict(msg), session, session.observation_message(observation)))
+
+    async def _run_action_turn(self, msg: dict[str, Any],
+                               session: actions.ActionSession,
+                               message: str) -> None:
+        """One model call → one validated turn. Shared by start and observe;
+        `message` is the user-role text (command or observation)."""
         try:
             t0 = time.perf_counter()
-            context = actions.ActionContext.from_dict(msg.get("context"))
-            context.transcript = transcript
-            attempts: list[str] = []
-            plan: dict[str, Any] | None = None
+            turn: dict[str, Any] | None = None
             last_error = ""
             for attempt in range(2):
-                prompt = (actions.build_action_prompt(context) if attempt == 0
-                          else actions.build_repair_prompt(context))
+                # The repair carries the actual rejection: "not valid JSON"
+                # teaches nothing when the JSON was fine and a rule was broken.
+                prompt = (session.system_prompt() if attempt == 0
+                          else session.system_prompt() + "\n"
+                               + actions.turn_repair_note(last_error))
                 result = await self.cleanup.cleanup(
-                    transcript, prompt,
-                    timeout_ms=actions.PLAN_TIMEOUT_MS,
+                    message, prompt,
+                    timeout_ms=(actions.FIRST_TURN_TIMEOUT_MS
+                                if session.turns_used == 0
+                                else actions.PLAN_TIMEOUT_MS),
                     check_ratio=False,
                     cancel_event=self._action_cancel,
                     max_tokens=actions.PLAN_MAX_TOKENS,
+                    # Every turn of a session shares the same system prompt;
+                    # two synthetic user messages make their common token
+                    # prefix exactly that prompt, so turn 2+ skips its ~2k
+                    # tokens of prefill (~1.5s per turn on a 4B).
+                    prefix_candidates=[(prompt, "a"), (prompt, "b")],
                 )
                 if self._action_cancel.is_set():
+                    self._drop_action_session(self._action_id)
                     await self._send({"event": "action_failed", "id": msg.get("id"),
                                       "code": "cancelled", "error": "action: cancelled"})
                     return
                 if not result.applied:
                     last_error = f"model unavailable ({result.reason or 'no output'})"
-                    attempts.append(last_error)
                     continue
-                attempts.append(result.text[:200])
                 try:
-                    plan = actions.plan_from_reply(result.text)
+                    turn = session.accept_reply(result.text)
                     break
                 except actions.PlanError as exc:
                     last_error = str(exc)
-                    log.warning("action plan attempt %d rejected: %s", attempt + 1, exc)
+                    # The reply excerpt is the difference between diagnosing a
+                    # systematic model spelling and guessing at it. Local log,
+                    # same sensitivity as the goal lines already logged.
+                    log.warning("action turn attempt %d rejected: %s — reply: %s",
+                                attempt + 1, exc,
+                                " ".join(result.text.split())[:220])
 
             ms = int((time.perf_counter() - t0) * 1000)
-            if plan is None:
+            if turn is None:
+                # The session survives a rejected turn: no turn was consumed
+                # (accept_reply raises before counting), and the app may ask
+                # again with a fresh observation — which beats the inline
+                # repair when the model is stuck on a shape. Bounded by its
+                # own cap so a stuck model cannot be asked forever.
+                session.rejections += 1
+                if session.rejections >= 4:
+                    self._drop_action_session(self._action_id)
                 await self._send({
                     "event": "action_failed", "id": msg.get("id"),
                     "code": "plan_invalid",
@@ -2231,21 +2328,30 @@ class Engine:
                     "ms": ms,
                 })
                 return
-            if plan.get("unsupported"):
+            if "fail" in turn:
+                self._drop_action_session(self._action_id)
                 await self._send({
                     "event": "action_failed", "id": msg.get("id"),
-                    "code": "unsupported", "error": plan["unsupported"], "ms": ms,
+                    "code": "unsupported", "error": turn["fail"], "ms": ms,
                 })
                 return
-            evt: dict[str, Any] = {"event": "action_plan", "plan": plan, "ms": ms}
+            if turn["done"]:
+                self._drop_action_session(self._action_id)
+            evt: dict[str, Any] = {
+                "event": "action_turn", "turn": session.turns_used,
+                "sends": bool(session.sends), "goal": session.goal,
+                "steps": turn["steps"], "done": turn["done"], "ms": ms,
+            }
             if msg.get("id") is not None:
                 evt["id"] = msg.get("id")
             await self._send(evt)
             self._restart_if_cleanup_unhealthy()
-            log.info("action_plan: %d steps sends=%s ms=%d",
-                     len(plan["steps"]), plan["sends"], ms)
+            log.info("action turn %d: %d steps sends=%s done=%s ms=%d",
+                     session.turns_used, len(turn["steps"]), session.sends,
+                     turn["done"], ms)
         except Exception as exc:  # noqa: BLE001 — the app is waiting on an answer
-            log.exception("action_plan failed")
+            log.exception("action turn failed")
+            self._drop_action_session(self._action_id)
             await self._send({
                 "event": "action_failed", "id": msg.get("id"),
                 "code": "failed", "error": f"action planning failed: {exc}",

@@ -186,6 +186,36 @@ final class SystemActionHost: ActionHost {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
+    /// AX role of the focused element, for observations ("AXTextField" tells
+    /// the model a search box is focused; "AXButton" tells it typing is lost).
+    func focusedElementRole() -> String? {
+        guard Permissions.accessibilityGranted,
+              let app = onMain({ NSWorkspace.shared.frontmostApplication })
+        else { return nil }
+        return ScreenContext.focusedElementRole(of: app)
+    }
+
+    /// The labels visible in the frontmost window right now — what the model
+    /// looks at between turns. Bounded walk; runs on the executor's queue.
+    func visibleNames() -> [String] {
+        guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
+        else { return [] }
+        return ScreenContext.visibleNames(of: app)
+    }
+
+    /// Press the control whose visible label matches. The frontmost app must
+    /// still be the one the plan verified — same gate as a keystroke, because
+    /// a press in the wrong app is just as irreversible.
+    func pressElement(label: String, expecting bundleID: String?) -> Bool {
+        guard Permissions.accessibilityGranted else { return false }
+        guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
+        else { return false }
+        if let bundleID, !bundleID.isEmpty, app.bundleIdentifier != bundleID {
+            return false
+        }
+        return ScreenContext.pressElement(labelled: label, in: app)
+    }
+
     // MARK: - Input
 
     /// Whether the frontmost app currently has a focused element at all. When

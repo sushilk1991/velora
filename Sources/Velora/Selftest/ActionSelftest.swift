@@ -12,6 +12,10 @@ final class FakeActionHost: ActionHost {
     var elementLabel: String?
     /// The highlighted row of a quick switcher, as the app labels it.
     var selectionLabel: String?
+    var focusedRole: String?
+    var visibleNamesValue: [String] = []
+    /// Labels that `pressElement` can find on the fake screen.
+    var pressableLabels: Set<String> = []
     var canPostInput = true
     var screenIsLocked = false
     /// Whether anything on screen can receive typed characters.
@@ -29,6 +33,7 @@ final class FakeActionHost: ActionHost {
     private(set) var typed: [String] = []
     private(set) var keys: [(CGKeyCode, CGEventFlags)] = []
     private(set) var openedURLs: [URL] = []
+    private(set) var pressedLabels: [String] = []
     private var frontmostReads = 0
     private var clock: TimeInterval = 0
 
@@ -56,6 +61,8 @@ final class FakeActionHost: ActionHost {
     func frontmostWindowTitle() -> String? { windowTitle }
     func focusedElementLabel() -> String? { elementLabel }
     func focusedSelectionLabel() -> String? { selectionLabel }
+    func focusedElementRole() -> String? { focusedRole }
+    func visibleNames() -> [String] { visibleNamesValue }
     var hasFocusedTextTarget: Bool { hasTextTarget }
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
@@ -76,8 +83,50 @@ final class FakeActionHost: ActionHost {
         return keyPressSucceeds
     }
 
+    func pressElement(label: String, expecting bundleID: String?) -> Bool {
+        log.append("press(\(label))")
+        guard pressableLabels.contains(label) else { return false }
+        pressedLabels.append(label)
+        onStep?("press(\(label))")
+        return true
+    }
+
     func sleep(ms: Int) { clock += Double(ms) / 1000 }
     func now() -> TimeInterval { clock }
+}
+
+/// Scripted stand-in for the engine's turn planner, so the loop driver can be
+/// exercised without a model or a socket.
+final class FakeTurnPlanner: ActionTurnPlanner {
+    private var turns: [PlannedTurn]
+    private(set) var startCount = 0
+    private(set) var observations: [[String: Any]] = []
+    private(set) var ended = false
+    /// Fires on each observe BEFORE the next turn is returned, so a test can
+    /// change the fake screen the way a real press changes a real one.
+    var onObserve: (([String: Any]) -> Void)?
+
+    init(turns: [PlannedTurn]) {
+        self.turns = turns
+    }
+
+    private func next() -> PlannedTurn {
+        turns.isEmpty ? .failure(reason: "planner script exhausted", code: "failed")
+                      : turns.removeFirst()
+    }
+
+    func start(transcript: String, context: ActionContextSnapshot) -> PlannedTurn {
+        startCount += 1
+        return next()
+    }
+
+    func observe(_ observation: [String: Any]) -> PlannedTurn {
+        observations.append(observation)
+        onObserve?(observation)
+        return next()
+    }
+
+    func end() { ended = true }
 }
 
 extension Selftest {
@@ -97,13 +146,434 @@ extension Selftest {
                "FIXTURE: the draft plan decodes to 9 steps")
         testActionPlanDecoding()
         testActionPlanRejectsUnsafePlans()
+        testPressElementDecoding()
+        testBatchStateCarriesAcrossTurns()
         testActionKeyVocabulary()
         testAppMatching()
         testActionExecutorHappyPath()
         testActionExecutorSafetyRails()
+        testActionExecutorPressElement()
+        testActionLoopRecovery()
+        testActionLoopSafetyRails()
         testSecondaryHotkeyRouting()
         testActionShortcutSettingsMigration()
         testActionCLIParsing()
+    }
+
+    // MARK: - press_element decoding
+
+    private static func testPressElementDecoding() {
+        guard let plan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_element","label":"Shivangi Singh"}]}
+        """) else {
+            expect(false, "a press_element plan decodes")
+            return
+        }
+        expect(plan.steps.last == .pressElement(label: "Shivangi Singh"),
+               "the label survives decoding")
+
+        expect(decodePlanError("""
+        {"steps":[{"do":"press_element","label":"Shivangi Singh"}]}
+        """) == .inputBeforeFocus(step: 0),
+        "a press lands on the frontmost app, so it needs the same checkpoint as typing")
+
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_element","label":"ok"}]}
+        """) == .weakPressLabel("ok"),
+        "a two-character label matches half the controls on screen")
+
+        // press_element exists to NAVIGATE. Anything that sends, deletes, pays,
+        // or signs out is refused by label — sending stays behind the keyboard
+        // path and its verify-before-return gate.
+        for label in ["Send", "Send to Shivangi", "Delete Chat", "Buy now",
+                      "Log Out", "Sign out", "Confirm order"] {
+            expect(decodePlanError("""
+            {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+              {"do":"press_element","label":"\(label)"}]}
+            """) == .committingPressLabel(label),
+            "'\(label)' names a committing control and is refused")
+        }
+        // Word-level matching: "ascending" contains "send" but is not the word.
+        for label in ["Sort ascending", "Himesh Singh, direct message",
+                      "Sign of the Times - Harry Styles"] {
+            expect(decodePlanError("""
+            {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+              {"do":"press_element","label":"\(label)"}]}
+            """) == nil, "'\(label)' is a navigation label and is allowed")
+        }
+
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_element","label":"Shivangi Singh"},
+          {"do":"type_text","text":"stuck in traffic"}]}
+        """) == .inputBeforeFocus(step: 2),
+        "a press changes what is on screen — typing after it needs a fresh checkpoint")
+    }
+
+    // MARK: - Carried state across turns
+
+    private static func testBatchStateCarriesAcrossTurns() {
+        // Text typed in turn N must not become committable in turn N+1 just
+        // because the new batch starts with a clean flag.
+        var state = ActionPlan.BatchState()
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello there"}]}
+        """, state: &state) != nil, "turn one types after its checkpoint")
+        expect(state.unverifiedText, "the typed text is remembered as unverified")
+        expect(decodeBatchError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},{"do":"key","key":"return"}]}
+        """, state: &state) == .unverifiedSend(step: 1),
+        "a bare Return in the NEXT turn cannot commit last turn's text")
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"return"}]}
+        """, state: &state) != nil,
+        "verifying first makes the same Return acceptable")
+
+        // The text budget is for the whole action, not per turn.
+        var textState = ActionPlan.BatchState()
+        let big = String(repeating: "x", count: 1_900)
+        for _ in 0..<2 {
+            _ = decodeBatch("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
+              {"do":"type_text","text":"\(big)"}]}
+            """, state: &textState)
+        }
+        expect(decodeBatchError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"\(String(repeating: "y", count: 300))"}]}
+        """, state: &textState) != nil,
+        "the total text budget spans every turn of the action")
+
+        // So is the step budget.
+        var stepState = ActionPlan.BatchState()
+        let batch = """
+        {"sends":false,"steps":[\((0..<10).map { _ in
+            "{\"do\":\"wait_frontmost\",\"app\":\"Slack\"}" }.joined(separator: ","))]}
+        """
+        _ = decodeBatch(batch, state: &stepState)
+        _ = decodeBatch(batch, state: &stepState)
+        expect(decodeBatchError(batch, state: &stepState) != nil,
+               "24 steps is the budget for the action, not for one turn")
+
+        // A rejected batch must not consume budget: the repair attempt starts
+        // from the same place.
+        var cleanState = ActionPlan.BatchState()
+        _ = decodeBatchError("""
+        {"steps":[{"do":"type_text","text":"hi"}]}
+        """, state: &cleanState)
+        expect(cleanState == ActionPlan.BatchState(),
+               "a rejected batch leaves the carried state untouched")
+    }
+
+    // MARK: - Executor: press_element
+
+    private static func testActionExecutorPressElement() {
+        let host = FakeActionHost()
+        host.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        host.pressableLabels = ["Shivangi Singh"]
+        guard let plan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_element","label":"Shivangi Singh"}]}
+        """) else {
+            expect(false, "the press plan decodes")
+            return
+        }
+        let result = ActionExecutor(host: host).run(plan)
+        expect(result.outcome == .completed, "a findable label is pressed")
+        expect(host.pressedLabels == ["Shivangi Singh"], "the press reaches the host")
+
+        // The label isn't on screen → recoverable: the model should look again
+        // and try something else, not the user.
+        let missing = FakeActionHost()
+        missing.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        if case .failed(_, _, let recoverable) = ActionExecutor(host: missing)
+            .run(plan).outcome {
+            expect(recoverable, "an unfindable label is a recoverable failure")
+        } else {
+            expect(false, "an unfindable label must fail the step")
+        }
+    }
+
+    // MARK: - The loop: observe → decide → act
+
+    private static func jsonSteps(_ text: String) -> [Any] {
+        (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [Any] ?? []
+    }
+
+    private static func loopContext() -> ActionContextSnapshot {
+        var snapshot = ActionContextSnapshot()
+        snapshot.frontmostApp = "Sublime Text"
+        snapshot.runningApps = ["WhatsApp", "Slack", "Sublime Text"]
+        return snapshot
+    }
+
+    /// The exact failure from the field, replayed: WhatsApp's Return does not
+    /// open a chat, so the verify fails — and instead of giving up with a
+    /// "Retry" toast, the loop reports what it saw and the next turn presses
+    /// the person's row directly.
+    private static func testActionLoopRecovery() {
+        let host = FakeActionHost()
+        host.appsByName["WhatsApp"] = ("WhatsApp", "net.whatsapp.WhatsApp")
+        host.windowTitle = "WhatsApp"
+        host.elementLabel = "Search"
+        host.focusedRole = "AXTextField"
+        host.visibleNamesValue = ["Shivangi Singh", "Himesh Singh"]
+        host.pressableLabels = ["Shivangi Singh"]
+        host.onStep = { step in
+            if step == "press(Shivangi Singh)" {
+                host.windowTitle = "Shivangi Singh"
+                host.elementLabel = "Message to Shivangi Singh"
+            }
+        }
+        let planner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "draft to Shivangi", steps: jsonSteps("""
+            [{"do":"open_app","app":"WhatsApp"},
+             {"do":"wait_frontmost","app":"WhatsApp"},
+             {"do":"key","key":"f","mods":["cmd"]},
+             {"do":"type_text","text":"Shivangi"},
+             {"do":"verify_context","expect":["Shivangi"]},
+             {"do":"key","key":"return"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"WhatsApp"},
+             {"do":"press_element","label":"Shivangi Singh"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Shivangi"]},
+             {"do":"type_text","text":"stuck in traffic"}]
+            """), done: true),
+        ])
+        let runner = ActionLoopRunner(host: host, planner: planner,
+                                      execute: true, allowSend: false)
+        let result = runner.run(transcript: "message Shivangi about traffic",
+                                context: loopContext())
+        guard case .completed(_, let trace) = result else {
+            expect(false, "the loop recovers and completes, got \(result)")
+            return
+        }
+        expect(host.pressedLabels == ["Shivangi Singh"],
+               "the recovery pressed the person's row")
+        expect(host.typed.contains("stuck in traffic"),
+               "the message was typed after the recovery verified the chat")
+        expect(trace.contains { $0.contains("press_element") },
+               "the trace shows the press")
+        expect(planner.observations.count == 2, "each turn saw a fresh observation")
+        let first = planner.observations[0]
+        expect((first["failed_step"] as? String)?.contains("Shivangi") == true,
+               "the failed verify is reported to the model verbatim")
+        expect((first["screen_names"] as? [String])?.contains("Shivangi Singh") == true,
+               "the observation offers the labels the screen actually shows")
+        expect((first["executed"] as? [String])?.isEmpty == false,
+               "the observation carries what already ran")
+        expect(planner.ended, "the session is closed when the loop finishes")
+    }
+
+    private static func testActionLoopSafetyRails() {
+        // 1. The runtime-truth rail. Turn 1 types and its verify FAILS at
+        //    runtime — decode-time state says "verified", the machine says no.
+        //    A bare Return next turn must be rejected, or the loop reintroduces
+        //    the wrong-recipient send the one-shot design already fixed.
+        let host = FakeActionHost()
+        host.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        host.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        host.windowTitle = "general (Channel) - Slack"
+        host.elementLabel = "Query"
+        let planner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "g", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"},
+             {"do":"type_text","text":"hello"},
+             {"do":"verify_context","expect":["Himesh"]}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"},
+             {"do":"key","key":"return"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Himesh"]}]
+            """), done: false),
+        ])
+        let runner = ActionLoopRunner(host: host, planner: planner,
+                                      execute: true, allowSend: false)
+        let result = runner.run(transcript: "t", context: loopContext())
+        expect(host.keys.isEmpty,
+               "text whose verify failed at RUNTIME is never committed by a later turn")
+        expect(planner.observations.count >= 2
+               && (planner.observations[1]["failed_step"] as? String)?
+                   .contains("rejected") == true,
+               "the rejected batch is reported to the model as an observation")
+        if case .completed = result {
+            expect(false, "a loop that never met its goal must not claim success")
+        }
+
+        // 2. sends=true from the first turn + a caller that never consented →
+        //    refused before anything runs.
+        let sendHost = FakeActionHost()
+        let sendPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: true, goal: "message Priya", steps: jsonSteps("""
+            [{"do":"open_app","app":"Slack"}]
+            """), done: false),
+        ])
+        let sendRunner = ActionLoopRunner(host: sendHost, planner: sendPlanner,
+                                          execute: true, allowSend: false)
+        let sendResult = sendRunner.run(transcript: "t", context: loopContext())
+        if case .needsSendApproval = sendResult {
+            expect(sendHost.log.isEmpty, "nothing executes without send consent")
+            expect(sendPlanner.ended, "the refused session is closed")
+        } else {
+            expect(false, "a sending action without consent is refused, got \(sendResult)")
+        }
+
+        // 3. A model that never says done runs out of turns, not forever.
+        let capHost = FakeActionHost()
+        capHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        capHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        let endless = PlannedTurn.turn(sends: false, goal: "g", steps: jsonSteps("""
+        [{"do":"wait_frontmost","app":"Slack"}]
+        """), done: false)
+        let capPlanner = FakeTurnPlanner(
+            turns: Array(repeating: endless, count: ActionLoopRunner.maxTurns + 4))
+        let capRunner = ActionLoopRunner(host: capHost, planner: capPlanner,
+                                        execute: true, allowSend: false)
+        if case .failed(let reason, _) = capRunner.run(transcript: "t",
+                                                       context: loopContext()) {
+            expect(reason.lowercased().contains("attempt"),
+                   "running out of turns says so plainly")
+        } else {
+            expect(false, "an endless loop must fail at the turn cap")
+        }
+        expect(capPlanner.observations.count == ActionLoopRunner.maxTurns - 1,
+               "the loop stops asking after the cap")
+
+        // 4. A fatal failure ends the loop immediately — no more turns.
+        let fatalHost = FakeActionHost()
+        fatalHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        fatalHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        fatalHost.windowTitle = "Himesh Singh (DM) - Slack"
+        fatalHost.canPostInput = false
+        let fatalPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "g", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"},{"do":"type_text","text":"hi"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"}]
+            """), done: false),
+        ])
+        let fatalRunner = ActionLoopRunner(host: fatalHost, planner: fatalPlanner,
+                                           execute: true, allowSend: false)
+        if case .failed = fatalRunner.run(transcript: "t", context: loopContext()) {
+            expect(fatalPlanner.observations.isEmpty,
+                   "secure input is not something another turn can fix")
+        } else {
+            expect(false, "blocked input must fail the loop")
+        }
+
+        // 5. Dry run: the first batch comes back described, nothing executes.
+        let dryHost = FakeActionHost()
+        let dryPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open Slack", steps: jsonSteps("""
+            [{"do":"open_app","app":"Slack"}]
+            """), done: false),
+        ])
+        let dryRunner = ActionLoopRunner(host: dryHost, planner: dryPlanner,
+                                         execute: false, allowSend: false)
+        if case .planned(let plan) = dryRunner.run(transcript: "t",
+                                                   context: loopContext()) {
+            expect(plan.steps.first == .openApp("Slack"), "the dry run shows the batch")
+            expect(dryHost.log.isEmpty, "a dry run never touches the machine")
+            expect(dryPlanner.ended, "a dry run closes the session")
+        } else {
+            expect(false, "a dry run reports the planned batch")
+        }
+
+        // 6. Cancel mid-batch stops the loop, not just the batch.
+        let cancelHost = FakeActionHost()
+        cancelHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        cancelHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        cancelHost.windowTitle = "Himesh Singh (DM) - Slack"
+        let cancelPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "g", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"},
+             {"do":"verify_context","expect":["Himesh"]},
+             {"do":"type_text","text":"one"},
+             {"do":"verify_context","expect":["Himesh"]},
+             {"do":"type_text","text":"two"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"}]
+            """), done: false),
+        ])
+        let cancelRunner = ActionLoopRunner(host: cancelHost, planner: cancelPlanner,
+                                            execute: true, allowSend: false)
+        cancelHost.onStep = { step in
+            if step == "type(one)" { cancelRunner.cancel() }
+        }
+        if case .cancelled = cancelRunner.run(transcript: "t",
+                                              context: loopContext()) {
+            expect(!cancelHost.typed.contains("two"), "cancel stops within the batch")
+            expect(cancelPlanner.observations.isEmpty, "a cancelled loop asks no more turns")
+            expect(cancelPlanner.ended, "a cancelled loop closes the session")
+        } else {
+            expect(false, "cancel must end the loop as cancelled")
+        }
+
+        // 7b. An engine-side rejection (plan_invalid) is not the end: the
+        //     loop asks again with a fresh observation carrying the reason.
+        let rejHost = FakeActionHost()
+        rejHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        rejHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        rejHost.windowTitle = "Himesh Singh (DM) - Slack"
+        rejHost.elementLabel = "Message to Himesh Singh"
+        let rejPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "draft", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"}]
+            """), done: false),
+            .failure(reason: "could not plan that action: type_text before "
+                        + "any focus checkpoint", code: "plan_invalid"),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Himesh"]},
+             {"do":"type_text","text":"hi"}]
+            """), done: true),
+        ])
+        let rejRunner = ActionLoopRunner(host: rejHost, planner: rejPlanner,
+                                         execute: true, allowSend: false)
+        if case .completed = rejRunner.run(transcript: "t", context: loopContext()) {
+            expect(rejPlanner.observations.count == 2,
+                   "the rejection cost one extra ask, not the whole action")
+            expect((rejPlanner.observations[1]["failed_step"] as? String)?
+                       .contains("rejected") == true,
+                   "the next ask names the rejection so the model can react")
+            expect(rejHost.typed == ["hi"], "the recovered turn still ran")
+        } else {
+            expect(false, "a plan_invalid reply must be retried with an observation")
+        }
+
+        // 7. done together with final steps completes without another ask.
+        let finishHost = FakeActionHost()
+        finishHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        finishHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        finishHost.windowTitle = "Himesh Singh (DM) - Slack"
+        finishHost.elementLabel = "Message to Himesh Singh"
+        let finishPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "draft", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"},
+             {"do":"verify_context","expect":["Himesh"]},
+             {"do":"type_text","text":"on my way"}]
+            """), done: true),
+        ])
+        let finishRunner = ActionLoopRunner(host: finishHost, planner: finishPlanner,
+                                            execute: true, allowSend: false)
+        if case .completed = finishRunner.run(transcript: "t",
+                                              context: loopContext()) {
+            expect(finishPlanner.observations.isEmpty,
+                   "a final batch marked done skips the extra round-trip")
+            expect(finishHost.typed == ["on my way"], "the final steps still ran")
+        } else {
+            expect(false, "a done-with-steps turn completes the loop")
+        }
     }
 
     // MARK: - Hotkey routing
@@ -608,8 +1078,10 @@ extension Selftest {
         stuck.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
         stuck.frontmostAfterReads = (reads: 0, value: ("Sublime Text", "com.sublimetext.4"))
         let stuckResult = ActionExecutor(host: stuck).run(plan)
-        expect(stuckResult.outcome == .failed(step: 1, reason: "Slack didn't come to the front"),
-               "a plan stops when its app never comes forward")
+        expect(stuckResult.outcome == .failed(step: 1,
+                                              reason: "Slack didn't come to the front",
+                                              recoverable: true),
+               "a plan stops when its app never comes forward — and another turn may retry")
         expect(stuck.typed.isEmpty, "nothing is typed when focus was never established")
 
         // 2. The wrong conversation is open → stop before the message is typed.
@@ -618,7 +1090,7 @@ extension Selftest {
         wrongChat.windowTitle = "Priya Sharma (DM) - Slack"
         wrongChat.elementLabel = "Message Priya Sharma"
         let wrongResult = ActionExecutor(host: wrongChat).run(plan)
-        if case .failed(let step, _) = wrongResult.outcome {
+        if case .failed(let step, _, _) = wrongResult.outcome {
             // Step 5 is the verify that now guards the switcher's Return —
             // it fires before anything is committed.
             expect(step == 5, "verify_context is what fails, at its own step")
@@ -658,7 +1130,8 @@ extension Selftest {
         locked.windowTitle = "Himesh Singh (DM) - Slack"
         locked.screenIsLocked = true
         let lockedResult = ActionExecutor(host: locked).run(plan)
-        expect(lockedResult.outcome == .failed(step: 0, reason: "the screen is locked"),
+        expect(lockedResult.outcome == .failed(step: 0, reason: "the screen is locked",
+                                               recoverable: false),
                "a locked screen fails the plan with an honest reason")
         expect(locked.log.isEmpty, "a locked screen stops the plan before it opens anything")
 
@@ -707,7 +1180,7 @@ extension Selftest {
         // 6. The app in the plan does not exist on this Mac.
         let missing = FakeActionHost()
         let missingResult = ActionExecutor(host: missing).run(plan)
-        if case .failed(let step, _) = missingResult.outcome {
+        if case .failed(let step, _, _) = missingResult.outcome {
             expect(step == 0, "an unknown app fails at the open step")
         } else {
             expect(false, "an unknown app must fail the plan")
@@ -756,6 +1229,27 @@ extension Selftest {
               let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
         do {
             _ = try ActionPlan.decode(object)
+            return nil
+        } catch let error as ActionPlanError {
+            return error
+        } catch {
+            return nil
+        }
+    }
+
+    static func decodeBatch(_ json: String,
+                            state: inout ActionPlan.BatchState) -> ActionPlan? {
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        return try? ActionPlan.decode(object, state: &state)
+    }
+
+    static func decodeBatchError(_ json: String,
+                                 state: inout ActionPlan.BatchState) -> ActionPlanError? {
+        guard let data = json.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) else { return nil }
+        do {
+            _ = try ActionPlan.decode(object, state: &state)
             return nil
         } catch let error as ActionPlanError {
             return error

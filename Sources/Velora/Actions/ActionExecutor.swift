@@ -19,6 +19,14 @@ protocol ActionHost: AnyObject {
     /// App-authored label of the highlighted row near the focused element (a
     /// quick switcher's selected result), if any.
     func focusedSelectionLabel() -> String?
+    /// AX role of the focused element ("AXTextField"), for observations.
+    func focusedElementRole() -> String?
+    /// Name-like labels visible in the frontmost window — what the model gets
+    /// to look at between turns.
+    func visibleNames() -> [String]
+    /// Press the on-screen control whose label matches. Label-addressed AX
+    /// action — never a coordinate, never a synthesized click.
+    func pressElement(label: String, expecting bundleID: String?) -> Bool
     func typeText(_ text: String, expecting bundleID: String?) -> Bool
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
@@ -43,7 +51,11 @@ protocol ActionHost: AnyObject {
 
 enum ActionOutcome: Equatable {
     case completed
-    case failed(step: Int, reason: String)
+    /// `recoverable` marks failures another turn of the loop can react to —
+    /// a checkpoint that did not match, a label that was not on screen. A
+    /// non-recoverable failure (secure input, a locked screen, stolen focus)
+    /// ends the whole action: it is not something a smarter plan fixes.
+    case failed(step: Int, reason: String, recoverable: Bool)
     case cancelled(step: Int)
 
     var isSuccess: Bool { self == .completed }
@@ -53,6 +65,10 @@ struct ActionRunResult: Equatable {
     let outcome: ActionOutcome
     /// One line per attempted step, for the log and for tests.
     let trace: [String]
+    /// How many steps fully completed. The loop recomputes its carried safety
+    /// state from THIS, not from the batch as written — a verify_context that
+    /// failed at runtime must not count as having verified anything.
+    let executedSteps: Int
 }
 
 /// Runs a validated plan, re-checking safety at every step.
@@ -100,39 +116,44 @@ final class ActionExecutor {
 
     func run(_ plan: ActionPlan) -> ActionRunResult {
         var trace: [String] = []
+
+        /// Failure at `index`: exactly the steps before it completed.
+        func failed(_ index: Int, _ reason: String,
+                    recoverable: Bool) -> ActionRunResult {
+            ActionRunResult(
+                outcome: .failed(step: index, reason: reason, recoverable: recoverable),
+                trace: trace, executedSteps: index)
+        }
+
         guard plan.isExecutable else {
-            return ActionRunResult(outcome: .failed(step: 0, reason: "nothing to do"),
-                                   trace: trace)
+            return failed(0, "nothing to do", recoverable: false)
         }
         // Checked up front rather than per step: on a locked Mac every plan
         // fails, and it should say why instead of blaming the target app.
         guard !host.screenIsLocked else {
             trace.append("blocked: screen locked")
-            return ActionRunResult(
-                outcome: .failed(step: 0, reason: "the screen is locked"), trace: trace)
+            return failed(0, "the screen is locked", recoverable: false)
         }
 
         for (index, step) in plan.steps.enumerated() {
             if cancelled {
-                return ActionRunResult(outcome: .cancelled(step: index), trace: trace)
+                return ActionRunResult(outcome: .cancelled(step: index), trace: trace,
+                                       executedSteps: index)
             }
             // Permission and secure-input state can change mid-plan (the user
             // clicks a password field between steps).
             if step.isInput, !host.canPostInput {
                 trace.append("blocked: input not permitted")
-                return ActionRunResult(
-                    outcome: .failed(step: index,
-                                     reason: "keyboard input is not permitted right now"),
-                    trace: trace)
+                return failed(index, "keyboard input is not permitted right now",
+                              recoverable: false)
             }
 
             switch step {
             case .openApp(let name):
                 guard let resolved = host.openApp(named: name) else {
                     trace.append("open_app \(name): not found")
-                    return ActionRunResult(
-                        outcome: .failed(step: index, reason: "couldn't find an app called \(name)"),
-                        trace: trace)
+                    return failed(index, "couldn't find an app called \(name)",
+                                  recoverable: true)
                 }
                 // Both cleared: activation is advisory, so until a
                 // wait_frontmost confirms it, "we asked for Slack" is not
@@ -146,9 +167,7 @@ final class ActionExecutor {
             case .openURL(let url):
                 guard host.openURL(url) else {
                     trace.append("open_url \(url.scheme ?? "?"): failed")
-                    return ActionRunResult(
-                        outcome: .failed(step: index, reason: "couldn't open that link"),
-                        trace: trace)
+                    return failed(index, "couldn't open that link", recoverable: true)
                 }
                 // A URL hands off to whichever app owns the scheme; the plan
                 // must re-establish focus before it may type.
@@ -160,9 +179,8 @@ final class ActionExecutor {
                 guard let front = waitForFrontmost(app, timeoutMs: timeoutMs) else {
                     let actual = host.frontmostApp()?.name ?? "nothing"
                     trace.append("wait_frontmost \(app): timed out (front: \(actual))")
-                    return ActionRunResult(
-                        outcome: .failed(step: index, reason: "\(app) didn't come to the front"),
-                        trace: trace)
+                    return failed(index, "\(app) didn't come to the front",
+                                  recoverable: true)
                 }
                 expectedAppName = front.name
                 expectedBundleID = front.bundleID
@@ -176,16 +194,13 @@ final class ActionExecutor {
                 // one app's title and then type into another's window.
                 guard let before = host.frontmostApp() else {
                     trace.append("verify_context: no frontmost app")
-                    return ActionRunResult(
-                        outcome: .failed(step: index, reason: "couldn't read the active window"),
-                        trace: trace)
+                    return failed(index, "couldn't read the active window",
+                                  recoverable: false)
                 }
                 if expectedAppName != nil || expectedBundleID != nil, !focusStillHeld() {
                     trace.append("verify_context: focus lost before the check")
-                    return ActionRunResult(
-                        outcome: .failed(step: index,
-                                         reason: "\(expectedAppName ?? "the app") lost focus"),
-                        trace: trace)
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
                 }
                 // Poll rather than read once. A UI does not settle on a
                 // schedule: Slack's search is network-backed, and a window
@@ -207,20 +222,20 @@ final class ActionExecutor {
                 guard let after = host.frontmostApp(),
                       after.bundleID == before.bundleID, after.name == before.name else {
                     trace.append("verify_context: focus moved while reading the screen")
-                    return ActionRunResult(
-                        outcome: .failed(step: index,
-                                         reason: "the active window changed mid-check"),
-                        trace: trace)
+                    return failed(index, "the active window changed mid-check",
+                                  recoverable: false)
                 }
                 guard AppMatcher.contextMatches(terms, in: [title, label, selection]) else {
                     trace.append("verify_context \(terms.joined(separator: "+")): "
                                  + "no match in '\(title ?? "")' / '\(label ?? "")'"
                                  + " / '\(selection ?? "")'")
-                    return ActionRunResult(
-                        outcome: .failed(
-                            step: index,
-                            reason: "couldn't confirm \(terms.first ?? "the target") on screen"),
-                        trace: trace)
+                    // Recoverable BY DESIGN: this is the observation the loop
+                    // exists for. The model gets told what the screen showed
+                    // instead, and chooses differently.
+                    return failed(
+                        index,
+                        "couldn't confirm \(terms.first ?? "the target") on screen",
+                        recoverable: true)
                 }
                 // The window that satisfied the check — and only that one — is
                 // what the following steps may type into.
@@ -241,19 +256,18 @@ final class ActionExecutor {
                 // run still claimed it had typed 17 characters.
                 guard host.hasFocusedTextTarget else {
                     trace.append("type_text: nothing focused to type into")
-                    return ActionRunResult(
-                        outcome: .failed(
-                            step: index,
-                            reason: "\(expectedAppName ?? "that app") has no text field "
-                                + "focused to type into"),
-                        trace: trace)
+                    // Recoverable: the next turn can open a compose field or
+                    // press the element that would focus one.
+                    return failed(
+                        index,
+                        "\(expectedAppName ?? "that app") has no text field "
+                            + "focused to type into",
+                        recoverable: true)
                 }
                 guard focusStillHeld() else {
                     trace.append("type_text: focus lost")
-                    return ActionRunResult(
-                        outcome: .failed(step: index,
-                                         reason: "\(expectedAppName ?? "the app") lost focus"),
-                        trace: trace)
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
                 }
                 let ok: Bool
                 if case .pasteText = step {
@@ -263,49 +277,59 @@ final class ActionExecutor {
                 }
                 guard ok else {
                     trace.append("type_text: refused")
-                    return ActionRunResult(
-                        outcome: .failed(step: index, reason: "couldn't type that text"),
-                        trace: trace)
+                    return failed(index, "couldn't type that text", recoverable: false)
                 }
                 trace.append("type_text \(text.count) chars")
 
             case .key(let name, let mods, let repeatCount):
                 guard focusStillHeld() else {
                     trace.append("key \(name): focus lost")
-                    return ActionRunResult(
-                        outcome: .failed(step: index,
-                                         reason: "\(expectedAppName ?? "the app") lost focus"),
-                        trace: trace)
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
                 }
                 guard let code = ActionKey.keyCode(for: name) else {
                     trace.append("key \(name): unmappable")
-                    return ActionRunResult(
-                        outcome: .failed(step: index, reason: "can't press \(name)"),
-                        trace: trace)
+                    return failed(index, "can't press \(name)", recoverable: false)
                 }
                 let flags = ActionModifier.flags(for: mods)
                 for iteration in 0..<repeatCount {
                     if cancelled {
-                        return ActionRunResult(outcome: .cancelled(step: index), trace: trace)
+                        return ActionRunResult(outcome: .cancelled(step: index),
+                                               trace: trace, executedSteps: index)
                     }
                     guard host.pressKey(code, flags: flags,
                                         expecting: expectedBundleID) else {
                         trace.append("key \(name): failed at \(iteration)")
-                        return ActionRunResult(
-                            outcome: .failed(step: index, reason: "couldn't press \(name)"),
-                            trace: trace)
+                        return failed(index, "couldn't press \(name)", recoverable: false)
                     }
                     if repeatCount > 1 { host.sleep(ms: 30) }
                 }
                 trace.append("key \(mods.joined(separator: "+"))\(mods.isEmpty ? "" : "+")\(name)"
                              + (repeatCount > 1 ? " x\(repeatCount)" : ""))
 
+            case .pressElement(let label):
+                guard focusStillHeld() else {
+                    trace.append("press_element \(label): focus lost")
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
+                }
+                guard host.pressElement(label: label,
+                                        expecting: expectedBundleID) else {
+                    trace.append("press_element \(label): not found")
+                    // Recoverable BY DESIGN: "that label isn't on screen" is
+                    // exactly the observation the next turn should react to.
+                    return failed(index, "couldn't find '\(label)' on screen",
+                                  recoverable: true)
+                }
+                trace.append("press_element \(label)")
+
             case .pause(let ms):
                 host.sleep(ms: ms)
                 trace.append("pause \(ms)ms")
             }
         }
-        return ActionRunResult(outcome: .completed, trace: trace)
+        return ActionRunResult(outcome: .completed, trace: trace,
+                               executedSteps: plan.steps.count)
     }
 
     /// True when the app the plan focused is still frontmost. When focus was

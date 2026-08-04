@@ -96,27 +96,46 @@ Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed
 
 Hold the Action hotkey (⌃⇧A by default), speak a command, and Velora carries it
 out: opens the app, navigates, types. The command is transcribed in **Raw** mode
-— cleanup would rewrite the names that identify a person or an app — and sent to
-the planner:
+— cleanup would rewrite the names that identify a person or an app — and drives
+an **observe→decide→act loop**: the model proposes a short batch of steps, the
+app executes them for real, reads what the screen actually says, and reports
+back; the model decides the next batch from what it sees. A failed checkpoint is
+an observation, not a dead end — v1's one-shot plans died on every app whose
+behaviour differed from a hardcoded recipe.
 
 ```
-app → engine  {"cmd":"action_plan","id":"uuid","transcript":"message Priya on Slack that I'm late",
+app → engine  {"cmd":"action_start","id":"uuid","transcript":"message Priya on Slack that I'm late",
                "context":{"frontmost_app":"Sublime Text","frontmost_bundle":"com.sublimetext.4",
                           "frontmost_window":"notes.md","running_apps":["Slack","Google Chrome"],
-                          "selection":""}}
-engine → app  {"event":"action_plan","id":"uuid","ms":1580,
-               "plan":{"version":1,"goal":"…","sends":true,"steps":[…]}}
-engine → app  {"event":"action_failed","id":"uuid","code":"plan_invalid|unsupported|busy|…"}
+                          "selection":"","screen_names":["Priya Menon","#standup"]}}
+engine → app  {"event":"action_turn","id":"uuid","turn":1,"sends":true,"goal":"…",
+               "steps":[…],"done":false,"ms":1580}
+app → engine  {"cmd":"action_observe","id":"uuid",
+               "observation":{"frontmost_app":"Slack","window_title":"…",
+                              "focused_label":"Query","focused_role":"AXTextField",
+                              "selection":"…","screen_names":[…],
+                              "executed":["open_app Slack","key cmd+k"],
+                              "failed_step":"verify_context [Priya]: no match in '…'"}}
+engine → app  {"event":"action_turn","id":"uuid","turn":2,"steps":[…],"done":false}
+…
+app → engine  {"cmd":"action_end","id":"uuid"}       # loop finished either way
+engine → app  {"event":"action_failed","id":"uuid","code":"plan_invalid|unsupported|turn_limit|…"}
 ```
 
-The planner is the same on-device Qwen that cleans dictation, prompted for JSON
-(`actions.py`), with one repair retry when the reply is not a single JSON object.
-It shares the model with dictation under the same preemption contract as Safe
-Voice Edit: pressing the dictation hotkey cancels an in-flight plan.
+The model is the same on-device Qwen that cleans dictation, prompted for JSON
+(`actions.py`), with one repair retry per turn. It shares the model with
+dictation under the same preemption contract as Safe Voice Edit. The loop is
+bounded: 8 turns, one session at a time, and the engine's `ActionSession` owns
+the budgets so no turn can reset them. Everything in an observation is read off
+the user's screen, so every string is defanged (chat-template control markers
+neutralized, line structure collapsed) before it reaches the prompt.
 
 **Step vocabulary** (closed by design — no shell, no scripts, no raw
 coordinates): `open_app`, `open_url`, `wait_frontmost`, `verify_context`,
-`type_text`, `key`, `pause`.
+`press_element`, `type_text`, `key`, `pause`. `press_element` activates the
+control whose visible label matches (AXPress, label-addressed, whole-word) —
+and refuses labels naming committing controls (send/delete/pay/confirm/…), so
+pressing can navigate but never deliver.
 
 **The safety gate is implemented twice**, in `velora_engine/actions.py` and again
 in `Sources/Velora/Actions/ActionPlan.swift`. That is deliberate: the engine
@@ -139,9 +158,14 @@ only the app holds the Accessibility grant. Its rules:
 - `verify_context` requires ALL its terms, matched whole-word, each at least
   three characters and never the target app's own name — "Slack" appears in
   every Slack window title and would prove nothing.
-- Every budget is capped (24 steps, 4 000 typed characters, 12 s of pauses).
-- `sends` marks a plan that delivers something to another person. A plan that
-  omits the field is treated as sending.
+- Every budget is capped and **spans the whole action, not one turn** (24
+  steps, 4 000 typed characters, 8 turns; pauses are capped per batch). Text
+  typed in turn N stays "unverified" into turn N+1 — the flag carries, and it
+  is recomputed from what actually *executed*, so a verify_context that failed
+  at runtime never counts as having verified anything.
+- `sends` marks an action that delivers something to another person. It is
+  declared on the first turn and locked — a later turn can never upgrade a
+  draft into a send. A first turn that omits the field is treated as sending.
 
 At execution time (`ActionExecutor`) each step re-checks reality: the frontmost
 app must still be the one focus was established on, secure input must be absent,
@@ -153,10 +177,12 @@ never a field's value, which would just be the plan's own typed text confirming
 itself. Any failure stops the plan where it stands rather
 than continuing blind.
 
-Recipes for Slack and WhatsApp live in the planner prompt (quick switcher →
-name → verify → message), not in Swift, so a new app is a prompt change. Web
-searches resolve to a single `open_url`, which is faster and far more reliable
-than walking a UI.
+App knowledge lives in the prompt as **hints, not scripts** ("Slack's ⌘K field
+labels itself Query"; "WhatsApp's Return does not open a chat — press the
+person's row"). The loop's observations are the ground truth; when a hint and
+the screen disagree, the screen wins, and an app nobody wrote a hint for is
+still navigable by looking. Web searches resolve to a single `open_url`, which
+is faster and far more reliable than walking a UI.
 
 ## Local control protocol (CLI and MCP)
 

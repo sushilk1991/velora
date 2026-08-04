@@ -164,6 +164,76 @@ enum ScreenContext {
         return names
     }
 
+    /// Finds and presses the control whose visible label matches `label` — a
+    /// chat row in a search list, a link in results. Label-addressed only;
+    /// there is deliberately no press-by-coordinate anywhere in Action Mode.
+    ///
+    /// Matching is `AppMatcher.contextMatches` (whole-word, ALL terms), the
+    /// same rule `verify_context` lives by, so "Priya" cannot press
+    /// "Priyanka". The element that carries the text is often not the one
+    /// that accepts the press (Slack rows expose AXStaticText children), so
+    /// after a label match the press walks up a few ancestors looking for one
+    /// that lists AXPress. Bounded like `visibleNames`: Electron trees are
+    /// enormous and every read is IPC.
+    static func pressElement(
+        labelled label: String,
+        in app: NSRunningApplication?,
+        nodeBudget: Int = 900,
+        deadline: TimeInterval = 1.5
+    ) -> Bool {
+        guard let app, app.processIdentifier > 0, Permissions.accessibilityGranted else {
+            return false
+        }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        guard let window = axElement(appElement, kAXFocusedWindowAttribute)
+            ?? axElements(appElement, kAXWindowsAttribute).first else { return false }
+
+        let stopAt = Date().addingTimeInterval(deadline)
+        var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
+        var visited = 0
+
+        while !queue.isEmpty, visited < nodeBudget, Date() < stopAt {
+            let (element, depth) = queue.removeFirst()
+            visited += 1
+            AXUIElementSetMessagingTimeout(element, 0.2)
+            for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
+                guard let text = axString(element, attribute),
+                      AppMatcher.contextMatches([label], in: [text]) else { continue }
+                if press(element) { return true }
+                // The text lives on a child; the pressable thing is the row.
+                var ancestor = axElement(element, kAXParentAttribute)
+                for _ in 0..<3 {
+                    guard let candidate = ancestor else { break }
+                    if press(candidate) { return true }
+                    ancestor = axElement(candidate, kAXParentAttribute)
+                }
+            }
+            guard depth < 10 else { continue }
+            for child in (axChildren(element) ?? []).prefix(40) {
+                queue.append((child, depth + 1))
+            }
+        }
+        return false
+    }
+
+    /// Performs AXPress if the element advertises it. Never presses blind:
+    /// an element without the action is skipped, not force-pressed.
+    private static func press(_ element: AXUIElement) -> Bool {
+        var actionsRef: CFArray?
+        guard AXUIElementCopyActionNames(element, &actionsRef) == .success,
+              let actions = actionsRef as? [String],
+              actions.contains(kAXPressAction as String) else { return false }
+        return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+    }
+
+    /// AX role of the app's focused element ("AXTextField", "AXTextArea").
+    static func focusedElementRole(of app: NSRunningApplication?) -> String? {
+        guard let app, let focused = focusedElement(of: app) else { return nil }
+        AXUIElementSetMessagingTimeout(focused, 0.3)
+        return axString(focused, kAXRoleAttribute)
+    }
+
     /// Keeps strings that could plausibly be a person, channel, or app name and
     /// drops UI prose. A sentence is not a name, and neither is a single letter.
     private static func nameCandidate(_ raw: String) -> String? {

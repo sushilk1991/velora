@@ -20,8 +20,11 @@ transcripts, and history are not sent to a transcription service.
   if the result is not right.
 - **Carries out spoken actions.** Hold ⌃⇧A and say what you want done — "search
   YouTube for the match highlights", "message Priya on Slack that I'm running
-  late" — and Velora opens the app and does it. Say "draft" instead and it stops
-  with the message written but unsent. Planning happens on your Mac, like
+  late" — and Velora opens the app and does it, working like an agent: it acts
+  a few steps at a time, reads what the screen actually says, and adjusts —
+  pressing the right person's chat when a shortcut didn't land, correcting a
+  misheard name to the spelling it can see. Say "draft" instead and it stops
+  with the message written but unsent. All of it happens on your Mac, like
   everything else, and Velora stops rather than guess whenever the window it
   expects is not the one in front.
 - **Remembers meetings—with permission.** After you confirm, Velora records

@@ -13,6 +13,10 @@ enum ActionStep: Equatable {
     case pasteText(String)
     case key(name: String, mods: [String], repeatCount: Int)
     case pause(ms: Int)
+    /// Press the on-screen control whose visible label matches — a chat row in
+    /// a search list, a link in results. Label-addressed, never a coordinate,
+    /// and never a committing control (the label denylist below).
+    case pressElement(label: String)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
@@ -64,6 +68,8 @@ enum ActionPlanError: Error, Equatable {
     case inputBeforeFocus(step: Int)
     case weakVerifyTerm(String)
     case unverifiedSend(step: Int)
+    case weakPressLabel(String)
+    case committingPressLabel(String)
 
     var message: String {
         switch self {
@@ -86,6 +92,10 @@ enum ActionPlanError: Error, Equatable {
             return "'\(term)' doesn't identify anything specific enough to check"
         case .unverifiedSend(let step):
             return "step \(step) would send text the plan never confirmed a target for"
+        case .weakPressLabel(let label):
+            return "'\(label)' is too short to identify one control to press"
+        case .committingPressLabel(let label):
+            return "'\(label)' names a committing control — pressing is for navigation only"
         }
     }
 }
@@ -115,9 +125,56 @@ extension ActionPlan {
         ]
         /// Keys that commit whatever is currently typed, when unmodified.
         static let committingKeys: Set<String> = ["return", "enter"]
+        /// press_element label bounds, mirrored from the engine.
+        static let minPressLabelCharacters = 3
+        static let maxPressLabelCharacters = 80
+        /// Words that mark a control as committing or destructive — a press
+        /// may navigate, never commit. Checked word-by-word AND against each
+        /// adjacent pair joined ("Log Out" → "logout"), so "Ascending" never
+        /// trips on the substring "send" but "Send to Priya" is refused.
+        /// Mirrored from `velora_engine/actions.py`; the engine test
+        /// `test_press_denylist_matches_the_swift_mirror` reads the marker
+        /// line below, so keep it in sync with this set.
+        // press_denylist: send submit post publish reply delete remove discard pay buy purchase order checkout confirm accept agree call transfer forward share tweet block leave archive unsubscribe logout signout
+        static let pressDenyWords: Set<String> = [
+            "send", "submit", "post", "publish", "reply", "delete", "remove",
+            "discard", "pay", "buy", "purchase", "order", "checkout", "confirm",
+            "accept", "agree", "call", "transfer", "forward", "share", "tweet",
+            "block", "leave", "archive", "unsubscribe", "logout", "signout",
+        ]
+    }
+
+    /// Budgets and safety state that CARRY ACROSS the turns of one action.
+    ///
+    /// Focus deliberately does NOT carry: every batch starts unverified,
+    /// because between turns the model spends seconds thinking and the user
+    /// may have clicked anywhere. `unverifiedText` deliberately DOES: text
+    /// typed in turn N must not become committable in turn N+1 just because a
+    /// fresh batch started with a clean flag.
+    struct BatchState: Equatable {
+        var stepsUsed = 0
+        var totalText = 0
+        var unverifiedText = false
+    }
+
+    /// True when the label names a control that would commit something.
+    static func pressLabelIsCommitting(_ label: String) -> Bool {
+        let words = label.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            .map(String.init)
+        let joinedPairs = zip(words, words.dropFirst()).map { $0 + $1 }
+        return (words + joinedPairs).contains { Limits.pressDenyWords.contains($0) }
     }
 
     static func decode(_ object: Any?) throws -> ActionPlan {
+        var state = BatchState()
+        return try decode(object, state: &state)
+    }
+
+    /// Decode one turn's batch as a continuation: budgets and the
+    /// unverified-text flag resume from `state`, and `state` is updated only
+    /// when the whole batch validates — a rejected batch (and the repair that
+    /// follows it) must start from the same pre-batch state.
+    static func decode(_ object: Any?, state: inout BatchState) throws -> ActionPlan {
         guard let plan = object as? [String: Any] else { throw ActionPlanError.notAnObject }
 
         if let unsupported = plan["unsupported"] as? String,
@@ -129,18 +186,18 @@ extension ActionPlan {
         guard let rawSteps = plan["steps"] as? [Any], !rawSteps.isEmpty else {
             throw ActionPlanError.noSteps
         }
-        guard rawSteps.count <= Limits.maxSteps else {
-            throw ActionPlanError.tooManySteps(rawSteps.count)
+        guard state.stepsUsed + rawSteps.count <= Limits.maxSteps else {
+            throw ActionPlanError.tooManySteps(state.stepsUsed + rawSteps.count)
         }
 
         var steps: [ActionStep] = []
         var focusEstablished = false
-        var totalText = 0
-        var totalPause = 0
+        var totalText = state.totalText
+        var totalPause = 0  // per batch: pauses bound UI settling, not the action
         var appNames: [String] = []
         /// True once text has been typed that a bare Return would commit, with
-        /// no verify_context since.
-        var unverifiedText = false
+        /// no verify_context since. Seeded from the previous turns.
+        var unverifiedText = state.unverifiedText
 
         for (index, raw) in rawSteps.enumerated() {
             guard let step = raw as? [String: Any],
@@ -288,16 +345,71 @@ extension ActionPlan {
                 }
                 steps.append(.pause(ms: ms))
 
+            case "press_element":
+                guard focusEstablished else {
+                    throw ActionPlanError.inputBeforeFocus(step: index)
+                }
+                let label = String(ActionPlan.sanitize(try string("label"))
+                    .prefix(Limits.maxPressLabelCharacters))
+                guard AppMatcher.normalize(label).count
+                        >= Limits.minPressLabelCharacters else {
+                    throw ActionPlanError.weakPressLabel(label)
+                }
+                guard !ActionPlan.pressLabelIsCommitting(label) else {
+                    throw ActionPlanError.committingPressLabel(label)
+                }
+                steps.append(.pressElement(label: label))
+                // The press changed what is on screen; whatever follows must
+                // re-establish focus before it may type or press again.
+                focusEstablished = false
+
             default:
                 throw ActionPlanError.unknownVerb(verb)
             }
         }
+
+        state.stepsUsed += steps.count
+        state.totalText = totalText
+        state.unverifiedText = unverifiedText
 
         let goal = (plan["goal"] as? String).map { String(ActionPlan.sanitize($0).prefix(200)) }
         return ActionPlan(goal: goal ?? "",
                           sends: plan["sends"] as? Bool ?? true,
                           steps: steps,
                           unsupported: nil)
+    }
+
+    /// The carried state as it stands after only the first `executedCount`
+    /// steps of a batch actually ran.
+    ///
+    /// Decode-time state assumes the whole batch executes; the machine may
+    /// stop halfway. The divergence that matters is a verify_context that
+    /// FAILED at runtime: decode counted it as clearing the typed text, but
+    /// nothing was actually verified — and the next turn's bare Return would
+    /// commit text to a target no check ever confirmed. Recomputing from the
+    /// executed prefix keeps the safety flag tied to what the machine did,
+    /// not what the plan intended. Steps are still budgeted in full (matching
+    /// the engine, and the conservative direction).
+    static func state(after plan: ActionPlan, executedCount: Int,
+                      seed: BatchState) -> BatchState {
+        var next = seed
+        next.stepsUsed = seed.stepsUsed + plan.steps.count
+        for step in plan.steps.prefix(max(0, executedCount)) {
+            switch step {
+            case .typeText(let text), .pasteText(let text):
+                next.totalText += text.count
+                next.unverifiedText = true
+            case .verifyContext:
+                next.unverifiedText = false
+            case .key(let name, let mods, _):
+                if Limits.committingKeys.contains(name), mods.isEmpty {
+                    next.unverifiedText = false
+                }
+            default:
+                break
+            }
+        }
+        return next
     }
 
     /// Drops control and bidi-override characters. A right-to-left override in
