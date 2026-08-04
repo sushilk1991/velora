@@ -156,7 +156,7 @@ extension ActionPlan {
         /// Mirrored from `velora_engine/actions.py`; the engine test
         /// `test_press_denylist_matches_the_swift_mirror` reads the marker
         /// line below, so keep it in sync with this set.
-        // press_denylist: send submit post publish reply delete remove discard pay buy purchase order checkout confirm accept agree call transfer forward share tweet block leave archive unsubscribe logout signout trash erase reset approve withdraw report mute unfollow subscribe
+        // press_denylist: abmelden abschicken absenden accept acheter afmelden agree antworten apagar approve archivar archive archiver beantwoorden bestaetigen bestatigen betalen bevestigen bezahlen block borrar buy call cancella cerrarsesion checkout compartilhar compartir comprar condividi conferma confirm confirmar confirmer deconnecter delen delete discard disconnetti doorsturen effacer elimina eliminar eliminare encaminhar enviar envoyer erase excluir forward inoltra invia inviare kaufen kopen leave loeschen logout loschen mute order paga pagar pagare partager pay payer post publicar publier publish purchase reenviar remove reply repondre report reset responder rispondi sairdaconta sedeconnecter send senden share signout submit subscribe supprimer teilen transfer transferer trash tweet uitloggen unfollow unsubscribe verwijderen verzenden weiterleiten withdraw
         static let pressDenyWords: Set<String> = [
             "send", "submit", "post", "publish", "reply", "delete", "remove",
             "discard", "pay", "buy", "purchase", "order", "checkout", "confirm",
@@ -164,7 +164,72 @@ extension ActionPlan {
             "block", "leave", "archive", "unsubscribe", "logout", "signout",
             "trash", "erase", "reset", "approve", "withdraw", "report", "mute",
             "unfollow", "subscribe",
+            // Localized labels for the same controls. macOS ships localized,
+            // and an English-only list meant this gate did not exist at all on
+            // a French or Spanish Mac (audited bypass, 2026-08-04). Diacritics
+            // are folded before matching, so "Répondre" arrives as "repondre"
+            // and "Löschen" as "loschen".
+            "enviar", "eliminar", "borrar", "pagar", "comprar", "confirmar",
+            "publicar", "responder", "reenviar", "compartir", "archivar",
+            "envoyer", "supprimer", "effacer", "payer", "acheter", "confirmer",
+            "publier", "repondre", "transferer", "partager", "archiver",
+            "senden", "loschen", "loeschen", "bezahlen", "kaufen",
+            "bestatigen", "bestaetigen", "antworten", "weiterleiten", "teilen",
+            "abschicken", "absenden",
+            "excluir", "apagar", "encaminhar", "compartilhar",
+            "invia", "inviare", "elimina", "eliminare", "cancella", "paga",
+            "pagare", "conferma", "rispondi", "inoltra", "condividi",
+            "verzenden", "verwijderen", "betalen", "kopen", "bevestigen",
+            "beantwoorden", "doorsturen", "delen",
+            // Sign-out, which the first pass covered only in English.
+            // Two-word forms are caught by the joined-pair check, so the pair
+            // spelling is what goes here — "cerrar" alone would refuse an
+            // ordinary Close.
+            "cerrarsesion", "deconnecter", "sedeconnecter", "abmelden",
+            "afmelden", "disconnetti", "sairdaconta", "uitloggen",
         ]
+        /// The same controls in scripts the word splitter cannot tokenize —
+        /// Japanese and Chinese have no spaces, so a word list can never match
+        /// them. Checked as substrings of the folded label. Mirrored from
+        /// `PRESS_DENY_SUBSTRINGS` in the engine.
+        static let pressDenySubstrings: [String] = [
+            "送信", "送出", "发送", "發送", "削除", "删除", "刪除",
+            "確認", "确认", "支払", "支付", "ログアウト", "退出登录",
+            "보내기", "전송", "삭제", "확인", "결제", "로그아웃",
+            "отправить", "послать", "удалить", "видалити",
+            "оплатить", "подтвердить", "выйти",
+            "भेजें", "हटाएं",
+            "إرسال", "حذف", "تأكيد", "שלח", "מחק",
+            "αποστολή", "διαγραφή", "ส่ง", "ลบ",
+        ]
+        /// Keys that ACTIVATE the focused control. A bare Space presses the
+        /// focused button, so `type_text` → `key tab` → `key space` delivered
+        /// a message past every send defense at once (audited bypass,
+        /// 2026-08-04). Gated only while text is pending: a Space with
+        /// nothing typed is ordinary navigation.
+        static let activationKeys: Set<String> = ["space"]
+        /// Keys that MOVE FOCUS OR THE SELECTED ROW without committing. Tab
+        /// was the other half of the Space bypass; the arrows are the same
+        /// hole one key over, aimed at the exact surface the verify gate was
+        /// built for — in Slack's ⌘K switcher, type "Priya" → verify → down →
+        /// return moved the highlight to Priyanka and sent to her with the
+        /// verification still counted good. These do NOT clear the focus
+        /// checkpoint (To → Tab → Subject is legitimate); they only re-arm
+        /// the send gate.
+        static let focusMovingKeys: Set<String> = [
+            "tab", "up", "down", "left", "right",
+            "home", "end", "page_up", "page_down",
+        ]
+        /// Everything after a URL's first `?` or `#` is payload, not address.
+        /// Bounds open_url as an outbound channel without trying to judge
+        /// which query strings are screen-derived. Defense in depth, NOT a
+        /// closed channel: the path is still uncapped below this length, and
+        /// a determined plan can chunk across steps.
+        static let maxURLQueryCharacters = 256
+        /// Total URL length, mirroring the engine's `_require_str` bound.
+        /// Swift had no equivalent, so a 1,900-character path the engine
+        /// refused would have been accepted here (review finding).
+        static let maxURLCharacters = 2_000
     }
 
     /// Budgets and safety state that CARRY ACROSS the turns of one action.
@@ -189,10 +254,24 @@ extension ActionPlan {
 
     /// True when the label names a control that would commit something.
     static func pressLabelIsCommitting(_ label: String) -> Bool {
-        let words = label.lowercased().split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        // Fold diacritics so localized labels compare as the engine spells
+        // them: the engine's word regex is ASCII-only and folds first, so
+        // "Répondre" is "repondre" on both sides.
+        let folded = label.folding(options: [.diacriticInsensitive, .widthInsensitive],
+                                   locale: nil).lowercased()
+        let words = folded.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
             .map(String.init)
         let joinedPairs = zip(words, words.dropFirst()).map { $0 + $1 }
-        return (words + joinedPairs).contains { Limits.pressDenyWords.contains($0) }
+        if (words + joinedPairs).contains(where: { Limits.pressDenyWords.contains($0) }) {
+            return true
+        }
+        // Scripts with no word boundaries. The needles are folded the same
+        // way, or Arabic "إرسال" would not match its own folded form.
+        return Limits.pressDenySubstrings.contains { needle in
+            folded.contains(needle.folding(
+                options: [.diacriticInsensitive, .widthInsensitive],
+                locale: nil).lowercased())
+        }
     }
 
     static func decode(_ object: Any?) throws -> ActionPlan {
@@ -268,6 +347,18 @@ extension ActionPlan {
                           CharacterSet.controlCharacters.contains($0)
                       })
                 else { throw ActionPlanError.badURL(String(raw.prefix(120))) }
+                // Bound open_url as an outbound channel: the planner's prompt
+                // holds the selection, window titles and on-screen labels,
+                // and a query string can carry any of it off the machine.
+                // Spoken searches are short; bulk exfiltration is not.
+                guard raw.count <= Limits.maxURLCharacters else {
+                    throw ActionPlanError.badURL(String(raw.prefix(120)))
+                }
+                if let mark = raw.firstIndex(where: { $0 == "?" || $0 == "#" }),
+                   raw.distance(from: raw.index(after: mark),
+                                to: raw.endIndex) > Limits.maxURLQueryCharacters {
+                    throw ActionPlanError.badURL(String(raw.prefix(120)))
+                }
                 steps.append(.openURL(url))
                 if pendingText { unverifiedText = true }
 
@@ -364,7 +455,12 @@ extension ActionPlan {
                 guard repeatCount >= 1, repeatCount <= Limits.maxKeyRepeat else {
                     throw ActionPlanError.repeatOutOfRange(repeatCount)
                 }
-                let committing = Limits.committingKeys.contains(name)
+                // A bare Space presses the focused control, so once text is
+                // pending it can deliver exactly like Return and must clear
+                // the same gate. With nothing typed it is plain navigation.
+                let activating = mods.isEmpty
+                    && Limits.activationKeys.contains(name) && pendingText
+                let committing = Limits.committingKeys.contains(name) || activating
                 if committing {
                     guard repeatCount == 1 else {
                         // One validated Return must not become twelve.
@@ -384,7 +480,14 @@ extension ActionPlan {
                     }
                 }
                 steps.append(.key(name: name, mods: mods, repeatCount: repeatCount))
-                if committing {
+                if activating {
+                    // Deliberately does NOT clear pendingText the way Return
+                    // does: we cannot tell whether the Space pressed a button
+                    // or typed a space, and clearing on the typed-a-space
+                    // reading would leave the text pending but ungated — the
+                    // same hole one step further along.
+                    unverifiedText = true
+                } else if committing {
                     unverifiedText = false
                     pendingText = false
                 } else if (mods.isEmpty && Limits.printableKeys.contains(name))
@@ -393,6 +496,10 @@ extension ActionPlan {
                     // is now pending exactly as if type_text had run.
                     unverifiedText = true
                     pendingText = true
+                } else if Limits.focusMovingKeys.contains(name), pendingText {
+                    // Focus moved, so the check that covered the pending text
+                    // no longer describes where a committing key would land.
+                    unverifiedText = true
                 }
 
             case "pause":
@@ -468,13 +575,23 @@ extension ActionPlan {
             case .verifyContext:
                 next.unverifiedText = false
             case .key(let name, let mods, _):
-                if Limits.committingKeys.contains(name) {
+                // The activation and focus-moving branches must mirror
+                // `decode` exactly: this function is what actually carries
+                // state BETWEEN turns, so a rule that lives only in decode
+                // evaporates at the batch boundary and the next turn's
+                // Return goes ungated (review finding, 2026-08-04).
+                if mods.isEmpty, Limits.activationKeys.contains(name),
+                   next.pendingText {
+                    next.unverifiedText = true
+                } else if Limits.committingKeys.contains(name) {
                     next.unverifiedText = false
                     next.pendingText = false
                 } else if (mods.isEmpty && Limits.printableKeys.contains(name))
                             || (name == "v" && mods.contains("cmd")) {
                     next.unverifiedText = true
                     next.pendingText = true
+                } else if Limits.focusMovingKeys.contains(name), next.pendingText {
+                    next.unverifiedText = true
                 }
             case .pressElement, .openApp, .openURL:
                 // Navigation that executed moved the screen out from under

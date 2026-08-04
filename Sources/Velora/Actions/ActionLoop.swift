@@ -128,9 +128,16 @@ final class ActionLoopRunner {
 
                 if stepsJSON.isEmpty {
                     planner.end()
-                    return done ? .completed(goal: lockedGoal, trace: fullTrace)
-                                : .failed(reason: "the planner returned nothing to do",
-                                          trace: fullTrace)
+                    // A FIRST turn that reports done without doing anything is
+                    // the planner shrugging, and this used to reach the user
+                    // as success. From turn 2 an observation has been seen, so
+                    // "already met" is a real answer. The engine refuses this
+                    // too; keeping the app's own check is the point of having
+                    // two (review finding, 2026-08-04).
+                    return done && turnsUsed > 1
+                        ? .completed(goal: lockedGoal, trace: fullTrace)
+                        : .failed(reason: "the planner returned nothing to do",
+                                  trace: fullTrace)
                 }
 
                 let batchObject: [String: Any] = [
