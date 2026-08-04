@@ -69,6 +69,10 @@ struct ActionRunResult: Equatable {
 ///   switcher happened to highlight;
 /// * `cancel()` is honoured between every step.
 final class ActionExecutor {
+    /// How long a `verify_context` step waits for the screen to catch up
+    /// before deciding the state it wanted never arrived.
+    static let verifySettleSeconds: TimeInterval = 2.5
+
     private let host: ActionHost
     /// Written on the main queue by `cancel()`, read on the executor's
     /// background queue. Locked rather than left to arm64's incidental
@@ -183,9 +187,23 @@ final class ActionExecutor {
                                          reason: "\(expectedAppName ?? "the app") lost focus"),
                         trace: trace)
                 }
-                let title = host.frontmostWindowTitle()
-                let label = host.focusedElementLabel()
-                let selection = host.focusedSelectionLabel()
+                // Poll rather than read once. A UI does not settle on a
+                // schedule: Slack's search is network-backed, and a window
+                // title updates some tens of milliseconds after the click that
+                // caused it. A single read turns "not yet" into "not true",
+                // which fails a correct plan. Polling only ever lets the check
+                // see the real state — it never loosens what counts as a match.
+                var title = host.frontmostWindowTitle()
+                var label = host.focusedElementLabel()
+                var selection = host.focusedSelectionLabel()
+                let settleDeadline = host.now() + Self.verifySettleSeconds
+                while !AppMatcher.contextMatches(terms, in: [title, label, selection]),
+                      host.now() < settleDeadline, !cancelled {
+                    host.sleep(ms: 150)
+                    title = host.frontmostWindowTitle()
+                    label = host.focusedElementLabel()
+                    selection = host.focusedSelectionLabel()
+                }
                 guard let after = host.frontmostApp(),
                       after.bundleID == before.bundleID, after.name == before.name else {
                     trace.append("verify_context: focus moved while reading the screen")
