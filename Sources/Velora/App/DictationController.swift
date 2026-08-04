@@ -449,7 +449,13 @@ final class DictationController: NSObject {
             self?.actionRequestID = nil
             switch result {
             case .planned(let plan):
-                completion(.success(["ok": true, "executed": false, "plan": plan.payload]))
+                // The harvested names are reported so a wrong-name plan can be
+                // diagnosed: an empty list means the target app's window was
+                // never read, which is a different bug from the model ignoring
+                // the names it was given.
+                var payload = plan.payload
+                payload["screen_names"] = context.screenNames
+                completion(.success(["ok": true, "executed": false, "plan": payload]))
             case .needsSendApproval(let plan):
                 completion(.failure(ControlFailure(
                     code: "send_not_allowed",
