@@ -306,6 +306,7 @@ struct ModesSettingsView: View {
                 }
             }
             .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
 
             Divider()
             HStack(spacing: VeloraSpacing.s) {
@@ -434,6 +435,7 @@ private struct ModeEditor: View {
                 }
             }
             .formStyle(.grouped)
+            .scrollContentBackground(.hidden)
 
             Divider()
             footer
