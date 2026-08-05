@@ -98,6 +98,11 @@ enum HUDGeometry {
         + meetingStopButtonSide
         + VeloraSpacing.s * 3
         + meetingContentSlack
+    /// Detected-start and uncertain-end actions need a title, context, and two
+    /// explicit choices. They may use the existing maximum capsule width but
+    /// never alter the proven compact recording geometry above.
+    static let meetingPromptWidth: CGFloat = maxListeningWidth
+    static let meetingPromptIconSide: CGFloat = 24
     static let chipIconSide: CGFloat = 22
     static let chipIconCornerRadius: CGFloat = 5
     static let maximumChipWidth =

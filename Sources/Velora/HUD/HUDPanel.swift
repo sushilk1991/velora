@@ -106,9 +106,7 @@ final class HUDPanel: NSObject {
         // Error and meeting states host real SwiftUI buttons — let SwiftUI own
         // the mouse there instead of the tap/drag interceptor.
         hosting.wantsNativeMouse = { [weak self] in
-            if case .error = self?.model.state { return true }
-            if case .meeting = self?.model.state { return true }
-            return false
+            self?.model.state.usesNativeMouseControls == true
         }
         hosting.onTap = { [weak self] in self?.onTap?() }
         hosting.onDragEnded = { [weak self] in self?.finalizeUserDrag() }
@@ -444,7 +442,13 @@ final class HUDPanel: NSObject {
         hideWorkItem = nil
 
         if !target.isHidden {
-            if model.state.isHidden || !panel.isVisible {
+            let promptShouldFollowMainDisplay: Bool = {
+                guard AppConfig.shared.hudPosition != .custom,
+                      model.state.isAvailable else { return false }
+                if case .meetingSuggestion = target { return true }
+                return false
+            }()
+            if model.state.isHidden || !panel.isVisible || promptShouldFollowMainDisplay {
                 position()
             }
             panel.orderFrontRegardless()  // shows without activating Velora

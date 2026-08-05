@@ -5,17 +5,14 @@ import Foundation
 /// the mic mid-way through a manual recording is not "the meeting".
 enum MeetingWatchScope: Equatable {
     case native(String)
-    case browser
+    case browser(String?)
     case unknown
 
-    static func forSource(_ source: String?) -> MeetingWatchScope {
-        switch source {
-        case "Slack Huddle", "Zoom", "Microsoft Teams":
-            return .native(source ?? "")
-        case "Google Meet", "Browser meeting":
-            return .browser
-        default:
-            return .unknown
+    static func forChannel(_ channel: MeetingChannel) -> MeetingWatchScope {
+        switch channel {
+        case .native(let name): return .native(name)
+        case .browser(let bundle): return .browser(bundle)
+        case .unknown: return .unknown
         }
     }
 
@@ -25,9 +22,10 @@ enum MeetingWatchScope: Equatable {
     func matches(_ presence: MeetingPresence) -> Bool {
         switch self {
         case .native(let name):
-            return presence.source == name
-        case .browser:
-            return presence.source == "Google Meet" || presence.source == "Browser meeting"
+            return presence.channel == .native(name)
+        case .browser(let expectedBundle):
+            guard case .browser(let currentBundle) = presence.channel else { return false }
+            return expectedBundle == nil || currentBundle == nil || expectedBundle == currentBundle
         case .unknown:
             return !presence.micBacked
         }
@@ -40,12 +38,20 @@ enum MeetingWatchScope: Equatable {
         return true
     }
 
+    /// Only native clients expose microphone ownership precisely enough to
+    /// stop without asking. Browser ownership is process-wide, not tab-wide.
+    var mayAutoStop: Bool {
+        if case .native = self { return true }
+        return false
+    }
+
     /// Native apps keep their window titles and their input stream through
     /// mutes and device switches — fast streak. Browser calls hide titles
     /// behind tabs and some web apps release the mic on mute; manual
     /// recordings have nothing attributable — both need the long streak.
     var endThreshold: Int {
         if case .native = self { return 2 }
+        if case .browser = self { return 12 }
         return 4
     }
 }

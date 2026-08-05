@@ -20,9 +20,15 @@ enum HUDState: Equatable {
     case standby
     case listening
     case transcribing
+    /// Consent for an automatically detected call. It lives on the same
+    /// non-activating panel as dictation so fullscreen meetings cannot hide it.
+    case meetingSuggestion(title: String, source: String)
     /// Persistent meeting indicator. It stays visible for the full capture and
     /// includes the truth of whether the remote/system track is healthy.
     case meeting(title: String, systemAudio: Bool)
+    /// A title-only end inference is uncertain, so the persistent meeting HUD
+    /// asks instead of opening a separate modal or stopping silently.
+    case meetingEnd(title: String)
     case inserted
     case error(String)
     /// Learned-a-correction toast (Wispr-style): the misheard word struck
@@ -43,6 +49,22 @@ enum HUDState: Equatable {
     /// idle chrome, not an active session.
     var isAvailable: Bool {
         isHidden || self == .standby
+    }
+
+    var isMeetingPrompt: Bool {
+        switch self {
+        case .meetingSuggestion, .meetingEnd: return true
+        default: return false
+        }
+    }
+
+    /// These capsules contain SwiftUI buttons. The hosting view must not
+    /// intercept their clicks as whole-HUD dictation taps.
+    var usesNativeMouseControls: Bool {
+        switch self {
+        case .error, .meetingSuggestion, .meeting, .meetingEnd: return true
+        default: return false
+        }
     }
 }
 
@@ -113,6 +135,11 @@ final class HUDModel: ObservableObject {
     var onRetry: (() -> Void)?
     /// Invoked by the stop control in the persistent meeting capsule.
     var onMeetingStop: (() -> Void)?
+    var onMeetingSuggestionAccept: (() -> Void)?
+    var onMeetingSuggestionDismiss: (() -> Void)?
+    var onMeetingEndConfirm: (() -> Void)?
+    var onMeetingEndKeep: (() -> Void)?
+    var onMeetingEndDiscard: (() -> Void)?
     /// Title of the error-state action button ("Retry" normally; "Open
     /// Settings" when the fix is granting a permission).
     @Published var retryTitle = "Retry"

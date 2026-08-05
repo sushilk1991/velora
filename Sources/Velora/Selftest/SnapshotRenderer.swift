@@ -40,6 +40,12 @@ enum SnapshotRenderer {
             ("hud-listening-long-mode", .listening),
             ("hud-listening-hour", .listening),
             ("hud-listening-day", .listening),
+            ("hud-meeting-suggestion", .meetingSuggestion(
+                title: "Harshi Ko", source: "Google Meet")),
+            ("hud-meeting-suggestion-long", .meetingSuggestion(
+                title: "Quarterly product planning with the leadership team",
+                source: "Microsoft Teams")),
+            ("hud-meeting-end", .meetingEnd(title: "Harshi Ko")),
             ("hud-meeting", .meeting(title: "Design review", systemAudio: true)),
             ("hud-meeting-hour", .meeting(title: "Design review", systemAudio: true)),
             ("hud-meeting-mic-only", .meeting(title: "Design review", systemAudio: false)),

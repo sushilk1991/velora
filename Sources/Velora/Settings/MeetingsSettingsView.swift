@@ -58,7 +58,7 @@ struct MeetingsSettingsView: View {
                     }
                 }
             } footer: {
-                SettingsFooter("Detection only suggests. Every recording still needs a Start Recording confirmation, and Velora stops for you when the call's microphone goes quiet. macOS asks for computer-audio access after that confirmation on the first meeting. Transcripts and notes stay until you delete them; this setting removes only audio.")
+                SettingsFooter("Detection checks local call-app and microphone state and, with Accessibility enabled, recognized meeting addresses and titles in browser windows. Meeting addresses become a temporary private identity and are never logged or saved. Every recording still needs Start Notes. Native-app calls can stop when their own microphone closes; uncertain browser endings ask first. Transcripts and notes stay until you delete them; this setting removes only audio.")
             }
 
             Section("Notes style") {
@@ -180,6 +180,7 @@ struct MeetingsSettingsView: View {
     private var captureActive: Bool {
         switch coordinator.state {
         case .idle: return false
+        case .suggesting: return false
         case .preparing, .recording: return true
         }
     }
@@ -233,13 +234,20 @@ struct MeetingsSettingsView: View {
             }
         case .preparing(let title):
             Label(title, systemImage: "hourglass")
-        case .recording(_, let title, let startedAt, let systemAudio):
+        case .suggesting(let title, let sourceApp):
+            Label(
+                "\(sourceApp ?? "Call") detected · \(title)",
+                systemImage: "video.fill")
+                .foregroundStyle(.orange)
+        case .recording(_, let title, let startedAt, let systemAudio, let endDetected):
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
                 Label(
-                    "Recording \(title) · \(elapsed / 60):\(String(format: "%02d", elapsed % 60)) · \(systemAudio ? "Mic + system" : "Mic only")",
-                    systemImage: "record.circle.fill")
-                    .foregroundStyle(.red)
+                    endDetected
+                        ? "Did \(title) end?"
+                        : "Recording \(title) · \(elapsed / 60):\(String(format: "%02d", elapsed % 60)) · \(systemAudio ? "Mic + system" : "Mic only")",
+                    systemImage: endDetected ? "questionmark.circle.fill" : "record.circle.fill")
+                    .foregroundStyle(endDetected ? .orange : .red)
             }
         }
     }
@@ -249,14 +257,30 @@ struct MeetingsSettingsView: View {
         case .idle:
             Button("Start Meeting…") { coordinator.startManual() }
                 .controlSize(.small)
+        case .suggesting:
+            Button("Start Notes") { coordinator.acceptSuggestion() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            Button("Not Now") { coordinator.declineSuggestion() }
+                .controlSize(.small)
         case .preparing:
             ProgressView().controlSize(.small)
-        case .recording:
-            Button("Stop & Create Notes") { coordinator.stopRecording() }
-                .buttonStyle(.borderedProminent).tint(.red)
-                .controlSize(.small)
-            Button("Discard") { coordinator.cancelRecording() }
-                .controlSize(.small)
+        case .recording(_, _, _, _, let endDetected):
+            if endDetected {
+                Button("Keep Recording") { coordinator.keepMeetingRecording() }
+                    .controlSize(.small)
+                Button("Finish Notes") { coordinator.confirmMeetingEnded() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                Button("Discard…") { coordinator.cancelRecording() }
+                    .controlSize(.small)
+            } else {
+                Button("Stop & Create Notes") { coordinator.stopRecording() }
+                    .buttonStyle(.borderedProminent).tint(.red)
+                    .controlSize(.small)
+                Button("Discard") { coordinator.cancelRecording() }
+                    .controlSize(.small)
+            }
         }
     }
 

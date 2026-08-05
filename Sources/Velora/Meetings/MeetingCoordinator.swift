@@ -20,15 +20,25 @@ final class MeetingCoordinator: ObservableObject {
 
     enum State: Equatable {
         case idle
+        /// A detected call is waiting for explicit per-meeting consent. This is
+        /// presented by the existing HUD, never a focus-stealing NSAlert.
+        case suggesting(title: String, sourceApp: String?)
         case preparing(title: String)
-        case recording(id: String, title: String, startedAt: Date, systemAudio: Bool)
+        case recording(
+            id: String, title: String, startedAt: Date,
+            systemAudio: Bool, endDetected: Bool)
 
         var isRecording: Bool {
             if case .recording = self { return true }
             return false
         }
 
-        var isActive: Bool { self != .idle }
+        var isActive: Bool {
+            switch self {
+            case .preparing, .recording: return true
+            case .idle, .suggesting: return false
+            }
+        }
     }
 
     private let config = AppConfig.shared
@@ -38,6 +48,7 @@ final class MeetingCoordinator: ObservableObject {
     private let processor: MeetingProcessor
     private let sounds: SoundPlayer
     private let foregroundBusy: () -> Bool
+    private var pendingCandidate: MeetingCandidate?
     private var pendingMetadata: (source: String?, calendarID: String?)?
     private var pendingMeetingID: String?
     private var finishingMeetingID: String?
@@ -47,11 +58,11 @@ final class MeetingCoordinator: ObservableObject {
     /// alerts may close naturally, but this token is revoked during teardown.
     private var consentToken: UUID?
     private var endWatch = MeetingEndWatch()
-    private var endPromptToken: UUID?
     private var discardConfirmToken: UUID?
-    /// True once this recording's call was ever confirmed by the microphone.
-    /// Mic-backed ends are definitive and stop the recording automatically;
-    /// title-only ends can be wrong, so they ask instead.
+    /// True once this recording's scoped call was confirmed by microphone
+    /// activity. A native app mic can authorize automatic stop; a browser mic
+    /// only changes the presence signal from stale titles to bundle activity,
+    /// and its eventual absence still asks.
     private var recordingMicEvidence = false
     /// Binds the watch to the call it was armed for. Presence from an
     /// unrelated source (another app's call, a website on the mic) must not
@@ -79,7 +90,7 @@ final class MeetingCoordinator: ObservableObject {
             calendarEnabled: { AppConfig.shared.meetingCalendar },
             suggestionsEnabled: { AppConfig.shared.meetingSuggestions })
         detector.onCandidate = { [weak self] candidate in self?.suggest(candidate) }
-        detector.onActivity = { [weak self] source in self?.handleActivity(source) }
+        detector.onActivity = { [weak self] presences in self?.handleActivity(presences) }
         capture.onSystemAudioFailure = { [weak self] message in
             self?.systemAudioDidFail(message)
         }
@@ -119,7 +130,8 @@ final class MeetingCoordinator: ObservableObject {
             self.beginCapture(
                 title: title.isEmpty ? "Meeting" : title,
                 source: nil,
-                calendarID: nil)
+                calendarID: nil,
+                channel: .unknown)
         }
     }
 
@@ -149,12 +161,6 @@ final class MeetingCoordinator: ObservableObject {
         dispatchPrecondition(condition: .onQueue(.main))
         terminating = true
         detector.stop()
-        if let token = endPromptToken {
-            // Answering is meaningless mid-teardown; the recording finalizes
-            // below regardless.
-            endPromptToken = nil
-            VisibleAlert.dismiss(token)
-        }
         if let token = discardConfirmToken {
             discardConfirmToken = nil
             VisibleAlert.dismiss(token)
@@ -165,6 +171,12 @@ final class MeetingCoordinator: ObservableObject {
             consentToken = nil
             state = .idle
             VisibleAlert.dismiss(token)
+            completion()
+            return
+        }
+        if case .suggesting = state {
+            pendingCandidate = nil
+            state = .idle
             completion()
             return
         }
@@ -200,7 +212,7 @@ final class MeetingCoordinator: ObservableObject {
         enqueue: Bool,
         completion: (() -> Void)?
     ) {
-        guard case .recording(let id, let title, _, _) = state else {
+        guard case .recording(let id, let title, _, _, _) = state else {
             completion?()
             return
         }
@@ -248,7 +260,7 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     func cancelRecording() {
-        guard case .recording(let meetingID, _, _, _) = state,
+        guard case .recording(let meetingID, _, _, _, _) = state,
               discardConfirmToken == nil else { return }
         let alert = NSAlert()
         alert.alertStyle = .warning
@@ -263,7 +275,7 @@ final class MeetingCoordinator: ObservableObject {
             guard let self else { return }
             self.discardConfirmToken = nil
             guard response == .alertFirstButtonReturn,
-                  case .recording(let currentID, _, _, _) = self.state,
+                  case .recording(let currentID, _, _, _, _) = self.state,
                   currentID == meetingID
             else { return }
             self.discardActiveCapture()
@@ -283,130 +295,189 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     private func suggest(_ candidate: MeetingCandidate) {
-        guard !terminating, config.meetingSuggestions,
-              state == .idle, !foregroundBusy() else { return }
-        let alert = consentAlert(title: "Record \(candidate.title)?")
-        alert.informativeText = "Velora detected \(candidate.sourceApp ?? "a scheduled call"). "
-            + alert.informativeText
-        state = .preparing(title: "Waiting for confirmation…")
-        // Watch call-confirmed candidates while the question is up so a
-        // huddle that ends unanswered withdraws its own stale "Record?"
-        // prompt. Seeded as confirmed: the candidate poll was the evidence.
-        if candidate.callConfirmed {
-            watchScope = .forSource(candidate.sourceApp)
-            endWatch = MeetingEndWatch(threshold: watchScope.endThreshold, confirmed: true)
-            detector.setEndWatch(true)
+        guard !terminating, config.meetingSuggestions else { return }
+        guard state == .idle, !foregroundBusy() else {
+            // The detector marks a candidate delivered before invoking us. If
+            // the shared foreground/HUD is busy, release that debounce so the
+            // same still-live call retries on the next five-second poll.
+            detector.resetSuggestionDebounce()
+            return
         }
-        consentToken = VisibleAlert.present(alert) { [weak self] response in
-            guard let self, self.consentToken != nil else { return }
-            self.consentToken = nil
-            self.detector.setEndWatch(false)
-            guard !self.terminating, case .preparing = self.state else { return }
-            self.state = .idle
-            guard response == .alertFirstButtonReturn else { return }
-            self.beginCapture(
-                title: candidate.title, source: candidate.sourceApp,
-                calendarID: candidate.calendarEventID,
-                callConfirmed: candidate.callConfirmed,
-                micBacked: candidate.micBacked)
+        pendingCandidate = candidate
+        state = .suggesting(title: candidate.title, sourceApp: candidate.sourceApp)
+        veloraLog(
+            "Velora: meeting suggestion shown in HUD "
+            + "source=\(candidate.sourceApp ?? "unknown") "
+            + "confidence=\(candidate.confidence) mic=\(candidate.micBacked ? "yes" : "no") "
+            + "calendar=\(candidate.calendarEventID == nil ? "no" : "yes")")
+        // Watch while the question is up so a huddle that ends unanswered
+        // withdraws its own stale prompt. Seeded as confirmed: the candidate
+        // poll was the evidence.
+        if candidate.callConfirmed {
+            watchScope = .forChannel(candidate.channel)
+            // An unanswered prompt should withdraw promptly. The longer
+            // browser streak is reserved for an actual recording, where a
+            // long mute must not look like a definitive end.
+            endWatch = MeetingEndWatch(
+                threshold: min(4, watchScope.endThreshold), confirmed: true)
+            detector.setEndWatch(true)
         }
     }
 
-    private func handleActivity(_ presence: MeetingPresence?) {
+    func acceptSuggestion() {
+        guard !terminating, case .suggesting = state,
+              let candidate = pendingCandidate else { return }
+        detector.setEndWatch(false)
+        state = .preparing(title: "Checking call…")
+        detector.revalidate(candidate) { [weak self] current in
+            guard let self, !self.terminating,
+                  self.pendingCandidate?.key == candidate.key,
+                  self.state == .preparing(title: "Checking call…") else { return }
+            guard let current else {
+                self.pendingCandidate = nil
+                self.detector.resetSuggestionDebounce()
+                self.state = .preparing(title: "Call no longer detected")
+                veloraLog("Velora: meeting suggestion was stale at consent — recording not started")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    guard let self,
+                          self.state == .preparing(title: "Call no longer detected") else {
+                        return
+                    }
+                    self.state = .idle
+                }
+                return
+            }
+            self.pendingCandidate = nil
+            veloraLog("Velora: meeting suggestion accepted in HUD after live re-check")
+            self.beginCapture(
+                title: current.title, source: current.sourceApp,
+                calendarID: current.calendarEventID,
+                channel: current.channel,
+                callConfirmed: current.callConfirmed,
+                micBacked: current.micBacked,
+                foregroundAlreadyOwned: true)
+        }
+    }
+
+    func declineSuggestion() {
+        dismissSuggestion(reason: "dismissed in HUD")
+    }
+
+    /// A suggestion owns no microphone and must never block an explicit
+    /// dictation. AppDelegate calls this at the start boundary so the shared
+    /// HUD cannot remain logically stuck after dictation replaces it.
+    func yieldSuggestionToForegroundOperation() {
+        dismissSuggestion(reason: "yielded to foreground recording", rearm: true)
+    }
+
+    private func dismissSuggestion(reason: String, rearm: Bool = false) {
+        guard case .suggesting = state else { return }
+        pendingCandidate = nil
+        detector.setEndWatch(false)
+        endWatch = MeetingEndWatch()
+        watchScope = .unknown
+        // Yield happens before dictation preflight. If that preflight fails,
+        // the still-live call must be eligible for another prompt; an explicit
+        // user dismissal intentionally keeps the detector's episode debounce.
+        if rearm { detector.resetSuggestionDebounce() }
+        state = .idle
+        veloraLog("Velora: meeting suggestion \(reason)")
+    }
+
+    private func handleActivity(_ presences: [MeetingPresence]) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !terminating else { return }
         // Presence only counts when it belongs to the call this watch was
         // armed for; an unrelated call or a website on the mic is neither
         // "the meeting continues" nor "the meeting ended".
-        let relevant = presence.flatMap { watchScope.matches($0) ? $0 : nil }
-        let present = relevant != nil
-        if let relevant, state.isRecording, watchScope.mayLatchMicEvidence(relevant) {
+        let relevant = presences.filter(watchScope.matches)
+        // Once the microphone has confirmed this recording, only attributable
+        // microphone presence may sustain it. A stale Meet/Zoom title can stay
+        // open on a post-call screen and must not pin recording forever.
+        let present = recordingMicEvidence
+            ? relevant.contains(where: \.micBacked)
+            : !relevant.isEmpty
+        if state.isRecording,
+           relevant.contains(where: watchScope.mayLatchMicEvidence) {
             recordingMicEvidence = true
-        }
-        if let token = endPromptToken {
-            guard present else { return }
-            // The call is back (rejoined, or a flaky poll) — withdraw the
-            // question rather than let it stop a live meeting.
-            endPromptToken = nil
-            VisibleAlert.dismiss(token)
-            _ = endWatch.observe(present: true)
-            return
         }
         // The destructive confirmation freezes observation entirely: an end
         // event consumed now could neither prompt nor ever re-fire (the call
         // is gone and cannot re-confirm the watch).
         guard discardConfirmToken == nil else { return }
         switch state {
-        case .preparing:
-            guard consentToken != nil else { return }
+        case .suggesting:
             if case .ended = endWatch.observe(present: present) {
                 // The call ended before the user answered the record prompt.
                 veloraLog("Velora: meeting ended before consent — dismissing suggestion")
-                let token = consentToken
-                consentToken = nil
+                pendingCandidate = nil
                 detector.setEndWatch(false)
+                endWatch = MeetingEndWatch()
+                watchScope = .unknown
                 state = .idle
-                if let token { VisibleAlert.dismiss(token) }
             }
-        case .recording:
+        case .recording(
+            let id, let title, let startedAt, let systemAudio, let endDetected
+        ):
+            if endDetected {
+                guard present else { return }
+                // The call is back (rejoined, or a flaky poll) — withdraw the
+                // HUD question rather than let it stop a live meeting.
+                _ = endWatch.observe(present: true)
+                state = .recording(
+                    id: id, title: title, startedAt: startedAt,
+                    systemAudio: systemAudio, endDetected: false)
+                return
+            }
             if case .ended = endWatch.observe(present: present) {
                 meetingLikelyEnded()
             }
-        case .idle:
+        case .idle, .preparing:
             break
         }
     }
 
     private func meetingLikelyEnded() {
-        guard case .recording(let id, let title, _, _) = state,
+        guard case .recording(
+            let id, let title, let startedAt, let systemAudio, false
+        ) = state,
               discardConfirmToken == nil else { return }
-        // No preference for this: the evidence decides. A call the
-        // microphone confirmed has definitively ended when the mic went
-        // quiet — stop and make the notes, that's the whole point. Only
-        // title-inferred ends (manual recordings, no mic evidence) can be
-        // wrong, so only they ask.
-        if recordingMicEvidence {
-            veloraLog("Velora: call released the microphone — stopping and creating notes")
+        // No preference for this: attribution decides. A native client's own
+        // mic closing is a definitive end. Browser mic ownership is only
+        // bundle-wide, and title/manual inferences can be stale, so both ask.
+        if recordingMicEvidence, watchScope.mayAutoStop {
+            veloraLog("Velora: native call released its microphone — stopping and creating notes")
             stopRecording()
             return
         }
-        veloraLog("Velora: meeting end inferred from window state — asking")
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = "Did the meeting end?"
-        alert.informativeText =
-            "Velora no longer detects an active call, but “\(title)” is still recording."
-        alert.addButton(withTitle: "Stop & Create Notes")
-        alert.addButton(withTitle: "Keep Recording")
-        alert.addButton(withTitle: "Discard…")
-        // A title inference can be wrong (backgrounded tab, minimized
-        // window) — the Return key must land on the harmless answer. Closing
-        // the window also maps to the second button, i.e. keep recording.
-        alert.buttons[0].keyEquivalent = ""
-        alert.buttons[1].keyEquivalent = "\r"
-        endPromptToken = VisibleAlert.present(alert) { [weak self] response in
-            guard let self, self.endPromptToken != nil else { return }
-            self.endPromptToken = nil
-            guard !self.terminating,
-                  case .recording(let currentID, _, _, _) = self.state,
-                  currentID == id else { return }
-            switch response {
-            case .alertFirstButtonReturn:
-                self.stopRecording()
-            case .alertThirdButtonReturn:
-                // Routes through the existing destructive confirmation.
-                self.cancelRecording()
-            default:
-                break
-            }
-        }
+        veloraLog("Velora: meeting end is not attributable enough to auto-stop — asking in HUD")
+        state = .recording(
+            id: id, title: title, startedAt: startedAt,
+            systemAudio: systemAudio, endDetected: true)
+    }
+
+    func confirmMeetingEnded() {
+        guard case .recording(_, _, _, _, true) = state else { return }
+        stopRecording()
+    }
+
+    func keepMeetingRecording() {
+        guard case .recording(
+            let id, let title, let startedAt, let systemAudio, true
+        ) = state else { return }
+        state = .recording(
+            id: id, title: title, startedAt: startedAt,
+            systemAudio: systemAudio, endDetected: false)
+        veloraLog("Velora: meeting end suggestion dismissed — keeping recording")
     }
 
     /// Arms end-of-meeting watching for a capture that just started. The
-    /// scope binds the watch to this call's source and decides the absence
+    /// scope binds the watch to this call's transport and decides the absence
     /// streak; manual recordings can never latch mic evidence.
-    private func armEndWatch(source: String?, callConfirmed: Bool, micBacked: Bool) {
-        watchScope = .forSource(source)
+    private func armEndWatch(
+        channel: MeetingChannel, callConfirmed: Bool, micBacked: Bool
+    ) {
+        watchScope = .forChannel(channel)
         recordingMicEvidence = micBacked && watchScope != .unknown
         endWatch = MeetingEndWatch(
             threshold: watchScope.endThreshold,
@@ -414,17 +485,12 @@ final class MeetingCoordinator: ObservableObject {
         detector.setEndWatch(true)
     }
 
-    /// Disarms watching and withdraws any open end-of-meeting question,
-    /// including a stranded discard confirmation.
+    /// Disarms watching and withdraws any open destructive confirmation.
     private func settleEndWatch() {
         detector.setEndWatch(false)
         endWatch = MeetingEndWatch()
         recordingMicEvidence = false
         watchScope = .unknown
-        if let token = endPromptToken {
-            endPromptToken = nil
-            VisibleAlert.dismiss(token)
-        }
         if let token = discardConfirmToken {
             discardConfirmToken = nil
             VisibleAlert.dismiss(token)
@@ -443,10 +509,14 @@ final class MeetingCoordinator: ObservableObject {
 
     private func beginCapture(
         title: String, source: String?, calendarID: String?,
-        callConfirmed: Bool = false, micBacked: Bool = false
+        channel: MeetingChannel,
+        callConfirmed: Bool = false, micBacked: Bool = false,
+        foregroundAlreadyOwned: Bool = false
     ) {
-        guard !terminating, state == .idle else { return }
-        guard !foregroundBusy() else {
+        let mayStart = state == .idle
+            || (foregroundAlreadyOwned && state == .preparing(title: "Checking call…"))
+        guard !terminating, mayStart else { return }
+        guard foregroundAlreadyOwned || !foregroundBusy() else {
             showError("Finish the current dictation or file transcription first")
             return
         }
@@ -496,9 +566,10 @@ final class MeetingCoordinator: ObservableObject {
                 self.store.insertRecording(recording)
                 self.state = .recording(
                     id: id, title: title,
-                    startedAt: start.startedAt, systemAudio: start.systemAudio)
+                    startedAt: start.startedAt, systemAudio: start.systemAudio,
+                    endDetected: false)
                 self.armEndWatch(
-                    source: source, callConfirmed: callConfirmed, micBacked: micBacked)
+                    channel: channel, callConfirmed: callConfirmed, micBacked: micBacked)
                 self.sounds.play(.start)
                 if let warning = start.warning {
                     veloraLog("Velora: meeting capture degraded: \(warning)")
@@ -508,7 +579,7 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     private func discardActiveCapture() {
-        guard case .recording(let id, let title, _, _) = state else { return }
+        guard case .recording(let id, let title, _, _, _) = state else { return }
         settleEndWatch()
         discardingMeetingID = id
         state = .preparing(title: "Discarding \(title)…")
@@ -528,8 +599,12 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     private func systemAudioDidFail(_ message: String) {
-        guard case .recording(let id, let title, let startedAt, true) = state else { return }
-        state = .recording(id: id, title: title, startedAt: startedAt, systemAudio: false)
+        guard case .recording(
+            let id, let title, let startedAt, true, let endDetected
+        ) = state else { return }
+        state = .recording(
+            id: id, title: title, startedAt: startedAt,
+            systemAudio: false, endDetected: endDetected)
         sounds.play(.error)
         veloraLog("Velora: meeting computer audio stopped: \(message)")
     }

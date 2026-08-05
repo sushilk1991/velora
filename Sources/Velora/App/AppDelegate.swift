@@ -87,6 +87,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var hudPrefsObserver: NSObjectProtocol?
     private var localAgentAccessObserver: LocalAgentAccessRevocationObserver?
     private var meetingHUDActive = false
+    /// Exact state last placed on the shared HUD by a meeting flow. Equality
+    /// is the ownership token: teardown never hides a state
+    /// another controller has since placed there.
+    private var meetingOwnedHUDState: HUDState?
     private var meetingEndOutcome: MeetingCoordinator.RecordingEndOutcome?
     private var meetingProcessingHUDActive = false
     private var meetingHUDDismiss: DispatchWorkItem?
@@ -147,10 +151,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             store: meetings, processor: meetingProcessor, sounds: sounds,
             foregroundBusy: { [weak self] in
                 guard let self else { return true }
-                return self.dictation.phase != .idle || self.transcriber.isTranscribing
+                return self.dictation.phase != .idle
+                    || self.transcriber.isTranscribing
+                    || !self.hud.model.state.isAvailable
             })
         dictation.recordingBlockReason = { [weak self] in
-            guard let self, self.meetingCoordinator.foregroundCaptureActive else { return nil }
+            guard let self else { return nil }
+            if case .suggesting = self.meetingCoordinator.state {
+                self.meetingCoordinator.yieldSuggestionToForegroundOperation()
+                return nil
+            }
+            guard self.meetingCoordinator.foregroundCaptureActive else { return nil }
             return self.meetingCoordinator.state.isRecording
                 ? "Meeting recording is active — stop it before dictating"
                 : "Meeting audio is starting or saving — wait a moment"
@@ -164,6 +175,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             self.meetingHUDDismiss = nil
             switch state {
             case .idle:
+                let ownedHUD = self.meetingOwnedHUDState
+                self.meetingOwnedHUDState = nil
                 self.statusController.meetingRecordingTitle = nil
                 self.statusController.meetingPreparingTitle = nil
                 self.hud.model.recordingStart = nil
@@ -181,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     self.meetingEndOutcome = nil
                     let toast = HUDState.notice(
                         symbol: notice.symbol, message: notice.message)
+                    self.meetingOwnedHUDState = toast
                     self.hud.transition(to: toast)
                     let item = DispatchWorkItem { [weak self] in
                         // Hide only OUR toast. A dictation can start inside
@@ -191,23 +205,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     }
                     self.meetingHUDDismiss = item
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: item)
-                } else if case .notice = self.hud.model.state {
+                } else if let ownedHUD, self.hud.model.state == ownedHUD {
                     self.hud.transition(to: .hidden(.cancel))
                 }
+            case .suggesting(let title, let sourceApp):
+                self.meetingProcessingHUDActive = false
+                self.statusController.meetingRecordingTitle = nil
+                self.statusController.meetingPreparingTitle = "Meeting detected: \(title)"
+                self.hud.model.recordingStart = nil
+                let prompt = HUDState.meetingSuggestion(
+                    title: title, source: sourceApp ?? "Call")
+                self.meetingOwnedHUDState = prompt
+                self.hud.transition(to: prompt)
             case .preparing(let title):
                 self.meetingProcessingHUDActive = false
                 self.statusController.meetingRecordingTitle = nil
                 self.statusController.meetingPreparingTitle = title
                 if title != "Waiting for confirmation…" {
-                    self.hud.transition(to: .notice(
-                        symbol: "hourglass", message: title.hasSuffix("…") ? title : "Starting meeting audio…"))
+                    let message: String
+                    if title == "Call no longer detected" {
+                        message = title
+                    } else if title.hasSuffix("…") {
+                        message = title
+                    } else {
+                        message = "Starting \(title)…"
+                    }
+                    let notice = HUDState.notice(
+                        symbol: title == "Call no longer detected"
+                            ? "video.slash.fill" : "hourglass",
+                        message: message)
+                    self.meetingOwnedHUDState = notice
+                    self.hud.transition(to: notice)
                 }
-            case .recording(_, let title, let startedAt, let systemAudio):
+            case .recording(_, let title, let startedAt, let systemAudio, let endDetected):
                 self.statusController.meetingPreparingTitle = nil
                 self.statusController.meetingRecordingTitle = title
                 self.meetingHUDActive = true
                 self.hud.model.recordingStart = startedAt
-                self.hud.transition(to: .meeting(title: title, systemAudio: systemAudio))
+                let meetingState: HUDState = endDetected
+                    ? .meetingEnd(title: title)
+                    : .meeting(title: title, systemAudio: systemAudio)
+                self.meetingOwnedHUDState = meetingState
+                self.hud.transition(to: meetingState)
             }
         }
         meetingProcessor.onStateChange = { [weak self] state in
@@ -231,6 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     self.meetingHUDDismiss?.cancel()
                     let toast = HUDState.notice(
                         symbol: "checkmark.circle.fill", message: "Meeting notes ready")
+                    self.meetingOwnedHUDState = toast
                     self.hud.transition(to: toast)
                     let item = DispatchWorkItem { [weak self] in
                         // Same guard as the meeting-saved toast: never hide a
@@ -257,9 +297,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     self.meetingProcessingHUDActive = false
                     self.meetingHUDDismiss?.cancel()
                     self.meetingHUDDismiss = nil
-                    self.hud.transition(to: .notice(
+                    let notice = HUDState.notice(
                         symbol: "exclamationmark.triangle.fill",
-                        message: "Meeting notes need attention"))
+                        message: "Meeting notes need attention")
+                    self.meetingOwnedHUDState = notice
+                    self.hud.transition(to: notice)
                 }
             }
         }
@@ -430,6 +472,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // right-click offers recent transcripts and placement.
         hud.onTap = { [weak self] in self?.dictation.toggleFromMenu() }
         hud.model.onMeetingStop = { [weak self] in self?.meetingCoordinator.stopRecording() }
+        hud.model.onMeetingSuggestionAccept = { [weak self] in
+            self?.meetingCoordinator.acceptSuggestion()
+        }
+        hud.model.onMeetingSuggestionDismiss = { [weak self] in
+            self?.meetingCoordinator.declineSuggestion()
+        }
+        hud.model.onMeetingEndConfirm = { [weak self] in
+            self?.meetingCoordinator.confirmMeetingEnded()
+        }
+        hud.model.onMeetingEndKeep = { [weak self] in
+            self?.meetingCoordinator.keepMeetingRecording()
+        }
+        hud.model.onMeetingEndDiscard = { [weak self] in
+            self?.meetingCoordinator.cancelRecording()
+        }
         hud.menuHooks = HUDPanel.MenuHooks(
             isRecording: { [weak self] in self?.dictation.isRecording ?? false },
             isMeetingRecording: { [weak self] in

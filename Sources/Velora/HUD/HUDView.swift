@@ -49,6 +49,10 @@ struct HUDView: View {
                     HUDGeometry.minListeningWidth),
                 HUDGeometry.maxListeningWidth)
             return (CGSize(width: width, height: HUDGeometry.height), true)
+        case .meetingSuggestion, .meetingEnd:
+            return (
+                CGSize(width: HUDGeometry.meetingPromptWidth, height: HUDGeometry.height),
+                true)
         case .meeting:
             return (CGSize(width: HUDGeometry.meetingWidth, height: HUDGeometry.height), true)
         case .inserted:
@@ -122,11 +126,9 @@ struct HUDView: View {
         .opacity(opacity)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
-        .accessibilityElement(children: isMeeting ? .contain : .ignore)
-        .accessibilityLabel(isMeeting ? "Velora meeting recording" : "Velora dictation")
-        .accessibilityHint(isMeeting
-            ? "Use the stop button to finish the meeting recording"
-            : (isStandby ? "Click to start dictation" : "Click to stop dictation"))
+        .accessibilityElement(children: isMeetingSurface ? .contain : .ignore)
+        .accessibilityLabel(meetingAccessibilityLabel)
+        .accessibilityHint(meetingAccessibilityHint)
     }
 
     @ViewBuilder private var background: some View {
@@ -175,8 +177,12 @@ struct HUDView: View {
                 .opacity(isStandby ? 1 : 0)
             recordingContent
                 .opacity(recordingContentOpacity)
+            meetingSuggestionContent
+                .opacity(isMeetingSuggestion ? 1 : 0)
             meetingContent
-                .opacity(isMeeting ? 1 : 0)
+                .opacity(isMeetingRecording ? 1 : 0)
+            meetingEndContent
+                .opacity(isMeetingEnd ? 1 : 0)
             checkmark
             errorContent
                 .opacity(isError ? 1 : 0)
@@ -246,6 +252,54 @@ struct HUDView: View {
 
     // MARK: - Meeting recording
 
+    private var meetingSuggestionValue: (title: String, source: String) {
+        if case .meetingSuggestion(let title, let source) = model.state {
+            return (title, source)
+        }
+        return ("Meeting", "Call")
+    }
+
+    private var meetingSuggestionContent: some View {
+        let value = meetingSuggestionValue
+        return HStack(spacing: VeloraSpacing.s) {
+            Image(systemName: "video.fill")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .systemYellow))
+                .frame(
+                    width: HUDGeometry.meetingPromptIconSide,
+                    height: HUDGeometry.meetingPromptIconSide)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(value.source) · \(value.title)")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(hudPrimaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text("Local mic + Mac audio · Tell everyone")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(hudSecondaryText)
+                    .lineLimit(1)
+            }
+            .frame(width: 210, alignment: .leading)
+            meetingPrimaryButton("Start Notes") {
+                model.onMeetingSuggestionAccept?()
+            }
+                .help("Records your microphone and computer audio locally. Make sure everyone knows.")
+                .accessibilityLabel("Start meeting notes")
+            Button { model.onMeetingSuggestionDismiss?() } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .frame(width: 20, height: 20)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(hudSecondaryText)
+            .help("Not now")
+            .accessibilityLabel("Dismiss meeting suggestion")
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: HUDGeometry.meetingPromptWidth)
+    }
+
     private var meetingValue: (title: String, systemAudio: Bool)? {
         if case .meeting(let title, let systemAudio) = model.state {
             return (title, systemAudio)
@@ -281,12 +335,77 @@ struct HUDView: View {
                         height: HUDGeometry.meetingStopButtonSide)
             }
             .buttonStyle(.borderless)
+            .foregroundStyle(hudPrimaryText)
             .help("Stop meeting recording")
             .accessibilityLabel("Stop meeting recording")
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
         .frame(width: HUDGeometry.meetingWidth)
+    }
+
+    private var meetingEndTitle: String {
+        if case .meetingEnd(let title) = model.state { return title }
+        return "Meeting"
+    }
+
+    private var meetingEndContent: some View {
+        HStack(spacing: VeloraSpacing.s) {
+            Image(systemName: "questionmark.circle.fill")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(Color(nsColor: .systemOrange))
+                .frame(
+                    width: HUDGeometry.meetingPromptIconSide,
+                    height: HUDGeometry.meetingPromptIconSide)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Meeting ended?")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(hudPrimaryText)
+                Text(meetingEndTitle)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(hudSecondaryText)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .frame(width: 150, alignment: .leading)
+            Button("Keep") { model.onMeetingEndKeep?() }
+                .buttonStyle(.borderless)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(hudSecondaryText)
+                .accessibilityLabel("Keep recording meeting")
+            meetingPrimaryButton("Finish Notes") {
+                model.onMeetingEndConfirm?()
+            }
+                .accessibilityLabel("Stop meeting and create notes")
+            Button { model.onMeetingEndDiscard?() } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 10, weight: .semibold))
+                    .frame(width: 18, height: 20)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(hudSecondaryText)
+            .help("Discard meeting recording…")
+            .accessibilityLabel("Discard meeting recording")
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .padding(.vertical, HUDGeometry.contentInsetV)
+        .frame(width: HUDGeometry.meetingPromptWidth)
+    }
+
+    private func meetingPrimaryButton(
+        _ title: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.black.opacity(0.88))
+                .padding(.horizontal, 11)
+                .frame(height: 28)
+                .background(
+                    Color.white.opacity(0.94),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     private var recordingDot: some View {
@@ -474,9 +593,49 @@ struct HUDView: View {
 
     private var isStandby: Bool { model.state == .standby }
 
-    private var isMeeting: Bool {
+    private var isMeetingRecording: Bool {
         if case .meeting = model.state { return true }
         return false
+    }
+
+    private var isMeetingSuggestion: Bool {
+        if case .meetingSuggestion = model.state { return true }
+        return false
+    }
+
+    private var isMeetingEnd: Bool {
+        if case .meetingEnd = model.state { return true }
+        return false
+    }
+
+    private var isMeetingSurface: Bool {
+        isMeetingRecording || isMeetingSuggestion || isMeetingEnd
+    }
+
+    private var meetingAccessibilityHint: String {
+        switch model.state {
+        case .meetingSuggestion:
+            return "Start notes or dismiss the detected meeting"
+        case .meeting:
+            return "Use the stop button to finish the meeting recording"
+        case .meetingEnd:
+            return "Finish notes or keep recording"
+        default:
+            return isStandby ? "Click to start dictation" : "Click to stop dictation"
+        }
+    }
+
+    private var meetingAccessibilityLabel: String {
+        switch model.state {
+        case .meetingSuggestion(let title, let source):
+            return "Meeting detected, \(source), \(title)"
+        case .meeting(let title, let systemAudio):
+            return "Recording \(title), \(systemAudio ? "microphone and computer audio" : "microphone only")"
+        case .meetingEnd(let title):
+            return "Meeting ended, \(title)"
+        default:
+            return "Velora dictation"
+        }
     }
 
     private var isRecordingActive: Bool {
@@ -580,6 +739,23 @@ struct HUDView: View {
                     opacity = 1
                     scale = 1
                     yOffset = 0
+                }
+            }
+
+        case .meetingSuggestion, .meetingEnd:
+            let target = HUDGeometry.meetingPromptWidth
+            if old.isHidden {
+                resetInstant(width: target, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            } else {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = target
+                    height = HUDGeometry.height
+                    showCheck = false
                 }
             }
 
