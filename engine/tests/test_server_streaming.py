@@ -13,6 +13,7 @@ import pytest
 
 from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 
+import velora_engine.cleanup_process as cleanup_process_mod
 import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_process import CleanupProcess
@@ -133,7 +134,8 @@ class HardTimeoutThenRecoveringCleanup(FakeCleanup):
     def __init__(self):
         super().__init__()
         self.timed_out = asyncio.Event()
-        self.wait_budgets: list[float] = []
+        self.is_finalizing = lambda: None
+        self.resume_finalizing_states: list[bool | None] = []
 
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
@@ -152,10 +154,9 @@ class HardTimeoutThenRecoveringCleanup(FakeCleanup):
             text=raw, applied=False, ms=0, reason="llm_recovering"
         )
 
-    async def wait_until_ready(self, timeout_s):
-        self.wait_budgets.append(timeout_s)
-        await asyncio.sleep(timeout_s)
-        return False
+    def resume_recovery(self):
+        super().resume_recovery()
+        self.resume_finalizing_states.append(self.is_finalizing())
 
 
 @pytest.fixture
@@ -198,6 +199,8 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     final = await client.recv_event("final")
     assert final["cleanup_applied"] is True
     assert final["cleanup_ms"] == 7  # the tail chunk's ms, not the sum
+    assert final["cleanup_recovery_pending"] is False
+    assert final["cleanup_recovery_wait_ms"] == 0
     assert final["text"] == f"<{SEG1}> <{SEG2}> <{TAIL}>."
     assert final["raw"] == f"{SEG1} {SEG2} {TAIL}"
 
@@ -217,6 +220,7 @@ async def test_mid_session_cleanup_timeout_falls_back_before_recovery(
 ):
     eng, sock = engine
     cleanup = HardTimeoutThenRecoveringCleanup()
+    cleanup.is_finalizing = lambda: eng._finalizing
     eng.cleanup = cleanup
     client = await connect(sock)
     await client.recv_event("ready")
@@ -229,13 +233,79 @@ async def test_mid_session_cleanup_timeout_falls_back_before_recovery(
 
     transcript = await client.recv_event("transcript")
     assert transcript["raw"]
-    final = await client.recv_event("final", timeout=0.05)
+    final = await client.recv_event("final", timeout=2)
     assert final["cleanup_applied"] is False
     assert final["text"] == f"{transcript['raw']}."
-    assert cleanup.wait_budgets == []
+    assert final["total_ms"] < 1_000
+    assert final["cleanup_recovery_pending"] is True
+    assert final["cleanup_recovery_wait_ms"] == 0
     assert cleanup.loaded is False
     assert cleanup.recovery_events == ["defer", "resume"]
+    assert cleanup.resume_finalizing_states == [False]
     client.close()
+
+
+async def test_real_cleanup_timeout_finalizes_then_recovers_for_next_session(
+    engine,
+    monkeypatch,
+):
+    hanging = "__hang__ alpha one two three four five six"
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", hanging)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", TAIL)
+    monkeypatch.setattr(cleanup_process_mod, "adaptive_timeout_ms", lambda _raw: 50)
+    eng, sock = engine
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[
+            sys.executable,
+            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
+        ],
+        hard_timeout_grace_s=0.05,
+        queue_timeout_s=0.2,
+        cancel_grace_s=0.1,
+        on_unhealthy=eng._queue_cleanup_unhealthy_restart,
+    )
+    await cleanup.load_async("warm prompt")
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({"cmd": "start", "session": "real-timeout", "context": {}})
+        for _ in range(2):
+            await client.send_audio(AUDIO)
+        for _ in range(200):
+            if not cleanup.loaded:
+                break
+            await asyncio.sleep(0.005)
+        assert cleanup.loaded is False
+
+        await client.send_json({"cmd": "stop", "session": "real-timeout"})
+        transcript = await client.recv_event("transcript")
+        final = await client.recv_event("final", timeout=2)
+        assert final["text"] == f"{transcript['raw']}."
+        assert final["cleanup_applied"] is False
+        assert final["cleanup_recovery_pending"] is True
+        assert final["cleanup_recovery_wait_ms"] == 0
+        assert final["total_ms"] < 1_000
+
+        for _ in range(400):
+            if cleanup.loaded:
+                break
+            await asyncio.sleep(0.005)
+        assert cleanup.loaded is True
+
+        monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", SEG1)
+        await client.send_json({"cmd": "start", "session": "after-recovery", "context": {}})
+        for _ in range(2):
+            await client.send_audio(AUDIO)
+        await client.send_json({"cmd": "stop", "session": "after-recovery"})
+        recovered = await client.recv_event("final")
+        assert recovered["cleanup_applied"] is True
+        assert SEG1.upper() in recovered["text"]
+    finally:
+        client.close()
+        await cleanup.aclose()
+        eng.cleanup = None
 
 
 async def test_final_tail_replaces_only_unfinished_last_chunk(engine, segments):

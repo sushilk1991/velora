@@ -36,6 +36,7 @@ CANCEL_GRACE_S = 1.0
 PREFIX_TIMEOUT_S = 6.0
 RECOVERY_ATTEMPTS = 3
 RECOVERY_BACKOFF_S = 0.25
+MAX_RECOVERY_DEFERRALS = 3
 WORKER_MODULE = "velora_engine.cleanup_worker"
 
 
@@ -81,6 +82,7 @@ class CleanupProcess:
         self._generation = 0
         self._recovery_deferred = False
         self._deferred_recovery_reason: str | None = None
+        self._recovery_deferrals = 0
         self._on_unhealthy = on_unhealthy
 
     async def load_async(self, warm_system_prompt: str | None = None) -> None:
@@ -115,6 +117,7 @@ class CleanupProcess:
                 raise RuntimeError(str(response.get("error") or "cleanup load failed"))
             self.loaded = True
             self.unhealthy = False
+            self._recovery_deferrals = 0
             log.info("cleanup worker ready model=%s pid=%s", self.model_id, self.pid)
         except BaseException:
             await self._stop_worker()
@@ -589,6 +592,18 @@ class CleanupProcess:
         recovery_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await recovery_task
+        if not self.loaded:
+            self._recovery_deferrals += 1
+            log.warning(
+                "cleanup recovery interrupted by dictation count=%d/%d",
+                self._recovery_deferrals,
+                MAX_RECOVERY_DEFERRALS,
+            )
+            if self._recovery_deferrals >= MAX_RECOVERY_DEFERRALS:
+                # Repeated hotkey presses can otherwise cancel every multi-second
+                # model warm-up forever. Escalate through the server's existing
+                # after-final restart path rather than contending with live STT.
+                self._mark_unhealthy()
 
     def resume_recovery(self) -> None:
         """Resume a deferred replacement only after dictation is fully idle."""
@@ -597,18 +612,6 @@ class CleanupProcess:
         self._deferred_recovery_reason = None
         if not self.loaded and not self._closed and not self.unhealthy:
             self._schedule_recovery(reason or "dictation_idle")
-
-    async def wait_until_ready(self, timeout_s: float) -> bool:
-        """Wait a bounded time for deferred replacement/recovery to finish."""
-        deadline = asyncio.get_running_loop().time() + timeout_s
-        while not self.loaded:
-            if self._closed or self.unhealthy:
-                return False
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return False
-            await asyncio.sleep(min(0.02, remaining))
-        return True
 
     def _mark_unhealthy(self) -> None:
         if self.unhealthy:

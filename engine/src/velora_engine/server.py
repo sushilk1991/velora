@@ -1322,6 +1322,9 @@ class Engine:
         # waiting for it here created 7–10 s stop-to-final tails. The formatting
         # pipeline below already preserves every word through its deterministic
         # fallback when cleanup is unavailable.
+        cleanup_recovery_pending = bool(
+            self.cleanup is not None and not self.cleanup.loaded
+        )
 
         # Stage 2: formatting pipeline. Long whisper dictations whose segments
         # were already cleaned during recording assemble from those chunks
@@ -1364,6 +1367,10 @@ class Engine:
             "cleanup_ms": cleanup_ms,
             "cleanup_wall_ms": cleanup_wall_ms,
             "cleanup_applied": cleanup_applied,
+            "cleanup_recovery_pending": cleanup_recovery_pending,
+            # Failed-worker finalization never waits for model warm-up. Keep the
+            # explicit phase metric so future history can verify that contract.
+            "cleanup_recovery_wait_ms": 0,
             "total_ms": total_ms,
         }
         if audio_name:
@@ -1373,7 +1380,8 @@ class Engine:
         await self._send(final_evt)
         log.info(
             "session %s done: stt_ms=%d mode=%s reason=%s cleanup_ms=%d "
-            "cleanup_wall_ms=%d cleanup_applied=%s total_ms=%d samples=%d audio=%s",
+            "cleanup_wall_ms=%d cleanup_applied=%s recovery_pending=%s "
+            "recovery_wait_ms=0 total_ms=%d samples=%d audio=%s",
             session.id,
             stt_ms,
             mode_name,
@@ -1381,6 +1389,7 @@ class Engine:
             cleanup_ms,
             cleanup_wall_ms,
             cleanup_applied,
+            cleanup_recovery_pending,
             total_ms,
             session.samples,
             audio_name or "-",

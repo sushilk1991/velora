@@ -360,6 +360,40 @@ async def test_replacement_warmup_waits_for_dictation_idle() -> None:
         await cleanup.aclose()
 
 
+async def test_repeated_dictation_deferrals_escalate_stuck_recovery() -> None:
+    escalated = asyncio.Event()
+    cleanup = CleanupProcess("fake", on_unhealthy=escalated.set)
+    blocker = asyncio.Event()
+
+    async def blocked_load() -> None:
+        cleanup.recovering = True
+        try:
+            await blocker.wait()
+        finally:
+            cleanup.recovering = False
+
+    cleanup._start_and_load = blocked_load  # type: ignore[method-assign]
+    try:
+        cleanup._schedule_recovery("initial")
+        for attempt in range(3):
+            for _ in range(100):
+                if cleanup.recovering:
+                    break
+                await asyncio.sleep(0.001)
+            assert cleanup.recovering is True
+            await cleanup.defer_recovery()
+            if attempt < 2:
+                assert cleanup.unhealthy is False
+                cleanup.resume_recovery()
+
+        await asyncio.wait_for(escalated.wait(), 1)
+        assert cleanup.unhealthy is True
+        assert cleanup.loaded is False
+    finally:
+        blocker.set()
+        await cleanup.aclose()
+
+
 async def test_threading_cancel_reaches_worker_without_replacing_it() -> None:
     cleanup = CleanupProcess(
         "fake",
