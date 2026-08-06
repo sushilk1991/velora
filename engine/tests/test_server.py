@@ -367,6 +367,8 @@ async def test_killed_cleanup_child_returns_raw_and_engine_serves_next_dictation
     assert final["cleanup_applied"] is False
     assert final["cleanup_ms"] == 1_500
     assert final["cleanup_wall_ms"] >= 1_500
+    assert final["cleanup_recovery_pending"] is True
+    assert final["cleanup_recovery_wait_ms"] == 0
     assert not eng.shutdown.is_set()
 
     await client.send_json({"cmd": "ping"})
