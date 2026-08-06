@@ -127,31 +127,35 @@ class FirstCallHangsCleanup(FakeCleanup):
         return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
 
 
-class RecoveringCleanup(FakeCleanup):
+class HardTimeoutThenRecoveringCleanup(FakeCleanup):
+    """A streaming request poisons the worker; replacement never becomes ready."""
+
     def __init__(self):
         super().__init__()
-        self.ready = asyncio.Event()
+        self.timed_out = asyncio.Event()
+        self.wait_budgets: list[float] = []
 
-    def fail_during_session(self):
-        self.loaded = False
-        self.ready.clear()
-
-    def resume_recovery(self):
-        self.recovery_events.append("resume")
-
-        async def recover():
-            await asyncio.sleep(0.02)
-            self.loaded = True
-            self.ready.set()
-
-        asyncio.create_task(recover())
+    async def cleanup(
+        self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+        cancel_event=None, allowed_terms=None, prefix_candidates=None,
+    ):
+        self.calls.append((raw, system_prompt))
+        self.cancel_events.append(cancel_event)
+        self.allowed_terms_calls.append(allowed_terms)
+        if not self.timed_out.is_set():
+            self.loaded = False
+            self.timed_out.set()
+            return CleanupResult(
+                text=raw, applied=False, ms=1_500, reason="timeout_hard"
+            )
+        return CleanupResult(
+            text=raw, applied=False, ms=0, reason="llm_recovering"
+        )
 
     async def wait_until_ready(self, timeout_s):
-        try:
-            await asyncio.wait_for(self.ready.wait(), timeout_s)
-        except TimeoutError:
-            return False
-        return self.loaded
+        self.wait_budgets.append(timeout_s)
+        await asyncio.sleep(timeout_s)
+        return False
 
 
 @pytest.fixture
@@ -207,30 +211,29 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     client.close()
 
 
-async def test_mid_session_cleanup_failure_recovers_before_final_formatting(
+async def test_mid_session_cleanup_timeout_falls_back_before_recovery(
     engine,
-    monkeypatch,
+    segments,
 ):
-    raw = (
-        "this longer dictation must wait for the replacement writing worker "
-        "before returning its final formatted result"
-    )
-    monkeypatch.delenv("VELORA_FAKE_STT_SEGMENTS", raising=False)
-    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", raw)
     eng, sock = engine
-    cleanup = RecoveringCleanup()
+    cleanup = HardTimeoutThenRecoveringCleanup()
     eng.cleanup = cleanup
     client = await connect(sock)
     await client.recv_event("ready")
 
     await client.send_json({"cmd": "start", "session": "recover-final", "context": {}})
-    await client.send_audio(AUDIO)
-    cleanup.fail_during_session()
+    for _ in range(2):  # close the first fake streaming segment
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.timed_out.wait(), 1)
     await client.send_json({"cmd": "stop", "session": "recover-final"})
-    final = await client.recv_event("final")
 
-    assert final["cleanup_applied"] is True
-    assert final["text"] == f"<{raw}>."
+    transcript = await client.recv_event("transcript")
+    assert transcript["raw"]
+    final = await client.recv_event("final", timeout=0.05)
+    assert final["cleanup_applied"] is False
+    assert final["text"] == f"{transcript['raw']}."
+    assert cleanup.wait_budgets == []
+    assert cleanup.loaded is False
     assert cleanup.recovery_events == ["defer", "resume"]
     client.close()
 

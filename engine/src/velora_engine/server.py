@@ -83,10 +83,9 @@ MAX_DROPPED_FRAMES = 50
 # nearly-finished chunk; otherwise cancel it and use the whole-text path. A
 # long wait here is pure post-hotkey latency and previously reached 15 seconds.
 STREAM_GATHER_TIMEOUT_S = 1.5
-# A replacement that was deliberately held during live STT gets one bounded
-# chance to become ready once transcription is complete. This protects final
-# output quality after a rare mid-session cleanup-worker failure.
-CLEANUP_FINAL_RECOVERY_TIMEOUT_S = 10.0
+# Cleanup replacement stays deferred for the complete foreground session.
+# Failed-worker formatting uses the lossless deterministic fallback; recovery
+# resumes only after the user-facing final event has been sent.
 
 # Idle gap before (and between) vocab-mining steps — mining must only ever use
 # compute nobody is waiting on, and yields the moment a session starts.
@@ -410,16 +409,6 @@ class Engine:
         resume = getattr(self.cleanup, "resume_recovery", None)
         if callable(resume):
             resume()
-
-    async def _wait_for_cleanup_recovery(self) -> None:
-        cleanup = self.cleanup
-        if cleanup is None or cleanup.loaded:
-            return
-        wait_until_ready = getattr(cleanup, "wait_until_ready", None)
-        if callable(wait_until_ready):
-            ready = await wait_until_ready(CLEANUP_FINAL_RECOVERY_TIMEOUT_S)
-            if not ready:
-                log.warning("cleanup recovery was not ready for final formatting")
 
     def _new_cleanup_process(self, model_id: str) -> CleanupProcess:
         return CleanupProcess(
@@ -1328,11 +1317,11 @@ class Engine:
             return
         stt_ms = int((time.perf_counter() - t_stop) * 1000)
         await self._send({"event": "transcript", "session": session.id, "raw": raw, "ms": stt_ms})
-        # Live STT no longer owns Metal. If cleanup recovery was deferred after
-        # a mid-session failure, start it now and give it a bounded chance to
-        # preserve final-output quality before the formatting stage.
-        self._resume_cleanup_recovery()
-        await self._wait_for_cleanup_recovery()
+        # A worker that failed during recording stays deferred until after
+        # `final` is sent. Replacement warm-up takes seconds on real hardware;
+        # waiting for it here created 7–10 s stop-to-final tails. The formatting
+        # pipeline below already preserves every word through its deterministic
+        # fallback when cleanup is unavailable.
 
         # Stage 2: formatting pipeline. Long whisper dictations whose segments
         # were already cleaned during recording assemble from those chunks
