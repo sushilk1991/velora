@@ -73,6 +73,53 @@ The deterministic manifest contains only local audio references, mode names,
 and durations—never transcript text. It still points at private archived audio,
 so keep it under `/tmp`, do not upload it, and do not commit it or the report.
 
+## Installed real-audio replay baseline
+
+With Velora running, the engine ready, local agent access enabled, and no active
+dictation, replay that private manifest through the installed app rather than a
+checkout build:
+
+```bash
+.venv/bin/python scripts/benchmark_installed_replay.py \
+  --manifest /tmp/velora-history-corpus.json \
+  --audio-root "$HOME/.velora/audio" \
+  --json /tmp/velora-installed-replay.json \
+  --repeats 3 \
+  --timeout 420
+```
+
+The runner accepts only Task 1 schema-version-1 manifests. Audio references
+must be relative, must resolve to regular files beneath the explicit
+`--audio-root` (including after symlink resolution), and are never copied into
+output or error messages. Each replay invokes exactly the installed
+`/Applications/Velora.app/Contents/Resources/bin/velora transcribe FILE --mode
+NAME --json` command. Transcript text exists only in process memory long enough
+to compute its UTF-8 SHA-256 and character count. The owner-only (`0600`),
+atomically replaced report stores case ID, manifest duration/mode, repeat
+number, wall/available engine metrics, character count, and the hash—not text or
+an audio path. A timeout, CLI error, invalid response, or incomplete model proof
+fails closed without writing a partial report.
+
+Before replay, the tool reads `~/.velora/config.json` without modifying it and
+uses installed `velora status --json` to prove the app/engine is ready, local
+access is enabled, and file transcription is available. It refuses any model
+pair except `mlx-community/whisper-large-v3-turbo` plus
+`mlx-community/Qwen3.5-4B-MLX-8bit` with cleanup enabled. It deliberately does
+not open a second raw engine-socket client: that socket is app-owned and its
+single-client lifecycle is not a safe installed-runtime readiness surface.
+
+Metric naming is intentionally conservative. The current file-transcription
+server starts CLI `stt_ms` before decoding and stops it only after explicit-mode
+cleanup, while the current CLI omits `cleanup_ms`. The report therefore calls
+that value `engine_total_inference_ms`, never STT-only time, and marks cleanup
+generation unavailable rather than inventing a zero.
+
+The first authorized 15-case × 3-repeat baseline was visibly run-order noisy:
+only 8 of 15 cases had one repeat-stable output hash. The aggregate report is a
+useful diagnostic baseline, not clean comparative evidence; investigate hash
+changes and use a smaller controlled idle replay before accepting an
+optimization. Keep all manifests and reports in `/tmp` and out of git.
+
 ## Coverage rules
 
 - Every production bug gets a regression at the lowest layer that reproduces
