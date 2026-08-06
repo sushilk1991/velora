@@ -41,6 +41,38 @@ or updates change:
 | Signed release DMG | Signature, notarization, staple, Gatekeeper, bundle identity, and packaged engine/CLI/MCP runtime checks all pass |
 | Software update window | Full release-note structure is readable; closing a manual changelog changes nothing; closing an automatic prompt defers only that version; one Install click downloads, verifies, replaces a disposable app copy, and relaunches that copy; a local-feed E2E leaves the real Skip/Later/check preferences unchanged |
 
+## Local history performance baseline
+
+Run the history benchmark locally from `engine/` with every input and output
+path explicit:
+
+```bash
+.venv/bin/python scripts/benchmark_history_performance.py \
+  --db "$HOME/.velora/history.sqlite3" \
+  --audio-root "$HOME/.velora/audio" \
+  --json /tmp/velora-history-performance.json
+```
+
+The tool opens SQLite with URI `mode=ro` plus `query_only`, never migrates or
+updates history, and writes the JSON output owner-only (`0600`). It does not
+load `raw` or `final` transcript bodies into Python: SQLite returns only their
+character counts. The report contains aggregate counts, p50/p95 timing and
+length metadata, duration buckets, and a derived recovery-wait residual. That
+residual is `max(0, finalization_ms - stt_ms - cleanup_wall_ms)` and is an upper
+bound because it can include small orchestration costs. Legacy rows report
+missing metric counts rather than being treated as zero.
+
+For a private replay manifest stratified by the 10/25/60-second duration
+buckets and mode, add:
+
+```bash
+  --select-corpus /tmp/velora-history-corpus.json
+```
+
+The deterministic manifest contains only local audio references, mode names,
+and durations—never transcript text. It still points at private archived audio,
+so keep it under `/tmp`, do not upload it, and do not commit it or the report.
+
 ## Coverage rules
 
 - Every production bug gets a regression at the lowest layer that reproduces
