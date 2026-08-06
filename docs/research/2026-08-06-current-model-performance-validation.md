@@ -1,7 +1,7 @@
 # Current-model whole-flow performance validation
 
-**Date:** 2026-08-06  
-**Branch:** `perf/current-model-flow`  
+**Date:** 2026-08-06
+**Branch:** `perf/current-model-flow`
 **Machine:** Apple M4 Max, 36 GB, macOS 26.5.2 (25F84)
 
 ## Scope and invariants
