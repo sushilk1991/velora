@@ -399,16 +399,26 @@ _SPAN_SPEECH_LEVEL_RATIO = 0.5
 
 
 def _reaches_speech_level(audio: np.ndarray, speech_level: float) -> bool:
-    """True when the span's loudest 20 ms frames approach speaking level."""
+    """True when a sustained 0.2 s of the span approaches speaking level.
+
+    A percentile over the whole span makes the decision depend on duration: a
+    one-second answer inside a minute-long meeting falls below p95 even though
+    it is real speech. Key the gate to a fixed evidence window instead.
+    """
     frame_count = len(audio) // _SPEECH_FRAME_SAMPLES
-    if frame_count < 3:
+    evidence_frames = max(
+        1, _MIN_SPAN_SPEECH_SAMPLES // _SPEECH_FRAME_SAMPLES
+    )
+    if frame_count < evidence_frames:
         return False
     framed = np.asarray(
         audio[: frame_count * _SPEECH_FRAME_SAMPLES], dtype=np.float32
     ).reshape(frame_count, _SPEECH_FRAME_SAMPLES)
     rms = np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
-    p95 = float(np.percentile(rms, 95))
-    return p95 >= max(_SPEECH_ACTIVE_RMS, _SPAN_SPEECH_LEVEL_RATIO * speech_level)
+    sustained_peak = float(np.partition(rms, -evidence_frames)[-evidence_frames])
+    return sustained_peak >= max(
+        _SPEECH_ACTIVE_RMS, _SPAN_SPEECH_LEVEL_RATIO * speech_level
+    )
 
 
 # The final ~0.3s of a recording is mechanically suspect: it holds the sound
@@ -650,7 +660,13 @@ class WhisperBackend:
             **options,
         )
 
-    def _decode(self, audio: np.ndarray, *, had_speech: bool | None = None) -> str:
+    def _decode(
+        self,
+        audio: np.ndarray,
+        *,
+        had_speech: bool | None = None,
+        ignore_stop_tail: bool = False,
+    ) -> str:
         """One guarded Whisper decode (segment, tail, or whole clip)."""
         if had_speech is None:
             had_speech = self._span_had_speech
@@ -704,14 +720,21 @@ class WhisperBackend:
             # could turn background noise into invented words.
             log.warning("glossary-biased whisper decode rejected/empty — retrying without prompt")
             try:
-                return guard_whisper_result(
+                text = guard_whisper_result(
                     self._transcribe(audio, None, temperature=0.0)
                 )
             except Exception:  # noqa: BLE001 — optional recovery must not fail the session
                 log.exception("prompt-free whisper recovery decode failed")
+        integrity_audio = (
+            audio[:-_STOP_NOISE_SAMPLES]
+            if ignore_stop_tail and len(audio) > _STOP_NOISE_SAMPLES
+            else audio
+        )
         if text and (
             not had_speech
-            or not _reaches_speech_level(audio, self._speech_reference())
+            or not _reaches_speech_level(
+                integrity_audio, self._speech_reference()
+            )
         ):
             # The dual of the empty-speech-span integrity rule below: text
             # decoded from a span that never carried sustained, speaking-level
@@ -912,6 +935,16 @@ class WhisperBackend:
             log.info("whisper clip too short to decode (%d samples)", self._samples)
             self.reset()
             return ""
+        if not self._session_had_speech and not self._segments:
+            # _decode's post-model integrity guard always discards text from
+            # this exact state. Skip the expensive call instead; archived
+            # meeting tracks can otherwise spend minutes decoding pure silence
+            # one chunk at a time only to throw every result away.
+            log.debug(
+                "whisper skipped %.1fs batch with no tracked speech", duration_s
+            )
+            self.reset()
+            return ""
         # Long dictation with usable segments: decode only the un-decoded tail
         # and stitch — stop→final stays flat however long the user spoke. Short
         # and medium clips re-decode WHOLE, exactly like the pre-segmenting
@@ -949,7 +982,11 @@ class WhisperBackend:
         audio = np.concatenate(self._chunks)
         try:
             text = self._strip_final_prompt_echo(
-                self._decode(audio, had_speech=self._session_had_speech)
+                self._decode(
+                    audio,
+                    had_speech=self._session_had_speech,
+                    ignore_stop_tail=True,
+                )
             )
         finally:
             self.reset()

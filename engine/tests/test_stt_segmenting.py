@@ -692,7 +692,7 @@ def test_prompt_hallucination_does_not_retry_silence(whisper):
     feed_seconds(backend, 2.5, chunk=quiet())
 
     assert backend.finalize() == ""
-    assert len(fake.calls) == 1
+    assert fake.calls == []
 
 
 def test_non_prompt_empty_decode_on_noise_does_not_invent_words(whisper):
@@ -820,6 +820,33 @@ def test_true_silence_span_is_consumed(whisper):
 # trailing "Thank you." fabricated from the stop pause / stop-key click. The
 # segments carried confident metadata (no_speech_prob=0.00, clean logprob and
 # compression), so only audio evidence can catch the class.
+
+
+def test_speechless_batch_clip_skips_model_decode(whisper):
+    backend, fake = whisper(["Closed Captioning by Example"])
+    feed_seconds(backend, 5.0, chunk=quiet())
+
+    assert backend.finalize() == ""
+    assert fake.calls == []
+
+
+def test_sparse_speech_in_long_batch_is_not_dropped(whisper):
+    backend, fake = whisper(["sparse but real speech"])
+    backend.segmenting_enabled = False
+    feed_seconds(backend, 59.0, chunk=quiet())
+    feed_seconds(backend, 1.0, chunk=speechy())
+
+    assert backend.finalize() == "sparse but real speech"
+    assert len(fake.calls) == 1
+
+
+def test_batch_stop_click_does_not_become_transcript(whisper):
+    backend, fake = whisper(["Thank you."])
+    pcm = np.zeros(60 * SAMPLE_RATE, dtype=np.float32)
+    pcm[-int(0.25 * SAMPLE_RATE):] = 0.1
+
+    assert transcribe_clip(backend, pcm) == ""
+    assert len(fake.calls) == 1
 
 
 def test_speechless_tail_is_never_decoded(whisper):

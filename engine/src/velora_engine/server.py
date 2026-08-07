@@ -46,7 +46,7 @@ from .cleanup import (
 from .cleanup_process import CleanupProcess
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
-from .media import load_media, split_for_batch
+from .media import load_media, load_meeting_media, split_for_batch
 from .meeting_notes import chunk_transcript, fallback_notes, merge_notes, parse_notes_json
 from .stt import (
     SAMPLE_RATE,
@@ -2794,6 +2794,7 @@ class Engine:
         speaker = str(msg["speaker"])
         job_id = msg.get("id")
         start_chunk = int(msg.get("start_chunk", 0))
+        track_started = time.perf_counter()
 
         async def fail(error: str, code: str = "failed") -> None:
             await self._send({
@@ -2805,8 +2806,17 @@ class Engine:
         self._begin_batch_job()
         try:
             try:
-                pcm = await asyncio.to_thread(load_media, path)
+                load_started = time.perf_counter()
+                pcm = await asyncio.to_thread(
+                    load_meeting_media, path,
+                    meeting_root=velora_home() / "meetings",
+                )
+                load_ms = int((time.perf_counter() - load_started) * 1000)
             except ValueError as exc:
+                log.warning(
+                    "meeting transcription rejected %s/%s: %s",
+                    meeting_id, speaker, exc,
+                )
                 await fail(str(exc))
                 return
             if self.shutdown.is_set():
@@ -2832,6 +2842,7 @@ class Engine:
             # silently skip or duplicate audio. No cached plan on resume →
             # restart from zero and tell the app to drop its stale rows.
             plan_path = self._meeting_plan_path(meeting_id, speaker)
+            plan_started = time.perf_counter()
             restarted = False
             spans: list[tuple[int, int, str]] | None = None
             if start_chunk > 0:
@@ -2854,6 +2865,7 @@ class Engine:
                         spans.append((cursor, cursor + len(chunk), speaker))
                         cursor += len(chunk)
                 self._save_meeting_plan(plan_path, spans)
+            plan_ms = int((time.perf_counter() - plan_started) * 1000)
             await self._send({
                 "event": "meeting_transcribe_started", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
@@ -2861,6 +2873,9 @@ class Engine:
                 "start_chunk": min(start_chunk, len(spans)),
                 "restarted": restarted,
             })
+            decode_ms = 0
+            nonempty_chunks = 0
+            processed_chunks = 0
             for index in range(start_chunk, len(spans)):
                 while (
                     self.session is not None or self._finalizing or self._starting
@@ -2877,8 +2892,13 @@ class Engine:
                 self._refresh_batch_priority()
                 sample_a, sample_b, chunk_speaker = spans[index]
                 self.stt.initial_prompt = self._meeting_glossary()
+                decode_started = time.perf_counter()
                 text = await self._stt_call(
                     transcribe_clip, self.stt, pcm[sample_a:sample_b])
+                decode_ms += int((time.perf_counter() - decode_started) * 1000)
+                cleaned_text = (text or "").strip()
+                nonempty_chunks += bool(cleaned_text)
+                processed_chunks += 1
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return
@@ -2891,7 +2911,7 @@ class Engine:
                     "chunk_index": index,
                     "start_ms": int(sample_a * 1000 / SAMPLE_RATE),
                     "end_ms": int(sample_b * 1000 / SAMPLE_RATE),
-                    "text": (text or "").strip(),
+                    "text": cleaned_text,
                 })
                 await self._send({
                     "event": "meeting_transcribe_progress", "id": job_id,
@@ -2911,6 +2931,14 @@ class Engine:
                 "meeting_id": meeting_id, "speaker": speaker,
                 "duration_s": round(duration_s, 1), "chunks": len(spans),
             })
+            log.info(
+                "meeting transcription done %s/%s: %.0fs audio, "
+                "%d/%d chunks processed this attempt, %d nonempty this attempt, "
+                "load=%dms plan=%dms decode=%dms wall=%dms",
+                meeting_id, speaker, duration_s, processed_chunks, len(spans),
+                nonempty_chunks, load_ms, plan_ms, decode_ms,
+                int((time.perf_counter() - track_started) * 1000),
+            )
         except Exception as exc:  # noqa: BLE001
             log.exception("meeting transcription failed")
             await fail(f"transcription failed: {exc}")

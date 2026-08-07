@@ -10,16 +10,29 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import numpy as np
+import pytest
 
 from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 
-from velora_engine.media import SAMPLE_RATE
+from velora_engine.media import SAMPLE_RATE, load_media
 from velora_engine.meeting_notes import (
     chunk_transcript,
     fallback_notes,
     merge_notes,
     parse_notes_json,
 )
+
+
+@pytest.fixture(autouse=True)
+def decode_protocol_fixtures_with_generic_media(monkeypatch):
+    """Keep protocol tests independent from the production CAF trust boundary."""
+    from velora_engine import server as server_mod
+
+    monkeypatch.setattr(
+        server_mod,
+        "load_meeting_media",
+        lambda path, *, meeting_root: load_media(path),
+    )
 
 
 def _write_wav(path, seconds: float = 2.0) -> None:
@@ -75,6 +88,37 @@ async def test_meeting_transcribe_emits_durable_segment_cursor(engine, tmp_path,
     assert resumed["start_chunk"] == 1
     done = await client.recv_event("meeting_transcribed")
     assert done["id"] == "resume"
+
+
+async def test_meeting_transcribe_uses_app_owned_source_limit(engine, monkeypatch):
+    from velora_engine import server as server_mod
+
+    seen = {}
+
+    def fake_load(path, *, meeting_root):
+        seen["path"] = path
+        seen["meeting_root"] = meeting_root
+        return np.tile(AUDIO, 3)
+
+    monkeypatch.setattr(server_mod, "load_meeting_media", fake_load)
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "meeting words")
+    _eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "large",
+        "meeting_id": "meeting-large", "speaker": "me",
+        "path": "/app-owned/meeting.caf", "start_chunk": 0,
+    })
+
+    await client.recv_event("meeting_transcribe_accepted")
+    await client.recv_event("meeting_transcribe_started")
+    await client.recv_event("meeting_segment")
+    await client.recv_event("meeting_transcribe_progress")
+    await client.recv_event("meeting_transcribed")
+
+    assert seen["path"] == "/app-owned/meeting.caf"
+    assert seen["meeting_root"] == _eng.config.home / "meetings"
 
 
 async def test_meeting_transcribe_keeps_audio_only_clusters_labeled_them(
@@ -259,12 +303,13 @@ async def test_old_meeting_plan_version_is_rejected(engine, tmp_path) -> None:
 
 
 async def test_meeting_resume_without_cached_plan_restarts_track(
-    engine, tmp_path, monkeypatch
+    engine, tmp_path, monkeypatch, caplog
 ):
     """A resume cursor whose chunk plan is gone (crash before the cache was
     written, or an upgraded install) must restart from zero and say so —
     silently emitting `meeting_transcribed` with nothing would truncate the
     transcript."""
+    caplog.set_level("INFO", logger="velora.server")
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "recovered words")
     _eng, sock = engine
     clip = tmp_path / "them.wav"
@@ -298,6 +343,11 @@ async def test_meeting_resume_without_cached_plan_restarts_track(
     assert resumed["start_chunk"] == 1
     done = await client.recv_event("meeting_transcribed")
     assert done["id"] == "r2"
+    assert any(
+        "meeting transcription done meeting-lost-plan/them" in record.message
+        and "0/1 chunks processed this attempt" in record.message
+        for record in caplog.records
+    )
 
 
 async def test_meeting_transcribe_rejects_invalid_channel(engine, tmp_path):
