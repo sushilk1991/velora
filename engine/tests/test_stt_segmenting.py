@@ -24,6 +24,7 @@ from velora_engine.stt import (
     SilenceTracker,
     WhisperBackend,
     build_glossary_prompt,
+    speech_window_fraction,
     strip_prompt_echo,
     transcribe_clip,
 )
@@ -86,6 +87,14 @@ def test_silence_tracker_reset():
     # EMA is back at its start value: 0.05 counts as speech again.
     t.feed(loud(0.05))
     assert t.trailing_silence_s == 0.0
+
+
+def test_speech_window_fraction_matches_batch_feed_windows():
+    mixed = np.concatenate(
+        [speechy() for _ in range(8)] + [quiet() for _ in range(2)]
+    )
+    assert speech_window_fraction(mixed, chunk_samples=CHUNK) == pytest.approx(0.8)
+    assert speech_window_fraction(np.zeros(CHUNK * 10), chunk_samples=CHUNK) == 0
 
 
 # ---- WhisperBackend segmenting (fake mlx_whisper) ------------------------------

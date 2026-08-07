@@ -121,16 +121,101 @@ async def test_meeting_transcribe_uses_app_owned_source_limit(engine, monkeypatc
     assert seen["meeting_root"] == _eng.config.home / "meetings"
 
 
+async def test_dense_remote_track_skips_expensive_diarization(
+    engine, tmp_path, monkeypatch, caplog
+):
+    from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "dense meeting words")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(
+        diar_mod,
+        "ensure_models",
+        lambda: pytest.fail("dense track must skip diarization models"),
+    )
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.43)
+    caplog.set_level("INFO", logger="velora.server")
+    _eng, sock = engine
+    clip = tmp_path / "dense-them.wav"
+    _write_wav(clip, seconds=10.0)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "dense",
+        "meeting_id": "meeting-dense", "speaker": "them",
+        "path": str(clip), "start_chunk": 0,
+    })
+
+    await client.recv_event("meeting_transcribe_accepted")
+    await client.recv_event("meeting_transcribe_started")
+    await client.recv_event("meeting_segment")
+    await client.recv_event("meeting_transcribe_progress")
+    await client.recv_event("meeting_transcribed")
+
+    assert any(
+        "diarization: meeting-dense skipping CPU plan for 43% active track"
+        in record.message
+        for record in caplog.records
+    )
+
+
+async def test_long_remote_track_skips_diarization_before_activity_scan(
+    engine, tmp_path, monkeypatch, caplog
+):
+    from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
+
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "long meeting words")
+    monkeypatch.setattr(diar_mod, "available", lambda: True)
+    monkeypatch.setattr(server_mod, "_DIARIZATION_MAX_TRACK_S", 5)
+    monkeypatch.setattr(
+        server_mod,
+        "speech_window_fraction",
+        lambda _pcm: pytest.fail("long track must skip the activity scan"),
+    )
+    monkeypatch.setattr(
+        diar_mod,
+        "ensure_models",
+        lambda: pytest.fail("long track must skip diarization models"),
+    )
+    caplog.set_level("INFO", logger="velora.server")
+    _eng, sock = engine
+    clip = tmp_path / "long-them.wav"
+    _write_wav(clip, seconds=10.0)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "long",
+        "meeting_id": "meeting-long", "speaker": "them",
+        "path": str(clip), "start_chunk": 0,
+    })
+
+    await client.recv_event("meeting_transcribe_accepted")
+    await client.recv_event("meeting_transcribe_started")
+    await client.recv_event("meeting_segment")
+    await client.recv_event("meeting_transcribe_progress")
+    await client.recv_event("meeting_transcribed")
+
+    assert any(
+        "diarization: meeting-long skipping CPU plan for 10s long track"
+        in record.message
+        for record in caplog.records
+    )
+
+
 async def test_meeting_transcribe_keeps_audio_only_clusters_labeled_them(
     engine, tmp_path, monkeypatch
 ):
     """Audio clusters improve speech chunking but cannot establish identity."""
     from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
     from velora_engine.diarization import Turn
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "diarized words")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
     monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(
         diar_mod, "diarize",
         lambda pcm: [Turn(0.0, 4.0, "s1"), Turn(4.6, 9.5, "s2")])
@@ -162,11 +247,13 @@ async def test_meeting_transcribe_single_speaker_falls_back_to_them(
     engine, tmp_path, monkeypatch
 ):
     from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
     from velora_engine.diarization import Turn
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "solo caller")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
     monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(diar_mod, "diarize", lambda pcm: [Turn(0.0, 2.0, "s1")])
     _eng, sock = engine
     clip = tmp_path / "them.wav"
@@ -188,11 +275,13 @@ async def test_meeting_transcribe_five_clusters_still_uses_stable_them(
 ):
     """Plausible-looking cluster counts still do not establish identity."""
     from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
     from velora_engine.diarization import Turn
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "stable five-cluster words")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
     monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(
         diar_mod,
         "diarize",
@@ -223,11 +312,13 @@ async def test_meeting_transcribe_implausible_clusters_fall_back_to_them(
 ):
     """Cluster explosions must not become hundreds of tiny speaker chunks."""
     from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
     from velora_engine.diarization import Turn
 
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "stable words")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
     monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(
         diar_mod,
         "diarize",
@@ -257,6 +348,7 @@ async def test_meeting_transcribe_diarization_failure_falls_back(
     engine, tmp_path, monkeypatch
 ):
     from velora_engine import diarization as diar_mod
+    from velora_engine import server as server_mod
 
     def boom(pcm):
         raise RuntimeError("onnx exploded")
@@ -264,6 +356,7 @@ async def test_meeting_transcribe_diarization_failure_falls_back(
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "still transcribed")
     monkeypatch.setattr(diar_mod, "available", lambda: True)
     monkeypatch.setattr(diar_mod, "ensure_models", lambda: None)
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(diar_mod, "diarize", boom)
     _eng, sock = engine
     clip = tmp_path / "them.wav"

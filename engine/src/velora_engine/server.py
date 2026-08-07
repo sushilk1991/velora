@@ -55,6 +55,7 @@ from .stt import (
     create_backend,
     fake_stt_enabled,
     pcm_from_payload,
+    speech_window_fraction,
     transcribe_clip,
 )
 from .vocab_miner import VocabMiner
@@ -68,6 +69,15 @@ CLEANUP_RESTART_GRACE_S = 0.1
 CLEANUP_RESTART_ARCHIVE_GRACE_S = 1.0
 
 PARENT_POLL_S = 2.0
+
+# Full CPU diarization costs roughly two seconds per audio-minute, while the
+# measured Whisper path costs about 3.5 seconds per minute. It can repay that
+# pass only below ~43% active windows. Long meetings skip it regardless: the
+# silence fast-path already avoids empty Whisper chunks, while serial CPU
+# planning delays the first transcript segment by minutes. Both fallbacks keep
+# the same honest "Them" label.
+_DIARIZATION_DENSE_ACTIVITY_FRACTION = 0.43
+_DIARIZATION_MAX_TRACK_S = 30 * 60
 
 # Bound the per-session audio queue: ~60s of backlog at 100ms chunks. If STT
 # falls that far behind realtime, frames are dropped; past MAX_DROPPED_FRAMES
@@ -2763,6 +2773,27 @@ class Engine:
             if not diarization.available():
                 log.info("diarization: sherpa-onnx not importable — skipping")
                 return None
+            duration_s = len(pcm) / SAMPLE_RATE
+            if duration_s > _DIARIZATION_MAX_TRACK_S:
+                log.info(
+                    "diarization: %s skipping CPU plan for %.0fs long track",
+                    meeting_id,
+                    duration_s,
+                )
+                return None
+            active_fraction = await asyncio.to_thread(
+                speech_window_fraction, pcm
+            )
+            if (
+                active_fraction == 0
+                or active_fraction >= _DIARIZATION_DENSE_ACTIVITY_FRACTION
+            ):
+                log.info(
+                    "diarization: %s skipping CPU plan for %.0f%% active track",
+                    meeting_id,
+                    active_fraction * 100,
+                )
+                return None
             if self._meeting_transcribe_cancel:
                 return None
             # Always runs the pinned-hash verification: existence alone must
@@ -2773,6 +2804,8 @@ class Engine:
             if self._meeting_transcribe_cancel:
                 return None
             turns = await asyncio.to_thread(diarization.diarize, pcm)
+            if self._meeting_transcribe_cancel:
+                return None
             speakers = {t.speaker for t in turns}
             speaker_count = len(speakers)
             if speaker_count == 0:

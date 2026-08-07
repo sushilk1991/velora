@@ -121,6 +121,21 @@ class SilenceTracker:
         self._trailing_silence_samples = 0
 
 
+def speech_window_fraction(
+    audio: np.ndarray, chunk_samples: int = SAMPLE_RATE
+) -> float:
+    """Fraction of batch-feed windows carrying tracker-level speech evidence."""
+    if len(audio) == 0 or chunk_samples <= 0:
+        return 0.0
+    tracker = SilenceTracker()
+    active = 0
+    total = 0
+    for start in range(0, len(audio), chunk_samples):
+        active += tracker.feed(audio[start : start + chunk_samples])
+        total += 1
+    return active / total
+
+
 class STTBackend(Protocol):
     """Interface: load, feed_chunk, finalize, reset (+ optional segmenting).
 
