@@ -14,6 +14,7 @@ struct MeetingsSettingsView: View {
     @State private var selectedID: String?
     @State private var selectedRecord: MeetingRecord?
     @State private var selectedHasRecoverableAudio = false
+    @State private var selectedCanRetryNotes = false
     @State private var selectedCanRecreate = false
     @State private var selectedIsReprocessing = false
     @State private var transcriptExpanded = false
@@ -314,6 +315,8 @@ struct MeetingsSettingsView: View {
                     if selectedCanRecreate && !processing {
                         Button("Retry Recreate") { processor.enqueue(meetingID: record.id) }
                     }
+                } else if selectedCanRetryNotes && !processing {
+                    Button("Retry notes") { processor.enqueue(meetingID: record.id) }
                 } else if record.status == .failed && selectedHasRecoverableAudio
                     && !processing {
                     Button("Retry") { processor.enqueue(meetingID: record.id) }
@@ -358,9 +361,10 @@ struct MeetingsSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             } else if let error = record.error {
-                Label(
-                    "Recreate did not finish; the previous notes were kept. \(error)",
-                    systemImage: "exclamationmark.triangle")
+                Label(selectedCanRetryNotes
+                      ? "Notes were not generated. \(error)"
+                      : "Recreate did not finish; the previous notes were kept. \(error)",
+                      systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.orange)
             }
 
@@ -457,6 +461,10 @@ struct MeetingsSettingsView: View {
             let canRecreate = selected.map {
                 store.hasAllCapturedAudio(for: $0)
             } ?? false
+            let canRetryNotes = selected.map {
+                store.hasPendingNotes(meetingID: $0.id)
+                    && store.hasCommittedSegments(meetingID: $0.id)
+            } ?? false
             let reprocessing = resolvedID.map {
                 store.isReprocessing(meetingID: $0)
             } ?? false
@@ -468,6 +476,7 @@ struct MeetingsSettingsView: View {
                 selectedID = resolvedID
                 selectedRecord = selected
                 selectedHasRecoverableAudio = recoverable
+                selectedCanRetryNotes = canRetryNotes
                 selectedCanRecreate = canRecreate
                 selectedIsReprocessing = reprocessing
                 if selectionChanged || recordChanged { resetTranscript() }
@@ -481,6 +490,7 @@ struct MeetingsSettingsView: View {
         selectedID = id
         selectedRecord = records.first(where: { $0.id == id })
         selectedHasRecoverableAudio = false
+        selectedCanRetryNotes = false
         selectedCanRecreate = false
         selectedIsReprocessing = false
         resetTranscript()
@@ -496,11 +506,16 @@ struct MeetingsSettingsView: View {
             let canRecreate = selected.map {
                 store.hasAllCapturedAudio(for: $0)
             } ?? false
+            let canRetryNotes = selected.map {
+                store.hasPendingNotes(meetingID: $0.id)
+                    && store.hasCommittedSegments(meetingID: $0.id)
+            } ?? false
             let reprocessing = store.isReprocessing(meetingID: id)
             DispatchQueue.main.async {
                 guard metadataLoadToken == token, selectedID == id else { return }
                 selectedRecord = selected
                 selectedHasRecoverableAudio = recoverable
+                selectedCanRetryNotes = canRetryNotes
                 selectedCanRecreate = canRecreate
                 selectedIsReprocessing = reprocessing
             }

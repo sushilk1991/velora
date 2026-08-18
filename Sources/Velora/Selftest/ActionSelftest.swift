@@ -129,6 +129,41 @@ final class FakeTurnPlanner: ActionTurnPlanner {
     func end() { ended = true }
 }
 
+final class FakeAgentActionCore: AgentActionCoordinating {
+    private(set) var isRunning = false
+    private(set) var isExecuting = false
+    private(set) var performCount = 0
+    private(set) var cancelCount = 0
+    private(set) var handledEvents = 0
+    private(set) var activeActionID: String? = "engine-task"
+    private var completion: ((ActionResult) -> Void)?
+
+    func perform(
+        transcript: String,
+        context: ActionContextSnapshot,
+        execute: Bool,
+        allowSend: Bool,
+        completion: @escaping (ActionResult) -> Void
+    ) {
+        performCount += 1
+        isRunning = true
+        isExecuting = execute
+        self.completion = completion
+    }
+
+    func cancel() { cancelCount += 1 }
+    func handle(_ event: EngineEvent) { handledEvents += 1 }
+
+    func complete(_ result: ActionResult) {
+        isRunning = false
+        isExecuting = false
+        activeActionID = nil
+        let callback = completion
+        completion = nil
+        callback?(result)
+    }
+}
+
 extension Selftest {
 
     // MARK: - Suite entry point
@@ -157,9 +192,159 @@ extension Selftest {
         testActionExecutorPressElement()
         testActionLoopRecovery()
         testActionLoopSafetyRails()
+        testAgentTaskLedger()
+        testAgentSessionManagerKeepsTheCoreBoundary()
         testSecondaryHotkeyRouting()
         testActionShortcutSettingsMigration()
+        testStreamDraftRevisionPolicy()
         testActionCLIParsing()
+    }
+
+    private static func testAgentTaskLedger() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-agent-ledger-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("agent.sqlite3")
+        var interruptedID = ""
+        do {
+            let store = AgentTaskStore(url: url, retentionDays: 14, maximumTasks: 2)
+            var context = ActionContextSnapshot()
+            context.frontmostApp = "Slack"
+            context.frontmostBundle = "com.tinyspeck.slackmacgap"
+            context.frontmostWindow = "Himesh"
+            let started = store.begin(
+                command: "draft hello to Himesh",
+                context: context,
+                execute: true,
+                allowSend: true)
+            guard case .success(let taskID) = started else {
+                expect(false, "the local agent ledger starts a durable task")
+                return
+            }
+            interruptedID = taskID
+            store.recordTurn(
+                taskID: interruptedID,
+                turn: 1,
+                sends: false,
+                goal: "draft hello",
+                stepCount: 3,
+                durationMs: 42)
+            store.flush()
+            expect(store.recent().first?.status == .running,
+                   "the local agent ledger records a live task")
+            expect(store.events(taskID: interruptedID).map(\.kind)
+                    == ["started", "planner_turn"],
+                   "the ledger appends compact lifecycle events in order")
+            let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+            let permissions = (attributes?[.posixPermissions] as? NSNumber)?.intValue
+            expect(permissions == 0o600, "the agent ledger is owner-only")
+        }
+
+        do {
+            let recovered = AgentTaskStore(url: url, retentionDays: 14, maximumTasks: 2)
+            expect(recovered.recent().first(where: { $0.id == interruptedID })?.status
+                    == .interrupted,
+                   "a task abandoned by a terminated app is marked interrupted")
+
+            var context = ActionContextSnapshot()
+            context.frontmostApp = "Finder"
+            for index in 0..<3 {
+                let started = recovered.begin(
+                    command: "task \(index)", context: context,
+                    execute: false, allowSend: false)
+                guard case .success(let id) = started else {
+                    expect(false, "the recovered ledger accepts task \(index)")
+                    continue
+                }
+                recovered.finish(
+                    taskID: id,
+                    result: .completed(goal: "task \(index)", trace: ["receipt \(index)"]),
+                    durationMs: index)
+                recovered.flush()
+            }
+            expect(recovered.recent(limit: 10).count == 2,
+                   "the agent ledger enforces its task-count memory bound")
+        }
+    }
+
+    private static func testAgentSessionManagerKeepsTheCoreBoundary() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-agent-manager-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = AgentTaskStore(
+            url: root.appendingPathComponent("agent.sqlite3"),
+            retentionDays: 14,
+            maximumTasks: 10)
+        let core = FakeAgentActionCore()
+        let manager = AgentSessionManager(core: core, store: store)
+        var completed = false
+        manager.perform(
+            transcript: "open Slack",
+            context: ActionContextSnapshot(),
+            execute: true,
+            allowSend: true
+        ) { result in
+            if case .completed = result { completed = true }
+        }
+        expect(core.performCount == 1 && manager.isRunning,
+               "the agent lifecycle delegates execution to the existing core")
+        var overlapRefused = false
+        manager.perform(
+            transcript: "open Mail",
+            context: ActionContextSnapshot()
+        ) { result in
+            if case .failed = result { overlapRefused = true }
+        }
+        expect(overlapRefused && core.performCount == 1,
+               "the agent lifecycle refuses an overlapping task")
+
+        manager.handle(.actionTurn(
+            id: "stale-engine-task", turn: 9, sends: true, goal: "stale",
+            steps: [], done: true, ms: 999))
+        manager.handle(.actionTurn(
+            id: "engine-task", turn: 1, sends: false, goal: "open Slack",
+            steps: [["do": "open_app", "app": "Slack"]], done: true, ms: 17))
+        manager.cancel()
+        expect(core.handledEvents == 2 && core.cancelCount == 1,
+               "events and cancellation still cross the single core boundary")
+        core.complete(.completed(goal: "open Slack", trace: ["open_app Slack"]))
+        expect(waitUntil { completed },
+               "completion waits for the durable receipt commit")
+
+        let row = store.recent().first
+        expect(completed && row?.status == .completed && row?.goal == "open Slack",
+               "the separate lifecycle persists the core's verified outcome")
+        let eventKinds = row.map { store.events(taskID: $0.id).map(\.kind) } ?? []
+        expect(eventKinds.contains("planner_turn")
+                && eventKinds.contains("cancel_requested")
+                && eventKinds.contains("receipt"),
+               "the durable ledger records planner, cancellation, and receipts")
+        let turns = row.map {
+            store.events(taskID: $0.id).filter { $0.kind == "planner_turn" }
+        } ?? []
+        expect(turns.count == 1 && turns.first?.turn == 1,
+               "the ledger ignores stale turns the core would reject")
+
+        let unavailableRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-agent-unavailable-\(UUID().uuidString)",
+                                    isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: unavailableRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: unavailableRoot) }
+        let blockedCore = FakeAgentActionCore()
+        let unavailable = AgentTaskStore(url: unavailableRoot)
+        let blocked = AgentSessionManager(core: blockedCore, store: unavailable)
+        var unavailableReason = ""
+        blocked.perform(
+            transcript: "open Calendar",
+            context: ActionContextSnapshot()
+        ) { result in
+            if case .failed(let reason, _) = result { unavailableReason = reason }
+        }
+        expect(blockedCore.performCount == 0 && unavailableReason.contains("ledger"),
+               "a privileged action cannot start without its durable ledger")
     }
 
     // MARK: - audited bypasses (2026-08-04)
@@ -777,7 +962,24 @@ extension Selftest {
         let probe = HotkeySelftestDelegate()
         monitor.delegate = probe
         monitor.hotkey = .rightOption
-        monitor.secondaryHotkeys = [.edit: .optionShiftE, .action: .optionShiftA]
+        monitor.secondaryHotkeys = [
+            .edit: .optionShiftE,
+            .stream: .controlShiftS,
+            .action: .optionShiftA,
+        ]
+
+        // Stream Typing has its own independently latched chord.
+        expect(monitor.handleKeyDown(
+            keyCode: 1, flags: Hotkey.controlShiftS.modifiers,
+            isRepeat: false, invalidateContinuation: false),
+            "the stream combo is suppressed by a filtering tap")
+        expect(waitUntil { probe.streamHotkeyDownCount == 1 },
+               "the stream hotkey callback is delivered")
+        expect(probe.editHotkeyDownCount == 0 && probe.actionHotkeyDownCount == 0,
+               "the stream combo fires no other voice mode")
+        expect(monitor.handleKeyUp(keyCode: 1), "the stream key-up is suppressed")
+        expect(waitUntil { probe.streamHotkeyUpCount == 1 },
+               "the stream key-up is delivered")
 
         // ⌥⇧A reaches Action Mode, and only Action Mode.
         expect(monitor.handleKeyDown(keyCode: 0, flags: Hotkey.optionShiftA.modifiers,
@@ -862,9 +1064,29 @@ extension Selftest {
         }
         expect(shortcuts.dictation == .rightOption, "the existing hotkey survives the upgrade")
         expect(shortcuts.voiceEdit, "the existing Voice Edit preference survives")
+        expect(shortcuts.streamTyping == .controlShiftS,
+               "a missing Stream Typing hotkey gets the collision-safe default")
+        expect(shortcuts.streamTypingEnabled,
+               "Stream Typing is on after an upgrade")
         expect(shortcuts.action == SettingsDocument.Shortcuts.defaultActionHotkey,
-               "a missing action hotkey defaults to ⌥⇧A")
+               "a missing action hotkey defaults to ⌃⇧A")
         expect(shortcuts.actionsEnabled, "Action Mode is on by default after an upgrade")
+
+        let streamDefaultAlreadyUsed = """
+        {"dictation":{"keyCode":1,"modifiers":393216,"isModifierOnly":false},
+         "editSelection":{"keyCode":14,"modifiers":655360,"isModifierOnly":false},
+         "voiceEdit":true,"behavior":"hold",
+         "action":{"keyCode":0,"modifiers":393216,"isModifierOnly":false},
+         "actionsEnabled":true}
+        """
+        if let collisionData = streamDefaultAlreadyUsed.data(using: .utf8),
+           let collisionSafe = try? JSONDecoder().decode(
+                SettingsDocument.Shortcuts.self, from: collisionData) {
+            expect(collisionSafe.streamTyping != collisionSafe.dictation,
+                   "a pre-Stream shortcut collision receives a deterministic spare")
+        } else {
+            expect(false, "a pre-Stream settings collision still decodes")
+        }
 
         // And a full round trip keeps a customized binding.
         var custom = SettingsDocument.Shortcuts.defaults
@@ -877,6 +1099,132 @@ extension Selftest {
             return
         }
         expect(decoded == custom, "a customized action hotkey round-trips")
+    }
+
+    private static func testStreamDraftRevisionPolicy() {
+        var plan = StreamDraftPlan()
+        expect(plan.next("hello", ownershipValid: true) == .insert("hello"),
+               "a stream draft inserts its first provisional transcript once")
+        plan.commit("hello")
+        expect(plan.next("hello", ownershipValid: true) == .noChange,
+               "an identical provisional transcript is idempotent")
+        expect(
+            plan.next("hello world", ownershipValid: true)
+                == .replace(previous: "hello", with: "hello world"),
+            "a newer provisional transcript replaces the exact owned draft")
+        plan.commit("hello world")
+        expect(plan.next("polished final", ownershipValid: false) == .abandon,
+               "cursor or text drift abandons replacement before the final")
+        expect(plan.next("anything", ownershipValid: true) == .abandon,
+               "an abandoned live range can never be reclaimed blindly")
+
+        expect(
+            StreamTypingSession.finishResultForFailedDelivery(
+                hadRenderedDraft: false, postedUTF16Units: 1) == .ownershipLost,
+            "a failed first write after any posted event never falls back to a second insertion")
+        expect(
+            StreamTypingSession.finishResultForFailedDelivery(
+                hadRenderedDraft: false, postedUTF16Units: 0) == .unavailable,
+            "a first write that posted nothing may use final-only fallback")
+        expect(
+            StreamTypingSession.finishResultForFailedDelivery(
+                hadRenderedDraft: true, postedUTF16Units: 0) == .ownershipLost,
+            "a failed revision of an existing draft never inserts a duplicate final")
+        expect(
+            StreamTypingSession.finishResultForFailedDelivery(
+                hadRenderedDraft: false,
+                postedUTF16Units: 0,
+                ownershipStillValid: false) == .ownershipLost,
+            "a zero-post first write cannot fall back after its original cursor moved")
+
+        var lostBeforeFirstDraft = StreamDraftPlan()
+        expect(
+            lostBeforeFirstDraft.next("final", ownershipValid: false) == .abandon
+                && lostBeforeFirstDraft.abandonment == .ownershipLost,
+            "ownership loss before the first partial is not mistaken for unavailable streaming")
+
+        var failedFirstProvisional = StreamDraftPlan()
+        expect(
+            failedFirstProvisional.next("partial", ownershipValid: true)
+                == .insert("partial"),
+            "the failed-first-write fixture begins with a provisional insertion")
+        failedFirstProvisional.abandonAfterFailedDelivery(
+            postedUTF16Units: 1, ownershipStillValid: false)
+        expect(
+            failedFirstProvisional.next("polished", ownershipValid: true) == .abandon
+                && failedFirstProvisional.abandonment == .ownershipLost,
+            "a partial first write remains ownership-lost when the later final arrives")
+
+        var simulatedClipboard = "before"
+        StreamFinalOutputStagingPolicy.stage(
+            "final", alreadyStaged: false, write: { simulatedClipboard = $0 })
+        simulatedClipboard = "new user copy"
+        StreamFinalOutputStagingPolicy.stage(
+            "final", alreadyStaged: true, write: { simulatedClipboard = $0 })
+        expect(
+            simulatedClipboard == "new user copy",
+            "an asynchronous Stream fallback does not overwrite a newer clipboard copy")
+
+        expect(
+            StreamInteractionGate.actionRequestIsBusy(
+                phaseIsIdle: true,
+                cancellationInFlight: true,
+                actionIsRunning: false),
+            "Action Mode stays busy until Stream cancellation restoration completes")
+        expect(
+            !StreamInteractionGate.actionRequestIsBusy(
+                phaseIsIdle: true,
+                cancellationInFlight: false,
+                actionIsRunning: false),
+            "Action Mode becomes available after Stream restoration releases ownership")
+
+        expect(
+            StreamTypingFinalPolicy.shouldDeferFinal(
+                session: "stream-1", cancellationSession: "stream-1"),
+            "a final for the restoring Stream session is deferred")
+        expect(
+            !StreamTypingFinalPolicy.shouldDeferFinal(
+                session: "new-session", cancellationSession: "stream-1"),
+            "an unrelated final is not captured by an old Stream restoration")
+        expect(
+            StreamTypingFinalPolicy.restorationDecision(
+                originalIsCurrent: false, attemptsRemaining: 2) == .retry
+                && StreamTypingFinalPolicy.restorationDecision(
+                    originalIsCurrent: true, attemptsRemaining: 1) == .restored,
+            "delayed AX restoration retries until the exact original selection appears")
+        expect(
+            StreamTypingFinalPolicy.restorationDecision(
+                originalIsCurrent: false, attemptsRemaining: 0) == .failed
+                && !StreamTypingFinalPolicy.commandMayExecute(after: .failed)
+                && StreamTypingFinalPolicy.commandMayExecute(after: .noDraft),
+            "failed restoration never authorizes a command while a no-draft cancellation can")
+
+        var streamHistoryWrites = 0
+        if StreamTypingFinalPolicy.shouldRecordHistory(alreadyRecorded: false) {
+            streamHistoryWrites += 1
+        }
+        // The normal insertion fallback is allowed after final delivery has
+        // started, including if cancellation races the AX completion. It must
+        // not create a second History row for the already-durable final.
+        if StreamTypingFinalPolicy.shouldRecordHistory(alreadyRecorded: true) {
+            streamHistoryWrites += 1
+        }
+        expect(
+            streamHistoryWrites == 1,
+            "a Stream final is retained exactly once across asynchronous fallback or cancellation")
+
+        let unicode = String(repeating: "a", count: 19) + "🙂" + " suffix"
+        let chunks = TextInserter.unicodeTypingChunks(unicode)
+        let joined = chunks.flatMap { $0 }
+        expect(joined.elementsEqual(unicode.utf16),
+               "Unicode typing chunks preserve every UTF-16 unit in order")
+        expect(
+            chunks.allSatisfy { chunk in
+                let decoded = String(decoding: chunk, as: UTF16.self)
+                return decoded.utf16.elementsEqual(chunk)
+                    && !decoded.contains("\u{FFFD}")
+            },
+            "Unicode typing never splits an emoji surrogate pair across events")
     }
 
     // MARK: - CLI / control surface

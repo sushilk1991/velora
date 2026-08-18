@@ -80,7 +80,7 @@ REGISTRY: list[ModelInfo] = [
         backend="parakeet",
         size="2.5 GB",
         description=(
-            "Fastest — live streaming preview while you speak. English + 24 "
+            "Fastest final transcription. English + 24 "
             "European languages (no Hindi/Mandarin/Arabic)."
         ),
     ),
@@ -89,7 +89,7 @@ REGISTRY: list[ModelInfo] = [
         kind="stt",
         backend="parakeet",
         size="2.3 GB",
-        description="Fastest English-only, live streaming. Lowest latency for pure English.",
+        description="Fastest English-only final transcription. Lowest latency for pure English.",
     ),
     ModelInfo(
         id="mlx-community/whisper-large-v3-turbo-q4",

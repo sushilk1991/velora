@@ -26,13 +26,19 @@ enum DictationOutputFailure {
 /// requests and Voice Edit must fail closed: their final is either API output
 /// or a spoken instruction, never ordinary text to auto-paste.
 enum LateFinalPolicy {
+    static func commandMayExecute(allowAutomaticInsertion: Bool) -> Bool {
+        allowAutomaticInsertion
+    }
+
     static func errorCancelsSession(
         _ failedSession: String,
         editInstructionSession: String?,
-        externalRequestSession: String?
+        externalRequestSession: String?,
+        actionInstructionSession: String?
     ) -> Bool {
         editInstructionSession == failedSession
             || externalRequestSession == failedSession
+            || actionInstructionSession == failedSession
     }
 }
 
@@ -169,13 +175,41 @@ final class DictationController: NSObject {
     private let dictionary: DictionaryRepository
     private var externalInsertionObserver: NSObjectProtocol?
 
-    /// Action Mode. Lazy because it needs `self`'s engine client and inserter,
-    /// and because a user who never runs an action never pays for it.
-    private lazy var actions = ActionCoordinator(
-        client: supervisor.client,
-        host: SystemActionHost(inserter: inserter))
+    /// Action Mode stays uninitialized until an action actually starts. Plain
+    /// dictation may consult actionsStorage to enforce input exclusion without
+    /// paying ledger setup on the hotkey-to-microphone path.
+    private var actionsStorage: AgentSessionManager?
+    private var actions: AgentSessionManager {
+        if let actionsStorage { return actionsStorage }
+        let manager = AgentSessionManager(
+            client: supervisor.client,
+            host: SystemActionHost(inserter: inserter))
+        actionsStorage = manager
+        return manager
+    }
     /// The dictation session whose transcript is a command, not text to insert.
     private var actionSession: String?
+    /// Opt-in session whose provisional transcript owns a bounded live draft
+    /// at the original text cursor.
+    private var streamSession: (
+        session: String, draft: StreamTypingSession, mode: String?)?
+    /// Keeps a cancelled session alive until any in-flight Unicode delivery
+    /// has finished and its still-owned original selection is restored.
+    private var streamCancellation: (
+        session: String, draft: StreamTypingSession, mode: String?)?
+    private struct DeferredStreamFinal {
+        let session: String
+        let text: String
+        let raw: String
+        let mode: String?
+        let cleanupMs: Int?
+        let cleanupApplied: Bool?
+        let cleanupWallMs: Int?
+        let finalizationMs: Int?
+        let audio: String?
+        let allowAutomaticInsertion: Bool
+    }
+    private var deferredStreamFinal: DeferredStreamFinal?
     /// Identity of the CLI request that owns the running action, if any.
     private var actionRequestID: UUID?
     /// Names harvested off the screen while the command was being spoken.
@@ -330,6 +364,7 @@ final class DictationController: NSObject {
         self.sounds = sounds
         self.dictionary = dictionary
         super.init()
+        ModeApplicationIndex.shared.reload()
         externalInsertionObserver = NotificationCenter.default.addObserver(
             forName: .veloraExternalTextInsertion, object: nil, queue: .main
         ) { [weak self] _ in
@@ -374,9 +409,10 @@ final class DictationController: NSObject {
             || sublimeCaptureID != nil
             || sublimeApplyID != nil
             || externalApproval != nil
+            || streamCancellation != nil
             // An action drives other apps' windows; relaunching Velora
             // underneath a half-run plan would strand it mid-message.
-            || actions.isRunning
+            || actionsStorage?.isRunning == true
     }
 
     // MARK: - Menubar entry point
@@ -416,7 +452,11 @@ final class DictationController: NSObject {
                 code: "app_unavailable", message: "Velora is shutting down")))
             return
         }
-        guard phase == .idle, !actions.isRunning else {
+        guard !StreamInteractionGate.actionRequestIsBusy(
+            phaseIsIdle: phase == .idle,
+            cancellationInFlight: streamCancellation != nil,
+            actionIsRunning: actionsStorage?.isRunning == true
+        ) else {
             completion(.failure(ControlFailure(
                 code: "busy", message: "Velora is busy right now")))
             return
@@ -483,7 +523,7 @@ final class DictationController: NSObject {
     func cancelAction(requestID: UUID? = nil) {
         dispatchPrecondition(condition: .onQueue(.main))
         if let requestID, actionRequestID != requestID { return }
-        actions.cancel()
+        actionsStorage?.cancel()
     }
 
     /// Runs a command spoken through the Action hotkey. Unlike the CLI path
@@ -1326,9 +1366,20 @@ final class DictationController: NSObject {
     @discardableResult
     private func startRecording(
         locked: Bool, explicitMode: String? = nil, external: Bool = false,
-        hudLabel: String? = nil
+        hudLabel: String? = nil, streamTyping: Bool = false
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
+        guard streamCancellation == nil else {
+            NSLog("Velora: recording deferred — restoring a cancelled stream draft")
+            return false
+        }
+        // Action execution drives focus and may synthesize text while the
+        // controller phase is idle. Starting any dictation in that interval
+        // would allow two independent keyboard-event streams to interleave.
+        guard actionsStorage?.isRunning != true else {
+            NSLog("Velora: recording refused — an action is still running")
+            return false
+        }
         if let reason = recordingBlockReason?() {
             showError(reason)
             return false
@@ -1409,6 +1460,7 @@ final class DictationController: NSObject {
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
             modeName: hudLabel ?? explicitMode
+                ?? ModeApplicationIndex.shared.modeName(forBundleID: sessionContext?.bundleID)
                 ?? ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
 
         NSLog(
@@ -1422,6 +1474,11 @@ final class DictationController: NSObject {
         if let explicitMode {
             var payload = startCommand["context"] as? [String: Any] ?? [:]
             payload["mode"] = explicitMode
+            startCommand["context"] = payload
+        }
+        if streamTyping {
+            var payload = startCommand["context"] as? [String: Any] ?? [:]
+            payload["stream_typing"] = true
             startCommand["context"] = payload
         }
         phase = .starting(locked: locked)
@@ -1551,9 +1608,12 @@ final class DictationController: NSObject {
         transcribeTimer = nil
         supervisor.send(["cmd": "cancel", "session": sessionID])
         cancelledSessionID = sessionID
+        cancelStreamDraft()
         hud.model.recordingStart = nil
-        hud.transition(to: .hidden(.cancel))
         phase = .idle
+        // HUDPanel publishes availability synchronously. Release dictation's
+        // phase first so a retained meeting failure can claim that callback.
+        hud.transition(to: .hidden(.cancel))
         editSession?.selection.discardMutableIdentity()
         editSession = nil
         failExternalRequest(for: sessionID, error: .cancelled)
@@ -1581,6 +1641,7 @@ final class DictationController: NSObject {
         // Mark this session cancelled so a late `final` for it is refused
         // (the user explicitly gave up on it).
         cancelledSessionID = sessionID
+        cancelStreamDraft()
         stopAfterCaptureStarts = false
         editSession?.selection.discardMutableIdentity()
         editSession = nil
@@ -1595,8 +1656,8 @@ final class DictationController: NSObject {
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
         hud.model.recordingStart = nil
-        hud.transition(to: .hidden(.cancel))
         phase = .idle
+        hud.transition(to: .hidden(.cancel))
         failExternalRequest(for: sessionID, error: .cancelled)
     }
 
@@ -1604,6 +1665,7 @@ final class DictationController: NSObject {
         _ message: String, retryIntent explicitRetryIntent: ErrorRetryIntent? = nil
     ) {
         clearSublimeCapture()
+        cancelStreamDraft()
         let failedSession = sessionID
         let retryIntent = ErrorRetryIntent.resolve(
             explicit: explicitRetryIntent,
@@ -1612,7 +1674,8 @@ final class DictationController: NSObject {
         if LateFinalPolicy.errorCancelsSession(
             failedSession,
             editInstructionSession: editSession?.session,
-            externalRequestSession: externalRequest?.session
+            externalRequestSession: externalRequest?.session,
+            actionInstructionSession: actionSession
         ) {
             // Once the requester has received a failure, a late final must not
             // fall through into the normal paste path. The same rule is
@@ -1620,6 +1683,9 @@ final class DictationController: NSObject {
             // after an edit timeout/error it must never become normal dictated
             // text merely because showError clears the captured selection.
             cancelledSessionID = failedSession
+        }
+        if actionSession == failedSession {
+            actionSession = nil
         }
         if editSession?.session == failedSession {
             editSession?.selection.discardMutableIdentity()
@@ -1654,17 +1720,20 @@ final class DictationController: NSObject {
         // belong to a dictation session.
         switch event {
         case .actionTurn, .actionFailed:
-            actions.handle(event)
+            actionsStorage?.handle(event)
             return
         default:
             break
         }
         switch event {
-        case .partial(let session, _):
-            // Protocol-compatible progress only. Whisper partials are
-            // provisional and must never compete with the authoritative final
-            // inside the waveform-first HUD.
+        case .partial(let session, let text):
             guard session == sessionID, phase != .idle else { return }
+            // Ordinary dictation keeps provisional Whisper output out of the
+            // HUD and target. Stream Typing alone owns an exact live range and
+            // may replace it; the authoritative final still wins below.
+            if let stream = streamSession, stream.session == session {
+                stream.draft.update(text, mode: stream.mode)
+            }
 
         case .transcript(let session, let raw, let ms):
             guard session == sessionID else { return }
@@ -1740,6 +1809,19 @@ final class DictationController: NSObject {
             }
             // Safe Voice Edit: this session's transcript is an INSTRUCTION for
             // the captured selection, never text to paste.
+            let effectiveRaw = raw.isEmpty ? (rawTranscript ?? text) : raw
+            if StreamTypingFinalPolicy.shouldDeferFinal(
+                session: session,
+                cancellationSession: streamCancellation?.session
+            ) {
+                deferredStreamFinal = DeferredStreamFinal(
+                    session: session, text: text, raw: effectiveRaw, mode: mode,
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs, finalizationMs: totalMs,
+                    audio: audio,
+                    allowAutomaticInsertion: !arrivedTooLate)
+                return
+            }
             if let edit = editSession, edit.session == session {
                 editSession = nil
                 let instruction = (raw.isEmpty ? text : raw)
@@ -1747,8 +1829,21 @@ final class DictationController: NSObject {
                 sendEditCommand(edit: edit, instruction: instruction)
                 return
             }
+            if let stream = streamSession, stream.session == session {
+                finishStreamInsertion(
+                    stream: stream,
+                    text: text,
+                    raw: effectiveRaw,
+                    mode: mode,
+                    cleanupMs: cleanupMs,
+                    cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: totalMs,
+                    audio: audio)
+                return
+            }
             finishInsertion(
-                text: text, raw: raw.isEmpty ? (rawTranscript ?? text) : raw,
+                text: text, raw: effectiveRaw,
                 mode: mode, cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
                 cleanupWallMs: cleanupWallMs, finalizationMs: totalMs, audio: audio,
                 allowAutomaticInsertion: !arrivedTooLate)
@@ -1858,7 +1953,9 @@ final class DictationController: NSObject {
         cleanupWallMs: Int?,
         finalizationMs: Int?,
         audio: String?,
-        allowAutomaticInsertion: Bool = true
+        allowAutomaticInsertion: Bool = true,
+        finalOutputAlreadyStaged: Bool = false,
+        historyAlreadyRecorded: Bool = false
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let context = sessionContext
@@ -1898,6 +1995,15 @@ final class DictationController: NSObject {
             // planner is matching names and app names, so verbatim wins.
             let command = (raw.isEmpty ? trimmed : raw)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard LateFinalPolicy.commandMayExecute(
+                allowAutomaticInsertion: allowAutomaticInsertion
+            ) else {
+                phase = .idle
+                showNotice(
+                    symbol: "exclamationmark.arrow.triangle.2.circlepath",
+                    message: "Finished late — action not run")
+                return
+            }
             if audio != nil {
                 recordHistory(
                     text: command, raw: raw, context: context, mode: "Action",
@@ -1907,6 +2013,25 @@ final class DictationController: NSObject {
             }
             phase = .idle
             runVoiceAction(command)
+            return
+        }
+
+        // Commands are recognized before the late-final empty-text gate: a
+        // cleanup model may intentionally remove the words "scratch that".
+        // Once automatic delivery is disallowed, report the command without
+        // executing Return/Undo or copying its literal words.
+        if config.voiceCommands,
+           let command = VoiceCommand.parse(text: trimmed, raw: raw) {
+            if LateFinalPolicy.commandMayExecute(
+                allowAutomaticInsertion: allowAutomaticInsertion
+            ) {
+                executeVoiceCommand(command)
+            } else {
+                phase = .idle
+                showNotice(
+                    symbol: "exclamationmark.arrow.triangle.2.circlepath",
+                    message: "Finished late — command not run")
+            }
             return
         }
 
@@ -1933,15 +2058,6 @@ final class DictationController: NSObject {
             return
         }
 
-        // Voice commands v1: an utterance that IS a command ("scratch that",
-        // "new line") executes instead of pasting. Checked before the
-        // empty-guard — cleanup can legitimately empty a bare retraction
-        // phrase, and the command must still fire off the raw transcript.
-        if config.voiceCommands, let command = VoiceCommand.parse(text: trimmed, raw: raw) {
-            executeVoiceCommand(command)
-            return
-        }
-
         if let message = DictationOutputFailure.message(for: trimmed) {
             // A real recording that survives to `final` must never disappear
             // without feedback. The engine already retried recoverable prompt
@@ -1962,7 +2078,9 @@ final class DictationController: NSObject {
         // typing, permission, secure-input, focus-change, and silent Command-V
         // failures while whole-utterance voice commands above remain commands
         // rather than copied prose.
-        inserter.stageFinalOutput(text)
+        StreamFinalOutputStagingPolicy.stage(
+            text, alreadyStaged: finalOutputAlreadyStaged,
+            write: inserter.stageFinalOutput)
 
         // Own-window insertion (onboarding try-it): the TextEditor lives inside
         // Velora's own window. AppContextTracker deliberately ignores Velora's
@@ -1981,11 +2099,15 @@ final class DictationController: NSObject {
             hud.model.retryTitle = "Retry"
             hud.transition(to: .inserted)
             phase = .idle
-            recordHistory(
-                text: text, raw: raw, context: context, mode: mode,
-                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
-                cleanupWallMs: cleanupWallMs,
-                finalizationMs: finalizationMs, audio: audio)
+            if StreamTypingFinalPolicy.shouldRecordHistory(
+                alreadyRecorded: historyAlreadyRecorded
+            ) {
+                recordHistory(
+                    text: text, raw: raw, context: context, mode: mode,
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio)
+            }
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
             scheduleInsertedHide()
             return
@@ -2030,19 +2152,27 @@ final class DictationController: NSObject {
             sounds.play(.error)
             hud.transition(to: .error(fallbackMessage))
             phase = .idle
+            if StreamTypingFinalPolicy.shouldRecordHistory(
+                alreadyRecorded: historyAlreadyRecorded
+            ) {
+                recordHistory(
+                    text: text, raw: raw, context: context, mode: mode,
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio)
+            }
+            return
+        }
+
+        if StreamTypingFinalPolicy.shouldRecordHistory(
+            alreadyRecorded: historyAlreadyRecorded
+        ) {
             recordHistory(
                 text: text, raw: raw, context: context, mode: mode,
                 cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
                 cleanupWallMs: cleanupWallMs,
                 finalizationMs: finalizationMs, audio: audio)
-            return
         }
-
-        recordHistory(
-            text: text, raw: raw, context: context, mode: mode,
-            cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
-            cleanupWallMs: cleanupWallMs,
-            finalizationMs: finalizationMs, audio: audio)
 
         let session = sessionID
         inserter.insert(
@@ -2065,6 +2195,139 @@ final class DictationController: NSObject {
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
             self.scheduleInsertedHide()
         }
+    }
+
+    private func finishStreamInsertion(
+        stream: (session: String, draft: StreamTypingSession, mode: String?),
+        text: String,
+        raw: String,
+        mode: String?,
+        cleanupMs: Int?,
+        cleanupApplied: Bool?,
+        cleanupWallMs: Int?,
+        finalizationMs: Int?,
+        audio: String?
+    ) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let command = StreamTypingFinalPolicy.voiceCommand(
+            enabled: config.voiceCommands, text: trimmed, raw: raw
+        ) {
+            let session = stream.session
+            // A command is never draft text. Remove a still-owned provisional
+            // revision first, then act only after exact restoration completes.
+            // This keeps both the document and clipboard untouched by the
+            // words "scratch that" / "new line" themselves.
+            cancelStreamDraft { [weak self] result in
+                guard let self,
+                      session == self.sessionID,
+                      session != self.cancelledSessionID
+                else { return }
+                guard StreamTypingFinalPolicy.commandMayExecute(after: result) else {
+                    self.phase = .idle
+                    self.showNotice(
+                        symbol: "exclamationmark.arrow.triangle.2.circlepath",
+                        message: "Draft changed — command not run")
+                    self.schedulePendingRecordingLimitNotice()
+                    return
+                }
+                self.executeVoiceCommand(command)
+                self.schedulePendingRecordingLimitNotice()
+            }
+            return
+        }
+        guard DictationOutputFailure.message(for: trimmed) == nil else {
+            cancelStreamDraft()
+            finishInsertion(
+                text: text, raw: raw, mode: mode,
+                cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                cleanupWallMs: cleanupWallMs,
+                finalizationMs: finalizationMs, audio: audio)
+            return
+        }
+
+        // The polished final is recoverable before any last live-range
+        // replacement. History is committed at the same boundary: cancelling
+        // an in-flight AX replacement may restore the original document, but
+        // it must never erase the user's completed utterance. Provisional text
+        // never enters either durable surface.
+        inserter.stageFinalOutput(text)
+        recordHistory(
+            text: text, raw: raw, context: sessionContext, mode: mode,
+            cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+            cleanupWallMs: cleanupWallMs,
+            finalizationMs: finalizationMs, audio: audio)
+        let session = stream.session
+        stream.draft.finish(text, mode: mode ?? stream.mode) { [weak self, weak draft = stream.draft] result in
+            guard let self, let draft,
+                  session == self.sessionID,
+                  session != self.cancelledSessionID,
+                  self.streamSession?.draft === draft
+            else { return }
+            self.streamSession = nil
+            switch result {
+            case .unavailable:
+                // The target never exposed a safely replaceable live range.
+                // Fall back to Velora's normal final-only delivery.
+                self.finishInsertion(
+                    text: text, raw: raw, mode: mode,
+                    cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: finalizationMs, audio: audio,
+                    finalOutputAlreadyStaged: true,
+                    historyAlreadyRecorded: true)
+            case .ownershipLost:
+                self.phase = .idle
+                self.showNotice(
+                    symbol: "doc.on.clipboard.fill",
+                    message: "Cursor changed — final copied")
+            case .applied:
+                self.inserter.resetContinuationContext()
+                self.hud.transition(to: .inserted)
+                self.phase = .idle
+                self.lastInsertion = (
+                    bundleID: self.sessionContext?.bundleID, at: Date())
+                self.captureLearningBaseline(
+                    text: text,
+                    bundleID: self.sessionContext?.bundleID,
+                    session: session)
+                NotificationCenter.default.post(
+                    name: .veloraDictationInserted, object: text)
+                self.scheduleInsertedHide()
+            }
+            self.schedulePendingRecordingLimitNotice()
+        }
+    }
+
+    private func finishDeferredStreamFinal(
+        _ final: DeferredStreamFinal,
+        after cancellation: StreamTypingSession.CancellationResult
+    ) {
+        guard final.session == sessionID,
+              final.session != cancelledSessionID else { return }
+        if !StreamTypingFinalPolicy.commandMayExecute(after: cancellation),
+           StreamTypingFinalPolicy.voiceCommand(
+            enabled: config.voiceCommands,
+            text: final.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            raw: final.raw
+           ) != nil {
+            phase = .idle
+            showNotice(
+                symbol: "exclamationmark.arrow.triangle.2.circlepath",
+                message: "Draft changed — command not run")
+            schedulePendingRecordingLimitNotice()
+            return
+        }
+        finishInsertion(
+            text: final.text, raw: final.raw, mode: final.mode,
+            cleanupMs: final.cleanupMs,
+            cleanupApplied: final.cleanupApplied,
+            cleanupWallMs: final.cleanupWallMs,
+            finalizationMs: final.finalizationMs,
+            audio: final.audio,
+            allowAutomaticInsertion:
+                StreamTypingFinalPolicy.commandMayExecute(after: cancellation)
+                    && final.allowAutomaticInsertion)
+        schedulePendingRecordingLimitNotice()
     }
 
     private func recordHistory(
@@ -2293,6 +2556,7 @@ extension DictationController: HotkeyMonitorDelegate {
     func secondaryHotkeyDown(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyDown()
+        case .stream: streamHotkeyDown()
         case .action: actionHotkeyDown()
         }
     }
@@ -2300,7 +2564,96 @@ extension DictationController: HotkeyMonitorDelegate {
     func secondaryHotkeyUp(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyUp()
+        case .stream: streamHotkeyUp()
         case .action: actionHotkeyUp()
+        }
+    }
+
+    private func beginStreamSession(locked: Bool) {
+        let app = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
+        let target = ScreenContext.streamTarget(of: app)
+        let mode = ModeApplicationIndex.shared.modeName(
+            forBundleID: app?.bundleIdentifier)
+            ?? ModeCategory.displayName(forBundleID: app?.bundleIdentifier)
+        let draft = StreamTypingSession(target: target)
+        guard startRecording(
+            locked: locked,
+            hudLabel: "Stream",
+            // Unsupported AX targets still get the polished final through the
+            // ordinary insertion path; do not spend Whisper cycles generating
+            // previews that cannot be rendered safely.
+            streamTyping: target != nil)
+        else { return }
+        streamSession = (session: sessionID, draft: draft, mode: mode)
+        NSLog(
+            "Velora: stream session started — liveTarget=%@ app=%@",
+            target == nil ? "unavailable" : "owned",
+            app?.bundleIdentifier ?? "unknown")
+    }
+
+    private func cancelStreamDraft(
+        completion: ((StreamTypingSession.CancellationResult) -> Void)? = nil
+    ) {
+        guard let stream = streamSession else {
+            completion?(.noDraft)
+            return
+        }
+        streamSession = nil
+        streamCancellation = stream
+        stream.draft.cancel { [weak self, weak draft = stream.draft] result in
+            guard let self, let draft,
+                  self.streamCancellation?.draft === draft else { return }
+            self.streamCancellation = nil
+            completion?(result)
+            if let final = self.deferredStreamFinal,
+               final.session == stream.session {
+                self.deferredStreamFinal = nil
+                self.finishDeferredStreamFinal(final, after: result)
+            }
+        }
+    }
+
+    private func streamHotkeyDown() {
+        if phase == .transcribing { resetIfStuckTranscribing() }
+        let isStreamRecording = streamSession?.session == sessionID && isRecording
+
+        switch (config.hotkeyMode, phase) {
+        case (.toggle, .idle):
+            beginStreamSession(locked: true)
+        case (.toggle, .starting) where isStreamRecording:
+            cancel()
+        case (.toggle, .recording) where isStreamRecording:
+            stopAndTranscribe()
+        case (.hold, .idle):
+            hotkeyDownAt = Date()
+            beginStreamSession(locked: false)
+        case (.hold, .starting(locked: true)) where isStreamRecording:
+            cancel()
+        case (.hold, .recording(locked: true)) where isStreamRecording:
+            stopAndTranscribe()
+        default:
+            break
+        }
+    }
+
+    private func streamHotkeyUp() {
+        guard config.hotkeyMode == .hold,
+              streamSession?.session == sessionID else { return }
+        let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+        if case .starting(locked: false) = phase {
+            if heldFor >= Self.tapThreshold {
+                stopAfterCaptureStarts = true
+            } else {
+                phase = .starting(locked: true)
+            }
+            return
+        }
+        guard case .recording(locked: false) = phase else { return }
+        if heldFor >= Self.tapThreshold {
+            stopAndTranscribe()
+        } else {
+            NSLog("Velora: stream tap (%.0f ms) — recording locked on", heldFor * 1000)
+            phase = .recording(locked: true)
         }
     }
 
@@ -2450,13 +2803,13 @@ extension DictationController: HotkeyMonitorDelegate {
         // Esc is the universal abort. A running plan is driving other apps'
         // windows, so it is the thing the user most urgently wants stopped —
         // and it runs while `phase` is idle, so it must be checked first.
-        if actions.isRunning {
-            actions.cancel()
+        if actionsStorage?.isRunning == true {
+            actionsStorage?.cancel()
             NSLog("Velora: action cancelled by Esc")
             // Only swallow Esc while steps are actually running. While a plan is
             // merely being planned nothing is touching the machine, and Esc
             // still belongs to whatever else is on screen.
-            if actions.isExecuting { return }
+            if actionsStorage?.isExecuting == true { return }
         }
         switch phase {
         case .starting, .recording, .transcribing:

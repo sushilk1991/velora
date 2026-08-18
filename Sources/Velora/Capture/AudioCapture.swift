@@ -22,14 +22,24 @@ extension MicrophoneStreamCapture: MicrophoneStreamCapturing {}
 /// Chunk callbacks fire on a private serial queue (callers forward to their
 /// own queue); level callbacks are delivered on the main queue.
 final class AudioCapture {
+    enum StartError: LocalizedError {
+        case noPCM
+
+        var errorDescription: String? {
+            "The selected microphone started but delivered no audio"
+        }
+    }
+
     /// Output format required by the engine (docs/ARCHITECTURE.md).
     static let sampleRate: Double = 16_000
     /// ~100 ms at 16 kHz.
     private static let chunkFrames = 1600
 
     private let source: any MicrophoneStreamCapturing
+    private let scheduleStartupCheck: (TimeInterval, DispatchWorkItem) -> Void
     private(set) var isRunning = false
     private var isStarting = false
+    private var startupTimeout: DispatchWorkItem?
     /// Identifies the start that owns the handlers currently installed below.
     /// A stale stop completion must never tear down a newer recording.
     private var generation: UInt64 = 0
@@ -57,8 +67,14 @@ final class AudioCapture {
     private var spectrumBuffer: [Float] = []
     private var sinceLastSpectrum = 0
 
-    init(source: any MicrophoneStreamCapturing = MicrophoneStreamCapture()) {
+    init(
+        source: any MicrophoneStreamCapturing = MicrophoneStreamCapture(),
+        scheduleStartupCheck: @escaping (TimeInterval, DispatchWorkItem) -> Void = {
+            delay, work in DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+    ) {
         self.source = source
+        self.scheduleStartupCheck = scheduleStartupCheck
     }
 
     /// Starts capture. `onChunk` receives raw Float32 LE PCM (~100 ms each);
@@ -75,6 +91,19 @@ final class AudioCapture {
         }
         let requestedGeneration = nextGeneration()
         isStarting = true
+        startupTimeout?.cancel()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.isCurrentGeneration(requestedGeneration),
+                  self.isStarting else { return }
+            self.startupTimeout = nil
+            self.isStarting = false
+            self.clearBuffers()
+            self.source.stop {}
+            completion(.failure(StartError.noPCM))
+        }
+        startupTimeout = timeout
+        scheduleStartupCheck(5, timeout)
 
         bufferQueue.sync {
             pending.removeAll(keepingCapacity: true)
@@ -86,7 +115,9 @@ final class AudioCapture {
         source.start(
             persistedUID: AppConfig.shared.inputDeviceUID,
             onBuffer: { [weak self] buffer in
-                self?.convertAndAccumulate(buffer, generation: requestedGeneration)
+                self?.convertAndAccumulate(
+                    buffer, generation: requestedGeneration,
+                    startupCompletion: completion)
             },
             onFailure: { [weak self] message in
                 guard let self, self.isCurrentGeneration(requestedGeneration) else { return }
@@ -96,14 +127,18 @@ final class AudioCapture {
             guard let self,
                   self.isCurrentGeneration(requestedGeneration),
                   self.isStarting else { return }
-            self.isStarting = false
             switch result {
             case .success:
-                self.isRunning = true
+                // A running AVCaptureSession is not readiness. The first
+                // converted PCM buffer completes startup below.
+                return
             case .failure:
+                self.startupTimeout?.cancel()
+                self.startupTimeout = nil
+                self.isStarting = false
                 self.clearBuffers()
+                completion(result)
             }
-            completion(result)
         }
     }
 
@@ -120,6 +155,8 @@ final class AudioCapture {
         }
         isRunning = false
         isStarting = false
+        startupTimeout?.cancel()
+        startupTimeout = nil
         let stoppedGeneration = currentGeneration()
         source.stop { [weak self] in
             guard let self else { completion(); return }
@@ -158,7 +195,9 @@ final class AudioCapture {
     /// Converts on AVCapture's serial sample queue, then copies Float32 data
     /// before handing it to Velora's existing accumulation queue.
     private func convertAndAccumulate(
-        _ buffer: AVAudioPCMBuffer, generation requestedGeneration: UInt64
+        _ buffer: AVAudioPCMBuffer,
+        generation requestedGeneration: UInt64,
+        startupCompletion: @escaping (Result<Void, Error>) -> Void
     ) {
         guard isCurrentGeneration(requestedGeneration) else { return }
         guard let outFormat = AVAudioFormat(
@@ -195,9 +234,22 @@ final class AudioCapture {
         guard conversionError == nil,
               let channel = out.floatChannelData?[0], out.frameLength > 0 else { return }
         let samples = Array(UnsafeBufferPointer(start: channel, count: Int(out.frameLength)))
+        // Commit every converted buffer before any main-queue readiness or
+        // stop transition can run. MicrophoneStreamCapture drains its sample
+        // queue before stop completion, so AudioCapture's later bufferQueue
+        // drain now necessarily includes every conversion already delivered.
         bufferQueue.async { [weak self] in
             guard let self, self.isCurrentGeneration(requestedGeneration) else { return }
             self.accumulate(samples)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isCurrentGeneration(requestedGeneration),
+                      self.isStarting else { return }
+                self.startupTimeout?.cancel()
+                self.startupTimeout = nil
+                self.isStarting = false
+                self.isRunning = true
+                startupCompletion(.success(()))
+            }
         }
     }
 

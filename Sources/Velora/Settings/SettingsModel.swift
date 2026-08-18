@@ -283,6 +283,8 @@ final class SettingsModel: ObservableObject {
         launchAtLogin = Self.launchAtLoginEnabled
         hotkey = config.hotkey
         editHotkey = config.editHotkey
+        streamTypingHotkey = config.streamTypingHotkey
+        streamTypingEnabled = config.streamTypingEnabled
         actionHotkey = config.actionHotkey
         actionsEnabled = config.actionsEnabled
         voiceEdit = config.voiceEdit
@@ -417,6 +419,8 @@ final class SettingsModel: ObservableObject {
 
         hotkey = imported.shortcuts.dictation
         editHotkey = imported.shortcuts.editSelection
+        streamTypingHotkey = imported.shortcuts.streamTyping
+        streamTypingEnabled = imported.shortcuts.streamTypingEnabled
         actionHotkey = imported.shortcuts.action
         actionsEnabled = imported.shortcuts.actionsEnabled
         voiceEdit = imported.shortcuts.voiceEdit
@@ -894,8 +898,14 @@ final class SettingsModel: ObservableObject {
                 hotkey = oldValue
                 return
             }
+            guard hotkey != streamTypingHotkey else {
+                streamTypingHotkeyConflict = true
+                hotkey = oldValue
+                return
+            }
             editHotkeyConflict = false
             actionHotkeyConflict = false
+            streamTypingHotkeyConflict = false
             config.hotkey = hotkey
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         }
@@ -909,7 +919,8 @@ final class SettingsModel: ObservableObject {
             // would silently disable Voice Edit, so reject it visibly. The same
             // applies to a collision with Action Mode, where the first role in
             // the table would silently win.
-            guard editHotkey != hotkey, editHotkey != actionHotkey else {
+            guard editHotkey != hotkey, editHotkey != actionHotkey,
+                  editHotkey != streamTypingHotkey else {
                 editHotkeyConflict = true
                 editHotkey = oldValue
                 return
@@ -920,10 +931,35 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    @Published var streamTypingHotkey: Hotkey {
+        didSet {
+            guard !applyingImportedSettings, streamTypingHotkey != oldValue else { return }
+            guard streamTypingHotkey != hotkey,
+                  streamTypingHotkey != editHotkey,
+                  streamTypingHotkey != actionHotkey else {
+                streamTypingHotkeyConflict = true
+                streamTypingHotkey = oldValue
+                return
+            }
+            streamTypingHotkeyConflict = false
+            config.streamTypingHotkey = streamTypingHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var streamTypingEnabled: Bool {
+        didSet {
+            guard !applyingImportedSettings, streamTypingEnabled != oldValue else { return }
+            config.streamTypingEnabled = streamTypingEnabled
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
     @Published var actionHotkey: Hotkey {
         didSet {
             guard !applyingImportedSettings, actionHotkey != oldValue else { return }
-            guard actionHotkey != hotkey, actionHotkey != editHotkey else {
+            guard actionHotkey != hotkey, actionHotkey != editHotkey,
+                  actionHotkey != streamTypingHotkey else {
                 actionHotkeyConflict = true
                 actionHotkey = oldValue
                 return
@@ -944,6 +980,7 @@ final class SettingsModel: ObservableObject {
 
     /// Set when a recorder would make two shortcuts collide.
     @Published var editHotkeyConflict = false
+    @Published var streamTypingHotkeyConflict = false
     @Published var actionHotkeyConflict = false
 
     @Published var voiceEdit: Bool {

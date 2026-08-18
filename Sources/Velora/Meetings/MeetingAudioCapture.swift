@@ -105,6 +105,7 @@ final class MeetingAudioCapture {
     private var startupTimeout: DispatchWorkItem?
     private var startupSystemAudio = false
     private var startupWarning: String?
+    private let systemAudioTeardown = DispatchGroup()
     private let failureLock = NSLock()
     private var systemAudioFailed = false
     private var microphoneWriteFailed = false
@@ -216,36 +217,37 @@ final class MeetingAudioCapture {
         micCapture.stop { [weak self] in
             guard let self else { completion(nil); return }
             self.micFile = nil
-            let systemHadFrames = self.stopSystemAudio()
-            let hasSystem = !self.didSystemAudioFail && systemHadFrames
-                && FileManager.default.fileExists(atPath: system?.path ?? "")
+            self.stopSystemAudio { systemHadFrames in
+                let hasSystem = !self.didSystemAudioFail && systemHadFrames
+                    && FileManager.default.fileExists(atPath: system?.path ?? "")
 
-            self.meetingID = nil
-            self.startedAt = nil
-            self.micURL = nil
-            self.systemURL = nil
-            self.readiness = nil
-            self.startupCompletion = nil
-            self.startupSystemAudio = false
-            self.startupWarning = nil
-            let directory = AppConfig.meetingsDirectory
-                .appendingPathComponent(meetingID, isDirectory: true)
-            if cancelled {
-                try? FileManager.default.removeItem(at: directory)
-                completion(nil)
-                return
+                self.meetingID = nil
+                self.startedAt = nil
+                self.micURL = nil
+                self.systemURL = nil
+                self.readiness = nil
+                self.startupCompletion = nil
+                self.startupSystemAudio = false
+                self.startupWarning = nil
+                let directory = AppConfig.meetingsDirectory
+                    .appendingPathComponent(meetingID, isDirectory: true)
+                if cancelled {
+                    try? FileManager.default.removeItem(at: directory)
+                    completion(nil)
+                    return
+                }
+                if !hasSystem, let system { try? FileManager.default.removeItem(at: system) }
+                if let mic { try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: mic.path) }
+                if hasSystem, let system { try? FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600], ofItemAtPath: system.path) }
+                completion(MeetingCaptureFiles(
+                    startedAt: startedAt, endedAt: Date(),
+                    micRelativePath: FileManager.default.fileExists(atPath: mic?.path ?? "")
+                        ? "\(meetingID)/me.caf" : nil,
+                    systemRelativePath: hasSystem
+                        ? MeetingSystemAudioPolicy.relativePath(meetingID: meetingID) : nil))
             }
-            if !hasSystem, let system { try? FileManager.default.removeItem(at: system) }
-            if let mic { try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: mic.path) }
-            if hasSystem, let system { try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o600], ofItemAtPath: system.path) }
-            completion(MeetingCaptureFiles(
-                startedAt: startedAt, endedAt: Date(),
-                micRelativePath: FileManager.default.fileExists(atPath: mic?.path ?? "")
-                    ? "\(meetingID)/me.caf" : nil,
-                systemRelativePath: hasSystem
-                    ? MeetingSystemAudioPolicy.relativePath(meetingID: meetingID) : nil))
         }
     }
 
@@ -269,16 +271,30 @@ final class MeetingAudioCapture {
         systemCapture = capture
     }
 
-    @discardableResult
-    private func stopSystemAudio() -> Bool {
+    private func stopSystemAudio(completion: @escaping (Bool) -> Void) {
+        dispatchPrecondition(condition: .onQueue(.main))
         guard #available(macOS 14.2, *),
               let capture = systemCapture as? CoreAudioSystemAudioCapture else {
             systemCapture = nil
-            return false
+            // A failure path may already have detached the capture and be
+            // draining its writer. Wait off-main before callers delete or
+            // inspect the CAF.
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.systemAudioTeardown.wait()
+                DispatchQueue.main.async { completion(false) }
+            }
+            return
         }
-        let result = capture.stop()
         systemCapture = nil
-        return result
+        // AudioDeviceStop and a durable file drain can block under the exact
+        // disk pressure that caused the capture failure. Never make the HUD or
+        // meeting controls wait on that teardown.
+        systemAudioTeardown.enter()
+        DispatchQueue.global(qos: .userInitiated).async {
+            let result = capture.stop()
+            self.systemAudioTeardown.leave()
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     private func finishStartupIfReady() {
@@ -317,13 +333,14 @@ final class MeetingAudioCapture {
             }
             if missing.contains(.systemAudio) {
                 self.markSystemAudioFailed()
-                _ = self.stopSystemAudio()
-                if let systemURL = self.systemURL {
-                    try? FileManager.default.removeItem(at: systemURL)
+                self.stopSystemAudio { _ in
+                    if let systemURL = self.systemURL {
+                        try? FileManager.default.removeItem(at: systemURL)
+                    }
+                    self.startupSystemAudio = false
+                    self.startupWarning = "Computer audio did not deliver any samples. This meeting is recording your microphone only."
+                    if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
                 }
-                self.startupSystemAudio = false
-                self.startupWarning = "Computer audio did not deliver any samples. This meeting is recording your microphone only."
-                if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
             }
         }
         startupTimeout = item
@@ -335,17 +352,22 @@ final class MeetingAudioCapture {
             guard let self, self.isCapturing else { return }
             if self.startedAt == nil, let readiness = self.readiness {
                 self.markSystemAudioFailed()
-                _ = self.stopSystemAudio()
-                if let systemURL = self.systemURL {
-                    try? FileManager.default.removeItem(at: systemURL)
+                self.stopSystemAudio { _ in
+                    if let systemURL = self.systemURL {
+                        try? FileManager.default.removeItem(at: systemURL)
+                    }
+                    self.startupSystemAudio = false
+                    self.startupWarning = Self.systemAudioWarning(for: NSError(
+                        domain: "VeloraSystemAudioCapture", code: 3,
+                        userInfo: [NSLocalizedDescriptionKey: message]))
+                    if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
                 }
-                self.startupSystemAudio = false
-                self.startupWarning = Self.systemAudioWarning(for: NSError(
-                    domain: "VeloraSystemAudioCapture", code: 3,
-                    userInfo: [NSLocalizedDescriptionKey: message]))
-                if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
             } else {
                 self.reportSystemAudioFailure(message)
+                // A terminal writer/device failure cannot recover in-place.
+                // Tear the tap down now instead of invoking a failing callback
+                // for the rest of a long meeting and wasting CPU indefinitely.
+                self.stopSystemAudio { _ in }
             }
         }
     }
@@ -362,18 +384,19 @@ final class MeetingAudioCapture {
         micCapture.stop { [weak self] in
             guard let self else { return }
             self.micFile = nil
-            _ = self.stopSystemAudio()
-            self.meetingID = nil
-            self.startedAt = nil
-            self.micURL = nil
-            self.systemURL = nil
-            self.readiness = nil
-            self.startupCompletion = nil
-            self.startupSystemAudio = false
-            self.startupWarning = nil
-            try? FileManager.default.removeItem(
-                at: AppConfig.meetingsDirectory
-                    .appendingPathComponent(meetingID, isDirectory: true))
+            self.stopSystemAudio { _ in
+                self.meetingID = nil
+                self.startedAt = nil
+                self.micURL = nil
+                self.systemURL = nil
+                self.readiness = nil
+                self.startupCompletion = nil
+                self.startupSystemAudio = false
+                self.startupWarning = nil
+                try? FileManager.default.removeItem(
+                    at: AppConfig.meetingsDirectory
+                        .appendingPathComponent(meetingID, isDirectory: true))
+            }
         }
     }
 
@@ -421,7 +444,16 @@ final class MeetingAudioCapture {
         guard let micURL else { return }
         do {
             if micFile == nil {
-                micFile = try AVAudioFile(forWriting: micURL, settings: buffer.format.settings)
+                // The capture route may be non-interleaved. The settings-only
+                // initializer lets AVAudioFile silently choose a different
+                // client layout, then Core Audio traps inside ExtAudioFileWrite
+                // when the live buffer arrives. Pin the processing layout to
+                // the callback's real PCM format, as the system track does.
+                micFile = try AVAudioFile(
+                    forWriting: micURL,
+                    settings: buffer.format.settings,
+                    commonFormat: buffer.format.commonFormat,
+                    interleaved: buffer.format.isInterleaved)
                 try? FileManager.default.setAttributes(
                     [.posixPermissions: 0o600], ofItemAtPath: micURL.path)
             }

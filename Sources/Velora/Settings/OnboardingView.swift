@@ -13,6 +13,9 @@ struct OnboardingSetupState: Equatable {
 
     var canTryIt: Bool { isComplete && status == nil }
     var progressFraction: Double? { fraction.map { min(0.99, max(0, $0)) } }
+    var primaryActionTitle: String {
+        canTryIt ? "Finish" : "Continue in the Background"
+    }
 }
 
 /// Onboarding state: current step, live permission status (polled — the
@@ -359,10 +362,14 @@ struct OnboardingView: View {
             }
         } button: {
             if setup.canTryIt {
-                Button("Finish") { model.onFinish?() }
+                Button(setup.primaryActionTitle) { model.onFinish?() }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.large)
                     .disabled(!model.dictationSucceeded)
+            } else {
+                Button(setup.primaryActionTitle) { model.onFinish?() }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
             }
         }
         .animation(.easeInOut(duration: 0.25), value: setup.canTryIt)

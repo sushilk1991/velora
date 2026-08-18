@@ -143,6 +143,9 @@ extension SettingsDocument {
         var dictation: Hotkey
         var editSelection: Hotkey
         var voiceEdit: Bool
+        /// Stream Typing writes provisional speech at the owned cursor.
+        var streamTyping: Hotkey
+        var streamTypingEnabled: Bool
         var behavior: HotkeyMode
         /// Action Mode: hold, speak a command, Velora carries it out.
         var action: Hotkey
@@ -152,18 +155,22 @@ extension SettingsDocument {
             dictation: .rightOption,
             editSelection: .optionShiftE,
             voiceEdit: true,
+            streamTyping: .controlShiftS,
+            streamTypingEnabled: true,
             behavior: .hold,
             action: .controlShiftA,
             actionsEnabled: true)
 
-        // Settings files written before Action Mode existed have no `action`
-        // keys; decoding must fill them in rather than fail the whole document
-        // and reset every unrelated preference.
+        // Older settings have neither Stream Typing nor Action Mode keys;
+        // decoding fills them rather than resetting unrelated preferences.
         init(dictation: Hotkey, editSelection: Hotkey, voiceEdit: Bool,
+             streamTyping: Hotkey, streamTypingEnabled: Bool,
              behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool) {
             self.dictation = dictation
             self.editSelection = editSelection
             self.voiceEdit = voiceEdit
+            self.streamTyping = streamTyping
+            self.streamTypingEnabled = streamTypingEnabled
             self.behavior = behavior
             self.action = action
             self.actionsEnabled = actionsEnabled
@@ -179,9 +186,24 @@ extension SettingsDocument {
                 ?? Shortcuts.defaultActionHotkey
             actionsEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .actionsEnabled) ?? true
+            streamTyping = try container.decodeIfPresent(
+                Hotkey.self, forKey: .streamTyping)
+                ?? Shortcuts.defaultStreamHotkey(
+                    excluding: [dictation, editSelection, action])
+            streamTypingEnabled = try container.decodeIfPresent(
+                Bool.self, forKey: .streamTypingEnabled) ?? true
         }
 
         static let defaultActionHotkey = Hotkey.controlShiftA
+
+        static func defaultStreamHotkey(excluding used: [Hotkey]) -> Hotkey {
+            // A pre-Stream settings file can already use the new default.
+            // Choose a deterministic spare instead of invalidating and
+            // resetting the user's whole settings document.
+            [Hotkey.controlShiftS, .f19, .fnGlobe, .optionShiftA,
+             .controlShiftA, .optionShiftE, .rightOption]
+                .first { !used.contains($0) } ?? .controlShiftS
+        }
     }
 
     struct Updates: Codable, Equatable {
@@ -411,14 +433,15 @@ enum SettingsDocumentCodec {
         }
         guard value.shortcuts.dictation.isValidSettingsHotkey,
               value.shortcuts.editSelection.isValidSettingsHotkey,
+              value.shortcuts.streamTyping.isValidSettingsHotkey,
               value.shortcuts.action.isValidSettingsHotkey else {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
         }
-        // All three must differ. The monitor resolves a collision by
+        // All four must differ. The monitor resolves a collision by
         // first-match, so a duplicate binding is not an error the user would
         // ever see — it is a shortcut that silently does something else.
         let bindings = [value.shortcuts.dictation, value.shortcuts.editSelection,
-                        value.shortcuts.action]
+                        value.shortcuts.streamTyping, value.shortcuts.action]
         for (index, binding) in bindings.enumerated()
         where bindings[(index + 1)...].contains(binding) {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")

@@ -3,12 +3,15 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import SQLite3
+import UniformTypeIdentifiers
 
 final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     var hotkeyDownCount = 0
     var hotkeyUpCount = 0
     var editHotkeyDownCount = 0
     var editHotkeyUpCount = 0
+    var streamHotkeyDownCount = 0
+    var streamHotkeyUpCount = 0
     var actionHotkeyDownCount = 0
     var actionHotkeyUpCount = 0
     var escapeCount = 0
@@ -20,6 +23,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     func secondaryHotkeyDown(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyDownCount += 1
+        case .stream: streamHotkeyDownCount += 1
         case .action: actionHotkeyDownCount += 1
         }
     }
@@ -27,6 +31,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     func secondaryHotkeyUp(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyUpCount += 1
+        case .stream: streamHotkeyUpCount += 1
         case .action: actionHotkeyUpCount += 1
         }
     }
@@ -101,11 +106,13 @@ enum Selftest {
         testKeyboardShortcutMapping()
         testSafeVoiceEditSelection()
         testModeCategories()
+        testModeApplicationAssignments()
         testVoiceCommands()
         testStreak()
         testLongestStreak()
         testHistoryStoreMigration()
         testHistoryEdit()
+        testHistoryClearAll()
         testIntelligenceAggregates()
         if ProcessInfo.processInfo.environment["VELORA_PERF_SELFTEST"] == "1" {
             testIntelligencePerformance100K()
@@ -113,9 +120,11 @@ enum Selftest {
         testQualityObservationMetrics()
         testMeetingStore()
         testMeetingProcessingPipeline()
+        testMeetingFailurePresentation()
         testMeetingCaptureReadiness()
         testMeetingSystemAudioBackendPolicy()
         testMeetingSystemAudioFrameMath()
+        testMeetingSystemAudioFileWriter()
         testMeetingSystemAudioWarnings()
         testMeetingDetection()
         testMeetingEndWatch()
@@ -132,6 +141,9 @@ enum Selftest {
         testSettingsSidebar()
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
+        testAudioCaptureRequiresPCM()
+        testAudioCaptureQuickReleasePreservesFirstPCM()
+        testAudioCaptureStopPreservesConvertedTail()
         testAudioCaptureRapidRestart()
         testMediaPlaybackNoop()
         testMediaPlaybackUnknownStateFailsClosed()
@@ -140,6 +152,7 @@ enum Selftest {
         testMediaPlaybackFailedPause()
         testMediaPlaybackUserOverride()
         testMediaPlaybackAmbiguousPlayers()
+        testMediaPlaybackPausedBrowserBlocksDedicatedPause()
         testMediaPlaybackMisdirectedToggleRollsBack()
         testMediaPlaybackUnsupportedOutput()
         testMediaPlaybackActiveInput()
@@ -149,14 +162,20 @@ enum Selftest {
         testMediaPlaybackTerminationDuringVerification()
         testMediaPlaybackRapidRestart()
         testMediaPlaybackMisdirectedRestoreRollsBack()
-        testMediaPlaybackBrowserStreamDrain()
+        testMediaPlaybackPausedBrowserBlocksDedicatedRestore()
+        testMediaPlaybackMisdirectedRestoreRollsBackOnTermination()
+        testMediaPlaybackPausedBrowserFailsClosed()
         testMediaPlaybackSupportedPlayers()
         testInsertionBoundary()
         testInsertionContinuation()
+        if ProcessInfo.processInfo.environment["VELORA_STREAM_TYPING_E2E"] == "1" {
+            testLiveStreamTypingInsertion()
+        }
         testEngineRestartDelay()
         testEmptyFinalFeedback()
         testClipboardStaging()
         testActionMode()
+        testFinderFileTranscriptionQueue()
         testUpdateChecker()
         testStatusMenuUpdateEntry()
         if ProcessInfo.processInfo.environment["VELORA_LIVE_AUDIO_SELFTEST"] == "1" {
@@ -168,6 +187,236 @@ enum Selftest {
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// Opt-in signed/install-surface proof against a real TextEdit AX target.
+    /// It exercises capture → provisional insert → revision → polished final;
+    /// deterministic policy and hotkey routing remain in the normal suite.
+    private static func testLiveStreamTypingInsertion() {
+        guard Permissions.accessibilityGranted, TextInserter.canPostEvents else {
+            expect(false, "Stream Typing E2E requires Accessibility permission")
+            return
+        }
+        let bundleID = "com.apple.TextEdit"
+        guard NSRunningApplication.runningApplications(
+                withBundleIdentifier: bundleID).isEmpty
+        else {
+            expect(false, "Stream Typing E2E requires TextEdit to be closed")
+            return
+        }
+        let prefix = "Prefix "
+        let fixtureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-stream-e2e-\(UUID().uuidString)")
+        let fixtureURL = fixtureDirectory.appendingPathComponent("stream-fixture.txt")
+        do {
+            try FileManager.default.createDirectory(
+                at: fixtureDirectory, withIntermediateDirectories: true)
+            try prefix.write(to: fixtureURL, atomically: true, encoding: .utf8)
+        } catch {
+            expect(false, "Stream Typing E2E creates its temporary fixture")
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+
+        guard let textEditURL = NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: bundleID)
+        else {
+            expect(false, "Stream Typing E2E finds TextEdit")
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        var launchedApp: NSRunningApplication?
+        var launchFinished = false
+        var launchError: Error?
+        NSWorkspace.shared.open(
+            [fixtureURL], withApplicationAt: textEditURL,
+            configuration: configuration
+        ) { app, error in
+            launchedApp = app
+            launchError = error
+            launchFinished = true
+        }
+        guard waitUntil(timeout: 5, { launchFinished }), launchError == nil,
+              let app = launchedApp,
+              waitUntil(timeout: 5, {
+                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                      == bundleID
+              }),
+              let element = ScreenContext.focusedElement(of: app)
+        else {
+            launchedApp?.forceTerminate()
+            expect(false, "TextEdit opened the fixture with a focused text element")
+            return
+        }
+        defer { app.forceTerminate() }
+
+        guard AXUIElementSetAttributeValue(
+                element, kAXValueAttribute as CFString, prefix as CFString) == .success
+        else {
+            expect(false, "TextEdit accepts the E2E fixture text")
+            return
+        }
+        var caret = CFRange(location: prefix.utf16.count, length: 0)
+        guard let caretValue = AXValueCreate(.cfRange, &caret),
+              AXUIElementSetAttributeValue(
+                element,
+                kAXSelectedTextRangeAttribute as CFString,
+                caretValue) == .success,
+              let target = ScreenContext.streamTarget(of: app)
+        else {
+            expect(false, "Stream Typing captures TextEdit's exact caret")
+            return
+        }
+
+        let stream = StreamTypingSession(target: target)
+        stream.update("hello", mode: "Note")
+        expect(waitUntil(timeout: 3) {
+            ScreenContext.streamOwnsDraft("hello", target: target)
+        }, "the first provisional transcript appears at the real cursor")
+
+        stream.update("hello world", mode: "Note")
+        expect(waitUntil(timeout: 3) {
+            ScreenContext.streamOwnsDraft("hello world", target: target)
+        }, "a newer provisional transcript replaces the owned draft")
+
+        var finish: StreamTypingSession.FinishResult?
+        stream.finish("Hello, world.", mode: "Note") { finish = $0 }
+        expect(waitUntil(timeout: 3) { finish != nil },
+               "the polished Stream Typing final completes")
+        if case .applied? = finish {
+            expect(true, "the polished final retained exact range ownership")
+        } else {
+            expect(false, "the polished final retained exact range ownership")
+        }
+        expect(
+            ScreenContext.stringValue(of: element) == "Prefix Hello, world.",
+            "TextEdit contains one polished final with no duplicate provisional text")
+
+        let polished = "Prefix Hello, world."
+        var selectedHello = CFRange(location: prefix.utf16.count, length: 5)
+        guard let selectedHelloValue = AXValueCreate(.cfRange, &selectedHello),
+              AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString,
+                selectedHelloValue) == .success,
+              let cancelTarget = ScreenContext.streamTarget(of: app)
+        else {
+            expect(false, "the cancellation fixture captures a non-empty selection")
+            return
+        }
+        var cancelled: StreamTypingSession? = StreamTypingSession(target: cancelTarget)
+        weak let releasedCancellation = cancelled
+        var cancellationFinished = false
+        var restorationCompleteAtCallback = false
+        cancelled?.update(String(repeating: "temporary-", count: 80), mode: "Note")
+        cancelled?.cancel { result in
+            restorationCompleteAtCallback =
+                result == .restored
+                && ScreenContext.stringValue(of: element) == polished
+                && ScreenContext.streamOriginalIsCurrent(cancelTarget)
+            cancellationFinished = true
+            // Mirrors DictationController releasing streamCancellation only
+            // after asynchronous restoration has completed.
+            cancelled = nil
+        }
+        expect(waitUntil(timeout: 5) { cancellationFinished },
+               "mid-chunk cancellation finishes its asynchronous restoration")
+        expect(
+            ScreenContext.stringValue(of: element) == polished
+                && ScreenContext.streamOriginalIsCurrent(cancelTarget),
+            "mid-chunk cancellation restores the exact original text and selection")
+        expect(restorationCompleteAtCallback,
+               "a Stream voice command callback runs only after exact restoration")
+        expect(waitUntil(timeout: 1) { releasedCancellation == nil },
+               "the cancelled session is released only after restoration")
+
+        var finalEnd = CFRange(location: polished.utf16.count, length: 0)
+        guard let finalEndValue = AXValueCreate(.cfRange, &finalEnd),
+              AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString,
+                finalEndValue) == .success,
+              let movedTarget = ScreenContext.streamTarget(of: app)
+        else {
+            expect(false, "the cursor-loss fixture captures its starting caret")
+            return
+        }
+        let moved = StreamTypingSession(target: movedTarget)
+        moved.update("draft", mode: "Note")
+        expect(waitUntil(timeout: 3) {
+            ScreenContext.streamOwnsDraft(" draft", target: movedTarget)
+        }, "the cursor-loss fixture owns its provisional draft")
+        var movedCaret = CFRange(location: 0, length: 0)
+        if let movedCaretValue = AXValueCreate(.cfRange, &movedCaret) {
+            _ = AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString,
+                movedCaretValue)
+        }
+        var movedFinish: StreamTypingSession.FinishResult?
+        moved.finish("authoritative final", mode: "Note") { movedFinish = $0 }
+        expect(waitUntil(timeout: 3) { movedFinish != nil },
+               "cursor loss resolves without hanging")
+        if case .ownershipLost? = movedFinish {
+            expect(true, "cursor loss refuses to replace unrelated text")
+        } else {
+            expect(false, "cursor loss refuses to replace unrelated text")
+        }
+        expect(
+            ScreenContext.stringValue(of: element) == polished + " draft",
+            "cursor loss leaves the last visible draft untouched")
+    }
+
+    // MARK: - Finder file transcription
+
+    private static func testFinderFileTranscriptionQueue() {
+        expect(
+            FileTranscriptionTypePolicy.supports(contentType: .mp3)
+                && FileTranscriptionTypePolicy.supports(contentType: .wav)
+                && FileTranscriptionTypePolicy.supports(contentType: .quickTimeMovie)
+                && FileTranscriptionTypePolicy.supports(contentType: .mpeg4Movie)
+                && !FileTranscriptionTypePolicy.supports(contentType: .midi)
+                && !FileTranscriptionTypePolicy.supports(contentType: .appleProtectedMPEG4Audio)
+                && !FileTranscriptionTypePolicy.supports(contentType: .appleProtectedMPEG4Video)
+                && !FileTranscriptionTypePolicy.supports(contentType: .movie),
+            "file transcription accepts decodable media without advertising MIDI or DRM media")
+        expect(
+            FileTranscriptionTypePolicy.allowedContentTypes.map(\.identifier)
+                == [
+                    "public.mp3", "com.microsoft.waveform-audio", "public.aiff-audio",
+                    "public.mpeg-4-audio", "com.apple.m4a-audio", "public.aac-audio",
+                    "com.apple.coreaudio-format", "org.xiph.flac", "org.xiph.ogg-audio",
+                    "com.apple.quicktime-movie", "public.mpeg-4",
+                ],
+            "the native picker exposes the exact Finder media type policy")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-open-files-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let urls = ["first.wav", "ignored.txt", "second.mov", "third.mp4"].map {
+            directory.appendingPathComponent($0)
+        }
+        for url in urls { try! Data().write(to: url) }
+
+        var queue = FileTranscriptionQueue()
+        expect(queue.enqueue(urls) == 3,
+               "Finder queue rejects unsupported files before they can run")
+        expect(queue.dequeueIfReady(engineReady: false, transcriberBusy: false) == nil,
+               "Finder files wait through cold engine launch")
+        expect(queue.dequeueIfReady(engineReady: true, transcriberBusy: true) == nil,
+               "Finder files wait behind an existing transcription")
+        let busy = queue.dequeueIfReady(engineReady: true, transcriberBusy: false)!
+        queue.retry(busy)
+        let drained = (0..<3).compactMap { _ in
+            queue.dequeueIfReady(engineReady: true, transcriberBusy: false)?.lastPathComponent
+        }
+        expect(drained == ["first.wav", "second.mov", "third.mp4"]
+                && queue.pendingURLs.isEmpty,
+               "Finder files retain their original order across a busy retry")
+        expect(!FileTranscriptionTypePolicy.supports(
+            url: URL(string: "https://example.com/remote.mp4")!),
+            "file transcription never admits a network URL")
     }
 
     // MARK: - Update checker
@@ -1302,20 +1551,35 @@ enum Selftest {
             LateFinalPolicy.errorCancelsSession(
                 "edit-session",
                 editInstructionSession: "edit-session",
-                externalRequestSession: nil),
+                externalRequestSession: nil,
+                actionInstructionSession: nil),
             "an errored edit session rejects its late instruction final")
         expect(
             LateFinalPolicy.errorCancelsSession(
                 "external-session",
                 editInstructionSession: nil,
-                externalRequestSession: "external-session"),
+                externalRequestSession: "external-session",
+                actionInstructionSession: nil),
             "an errored external session rejects its late API final")
+        expect(
+            LateFinalPolicy.errorCancelsSession(
+                "action-session",
+                editInstructionSession: nil,
+                externalRequestSession: nil,
+                actionInstructionSession: "action-session"),
+            "an errored Action capture rejects a late command final")
         expect(
             !LateFinalPolicy.errorCancelsSession(
                 "normal-session",
                 editInstructionSession: nil,
-                externalRequestSession: nil),
+                externalRequestSession: nil,
+                actionInstructionSession: nil),
             "normal dictation retains its bounded late-final recovery")
+        expect(
+            VoiceCommand.parse(text: "", raw: "scratch that") == .undoLastInsertion
+                && !LateFinalPolicy.commandMayExecute(
+                    allowAutomaticInsertion: false),
+            "a cleanup-empty late voice command is recognized but never executed")
         expect(
             ErrorRetryIntent.resolve(
                 explicit: nil,
@@ -1571,15 +1835,21 @@ enum Selftest {
             status: "Downloading the speech model (1.6 GB) — 42%",
             fraction: 0.42)
         expect(!downloading.canTryIt, "model download keeps onboarding try-it locked")
+        expect(downloading.primaryActionTitle == "Continue in the Background",
+               "model download keeps a visible primary exit without unlocking try-it")
 
         let staleDownload = OnboardingSetupState(
             isComplete: true,
             status: "Preparing the writing model…",
             fraction: nil)
         expect(!staleDownload.canTryIt, "visible model work wins over a stale completion signal")
+        expect(staleDownload.primaryActionTitle == "Continue in the Background",
+               "visible setup work keeps the background-continuation action")
 
         let ready = OnboardingSetupState(isComplete: true, status: nil, fraction: nil)
         expect(ready.canTryIt, "explicit setup completion unlocks onboarding try-it")
+        expect(ready.primaryActionTitle == "Finish",
+               "ready onboarding retains the successful-dictation finish action")
 
         let oversized = OnboardingSetupState(isComplete: false, status: "Downloading", fraction: 1.7)
         expect(oversized.progressFraction == 0.99, "onboarding progress reserves 100% for completion")
@@ -3225,6 +3495,26 @@ enum Selftest {
                "'Undo that' parses as undo")
         expect(VoiceCommand.parse(text: "New paragraph.", raw: "new paragraph") == .newParagraph,
                "'New paragraph' is its own command (two Returns)")
+
+        var commandExecutions = 0
+        var clipboardStages = 0
+        // A live AX range and a final-only fallback share this decision: the
+        // command is recognized before either path may stage or insert text.
+        for liveTargetAvailable in [true, false] {
+            if StreamTypingFinalPolicy.voiceCommand(
+                enabled: true,
+                text: liveTargetAvailable ? "Scratch that." : "",
+                raw: "scratch that"
+            ) == .undoLastInsertion {
+                commandExecutions += 1
+            } else {
+                StreamFinalOutputStagingPolicy.stage(
+                    "Scratch that.", alreadyStaged: false,
+                    write: { _ in clipboardStages += 1 })
+            }
+        }
+        expect(commandExecutions == 2 && clipboardStages == 0,
+               "Stream commands execute once in live and fallback targets without clipboard staging")
     }
 
     // MARK: - Stats streak
@@ -3311,6 +3601,36 @@ enum Selftest {
                    "manual edit leaves the raw transcript untouched")
             expect(reloaded?.id == row.id, "manual edit keeps the same row")
         }
+    }
+
+    private static func testHistoryClearAll() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-history-clear-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var removedClips: [String] = []
+        let store = HistoryStore(
+            url: directory.appendingPathComponent("history.sqlite3"),
+            removeArchivedClip: { removedClips.append($0) })
+        var first = dictation(daysAgo: 0, words: 3)
+        first.audioPath = "first.flac"
+        var second = dictation(daysAgo: 1, words: 4)
+        second.audioPath = "second.wav"
+        store.insert(first)
+        store.insert(second)
+
+        store.deleteAll()
+
+        expect(store.recent(limit: 10).isEmpty,
+               "clear all permanently removes every history row")
+        expect(Set(removedClips) == Set(["first.flac", "second.wav"]),
+               "clear all removes every archived clip referenced by history")
+        expect(
+            HistoryClearPolicy.confirmationMessage.contains("archived audio")
+                && HistoryClearPolicy.confirmationMessage.contains("can't be undone"),
+            "clear-all confirmation accurately discloses destructive audio deletion")
     }
 
     private static func testHistoryStoreMigration() {
@@ -3762,6 +4082,23 @@ enum Selftest {
                "meeting picker rows never load full transcripts")
         expect(store.recordMetadata(id: id)?.segments.isEmpty == true,
                "focused meeting windows load notes before transcript rows")
+        let notesFailedID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: notesFailedID, title: "Transcript without notes",
+            startedAt: started.addingTimeInterval(-60),
+            endedAt: started, status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: notesFailedID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 4_000, text: "Durable transcript content."))
+        store.markNotesFailed(
+            meetingID: notesFailedID,
+            error: "local notes generation failed (timeout_hard)")
+        expect(store.recordMetadata(id: notesFailedID)?.status == .ready
+               && store.hasCommittedSegments(meetingID: notesFailedID)
+               && store.hasPendingNotes(meetingID: notesFailedID)
+               && store.search("Durable transcript", limit: 10)
+                    .contains(where: { $0.meetingID == notesFailedID }),
+               "notes-only failure keeps the durable transcript searchable")
         expect(!store.hasUsableAudio(relativePath: "\(id)/me.caf"),
                "header-only or tiny meeting captures are not offered for Retry")
         expect(store.audioURL(relativePath: "../outside.wav") == nil
@@ -3808,6 +4145,7 @@ enum Selftest {
                && store.record(id: id)?.micPath != nil,
                "retention never removes audio from queued or processing work")
         store.delete(meetingID: id)
+        store.delete(meetingID: notesFailedID)
         expect(store.record(id: id) == nil && !FileManager.default.fileExists(atPath: audioDir.path),
                "complete meeting deletion removes database rows and retained audio")
 
@@ -3890,6 +4228,52 @@ enum Selftest {
                 && pruneNotificationReceived
         }, "audio pruning refreshes cached Retry/Recreate eligibility")
         NotificationCenter.default.removeObserver(pruneObserver)
+
+        let legacyNotesRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "velora-meeting-notes-migration-\(UUID().uuidString)",
+                isDirectory: true)
+        let legacyNotesDB = legacyNotesRoot.appendingPathComponent("meetings.sqlite3")
+        defer { try? FileManager.default.removeItem(at: legacyNotesRoot) }
+        try? FileManager.default.createDirectory(
+            at: legacyNotesRoot, withIntermediateDirectories: true)
+        var legacyHandle: OpaquePointer?
+        let legacyID = UUID().uuidString
+        let legacyOpened = sqlite3_open(legacyNotesDB.path, &legacyHandle) == SQLITE_OK
+        let legacySQL = """
+            CREATE TABLE meetings (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at REAL NOT NULL,
+                ended_at REAL NOT NULL, source_app TEXT, calendar_event_id TEXT,
+                status TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+                decisions TEXT NOT NULL DEFAULT '', action_items TEXT NOT NULL DEFAULT '',
+                mic_path TEXT, system_path TEXT, error TEXT
+            );
+            CREATE TABLE meeting_segments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT NOT NULL,
+                speaker TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+                start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, text TEXT NOT NULL,
+                UNIQUE(meeting_id, speaker, chunk_index)
+            );
+            INSERT INTO meetings
+                (id, title, started_at, ended_at, status, error)
+            VALUES ('\(legacyID)', 'Legacy notes timeout', 1, 2, 'failed',
+                    'local notes generation failed (timeout_hard)');
+            INSERT INTO meeting_segments
+                (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
+            VALUES ('\(legacyID)', 'me', 0, 0, 1000, 'Saved before upgrade.');
+            """
+        let legacySeeded = legacyOpened
+            && sqlite3_exec(legacyHandle, legacySQL, nil, nil, nil) == SQLITE_OK
+        if legacyHandle != nil { sqlite3_close(legacyHandle) }
+        expect(legacySeeded, "legacy notes-timeout fixture seeds")
+        if legacySeeded {
+            let migratedStore = MeetingStore(
+                url: legacyNotesDB, filesRoot: legacyNotesRoot)
+            expect(migratedStore.recordMetadata(id: legacyID)?.status == .processing
+                   && migratedStore.hasPendingNotes(meetingID: legacyID)
+                   && migratedStore.resumable().contains(where: { $0.id == legacyID }),
+                   "legacy notes timeout migrates into one durable automatic retry")
+        }
     }
 
     private static func testMeetingProcessingPipeline() {
@@ -4045,7 +4429,27 @@ enum Selftest {
             summary: "The proposal will be sent tomorrow.",
             decisions: ["Send tomorrow"],
             actionItems: ["Me: send the proposal"])
-        processor.handle(.meetingNotesReady(id: notesJob, meetingID: id, notes: notes))
+        processor.handle(.meetingNotesFailed(
+            id: notesJob, meetingID: id,
+            error: "local notes generation failed (timeout_hard)",
+            code: "timeout_hard"))
+        expect(store.recordMetadata(id: id)?.status == .ready
+               && store.record(id: id)?.segments.count == 2
+               && store.recordMetadata(id: id)?.error != nil,
+               "notes timeout preserves the completed transcript as a ready meeting")
+
+        commands.removeAll()
+        processor.enqueue(meetingID: id)
+        let retryNotesCommand = commands.last
+        expect(commands.count == 1
+               && retryNotesCommand?["cmd"] as? String == "meeting_notes",
+               "Retry after notes failure skips already-completed transcription")
+        guard let retryNotesJob = retryNotesCommand?["id"] as? String else {
+            expect(false, "notes-only retry carries a job id")
+            return
+        }
+        processor.handle(.meetingNotesReady(
+            id: retryNotesJob, meetingID: id, notes: notes))
 
         expect(store.record(id: id)?.status == .ready
                && store.record(id: id)?.segments.count == 2,
@@ -4074,6 +4478,159 @@ enum Selftest {
         model.show(meetingID: id)
         expect(waitUntil { model.record?.id == id },
                "a stale async meeting load cannot replace the latest selection")
+
+        let transcriptOnlyID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: transcriptOnlyID, title: "Audio already expired",
+            startedAt: Date(timeIntervalSince1970: 1_700_001_900),
+            endedAt: Date(timeIntervalSince1970: 1_700_001_960),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: transcriptOnlyID, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 20_000, text: "Use the saved transcript."))
+        store.markNotesFailed(
+            meetingID: transcriptOnlyID,
+            error: "local notes generation failed (timeout_hard)")
+        commands.removeAll()
+        processor.enqueue(meetingID: transcriptOnlyID)
+        expect(commands.count == 1
+               && commands.first?["cmd"] as? String == "meeting_notes"
+               && commands.first?["transcript"] as? String
+                    == "[00:00] Them: Use the saved transcript.",
+               "notes can be retried from the transcript after all audio is gone")
+        processorEngineReady = false
+        processor.handleEngineStateChange(.launching)
+        processorEngineReady = true
+        processor.handleEngineStateChange(.ready)
+        expect(commands.count == 2
+               && commands.last?["cmd"] as? String == "meeting_notes"
+               && store.recordMetadata(id: transcriptOnlyID)?.status == .processing,
+               "engine restart preserves an audio-free notes-only retry")
+        if let transcriptOnlyJob = commands.last?["id"] as? String {
+            processor.handle(.meetingNotesReady(
+                id: transcriptOnlyJob, meetingID: transcriptOnlyID,
+                notes: MeetingNotes(summary: "Recovered without audio.")))
+        }
+
+        let partialID = UUID().uuidString
+        let partialDirectory = root.appendingPathComponent(
+            partialID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(partialDirectory)
+        try? FileManager.default.copyItem(
+            at: audioDir.appendingPathComponent("me.caf"),
+            to: partialDirectory.appendingPathComponent("me.caf"))
+        store.insertProcessing(MeetingRecord(
+            id: partialID, title: "Interrupted transcription",
+            startedAt: Date(timeIntervalSince1970: 1_700_001_800),
+            endedAt: Date(timeIntervalSince1970: 1_700_001_860),
+            status: .processing, micPath: "\(partialID)/me.caf"))
+        store.appendSegment(MeetingSegment(
+            meetingID: partialID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 10_000, text: "Only the first chunk exists."))
+        store.markFailed(
+            meetingID: partialID, error: "transcription failed mid-track")
+        commands.removeAll()
+        processor.enqueue(meetingID: partialID)
+        expect(commands.count == 1
+               && commands.first?["cmd"] as? String == "meeting_transcribe",
+               "a partial transcription error never masquerades as notes-only recovery")
+        processor.cancelAndForget(meetingID: partialID)
+        store.delete(meetingID: partialID)
+
+        let crashRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "velora-meeting-notes-crash-\(UUID().uuidString)",
+                isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: crashRoot) }
+        let crashID = UUID().uuidString
+        var crashStore: MeetingStore? = MeetingStore(
+            url: crashRoot.appendingPathComponent("meetings.sqlite3"),
+            filesRoot: crashRoot)
+        let crashAudioDir = crashRoot.appendingPathComponent(
+            crashID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(crashAudioDir)
+        try? FileManager.default.copyItem(
+            at: audioDir.appendingPathComponent("me.caf"),
+            to: crashAudioDir.appendingPathComponent("me.caf"))
+        crashStore?.insertProcessing(MeetingRecord(
+            id: crashID, title: "Crash during notes",
+            startedAt: Date(timeIntervalSince1970: 1_700_001_600),
+            endedAt: Date(timeIntervalSince1970: 1_700_001_660),
+            status: .processing, micPath: "\(crashID)/me.caf"))
+        var beforeCrashCommands: [[String: Any]] = []
+        var beforeCrash: MeetingProcessor? = crashStore.map { crashStore in
+            MeetingProcessor(
+                store: crashStore, engineIsReady: { true },
+                sendToEngine: { beforeCrashCommands.append($0) })
+        }
+        beforeCrash?.enqueue(meetingID: crashID)
+        if let transcribeJob = beforeCrashCommands.first?["id"] as? String {
+            beforeCrash?.handle(.meetingSegment(
+                id: transcribeJob,
+                segment: MeetingSegment(
+                    meetingID: crashID, speaker: .me, chunkIndex: 0,
+                    startMs: 0, endMs: 8_000,
+                    text: "The transcript was committed before the crash.")))
+            beforeCrash?.handle(.meetingTranscribed(
+                id: transcribeJob, meetingID: crashID, speaker: .me,
+                durationS: 8, chunks: 1))
+        }
+        expect(beforeCrashCommands.last?["cmd"] as? String == "meeting_notes"
+               && crashStore?.hasPendingNotes(meetingID: crashID) == true,
+               "entering notes persists the notes-only crash boundary before engine send")
+        beforeCrash = nil
+        crashStore = nil
+
+        let reopenedCrashStore = MeetingStore(
+            url: crashRoot.appendingPathComponent("meetings.sqlite3"),
+            filesRoot: crashRoot)
+        var afterCrashCommands: [[String: Any]] = []
+        let afterCrash = MeetingProcessor(
+            store: reopenedCrashStore, engineIsReady: { true },
+            sendToEngine: { afterCrashCommands.append($0) })
+        afterCrash.resumeRecoverable()
+        expect(afterCrashCommands.count == 1
+               && afterCrashCommands.first?["cmd"] as? String == "meeting_notes",
+               "hard app restart during notes resumes notes instead of retranscribing audio")
+        if let notesJob = afterCrashCommands.first?["id"] as? String {
+            afterCrash.handle(.meetingNotesReady(
+                id: notesJob, meetingID: crashID,
+                notes: MeetingNotes(summary: "Recovered after hard exit.")))
+        }
+
+        let durableID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: durableID, title: "Restarted notes retry",
+            startedAt: Date(timeIntervalSince1970: 1_700_001_700),
+            endedAt: Date(timeIntervalSince1970: 1_700_001_760),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: durableID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 12_000, text: "Notes survive app restart."))
+        store.markNotesFailed(
+            meetingID: durableID,
+            error: "local notes generation failed (timeout_hard)")
+        do {
+            let preRestart = MeetingProcessor(
+                store: store, engineIsReady: { false },
+                sendToEngine: { _ in
+                    expect(false, "unavailable engine cannot receive notes")
+                })
+            preRestart.enqueue(meetingID: durableID)
+        }
+        var restartedCommands: [[String: Any]] = []
+        let postRestart = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { restartedCommands.append($0) })
+        postRestart.resumeRecoverable()
+        expect(restartedCommands.count == 1
+               && restartedCommands.first?["cmd"] as? String == "meeting_notes",
+               "notes-only retry is durable across an app-process restart")
+        if let restartedJob = restartedCommands.first?["id"] as? String {
+            postRestart.handle(.meetingNotesReady(
+                id: restartedJob, meetingID: durableID,
+                notes: MeetingNotes(summary: "Recovered after restart.")))
+        }
 
         commands.removeAll()
         processor.reprocess(meetingID: id)
@@ -4809,6 +5366,63 @@ enum Selftest {
                "startup health names a missing microphone track")
     }
 
+    private static func testMeetingFailurePresentation() {
+        expect(
+            MeetingFailurePresentation.hudMessage(
+                "local notes generation failed (timeout_hard); retry")
+                == "Meeting notes timed out",
+            "meeting timeout HUD names the failed stage instead of a generic warning")
+        let state = HUDState.meetingFailure(
+            meetingID: "meeting-1", message: "Meeting notes timed out")
+        expect(
+            state.usesNativeMouseControls
+                && HUDView.capsuleMetrics(for: state, context: nil).size.width
+                    == HUDGeometry.errorWidth,
+            "meeting failure HUD owns Open and Retry without starting dictation")
+        var failures = MeetingFailureHUDQueue()
+        failures.retain(meetingID: "first", message: "First failed")
+        failures.retain(meetingID: "second", message: "Second failed")
+        failures.remove(meetingID: "second")
+        expect(failures.first == .meetingFailure(
+            meetingID: "first", message: "First failed"),
+            "processing a second queued meeting cannot discard the first actionable failure")
+        failures.retain(meetingID: "second", message: "Second failed")
+        failures.remove(meetingID: "first")
+        expect(failures.first == .meetingFailure(
+            meetingID: "second", message: "Second failed"),
+            "opening or retrying one failure replays the next retained failure")
+        expect(MeetingFailureHUDReplayPolicy.shouldShow(
+            dictationIsIdle: true, meetingIsIdle: true,
+            processorAllowsFailure: true, hudIsAvailable: true,
+            ownsVisibleHUD: false)
+               && MeetingFailureHUDReplayPolicy.shouldShow(
+                    dictationIsIdle: true, meetingIsIdle: true,
+                    processorAllowsFailure: true, hudIsAvailable: false,
+                    ownsVisibleHUD: true)
+               && !MeetingFailureHUDReplayPolicy.shouldShow(
+                    dictationIsIdle: false, meetingIsIdle: true,
+                    processorAllowsFailure: true, hudIsAvailable: true,
+                    ownsVisibleHUD: false),
+               "meeting failure replay waits for dictation release and may replace its own progress HUD")
+
+        var retainedDuringWork = MeetingFailureHUDQueue()
+        retainedDuringWork.retain(meetingID: "meeting-a", message: "A failed")
+        retainedDuringWork.remove(meetingID: "meeting-b")
+        let replayDeniedWhileBProcesses = !MeetingFailureHUDReplayPolicy.shouldShow(
+            dictationIsIdle: true, meetingIsIdle: true,
+            processorAllowsFailure: false, hudIsAvailable: true,
+            ownsVisibleHUD: false)
+        let replayAttemptedWhenBBecomesIdle = !retainedDuringWork.isEmpty
+        let replayAllowedWhenBBecomesIdle = MeetingFailureHUDReplayPolicy.shouldShow(
+            dictationIsIdle: true, meetingIsIdle: true,
+            processorAllowsFailure: true, hudIsAvailable: true,
+            ownsVisibleHUD: false)
+        expect(replayDeniedWhileBProcesses
+               && replayAttemptedWhenBBecomesIdle
+               && replayAllowedWhenBBecomesIdle,
+               "processor processing-to-idle replays a failure retained behind queued work")
+    }
+
     private static func testMeetingSystemAudioBackendPolicy() {
         expect(
             MeetingSystemAudioPolicy.backend(for: OperatingSystemVersion(
@@ -5235,6 +5849,72 @@ enum Selftest {
         expect(ModeCategory.displayName(forBundleID: "com.example.unknown") == "Text",
                "unknown app falls back to Text")
         expect(ModeCategory.displayName(forBundleID: nil) == "Text", "nil bundle falls back to Text")
+    }
+
+    private static func testModeApplicationAssignments() {
+        expect(
+            Mode.normalizedApplicationIDs([
+                " com.apple.Mail ", "com.tinyspeck.slackmacgap", "COM.APPLE.MAIL", "",
+            ]) == ["com.apple.Mail", "com.tinyspeck.slackmacgap"],
+            "manual mode app assignments deduplicate case-insensitively")
+        expect(
+            Mode.normalizedApplicationIDs(Mode.parseList(
+                "com.apple.Notes, com.microsoft.VSCode, com.apple.Notes"))
+                == ["com.apple.Notes", "com.microsoft.VSCode"],
+            "advanced bundle-id input shares the app picker's normalization")
+        expect(
+            Mode.mergingApplicationIDs(
+                existing: ["COM.APPLE.MAIL", "com.tinyspeck.slackmacgap", "com.apple.Mail"],
+                selected: ["com.apple.mail", "com.apple.Notes"])
+                == ["com.apple.mail", "com.tinyspeck.slackmacgap", "com.apple.Notes"],
+            "native app selection replaces manual casing and collapses stale variants")
+        let email = Mode(
+            name: "Email", prompt: "", formatting: "full",
+            apps: ["com.apple.Mail"], vocabulary: [], replacements: [])
+        let note = Mode(
+            name: "Note", prompt: "", formatting: "full",
+            apps: [], vocabulary: [], replacements: [])
+        let conflict = Mode.firstAssignmentConflict(
+            applications: ["COM.APPLE.MAIL"], modes: [email, note], excluding: note.id)
+        expect(conflict?.modeName == "Email" && conflict?.bundleID == "com.apple.Mail",
+               "an app cannot silently activate whichever duplicate mode loads first")
+        expect(
+            Mode.firstAssignmentConflict(
+                applications: ["com.apple.Mail"], modes: [email, note], excluding: email.id) == nil,
+            "saving an app assignment back to its current mode remains valid")
+        expect(
+            Mode.assignmentConflictExclusion(
+                selectedID: email.id, originalIsProtected: true, draftName: "Work Email") == nil,
+            "renaming a protected mode validates inherited apps against the retained original")
+        expect(
+            Mode.assignmentConflictExclusion(
+                selectedID: email.id, originalIsProtected: false, draftName: "Work Email") == email.id,
+            "renaming a normal mode excludes the row it replaces")
+        let index = ModeApplicationIndex.build([
+            (name: "Banter", applications: ["COM.TINYSPECK.SLACKMACGAP"]),
+        ])
+        expect(index["com.tinyspeck.slackmacgap"] == "Banter",
+               "custom app assignment supplies the HUD mode label case-insensitively")
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-mode-index-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let codeURL = directory.appendingPathComponent("code.json")
+        let terminalURL = directory.appendingPathComponent("terminal.json")
+        try! Data(#"{"name":"Code","apps":["com.apple.Terminal"]}"#.utf8)
+            .write(to: codeURL)
+        let lifecycleIndex = ModeApplicationIndex()
+        lifecycleIndex.reload(directory: directory)
+        expect(lifecycleIndex.modeName(forBundleID: "com.apple.Terminal") == "Code",
+               "HUD mode cache reads the pre-migration assignment at startup")
+        try! Data(#"{"name":"Code","apps":[]}"#.utf8).write(to: codeURL)
+        try! Data(#"{"name":"Terminal","apps":["com.apple.Terminal"]}"#.utf8)
+            .write(to: terminalURL)
+        lifecycleIndex.reload(directory: directory)
+        expect(lifecycleIndex.modeName(forBundleID: "com.apple.Terminal") == "Terminal",
+               "ready-state cache refresh follows engine mode migration")
     }
 
     // MARK: - HUD waveform-first geometry
@@ -5838,6 +6518,147 @@ enum Selftest {
             "system-audio IO rejects an unusable zero-byte frame format")
     }
 
+    private static func testMeetingSystemAudioFileWriter() {
+        guard #available(macOS 14.2, *) else { return }
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-system-writer-\(UUID().uuidString).caf")
+        let rejectedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-system-writer-reject-\(UUID().uuidString).caf")
+        let contendedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-system-writer-contended-\(UUID().uuidString).caf")
+        let interleavedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-system-writer-interleaved-\(UUID().uuidString).caf")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(at: rejectedURL)
+            try? FileManager.default.removeItem(at: contendedURL)
+            try? FileManager.default.removeItem(at: interleavedURL)
+        }
+        guard let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 2,
+            interleaved: false),
+              let buffer = AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: 512)
+        else {
+            expect(false, "system-audio writer test creates PCM fixtures")
+            return
+        }
+        buffer.frameLength = 512
+        for channel in 0..<Int(format.channelCount) {
+            guard let samples = buffer.floatChannelData?[channel] else { continue }
+            for frame in 0..<Int(buffer.frameLength) { samples[frame] = 0.05 }
+        }
+
+        let lock = NSLock()
+        var writtenFrames = 0
+        var failure: String?
+        do {
+            let writer = try SystemAudioFileWriter(
+                url: url, format: format,
+                onWritten: { frames in
+                    lock.lock(); writtenFrames += Int(frames); lock.unlock()
+                },
+                onFailure: { message in
+                    lock.lock(); failure = message; lock.unlock()
+                })
+            let accepted = writer.enqueue(
+                buffer.audioBufferList,
+                frames: UInt32(buffer.frameLength))
+            writer.finish()
+            let saved = try AVAudioFile(forReading: url)
+            lock.lock()
+            let callbackFrames = writtenFrames
+            let callbackFailure = failure
+            lock.unlock()
+            expect(
+                accepted && callbackFailure == nil
+                    && callbackFrames == 512 && saved.length == 512,
+                "system audio is copied off the realtime callback and fully flushed")
+        } catch {
+            expect(false, "system-audio writer saves a CAF: \(error.localizedDescription)")
+        }
+        if let interleavedFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 48_000,
+            channels: 2,
+            interleaved: true),
+           let interleavedBuffer = AVAudioPCMBuffer(
+            pcmFormat: interleavedFormat, frameCapacity: 256) {
+            interleavedBuffer.frameLength = 256
+            do {
+                let writer = try SystemAudioFileWriter(
+                    url: interleavedURL, format: interleavedFormat)
+                let accepted = writer.enqueue(
+                    interleavedBuffer.audioBufferList,
+                    frames: UInt32(interleavedBuffer.frameLength))
+                writer.finish()
+                let saved = try AVAudioFile(forReading: interleavedURL)
+                expect(accepted && saved.length == 256,
+                       "system-audio writer accepts the live tap's interleaved LPCM layout")
+            } catch {
+                expect(false,
+                       "interleaved system-audio writer saves a CAF: \(error.localizedDescription)")
+            }
+        } else {
+            expect(false, "interleaved system-audio writer fixtures initialize")
+        }
+        do {
+            var rejection: String?
+            let writer = try SystemAudioFileWriter(
+                url: rejectedURL, format: format,
+                maxPendingBuffers: 1, maxPendingBytes: 1_024,
+                bufferFrameCapacity: 128,
+                onFailure: { rejection = $0 })
+            let accepted = writer.enqueue(
+                buffer.audioBufferList,
+                frames: UInt32(buffer.frameLength))
+            writer.finish()
+            expect(!accepted && rejection != nil,
+                   "system-audio writer fails closed at its byte bound")
+        } catch {
+            expect(false, "bounded system-audio writer initializes: \(error.localizedDescription)")
+        }
+        do {
+            let callbackReturned = DispatchSemaphore(value: 0)
+            let callbackResultLock = NSLock()
+            var callbackAccepted: Bool?
+            var contentionFailure: String?
+            let writer = try SystemAudioFileWriter(
+                url: contendedURL, format: format,
+                onFailure: { message in
+                    callbackResultLock.lock()
+                    contentionFailure = message
+                    callbackResultLock.unlock()
+                })
+            writer.withStateLockForSelftest {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let accepted = writer.enqueue(
+                        buffer.audioBufferList,
+                        frames: UInt32(buffer.frameLength))
+                    callbackResultLock.lock()
+                    callbackAccepted = accepted
+                    callbackResultLock.unlock()
+                    callbackReturned.signal()
+                }
+                _ = callbackReturned.wait(timeout: .now() + 1)
+            }
+            // Reproduce the teardown race immediately after the realtime
+            // callback loses its nonblocking state-lock acquisition.
+            writer.finish()
+            callbackResultLock.lock()
+            let accepted = callbackAccepted
+            let reportedFailure = contentionFailure
+            callbackResultLock.unlock()
+            expect(accepted == false
+                   && reportedFailure == "computer-audio disk writer could not keep up",
+                   "lock contention remains a durable failure across immediate finish")
+        } catch {
+            expect(false, "contended system-audio writer initializes: \(error.localizedDescription)")
+        }
+    }
+
     /// Explicit opt-in integration probe for the signed app. It listens only
     /// long enough to prove buffers arrive, retains no microphone audio, and is
     /// excluded from ordinary/CI selftests because it needs the user's TCC grant.
@@ -6041,6 +6862,12 @@ enum Selftest {
         var firstStopped = false
         var secondStarted = false
         var secondBytes = 0
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
+            channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        buffer.frameLength = 1600
+        for index in 0..<1600 { buffer.floatChannelData![0][index] = 0.1 }
 
         capture.start(
             onChunk: { _ in }, onLevel: { _ in },
@@ -6048,6 +6875,10 @@ enum Selftest {
                 if case .success = result { firstStarted = true }
             })
         source.starts[0].completion(.success(()))
+        expect(!firstStarted && !capture.isRunning,
+               "a session flag alone does not claim microphone readiness")
+        source.starts[0].onBuffer(buffer)
+        _ = waitUntil { firstStarted }
         expect(firstStarted && capture.isRunning, "first microphone session starts")
 
         capture.stop { firstStopped = true }
@@ -6063,22 +6894,103 @@ enum Selftest {
         // arrive after the new start has installed its handlers.
         source.stops[0]()
         source.starts[1].completion(.success(()))
+        source.starts[1].onBuffer(buffer)
+        _ = waitUntil { secondStarted }
         expect(firstStopped && secondStarted && capture.isRunning,
                "a stale stop completion does not stop the newer session")
 
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
-            channels: 1, interleaved: false)!
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
-        buffer.frameLength = 1600
-        for index in 0..<1600 { buffer.floatChannelData![0][index] = 0.1 }
-        source.starts[1].onBuffer(buffer)
         _ = waitUntil { secondBytes > 0 }
         expect(secondBytes == 1600 * MemoryLayout<Float>.size,
                "new microphone handlers still receive PCM after stale teardown")
 
         capture.stop()
         source.stops[1]()
+    }
+
+    private static func testAudioCaptureRequiresPCM() {
+        let source = FakeMicrophoneSource()
+        var scheduled: [DispatchWorkItem] = []
+        let capture = AudioCapture(
+            source: source,
+            scheduleStartupCheck: { _, work in scheduled.append(work) })
+        var result: Result<Void, Error>?
+
+        capture.start(onChunk: { _ in }, onLevel: { _ in }) { result = $0 }
+        source.starts[0].completion(.success(()))
+
+        expect(result == nil && !capture.isRunning,
+               "microphone startup waits for observed PCM after the session opens")
+        scheduled[0].perform()
+        if case .failure(let error) = result {
+            expect(error.localizedDescription.contains("delivered no audio"),
+                   "missing first PCM fails with an actionable microphone error")
+        } else {
+            expect(false, "missing first PCM must fail startup")
+        }
+        expect(!capture.isRunning && source.stops.count == 1,
+               "first-PCM timeout tears down the unusable microphone session")
+        source.stops[0]()
+    }
+
+    private static func testAudioCaptureQuickReleasePreservesFirstPCM() {
+        let source = FakeMicrophoneSource()
+        let capture = AudioCapture(source: source)
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
+            channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        buffer.frameLength = 1600
+        for index in 0..<1600 { buffer.floatChannelData![0][index] = 0.1 }
+        var bytes = 0
+        var stopped = false
+
+        capture.start(
+            onChunk: { bytes += $0.count }, onLevel: { _ in },
+            completion: { result in
+                if case .success = result {
+                    capture.stop { stopped = true }
+                }
+            })
+        source.starts[0].completion(.success(()))
+        source.starts[0].onBuffer(buffer)
+        _ = waitUntil { source.stops.count == 1 }
+        source.stops[0]()
+        _ = waitUntil { stopped }
+
+        expect(bytes == 1600 * MemoryLayout<Float>.size,
+               "quick hold release preserves the first PCM buffer before stop")
+    }
+
+    private static func testAudioCaptureStopPreservesConvertedTail() {
+        let source = FakeMicrophoneSource()
+        let capture = AudioCapture(source: source)
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
+            channels: 1, interleaved: false)!
+        let first = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        first.frameLength = 1600
+        let tail = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 800)!
+        tail.frameLength = 800
+        var bytes = 0
+        var started = false
+        var stopped = false
+
+        capture.start(
+            onChunk: { bytes += $0.count }, onLevel: { _ in },
+            completion: { result in
+                if case .success = result { started = true }
+            })
+        source.starts[0].completion(.success(()))
+        source.starts[0].onBuffer(first)
+        _ = waitUntil { started }
+
+        source.starts[0].onBuffer(tail)
+        capture.stop { stopped = true }
+        source.stops[0]()
+        _ = waitUntil { stopped }
+
+        expect(bytes == 2400 * MemoryLayout<Float>.size,
+               "ordinary stop flushes converted tail PCM queued before source teardown")
     }
 
     private static func testMediaPlaybackNoop() {
@@ -6223,7 +7135,8 @@ enum Selftest {
         let intended = AudioObjectID(54)
         let accidental = AudioObjectID(55)
         var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [intended], playing: [intended])
+            processes: [intended], playing: [intended],
+            bundleIDs: [intended: "com.spotify.client"])
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
@@ -6233,13 +7146,43 @@ enum Selftest {
 
         coordinator.pauseForDictation()
         snapshot.processes = [intended, accidental]
-        snapshot.playing = [intended, accidental]
+        // Production excludes browsers from `playing`; the all-output set is
+        // the only evidence that the global key started paused YouTube.
+        snapshot.playing = [intended]
         snapshot.allPlaying = [intended, accidental]
+        snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
         scheduled.removeFirst().1()
         coordinator.restoreAfterDictation()
 
         expect(toggles == 2, "a media key that starts the wrong player is immediately reversed")
         expect(scheduled.isEmpty, "a misdirected media key never earns a later resume")
+    }
+
+    private static func testMediaPlaybackPausedBrowserBlocksDedicatedPause() {
+        let player = AudioObjectID(66)
+        let browser = AudioObjectID(67)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: {
+                .init(
+                    processes: [player, browser],
+                    playing: [player],
+                    allPlaying: [player],
+                    bundleIDs: [
+                        player: "com.spotify.client",
+                        browser: "app.zen-browser.zen-media-plugin-helper",
+                    ])
+            },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+
+        expect(toggles == 0,
+               "a paused browser that could own the media key blocks a dedicated-player pause")
+        expect(scheduled.isEmpty,
+               "an ambiguous paused media-key target creates no later media work")
     }
 
     private static func testMediaPlaybackUnsupportedOutput() {
@@ -6263,36 +7206,36 @@ enum Selftest {
     }
 
     private static func testMediaPlaybackActiveInput() {
-        let browser = AudioObjectID(60)
+        let player = AudioObjectID(60)
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
             snapshot: {
                 .init(
-                    processes: [browser], playing: [browser],
-                    inputProcesses: [browser],
-                    bundleIDs: [browser: "com.google.Chrome.helper"])
+                    processes: [player], playing: [player],
+                    inputProcesses: [player],
+                    bundleIDs: [player: "com.spotify.client"])
             },
             postToggle: { toggles += 1; return true },
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
-        expect(toggles == 0, "browser media keys are blocked while another process captures input")
+        expect(toggles == 0, "media keys are blocked while the player process captures input")
         expect(scheduled.isEmpty, "active call input creates no media resume obligation")
     }
 
     private static func testMediaPlaybackUnrelatedSystemInput() {
-        let browser = AudioObjectID(61)
+        let player = AudioObjectID(61)
         let systemSpeech = AudioObjectID(62)
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
             snapshot: {
                 .init(
-                    processes: [browser, systemSpeech], playing: [browser],
+                    processes: [player, systemSpeech], playing: [player],
                     inputProcesses: [systemSpeech],
                     bundleIDs: [
-                        browser: "com.google.Chrome.helper",
+                        player: "com.apple.Music",
                         systemSpeech: "com.apple.CoreSpeech",
                     ])
             },
@@ -6300,8 +7243,8 @@ enum Selftest {
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
-        expect(toggles == 1, "unrelated system speech input does not block browser media")
-        expect(scheduled.count == 1, "eligible browser media still enters verification")
+        expect(toggles == 1, "unrelated system speech input does not block dedicated media")
+        expect(scheduled.count == 1, "an eligible dedicated player still enters verification")
     }
 
     private static func testMediaPlaybackUnsupportedOutputOnRestore() {
@@ -6416,7 +7359,8 @@ enum Selftest {
         let intended = AudioObjectID(56)
         let accidental = AudioObjectID(57)
         var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [intended], playing: [intended])
+            processes: [intended], playing: [intended],
+            bundleIDs: [intended: "com.spotify.client"])
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
@@ -6432,8 +7376,9 @@ enum Selftest {
         scheduled.removeFirst().1()
 
         snapshot.processes = [intended, accidental]
-        snapshot.playing = [accidental]
+        snapshot.playing = []
         snapshot.allPlaying = [accidental]
+        snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
         scheduled.removeFirst().1()
 
         expect(toggles == 3, "a media restore that starts the wrong player is reversed")
@@ -6441,12 +7386,12 @@ enum Selftest {
         expect(scheduled.isEmpty, "a misdirected restore leaves no outstanding media work")
     }
 
-    private static func testMediaPlaybackBrowserStreamDrain() {
-        let browser = AudioObjectID(58)
-        let snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [browser],
-            playing: [browser],
-            bundleIDs: [browser: "com.google.Chrome.helper"])
+    private static func testMediaPlaybackPausedBrowserBlocksDedicatedRestore() {
+        let player = AudioObjectID(68)
+        let browser = AudioObjectID(69)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player],
+            bundleIDs: [player: "com.apple.Music"])
         var toggles = 0
         var scheduled: [(TimeInterval, () -> Void)] = []
         let coordinator = MediaPlaybackCoordinator(
@@ -6455,32 +7400,94 @@ enum Selftest {
             schedule: { delay, work in scheduled.append((delay, work)) })
 
         coordinator.pauseForDictation()
-        // Chrome deliberately remains `IsRunningOutput == true` for roughly
-        // 15 seconds after its Media Session has accepted the pause.
-        for _ in 0..<4 { scheduled.removeFirst().1() }
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        snapshot.processes = [player, browser]
+        snapshot.bundleIDs[browser] = "app.zen-browser.zen"
+        scheduled.removeFirst().1()
+
+        expect(toggles == 1,
+               "a paused browser that could own the media key suppresses player restore")
+        expect(scheduled.isEmpty,
+               "a suppressed ambiguous restore creates no verification work")
+    }
+
+    private static func testMediaPlaybackMisdirectedRestoreRollsBackOnTermination() {
+        let intended = AudioObjectID(64)
+        let accidental = AudioObjectID(65)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [intended], playing: [intended],
+            bundleIDs: [intended: "com.apple.Music"])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
         coordinator.restoreAfterDictation()
         scheduled.removeFirst().1()
-        expect(toggles == 2,
-               "a browser pause is paired without waiting for its stale Core Audio stream")
 
+        snapshot.processes = [intended, accidental]
+        snapshot.allPlaying = [accidental]
+        snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
+        coordinator.restoreImmediatelyForTermination()
         scheduled.removeFirst().1()
-        expect(scheduled.isEmpty, "the paired browser restore creates no extra media commands")
+
+        expect(toggles == 3,
+               "termination reverses a restore key that started paused browser media")
+        expect(scheduled.isEmpty,
+               "termination invalidates stale misdirected-restore verification")
+    }
+
+    private static func testMediaPlaybackPausedBrowserFailsClosed() {
+        let browser = AudioObjectID(63)
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: {
+                // Chromium keeps IsRunningOutput set after YouTube is paused,
+                // so a browser process in this Core Audio set is not evidence
+                // that sending a global Play/Pause key will pause anything.
+                .init(
+                    processes: [browser], playing: [browser],
+                    bundleIDs: [browser: "com.google.Chrome.helper"])
+            },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+
+        expect(toggles == 0, "paused browser playback is never started by dictation")
+        expect(scheduled.isEmpty, "paused browser playback creates no restore obligation")
     }
 
     private static func testMediaPlaybackSupportedPlayers() {
         expect(
             MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.apple.Music")
-                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.spotify.client")
-                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.google.Chrome")
-                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.google.Chrome.helper")
-                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "org.mozilla.firefox"),
-            "dedicated players and browser playback are eligible for direct dictation pause")
+                && MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.spotify.client"),
+            "dedicated players with observable playback state are eligible for dictation pause")
         expect(
-            !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.apple.FaceTime")
+            !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.google.Chrome")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.google.Chrome.helper")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "org.mozilla.firefox")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "app.zen-browser.zen")
+                && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.apple.FaceTime")
                 && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "us.zoom.xos")
                 && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.microsoft.teams2")
                 && !MediaPlaybackSystem.isAutomaticPlaybackCandidate(bundleID: "com.example.unknown"),
-            "conference clients and unknown output never trigger a global media toggle")
+            "browsers, conference clients, and unknown output never trigger a global media toggle")
+        expect(
+            MediaPlaybackSystem.isMediaKeyPlaybackCandidate("app.zen-browser.zen")
+                && MediaPlaybackSystem.isMediaKeyPlaybackCandidate(
+                    "app.zen-browser.zen-media-plugin-helper"),
+            "Zen browser processes remain visible to media-key ambiguity guards")
     }
 
     // MARK: - Final-output clipboard staging

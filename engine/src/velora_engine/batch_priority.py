@@ -1,11 +1,9 @@
-"""Darwin background scheduling for batch jobs (meetings, idle mining).
+"""Darwin background scheduling for genuinely idle maintenance work.
 
-Meeting transcription/notes previously ran at default priority and visibly
-fought the user's foreground apps the moment a meeting ended. While batch
-work runs and no dictation is active, the engine and its cleanup sidecar drop
-to Darwin BACKGROUND (efficiency cores, throttled I/O, deprioritized GPU
-submission); they return to normal the instant a dictation starts, so live
-latency is unaffected.
+Idle vocabulary mining drops the engine and its cleanup sidecar to Darwin
+BACKGROUND. User-visible meeting transcription and notes do not: exact replay
+showed the policy making identical speech decodes 2.5-6.5x slower. Foreground
+dictation preempts meeting work through the engine state machine instead.
 
 setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG) is the same mechanism
 `taskpolicy -b -p` uses; a process may freely demote and restore itself and

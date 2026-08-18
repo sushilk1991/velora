@@ -303,6 +303,41 @@ async def test_full_dictation_flow(engine):
     client.close()
 
 
+async def test_stream_typing_enables_preview_only_for_its_session(engine):
+    eng, sock = engine
+    # The fake backend has no preview lane by default; add the same public flag
+    # Whisper exposes so this protocol gate stays deterministic and model-free.
+    eng.stt.preview_enabled = False
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({
+        "cmd": "start", "session": "stream-preview",
+        "context": {"stream_typing": True},
+    })
+    for _ in range(100):
+        if eng.session is not None:
+            break
+        await asyncio.sleep(0.01)
+    assert eng.session is not None
+    assert eng.stt.preview_enabled is True
+    await client.send_json({"cmd": "cancel", "session": "stream-preview"})
+    await client.recv_event("cancelled")
+    assert eng.stt.preview_enabled is False
+
+    await client.send_json({
+        "cmd": "start", "session": "ordinary-no-preview", "context": {},
+    })
+    for _ in range(100):
+        if eng.session is not None and eng.session.id == "ordinary-no-preview":
+            break
+        await asyncio.sleep(0.01)
+    assert eng.stt.preview_enabled is False
+    await client.send_json({"cmd": "cancel", "session": "ordinary-no-preview"})
+    await client.recv_event("cancelled")
+    client.close()
+
+
 async def test_hard_wedged_cleanup_sends_raw_final_then_restarts_engine(engine):
     eng, sock = engine
 

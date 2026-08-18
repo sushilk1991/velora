@@ -47,7 +47,7 @@ from .cleanup_process import CleanupProcess
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import load_media, load_meeting_media, split_for_batch
-from .meeting_notes import chunk_transcript, fallback_notes, merge_notes, parse_notes_json
+from .meeting_notes import chunk_transcript, merge_notes, parse_notes_json
 from .stt import (
     SAMPLE_RATE,
     STTBackend,
@@ -106,6 +106,19 @@ MINE_STARTUP_DELAY_S = 60.0
 # semantics change so an upgraded app restarts the track instead of mixing old
 # fragmented labels with the corrected plan.
 MEETING_PLAN_VERSION = 3
+
+# Meeting notes are a bounded transformation, but they are materially larger
+# than dictation cleanup. The previous input-proportional output allowance let
+# Qwen3.5-4B run until the 20s deadline, then mislabeled a transcript excerpt as
+# a ready summary. Bound output memory directly while retaining the measured
+# foreground-safe deadline.
+MEETING_NOTES_TIMEOUT_MS = 20_000
+MEETING_NOTES_MAX_TOKENS = 1_024
+# The server advertises STT readiness before the cleanup worker finishes its
+# background warm-up. Relaunch recovery can therefore submit durable notes a
+# few seconds before Qwen is usable. Wait only for an existing, healthy worker;
+# an absent or unhealthy model still fails honestly instead of hanging.
+MEETING_NOTES_MODEL_READY_WAIT_S = 15.0
 
 # Seam context for per-segment cleanup: the tail of the previous cleaned chunk
 # rides along in the system prompt so seams punctuate/capitalize correctly.
@@ -280,6 +293,11 @@ class Engine:
         # reset by opening a second loop.
         self._action_session: actions.ActionSession | None = None
         self._action_id: Any = None
+        # A terminal reply keeps the session identity until the app confirms
+        # it has finished presenting/handling that result with action_end.
+        # Dropping the id at failure time made the matching release unable to
+        # clear this session's planner KV prefix.
+        self._action_terminal = False
         # Meeting notes share the cleanup model but are chunked and
         # cooperatively preempted whenever live dictation starts.
         self._meeting_notes_running = False
@@ -308,6 +326,11 @@ class Engine:
         # soon as the speech model is usable.
         self.setup_complete = False
         self.cleanup: CleanupProcess | None = None
+        # The writing worker exists before it is ready. Keep that cold-start
+        # identity visible so durable meeting notes restored as soon as STT is
+        # ready can wait for the same worker instead of failing in the brief
+        # self.cleanup == nil publication window.
+        self._cleanup_loading: CleanupProcess | None = None
         self.session: Session | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.shutdown = asyncio.Event()
@@ -345,13 +368,22 @@ class Engine:
 
     # ---------------- batch scheduling + memory ----------------
 
-    def _begin_batch_job(self) -> None:
-        self._batch_jobs += 1
-        self._refresh_batch_priority()
+    def _begin_batch_job(self, *, lower_priority: bool) -> None:
+        """Track work that is safe to put in Darwin background.
 
-    def _end_batch_job(self) -> None:
-        self._batch_jobs = max(0, self._batch_jobs - 1)
-        self._refresh_batch_priority()
+        User-visible meeting processing is deliberately *not* counted. Darwin
+        background lowers CPU and disk priority enough to turn a one-minute
+        Whisper chunk into tens of seconds under ordinary desktop load. Live
+        dictation still preempts meeting work through the existing busy gates.
+        """
+        if lower_priority:
+            self._batch_jobs += 1
+            self._refresh_batch_priority()
+
+    def _end_batch_job(self, *, lower_priority: bool) -> None:
+        if lower_priority:
+            self._batch_jobs = max(0, self._batch_jobs - 1)
+            self._refresh_batch_priority()
 
     def _refresh_batch_priority(self) -> None:
         """Apply the demote-while-batching policy to self + cleanup child.
@@ -629,6 +661,10 @@ class Engine:
                     await self._set_loading(None)
                 self.shutdown.set()
                 return
+        startup_cleanup: CleanupProcess | None = None
+        if self.config.cleanup_enabled and not fake_stt_enabled():
+            startup_cleanup = self._new_cleanup_process(self.config.cleanup_model)
+            self._cleanup_loading = startup_cleanup
         self.stt_ready.set()
         # Enforce audio retention once at startup (deletes clips > 6 months and
         # trims the archive under its size cap).
@@ -637,8 +673,18 @@ class Engine:
                 await asyncio.to_thread(
                     self.audio.prune, self.config.audio_retention_days, self.config.audio_max_bytes
                 )
-        if self.config.cleanup_enabled and not fake_stt_enabled():
-            engine = self._new_cleanup_process(self.config.cleanup_model)
+        if startup_cleanup is not None:
+            engine = startup_cleanup
+            close_task: asyncio.Task[None] | None = None
+
+            async def close_startup_engine_once() -> None:
+                nonlocal close_task
+                if close_task is None:
+                    close_task = asyncio.create_task(engine.aclose())
+                # Keep the one close operation alive if serve() cancels this
+                # loader while a superseded startup worker is being reaped.
+                await asyncio.shield(close_task)
+
             try:
                 # Dictation is already available (raw text) — but the first-run
                 # download of the cleanup LLM is multi-GB, so keep the progress
@@ -658,11 +704,23 @@ class Engine:
                     # to reclaim the old weights.
                     await self._prune_superseded_models()
                 else:
-                    await engine.aclose()
+                    await close_startup_engine_once()
+            except asyncio.CancelledError:
+                if self.cleanup is engine:
+                    self.cleanup = None
+                await close_startup_engine_once()
+                raise
             except Exception:
                 log.exception("cleanup LLM failed to load; dictations will return raw text")
+                if self.cleanup is engine:
+                    self.cleanup = None
+                with contextlib.suppress(Exception):
+                    await close_startup_engine_once()
                 with contextlib.suppress(Exception):
                     await self._set_loading(None)  # never leave a stale phase up
+            finally:
+                if self._cleanup_loading is engine:
+                    self._cleanup_loading = None
         # Completion means no startup work remains. The writing model is an
         # optional enhancement: its terminal failure falls back to raw text
         # and must not strand onboarding forever after the download stops.
@@ -695,6 +753,10 @@ class Engine:
         finally:
             watchdog.cancel()
             loader.cancel()
+            # Cancellation owns cleanup too: wait until _load_models has
+            # reaped any cold-start sidecar before serve() can return. A bare
+            # cancel left that child alive during app replacement.
+            await asyncio.gather(watchdog, loader, return_exceptions=True)
             if self._miner_task is not None:
                 self._miner_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -704,13 +766,24 @@ class Engine:
                 await self._server.wait_closed()
             with contextlib.suppress(FileNotFoundError):
                 socket_path.unlink()
-            close_cleanup_async = getattr(self.cleanup, "aclose", None)
-            if callable(close_cleanup_async):
-                await close_cleanup_async()
-            else:
-                close_cleanup = getattr(self.cleanup, "close", None)
-                if callable(close_cleanup):
-                    close_cleanup()
+            # Normally loader completion leaves only self.cleanup. Keep the
+            # identity-deduplicated sweep so an exceptional loader cannot
+            # strand a separately published _cleanup_loading instance.
+            cleanup_candidates = (self.cleanup, self._cleanup_loading)
+            self.cleanup = None
+            self._cleanup_loading = None
+            closed_cleanup_ids: set[int] = set()
+            for cleanup in cleanup_candidates:
+                if cleanup is None or id(cleanup) in closed_cleanup_ids:
+                    continue
+                closed_cleanup_ids.add(id(cleanup))
+                close_cleanup_async = getattr(cleanup, "aclose", None)
+                if callable(close_cleanup_async):
+                    await close_cleanup_async()
+                else:
+                    close_cleanup = getattr(cleanup, "close", None)
+                    if callable(close_cleanup):
+                        close_cleanup()
             log.info("engine shut down")
 
     async def _watch_parent(self) -> None:
@@ -913,11 +986,23 @@ class Engine:
             elif cmd == "action_observe":
                 await self._cmd_action_observe(msg)
             elif cmd == "action_end":
-                self._drop_action_session(msg.get("id"))
+                requested = msg.get("id")
+                if (isinstance(requested, str) and requested
+                        and requested == self._action_id
+                        and self._drop_action_session(requested)):
+                    await self._release_action_memory()
             elif cmd == "action_cancel":
-                if self._planning:
-                    self._action_cancel.set()
-                self._drop_action_session(msg.get("id"))
+                requested = msg.get("id")
+                matches = (
+                    self._action_session is None
+                    or requested is None
+                    or requested == self._action_id
+                )
+                if matches:
+                    if self._planning:
+                        self._action_cancel.set()
+                    if self._drop_action_session(requested):
+                        await self._release_action_memory()
             elif cmd == "meeting_notes":
                 await self._cmd_meeting_notes(msg)
             elif cmd == "meeting_notes_cancel":
@@ -1003,6 +1088,11 @@ class Engine:
             # the NAMES on screen right now (person/file/channel/subject entities
             # only — nearby free text is cleanup-prompt material, not glossary).
             self.stt.initial_prompt = self._glossary(session.start_entities)
+            # Whisper's extra preview decodes are opt-in because they consume
+            # model time. Ordinary dictation keeps the existing final-first
+            # latency; Stream Typing alone asks for progressive cursor text.
+            if hasattr(self.stt, "preview_enabled"):
+                self.stt.preview_enabled = context.get("stream_typing") is True
             await self._stt_call(self.stt.start_session)
             session.feeder = asyncio.create_task(self._feed_loop(session))
             self.session = session
@@ -1222,6 +1312,8 @@ class Engine:
         await self._drain_feeder(session)
         await self._drain_preview(session)
         await self._stt_call(self.stt.reset)
+        if hasattr(self.stt, "preview_enabled"):
+            self.stt.preview_enabled = False
         log.info("session %s discarded (%s)", session.id, why)
         self._resume_cleanup_recovery()
         # The engine is idle again after an abort too — without this, a
@@ -1309,6 +1401,8 @@ class Engine:
         try:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
+            if hasattr(self.stt, "preview_enabled"):
+                self.stt.preview_enabled = False
             self._finalizing = False
             self._finalizing_session_id = None
             self._resume_cleanup_recovery()
@@ -1907,6 +2001,24 @@ class Engine:
             self._miner_task.cancel()
         self._miner_task = asyncio.create_task(self._mine_when_idle(delay))
 
+    async def _cancel_idle_mining(self) -> None:
+        """Preempt mining and wait until its Darwin demotion is restored.
+
+        Cancelling the task without awaiting it leaves a small race where a
+        user-visible meeting starts while the miner's `_batch_jobs` lease is
+        still active. The meeting would then inherit background scheduling —
+        exactly the latency regression this boundary is meant to prevent.
+        """
+        task = self._miner_task
+        if task is None:
+            return
+        self._mine_cancel.set()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        if self._miner_task is task:
+            self._miner_task = None
+
     async def _mine_when_idle(self, delay: float) -> None:
         """Run mining steps across idle windows. Every iteration re-checks that
         the engine is truly idle; a starting session cancels this task outright
@@ -1922,6 +2034,8 @@ class Engine:
                     or self._editing
                     or self._transcribing
                     or self._meeting_notes_running
+                    or self._planning
+                    or self._action_session is not None
                     or not (self.cleanup is not None and self.cleanup.loaded)
                     or not self.config.vocab_mining
                 ):
@@ -1930,11 +2044,11 @@ class Engine:
                     self._miner = VocabMiner(self.config.home, self._mine_generate)
                 # Idle mining is the definition of interruptible batch work —
                 # run it demoted so an "idle" machine stays cool and quiet.
-                self._begin_batch_job()
+                self._begin_batch_job(lower_priority=True)
                 try:
                     more = await self._miner.step()
                 finally:
-                    self._end_batch_job()
+                    self._end_batch_job(lower_priority=True)
                 if self._miner.last_step_new_terms:
                     # Make the new terms live (cleanup vocab + next glossary).
                     # Counts only — never term values — in the log.
@@ -2028,8 +2142,10 @@ class Engine:
             await self._error("set_model: missing 'model'")
             return
         if (self.session is not None or self._reprocessing or self._transcribing
-                or self._meeting_notes_running or self._editing):
-            await self._error("set_model: busy (dictation, reprocess, or file transcription in progress)")
+                or self._meeting_notes_running or self._editing or self._planning
+                or self._action_session is not None):
+            await self._error(
+                "set_model: busy (dictation, transcription, edit, or action in progress)")
             return
         info = models.lookup(model_id)
         kind = msg.get("kind") or (info.kind if info else "stt")
@@ -2195,16 +2311,42 @@ class Engine:
             self._editing = False
             self._schedule_mining()
 
-    def _drop_action_session(self, requested: Any) -> None:
+    def _drop_action_session(self, requested: Any) -> bool:
         """Forget the live action session (loop finished, cancelled, or the
         app gave up). A mismatched id is ignored so a stale `action_end` from
-        a previous action cannot kill its successor's session."""
+        a previous action cannot kill its successor's session. The return value
+        also prevents that stale request from clearing the successor's KV
+        prefix."""
         if self._action_session is None:
-            return
+            return True
         if requested is not None and requested != self._action_id:
-            return
+            return False
         self._action_session = None
         self._action_id = None
+        self._action_terminal = False
+        return True
+
+    def _mark_action_terminal(self, requested: Any) -> bool:
+        """Retain an ended loop until its exact owner sends action_end."""
+        if self._action_session is None or requested != self._action_id:
+            return False
+        self._action_terminal = True
+        return True
+
+    async def _release_action_memory(self) -> None:
+        """Best-effort removal of session-only planner KV state.
+
+        The cleanup worker's model weights and dictation prefix remain warm.
+        A busy worker means cancellation is still unwinding; the app always
+        follows with `action_end`, which retries after the loop has stopped.
+        """
+        release = getattr(self.cleanup, "release_action_memory", None)
+        if not callable(release):
+            return
+        try:
+            await release()
+        except Exception:  # noqa: BLE001 — hygiene must never fail a task
+            log.debug("action memory release failed", exc_info=True)
 
     async def _action_busy_reason(self) -> tuple[str, str] | None:
         if self.session is not None or self._starting or self._finalizing:
@@ -2250,11 +2392,14 @@ class Engine:
         # a worse failure than dropping a loop nobody is driving.
         if self._action_session is not None:
             log.info("action_start: replacing an abandoned session %s", self._action_id)
+            self._drop_action_session(self._action_id)
+            await self._release_action_memory()
         context = actions.ActionContext.from_dict(msg.get("context"))
         context.transcript = transcript
         session = actions.ActionSession(transcript, context)
         self._action_session = session
         self._action_id = msg.get("id")
+        self._action_terminal = False
         if self._miner_task is not None:
             self._miner_task.cancel()
         self._mine_cancel.set()
@@ -2280,12 +2425,11 @@ class Engine:
         if busy is not None:
             await fail(*busy)
             return
-        if session.finished:
-            self._drop_action_session(self._action_id)
+        if self._action_terminal or session.finished:
             await fail("action: session already finished", "no_session")
             return
         if session.turns_used >= actions.MAX_TURNS:
-            self._drop_action_session(self._action_id)
+            self._mark_action_terminal(self._action_id)
             await fail(f"action: ran out of turns (max {actions.MAX_TURNS})",
                        "turn_limit")
             return
@@ -2293,6 +2437,12 @@ class Engine:
         if not isinstance(observation, dict):
             await fail("action: missing 'observation'", "invalid_arguments")
             return
+        # The app may spend tens of seconds carrying out a batch. Prevent the
+        # idle miner from owning the one cleanup worker when the next
+        # interactive planning turn arrives.
+        if self._miner_task is not None:
+            self._miner_task.cancel()
+        self._mine_cancel.set()
         self._planning = True
         self._action_cancel.clear()
         asyncio.create_task(self._run_action_turn(
@@ -2303,6 +2453,20 @@ class Engine:
                                message: str) -> None:
         """One model call → one validated turn. Shared by start and observe;
         `message` is the user-role text (command or observation)."""
+        planning_released = False
+
+        async def send_after_planning(payload: dict[str, Any]) -> None:
+            """Publish only after a next turn is allowed through the busy gate.
+
+            The socket write can yield. Marking planning idle first prevents a
+            fast action_observe from being rejected, while the local flag keeps
+            this turn's finally block from clearing a successor's planning bit.
+            """
+            nonlocal planning_released
+            self._planning = False
+            planning_released = True
+            await self._send(payload)
+
         try:
             t0 = time.perf_counter()
             turn: dict[str, Any] | None = None
@@ -2330,11 +2494,18 @@ class Engine:
                     # prefix exactly that prompt, so turn 2+ skips its ~2k
                     # tokens of prefill (~1.5s per turn on a 4B).
                     prefix_candidates=[(prompt, "a"), (prompt, "b")],
+                    cache_scope="action",
                 )
                 if self._action_cancel.is_set():
-                    self._drop_action_session(self._action_id)
-                    await self._send({"event": "action_failed", "id": msg.get("id"),
-                                      "code": "cancelled", "error": "action: cancelled"})
+                    self._drop_action_session(msg.get("id"))
+                    # action_cancel/action_end may have arrived while the
+                    # cleanup process lock was held. It is free after the await
+                    # above, so this is the authoritative retry.
+                    await self._release_action_memory()
+                    await send_after_planning({
+                        "event": "action_failed", "id": msg.get("id"),
+                        "code": "cancelled", "error": "action: cancelled",
+                    })
                     return
                 if not result.applied:
                     last_error = f"model unavailable ({result.reason or 'no output'})"
@@ -2360,8 +2531,8 @@ class Engine:
                 # own cap so a stuck model cannot be asked forever.
                 session.rejections += 1
                 if session.rejections >= 4:
-                    self._drop_action_session(self._action_id)
-                await self._send({
+                    self._mark_action_terminal(msg.get("id"))
+                await send_after_planning({
                     "event": "action_failed", "id": msg.get("id"),
                     "code": "plan_invalid",
                     "error": f"could not plan that action: {last_error}",
@@ -2369,14 +2540,12 @@ class Engine:
                 })
                 return
             if "fail" in turn:
-                self._drop_action_session(self._action_id)
-                await self._send({
+                self._mark_action_terminal(msg.get("id"))
+                await send_after_planning({
                     "event": "action_failed", "id": msg.get("id"),
                     "code": "unsupported", "error": turn["fail"], "ms": ms,
                 })
                 return
-            if turn["done"]:
-                self._drop_action_session(self._action_id)
             evt: dict[str, Any] = {
                 "event": "action_turn", "turn": session.turns_used,
                 "sends": bool(session.sends), "goal": session.goal,
@@ -2384,20 +2553,22 @@ class Engine:
             }
             if msg.get("id") is not None:
                 evt["id"] = msg.get("id")
-            await self._send(evt)
             self._restart_if_cleanup_unhealthy()
             log.info("action turn %d: %d steps sends=%s done=%s ms=%d",
                      session.turns_used, len(turn["steps"]), session.sends,
                      turn["done"], ms)
+            await send_after_planning(evt)
         except Exception as exc:  # noqa: BLE001 — the app is waiting on an answer
             log.exception("action turn failed")
-            self._drop_action_session(self._action_id)
-            await self._send({
-                "event": "action_failed", "id": msg.get("id"),
-                "code": "failed", "error": f"action planning failed: {exc}",
-            })
+            self._mark_action_terminal(msg.get("id"))
+            if not planning_released:
+                await send_after_planning({
+                    "event": "action_failed", "id": msg.get("id"),
+                    "code": "failed", "error": f"action planning failed: {exc}",
+                })
         finally:
-            self._planning = False
+            if not planning_released:
+                self._planning = False
             self._schedule_mining()
 
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
@@ -2696,6 +2867,7 @@ class Engine:
                 "error": "another background job is already running",
             })
             return
+        await self._cancel_idle_mining()
         self._transcribing = True
         self._meeting_transcribe_cancel = False
         self._meeting_transcribe_job_id = msg.get("id")
@@ -2836,7 +3008,10 @@ class Engine:
                 "code": code, "error": error,
             })
 
-        self._begin_batch_job()
+        # The user explicitly asked for notes and is waiting for the result.
+        # Foreground dictation still preempts between chunks, but Darwin
+        # background priority made this 2.5-6.5x slower in an exact replay.
+        self._begin_batch_job(lower_priority=False)
         try:
             try:
                 load_started = time.perf_counter()
@@ -2979,7 +3154,7 @@ class Engine:
             self._transcribing = False
             self._meeting_transcribe_cancel = False
             self._meeting_transcribe_job_id = None
-            self._end_batch_job()
+            self._end_batch_job(lower_priority=False)
             with contextlib.suppress(RuntimeError):  # executor gone at shutdown
                 await self._stt_call(self._release_stt_memory)
             self._schedule_mining()
@@ -3016,6 +3191,7 @@ class Engine:
                 "error": "another background job is already running",
             })
             return
+        await self._cancel_idle_mining()
         self._meeting_notes_running = True
         self._meeting_notes_cancel = False
         self._meeting_notes_preempt.clear()
@@ -3035,7 +3211,9 @@ class Engine:
         # contract parse_notes_json() enforces.
         schema_clause = (
             "Return JSON only with exact keys summary (string), decisions (array of "
-            "strings), and action_items (array of strings)."
+            "strings), and action_items (array of strings). Keep the summary to 3-6 "
+            "concise sentences and each array to at most 8 concise items. Use an empty "
+            "array when the transcript contains no explicit decision or action item."
         )
         default_guidance = (
             "Create faithful meeting notes from this transcript chunk. "
@@ -3065,38 +3243,70 @@ class Engine:
                 "meeting_id": meeting_id, "code": code, "error": error,
             })
 
-        async def generate(user_text: str, prompt: str) -> dict[str, Any] | None:
+        async def generate(
+            user_text: str, prompt: str
+        ) -> tuple[dict[str, Any] | None, str | None]:
             while not self._meeting_notes_cancel:
                 if self.shutdown.is_set():
-                    return None
+                    return None, "engine shutting down"
                 while self.session is not None or self._starting or self._finalizing:
                     await asyncio.sleep(0.25)
                     if self._meeting_notes_cancel or self.shutdown.is_set():
-                        return None
+                        return None, "cancelled"
                 self._meeting_notes_preempt.clear()
                 # Dictation just released the machine (wait loop above), or a
                 # cleanup child respawned — recompute who gets demoted.
                 self._refresh_batch_priority()
-                cleanup = self.cleanup
-                if cleanup is None or not cleanup.loaded:
-                    return None
+                model_ready_deadline = (
+                    asyncio.get_running_loop().time()
+                    + MEETING_NOTES_MODEL_READY_WAIT_S
+                )
+                cleanup = self.cleanup or self._cleanup_loading
+                if cleanup is None:
+                    return None, "the local notes model is unavailable"
+                while not cleanup.loaded:
+                    if (
+                        self._meeting_notes_cancel
+                        or self.shutdown.is_set()
+                    ):
+                        return None, "cancelled"
+                    if cleanup.unhealthy or (
+                        asyncio.get_running_loop().time() >= model_ready_deadline
+                    ):
+                        return None, "the local notes model is unavailable"
+                    if self.session is not None or self._starting or self._finalizing:
+                        break
+                    await asyncio.sleep(0.1)
+                    replacement = self.cleanup or self._cleanup_loading
+                    if replacement is None:
+                        return None, "the local notes model is unavailable"
+                    cleanup = replacement
+                if self.session is not None or self._starting or self._finalizing:
+                    continue
                 result = await cleanup.cleanup(
-                    user_text, prompt, timeout_ms=20_000, check_ratio=False,
+                    user_text, prompt,
+                    timeout_ms=MEETING_NOTES_TIMEOUT_MS,
+                    max_tokens=MEETING_NOTES_MAX_TOKENS,
+                    check_ratio=False,
                     cancel_event=self._meeting_notes_preempt,
                 )
                 if self._meeting_notes_cancel or self.shutdown.is_set():
-                    return None
+                    return None, "cancelled"
                 if self._meeting_notes_preempt.is_set():
                     # A dictation interrupted generation. Retry this exact map
                     # chunk once the foreground session has finished.
                     await asyncio.sleep(0.25)
                     continue
                 if not result.applied:
-                    return None
-                return parse_notes_json(result.text)
-            return None
+                    reason = str(getattr(result, "reason", None) or "no output")
+                    return None, f"local notes generation failed ({reason})"
+                parsed = parse_notes_json(result.text)
+                if parsed is None:
+                    return None, "the local notes model returned malformed notes"
+                return parsed, None
+            return None, "cancelled"
 
-        self._begin_batch_job()
+        self._begin_batch_job(lower_priority=False)
         try:
             chunks = chunk_transcript(transcript)
             partials: list[dict[str, Any]] = []
@@ -3107,11 +3317,18 @@ class Engine:
                 if self._meeting_notes_cancel:
                     await fail("cancelled", "cancelled")
                     return
-                notes = await generate(chunk, map_prompt)
+                notes, generation_error = await generate(chunk, map_prompt)
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return
-                notes = notes or fallback_notes(chunk)
+                if self._meeting_notes_cancel:
+                    await fail("cancelled", "cancelled")
+                    return
+                if notes is None:
+                    error = generation_error or "local notes generation failed"
+                    log.warning("meeting notes failed for %s: %s", meeting_id, error)
+                    await fail(error + "; retry to generate notes", "generation_failed")
+                    return
                 partials.append(notes)
                 await self._send({
                     "event": "meeting_notes_progress", "id": job_id,
@@ -3120,11 +3337,25 @@ class Engine:
                 })
             merged = merge_notes(partials)
             if len(partials) > 1:
-                reduced = await generate(json.dumps(partials, ensure_ascii=False), reduce_prompt)
+                reduced, reduce_error = await generate(
+                    # merge_notes applies global size/item bounds before this
+                    # model call. Passing every per-chunk response directly
+                    # made a maximum-size transcript create an unbounded
+                    # reducer context despite the per-call output-token cap.
+                    json.dumps(merged, ensure_ascii=False), reduce_prompt)
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return
-                if reduced is not None:
+                if self._meeting_notes_cancel:
+                    await fail("cancelled", "cancelled")
+                    return
+                if reduced is None:
+                    error = reduce_error or "local notes merge failed"
+                    log.warning("meeting notes merge failed for %s: %s", meeting_id, error)
+                    # Every map result already passed the strict schema. A
+                    # deterministic merge is less polished but remains real
+                    # generated notes, unlike the old raw-transcript fallback.
+                else:
                     merged = reduced
             if self._meeting_notes_cancel:
                 await fail("cancelled", "cancelled")
@@ -3142,7 +3373,7 @@ class Engine:
             self._meeting_notes_cancel = False
             self._meeting_notes_preempt.clear()
             self._meeting_notes_job_id = None
-            self._end_batch_job()
+            self._end_batch_job(lower_priority=False)
             # Notes generate inside the cleanup child — the parent-side cache
             # clear cannot reach that allocator, so ask the child directly.
             release = getattr(self.cleanup, "release_cache", None)

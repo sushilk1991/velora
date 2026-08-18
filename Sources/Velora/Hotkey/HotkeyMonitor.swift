@@ -11,6 +11,8 @@ import Foundation
 enum SecondaryHotkeyRole: String, CaseIterable {
     /// Safe Voice Edit: select text, hold, speak an instruction.
     case edit
+    /// Stream Typing: show provisional speech at the exact text cursor.
+    case stream
     /// Action Mode: hold, speak a command, Velora carries it out.
     case action
 
@@ -79,7 +81,7 @@ final class HotkeyMonitor {
         }
     }
 
-    /// Optional extra hotkeys by role (Safe Voice Edit, Action Mode). A missing
+    /// Optional extra hotkeys by role (Voice Edit, Stream Typing, Action Mode). A missing
     /// entry disables that role; a value equal to the dictation hotkey is
     /// ignored at match time so the main hotkey always wins.
     var secondaryHotkeys: [SecondaryHotkeyRole: Hotkey] = AppConfig.shared.activeSecondaryHotkeys {

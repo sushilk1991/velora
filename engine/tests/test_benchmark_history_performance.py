@@ -37,6 +37,7 @@ def _create_history(path: Path, *, current: bool = True) -> sqlite3.Connection:
         , cleanup_applied INTEGER
         , finalization_ms INTEGER
         , cleanup_wall_ms INTEGER
+        , quality_state INTEGER
     """ if current else ""
     connection.execute(
         f"""
@@ -62,12 +63,14 @@ def _sample(module: ModuleType, **overrides):
         "duration_ms": 5_000,
         "raw_chars": 10,
         "final_chars": 11,
+        "final_nonempty": True,
         "cleanup_ms": 100,
         "audio_path": "clip.flac",
         "stt_ms": 500,
         "cleanup_applied": True,
         "finalization_ms": 900,
         "cleanup_wall_ms": 200,
+        "quality_state": None,
     }
     values.update(overrides)
     return module.HistorySample(**values)
@@ -153,6 +156,57 @@ def test_recovery_wait_is_the_nonnegative_residual_after_stt_and_cleanup():
     assert module.derive_recovery_wait_ms(1_000, 800, None) is None
 
 
+def test_quality_report_exposes_observation_coverage_without_transcript_text(tmp_path):
+    module = _load_script()
+    samples = [
+        _sample(module, id=1, quality_state=1),
+        _sample(module, id=2, quality_state=2),
+        _sample(module, id=3, quality_state=None),
+        _sample(module, id=4, quality_state=None),
+        _sample(module, id=5, final_chars=0, final_nonempty=False, quality_state=None),
+    ]
+
+    quality = module.build_report(samples, tmp_path / "audio")["quality"]
+
+    assert quality == {
+        "eligible": 4,
+        "observed": 2,
+        "unobserved": 2,
+        "unchanged": 1,
+        "edited": 1,
+        "observation_coverage": 0.5,
+        "zero_edit_rate": 0.5,
+    }
+
+
+def test_quality_eligibility_matches_the_apps_trimmed_final_definition(tmp_path):
+    module = _load_script()
+    database = tmp_path / "history.sqlite3"
+    connection = _create_history(database)
+    for row_id, final, quality in (
+        (1, "\n\t   \n", 2),
+        (2, "a real result", 1),
+    ):
+        connection.execute(
+            """
+            INSERT INTO dictations
+                (id, ts, raw, final, mode, duration_ms, cleanup_ms, quality_state)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (row_id, 1.0, "synthetic", final, "Default", 1_000, 10, quality),
+        )
+    connection.commit()
+    connection.close()
+
+    quality = module.build_report(
+        module.load_history_samples(database), tmp_path / "audio"
+    )["quality"]
+
+    assert quality["eligible"] == 1
+    assert quality["observed"] == 1
+    assert quality["unchanged"] == 1
+
+
 def test_legacy_history_without_new_metrics_reports_missing_samples(tmp_path):
     module = _load_script()
     database = tmp_path / "legacy.sqlite3"
@@ -173,11 +227,13 @@ def test_legacy_history_without_new_metrics_reports_missing_samples(tmp_path):
 
     assert report["rows"]["total"] == 1
     assert report["privacy"]["transcript_text_included"] is False
+    assert report["privacy"]["only_aggregate_nontext_metadata"] is True
     assert report["metrics"]["stt_ms"]["available"] == 0
     assert report["metrics"]["stt_ms"]["missing"] == 1
     assert report["metrics"]["stt_ms"]["p50"] is None
     assert report["metrics"]["finalization_ms"]["available"] == 0
     assert report["metrics"]["recovery_wait_ms"]["available"] == 0
+    assert report["quality"]["observation_coverage"] == 0
     assert samples[0].raw_chars == len("synthetic raw")
     assert samples[0].final_chars == len("synthetic final")
 
@@ -237,8 +293,9 @@ def test_cli_writes_only_redacted_report_and_corpus_metadata(tmp_path):
         """
         INSERT INTO dictations
             (id, ts, raw, final, mode, duration_ms, cleanup_ms, audio_path,
-             stt_ms, cleanup_applied, finalization_ms, cleanup_wall_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             stt_ms, cleanup_applied, finalization_ms, cleanup_wall_ms,
+             quality_state)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             7,
@@ -253,6 +310,7 @@ def test_cli_writes_only_redacted_report_and_corpus_metadata(tmp_path):
             1,
             2_000,
             600,
+            2,
         ),
     )
     connection.commit()
@@ -290,6 +348,8 @@ def test_cli_writes_only_redacted_report_and_corpus_metadata(tmp_path):
     assert "final" not in _all_keys(corpus)
     assert report["metrics"]["raw_chars"]["p50"] == len(raw_canary)
     assert report["metrics"]["final_chars"]["p50"] == len(final_canary)
+    assert report["quality"]["edited"] == 1
+    assert report["quality"]["observation_coverage"] == 1
     assert corpus["cases"] == [
         {
             "case_id": "history-7",

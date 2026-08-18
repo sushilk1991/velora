@@ -279,6 +279,77 @@ def test_runtime_prefix_extension_preserves_exact_prompt_and_static_fallback(
         engine.close()
 
 
+def test_action_prefix_is_session_scoped_and_cleanup_prefix_survives(monkeypatch):
+    import mlx.core as mx
+    import mlx_lm
+
+    engine = RecordingCleanup()
+    engine._warm("stable dictation instructions")
+    dictation_tokens = list(engine._prepared_tokens)
+    dictation_snapshot = engine._prepared_cache
+    action_system = "independent action agent protocol"
+    action_raw = "open Slack"
+    candidates = [
+        (action_system, "alpha action"),
+        (action_system, "zulu action"),
+    ]
+
+    def generate(*_args, **_kwargs):
+        yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)
+
+    clear_calls = 0
+
+    def clear_cache():
+        nonlocal clear_calls
+        clear_calls += 1
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", generate)
+    monkeypatch.setattr(mx, "clear_cache", clear_cache)
+    try:
+        result = engine._run(
+            action_raw,
+            action_system,
+            timeout_ms=100,
+            check_ratio=False,
+            prefix_candidates=candidates,
+            cache_scope="action",
+        )
+
+        assert result.applied is True
+        assert engine._action_prepared_tokens
+        assert engine._action_prepared_cache is not None
+        assert engine._prepared_tokens == dictation_tokens
+        assert engine._prepared_cache is dictation_snapshot
+
+        action_request = engine._action_prepared_tokens + [999]
+        _cache, common, hit = engine._cache_for_tokens(action_request)
+        assert (common, hit) == (0, False)
+        _cache, common, hit = engine._cache_for_tokens(
+            action_request, cache_scope="action"
+        )
+        assert (common, hit) == (len(engine._action_prepared_tokens), True)
+
+        stable_action_tokens = list(engine._action_prepared_tokens)
+        stable_action_snapshot = engine._action_prepared_cache
+        engine._install_prepared_prefix(
+            stable_action_tokens + [1, 2, 3],
+            [FakeCache([[1, 2, 3]])],
+            cache_scope="action",
+        )
+        assert engine._action_prepared_tokens == stable_action_tokens
+        assert engine._action_prepared_cache is stable_action_snapshot
+
+        engine._release_action_memory()
+
+        assert engine._action_prepared_tokens == []
+        assert engine._action_prepared_cache is None
+        assert engine._prepared_tokens == dictation_tokens
+        assert engine._prepared_cache is dictation_snapshot
+        assert clear_calls == 1
+    finally:
+        engine.close()
+
+
 def test_failed_runtime_prefix_extension_restores_clean_static_snapshot(
     monkeypatch,
 ):
@@ -377,7 +448,9 @@ def test_runtime_prefix_snapshot_failure_keeps_atomic_old_pair(
 
 def test_soft_deadline_starts_after_first_output_token(monkeypatch):
     engine = RecordingCleanup()
-    engine._cache_for_tokens = lambda _tokens: ([FakeCache()], 7, True)
+    engine._cache_for_tokens = (
+        lambda _tokens, cache_scope=None: ([FakeCache()], 7, True)
+    )
 
     def slow_prefill_then_fast_output(*_args, **_kwargs):
         time.sleep(0.03)  # longer than the 10ms output budget
@@ -398,7 +471,9 @@ def test_soft_deadline_starts_after_first_output_token(monkeypatch):
 
 def test_soft_deadline_still_bounds_slow_output(monkeypatch):
     engine = RecordingCleanup()
-    engine._cache_for_tokens = lambda _tokens: ([FakeCache()], 0, False)
+    engine._cache_for_tokens = (
+        lambda _tokens, cache_scope=None: ([FakeCache()], 0, False)
+    )
 
     def slow_output(*_args, **_kwargs):
         yield SimpleNamespace(text="fixed", token=1, generation_tokens=1)

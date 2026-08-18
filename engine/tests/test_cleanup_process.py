@@ -52,6 +52,7 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         assert memory.active_bytes == 500_000_000
         assert memory.peak_bytes == 750_000_000
         assert memory.cache_bytes == 25_000_000
+        await cleanup.release_action_memory()
     finally:
         await cleanup.aclose()
 
@@ -124,6 +125,29 @@ async def test_child_watchdog_result_retires_worker_and_recovers() -> None:
         assert (await cleanup.cleanup("after child watchdog", "system")).text == (
             "AFTER CHILD WATCHDOG"
         )
+    finally:
+        await cleanup.aclose()
+
+
+async def test_child_watchdog_has_time_to_serialize_boundary_result() -> None:
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        hard_timeout_grace_s=0.05,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        started = asyncio.get_running_loop().time()
+        result = await cleanup.cleanup(
+            "__child_timeout_boundary__", "system", timeout_ms=50)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        # The fake child responds after the former 100ms parent boundary. Its
+        # distinct ms value proves the response arrived over IPC instead of
+        # the parent manufacturing its own timeout fallback.
+        assert result.reason == "timeout_hard"
+        assert result.ms == 12
+        assert 0.11 <= elapsed < 0.30
     finally:
         await cleanup.aclose()
 

@@ -2,6 +2,11 @@ import AppKit
 import AVFoundation
 import SwiftUI
 
+enum HistoryClearPolicy {
+    static let confirmationMessage =
+        "This permanently deletes every saved transcript and its archived audio. This can't be undone."
+}
+
 /// Backs the History tab: a paged, searchable view over `HistoryStore` plus the
 /// live `reprocess` round-trip. Owns audio playback and reprocess-in-flight
 /// state. Main-thread only (all mutation happens from SwiftUI / notifications).
@@ -282,7 +287,7 @@ struct HistorySettingsView: View {
                 Button("Delete All History", role: .destructive) { vm.clearAll() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This permanently removes every saved transcript. Audio clips age out separately.")
+                Text(HistoryClearPolicy.confirmationMessage)
             }
         }
         .padding(VeloraSpacing.m)

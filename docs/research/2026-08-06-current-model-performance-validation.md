@@ -108,7 +108,8 @@ Two committed tools make the work reproducible without exporting content:
 
 - `engine/scripts/benchmark_history_performance.py` opens SQLite with URI
   `mode=ro`, never loads transcript bodies into Python, and produces aggregate
-  timing/length buckets plus a deterministic private corpus manifest.
+  timing/length buckets, quality-observation coverage, and a deterministic
+  private corpus manifest.
 - `engine/scripts/benchmark_installed_replay.py` confines relative audio paths
   beneath an explicit root, proves the exact configured model pair plus live
   installed readiness without displacing the app-owned engine socket, hashes

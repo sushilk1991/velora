@@ -145,6 +145,13 @@ final class AppConfig {
         veloraDirectory.appendingPathComponent("history.sqlite3")
     }
 
+    /// Bounded local execution ledger for Agent Mode. Kept separate from
+    /// dictation history so task receipts can be pruned and migrated without
+    /// putting the latency-sensitive history store on the same write path.
+    static var agentDatabaseURL: URL {
+        veloraDirectory.appendingPathComponent("agent.sqlite3")
+    }
+
     /// Independent meeting transcript index and disk-spooled audio root.
     static var meetingsDirectory: URL {
         veloraDirectory.appendingPathComponent("meetings", isDirectory: true)
@@ -480,6 +487,10 @@ final class AppConfig {
             dictation: storedHotkey,
             editSelection: storedEditHotkey,
             voiceEdit: defaults.bool(forKey: Key.voiceEdit),
+            streamTyping: SettingsDocument.Shortcuts.defaultStreamHotkey(
+                excluding: [storedHotkey, storedEditHotkey,
+                            SettingsDocument.Shortcuts.defaultActionHotkey]),
+            streamTypingEnabled: true,
             behavior: HotkeyMode(
                 rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold,
             action: SettingsDocument.Shortcuts.defaultActionHotkey,
@@ -752,6 +763,21 @@ final class AppConfig {
     /// What the monitor should listen for — nil when the feature is off.
     var activeEditHotkey: Hotkey? { voiceEdit ? editHotkey : nil }
 
+    /// Stream Typing: hold this to see provisional speech at the cursor.
+    var streamTypingHotkey: Hotkey {
+        get { readSetting(\.shortcuts.streamTyping) }
+        set { updateSettings { $0.shortcuts.streamTyping = newValue } }
+    }
+
+    var streamTypingEnabled: Bool {
+        get { readSetting(\.shortcuts.streamTypingEnabled) }
+        set { updateSettings { $0.shortcuts.streamTypingEnabled = newValue } }
+    }
+
+    var activeStreamTypingHotkey: Hotkey? {
+        streamTypingEnabled ? streamTypingHotkey : nil
+    }
+
     /// Action Mode: hold this, speak a command, Velora carries it out.
     var actionHotkey: Hotkey {
         get { readSetting(\.shortcuts.action) }
@@ -776,8 +802,12 @@ final class AppConfig {
         var table: [SecondaryHotkeyRole: Hotkey] = [:]
         let dictation = hotkey
         if let edit = activeEditHotkey, edit != dictation { table[.edit] = edit }
+        if let stream = activeStreamTypingHotkey, stream != dictation,
+           stream != table[.edit] {
+            table[.stream] = stream
+        }
         if let action = activeActionHotkey, action != dictation,
-           action != table[.edit] {
+           action != table[.edit], action != table[.stream] {
             table[.action] = action
         }
         return table

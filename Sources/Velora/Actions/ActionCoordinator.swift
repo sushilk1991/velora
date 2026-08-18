@@ -229,6 +229,9 @@ final class ActionCoordinator {
     }
 
     var isRunning: Bool { runner != nil }
+    /// Planner transport identity, exposed only so the outer Agent lifecycle
+    /// can avoid recording a late event from a superseded engine session.
+    var activeActionID: String? { planner?.id }
     /// True once the loop has begun driving the machine. Until the first turn
     /// arrives nothing has been touched, so Esc still belongs to whatever
     /// else is on screen.

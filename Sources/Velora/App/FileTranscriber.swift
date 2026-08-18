@@ -2,6 +2,64 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
+enum FileTranscriptionTypePolicy {
+    static let allowedContentTypes: [UTType] = [
+        .mp3,
+        .wav,
+        .aiff,
+        .mpeg4Audio,
+        UTType(importedAs: "com.apple.m4a-audio"),
+        UTType(importedAs: "public.aac-audio"),
+        UTType(importedAs: "com.apple.coreaudio-format"),
+        UTType(importedAs: "org.xiph.flac"),
+        UTType(importedAs: "org.xiph.ogg-audio"),
+        .quickTimeMovie,
+        .mpeg4Movie,
+    ]
+
+    private static let rejectedContentTypes: [UTType] = [
+        .appleProtectedMPEG4Audio,
+        .appleProtectedMPEG4Video,
+    ]
+
+    static func supports(contentType: UTType) -> Bool {
+        guard !rejectedContentTypes.contains(where: { contentType.conforms(to: $0) })
+        else { return false }
+        return allowedContentTypes.contains { contentType.conforms(to: $0) }
+    }
+
+    static func supports(url: URL) -> Bool {
+        guard url.isFileURL else { return false }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue else { return false }
+        let values = try? url.resourceValues(forKeys: [.contentTypeKey])
+        guard let contentType = values?.contentType
+                ?? UTType(filenameExtension: url.pathExtension) else { return false }
+        return supports(contentType: contentType)
+    }
+}
+
+struct FileTranscriptionQueue {
+    private(set) var pendingURLs: [URL] = []
+
+    @discardableResult
+    mutating func enqueue(_ urls: [URL]) -> Int {
+        let supported = urls.filter(FileTranscriptionTypePolicy.supports(url:))
+        pendingURLs.append(contentsOf: supported)
+        return supported.count
+    }
+
+    mutating func dequeueIfReady(engineReady: Bool, transcriberBusy: Bool) -> URL? {
+        guard engineReady, !transcriberBusy, !pendingURLs.isEmpty else { return nil }
+        return pendingURLs.removeFirst()
+    }
+
+    mutating func retry(_ url: URL) {
+        pendingURLs.insert(url, at: 0)
+    }
+}
+
 struct FileTranscriptionResult {
     let text: String
     let path: String
@@ -28,7 +86,7 @@ enum FileTranscriptionError: LocalizedError {
     }
 }
 
-/// "Transcribe Audio File…": file picker → engine `transcribe_file` job →
+/// "Transcribe Audio or Video File…": file picker → engine `transcribe_file` job →
 /// progress in the menubar menu → transcript to the clipboard + a sidecar
 /// "<name> transcript.txt" next to the source + a HUD toast.
 ///
@@ -50,6 +108,7 @@ final class FileTranscriber {
     private var requestedMode: String?
     private var agentRequestID: UUID?
     private var agentCompletion: ((Result<FileTranscriptionResult, FileTranscriptionError>) -> Void)?
+    private var queuedFromFinder = false
     /// Terminal lifecycle gate: no picker callback or broker dispatch can
     /// create a new engine job once application termination has started.
     private var terminating = false
@@ -58,6 +117,9 @@ final class FileTranscriber {
     private var ackTimer: Timer?
     /// Called on every progress/state change so the menubar can refresh.
     var onStateChange: (() -> Void)?
+    /// Engine-side work (meeting notes, reprocessing, editing) can outlive the
+    /// app-side file busy flag. Finder jobs retry instead of being discarded.
+    var onQueuedFileBusy: ((URL) -> Void)?
 
     var isTranscribing: Bool { progressLabel != nil }
 
@@ -72,21 +134,35 @@ final class FileTranscriber {
     func pickAndTranscribe() {
         guard !isTranscribing else { return }
         let panel = NSOpenPanel()
-        panel.title = "Transcribe Audio File"
-        panel.message = "Choose a voice memo, meeting recording, or any audio file."
+        panel.title = "Transcribe Audio or Video File"
+        panel.message = "Choose an audio, QuickTime, or MPEG-4 file."
         panel.prompt = "Transcribe"
-        panel.allowedContentTypes = [.audio]
+        panel.allowedContentTypes = FileTranscriptionTypePolicy.allowedContentTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         NSApp.activate(ignoringOtherApps: true)
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
+            guard FileTranscriptionTypePolicy.supports(url: url) else {
+                self.showToast(
+                    symbol: "exclamationmark.triangle.fill",
+                    message: "That media file is protected or unsupported")
+                return
+            }
             self.transcribe(url: url)
         }
     }
 
     func transcribe(url: URL) {
-        start(url: url, mode: nil, agentRequestID: nil, completion: nil)
+        start(
+            url: url, mode: nil, agentRequestID: nil,
+            queuedFromFinder: false, completion: nil)
+    }
+
+    func transcribeQueuedFromFinder(url: URL) {
+        start(
+            url: url, mode: nil, agentRequestID: nil,
+            queuedFromFinder: true, completion: nil)
     }
 
     /// Programmatic file transcription for the local broker. Unlike the menu
@@ -99,13 +175,16 @@ final class FileTranscriber {
         completion: @escaping (Result<FileTranscriptionResult, FileTranscriptionError>) -> Void
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
-        start(url: url, mode: mode, agentRequestID: requestID, completion: completion)
+        start(
+            url: url, mode: mode, agentRequestID: requestID,
+            queuedFromFinder: false, completion: completion)
     }
 
     private func start(
         url: URL,
         mode: String?,
         agentRequestID: UUID?,
+        queuedFromFinder: Bool,
         completion: ((Result<FileTranscriptionResult, FileTranscriptionError>) -> Void)?
     ) {
         guard !terminating else {
@@ -117,13 +196,13 @@ final class FileTranscriber {
             return
         }
         guard url.isFileURL, url.path.utf8.count <= 4_096 else {
-            completion?(.failure(.invalidFile("The audio path is invalid")))
+            completion?(.failure(.invalidFile("The media path is invalid")))
             return
         }
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
               !isDirectory.boolValue else {
-            completion?(.failure(.invalidFile("Audio file not found")))
+            completion?(.failure(.invalidFile("Media file not found")))
             return
         }
         guard supervisor.isReady else {
@@ -142,6 +221,7 @@ final class FileTranscriber {
         requestedMode = mode
         self.agentRequestID = agentRequestID
         agentCompletion = completion
+        self.queuedFromFinder = queuedFromFinder
         progressLabel = "Preparing…"
         onStateChange?()
         veloraLog("Velora: transcribe_file requested (\(url.pathExtension), \((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) bytes)")
@@ -225,7 +305,15 @@ final class FileTranscriber {
         case .transcribeFailed(let id, let error):
             guard isTranscribing, matches(id) else { return }
             veloraLog("Velora: transcribe_file failed: \(error)")
-            fail(error)
+            if queuedFromFinder,
+               error == "another transcription is already running",
+               let sourceURL {
+                reset(notify: false)
+                onQueuedFileBusy?(sourceURL)
+                onStateChange?()
+            } else {
+                fail(error)
+            }
         default:
             break
         }
@@ -282,7 +370,7 @@ final class FileTranscriber {
         }
         showToast(
             symbol: "doc.text.fill",
-            message: savedSidecar ? "Transcript copied · saved next to audio" : "Transcript copied")
+            message: savedSidecar ? "Transcript copied · saved next to file" : "Transcript copied")
     }
 
     /// "<name> transcript.txt", counting up ("… transcript 2.txt") instead of
@@ -310,7 +398,7 @@ final class FileTranscriber {
                   message: message)
     }
 
-    private func reset() {
+    private func reset(notify: Bool = true) {
         ackTimer?.invalidate()
         ackTimer = nil
         progressLabel = nil
@@ -319,7 +407,8 @@ final class FileTranscriber {
         requestedMode = nil
         agentRequestID = nil
         agentCompletion = nil
-        onStateChange?()
+        queuedFromFinder = false
+        if notify { onStateChange?() }
     }
 
     private func matches(_ eventID: String?) -> Bool {

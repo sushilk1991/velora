@@ -57,7 +57,7 @@ struct HUDView: View {
             return (CGSize(width: HUDGeometry.meetingWidth, height: HUDGeometry.height), true)
         case .inserted:
             return (CGSize(width: HUDGeometry.insertedDiameter, height: HUDGeometry.height), true)
-        case .error:
+        case .error, .meetingFailure:
             return (CGSize(width: HUDGeometry.errorWidth, height: HUDGeometry.height), true)
         case .learned(let wrong, let right):
             var value = HUDGeometry.contentInsetH * 2 + 14 + 12 + VeloraSpacing.s * 4
@@ -496,8 +496,15 @@ struct HUDView: View {
     // MARK: - Error
 
     private var errorMessage: String {
-        if case .error(let message) = model.state { return message }
-        return ""
+        switch model.state {
+        case .error(let message), .meetingFailure(_, let message): return message
+        default: return ""
+        }
+    }
+
+    private var meetingFailureID: String? {
+        if case .meetingFailure(let meetingID, _) = model.state { return meetingID }
+        return nil
     }
 
     private var errorContent: some View {
@@ -510,10 +517,21 @@ struct HUDView: View {
                 .lineLimit(1)
                 .foregroundStyle(hudPrimaryText)
             Spacer(minLength: 0)
-            Button(model.retryTitle) { model.onRetry?() }
-                .buttonStyle(.borderless)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(Color.accentColor)
+            if let meetingID = meetingFailureID {
+                Button("Open") { model.onMeetingFailureOpen?(meetingID) }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+                Button("Retry") { model.onMeetingFailureRetry?(meetingID) }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            } else {
+                Button(model.retryTitle) { model.onRetry?() }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
+            }
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
@@ -610,6 +628,7 @@ struct HUDView: View {
 
     private var isMeetingSurface: Bool {
         isMeetingRecording || isMeetingSuggestion || isMeetingEnd
+            || meetingFailureID != nil
     }
 
     private var meetingAccessibilityHint: String {
@@ -620,6 +639,8 @@ struct HUDView: View {
             return "Use the stop button to finish the meeting recording"
         case .meetingEnd:
             return "Finish notes or keep recording"
+        case .meetingFailure:
+            return "Open the saved transcript or retry meeting processing"
         default:
             return isStandby ? "Click to start dictation" : "Click to stop dictation"
         }
@@ -633,6 +654,8 @@ struct HUDView: View {
             return "Recording \(title), \(systemAudio ? "microphone and computer audio" : "microphone only")"
         case .meetingEnd(let title):
             return "Meeting ended, \(title)"
+        case .meetingFailure(_, let message):
+            return message
         default:
             return "Velora dictation"
         }
@@ -650,8 +673,10 @@ struct HUDView: View {
     }
 
     private var isError: Bool {
-        if case .error = model.state { return true }
-        return false
+        switch model.state {
+        case .error, .meetingFailure: return true
+        default: return false
+        }
     }
 
     private var isLearned: Bool {
@@ -798,7 +823,7 @@ struct HUDView: View {
                 }
             }
 
-        case .error:
+        case .error, .meetingFailure:
             if old.isHidden {
                 resetInstant(width: HUDGeometry.errorWidth, height: HUDGeometry.height)
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {

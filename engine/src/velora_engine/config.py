@@ -42,8 +42,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # cleanup instead of verbatim passthrough; short commands stay verbatim.
     "smart_terminal": True,
     # Clean whisper segments with the LLM DURING recording (smartness-v2 §2) so
-    # long dictations stop blowing the cleanup budget; off → segments are
-    # HUD-preview-only and finalize runs the whole-text cleanup as before.
+    # long dictations stop blowing the cleanup budget; off → finalization runs
+    # the whole-text cleanup without rendering provisional transcript text.
     "streaming_cleanup": True,
     # Idle vocabulary miner: the cleanup LLM extracts proper nouns/jargon from
     # recent dictation history while nothing else is happening, growing
@@ -106,11 +106,23 @@ class Mode:
         fmt = d.get("formatting", "full")
         if fmt not in VALID_FORMATTING:
             fmt = "full"
+        raw_apps = d.get("apps", []) or []
+        if not isinstance(raw_apps, list):
+            raw_apps = []
+        apps: list[str] = []
+        seen_apps: set[str] = set()
+        for value in raw_apps:
+            identifier = str(value).strip()
+            key = identifier.casefold()
+            if not identifier or key in seen_apps:
+                continue
+            seen_apps.add(key)
+            apps.append(identifier)
         return cls(
             name=str(d.get("name", "Unnamed")),
             prompt=str(d.get("prompt", "") or ""),
             formatting=fmt,
-            apps=[str(a) for a in d.get("apps", []) or []],
+            apps=apps,
             vocabulary=[str(v) for v in d.get("vocabulary", []) or []],
             replacements={str(k): str(v) for k, v in (d.get("replacements") or {}).items()},
         )
@@ -545,7 +557,10 @@ class Config:
     def mode_for_bundle(self, bundle_id: str | None) -> Mode | None:
         if not bundle_id:
             return None
+        key = bundle_id.strip().casefold()
+        if not key:
+            return None
         for mode in self.modes.values():
-            if bundle_id in mode.apps:
+            if any(app.casefold() == key for app in mode.apps):
                 return mode
         return None

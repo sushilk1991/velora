@@ -46,9 +46,9 @@ _PARAKEET_FEED_SAMPLES = SAMPLE_RATE // 2
 MIN_SEGMENT_S = 10.0  # min un-decoded audio before a pause may close a segment
 SEGMENT_SILENCE_S = 0.7  # trailing-pause length that closes a segment
 HARD_SEGMENT_S = 25.0  # close even mid-speech past this much un-decoded audio
-# Optional HUD-only preview lane, retained for diagnostics but disabled in
-# production. Its extra decodes compete with authoritative Whisper and Qwen
-# work on slower Apple Silicon even though they never feed final stitching.
+# Optional display-only preview lane used by Stream Typing. Ordinary dictation
+# leaves it disabled because the extra decodes compete with authoritative
+# Whisper and Qwen work even though they never feed final stitching.
 PREVIEW_FIRST_S = 2.0
 PREVIEW_MIN_SPAN_S = 1.2
 PREVIEW_PAUSE_S = 0.3

@@ -88,6 +88,10 @@ class Worker:
                 await self.engine.release_cache()
                 await self._respond(request_id, ok=True)
                 return
+            if operation == "release_action_memory":
+                await self.engine.release_action_memory()
+                await self._respond(request_id, ok=True)
+                return
             if operation == "cleanup":
                 raw = str(message.get("raw") or "")
                 prompt = str(message.get("system_prompt") or "")
@@ -106,6 +110,7 @@ class Worker:
                     allowed_terms=message.get("allowed_terms"),
                     prefix_candidates=prefix_candidates,
                     max_tokens=message.get("max_tokens"),
+                    cache_scope=message.get("cache_scope"),
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return

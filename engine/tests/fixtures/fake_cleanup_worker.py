@@ -80,6 +80,9 @@ async def main(
                 },
             )
             return
+        if operation in {"release_cache", "release_action_memory"}:
+            await respond(request_id, ok=True)
+            return
         raw = message["raw"]
         if raw == "__crash__":
             os._exit(17)
@@ -103,7 +106,13 @@ async def main(
                 "output_tokens": 0,
                 "cache_hit": False,
             }
-        elif raw == "__child_timeout__":
+        elif raw in {"__child_timeout__", "__child_timeout_boundary__"}:
+            if raw == "__child_timeout_boundary__":
+                # The matching test configures a 50ms request + 50ms child
+                # hard-wall grace. Serialize 20ms beyond that old parent
+                # deadline: only the IPC delivery margin can preserve this
+                # authoritative child result.
+                await asyncio.sleep(message["timeout_ms"] / 1000.0 + 0.07)
             result = {
                 "text": raw,
                 "applied": False,

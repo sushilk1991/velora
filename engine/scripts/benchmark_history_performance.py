@@ -39,12 +39,14 @@ class HistorySample:
     duration_ms: int
     raw_chars: int | None
     final_chars: int | None
+    final_nonempty: bool
     cleanup_ms: int | None
     audio_path: str | None
     stt_ms: int | None
     cleanup_applied: bool | None
     finalization_ms: int | None
     cleanup_wall_ms: int | None
+    quality_state: int | None
 
     @property
     def recovery_wait_ms(self) -> int | None:
@@ -168,12 +170,19 @@ def load_history_samples(database: Path) -> list[HistorySample]:
             "LENGTH(final) AS final_chars"
             if "final" in columns
             else "NULL AS final_chars",
+            (
+                "TRIM(REPLACE(REPLACE(final, char(10), ' '), char(9), ' ')) != '' "
+                "AS final_nonempty"
+                if "final" in columns
+                else "0 AS final_nonempty"
+            ),
             _optional_expression(columns, "cleanup_ms"),
             _optional_expression(columns, "audio_path"),
             _optional_expression(columns, "stt_ms"),
             _optional_expression(columns, "cleanup_applied"),
             _optional_expression(columns, "finalization_ms"),
             _optional_expression(columns, "cleanup_wall_ms"),
+            _optional_expression(columns, "quality_state"),
         ]
         rows = connection.execute(
             "SELECT " + ", ".join(expressions) + " FROM dictations ORDER BY id"
@@ -190,6 +199,7 @@ def load_history_samples(database: Path) -> list[HistorySample]:
                     duration_ms=max(0, int(row["duration_ms"])),
                     raw_chars=_optional_int(row["raw_chars"]),
                     final_chars=_optional_int(row["final_chars"]),
+                    final_nonempty=bool(row["final_nonempty"]),
                     cleanup_ms=_optional_int(row["cleanup_ms"]),
                     audio_path=(
                         str(row["audio_path"])
@@ -202,6 +212,7 @@ def load_history_samples(database: Path) -> list[HistorySample]:
                     ),
                     finalization_ms=_optional_int(row["finalization_ms"]),
                     cleanup_wall_ms=_optional_int(row["cleanup_wall_ms"]),
+                    quality_state=_optional_int(row["quality_state"]),
                 )
             )
         return samples
@@ -244,6 +255,26 @@ def _metric_values(samples: Sequence[HistorySample]) -> dict[str, list[int | Non
     }
 
 
+def summarize_quality(samples: Sequence[HistorySample]) -> dict[str, Any]:
+    """Summarize explicit quality observations without reading transcript text."""
+    # Match the app's Insights denominator: failed/empty final outputs are not
+    # editable dictation results and cannot honestly count as unobserved edits.
+    eligible = [sample for sample in samples if sample.final_nonempty]
+    unchanged = sum(sample.quality_state == 1 for sample in eligible)
+    edited = sum(sample.quality_state == 2 for sample in eligible)
+    observed = unchanged + edited
+    total = len(eligible)
+    return {
+        "eligible": total,
+        "observed": observed,
+        "unobserved": total - observed,
+        "unchanged": unchanged,
+        "edited": edited,
+        "observation_coverage": _compact_number(observed / total) if total else None,
+        "zero_edit_rate": _compact_number(unchanged / observed) if observed else None,
+    }
+
+
 def build_report(samples: Sequence[HistorySample], audio_root: Path) -> dict[str, Any]:
     """Build aggregate JSON-safe timing and length metadata."""
     audio_referenced = sum(sample.audio_path is not None for sample in samples)
@@ -283,7 +314,7 @@ def build_report(samples: Sequence[HistorySample], audio_root: Path) -> dict[str
         "privacy": {
             "database_access": "sqlite_uri_mode_ro",
             "transcript_text_included": False,
-            "only_aggregate_timing_and_length_metadata": True,
+            "only_aggregate_nontext_metadata": True,
         },
         "rows": {
             "total": len(samples),
@@ -296,6 +327,7 @@ def build_report(samples: Sequence[HistorySample], audio_root: Path) -> dict[str
             "missing": len(samples) - len(cleanup_known),
             "applied": sum(cleanup_known),
         },
+        "quality": summarize_quality(samples),
         "metrics": {
             metric: summarize_metric(values)
             for metric, values in _metric_values(samples).items()

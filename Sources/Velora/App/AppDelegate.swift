@@ -11,6 +11,45 @@ enum MeetingProcessingHUDPolicy {
     }
 }
 
+struct MeetingFailureHUDQueue {
+    private var states: [HUDState] = []
+
+    var first: HUDState? { states.first }
+    var isEmpty: Bool { states.isEmpty }
+
+    mutating func retain(meetingID: String, message: String) {
+        remove(meetingID: meetingID)
+        states.append(.meetingFailure(meetingID: meetingID, message: message))
+    }
+
+    mutating func remove(meetingID: String) {
+        states.removeAll {
+            if case .meetingFailure(let id, _) = $0 { return id == meetingID }
+            return false
+        }
+    }
+
+    func state(meetingID: String) -> HUDState? {
+        states.first {
+            if case .meetingFailure(let id, _) = $0 { return id == meetingID }
+            return false
+        }
+    }
+}
+
+enum MeetingFailureHUDReplayPolicy {
+    static func shouldShow(
+        dictationIsIdle: Bool,
+        meetingIsIdle: Bool,
+        processorAllowsFailure: Bool,
+        hudIsAvailable: Bool,
+        ownsVisibleHUD: Bool
+    ) -> Bool {
+        dictationIsIdle && meetingIsIdle && processorAllowsFailure
+            && (hudIsAvailable || ownsVisibleHUD)
+    }
+}
+
 enum UpdateRelaunchSafety {
     static func blockReason(
         dictationBusy: Bool,
@@ -93,9 +132,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var meetingOwnedHUDState: HUDState?
     private var meetingEndOutcome: MeetingCoordinator.RecordingEndOutcome?
     private var meetingProcessingHUDActive = false
+    /// Retained until Retry/success so a dictation that temporarily owns the
+    /// shared HUD cannot permanently swallow meeting recovery controls.
+    private var meetingFailureHUDQueue = MeetingFailureHUDQueue()
     private var meetingHUDDismiss: DispatchWorkItem?
     private var terminationPending = false
     private var terminationReplied = false
+    private var openFileTranscriptionQueue = FileTranscriptionQueue()
+    private var openFileRetryPending = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
@@ -134,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             dictionary: dictionary)
         hud.onAvailable = { [weak self] in
             self?.dictation.hudDidBecomeAvailable()
+            self?.showMeetingFailureIfPossible()
         }
         statusController = StatusItemController(history: history)
         transcriber = FileTranscriber(
@@ -145,8 +190,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         transcriber.onStateChange = { [weak self] in
             guard let self else { return }
             self.statusController.transcriptionProgress = self.transcriber.progressLabel
+            self.drainOpenFileTranscriptions()
+        }
+        transcriber.onQueuedFileBusy = { [weak self] url in
+            guard let self else { return }
+            self.openFileTranscriptionQueue.retry(url)
+            self.openFileRetryPending = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, !self.terminationPending else { return }
+                self.openFileRetryPending = false
+                self.drainOpenFileTranscriptions()
+            }
         }
         meetingProcessor = MeetingProcessor(supervisor: supervisor, store: meetings)
+        hud.model.onMeetingFailureOpen = { [weak self] meetingID in
+            self?.clearMeetingFailure(meetingID: meetingID)
+            self?.showMeetingNotes(meetingID: meetingID)
+        }
+        hud.model.onMeetingFailureRetry = { [weak self] meetingID in
+            self?.clearMeetingFailure(meetingID: meetingID)
+            self?.meetingProcessor.enqueue(meetingID: meetingID)
+        }
         meetingCoordinator = MeetingCoordinator(
             store: meetings, processor: meetingProcessor, sounds: sounds,
             foregroundBusy: { [weak self] in
@@ -251,16 +315,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         meetingProcessor.onStateChange = { [weak self] state in
             guard let self else { return }
-            let ownsVisibleNotice: Bool = {
-                guard self.meetingProcessingHUDActive else { return false }
-                if case .notice = self.hud.model.state { return true }
-                return false
-            }()
+            let ownsVisibleMeetingState = self.meetingOwnedHUDState == self.hud.model.state
             let canShow = MeetingProcessingHUDPolicy.shouldShow(
                 dictationIsIdle: self.dictation.phase == .idle,
                 meetingIsIdle: self.meetingCoordinator.state == .idle,
                 hudAllowsMeetingProgress:
-                    self.hud.model.state.isAvailable || ownsVisibleNotice)
+                    self.hud.model.state.isAvailable || ownsVisibleMeetingState)
             switch state {
             case .idle:
                 self.statusController.meetingProcessingLabel = nil
@@ -280,32 +340,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     }
                     self.meetingHUDDismiss = item
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: item)
+                } else if !self.meetingFailureHUDQueue.isEmpty {
+                    // A retained failure may have been denied while another
+                    // meeting was processing. Processor idle is the final
+                    // availability edge, so replay it without waiting for a
+                    // new HUD availability callback that may never arrive.
+                    self.showMeetingFailureIfPossible()
                 }
-            case .processing(_, let label, let fraction):
+            case .processing(let meetingID, let label, let fraction):
+                // A Retry resolves only that meeting's retained failure. Work
+                // for a different queued meeting must not swallow it.
+                self.meetingFailureHUDQueue.remove(meetingID: meetingID)
                 let progress = "\(label) \(Int((fraction * 100).rounded()))%"
                 self.statusController.meetingProcessingLabel = progress
                 guard canShow else { return }
                 self.meetingProcessingHUDActive = true
                 self.meetingHUDDismiss?.cancel()
                 self.meetingHUDDismiss = nil
-                self.hud.transition(to: .notice(
-                    symbol: "waveform", message: progress))
-            case .failed:
+                let notice = HUDState.notice(
+                    symbol: "waveform", message: progress)
+                self.meetingOwnedHUDState = notice
+                self.hud.transition(to: notice)
+            case .failed(let meetingID, let message):
                 self.statusController.meetingProcessingLabel =
                     "Meeting processing needs attention"
-                if self.meetingProcessingHUDActive, canShow {
-                    self.meetingProcessingHUDActive = false
-                    self.meetingHUDDismiss?.cancel()
-                    self.meetingHUDDismiss = nil
-                    let notice = HUDState.notice(
-                        symbol: "exclamationmark.triangle.fill",
-                        message: "Meeting notes need attention")
-                    self.meetingOwnedHUDState = notice
-                    self.hud.transition(to: notice)
-                }
+                self.meetingFailureHUDQueue.retain(
+                    meetingID: meetingID,
+                    message: MeetingFailurePresentation.hudMessage(message))
+                self.showMeetingFailureIfPossible()
             }
         }
         meetingProcessor.onNotesReady = { [weak self] meetingID in
+            self?.meetingFailureHUDQueue.remove(meetingID: meetingID)
             self?.showMeetingNotes(meetingID: meetingID)
         }
 
@@ -607,6 +673,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
+    private func showMeetingFailureIfPossible() {
+        guard let failure = meetingFailureHUDQueue.first,
+              dictation != nil, meetingCoordinator != nil,
+              meetingProcessor != nil else { return }
+        let processorAllowsFailure: Bool
+        switch meetingProcessor.state {
+        case .idle, .failed: processorAllowsFailure = true
+        case .processing: processorAllowsFailure = false
+        }
+        guard MeetingFailureHUDReplayPolicy.shouldShow(
+            dictationIsIdle: dictation.phase == .idle,
+            meetingIsIdle: meetingCoordinator.state == .idle,
+            processorAllowsFailure: processorAllowsFailure,
+            hudIsAvailable: hud.model.state.isAvailable,
+            ownsVisibleHUD: meetingOwnedHUDState == hud.model.state)
+        else { return }
+        meetingProcessingHUDActive = false
+        meetingHUDDismiss?.cancel()
+        meetingHUDDismiss = nil
+        meetingOwnedHUDState = failure
+        if hud.model.state != failure { hud.transition(to: failure) }
+    }
+
+    private func clearMeetingFailure(meetingID: String) {
+        let state = meetingFailureHUDQueue.state(meetingID: meetingID)
+        meetingFailureHUDQueue.remove(meetingID: meetingID)
+        guard let state, hud.model.state == state else { return }
+        meetingOwnedHUDState = nil
+        hud.transition(to: .hidden(.cancel))
+    }
+
+    func application(_ sender: NSApplication, openFiles filenames: [String]) {
+        let accepted = openFileTranscriptionQueue.enqueue(
+            filenames.map { URL(fileURLWithPath: $0) })
+        if accepted > 0 {
+            veloraLog("Velora: queued \(accepted) Finder media file(s) for transcription")
+            drainOpenFileTranscriptions()
+        }
+        sender.reply(toOpenOrPrint: accepted > 0 ? .success : .failure)
+    }
+
+    private func drainOpenFileTranscriptions() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !terminationPending, !openFileRetryPending, let transcriber else { return }
+        while let url = openFileTranscriptionQueue.dequeueIfReady(
+            engineReady: supervisor.isReady,
+            transcriberBusy: transcriber.isTranscribing
+        ) {
+            transcriber.transcribeQueuedFromFinder(url: url)
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
         terminationPending = true
@@ -801,10 +919,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
 extension AppDelegate: EngineSupervisorDelegate {
     func engineSupervisor(_ supervisor: EngineSupervisor, didChangeState state: EngineSupervisor.State) {
+        if state == .ready {
+            // Engine startup can migrate legacy app assignments. Refresh after
+            // that work so the listening HUD and final engine mode stay equal.
+            ModeApplicationIndex.shared.reload()
+        }
         dictation.handleEngineStateChange(state)
         transcriber.handleEngineStateChange(state)
         meetingProcessor.handleEngineStateChange(state)
         refreshDegradedState()
+        drainOpenFileTranscriptions()
     }
 
     func engineSupervisor(_ supervisor: EngineSupervisor, didReceive event: EngineEvent) {

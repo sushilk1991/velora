@@ -55,12 +55,14 @@ path explicit:
 
 The tool opens SQLite with URI `mode=ro` plus `query_only`, never migrates or
 updates history, and writes the JSON output owner-only (`0600`). It does not
-load `raw` or `final` transcript bodies into Python: SQLite returns only their
-character counts. The report contains aggregate counts, p50/p95 timing and
-length metadata, duration buckets, and a derived recovery-wait residual. That
-residual is `max(0, finalization_ms - stt_ms - cleanup_wall_ms)` and is an upper
-bound because it can include small orchestration costs. Legacy rows report
-missing metric counts rather than being treated as zero.
+load `raw` or `final` transcript bodies into Python. SQLite returns character
+counts, a trimmed-nonempty flag, timing fields, and the numeric quality state.
+The report contains aggregate counts, p50/p95 timing and length metadata,
+quality-observation coverage, zero-edit rate, duration buckets, and a derived
+recovery-wait residual. That residual is
+`max(0, finalization_ms - stt_ms - cleanup_wall_ms)` and is an upper bound
+because it can include small orchestration costs. Legacy rows report missing
+metric counts rather than being treated as zero.
 
 For a private replay manifest stratified by the 10/25/60-second duration
 buckets and mode, add:

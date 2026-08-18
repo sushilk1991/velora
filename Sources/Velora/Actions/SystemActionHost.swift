@@ -264,10 +264,10 @@ final class SystemActionHost: ActionHost {
         // not race the characters into the field.
         let finished = DispatchSemaphore(value: 0)
         var succeeded = false
-        inserter.insertViaTyping(text, targetBundleID: bundleID) { ok in
+        inserter.insertViaTyping(text, targetBundleID: bundleID, completion: { ok in
             succeeded = ok
             finished.signal()
-        }
+        })
         let deadline = DispatchTime.now() + .milliseconds(max(3_000, text.count * 12))
         guard finished.wait(timeout: deadline) == .success else { return false }
         return succeeded

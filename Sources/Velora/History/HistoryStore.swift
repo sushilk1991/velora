@@ -49,11 +49,16 @@ enum QualityObservation: Int {
 final class HistoryStore {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "com.velora.history")
+    private let removeArchivedClip: (String) -> Void
 
     /// SQLITE_TRANSIENT: make sqlite copy bound strings immediately.
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    init(url: URL = AppConfig.historyDatabaseURL) {
+    init(
+        url: URL = AppConfig.historyDatabaseURL,
+        removeArchivedClip: @escaping (String) -> Void = HistoryStore.removeClip
+    ) {
+        self.removeArchivedClip = removeArchivedClip
         AppConfig.shared.ensureVeloraDirectory()
         var handle: OpaquePointer?
         if sqlite3_open(url.path, &handle) == SQLITE_OK {
@@ -288,7 +293,7 @@ final class HistoryStore {
         queue.sync { [self] in
             guard db != nil else { return }
             // Remove the clip first — best effort; a missing file is fine.
-            if let name = audioPathOnQueue(forID: id) { Self.removeClip(name) }
+            if let name = audioPathOnQueue(forID: id) { removeArchivedClip(name) }
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, "DELETE FROM dictations WHERE id = ?;", -1, &stmt, nil) == SQLITE_OK
             else { return }
@@ -302,7 +307,7 @@ final class HistoryStore {
     func deleteAll() {
         queue.sync { [self] in
             guard db != nil else { return }
-            for name in allAudioPathsOnQueue() { Self.removeClip(name) }
+            for name in allAudioPathsOnQueue() { removeArchivedClip(name) }
             sqlite3_exec(db, "DELETE FROM dictations;", nil, nil, nil)
         }
     }

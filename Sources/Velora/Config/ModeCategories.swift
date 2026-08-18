@@ -1,11 +1,60 @@
 import Foundation
 
+/// Small, thread-safe mirror of user-authored app assignments. Loading JSON is
+/// kept off the hotkey path: the cache is populated at controller startup and
+/// refreshed whenever the Modes editor writes or deletes a mode.
+final class ModeApplicationIndex {
+    static let shared = ModeApplicationIndex()
+
+    private let lock = NSLock()
+    private var namesByBundleID: [String: String] = [:]
+
+    static func build(_ assignments: [(name: String, applications: [String])]) -> [String: String] {
+        var result: [String: String] = [:]
+        for assignment in assignments {
+            for application in assignment.applications {
+                let key = application.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !key.isEmpty, result[key] == nil else { continue }
+                result[key] = assignment.name
+            }
+        }
+        return result
+    }
+
+    func reload(directory: URL = AppConfig.modesDirectory) {
+        let urls = ((try? FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil)) ?? [])
+            .filter { $0.pathExtension == "json" }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let assignments = urls.compactMap { url -> (String, [String])? in
+            guard let data = try? Data(contentsOf: url),
+                  let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let name = object["name"] as? String,
+                  let applications = object["apps"] as? [String]
+            else { return nil }
+            return (name, applications)
+        }
+        let refreshed = Self.build(assignments)
+        lock.lock()
+        namesByBundleID = refreshed
+        lock.unlock()
+    }
+
+    func modeName(forBundleID bundleID: String?) -> String? {
+        guard let key = bundleID?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !key.isEmpty else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return namesByBundleID[key]
+    }
+}
+
 /// Client-side mirror of the engine's bundle-id → app-category map
 /// (`engine/src/velora_engine/formatting.py`, `CATEGORY_BY_BUNDLE`).
 ///
-/// The engine only reports the resolved mode with the `final` event — too
-/// late for the HUD's context chip, which appears the moment recording
-/// starts — so the HUD derives a display label from this table instead.
+/// The engine only reports the resolved mode with the `final` event — too late
+/// for the HUD's context chip. User-authored assignments come from the cached
+/// `ModeApplicationIndex`; this table supplies the automatic category fallback.
 /// This duplication is deliberate; keep the bundle ids in sync with the
 /// engine when adding apps.
 enum ModeCategory: String {

@@ -66,6 +66,10 @@ struct MeetingNotes: Equatable {
     var summary: String = ""
     var decisions: [String] = []
     var actionItems: [String] = []
+
+    var isEmpty: Bool {
+        summary.isEmpty && decisions.isEmpty && actionItems.isEmpty
+    }
 }
 
 struct MeetingRecord: Identifiable, Equatable {
@@ -178,7 +182,8 @@ final class MeetingStore {
                 action_items TEXT NOT NULL DEFAULT '',
                 mic_path TEXT,
                 system_path TEXT,
-                error TEXT
+                error TEXT,
+                notes_pending INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS meeting_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -213,6 +218,25 @@ final class MeetingStore {
             NSLog("Velora: meeting schema failed: %@", lastError)
             return
         }
+        // Existing installs predate the durable notes-only retry marker.
+        // Duplicate-column is expected after the first migrated launch.
+        sqlite3_exec(
+            db,
+            "ALTER TABLE meetings ADD COLUMN notes_pending INTEGER NOT NULL DEFAULT 0;",
+            nil, nil, nil)
+        // Recover only the legacy error text emitted by the notes worker. Do
+        // not infer from arbitrary errors: a transcription failure may also
+        // have committed some segments and must resume the remaining audio.
+        sqlite3_exec(db, """
+            UPDATE meetings SET status = 'processing', notes_pending = 1
+            WHERE notes_pending = 0
+              AND summary = '' AND decisions = '' AND action_items = ''
+              AND error LIKE 'local notes generation failed%'
+              AND EXISTS (
+                  SELECT 1 FROM meeting_segments
+                  WHERE meeting_id = meetings.id LIMIT 1
+              );
+            """, nil, nil, nil)
         ftsAvailable = sqlite3_exec(db, """
             CREATE VIRTUAL TABLE IF NOT EXISTS meeting_search USING fts5(
                 meeting_id UNINDEXED, title, transcript, summary, decisions, action_items,
@@ -379,7 +403,7 @@ final class MeetingStore {
                         "INSERT OR IGNORE INTO meeting_reprocess_jobs (meeting_id) VALUES (?);",
                         meetingID: meetingID)
                     && executeOnQueue(
-                        "UPDATE meetings SET status = 'processing', error = NULL WHERE id = ?;",
+                        "UPDATE meetings SET status = 'processing', error = NULL, notes_pending = 0 WHERE id = ?;",
                         meetingID: meetingID)
             }
         }
@@ -469,7 +493,7 @@ final class MeetingStore {
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, """
                 UPDATE meetings SET status = ?, summary = ?, decisions = ?,
-                    action_items = ?, error = NULL WHERE id = ?;
+                    action_items = ?, error = NULL, notes_pending = 0 WHERE id = ?;
                 """, -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, MeetingStatus.ready.rawValue)
@@ -515,7 +539,7 @@ final class MeetingStore {
                 var update: OpaquePointer?
                 guard sqlite3_prepare_v2(db, """
                     UPDATE meetings SET status = ?, summary = ?, decisions = ?,
-                        action_items = ?, error = NULL WHERE id = ?;
+                        action_items = ?, error = NULL, notes_pending = 0 WHERE id = ?;
                     """, -1, &update, nil) == SQLITE_OK else { return false }
                 bindText(update, 1, MeetingStatus.ready.rawValue)
                 bindText(update, 2, notes.summary)
@@ -551,7 +575,7 @@ final class MeetingStore {
                                  SELECT 1 FROM meeting_segments
                                  WHERE meeting_id = meetings.id LIMIT 1)
                         THEN 'ready' ELSE 'failed' END,
-                    error = ?
+                    error = ?, notes_pending = 0
                 WHERE id = ?;
                 """, -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
@@ -565,7 +589,7 @@ final class MeetingStore {
         queue.sync { [self] in
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(
-                db, "UPDATE meetings SET status = ?, error = ? WHERE id = ?;",
+                db, "UPDATE meetings SET status = ?, error = ?, notes_pending = 0 WHERE id = ?;",
                 -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, MeetingStatus.failed.rawValue)
@@ -575,15 +599,40 @@ final class MeetingStore {
         }
     }
 
-    func markProcessing(meetingID: String) {
+    /// Notes are downstream of a durable transcript. A notes-model failure
+    /// must not hide that transcript from meeting memory or make recovery
+    /// depend on retained audio that notes generation never reads.
+    func markNotesFailed(meetingID: String, error: String) {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, """
+                UPDATE meetings SET
+                    status = CASE WHEN EXISTS (
+                        SELECT 1 FROM meeting_segments
+                        WHERE meeting_id = meetings.id LIMIT 1
+                    ) THEN 'ready' ELSE 'failed' END,
+                    error = ?, notes_pending = 1
+                WHERE id = ?;
+                """, -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, String(error.prefix(1_000)))
+            bindText(stmt, 2, meetingID)
+            if sqlite3_step(stmt) == SQLITE_DONE {
+                refreshSearchOnQueue(meetingID: meetingID)
+            }
+        }
+    }
+
+    func markProcessing(meetingID: String, notesPending: Bool = false) {
         queue.sync { [self] in
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(
-                db, "UPDATE meetings SET status = ?, error = NULL WHERE id = ?;",
+                db, "UPDATE meetings SET status = ?, error = NULL, notes_pending = ? WHERE id = ?;",
                 -1, &stmt, nil) == SQLITE_OK else { return }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, MeetingStatus.processing.rawValue)
-            bindText(stmt, 2, meetingID)
+            sqlite3_bind_int(stmt, 2, notesPending ? 1 : 0)
+            bindText(stmt, 3, meetingID)
             sqlite3_step(stmt)
         }
     }
@@ -699,6 +748,32 @@ final class MeetingStore {
             recordsOnQueue(
                 whereClause: "WHERE id = ?", bindings: [id], limit: 1,
                 includeSegments: false).first
+        }
+    }
+
+    func hasCommittedSegments(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db,
+                "SELECT 1 FROM meeting_segments WHERE meeting_id = ? LIMIT 1;",
+                -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, meetingID)
+            return sqlite3_step(stmt) == SQLITE_ROW
+        }
+    }
+
+    func hasPendingNotes(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "SELECT notes_pending FROM meetings WHERE id = ? LIMIT 1;",
+                -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, meetingID)
+            return sqlite3_step(stmt) == SQLITE_ROW
+                && sqlite3_column_int(stmt, 0) == 1
         }
     }
 

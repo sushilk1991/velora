@@ -64,6 +64,16 @@ struct ScreenTextSelection {
     }
 }
 
+/// Exact, bounded insertion point owned by one Stream Typing session.
+/// Character offsets are UTF-16 because that is the unit used by macOS AX.
+struct ScreenStreamTarget {
+    let bundleID: String
+    let element: AXUIElement
+    let location: Int
+    let originalText: String
+    let boundary: TextSelectionBoundary
+}
+
 /// Extracts lightweight entities from the frontmost app using the macOS
 /// Accessibility API (already-granted permission — no Screen Recording, no
 /// screenshot). Reads only the focused window's title, so it stays cheap
@@ -398,6 +408,97 @@ enum ScreenContext {
             : axStringForRange(focused, CFRange(location: afterStart, length: afterLength))
         guard let before, let after else { return nil }
         return TextSelectionBoundary(before: before, after: after)
+    }
+
+    // MARK: - Stream Typing target ownership
+
+    /// Captures a caret/selection without reading the surrounding document.
+    /// Stream Typing is enabled only for AX controls whose selection range can
+    /// be set, because every provisional revision must replace exactly the
+    /// draft Velora previously wrote. Unsupported apps still receive the final
+    /// through the normal safe insertion path.
+    static func streamTarget(of app: NSRunningApplication?) -> ScreenStreamTarget? {
+        guard let app, let bundleID = app.bundleIdentifier,
+              let focused = focusedElement(of: app),
+              let range = axRange(focused, kAXSelectedTextRangeAttribute),
+              range.location >= 0, range.length >= 0, range.length <= 8_000,
+              axAttributeIsSettable(focused, kAXSelectedTextRangeAttribute),
+              let boundary = selectionBoundary(of: focused)
+        else { return nil }
+        let selected = range.length == 0
+            ? ""
+            : axStringForRange(focused, range)
+        guard let selected else { return nil }
+        return ScreenStreamTarget(
+            bundleID: bundleID,
+            element: focused,
+            location: range.location,
+            originalText: selected,
+            boundary: boundary)
+    }
+
+    /// The user has not moved or edited the original selection.
+    static func streamOriginalIsCurrent(_ target: ScreenStreamTarget) -> Bool {
+        streamSelectionMatches(
+            target, location: target.location,
+            text: target.originalText)
+    }
+
+    /// The exact range is currently selected, immediately before a revision
+    /// types over it.
+    static func streamSelectionIsCurrent(
+        _ text: String, target: ScreenStreamTarget
+    ) -> Bool {
+        streamSelectionMatches(target, location: target.location, text: text)
+    }
+
+    /// The caret and bounded text still prove that Velora owns `draft`.
+    static func streamOwnsDraft(_ draft: String, target: ScreenStreamTarget) -> Bool {
+        guard streamFocusedElementMatches(target),
+              let range = axRange(target.element, kAXSelectedTextRangeAttribute),
+              range.location == target.location + draft.utf16.count,
+              range.length == 0
+        else { return false }
+        return axStringForRange(
+            target.element,
+            CFRange(location: target.location, length: draft.utf16.count)
+        ) == draft
+    }
+
+    /// Selects only the exact provisional draft after proving its contents and
+    /// caret. A user keystroke/click invalidates the separate generation guard
+    /// before this method is called.
+    static func selectStreamDraft(_ draft: String, target: ScreenStreamTarget) -> Bool {
+        guard streamOwnsDraft(draft, target: target) else { return false }
+        var range = CFRange(location: target.location, length: draft.utf16.count)
+        guard let value = AXValueCreate(.cfRange, &range),
+              AXUIElementSetAttributeValue(
+                target.element,
+                kAXSelectedTextRangeAttribute as CFString,
+                value) == .success
+        else { return false }
+        return streamSelectionMatches(
+            target, location: target.location, text: draft)
+    }
+
+    private static func streamSelectionMatches(
+        _ target: ScreenStreamTarget, location: Int, text: String
+    ) -> Bool {
+        guard streamFocusedElementMatches(target),
+              let range = axRange(target.element, kAXSelectedTextRangeAttribute),
+              range.location == location,
+              range.length == text.utf16.count
+        else { return false }
+        if text.isEmpty { return true }
+        return axStringForRange(target.element, range) == text
+    }
+
+    private static func streamFocusedElementMatches(_ target: ScreenStreamTarget) -> Bool {
+        let app = NSWorkspace.shared.frontmostApplication
+        guard app?.bundleIdentifier == target.bundleID,
+              let focused = focusedElement(of: app)
+        else { return false }
+        return CFEqual(focused, target.element)
     }
 
     // MARK: - Nearby-text read (rich context)

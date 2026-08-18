@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// A dictation mode: the per-context instruction set the engine applies. Mirror
 /// of the JSON at `~/.velora/modes/<Name>.json`
@@ -46,6 +47,61 @@ struct Mode: Identifiable, Equatable {
         text.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+    }
+
+    /// Keeps the first spelling/order of each bundle identifier. Bundle IDs are
+    /// compared case-insensitively end to end, including hand-edited JSON.
+    static func normalizedApplicationIDs(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        return values.compactMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            guard seen.insert(trimmed.lowercased()).inserted else { return nil }
+            return trimmed
+        }
+    }
+
+    /// A picker result is authoritative: replace any manually entered casing
+    /// of the same identifier without moving its row, then append new apps.
+    static func mergingApplicationIDs(existing: [String], selected: [String]) -> [String] {
+        let canonical = normalizedApplicationIDs(selected)
+        let selectedByKey = Dictionary(
+            canonical.map { ($0.lowercased(), $0) },
+            uniquingKeysWith: { first, _ in first })
+        var emitted: Set<String> = []
+        var merged = normalizedApplicationIDs(existing).compactMap { identifier -> String? in
+            let key = identifier.lowercased()
+            guard let replacement = selectedByKey[key] else { return identifier }
+            guard emitted.insert(key).inserted else { return nil }
+            return replacement
+        }
+        for identifier in canonical where emitted.insert(identifier.lowercased()).inserted {
+            merged.append(identifier)
+        }
+        return normalizedApplicationIDs(merged)
+    }
+
+    static func firstAssignmentConflict(
+        applications: [String], modes: [Mode], excluding selectedID: String?
+    ) -> (bundleID: String, modeName: String)? {
+        let requested = Set(applications.map { $0.lowercased() })
+        guard !requested.isEmpty else { return nil }
+        for mode in modes where mode.id != selectedID {
+            if let bundleID = mode.apps.first(where: { requested.contains($0.lowercased()) }) {
+                return (bundleID, mode.name)
+            }
+        }
+        return nil
+    }
+
+    /// A protected built-in is retained when renamed, so it must participate in
+    /// app-assignment validation rather than being treated as the replaced row.
+    static func assignmentConflictExclusion(
+        selectedID: String?, originalIsProtected: Bool, draftName: String
+    ) -> String? {
+        guard let selectedID else { return nil }
+        let renamed = selectedID != draftName
+        return renamed && originalIsProtected ? nil : selectedID
     }
 }
 
@@ -155,13 +211,23 @@ final class ModesViewModel: ObservableObject {
             saveError = "A mode named “\(draft.name)” already exists. Choose a different name."
             return
         }
+        let original = modes.first { $0.id == selectedID }
+        let conflictExclusion = Mode.assignmentConflictExclusion(
+            selectedID: selectedID,
+            originalIsProtected: original?.isProtected == true,
+            draftName: draft.name)
+        if let conflict = Mode.firstAssignmentConflict(
+            applications: draft.apps, modes: modes, excluding: conflictExclusion
+        ) {
+            saveError = "\(conflict.bundleID) is already assigned to “\(conflict.modeName)”. Each app can activate only one mode."
+            return
+        }
         saveError = nil
 
         AppConfig.shared.ensureVeloraDirectory()
         try? FileManager.default.createDirectory(
             at: AppConfig.modesDirectory, withIntermediateDirectories: true)
 
-        let original = modes.first { $0.id == selectedID }
         let renamed = selectedID != nil && selectedID != draft.name
         let renamedProtected = renamed && original?.isProtected == true
 
@@ -242,6 +308,7 @@ final class ModesViewModel: ObservableObject {
     }
 
     private func reloadEngine() {
+        ModeApplicationIndex.shared.reload()
         supervisor?.send(["cmd": "reload_config"])
     }
 
@@ -368,6 +435,7 @@ private struct ModeEditor: View {
     /// which eats the ", " you just typed before the next item can exist.
     @State private var appsText = ""
     @State private var vocabularyText = ""
+    @State private var applicationPickerError: String?
 
     var body: some View {
         // Grouped form + bottom action bar — the pre-0.9 editor was a bare
@@ -407,15 +475,37 @@ private struct ModeEditor: View {
                 }
 
                 Section {
+                    if vm.draft.apps.isEmpty {
+                        Label("No apps assigned", systemImage: "app.dashed")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(vm.draft.apps, id: \.self) { bundleID in
+                            applicationRow(bundleID)
+                        }
+                    }
+
+                    Button {
+                        chooseApplications()
+                    } label: {
+                        Label("Choose Applications…", systemImage: "plus.app")
+                    }
+
+                    stackedField(
+                        "Advanced bundle identifiers", text: $appsText,
+                        prompt: "com.tinyspeck.slackmacgap, com.apple.MobileSMS")
+                        .onChange(of: appsText) { _, text in
+                            vm.draft.apps = Mode.normalizedApplicationIDs(Mode.parseList(text))
+                        }
+                } header: {
+                    Text("Automatic activation")
+                } footer: {
+                    SettingsFooter("Choose the apps where this mode should activate automatically. Assigning a browser applies this mode to every website in that browser and overrides automatic site-specific modes. Bundle identifiers remain available for apps the picker cannot find.")
+                }
+
+                Section {
                     // Long comma lists get label-above, wrapping fields — the
                     // labeled-row idiom truncated them into an unreadable
                     // right-aligned sliver in this column.
-                    stackedField(
-                        "Apps", text: $appsText,
-                        prompt: "com.tinyspeck.slackmacgap, com.apple.MobileSMS")
-                        .onChange(of: appsText) { _, text in
-                            vm.draft.apps = Mode.parseList(text)
-                        }
                     stackedField(
                         "Vocabulary", text: $vocabularyText,
                         prompt: "Velora, Anthropic, Kubernetes")
@@ -423,7 +513,7 @@ private struct ModeEditor: View {
                             vm.draft.vocabulary = Mode.parseList(text)
                         }
                 } footer: {
-                    SettingsFooter("Apps lists the bundle identifiers this mode auto-activates for; Vocabulary adds words and proper nouns it should recognize. Both are comma separated. Modes also activate from the menubar's Mode menu.")
+                    SettingsFooter("Add words and proper nouns this mode should recognize. Separate entries with commas.")
                 }
 
                 Section {
@@ -451,12 +541,101 @@ private struct ModeEditor: View {
         } message: {
             Text(vm.saveError ?? "")
         }
+        .alert(
+            "Can't add application",
+            isPresented: Binding(get: { applicationPickerError != nil },
+                                 set: { if !$0 { applicationPickerError = nil } })
+        ) {
+            Button("OK", role: .cancel) { applicationPickerError = nil }
+        } message: {
+            Text(applicationPickerError ?? "")
+        }
     }
 
     /// Re-seeds the list-field buffers from the (newly selected) draft.
     private func syncListBuffers() {
-        appsText = vm.draft.apps.joined(separator: ", ")
+        let applications = Mode.normalizedApplicationIDs(vm.draft.apps)
+        vm.draft.apps = applications
+        appsText = applications.joined(separator: ", ")
         vocabularyText = vm.draft.vocabulary.joined(separator: ", ")
+    }
+
+    private func setApplications(_ values: [String]) {
+        let applications = Mode.normalizedApplicationIDs(values)
+        vm.draft.apps = applications
+        appsText = applications.joined(separator: ", ")
+    }
+
+    private func applicationRow(_ bundleID: String) -> some View {
+        let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID)
+        let name = url?.deletingPathExtension().lastPathComponent ?? bundleID
+        let icon = url.map { NSWorkspace.shared.icon(forFile: $0.path) }
+        return HStack(spacing: VeloraSpacing.s) {
+            Group {
+                if let icon {
+                    Image(nsImage: icon)
+                        .resizable()
+                        .scaledToFit()
+                } else {
+                    Image(systemName: "app.dashed")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 24, height: 24)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(name)
+                Text(bundleID)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button {
+                setApplications(vm.draft.apps.filter { $0.caseInsensitiveCompare(bundleID) != .orderedSame })
+            } label: {
+                Image(systemName: "minus.circle")
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.plain)
+            .help("Remove \(name)")
+            .accessibilityLabel("Remove \(name)")
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func chooseApplications() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Applications"
+        panel.message = "Select the apps where \(vm.draft.name) should activate automatically."
+        panel.prompt = "Add"
+        panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
+        panel.allowedContentTypes = [.application]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.resolvesAliases = true
+
+        guard panel.runModal() == .OK else { return }
+        let ownBundleID = Bundle.main.bundleIdentifier
+        let selected = panel.urls.compactMap { url -> String? in
+            guard let identifier = Bundle(url: url)?.bundleIdentifier,
+                  !identifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  ownBundleID.map({ identifier.caseInsensitiveCompare($0) != .orderedSame }) ?? true
+            else { return nil }
+            return identifier
+        }
+        guard !selected.isEmpty else {
+            applicationPickerError = "Select a macOS app with a bundle identifier. Velora itself cannot activate a dictation mode."
+            return
+        }
+        if let conflict = Mode.firstAssignmentConflict(
+            applications: selected, modes: vm.modes, excluding: vm.selectedID
+        ) {
+            applicationPickerError = "That app is already assigned to “\(conflict.modeName)”. Remove it there before assigning it to this mode."
+            return
+        }
+        setApplications(Mode.mergingApplicationIDs(existing: vm.draft.apps, selected: selected))
     }
 
     /// Label-above bordered field that wraps long values across lines.

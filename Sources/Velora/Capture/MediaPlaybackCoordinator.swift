@@ -2,16 +2,14 @@ import AppKit
 import CoreAudio
 import Foundation
 
-/// Pauses the one process producing system audio while foreground dictation
-/// owns the mic, then restores it after capture releases the mic.
+/// Pauses one supported dedicated player while foreground dictation owns the
+/// mic, then restores it after capture releases the mic.
 ///
 /// macOS has no public API that exposes another app's Now Playing state. The
 /// safe boundary is therefore observable behavior: Core Audio identifies one
-/// unambiguous media process and a media-key event asks the system Now Playing
-/// target to pause. Dedicated players are verified by their output stopping.
-/// Browsers keep their Core Audio stream alive for about 15 seconds after a
-/// Media Session pauses, so Velora observes a short misdirection window and
-/// then pairs the delivered pause with one guarded restore.
+/// unambiguous dedicated player and a media-key event asks the system Now
+/// Playing target to pause. Browsers fail closed because their output stream
+/// can remain active while video is paused, making a global toggle destructive.
 final class MediaPlaybackCoordinator {
     struct Snapshot {
         var processes: Set<AudioObjectID>
@@ -43,6 +41,16 @@ final class MediaPlaybackCoordinator {
             }
         }
 
+        /// Outputs that could own the global Play/Pause command. This is wider
+        /// than `playing`: browsers are deliberately ineligible for automatic
+        /// pause, but must remain observable so a misdirected toggle can be
+        /// reversed before it leaves paused video playing.
+        func mediaKeyTargets(in processIDs: Set<AudioObjectID>) -> Set<AudioObjectID> {
+            Set(processIDs.filter { processID in
+                bundleIDs[processID].map(MediaPlaybackSystem.isMediaKeyPlaybackCandidate) == true
+            })
+        }
+
         func hasMatchingInput(for outputProcessIDs: Set<AudioObjectID>) -> Bool {
             inputProcesses.contains { inputID in
                 guard let inputBundleID = bundleIDs[inputID] else { return false }
@@ -64,15 +72,11 @@ final class MediaPlaybackCoordinator {
         case resumePending(Set<AudioObjectID>)
     }
 
-    /// Browsers can keep their output stream alive for several seconds after
-    /// their media session pauses. Poll to a bounded deadline rather than
-    /// mistaking that drain lag for a failed command after one sample.
+    /// Output streams can close asynchronously. Poll to a bounded deadline
+    /// rather than mistaking a short drain lag for a failed command.
     private static let pauseVerificationDelay: TimeInterval = 0.4
     private static let pauseVerificationInterval: TimeInterval = 0.4
     private static let pauseVerificationAttempts = 15
-    /// Three follow-up samples catch a media key that woke another player,
-    /// while keeping short browser dictations responsive.
-    private static let browserAssumptionAttemptsRemaining = 12
     /// Let Bluetooth leave headset mode after the input engine stops before
     /// playback returns to the headphones.
     private static let restoreDelay: TimeInterval = 0.8
@@ -138,13 +142,17 @@ final class MediaPlaybackCoordinator {
         }
 
         let current = snapshot()
-        // A media key is global. Only one eligible output process, with no
-        // simultaneous call/system output, earns a toggle. Paused applications
-        // are not counted: public macOS APIs do not expose their Now Playing
-        // ownership, so the verification below is the authoritative guard.
+        let possibleMediaKeyTargets = current.mediaKeyTargets(in: current.processes)
+        // A media key is global. Only one eligible dedicated player, with no
+        // simultaneous or paused browser/player target, earns a toggle.
+        // Browser streams are explicitly rejected because Core Audio cannot
+        // tell a playing tab from a paused tab, and a paused tab can still own
+        // the global key even when it is not currently producing output.
         guard current.isComplete,
               current.playing.count == 1,
               current.allPlaying == current.playing,
+              possibleMediaKeyTargets.isSubset(of: current.playing),
+              !current.allAreBrowsers(current.playing),
               !current.hasMatchingInput(for: current.playing),
               postToggle()
         else { return }
@@ -177,19 +185,17 @@ final class MediaPlaybackCoordinator {
         switch state {
         case .pausePending(let before, _):
             let current = snapshot()
-            let confirmed = before
+            paused = before
                 .subtracting(current.playing)
                 .intersection(current.processes)
-            let guardedBrowserPair = current.isComplete
-                && current.allPlaying.isSubset(of: before)
-                && current.allAreBrowsers(before)
-            paused = confirmed.isEmpty && guardedBrowserPair ? before : confirmed
         case .paused(let value), .restorePending(let value):
             paused = value
         case .resumePending(let value):
             let current = snapshot()
+            let unexpectedlyStarted = current.mediaKeyTargets(
+                in: current.allPlaying.subtracting(value))
             if current.isComplete, value.isDisjoint(with: current.playing),
-               !current.playing.isEmpty, postToggle() {
+               !unexpectedlyStarted.isEmpty, postToggle() {
                 NSLog("Velora: reverted a misdirected media resume during termination")
             }
             state = .idle
@@ -226,7 +232,8 @@ final class MediaPlaybackCoordinator {
             // If that mistake made a different eligible process start while
             // the original kept playing, immediately send the matching toggle
             // to put the accidental target back. Never claim a resume right.
-            let unexpectedlyStarted = after.playing.subtracting(before)
+            let unexpectedlyStarted = after.mediaKeyTargets(
+                in: after.allPlaying.subtracting(before))
             if !unexpectedlyStarted.isEmpty, !before.isDisjoint(with: after.playing) {
                 if postToggle() {
                     NSLog("Velora: media pause targeted another player; reverted the toggle")
@@ -235,14 +242,6 @@ final class MediaPlaybackCoordinator {
                 // Playing owner. A retry would be another untargeted media
                 // command and could restart that player, so fail closed.
                 state = .idle
-                return
-            }
-            if attemptsRemaining <= Self.browserAssumptionAttemptsRemaining,
-               after.allAreBrowsers(before),
-               before.isSubset(of: after.processes) {
-                NSLog("Velora: browser media pause accepted after target-safety window")
-                state = .paused(before)
-                if restoreRequested { scheduleRestore(before) }
                 return
             }
             if attemptsRemaining > 0 {
@@ -273,13 +272,15 @@ final class MediaPlaybackCoordinator {
         guard case .restorePending(let pending) = state, pending == paused else { return }
 
         let current = snapshot()
+        let competingMediaKeyTargets = current.mediaKeyTargets(
+            in: current.processes).subtracting(paused)
         // Never interrupt something the user resumed or another supported
-        // player they started while dictating. Also refuse to revive a player
-        // process that exited while the mic was open.
-        let outputIsSafe = current.allPlaying.isEmpty
-            || (current.allPlaying.isSubset(of: paused) && current.allAreBrowsers(paused))
+        // player they started while dictating. A paused browser can still own
+        // the global key, so its mere process presence also suppresses restore.
+        // Refuse to revive a player process that exited while the mic was open.
         guard current.isComplete,
-              outputIsSafe,
+              current.allPlaying.isEmpty,
+              competingMediaKeyTargets.isEmpty,
               !current.hasMatchingInput(for: paused),
               !paused.intersection(current.processes).isEmpty
         else {
@@ -306,7 +307,9 @@ final class MediaPlaybackCoordinator {
             NSLog("Velora: media restore confirmed")
             return
         }
-        if !after.playing.isEmpty, postToggle() {
+        let unexpectedlyStarted = after.mediaKeyTargets(
+            in: after.allPlaying.subtracting(paused))
+        if !unexpectedlyStarted.isEmpty, postToggle() {
             NSLog("Velora: media restore targeted another player; reverted the toggle")
         } else {
             NSLog("Velora: media restore was not observed")
@@ -323,11 +326,15 @@ enum MediaPlaybackSystem {
         "com.spotify.client",
     ]
     static func isAutomaticPlaybackCandidate(bundleID: String) -> Bool {
-        mediaFamily(bundleID) != nil
+        dedicatedPlayerBundleIDs.contains(bundleID)
     }
 
     static func isBrowserPlaybackCandidate(_ bundleID: String) -> Bool {
         mediaFamily(bundleID)?.hasPrefix("browser.") == true
+    }
+
+    static func isMediaKeyPlaybackCandidate(_ bundleID: String) -> Bool {
+        mediaFamily(bundleID) != nil
     }
 
     static func sameMediaFamily(_ lhs: String, _ rhs: String) -> Bool {
@@ -378,6 +385,7 @@ enum MediaPlaybackSystem {
         if bundleID.hasPrefix("com.microsoft.edgemac") { return "browser.edge" }
         if bundleID.hasPrefix("company.thebrowser.Browser") { return "browser.arc" }
         if bundleID.hasPrefix("org.mozilla.firefox") { return "browser.firefox" }
+        if bundleID.hasPrefix("app.zen-browser.") { return "browser.zen" }
         return nil
     }
 

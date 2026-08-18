@@ -21,6 +21,14 @@ extension Notification.Name {
 /// Posting CGEvents requires the Accessibility TCC grant; without it the post
 /// is a silent no-op (see spikes/menubar/FINDINGS.md).
 final class TextInserter {
+    struct TypingOutcome: Equatable {
+        let completed: Bool
+        /// UTF-16 units included in events already posted to the target. A
+        /// non-zero failed delivery may have changed user text and must never
+        /// be treated as though live typing was unavailable.
+        let postedUTF16Units: Int
+    }
+
     /// Delay before restoring the user's pasteboard (docs/SPEC.md). Long
     /// enough for the target app to service the synthetic ⌘V; restore is
     /// additionally guarded by a `changeCount` check so a late paste (or a
@@ -199,15 +207,15 @@ final class TextInserter {
             insertViaTyping(
                 deliveryText,
                 targetBundleID: targetBundleID,
-                targetElement: targetElement
-            ) { [weak self] inserted in
+                targetElement: targetElement,
+                completion: { [weak self] inserted in
                 if inserted {
                     self?.recordDelivery(
                         deliveryText, precededBy: boundary?.before,
                         targetBundleID: targetBundleID, targetElement: targetElement)
                 }
                 completion?(inserted)
-            }
+            })
         } else {
             let inserted = insertViaPasteboard(
                 deliveryText,
@@ -416,45 +424,109 @@ final class TextInserter {
         _ text: String,
         targetBundleID: String? = nil,
         targetElement: AXUIElement? = nil,
+        initialDeliveryCheck: (() -> Bool)? = nil,
+        continuationDeliveryCheck: (() -> Bool)? = nil,
         completion: ((Bool) -> Void)? = nil
+    ) {
+        insertViaTypingDetailed(
+            text,
+            targetBundleID: targetBundleID,
+            targetElement: targetElement,
+            initialDeliveryCheck: initialDeliveryCheck,
+            continuationDeliveryCheck: continuationDeliveryCheck
+        ) { outcome in
+            completion?(outcome.completed)
+        }
+    }
+
+    /// Detailed variant used by Stream Typing, where "nothing was posted"
+    /// and "a prefix may have been posted" require different safe fallbacks.
+    func insertViaTypingDetailed(
+        _ text: String,
+        targetBundleID: String? = nil,
+        targetElement: AXUIElement? = nil,
+        initialDeliveryCheck: (() -> Bool)? = nil,
+        continuationDeliveryCheck: (() -> Bool)? = nil,
+        completion: @escaping (TypingOutcome) -> Void
     ) {
         // Typing is slow for long strings; keep it off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
+            guard Self.deliveryAllowed(
+                    targetBundleID: targetBundleID,
+                    targetElement: targetElement),
+                  initialDeliveryCheck?() ?? true
+            else {
+                DispatchQueue.main.async {
+                    completion(TypingOutcome(completed: false, postedUTF16Units: 0))
+                }
+                return
+            }
             let source = CGEventSource(stateID: .combinedSessionState)
-            let utf16 = Array(text.utf16)
-            var index = 0
-            while index < utf16.count {
+            let chunks = Self.unicodeTypingChunks(text)
+            var postedUTF16Units = 0
+            for var chunk in chunks {
                 // A long terminal dictation spans many events. Stop before each
                 // chunk if the user changes apps or enters a secure field so
                 // the tail cannot spill into an unrelated/password target.
                 guard Self.deliveryAllowed(
                     targetBundleID: targetBundleID, targetElement: targetElement
-                ) else {
+                ), continuationDeliveryCheck?() ?? true
+                else {
                     NSLog("Velora: typing aborted at utf16=%ld/%ld — target no longer safe",
-                          index, utf16.count)
-                    DispatchQueue.main.async { completion?(false) }
+                          postedUTF16Units, text.utf16.count)
+                    DispatchQueue.main.async {
+                        completion(TypingOutcome(
+                            completed: false,
+                            postedUTF16Units: postedUTF16Units))
+                    }
                     return
                 }
-                let end = min(index + Self.typingChunk, utf16.count)
-                var chunk = Array(utf16[index..<end])
-                index = end
 
                 guard let down = CGEvent(
                           keyboardEventSource: source, virtualKey: 0, keyDown: true),
                       let up = CGEvent(
                           keyboardEventSource: source, virtualKey: 0, keyDown: false)
                 else {
-                    DispatchQueue.main.async { completion?(false) }
+                    DispatchQueue.main.async {
+                        completion(TypingOutcome(
+                            completed: false,
+                            postedUTF16Units: postedUTF16Units))
+                    }
                     return
                 }
                 down.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
                 up.keyboardSetUnicodeString(stringLength: chunk.count, unicodeString: &chunk)
                 down.post(tap: .cghidEventTap)
                 up.post(tap: .cghidEventTap)
+                postedUTF16Units += chunk.count
                 usleep(2000)
             }
-            DispatchQueue.main.async { completion?(true) }
+            DispatchQueue.main.async {
+                completion(TypingOutcome(
+                    completed: true,
+                    postedUTF16Units: postedUTF16Units))
+            }
         }
+    }
+
+    /// CGEvent consumes UTF-16, but an event must never end between a high and
+    /// low surrogate. Keeping this helper deterministic also makes the emoji
+    /// boundary contract directly testable without posting keyboard events.
+    static func unicodeTypingChunks(_ text: String) -> [[UInt16]] {
+        let units = Array(text.utf16)
+        var chunks: [[UInt16]] = []
+        var index = 0
+        while index < units.count {
+            var end = min(index + typingChunk, units.count)
+            if end < units.count,
+               (0xD800...0xDBFF).contains(units[end - 1]),
+               (0xDC00...0xDFFF).contains(units[end]) {
+                end -= 1
+            }
+            chunks.append(Array(units[index..<end]))
+            index = end
+        }
+        return chunks
     }
 
     private static func deliveryAllowed(

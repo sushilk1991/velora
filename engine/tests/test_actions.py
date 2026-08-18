@@ -10,6 +10,7 @@ what the model emits.
 
 # ruff: noqa: F811
 
+import asyncio
 import json
 import re
 from pathlib import Path
@@ -542,6 +543,7 @@ class FakePlanner:
     def __init__(self, *replies: str) -> None:
         self.replies = list(replies)
         self.calls: list[tuple[str, str]] = []
+        self.action_memory_releases = 0
 
     @property
     def unhealthy(self) -> bool:
@@ -549,12 +551,57 @@ class FakePlanner:
 
     async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True,
                       cancel_event=None, allowed_terms=None, max_tokens=None,
-                      prefix_candidates=None):
+                      prefix_candidates=None, cache_scope=None):
         assert check_ratio is False, "a plan is not a cleanup of the transcript"
         assert max_tokens and max_tokens >= 400, "plans need real output headroom"
+        assert cache_scope == "action", "action KV must not evict dictation prefixes"
         self.calls.append((raw, system_prompt))
         text = self.replies.pop(0) if self.replies else "{}"
         return SimpleNamespace(text=text, applied=True, ms=5, reason="")
+
+    async def release_action_memory(self):
+        self.action_memory_releases += 1
+
+
+class BlockingPlanner(FakePlanner):
+    def __init__(self, *replies: str, block_call: int) -> None:
+        super().__init__(*replies)
+        self.block_call = block_call
+        self.blocked = asyncio.Event()
+        self.resume = asyncio.Event()
+
+    async def cleanup(self, *args, **kwargs):
+        if len(self.calls) + 1 == self.block_call:
+            self.blocked.set()
+            await self.resume.wait()
+        return await super().cleanup(*args, **kwargs)
+
+
+class CancelAwarePlanner(FakePlanner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.busy = False
+
+    async def cleanup(self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+                      cancel_event=None, allowed_terms=None, max_tokens=None,
+                      prefix_candidates=None, cache_scope=None):
+        self.busy = True
+        self.started.set()
+        while cancel_event is not None and not cancel_event.is_set():
+            await asyncio.sleep(0.005)
+        self.busy = False
+        return SimpleNamespace(
+            text=raw, applied=False, ms=5, reason="cancelled")
+
+    async def release_action_memory(self):
+        if not self.busy:
+            self.action_memory_releases += 1
+
+
+class RaisingPlanner(FakePlanner):
+    async def cleanup(self, *args, **kwargs):
+        raise RuntimeError("planner process disappeared")
 
 
 def turn(steps=None, done=False, **extra):
@@ -751,6 +798,20 @@ async def test_action_start_surfaces_unsupported(engine):
     evt = await client.recv_event("action_failed")
     assert evt["code"] == "unsupported"
     assert "Photoshop" in evt["error"]
+    assert eng._action_terminal is True and eng._action_id == "a1"
+    assert eng.cleanup.action_memory_releases == 0
+
+    # A stale owner cannot release this terminal session's KV; its exact app
+    # owner can still do so after it has presented the failure.
+    await client.send_json({"cmd": "action_end", "id": "wrong"})
+    await client.send_json({"cmd": "ping"})
+    await client.recv_event("pong")
+    assert eng.cleanup.action_memory_releases == 0
+    await client.send_json({"cmd": "action_end", "id": "a1"})
+    await client.send_json({"cmd": "ping"})
+    await client.recv_event("pong")
+    assert eng.cleanup.action_memory_releases == 1
+    assert eng._action_session is None
 
 
 async def test_action_session_budgets_span_turns(engine):
@@ -789,6 +850,53 @@ async def test_action_session_turn_cap(engine):
     await send_observe(client)
     evt = await client.recv_event("action_failed")
     assert evt["code"] == "turn_limit"
+    assert eng._action_terminal is True and eng._action_id == "a1"
+    assert eng.cleanup.action_memory_releases == 0
+    await client.send_json({"cmd": "action_end", "id": "a1"})
+    await client.send_json({"cmd": "ping"})
+    await client.recv_event("pong")
+    assert eng.cleanup.action_memory_releases == 1
+
+
+async def test_action_rejection_cap_retains_owner_until_action_end(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(*(["junk", "still junk"] * 4))
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    for rejection in range(4):
+        evt = await client.recv_event("action_failed")
+        assert evt["code"] == "plan_invalid"
+        if rejection < 3:
+            await send_observe(client)
+
+    assert eng._action_terminal is True and eng._action_id == "a1"
+    assert eng.cleanup.action_memory_releases == 0
+    await send_observe(client)
+    assert (await client.recv_event("action_failed"))["code"] == "no_session"
+    assert eng.cleanup.action_memory_releases == 0
+    await client.send_json({"cmd": "action_end", "id": "a1"})
+    await client.send_json({"cmd": "ping"})
+    await client.recv_event("pong")
+    assert eng.cleanup.action_memory_releases == 1
+
+
+async def test_action_exception_retains_owner_until_action_end(engine):
+    eng, sock = engine
+    eng.cleanup = RaisingPlanner()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    evt = await client.recv_event("action_failed")
+    assert evt["code"] == "failed"
+    assert "planner process disappeared" in evt["error"]
+    assert eng._action_terminal is True and eng._action_id == "a1"
+    assert eng.cleanup.action_memory_releases == 0
+
+    await client.send_json({"cmd": "action_end", "id": "a1"})
+    await client.send_json({"cmd": "ping"})
+    await client.recv_event("pong")
+    assert eng.cleanup.action_memory_releases == 1
 
 
 async def test_action_observe_unknown_id(engine):
@@ -809,6 +917,11 @@ async def test_action_end_drops_the_session(engine):
     await send_start(client)
     await client.recv_event("action_turn")
     await client.send_json({"cmd": "action_end", "id": "a1"})
+    for _ in range(20):
+        if eng.cleanup.action_memory_releases == 1:
+            break
+        await asyncio.sleep(0.01)
+    assert eng.cleanup.action_memory_releases == 1
     await send_observe(client)
     evt = await client.recv_event("action_failed")
     assert evt["code"] == "no_session"
@@ -828,6 +941,226 @@ async def test_action_start_replaces_a_stale_session(engine):
     await send_start(client, id="a2")
     evt = await client.recv_event("action_turn")
     assert evt["id"] == "a2" and evt["turn"] == 1
+    assert eng.cleanup.action_memory_releases == 1
+
+
+async def test_stale_action_end_cannot_clear_successor_memory(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(
+        turn(FIRST_BATCH, goal="first", sends=False),
+        turn(FIRST_BATCH, goal="second", sends=False))
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    await client.recv_event("action_turn")
+    await send_start(client, id="a2")
+    await client.recv_event("action_turn")
+    assert eng.cleanup.action_memory_releases == 1
+
+    await client.send_json({"cmd": "action_end", "id": "a1"})
+    await asyncio.sleep(0.02)
+    assert eng.cleanup.action_memory_releases == 1
+
+    await client.send_json({"cmd": "action_end", "id": "a2"})
+    for _ in range(20):
+        if eng.cleanup.action_memory_releases == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert eng.cleanup.action_memory_releases == 2
+
+
+async def test_stale_action_cancel_cannot_cancel_successor_planning(engine):
+    eng, sock = engine
+    planner = BlockingPlanner(
+        turn(FIRST_BATCH, goal="first", sends=False),
+        turn(FIRST_BATCH, goal="second", sends=False),
+        block_call=2,
+    )
+    eng.cleanup = planner
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    await client.recv_event("action_turn")
+    await send_start(client, id="a2")
+    await asyncio.wait_for(planner.blocked.wait(), timeout=1)
+
+    await client.send_json({"cmd": "action_cancel", "id": "a1"})
+    await asyncio.sleep(0.02)
+    assert eng._action_cancel.is_set() is False
+    planner.resume.set()
+
+    evt = await client.recv_event("action_turn")
+    assert evt["id"] == "a2"
+
+
+async def test_model_switch_is_busy_until_live_action_finishes(engine):
+    eng, sock = engine
+    planner = BlockingPlanner(
+        turn(FIRST_BATCH, goal="keep the worker", sends=False),
+        block_call=1,
+    )
+    eng.cleanup = planner
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    await asyncio.wait_for(planner.blocked.wait(), timeout=1)
+
+    await client.send_json({
+        "cmd": "set_model",
+        "kind": "cleanup",
+        "model": "replacement-must-not-load",
+    })
+    rejected = await client.recv()
+    assert rejected["event"] == "error"
+    assert "busy" in rejected["message"]
+    assert eng.cleanup is planner
+
+    planner.resume.set()
+    completed = await client.recv_event("action_turn")
+    assert completed["id"] == "a1"
+    assert eng.cleanup is planner
+
+
+async def test_done_batch_keeps_model_switch_busy_until_action_end(
+    engine, monkeypatch
+):
+    class SwitchablePlanner(FakePlanner):
+        loaded = True
+        model_id = "test/action-old"
+
+        def __init__(self, *replies):
+            super().__init__(*replies)
+            self.close_calls = 0
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    eng, sock = engine
+    planner = SwitchablePlanner(
+        turn(FIRST_BATCH, done=True, goal="finish after these steps", sends=False))
+    replacement = SwitchablePlanner()
+    replacement.model_id = "test/action-new"
+    eng.cleanup = planner
+    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: replacement)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    final_turn = await client.recv_event("action_turn")
+    assert final_turn["done"] is True
+    assert [step["do"] for step in final_turn["steps"]] == [
+        step["do"] for step in FIRST_BATCH
+    ]
+
+    await client.send_json({
+        "cmd": "set_model", "kind": "cleanup", "model": replacement.model_id,
+    })
+    rejected = await client.recv()
+    assert rejected["event"] == "error" and "busy" in rejected["message"]
+    assert eng.cleanup is planner and planner.close_calls == 0
+
+    # Neither an ID-less release nor an observe-after-done may surrender the
+    # worker while Swift still owns the final batch.
+    await client.send_json({"cmd": "action_end"})
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv_event("pong"))["event"] == "pong"
+    await client.send_json({
+        "cmd": "set_model", "kind": "cleanup", "model": replacement.model_id,
+    })
+    rejected = await client.recv()
+    assert rejected["event"] == "error" and "busy" in rejected["message"]
+
+    await send_observe(client)
+    finished = await client.recv_event("action_failed")
+    assert finished["code"] == "no_session"
+    await client.send_json({
+        "cmd": "set_model", "kind": "cleanup", "model": replacement.model_id,
+    })
+    rejected = await client.recv()
+    assert rejected["event"] == "error" and "busy" in rejected["message"]
+    assert eng.cleanup is planner and planner.close_calls == 0
+
+    # Swift sends action_end only after it has executed and verified the final
+    # batch. Once that ownership release is processed, switching is safe.
+    await client.send_json({"cmd": "action_end", "id": "a1"})
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv_event("pong"))["event"] == "pong"
+    await client.send_json({
+        "cmd": "set_model", "kind": "cleanup", "model": replacement.model_id,
+    })
+    changed = await client.recv_event("model_set")
+    assert changed["model"] == replacement.model_id
+    assert eng.cleanup is replacement and planner.close_calls == 1
+
+
+async def test_cancel_retries_action_memory_release_after_planning_unwinds(engine):
+    eng, sock = engine
+    planner = CancelAwarePlanner()
+    eng.cleanup = planner
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    await asyncio.wait_for(planner.started.wait(), timeout=1)
+
+    await client.send_json({"cmd": "action_cancel", "id": "a1"})
+    evt = await client.recv_event("action_failed")
+
+    assert evt["code"] == "cancelled"
+    assert planner.action_memory_releases == 1
+
+
+async def test_action_observe_preempts_idle_vocab_mining(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(
+        turn(FIRST_BATCH, goal="g", sends=False),
+        turn(done=True),
+    )
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client)
+    await client.recv_event("action_turn")
+    miner = asyncio.create_task(asyncio.sleep(60))
+    eng._miner_task = miner
+    eng._mine_cancel.clear()
+
+    await send_observe(client)
+    await client.recv_event("action_turn")
+    await asyncio.sleep(0)
+
+    assert miner.cancelled()
+    assert eng._mine_cancel.is_set()
+
+
+async def test_next_observe_is_admitted_while_prior_turn_send_is_yielded(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(
+        turn(FIRST_BATCH, goal="g", sends=False),
+        turn(done=True),
+    )
+    original_send = eng._send
+    release_first_send = asyncio.Event()
+    first_send_blocked = asyncio.Event()
+
+    async def yielding_send(payload):
+        await original_send(payload)
+        if payload.get("event") == "action_turn" and payload.get("turn") == 1:
+            first_send_blocked.set()
+            await release_first_send.wait()
+
+    eng._send = yielding_send
+    client = await connect(sock)
+    try:
+        await client.recv_event("ready")
+        await send_start(client)
+        await client.recv_event("action_turn")
+        await asyncio.wait_for(first_send_blocked.wait(), timeout=1)
+
+        await send_observe(client)
+        evt = await client.recv(timeout=1)
+
+        assert evt["event"] == "action_turn"
+        assert evt["turn"] == 2
+    finally:
+        release_first_send.set()
 
 
 async def test_action_start_validates_arguments(engine):

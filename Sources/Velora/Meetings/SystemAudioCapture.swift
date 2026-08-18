@@ -1,5 +1,7 @@
 import AudioToolbox
+import AVFoundation
 import CoreAudio
+import Darwin
 import Foundation
 
 /// Meeting capture must never obtain computer audio by opening a display-wide
@@ -29,6 +31,292 @@ enum SystemAudioFrameMath {
     static func frames(byteCount: UInt32, bytesPerFrame: UInt32) -> UInt32 {
         guard bytesPerFrame > 0 else { return 0 }
         return byteCount / bytesPerFrame
+    }
+}
+
+/// Owns the computer-audio file off Core Audio's realtime callback.
+///
+/// `ExtAudioFileWriteAsync` has a small internal ring. Under ordinary disk
+/// pressure it returned `kExtAudioFileError_AsyncWriteBufferOverflow` and the
+/// rest of a meeting silently became mic-only. Copying into a bounded pool
+/// lets the callback return immediately; one serial user-initiated queue does
+/// the synchronous file writes in order and `finish()` drains them before the
+/// CAF is closed.
+@available(macOS 14.2, *)
+final class SystemAudioFileWriter {
+    enum WriterError: LocalizedError {
+        case unsupportedFormat
+        case couldNotCreateBuffer
+
+        var errorDescription: String? {
+            switch self {
+            case .unsupportedFormat:
+                return "computer-audio tap has an unsupported PCM layout"
+            case .couldNotCreateBuffer:
+                return "computer-audio buffer could not be allocated"
+            }
+        }
+    }
+
+    private final class Slot {
+        let buffer: AVAudioPCMBuffer
+        var byteCount = 0
+        var frames: UInt32 = 0
+
+        init(buffer: AVAudioPCMBuffer) {
+            self.buffer = buffer
+        }
+    }
+
+    private enum FailureReason {
+        case overrun
+        case unsupportedFormat
+        case fileWrite(String)
+    }
+
+    private let format: AVAudioFormat
+    private let queue = DispatchQueue(
+        label: "com.velora.meetings.system-audio-writer",
+        qos: .userInitiated)
+    private let workAvailable = DispatchSemaphore(value: 0)
+    private let workerFinished = DispatchSemaphore(value: 0)
+    private let stateLock = NSLock()
+    private let maxPendingBytes: Int
+    private let onWritten: (UInt32) -> Void
+    private let onFailure: (String) -> Void
+    private var file: AVAudioFile?
+    private var slots: [Slot] = []
+    private var freeIndices: [Int] = []
+    private var pendingIndices: [Int] = []
+    private var pendingBytes = 0
+    private var accepting = true
+    private var finishing = false
+    private var failureReason: FailureReason?
+    private var failureReported = false
+    // The realtime callback cannot wait for `stateLock`. Use a one-way,
+    // lock-free latch so teardown cannot erase a contended callback failure.
+    private var callbackOverrun: Int32 = 0
+
+    init(
+        url: URL,
+        format: AVAudioFormat,
+        maxPendingBuffers: Int = 64,
+        maxPendingBytes: Int = 32 * 1_024 * 1_024,
+        bufferFrameCapacity: AVAudioFrameCount = 32_768,
+        onWritten: @escaping (UInt32) -> Void = { _ in },
+        onFailure: @escaping (String) -> Void = { _ in }
+    ) throws {
+        let stream = format.streamDescription.pointee
+        // Process taps can expose valid interleaved LPCM that AVAudioFormat
+        // does not classify as its narrow "standard" (deinterleaved Float32)
+        // layout. AVAudioPCMBuffer and AVAudioFile both support that PCM, so
+        // validate the actual requirements instead of rejecting live taps.
+        guard stream.mFormatID == kAudioFormatLinearPCM,
+              stream.mBytesPerFrame > 0, format.channelCount > 0,
+              format.sampleRate > 0, maxPendingBuffers > 0,
+              maxPendingBytes > 0, bufferFrameCapacity > 0 else {
+            throw WriterError.unsupportedFormat
+        }
+        self.format = format
+        self.maxPendingBytes = maxPendingBytes
+        self.onWritten = onWritten
+        self.onFailure = onFailure
+        file = try AVAudioFile(
+            forWriting: url,
+            settings: format.settings,
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved)
+        slots.reserveCapacity(maxPendingBuffers)
+        freeIndices.reserveCapacity(maxPendingBuffers)
+        pendingIndices.reserveCapacity(maxPendingBuffers)
+        for _ in 0..<maxPendingBuffers {
+            guard let buffer = AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: bufferFrameCapacity)
+            else { throw WriterError.couldNotCreateBuffer }
+            slots.append(Slot(buffer: buffer))
+        }
+        guard slots.reduce(0, { $0 + storageBytes(for: $1.buffer) })
+                <= maxPendingBytes else {
+            throw WriterError.couldNotCreateBuffer
+        }
+        freeIndices.append(contentsOf: slots.indices)
+        // One long-lived worker replaces a DispatchQueue.async allocation for
+        // every Core Audio callback. The realtime side only copies into a
+        // preallocated slot and signals this semaphore.
+        queue.async { [self] in workerLoop() }
+    }
+
+    /// Deep-copies one callback buffer and schedules its ordered disk write.
+    /// Returns false after the first terminal writer failure.
+    @discardableResult
+    func enqueue(
+        _ inputData: UnsafePointer<AudioBufferList>,
+        frames: UInt32
+    ) -> Bool {
+        guard frames > 0 else { return true }
+        let capacity = AVAudioFrameCount(frames)
+        let source = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: inputData))
+        var inputByteCount = 0
+        for input in source {
+            inputByteCount += Int(input.mDataByteSize)
+        }
+
+        // The Core Audio callback must never wait for the disk queue. The pool
+        // is fully allocated at start; a contended/empty pool fails closed and
+        // stops the tap rather than blocking or allocating on the IO thread.
+        guard stateLock.try() else {
+            OSAtomicCompareAndSwap32Barrier(0, 1, &callbackOverrun)
+            workAvailable.signal()
+            return false
+        }
+        guard accepting, !freeIndices.isEmpty,
+              inputByteCount <= maxPendingBytes - pendingBytes else {
+            if accepting { requestFailureLocked(.overrun) }
+            stateLock.unlock()
+            workAvailable.signal()
+            return false
+        }
+        let slotIndex = freeIndices.removeLast()
+        let slot = slots[slotIndex]
+        let buffer = slot.buffer
+        guard buffer.frameCapacity >= capacity else {
+            freeIndices.append(slotIndex)
+            requestFailureLocked(.unsupportedFormat)
+            stateLock.unlock()
+            workAvailable.signal()
+            return false
+        }
+
+        buffer.frameLength = capacity
+        let destination = UnsafeMutableAudioBufferListPointer(
+            buffer.mutableAudioBufferList)
+        guard source.count == destination.count else {
+            freeIndices.append(slotIndex)
+            requestFailureLocked(.unsupportedFormat)
+            stateLock.unlock()
+            workAvailable.signal()
+            return false
+        }
+        for bufferIndex in source.indices {
+            let input = source[bufferIndex]
+            let byteCount = Int(input.mDataByteSize)
+            guard byteCount <= Int(destination[bufferIndex].mDataByteSize),
+                  let sourceData = input.mData,
+                  let destinationData = destination[bufferIndex].mData else {
+                freeIndices.append(slotIndex)
+                requestFailureLocked(.unsupportedFormat)
+                stateLock.unlock()
+                workAvailable.signal()
+                return false
+            }
+            memcpy(destinationData, sourceData, byteCount)
+            destination[bufferIndex].mDataByteSize = input.mDataByteSize
+        }
+        slot.byteCount = inputByteCount
+        slot.frames = frames
+        pendingBytes += inputByteCount
+        pendingIndices.append(slotIndex)
+        stateLock.unlock()
+        workAvailable.signal()
+        return true
+    }
+
+    /// Stops accepting callbacks, drains every accepted buffer, then closes
+    /// the CAF so its pending header/data are durable before capture returns.
+    func finish() {
+        stateLock.lock()
+        accepting = false
+        finishing = true
+        stateLock.unlock()
+        workAvailable.signal()
+        workerFinished.wait()
+    }
+
+    private func storageBytes(for buffer: AVAudioPCMBuffer) -> Int {
+        let planes = format.isInterleaved ? 1 : Int(format.channelCount)
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        return Int(buffer.frameCapacity) * max(1, bytesPerFrame) * max(1, planes)
+    }
+
+    private func requestFailureLocked(_ reason: FailureReason) {
+        if failureReason == nil { failureReason = reason }
+        accepting = false
+    }
+
+    private func consumeFailureLocked() -> FailureReason? {
+        guard !failureReported, let failureReason else { return nil }
+        failureReported = true
+        return failureReason
+    }
+
+    private func failureMessage(for reason: FailureReason) -> String {
+        switch reason {
+        case .overrun:
+            return "computer-audio disk writer could not keep up"
+        case .unsupportedFormat:
+            return "computer-audio tap has an unsupported PCM layout"
+        case .fileWrite(let message):
+            return "computer-audio file write failed (\(message))"
+        }
+    }
+
+    private func workerLoop() {
+        while true {
+            workAvailable.wait()
+            var slotIndex: Int?
+            var failure: FailureReason?
+            var shouldFinish = false
+
+            stateLock.lock()
+            if OSAtomicCompareAndSwap32Barrier(1, 0, &callbackOverrun) {
+                requestFailureLocked(.overrun)
+            }
+            if !pendingIndices.isEmpty {
+                slotIndex = pendingIndices.removeFirst()
+            } else {
+                failure = consumeFailureLocked()
+                shouldFinish = finishing
+            }
+            stateLock.unlock()
+
+            if let failure { onFailure(failureMessage(for: failure)) }
+            guard let slotIndex else {
+                if shouldFinish { break }
+                continue
+            }
+
+            let slot = slots[slotIndex]
+            do {
+                guard let file else { throw WriterError.unsupportedFormat }
+                try file.write(from: slot.buffer)
+                onWritten(slot.frames)
+            } catch {
+                stateLock.lock()
+                requestFailureLocked(.fileWrite(error.localizedDescription))
+                failure = consumeFailureLocked()
+                stateLock.unlock()
+                if let failure { onFailure(failureMessage(for: failure)) }
+                workAvailable.signal()
+            }
+
+            stateLock.lock()
+            pendingBytes = max(0, pendingBytes - slot.byteCount)
+            slot.byteCount = 0
+            slot.frames = 0
+            freeIndices.append(slotIndex)
+            stateLock.unlock()
+        }
+        file = nil
+        workerFinished.signal()
+    }
+
+    /// Deterministically exercises the realtime lock-contention path from the
+    /// in-process selftest without exposing production state mutation.
+    func withStateLockForSelftest(_ body: () -> Void) {
+        stateLock.lock()
+        body()
+        stateLock.unlock()
     }
 }
 
@@ -74,7 +362,7 @@ final class CoreAudioSystemAudioCapture {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
-    private var audioFile: ExtAudioFileRef?
+    private var fileWriter: SystemAudioFileWriter?
     private var streamFormat = AudioStreamBasicDescription()
     private var heartbeat: Timer?
     private let healthLock = NSLock()
@@ -125,18 +413,23 @@ final class CoreAudioSystemAudioCapture {
             }
             aggregateID = newAggregate
 
-            var file: ExtAudioFileRef?
             var format = streamFormat
-            let fileStatus = ExtAudioFileCreateWithURL(
-                url as CFURL, kAudioFileCAFType, &format, nil,
-                AudioFileFlags.eraseFile.rawValue, &file)
-            guard fileStatus == noErr, let file else {
-                throw CaptureError.file(fileStatus)
+            guard let audioFormat = AVAudioFormat(streamDescription: &format) else {
+                throw CaptureError.tapFormat(kAudio_ParamError)
             }
-            audioFile = file
-            // Prime the async writer away from the realtime callback.
-            let primeStatus = ExtAudioFileWriteAsync(file, 0, nil)
-            guard primeStatus == noErr else { throw CaptureError.file(primeStatus) }
+            fileWriter = try SystemAudioFileWriter(
+                url: url,
+                format: audioFormat,
+                onWritten: { [weak self] written in
+                    guard let self else { return }
+                    self.healthLock.lock()
+                    self.capturedFrames += Int(written)
+                    self.lastBufferAt = Date()
+                    let stopping = self.stopping
+                    self.healthLock.unlock()
+                    if !stopping { self.onFrames?(Int(written)) }
+                },
+                onFailure: { [weak self] message in self?.reportFailure(message) })
 
             var proc: AudioDeviceIOProcID?
             let procStatus = AudioDeviceCreateIOProcIDWithBlock(
@@ -171,7 +464,6 @@ final class CoreAudioSystemAudioCapture {
     func stop() -> Bool {
         healthLock.lock()
         stopping = true
-        let hadFrames = capturedFrames > 0
         healthLock.unlock()
 
         heartbeat?.invalidate()
@@ -181,8 +473,14 @@ final class CoreAudioSystemAudioCapture {
             AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
         }
         ioProcID = nil
-        if let audioFile { ExtAudioFileDispose(audioFile) }
-        audioFile = nil
+        fileWriter?.finish()
+        fileWriter = nil
+        // `finish()` can complete buffers accepted just before AudioDeviceStop.
+        // Read the proof after that drain or a short valid capture can be
+        // misclassified as empty and deleted.
+        healthLock.lock()
+        let hadFrames = capturedFrames > 0
+        healthLock.unlock()
         if aggregateID != kAudioObjectUnknown {
             AudioHardwareDestroyAggregateDevice(aggregateID)
             aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -195,27 +493,16 @@ final class CoreAudioSystemAudioCapture {
         return hadFrames
     }
 
-    /// Runs on the aggregate device's realtime IO thread. ExtAudioFile's async
-    /// writer is primed before IO starts; only the failure path dispatches.
+    /// Runs on the aggregate device's realtime IO thread. The writer copies
+    /// the callback buffers before returning and performs file I/O elsewhere.
     private func receive(_ inputData: UnsafePointer<AudioBufferList>) {
-        guard inputData.pointee.mNumberBuffers > 0, let audioFile else { return }
+        guard inputData.pointee.mNumberBuffers > 0, let fileWriter else { return }
         let first = inputData.pointee.mBuffers
         let frames = SystemAudioFrameMath.frames(
             byteCount: first.mDataByteSize,
             bytesPerFrame: streamFormat.mBytesPerFrame)
         guard frames > 0 else { return }
-        let status = ExtAudioFileWriteAsync(audioFile, frames, inputData)
-        guard status == noErr else {
-            reportFailure("computer-audio file write failed (\(status))")
-            return
-        }
-
-        healthLock.lock()
-        capturedFrames += Int(frames)
-        lastBufferAt = Date()
-        let stopping = stopping
-        healthLock.unlock()
-        if !stopping { onFrames?(Int(frames)) }
+        fileWriter.enqueue(inputData, frames: frames)
     }
 
     private func resetHealth() {

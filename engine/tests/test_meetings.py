@@ -4,10 +4,14 @@
 # ruff: noqa: F811
 
 import asyncio
+import contextlib
 import json
+import shutil
+import tempfile
 import wave
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
@@ -17,10 +21,11 @@ from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 from velora_engine.media import SAMPLE_RATE, load_media
 from velora_engine.meeting_notes import (
     chunk_transcript,
-    fallback_notes,
     merge_notes,
     parse_notes_json,
 )
+from velora_engine.config import Config
+from velora_engine.server import Engine
 
 
 @pytest.fixture(autouse=True)
@@ -482,7 +487,7 @@ async def test_meeting_busy_failures_have_stable_codes(engine, tmp_path):
     eng._transcribing = False
 
 
-async def test_meeting_notes_fall_back_locally_without_cleanup_model(engine):
+async def test_meeting_notes_fail_honestly_without_cleanup_model(engine):
     eng, sock = engine
     eng.cleanup = None
     client = await connect(sock)
@@ -493,11 +498,331 @@ async def test_meeting_notes_fall_back_locally_without_cleanup_model(engine):
         "transcript": transcript,
     })
     await client.recv_event("meeting_notes_accepted")
-    await client.recv_event("meeting_notes_progress")
-    ready = await client.recv_event("meeting_notes_ready")
-    assert "ship Friday" in ready["summary"]
-    assert ready["decisions"] == []
-    assert ready["action_items"] == []
+    failed = await client.recv()
+    assert failed["event"] == "meeting_notes_failed"
+    assert failed["code"] == "generation_failed"
+    assert "model" in failed["error"].lower()
+    assert not eng._meeting_notes_running
+
+
+async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
+    home, monkeypatch
+):
+    from velora_engine import models
+    from velora_engine import server as server_mod
+
+    allow_model_ready = asyncio.Event()
+
+    class LoadingCleanup:
+        loaded = False
+        unhealthy = False
+        calls = 0
+        model_id = "test/meeting-notes"
+
+        async def load_async(self, _prompt):
+            await allow_model_ready.wait()
+            self.loaded = True
+
+        async def aclose(self):
+            return None
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(
+                applied=True,
+                text=json.dumps({
+                    "summary": "Recovered after model warm-up.",
+                    "decisions": [],
+                    "action_items": [],
+                }),
+            )
+
+    config = Config(home)
+    config.data.update({
+        "cleanup_enabled": True,
+        "cleanup_model": LoadingCleanup.model_id,
+        "save_audio": False,
+    })
+    cleanup = LoadingCleanup()
+    eng = Engine(config, parent_pid=None, hard_exit=Mock())
+    eng._stt_call = AsyncMock(return_value=None)
+    eng._prune_superseded_models = AsyncMock(return_value=None)
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
+    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: cleanup)
+
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-meeting-startup-"))
+    sock = sock_dir / "e.sock"
+    task = asyncio.create_task(eng.serve(sock))
+    try:
+        for _ in range(100):
+            if sock.exists():
+                break
+            await asyncio.sleep(0.01)
+        client = await connect(sock)
+        await client.recv_event("ready")
+        assert eng.cleanup is None
+        assert eng._cleanup_loading is cleanup
+
+        await client.send_json({
+            "cmd": "meeting_notes", "id": "startup-notes",
+            "meeting_id": "m-startup",
+            "transcript": "[00:00] Me: Resume these saved notes on launch.",
+        })
+        await client.recv_event("meeting_notes_accepted")
+        await asyncio.sleep(0.15)
+        assert cleanup.calls == 0
+
+        allow_model_ready.set()
+        ready = await client.recv_event("meeting_notes_ready")
+        assert ready["summary"] == "Recovered after model warm-up."
+        assert cleanup.calls == 1
+        assert eng.cleanup is cleanup
+        assert eng._cleanup_loading is None
+        assert not eng._meeting_notes_running
+        client.close()
+        await client.writer.wait_closed()
+    finally:
+        allow_model_ready.set()
+        eng.shutdown.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+async def test_cleanup_startup_replacement_and_failure_close_only_their_worker(
+    home, monkeypatch
+):
+    from velora_engine import models
+    from velora_engine import server as server_mod
+
+    class Cleanup:
+        loaded = False
+        unhealthy = False
+        model_id = "test/startup-lifecycle"
+
+        def __init__(self, *, failure: bool = False):
+            self.failure = failure
+            self.allow_load = asyncio.Event()
+            self.load_started = asyncio.Event()
+            self.close_calls = 0
+
+        async def load_async(self, _prompt):
+            self.load_started.set()
+            await self.allow_load.wait()
+            if self.failure:
+                raise RuntimeError("fixture load failure")
+            self.loaded = True
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    async def configured_engine(cleanup):
+        config = Config(home)
+        config.data.update({
+            "cleanup_enabled": True,
+            "cleanup_model": Cleanup.model_id,
+            "save_audio": False,
+        })
+        eng = Engine(config, parent_pid=None, hard_exit=Mock())
+        eng._stt_call = AsyncMock(return_value=None)
+        eng._prune_superseded_models = AsyncMock(return_value=None)
+        monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: cleanup)
+        return eng
+
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
+
+    superseded = Cleanup()
+    eng = await configured_engine(superseded)
+    load = asyncio.create_task(eng._load_models())
+    await superseded.load_started.wait()
+    replacement = Cleanup()
+    replacement.loaded = True
+    eng.cleanup = replacement
+    superseded.allow_load.set()
+    await load
+    assert eng.cleanup is replacement
+    assert eng._cleanup_loading is None
+    assert superseded.close_calls == 1
+    assert replacement.close_calls == 0
+
+    failed = Cleanup(failure=True)
+    failed_eng = await configured_engine(failed)
+    failed_load = asyncio.create_task(failed_eng._load_models())
+    await failed.load_started.wait()
+    failed.allow_load.set()
+    await failed_load
+    assert failed_eng.cleanup is None
+    assert failed_eng._cleanup_loading is None
+    assert failed_eng.setup_complete is True
+    assert failed.close_calls == 1
+
+
+async def test_serve_waits_for_loading_cleanup_to_close_on_shutdown(home, monkeypatch):
+    from velora_engine import models
+    from velora_engine import server as server_mod
+
+    class LoadingCleanup:
+        loaded = False
+        unhealthy = False
+        model_id = "test/shutdown-loading-cleanup"
+
+        def __init__(self):
+            self.load_started = asyncio.Event()
+            self.close_started = asyncio.Event()
+            self.allow_close = asyncio.Event()
+            self.close_calls = 0
+
+        async def load_async(self, _prompt):
+            self.load_started.set()
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            self.close_calls += 1
+            self.close_started.set()
+            await self.allow_close.wait()
+
+    config = Config(home)
+    config.data.update({
+        "cleanup_enabled": True,
+        "cleanup_model": LoadingCleanup.model_id,
+        "save_audio": False,
+    })
+    cleanup = LoadingCleanup()
+    eng = Engine(config, parent_pid=None, hard_exit=Mock())
+    eng._stt_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
+    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: cleanup)
+
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-cleanup-shutdown-"))
+    task = asyncio.create_task(eng.serve(sock_dir / "e.sock"))
+    try:
+        await asyncio.wait_for(cleanup.load_started.wait(), 2)
+        assert eng._cleanup_loading is cleanup
+        eng.shutdown.set()
+        await asyncio.wait_for(cleanup.close_started.wait(), 2)
+        await asyncio.sleep(0.05)
+        assert not task.done(), "serve returned before the loading worker was reaped"
+        cleanup.allow_close.set()
+        await asyncio.wait_for(task, 2)
+        assert cleanup.close_calls == 1
+        assert eng.cleanup is None
+        assert eng._cleanup_loading is None
+    finally:
+        cleanup.allow_close.set()
+        eng.shutdown.set()
+        if not task.done():
+            await asyncio.wait_for(task, 2)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+async def test_replaced_startup_cleanup_closes_once_when_shutdown_interrupts_close(
+    home, monkeypatch
+):
+    from velora_engine import models
+    from velora_engine import server as server_mod
+
+    class StartupCleanup:
+        loaded = False
+        unhealthy = False
+        model_id = "test/replaced-startup-shutdown"
+
+        def __init__(self):
+            self.load_started = asyncio.Event()
+            self.allow_load = asyncio.Event()
+            self.close_started = asyncio.Event()
+            self.allow_close = asyncio.Event()
+            self.close_calls = 0
+
+        async def load_async(self, _prompt):
+            self.load_started.set()
+            await self.allow_load.wait()
+            self.loaded = True
+
+        async def aclose(self):
+            self.close_calls += 1
+            self.close_started.set()
+            await self.allow_close.wait()
+
+    class ReplacementCleanup:
+        loaded = True
+        unhealthy = False
+        model_id = "test/replacement"
+
+        def __init__(self):
+            self.close_calls = 0
+
+        async def aclose(self):
+            self.close_calls += 1
+
+    config = Config(home)
+    config.data.update({
+        "cleanup_enabled": True,
+        "cleanup_model": StartupCleanup.model_id,
+        "save_audio": False,
+    })
+    startup = StartupCleanup()
+    replacement = ReplacementCleanup()
+    eng = Engine(config, parent_pid=None, hard_exit=Mock())
+    eng._stt_call = AsyncMock(return_value=None)
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
+    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: startup)
+
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-cleanup-replaced-shutdown-"))
+    task = asyncio.create_task(eng.serve(sock_dir / "e.sock"))
+    try:
+        await asyncio.wait_for(startup.load_started.wait(), 2)
+        eng.cleanup = replacement
+        startup.allow_load.set()
+        await asyncio.wait_for(startup.close_started.wait(), 2)
+
+        eng.shutdown.set()
+        await asyncio.sleep(0.05)
+        assert startup.close_calls == 1
+        assert not task.done(), "serve returned before the one startup close completed"
+
+        startup.allow_close.set()
+        await asyncio.wait_for(task, 2)
+        assert startup.close_calls == 1
+        assert replacement.close_calls == 1
+        assert eng.cleanup is None
+        assert eng._cleanup_loading is None
+    finally:
+        startup.allow_load.set()
+        startup.allow_close.set()
+        eng.shutdown.set()
+        if not task.done():
+            await asyncio.wait_for(task, 2)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+
+
+async def test_meeting_notes_model_failure_is_not_reported_as_ready(engine):
+    eng, sock = engine
+
+    class TimedOutCleanup:
+        loaded = True
+        unhealthy = False
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            return SimpleNamespace(
+                applied=False, text=raw, reason="timeout_hard")
+
+    eng.cleanup = TimedOutCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    transcript = "[00:00] Me: We should ship Friday.\n[00:05] Them: I agree."
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "timed-out", "meeting_id": "m-timeout",
+        "transcript": transcript,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    failed = await client.recv()
+    assert failed["event"] == "meeting_notes_failed"
+    assert failed["code"] == "generation_failed"
+    assert "timeout_hard" in failed["error"]
     assert not eng._meeting_notes_running
 
 
@@ -511,6 +836,8 @@ async def test_meeting_notes_return_strict_structured_output(engine):
         async def cleanup(self, raw, system_prompt, **kwargs):
             assert kwargs["check_ratio"] is False
             assert kwargs["cancel_event"] is eng._meeting_notes_preempt
+            assert kwargs["timeout_ms"] == 20_000
+            assert kwargs["max_tokens"] == 1_024
             return SimpleNamespace(
                 applied=True,
                 text=json.dumps({
@@ -533,6 +860,135 @@ async def test_meeting_notes_return_strict_structured_output(engine):
     assert ready["summary"] == "The launch was approved."
     assert ready["decisions"] == ["Ship Friday"]
     assert ready["action_items"] == ["Me: run release QA"]
+
+
+async def test_meeting_notes_multi_chunk_reduce_failure_keeps_valid_map_notes(engine):
+    eng, sock = engine
+
+    class ReduceFailureCleanup:
+        loaded = True
+        unhealthy = False
+        calls = 0
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    applied=True,
+                    text=json.dumps({
+                        "summary": "First section.",
+                        "decisions": ["Ship Friday"],
+                        "action_items": ["Run QA", "A2", "A3", "A4", "A5"],
+                    }),
+                )
+            if self.calls == 2:
+                return SimpleNamespace(
+                    applied=True,
+                    text=json.dumps({
+                        "summary": "Second section.",
+                        "decisions": ["ship friday"],
+                        "action_items": ["Deploy", "A7", "A8", "A9", "A10"],
+                    }),
+                )
+            reduced_input = json.loads(raw)
+            assert isinstance(reduced_input, dict)
+            assert set(reduced_input) == {"summary", "decisions", "action_items"}
+            assert len(reduced_input["action_items"]) == 8
+            return SimpleNamespace(
+                applied=False, text=raw, reason="timeout_hard")
+
+    cleanup = ReduceFailureCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "multi", "meeting_id": "m-multi",
+        "transcript": "x" * 12_001,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+    assert cleanup.calls == 3
+    assert ready["summary"] == "First section. Second section."
+    assert ready["decisions"] == ["Ship Friday"]
+    assert ready["action_items"] == [
+        "Run QA", "A2", "A3", "A4", "A5", "Deploy", "A7", "A8",
+    ]
+
+
+async def test_meeting_notes_schema_invalid_output_is_not_reported_as_ready(engine):
+    eng, sock = engine
+
+    class InvalidCleanup:
+        loaded = True
+        unhealthy = False
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            return SimpleNamespace(
+                applied=True,
+                text=json.dumps({
+                    "summary": 42,
+                    "decisions": "Ship",
+                    "action_items": [{"raw": "transcript excerpt"}],
+                    "extra": "unexpected",
+                }),
+            )
+
+    eng.cleanup = InvalidCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "invalid-schema",
+        "meeting_id": "m-invalid", "transcript": "[00:00] Me: update",
+    })
+    await client.recv_event("meeting_notes_accepted")
+    failed = await client.recv()
+    assert failed["event"] == "meeting_notes_failed"
+    assert failed["code"] == "generation_failed"
+
+
+async def test_meeting_notes_cancel_during_reduce_never_emits_ready(engine):
+    eng, sock = engine
+    reduce_started = asyncio.Event()
+
+    class CancelDuringReduceCleanup:
+        loaded = True
+        unhealthy = False
+        calls = 0
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls += 1
+            if self.calls <= 2:
+                return SimpleNamespace(
+                    applied=True,
+                    text=json.dumps({
+                        "summary": f"Section {self.calls}.",
+                        "decisions": [],
+                        "action_items": [],
+                    }),
+                )
+            reduce_started.set()
+            cancel = kwargs["cancel_event"]
+            while not cancel.is_set():
+                await asyncio.sleep(0.01)
+            return SimpleNamespace(applied=False, text=raw, reason="cancelled")
+
+    cleanup = CancelDuringReduceCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "cancel-reduce",
+        "meeting_id": "m-cancel-reduce", "transcript": "x" * 12_001,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    await asyncio.wait_for(reduce_started.wait(), timeout=2)
+    await client.send_json({
+        "cmd": "meeting_notes_cancel", "id": "cancel-reduce",
+    })
+    failed = await client.recv_event("meeting_notes_failed")
+    assert failed["code"] == "cancelled"
+    assert cleanup.calls == 3
+    assert not eng._meeting_notes_running
 
 
 async def test_meeting_notes_custom_prompt_keeps_schema_clause(engine):
@@ -624,7 +1080,8 @@ async def test_meeting_notes_truncates_oversized_prompt(engine):
     await client.recv_event("meeting_notes_accepted")
     ready = await client.recv_event("meeting_notes_ready")
     assert ready["summary"] == "Trimmed"
-    assert seen_prompts and len(seen_prompts[0]) < 8_200
+    assert seen_prompts
+    assert seen_prompts[0].startswith("x" * 8_000 + "\n\nReturn JSON only")
 
 
 async def test_meeting_notes_rejects_non_string_prompt(engine):
@@ -695,7 +1152,9 @@ def test_meeting_note_helpers_bound_and_validate_generation():
     )
     assert parsed == {"summary": "S", "decisions": ["D"], "action_items": ["A"]}
     assert parse_notes_json("not json") is None
-    assert fallback_notes(" ")["summary"] == ""
+    assert parse_notes_json(
+        '{"summary":42,"decisions":"D","action_items":[],"extra":"x"}'
+    ) is None
     merged = merge_notes([
         {"summary": "One", "decisions": ["Ship"], "action_items": ["Test"]},
         {"summary": "Two", "decisions": ["ship"], "action_items": ["Test", "Deploy"]},

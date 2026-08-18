@@ -29,6 +29,9 @@ enum HUDState: Equatable {
     /// A title-only end inference is uncertain, so the persistent meeting HUD
     /// asks instead of opening a separate modal or stopping silently.
     case meetingEnd(title: String)
+    /// A post-capture failure with direct recovery. Unlike a generic notice,
+    /// this capsule must not turn a click into a new dictation.
+    case meetingFailure(meetingID: String, message: String)
     case inserted
     case error(String)
     /// Learned-a-correction toast (Wispr-style): the misheard word struck
@@ -62,7 +65,8 @@ enum HUDState: Equatable {
     /// intercept their clicks as whole-HUD dictation taps.
     var usesNativeMouseControls: Bool {
         switch self {
-        case .error, .meetingSuggestion, .meeting, .meetingEnd: return true
+        case .error, .meetingSuggestion, .meeting, .meetingEnd, .meetingFailure:
+            return true
         default: return false
         }
     }
@@ -140,6 +144,8 @@ final class HUDModel: ObservableObject {
     var onMeetingEndConfirm: (() -> Void)?
     var onMeetingEndKeep: (() -> Void)?
     var onMeetingEndDiscard: (() -> Void)?
+    var onMeetingFailureOpen: ((String) -> Void)?
+    var onMeetingFailureRetry: ((String) -> Void)?
     /// Title of the error-state action button ("Retry" normally; "Open
     /// Settings" when the fix is granting a permission).
     @Published var retryTitle = "Retry"

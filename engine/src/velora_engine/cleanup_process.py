@@ -30,6 +30,12 @@ from .cleanup import (
     adaptive_timeout_ms,
 )
 
+# The worker owns the native-generation watchdog and then must serialize its
+# timeout result over IPC. Give that response a small delivery margin so the
+# parent does not kill a worker at the exact instant it is reporting its own
+# bounded fallback (observed as a 23.001s notes timeout at a 20s + 3s wall).
+WORKER_RESPONSE_GRACE_S = 0.2
+
 log = logging.getLogger("velora.cleanup_process")
 
 CANCEL_GRACE_S = 1.0
@@ -259,6 +265,7 @@ class CleanupProcess:
         allowed_terms: list[str] | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
         max_tokens: int | None = None,
+        cache_scope: str | None = None,
     ) -> CleanupResult:
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
@@ -313,6 +320,7 @@ class CleanupProcess:
                 "allowed_terms": allowed_terms,
                 "prefix_candidates": prefix_candidates,
                 "max_tokens": max_tokens,
+                "cache_scope": cache_scope,
             }
             async with self._write_lock:
                 writer.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
@@ -323,7 +331,11 @@ class CleanupProcess:
                 )
             response = await asyncio.wait_for(
                 asyncio.shield(future),
-                timeout=timeout_ms / 1000.0 + self._hard_timeout_grace_s,
+                timeout=(
+                    timeout_ms / 1000.0
+                    + self._hard_timeout_grace_s
+                    + WORKER_RESPONSE_GRACE_S
+                ),
             )
             if not response.get("ok"):
                 raise RuntimeError(str(response.get("error") or "cleanup failed"))
@@ -516,6 +528,27 @@ class CleanupProcess:
                     response.get("error") or "unknown")
         except (TimeoutError, OSError, RuntimeError):
             log.debug("cleanup cache release skipped", exc_info=True)
+        finally:
+            self._operation_lock.release()
+
+    async def release_action_memory(self) -> None:
+        """Drop only Agent Mode's KV snapshot; retain model + dictation cache.
+
+        Best effort by design: if generation is still unwinding after a
+        cancellation, the later `action_end` request retries this cleanup.
+        """
+        if not self.loaded or self._operation_lock.locked():
+            return
+        await self._operation_lock.acquire()
+        try:
+            response = await asyncio.wait_for(
+                self._request("release_action_memory"), timeout=5.0)
+            if not response.get("ok"):
+                log.debug(
+                    "action memory release failed: %s",
+                    response.get("error") or "unknown")
+        except (TimeoutError, OSError, RuntimeError):
+            log.debug("action memory release skipped", exc_info=True)
         finally:
             self._operation_lock.release()
 

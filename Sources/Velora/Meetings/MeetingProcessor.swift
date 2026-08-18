@@ -18,6 +18,25 @@ enum MeetingNotesPrompt {
         + "the same way. Never guess who a speaker is."
 }
 
+enum MeetingFailurePresentation {
+    static func hudMessage(_ detail: String) -> String {
+        let value = detail.lowercased()
+        if value.contains("note") && value.contains("timeout") {
+            return "Meeting notes timed out"
+        }
+        if value.contains("note") || value.contains("model") {
+            return "Meeting notes failed"
+        }
+        if value.contains("no speech") {
+            return "No speech found in meeting"
+        }
+        if value.contains("audio") || value.contains("file") {
+            return "Meeting audio could not be processed"
+        }
+        return "Meeting processing failed"
+    }
+}
+
 /// Resumable post-capture pipeline. Each engine chunk is committed before the
 /// next one is requested; relaunch resumes from `MAX(chunk_index) + 1`.
 final class MeetingProcessor: ObservableObject {
@@ -35,6 +54,7 @@ final class MeetingProcessor: ObservableObject {
     private struct QueueItem {
         let meetingID: String
         let reprocessing: Bool
+        let notesOnly: Bool
     }
 
     private struct Work {
@@ -90,22 +110,35 @@ final class MeetingProcessor: ObservableObject {
         dispatchPrecondition(condition: .onQueue(.main))
         guard work?.meetingID != meetingID, !isQueued(meetingID) else { return }
         let reprocessing = store.isReprocessing(meetingID: meetingID)
-        guard let record = store.recordMetadata(id: meetingID),
-              reprocessing
+        guard let record = store.recordMetadata(id: meetingID) else {
+            failUnqueued(meetingID: meetingID, message: "Meeting could not be found")
+            return
+        }
+        let notesOnly = !reprocessing
+            && store.hasPendingNotes(meetingID: meetingID)
+            && store.hasCommittedSegments(meetingID: meetingID)
+        guard notesOnly || (reprocessing
                 ? store.hasAllCapturedAudio(for: record)
-                : hasRecoverableAudio(record) else {
+                : hasRecoverableAudio(record)) else {
             failUnqueued(meetingID: meetingID, message: "No usable audio was captured for this meeting")
             return
         }
-        enqueueValidated(meetingID: meetingID, reprocessing: reprocessing)
+        enqueueValidated(
+            meetingID: meetingID, reprocessing: reprocessing,
+            notesOnly: notesOnly)
     }
 
-    private func enqueueValidated(meetingID: String, reprocessing: Bool) {
+    private func enqueueValidated(
+        meetingID: String, reprocessing: Bool, notesOnly: Bool = false
+    ) {
         engineRestartAttempts[meetingID] = 0
         // Protect queued audio from retention pruning even if the engine is
         // currently unavailable and cannot begin it immediately.
-        store.markProcessing(meetingID: meetingID)
-        queued.append(QueueItem(meetingID: meetingID, reprocessing: reprocessing))
+        store.markProcessing(
+            meetingID: meetingID, notesPending: notesOnly)
+        queued.append(QueueItem(
+            meetingID: meetingID, reprocessing: reprocessing,
+            notesOnly: notesOnly))
         notifyChanged()
         beginNextIfPossible()
     }
@@ -135,7 +168,23 @@ final class MeetingProcessor: ObservableObject {
         dispatchPrecondition(condition: .onQueue(.main))
         var changed = false
         for record in store.resumable().reversed() {
+            // An interrupted in-memory job has already preserved its exact
+            // stage in `queued` (including notes-only retries after audio
+            // retention). Do not reinterpret that row as a fresh audio job
+            // when the engine reports ready again.
+            guard work?.meetingID != record.id, !isQueued(record.id) else {
+                continue
+            }
             let reprocessing = store.isReprocessing(meetingID: record.id)
+            let notesOnly = !reprocessing
+                && store.hasPendingNotes(meetingID: record.id)
+                && store.hasCommittedSegments(meetingID: record.id)
+            if notesOnly {
+                queued.append(QueueItem(
+                    meetingID: record.id, reprocessing: false,
+                    notesOnly: true))
+                continue
+            }
             let audioReady = reprocessing
                 ? store.hasAllCapturedAudio(for: record)
                 : hasRecoverableAudio(record)
@@ -149,10 +198,9 @@ final class MeetingProcessor: ObservableObject {
                 changed = true
                 continue
             }
-            if work?.meetingID != record.id, !isQueued(record.id) {
-                queued.append(QueueItem(
-                    meetingID: record.id, reprocessing: reprocessing))
-            }
+            queued.append(QueueItem(
+                meetingID: record.id, reprocessing: reprocessing,
+                notesOnly: false))
         }
         if changed { notifyChanged() }
         beginNextIfPossible()
@@ -173,7 +221,8 @@ final class MeetingProcessor: ObservableObject {
     func cancel(meetingID: String) {
         dispatchPrecondition(condition: .onQueue(.main))
         let active = work.flatMap { $0.meetingID == meetingID ? $0 : nil }
-        let queuedMatch = isQueued(meetingID)
+        let queuedItem = queued.first { $0.meetingID == meetingID }
+        let queuedMatch = queuedItem != nil
         let presented = stateMeetingID == meetingID
         guard active != nil || queuedMatch || presented else { return }
         if let active {
@@ -189,6 +238,7 @@ final class MeetingProcessor: ObservableObject {
             ?? store.isReprocessing(meetingID: meetingID)
         persistFailure(
             meetingID: meetingID, reprocessing: reprocessing,
+            notesOnly: active?.stage == .notes || queuedItem?.notesOnly == true,
             message: "Processing cancelled")
         engineRestartAttempts.removeValue(forKey: meetingID)
         if active != nil || presented {
@@ -321,23 +371,28 @@ final class MeetingProcessor: ObservableObject {
             if work == nil { resumeRecoverable() }
         case .stopped, .launching, .degraded:
             if let meetingID = work?.meetingID {
-                let reprocessing = work?.reprocessing ?? false
+                let interruptedWork = work
+                let reprocessing = interruptedWork?.reprocessing ?? false
+                let notesOnly = interruptedWork?.stage == .notes && !reprocessing
                 let attempts = (engineRestartAttempts[meetingID] ?? 0) + 1
                 engineRestartAttempts[meetingID] = attempts
                 if attempts >= 3 {
                     persistFailure(
                         meetingID: meetingID, reprocessing: reprocessing,
+                        notesOnly: notesOnly,
                         message: "Speech engine repeatedly restarted on this meeting; retry manually")
                     state = .failed(
                         meetingID: meetingID,
                         message: "Meeting processing stopped after repeated engine restarts")
                 } else {
-                    store.markProcessing(meetingID: meetingID)
+                    store.markProcessing(
+                        meetingID: meetingID, notesPending: notesOnly)
                     if !isQueued(meetingID) {
                         queued.insert(
                             QueueItem(
                                 meetingID: meetingID,
-                                reprocessing: reprocessing),
+                                reprocessing: reprocessing,
+                                notesOnly: notesOnly),
                             at: 0)
                     }
                     state = .processing(
@@ -365,6 +420,20 @@ final class MeetingProcessor: ObservableObject {
         let meetingID = item.meetingID
         guard let record = store.recordMetadata(id: meetingID) else {
             beginNextIfPossible(); return
+        }
+        if item.notesOnly {
+            guard !item.reprocessing, record.notes.isEmpty,
+                  store.hasCommittedSegments(meetingID: meetingID) else {
+                state = .idle
+                beginNextIfPossible()
+                return
+            }
+            store.markProcessing(meetingID: meetingID, notesPending: true)
+            work = Work(
+                meetingID: meetingID, tracks: [], reprocessing: false,
+                trackIndex: 0, jobID: UUID().uuidString, stage: .notes)
+            beginNotes()
+            return
         }
         let tracks = availableTracks(record)
         let capturedSpeakers = Set(capturedSpeakers(record))
@@ -438,6 +507,12 @@ final class MeetingProcessor: ObservableObject {
         work.jobID = UUID().uuidString
         work.stage = .notes
         self.work = work
+        if !work.reprocessing {
+            // This write is the crash boundary: after the transcript exists,
+            // relaunch must regenerate notes directly even if the process dies
+            // before the engine replies.
+            store.markProcessing(meetingID: work.meetingID, notesPending: true)
+        }
         state = .processing(
             meetingID: work.meetingID, label: "Creating notes…", fraction: 0.75)
         var message: [String: Any] = [
@@ -450,13 +525,17 @@ final class MeetingProcessor: ObservableObject {
     }
 
     private func failActive(_ message: String, code: String? = nil) {
-        guard let meetingID = work?.meetingID else { return }
+        guard let active = work else { return }
+        let meetingID = active.meetingID
         if code == "busy" {
-            let reprocessing = work?.reprocessing ?? false
+            let reprocessing = active.reprocessing
+            let notesOnly = active.stage == .notes && !reprocessing
             work = nil
             if !isQueued(meetingID) {
                 queued.insert(
-                    QueueItem(meetingID: meetingID, reprocessing: reprocessing),
+                    QueueItem(
+                        meetingID: meetingID, reprocessing: reprocessing,
+                        notesOnly: notesOnly),
                     at: 0)
             }
             state = .processing(
@@ -466,9 +545,11 @@ final class MeetingProcessor: ObservableObject {
             }
             return
         }
-        let reprocessing = work?.reprocessing ?? false
+        let reprocessing = active.reprocessing
         persistFailure(
-            meetingID: meetingID, reprocessing: reprocessing, message: message)
+            meetingID: meetingID, reprocessing: reprocessing,
+            notesOnly: active.stage == .notes && !reprocessing,
+            message: message)
         engineRestartAttempts.removeValue(forKey: meetingID)
         work = nil
         state = .failed(meetingID: meetingID, message: message)
@@ -539,10 +620,13 @@ final class MeetingProcessor: ObservableObject {
     }
 
     private func persistFailure(
-        meetingID: String, reprocessing: Bool, message: String
+        meetingID: String, reprocessing: Bool, notesOnly: Bool = false,
+        message: String
     ) {
         if reprocessing {
             store.markReprocessFailed(meetingID: meetingID, error: message)
+        } else if notesOnly {
+            store.markNotesFailed(meetingID: meetingID, error: message)
         } else {
             store.markFailed(meetingID: meetingID, error: message)
         }

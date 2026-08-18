@@ -31,6 +31,23 @@ def test_resolve_bundle_match(config):
     assert resolve_mode(config, "md.obsidian", None).name == "Note"
 
 
+def test_bundle_match_normalizes_hand_edited_identifier(home):
+    import json
+
+    from velora_engine.config import Config
+
+    modes = home / "modes"
+    modes.mkdir(parents=True)
+    (modes / "mixed-case.json").write_text(json.dumps({
+        "name": "Mixed Case",
+        "apps": [" COM.EXAMPLE.MIXED ", "com.example.mixed", ""],
+    }))
+    config = Config(home)
+
+    assert config.mode_by_name("Mixed Case").apps == ["COM.EXAMPLE.MIXED"]
+    assert resolve_mode(config, "com.example.mixed", None).name == "Mixed Case"
+
+
 def test_resolve_default_fallback(config):
     assert resolve_mode(config, "com.unknown.app", None).name == "Default"
     assert resolve_mode(config, None, None).name == "Default"

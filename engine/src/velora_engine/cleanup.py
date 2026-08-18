@@ -456,6 +456,15 @@ class CleanupEngine:
         self._fallback_prepared_cache: list[
             tuple[type[Any], Any, Any]
         ] | None = None
+        # Agent Mode has a much larger, context-specific protocol prefix than
+        # dictation cleanup. Keep its snapshot in a separate slot so an action
+        # cannot evict the warm dictation prefix, then drop it as soon as the
+        # task ends. The model weights remain resident; only action KV state is
+        # session-scoped.
+        self._action_prepared_tokens: list[int] = []
+        self._action_prepared_cache: list[
+            tuple[type[Any], Any, Any]
+        ] | None = None
         self._lock = threading.Lock()
         # MLX streams are thread-affine: load and generation must all happen
         # on this one dedicated thread.
@@ -495,6 +504,8 @@ class CleanupEngine:
         self._prepared_cache = None
         self._fallback_prepared_tokens = []
         self._fallback_prepared_cache = None
+        self._action_prepared_tokens = []
+        self._action_prepared_cache = None
         t0 = time.perf_counter()
         # Local path, not repo id: a cached model must load without network.
         self._model, self._tokenizer = load(ensure_downloaded(self.model_id))
@@ -586,12 +597,29 @@ class CleanupEngine:
         self,
         tokens: list[int],
         cache: list[Any],
+        cache_scope: str | None = None,
     ) -> None:
         """Install an exact snapshot while retaining the shorter base prefix."""
+        if (
+            cache_scope == "action"
+            and self._action_prepared_cache is not None
+            and self._action_prepared_tokens
+            and len(tokens) >= len(self._action_prepared_tokens)
+            and tokens[: len(self._action_prepared_tokens)]
+            == self._action_prepared_tokens
+        ):
+            # A repair prompt extends the stable action prompt with one error
+            # note. Keeping the shorter snapshot serves both repairs and later
+            # turns while retaining less KV state.
+            return
         # Snapshot first. If copying cache metadata fails, the active
         # token/cache pair must remain untouched; publishing the longer token
         # count with the old shorter cache would skip real prompt tokens.
         snapshot = _snapshot_prompt_cache(cache)
+        if cache_scope == "action":
+            self._action_prepared_tokens = list(tokens)
+            self._action_prepared_cache = snapshot
+            return
         if (
             self._prepared_cache is not None
             and self._prepared_tokens
@@ -697,11 +725,38 @@ class CleanupEngine:
             self._executor, self._release_cache
         )
 
-    def _cache_for_tokens(self, tokens: list[int]) -> tuple[list[Any], int, bool]:
-        candidates = (
+    def _release_action_memory(self) -> None:
+        """Drop Agent Mode's session KV snapshot without unloading weights.
+
+        The ordinary cleanup prefix lives in a different slot and survives, so
+        ending an action lowers memory pressure without making the next
+        dictation pay a cold model load or a full static-prefix prefill.
+        """
+        import mlx.core as mx
+
+        with self._lock:
+            self._action_prepared_tokens = []
+            self._action_prepared_cache = None
+            mx.clear_cache()
+
+    async def release_action_memory(self) -> None:
+        await asyncio.get_running_loop().run_in_executor(
+            self._executor, self._release_action_memory
+        )
+
+    def _cache_for_tokens(
+        self,
+        tokens: list[int],
+        cache_scope: str | None = None,
+    ) -> tuple[list[Any], int, bool]:
+        candidates = [
             (self._prepared_tokens, self._prepared_cache),
             (self._fallback_prepared_tokens, self._fallback_prepared_cache),
-        )
+        ]
+        if cache_scope == "action":
+            candidates.append(
+                (self._action_prepared_tokens, self._action_prepared_cache)
+            )
         for prepared, snapshot in sorted(
             candidates,
             key=lambda item: len(item[0]),
@@ -723,6 +778,7 @@ class CleanupEngine:
         cache: list[Any],
         common: int,
         cancel_event: threading.Event | None,
+        cache_scope: str | None,
     ) -> tuple[list[Any], int, bool]:
         """Extend the exact cache using prompt work this request already needs.
 
@@ -750,7 +806,7 @@ class CleanupEngine:
                 prefix[common:],
                 cancel_event,
             )
-            self._install_prepared_prefix(prefix, cache)
+            self._install_prepared_prefix(prefix, cache, cache_scope=cache_scope)
             log.info(
                 "cleanup rolling prefix prepared tokens=%d added_tokens=%d",
                 len(prefix),
@@ -764,7 +820,7 @@ class CleanupEngine:
             # The local cache may be partially advanced. Restore a clean,
             # immutable snapshot before authoritative generation continues.
             restored, restored_common, restored_hit = self._cache_for_tokens(
-                tokens
+                tokens, cache_scope=cache_scope
             )
             return restored, restored_common, restored_hit
 
@@ -778,6 +834,7 @@ class CleanupEngine:
         output_timeout_s: float,
         cancel_event: threading.Event | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
+        cache_scope: str | None = None,
     ) -> _GenerationResult:
         """Generate with a quality budget that begins at first output token."""
         from mlx_lm import stream_generate
@@ -787,7 +844,9 @@ class CleanupEngine:
         if cancel_event is not None and cancel_event.is_set():
             return _GenerationResult("", "cancelled", 0, 0, 0, 0, False)
         tokens = self._prompt_tokens(system_prompt, user_text)
-        cache, common, cache_hit = self._cache_for_tokens(tokens)
+        cache, common, cache_hit = self._cache_for_tokens(
+            tokens, cache_scope=cache_scope
+        )
         if prefix_candidates:
             try:
                 cache, common, extended = self._extend_runtime_prefix_locked(
@@ -796,6 +855,7 @@ class CleanupEngine:
                     cache,
                     common,
                     cancel_event,
+                    cache_scope,
                 )
                 cache_hit = cache_hit or extended
             except _PrefixCancelled:
@@ -881,6 +941,7 @@ class CleanupEngine:
         allowed_terms: list[str] | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
         max_tokens_override: int | None = None,
+        cache_scope: str | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
@@ -900,6 +961,7 @@ class CleanupEngine:
                 timeout_ms / 1000.0,
                 cancel_event,
                 prefix_candidates,
+                cache_scope,
             )
         ms = int((time.perf_counter() - t0) * 1000)
         log.info(
@@ -956,6 +1018,7 @@ class CleanupEngine:
         allowed_terms: list[str] | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
         max_tokens: int | None = None,
+        cache_scope: str | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
@@ -982,6 +1045,7 @@ class CleanupEngine:
             return self._run(
                 raw, system_prompt, timeout_ms, check_ratio,
                 worker_cancel, allowed_terms, prefix_candidates, max_tokens,
+                cache_scope,
             )
 
         worker = loop.run_in_executor(self._executor, run_started)

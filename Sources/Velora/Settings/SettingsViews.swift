@@ -742,6 +742,34 @@ struct ShortcutsSettingsView: View {
                 SettingsFooter("Click the shortcut, then press a new key combo — a bare modifier like Right Option works too.")
             }
             Section {
+                Toggle(isOn: $model.streamTypingEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Text("Stream typing")
+                            Text("NEW")
+                                .font(.caption2.weight(.bold))
+                                .foregroundStyle(.tint)
+                        }
+                        Text("See your words appear at the cursor while you speak. Velora replaces its own live draft with the polished final when you finish.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                LabeledContent("Type as you speak") {
+                    HotkeyRecorderView(hotkey: $model.streamTypingHotkey)
+                }
+                .disabled(!model.streamTypingEnabled)
+                if model.streamTypingHotkeyConflict {
+                    Text("Stream typing needs a shortcut of its own.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Stream typing")
+            } footer: {
+                SettingsFooter("If you type or move the cursor mid-stream, Velora stops rewriting and copies the final instead.")
+            }
+            Section {
                 Toggle(isOn: $model.voiceEdit) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Voice edit selection")

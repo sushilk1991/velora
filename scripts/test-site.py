@@ -273,8 +273,8 @@ def main() -> None:
     assert "new line decisions" not in public_source, (
         "the demo must not imply that natural structure requires a spoken command"
     )
-    assert "including browser playback" in public_source, (
-        "the direct-dictation playback claim must include browser media"
+    assert "browser video is excluded from automatic pause and resume" in public_source, (
+        "the playback claim must state the browser media boundary"
     )
     assert "meeting capture leaves call audio running" in public_source, (
         "the playback claim must preserve the meeting-capture boundary"

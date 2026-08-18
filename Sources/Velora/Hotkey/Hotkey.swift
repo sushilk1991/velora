@@ -78,6 +78,12 @@ extension Hotkey {
         keyCode: 0,
         modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
         isModifierOnly: false)
+    /// Default Stream Typing hotkey: ⌃⇧S (S for stream). A control chord does
+    /// not trip the modifier-only Right Option dictation default.
+    static let controlShiftS = Hotkey(
+        keyCode: 1,
+        modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
+        isModifierOnly: false)
     /// Kept for the tests that exercise the collision this default avoids.
     static let optionShiftA = Hotkey(
         keyCode: 0,
