@@ -1102,6 +1102,68 @@ extension Selftest {
     }
 
     private static func testStreamDraftRevisionPolicy() {
+        expect(
+            StreamTargetRouting.route(
+                bundleID: SublimeTextSelectionBridge.bundleID,
+                nativeTargetAvailable: false) == .sublime,
+            "Sublime routes through its exact bridge when AX exposes only a window")
+        expect(
+            StreamTargetRouting.route(
+                bundleID: "com.apple.TextEdit",
+                nativeTargetAvailable: true) == .accessibility,
+            "native editable controls keep the direct Accessibility stream path")
+        expect(
+            StreamTargetRouting.route(
+                bundleID: "com.example.opaque",
+                nativeTargetAvailable: false) == .unavailable,
+            "an opaque unsupported field is rejected instead of becoming normal dictation")
+
+        let capturedInputGeneration = UserInputActivity.snapshot()
+        expect(
+            StreamInputOwnership.isCurrent(capturedInputGeneration),
+            "a Sublime stream initially owns the physical-input generation")
+        UserInputActivity.mark()
+        expect(
+            !StreamInputOwnership.isCurrent(capturedInputGeneration),
+            "any later physical input permanently invalidates Sublime stream ownership")
+        expect(
+            SublimeStreamCancelRetryPolicy.shouldRetry(
+                .unknown, attemptsRemaining: 4),
+            "an unconfirmed Sublime cancel is retried while its token is recoverable")
+        expect(
+            !SublimeStreamCancelRetryPolicy.shouldRetry(
+                .unknown, attemptsRemaining: 0),
+            "an unconfirmed Sublime cancel retry remains bounded")
+        expect(
+            SublimeStreamCompletionPolicy.source(
+                currentIsFinal: false, pendingIsFinal: true) == .pending,
+            "ownership loss reports a queued final after an in-flight partial")
+        expect(
+            SublimeStreamCompletionPolicy.completesCancellation(
+                cancelRequested: true, duringOwnershipRestore: true),
+            "cancel during ownership restore always releases the controller")
+        expect(
+            SublimeBridgePeerPolicy.isTrusted(
+                peerPID: 91,
+                parentPID: 42,
+                expectedParentPID: 42,
+                signatureValid: true),
+            "the connected signed Sublime plugin child is accepted")
+        expect(
+            !SublimeBridgePeerPolicy.isTrusted(
+                peerPID: 91,
+                parentPID: 7,
+                expectedParentPID: 42,
+                signatureValid: true),
+            "a signed plugin host from another editor process is rejected")
+        expect(
+            !SublimeBridgePeerPolicy.isTrusted(
+                peerPID: 91,
+                parentPID: 42,
+                expectedParentPID: 42,
+                signatureValid: false),
+            "an unsigned server cannot impersonate Sublime's bridge")
+
         var plan = StreamDraftPlan()
         expect(plan.next("hello", ownershipValid: true) == .insert("hello"),
                "a stream draft inserts its first provisional transcript once")

@@ -1,6 +1,58 @@
 import AppKit
 import Foundation
 
+enum StreamTargetRouting {
+    enum Route: Equatable {
+        case accessibility
+        case sublime
+        case unavailable
+    }
+
+    static func route(
+        bundleID: String?, nativeTargetAvailable: Bool
+    ) -> Route {
+        if nativeTargetAvailable { return .accessibility }
+        if bundleID == SublimeTextSelectionBridge.bundleID { return .sublime }
+        return .unavailable
+    }
+}
+
+enum StreamInputOwnership {
+    static func isCurrent(_ capturedGeneration: UInt64) -> Bool {
+        capturedGeneration == UserInputActivity.snapshot()
+    }
+}
+
+enum SublimeStreamCancelRetryPolicy {
+    static func shouldRetry(
+        _ result: SublimeStreamCancelResult, attemptsRemaining: Int
+    ) -> Bool {
+        result == .unknown && attemptsRemaining > 0
+    }
+}
+
+enum SublimeStreamCompletionPolicy {
+    enum Source: Equatable {
+        case current
+        case pending
+        case none
+    }
+
+    static func source(
+        currentIsFinal: Bool, pendingIsFinal: Bool
+    ) -> Source {
+        if currentIsFinal { return .current }
+        if pendingIsFinal { return .pending }
+        return .none
+    }
+
+    static func completesCancellation(
+        cancelRequested: Bool, duringOwnershipRestore: Bool
+    ) -> Bool {
+        cancelRequested && duringOwnershipRestore
+    }
+}
+
 /// Pure revision policy for a live draft. The UI adapter proves ownership;
 /// this type ensures provisional updates only ever insert once or replace the
 /// exact revision that was committed before them.
@@ -402,5 +454,258 @@ final class StreamTypingSession {
         for abandonment: StreamDraftPlan.Abandonment?
     ) -> FinishResult {
         abandonment == .ownershipLost ? .ownershipLost : .unavailable
+    }
+}
+
+protocol LiveStreamDraftSession: AnyObject {
+    var hasRenderedDraft: Bool { get }
+    func update(_ text: String, mode: String?)
+    func finish(
+        _ text: String,
+        mode: String?,
+        completion: @escaping (StreamTypingSession.FinishResult) -> Void)
+    func cancel(
+        completion: ((StreamTypingSession.CancellationResult) -> Void)?)
+}
+
+extension StreamTypingSession: LiveStreamDraftSession {}
+
+/// Live-draft adapter for Sublime's opaque editor surface. All document reads
+/// and mutations stay inside the authenticated plugin; socket work runs on a
+/// serial background queue and only publishes state changes back on main.
+final class SublimeStreamTypingSession: LiveStreamDraftSession {
+    private enum RestoreReason {
+        case cancellation
+        case ownershipLoss(((StreamTypingSession.FinishResult) -> Void)?)
+    }
+
+    private struct Request {
+        let text: String
+        let mode: String?
+        let isFinal: Bool
+        let completion: ((StreamTypingSession.FinishResult) -> Void)?
+    }
+
+    private let boundary: TextSelectionBoundary
+    private let token: SublimeStreamTypingToken
+    private let inputGeneration: UInt64
+    private let queue = DispatchQueue(
+        label: "com.velora.sublime-stream", qos: .userInitiated)
+    private var plan = StreamDraftPlan()
+    private var pending: Request?
+    private var busy = false
+    private var cancelRequested = false
+    private var cancelCompletion:
+        ((StreamTypingSession.CancellationResult) -> Void)?
+
+    init(
+        capture: SublimeStreamTypingCapture,
+        inputGeneration: UInt64
+    ) {
+        boundary = capture.boundary
+        token = capture.token
+        self.inputGeneration = inputGeneration
+    }
+
+    var hasRenderedDraft: Bool { plan.rendered != nil }
+
+    func update(_ text: String, mode: String?) {
+        guard !cancelRequested, !plan.isAbandoned else { return }
+        enqueue(Request(
+            text: text, mode: mode, isFinal: false, completion: nil))
+    }
+
+    func finish(
+        _ text: String,
+        mode: String?,
+        completion: @escaping (StreamTypingSession.FinishResult) -> Void
+    ) {
+        guard !cancelRequested, !plan.isAbandoned else {
+            completion(.ownershipLost)
+            return
+        }
+        enqueue(Request(
+            text: text, mode: mode, isFinal: true, completion: completion))
+    }
+
+    func cancel(
+        completion: ((StreamTypingSession.CancellationResult) -> Void)? = nil
+    ) {
+        if let completion {
+            let existing = cancelCompletion
+            cancelCompletion = { result in
+                existing?(result)
+                completion(result)
+            }
+        }
+        cancelRequested = true
+        pending = nil
+        guard !busy else { return }
+        restore(reason: .cancellation)
+    }
+
+    private func enqueue(_ request: Request) {
+        if pending?.isFinal == true, !request.isFinal { return }
+        pending = request
+        drain()
+    }
+
+    private func drain() {
+        guard !busy else { return }
+        if cancelRequested {
+            restore(reason: .cancellation)
+            return
+        }
+        guard let request = pending else { return }
+        pending = nil
+        let delivery = TextInsertionBoundary.adjusted(
+            request.text, boundary: boundary, mode: request.mode)
+        let operation = plan.next(
+            delivery,
+            ownershipValid: StreamInputOwnership.isCurrent(inputGeneration))
+        switch operation {
+        case .abandon:
+            pending = nil
+            restore(reason: .ownershipLoss(request.completion))
+        case .noChange where !request.isFinal:
+            drain()
+        case .insert, .replace, .noChange:
+            deliver(delivery, request: request)
+        }
+    }
+
+    private func deliver(_ text: String, request: Request) {
+        busy = true
+        queue.async { [weak self] in
+            guard let self else { return }
+            // Keep the plugin session restorable until the main-thread owner
+            // accepts the final. This closes the Esc-vs-final response race.
+            let result = self.token.update(text, final: false)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.busy = false
+                guard result == .applied else {
+                    self.plan.abandon()
+                    let finishCompletion = self.finishCompletion(
+                        current: request)
+                    self.pending = nil
+                    if self.cancelRequested {
+                        self.restore(reason: .cancellation)
+                    } else {
+                        self.restore(
+                            reason: .ownershipLoss(finishCompletion))
+                    }
+                    return
+                }
+                self.plan.commit(text)
+                if self.cancelRequested {
+                    self.restore(reason: .cancellation)
+                    return
+                }
+                guard StreamInputOwnership.isCurrent(self.inputGeneration) else {
+                    self.plan.abandon()
+                    let finishCompletion = self.finishCompletion(
+                        current: request)
+                    self.pending = nil
+                    self.restore(
+                        reason: .ownershipLoss(finishCompletion))
+                    return
+                }
+                if request.isFinal {
+                    self.token.finish()
+                    request.completion?(.applied)
+                }
+                self.drain()
+            }
+        }
+    }
+
+    private func restore(
+        attemptsRemaining: Int = 4,
+        reason: RestoreReason
+    ) {
+        busy = true
+        queue.async { [weak self] in
+            guard let self else { return }
+            let result = self.token.cancel()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if SublimeStreamCancelRetryPolicy.shouldRetry(
+                    result, attemptsRemaining: attemptsRemaining
+                ) {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        self.restore(
+                            attemptsRemaining: attemptsRemaining - 1,
+                            reason: reason)
+                    }
+                    return
+                }
+                switch reason {
+                case .ownershipLoss(let completion):
+                    self.busy = false
+                    self.plan.abandon()
+                    completion?(.ownershipLost)
+                    if SublimeStreamCompletionPolicy.completesCancellation(
+                        cancelRequested: self.cancelRequested,
+                        duringOwnershipRestore: true
+                    ) {
+                        self.finishCancellation(
+                            Self.cancellationResult(for: result))
+                    }
+                    return
+                case .cancellation:
+                    break
+                }
+                switch result {
+                case .restored:
+                    self.finishCancellation(.restored)
+                case .noDraft:
+                    self.finishCancellation(.noDraft)
+                case .failed:
+                    self.finishCancellation(.failed)
+                case .unknown:
+                    self.finishCancellation(.failed)
+                }
+            }
+        }
+    }
+
+    private func finishCancellation(
+        _ result: StreamTypingSession.CancellationResult
+    ) {
+        busy = false
+        plan.abandon()
+        let completion = cancelCompletion
+        cancelCompletion = nil
+        completion?(result)
+    }
+
+    private func finishCompletion(
+        current: Request
+    ) -> ((StreamTypingSession.FinishResult) -> Void)? {
+        switch SublimeStreamCompletionPolicy.source(
+            currentIsFinal: current.isFinal,
+            pendingIsFinal: pending?.isFinal == true
+        ) {
+        case .current:
+            return current.completion
+        case .pending:
+            return pending?.completion
+        case .none:
+            return nil
+        }
+    }
+
+    private static func cancellationResult(
+        for result: SublimeStreamCancelResult
+    ) -> StreamTypingSession.CancellationResult {
+        switch result {
+        case .restored:
+            return .restored
+        case .noDraft:
+            return .noDraft
+        case .failed, .unknown:
+            return .failed
+        }
     }
 }

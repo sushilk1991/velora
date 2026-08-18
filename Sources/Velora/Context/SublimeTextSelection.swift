@@ -8,9 +8,15 @@ struct SublimeTextSelectionCapture {
     let token: SublimeTextSelectionToken
 }
 
+struct SublimeStreamTypingCapture {
+    let boundary: TextSelectionBoundary
+    let token: SublimeStreamTypingToken
+}
+
 enum SublimeTextSelectionError: Error {
     case emptySelection
     case multipleSelections
+    case selectionTooLong
     case unsupportedView
     case integrationNeedsRestart
     case integrationUnavailable
@@ -20,6 +26,78 @@ enum SublimeTextApplyResult: Equatable {
     case applied
     case rejected
     case unknown
+}
+
+enum SublimeStreamCancelResult: Equatable {
+    case restored
+    case noDraft
+    case failed
+    case unknown
+}
+
+/// Multi-revision identity for one Sublime document range. The plugin remains
+/// authoritative for the view, caret, bytes, and buffer revision; this token
+/// only serializes the lifetime exposed to Velora.
+final class SublimeStreamTypingToken {
+    private let lock = NSLock()
+    private let value: String
+    private let generation: String
+    private let client: SublimeCommandClient
+    private var active = true
+
+    init(value: String, generation: String, client: SublimeCommandClient) {
+        self.value = value
+        self.generation = generation
+        self.client = client
+    }
+
+    func update(_ text: String, final: Bool) -> SublimeTextApplyResult {
+        lock.lock()
+        guard active else {
+            lock.unlock()
+            return .rejected
+        }
+        lock.unlock()
+        let result = client.streamUpdate(
+            token: value,
+            generation: generation,
+            replacement: text,
+            final: final)
+        lock.lock()
+        if final { active = false }
+        lock.unlock()
+        return result
+    }
+
+    func cancel() -> SublimeStreamCancelResult {
+        lock.lock()
+        guard active else {
+            lock.unlock()
+            return .failed
+        }
+        lock.unlock()
+        let result = client.streamCancel(token: value, generation: generation)
+        lock.lock()
+        if result != .unknown { active = false }
+        lock.unlock()
+        return result
+    }
+
+    func finish() {
+        lock.lock()
+        guard active else {
+            lock.unlock()
+            return
+        }
+        active = false
+        lock.unlock()
+        let client = client
+        let value = value
+        let generation = generation
+        DispatchQueue.global(qos: .utility).async {
+            client.discard(token: value, generation: generation)
+        }
+    }
 }
 
 /// Opaque identity for one exact Sublime view and region. Sublime's plugin
@@ -130,7 +208,25 @@ enum SublimeTextSelectionBridge {
         ).capture()
     }
 
-    private static func runningCodeIsValid(
+    static func captureStream(
+        of app: NSRunningApplication
+    ) -> Result<SublimeStreamTypingCapture, SublimeTextSelectionError> {
+        guard app.bundleIdentifier == bundleID,
+              runningCodeIsValid(
+                  pid: app.processIdentifier,
+                  requirement:
+                    "anchor apple generic and certificate leaf[subject.OU] "
+                    + "= \"\(teamID)\" and identifier \"\(bundleID)\"")
+        else {
+            veloraLog("Velora: rejected untrusted Sublime Text process")
+            return .failure(.integrationUnavailable)
+        }
+        return SublimeCommandClient(
+            targetPID: app.processIdentifier
+        ).captureStream()
+    }
+
+    static func runningCodeIsValid(
         pid: pid_t, requirement expression: String
     ) -> Bool {
         let attributes = [
@@ -158,6 +254,19 @@ enum SublimeTextSelectionBridge {
     }
 }
 
+enum SublimeBridgePeerPolicy {
+    static func isTrusted(
+        peerPID: pid_t,
+        parentPID: pid_t,
+        expectedParentPID: pid_t,
+        signatureValid: Bool
+    ) -> Bool {
+        peerPID > 0
+            && parentPID == expectedParentPID
+            && signatureValid
+    }
+}
+
 /// One-request-per-connection client for the owner-only AF_UNIX endpoint that
 /// the bundled Sublime plugin opens inside ~/.velora/sublime-bridge. This
 /// deliberately does not use `subl --command`: that helper can lose contact
@@ -173,6 +282,9 @@ struct SublimeCommandClient {
         let known: Bool?
         let resultOK: Bool?
         let resultError: String?
+        let before: String?
+        let after: String?
+        let restored: Bool?
 
         enum CodingKeys: String, CodingKey {
             case ok
@@ -184,6 +296,9 @@ struct SublimeCommandClient {
             case known
             case resultOK = "result_ok"
             case resultError = "result_error"
+            case before
+            case after
+            case restored
         }
     }
 
@@ -256,6 +371,60 @@ struct SublimeCommandClient {
                 client: self)))
     }
 
+    func captureStream(
+    ) -> Result<SublimeStreamTypingCapture, SublimeTextSelectionError> {
+        guard targetIsCurrent(),
+              let pluginChanged = installPluginIfNeeded()
+        else { return .failure(.integrationUnavailable) }
+        if pluginChanged {
+            veloraLog("Velora: installed updated Sublime Text integration")
+        }
+
+        let requestID = UUID().uuidString.lowercased()
+        let request: [String: Any] = [
+            "version": Self.protocolVersion,
+            "command": "stream_capture",
+            "request_id": requestID,
+        ]
+        guard let response = waitForPlugin(
+            request: request,
+            startupTimeout: Self.socketStartupWait,
+            socketTimeoutSeconds: 1)
+        else { return .failure(.integrationNeedsRestart) }
+        guard response.ok,
+              response.token == requestID,
+              let generation = response.generation,
+              !generation.isEmpty,
+              let before = response.before,
+              let after = response.after
+        else {
+            switch response.error {
+            case "multiple_selections":
+                return .failure(.multipleSelections)
+            case "selection_too_long":
+                return .failure(.selectionTooLong)
+            case "too_many_sessions":
+                return .failure(.integrationNeedsRestart)
+            case "invalid_request":
+                // The bundled package is newer than the still-running plugin
+                // host. Sublime only loads the added stream commands after a
+                // plugin reload/restart; do not misreport this as a connection
+                // failure or fall back to ordinary dictation.
+                return .failure(.integrationNeedsRestart)
+            case "unsupported_view":
+                return .failure(.unsupportedView)
+            default:
+                return .failure(.integrationUnavailable)
+            }
+        }
+        return .success(SublimeStreamTypingCapture(
+            boundary: TextSelectionBoundary(before: before, after: after),
+            token: SublimeStreamTypingToken(
+                value: requestID,
+                generation: generation,
+                client: self)))
+    }
+
     func apply(
         token: String,
         generation: String,
@@ -305,6 +474,71 @@ struct SublimeCommandClient {
             "token": token,
             "generation": generation,
         ], timeoutSeconds: 1)
+    }
+
+    func streamUpdate(
+        token: String,
+        generation: String,
+        replacement: String,
+        final: Bool
+    ) -> SublimeTextApplyResult {
+        guard targetIsCurrent() else { return .rejected }
+        let requestID = UUID().uuidString.lowercased()
+        let request: [String: Any] = [
+            "version": Self.protocolVersion,
+            "command": "stream_update",
+            "request_id": requestID,
+            "token": token,
+            "generation": generation,
+            "replacement": replacement,
+            "final": final,
+            "expires_at": Date().timeIntervalSince1970 + Self.applyLifetime,
+        ]
+        if let response = transact(request, timeoutSeconds: 3) {
+            guard response.generation == generation else { return .rejected }
+            return response.ok ? .applied : .rejected
+        }
+        guard let status = transact([
+            "version": Self.protocolVersion,
+            "command": "status",
+            "request_id": UUID().uuidString.lowercased(),
+            "apply_request_id": requestID,
+        ], timeoutSeconds: 1),
+              status.generation == generation,
+              status.ok,
+              status.known == true
+        else { return .unknown }
+        return status.resultOK == true ? .applied : .rejected
+    }
+
+    func streamCancel(
+        token: String, generation: String
+    ) -> SublimeStreamCancelResult {
+        guard targetIsRunning() else { return .failed }
+        let requestID = UUID().uuidString.lowercased()
+        let request: [String: Any] = [
+            "version": Self.protocolVersion,
+            "command": "stream_cancel",
+            "request_id": requestID,
+            "token": token,
+            "generation": generation,
+        ]
+        if let response = transact(request, timeoutSeconds: 3) {
+            guard response.generation == generation else { return .failed }
+            guard response.ok else { return .failed }
+            return response.restored == true ? .restored : .noDraft
+        }
+        guard let status = transact([
+            "version": Self.protocolVersion,
+            "command": "status",
+            "request_id": UUID().uuidString.lowercased(),
+            "apply_request_id": requestID,
+        ], timeoutSeconds: 1),
+              status.generation == generation,
+              status.ok,
+              status.known == true
+        else { return .unknown }
+        return status.resultOK == true ? .restored : .failed
     }
 
     private func targetIsCurrent() -> Bool {
@@ -486,6 +720,7 @@ struct SublimeCommandClient {
                 Darwin.connect(descriptor, address, length) == 0
             }),
               connected,
+              connectedPeerIsTrusted(descriptor),
               !isCancelled()
         else { return nil }
 
@@ -501,5 +736,37 @@ struct SublimeCommandClient {
               response.editorPID == Int(targetPID)
         else { return nil }
         return response
+    }
+
+    private func connectedPeerIsTrusted(_ descriptor: Int32) -> Bool {
+        var peerPID: pid_t = 0
+        var peerPIDSize = socklen_t(MemoryLayout.size(ofValue: peerPID))
+        guard getsockopt(
+            descriptor,
+            SOL_LOCAL,
+            LOCAL_PEERPID,
+            &peerPID,
+            &peerPIDSize) == 0
+        else { return false }
+
+        var processInfo = proc_bsdinfo()
+        let infoSize = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(
+            peerPID,
+            PROC_PIDTBSDINFO,
+            0,
+            &processInfo,
+            infoSize) == infoSize
+        else { return false }
+
+        let requirement =
+            "anchor apple generic and certificate leaf[subject.OU] "
+            + "= \"Z6D26JE4Y4\" and identifier \"plugin_host-3\""
+        return SublimeBridgePeerPolicy.isTrusted(
+            peerPID: peerPID,
+            parentPID: pid_t(processInfo.pbi_ppid),
+            expectedParentPID: targetPID,
+            signatureValid: SublimeTextSelectionBridge.runningCodeIsValid(
+                pid: peerPID, requirement: requirement))
     }
 }

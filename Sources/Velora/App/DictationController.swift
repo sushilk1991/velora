@@ -192,11 +192,11 @@ final class DictationController: NSObject {
     /// Opt-in session whose provisional transcript owns a bounded live draft
     /// at the original text cursor.
     private var streamSession: (
-        session: String, draft: StreamTypingSession, mode: String?)?
+        session: String, draft: LiveStreamDraftSession, mode: String?)?
     /// Keeps a cancelled session alive until any in-flight Unicode delivery
     /// has finished and its still-owned original selection is restored.
     private var streamCancellation: (
-        session: String, draft: StreamTypingSession, mode: String?)?
+        session: String, draft: LiveStreamDraftSession, mode: String?)?
     private struct DeferredStreamFinal {
         let session: String
         let text: String
@@ -815,6 +815,9 @@ final class DictationController: NSObject {
                 case .failure(.multipleSelections):
                     self.showEditStartError(
                         "Select one text range, then speak an edit")
+                case .failure(.selectionTooLong):
+                    self.showEditStartError(
+                        "Select a shorter text range, then speak an edit")
                 case .failure(.unsupportedView):
                     self.showEditStartError(
                         "Select text in a Sublime document, not Find or Console")
@@ -2198,7 +2201,7 @@ final class DictationController: NSObject {
     }
 
     private func finishStreamInsertion(
-        stream: (session: String, draft: StreamTypingSession, mode: String?),
+        stream: (session: String, draft: LiveStreamDraftSession, mode: String?),
         text: String,
         raw: String,
         mode: String?,
@@ -2570,24 +2573,136 @@ extension DictationController: HotkeyMonitorDelegate {
     }
 
     private func beginStreamSession(locked: Bool) {
-        let app = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
-        let target = ScreenContext.streamTarget(of: app)
+        guard phase == .idle, sublimeCaptureID == nil else { return }
+        // Read the live owner first; the activation observer can trail a newly
+        // focused editor by one run-loop turn.
+        let app = NSWorkspace.shared.frontmostApplication
+            ?? contextTracker.frontmost
+        let nativeTarget = ScreenContext.streamTarget(of: app)
+        switch StreamTargetRouting.route(
+            bundleID: app?.bundleIdentifier,
+            nativeTargetAvailable: nativeTarget != nil
+        ) {
+        case .accessibility:
+            guard let nativeTarget else { return }
+            startStreamRecording(
+                draft: StreamTypingSession(target: nativeTarget),
+                app: app,
+                locked: locked)
+        case .sublime:
+            guard let app else { return }
+            beginSublimeStreamCapture(
+                app: app,
+                locked: locked,
+                inputGeneration: UserInputActivity.snapshot())
+        case .unavailable:
+            veloraLog(
+                "Velora: stream target unavailable in "
+                    + (app?.bundleIdentifier ?? "unknown"))
+            showNotice(
+                symbol: "text.cursor",
+                message: "Stream Typing isn't available in this field")
+        }
+    }
+
+    private func beginSublimeStreamCapture(
+        app: NSRunningApplication,
+        locked: Bool,
+        inputGeneration: UInt64
+    ) {
+        let captureID = UUID()
+        sublimeCaptureID = captureID
+        sublimeCaptureLocksRecording = locked
+        sublimeCaptureReleasedBeforeStart = false
+        sublimeQueue.async { [weak self] in
+            let result = SublimeTextSelectionBridge.captureStream(of: app)
+            DispatchQueue.main.async {
+                guard let self, self.sublimeCaptureID == captureID else {
+                    if case .success(let capture) = result {
+                        DispatchQueue.global(qos: .utility).async {
+                            _ = capture.token.cancel()
+                        }
+                    }
+                    return
+                }
+                let captureLocksRecording = self.sublimeCaptureLocksRecording
+                let releasedBeforeStart =
+                    self.sublimeCaptureReleasedBeforeStart
+                self.clearSublimeCapture()
+                guard self.phase == .idle,
+                      inputGeneration == UserInputActivity.snapshot(),
+                      NSWorkspace.shared.frontmostApplication?
+                          .processIdentifier == app.processIdentifier
+                else {
+                    if case .success(let capture) = result {
+                        DispatchQueue.global(qos: .utility).async {
+                            _ = capture.token.cancel()
+                        }
+                    }
+                    return
+                }
+                switch result {
+                case .success(let capture):
+                    guard !releasedBeforeStart else {
+                        DispatchQueue.global(qos: .utility).async {
+                            _ = capture.token.cancel()
+                        }
+                        self.showNotice(
+                            symbol: "text.cursor",
+                            message: "Sublime Text took too long — retry Stream")
+                        return
+                    }
+                    self.startStreamRecording(
+                        draft: SublimeStreamTypingSession(
+                            capture: capture,
+                            inputGeneration: inputGeneration),
+                        app: app,
+                        locked: captureLocksRecording)
+                case .failure(.multipleSelections):
+                    self.showNotice(
+                        symbol: "text.cursor",
+                        message: "Use one cursor or selection for Stream")
+                case .failure(.selectionTooLong):
+                    self.showNotice(
+                        symbol: "text.cursor",
+                        message: "Select fewer than 8,000 characters for Stream")
+                case .failure(.unsupportedView):
+                    self.showNotice(
+                        symbol: "text.cursor",
+                        message: "Stream works in a Sublime document, not Find or Console")
+                case .failure(.integrationNeedsRestart):
+                    self.showNotice(
+                        symbol: "arrow.clockwise",
+                        message: "Restart Sublime Text once, then retry Stream")
+                case .failure(.emptySelection),
+                     .failure(.integrationUnavailable):
+                    self.showNotice(
+                        symbol: "text.cursor",
+                        message: "Couldn't connect Stream to Sublime Text")
+                }
+            }
+        }
+    }
+
+    private func startStreamRecording(
+        draft: LiveStreamDraftSession,
+        app: NSRunningApplication?,
+        locked: Bool
+    ) {
         let mode = ModeApplicationIndex.shared.modeName(
             forBundleID: app?.bundleIdentifier)
             ?? ModeCategory.displayName(forBundleID: app?.bundleIdentifier)
-        let draft = StreamTypingSession(target: target)
         guard startRecording(
             locked: locked,
             hudLabel: "Stream",
-            // Unsupported AX targets still get the polished final through the
-            // ordinary insertion path; do not spend Whisper cycles generating
-            // previews that cannot be rendered safely.
-            streamTyping: target != nil)
-        else { return }
+            streamTyping: true)
+        else {
+            draft.cancel(completion: nil)
+            return
+        }
         streamSession = (session: sessionID, draft: draft, mode: mode)
         NSLog(
-            "Velora: stream session started — liveTarget=%@ app=%@",
-            target == nil ? "unavailable" : "owned",
+            "Velora: stream session started — liveTarget=owned app=%@",
             app?.bundleIdentifier ?? "unknown")
     }
 
@@ -2614,6 +2729,10 @@ extension DictationController: HotkeyMonitorDelegate {
     }
 
     private func streamHotkeyDown() {
+        if sublimeCaptureID != nil {
+            cancel()
+            return
+        }
         if phase == .transcribing { resetIfStuckTranscribing() }
         let isStreamRecording = streamSession?.session == sessionID && isRecording
 
@@ -2637,8 +2756,18 @@ extension DictationController: HotkeyMonitorDelegate {
     }
 
     private func streamHotkeyUp() {
-        guard config.hotkeyMode == .hold,
-              streamSession?.session == sessionID else { return }
+        guard config.hotkeyMode == .hold else { return }
+        if phase == .idle, sublimeCaptureID != nil {
+            let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+            switch Self.delayedEditCaptureRelease(heldFor: heldFor) {
+            case .lockRecording:
+                sublimeCaptureLocksRecording = true
+            case .cancel:
+                sublimeCaptureReleasedBeforeStart = true
+            }
+            return
+        }
+        guard streamSession?.session == sessionID else { return }
         let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
         if case .starting(locked: false) = phase {
             if heldFor >= Self.tapThreshold {

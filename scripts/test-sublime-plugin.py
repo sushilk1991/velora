@@ -99,6 +99,9 @@ class View:
         commands = {
             "velora_voice_edit_capture": PLUGIN.VeloraVoiceEditCaptureCommand,
             "velora_voice_edit_apply": PLUGIN.VeloraVoiceEditApplyCommand,
+            "velora_stream_capture": PLUGIN.VeloraStreamCaptureCommand,
+            "velora_stream_update": PLUGIN.VeloraStreamUpdateCommand,
+            "velora_stream_cancel": PLUGIN.VeloraStreamCancelCommand,
         }
         commands[command](self).run(None, **args)
 
@@ -160,6 +163,7 @@ def load_plugin():
 
 ACTIVE_WINDOW = [None]
 PLUGIN = load_plugin()
+REAL_PEER_IS_VELORA = PLUGIN._peer_is_velora
 
 
 class SublimePluginTests(unittest.TestCase):
@@ -167,8 +171,10 @@ class SublimePluginTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         PLUGIN.BRIDGE_DIR = self.temporary.name
         PLUGIN._SESSIONS.clear()
+        PLUGIN._STREAM_SESSIONS.clear()
         PLUGIN._COMMAND_RESULTS.clear()
         PLUGIN._DELIVERY_RESULTS.clear()
+        PLUGIN._peer_is_velora = lambda connection: True
         self.view = View("TARGET", [Region(0, 6)])
         ACTIVE_WINDOW[0] = Window(self.view)
         PLUGIN.plugin_loaded()
@@ -222,6 +228,194 @@ class SublimePluginTests(unittest.TestCase):
             replacement=replacement,
             expires_at=expires_at or time.time() + 5,
         )
+
+    def stream_capture(self, view=None):
+        if view is not None:
+            ACTIVE_WINDOW[0].view = view
+        return self.request("stream_capture")
+
+    def stream_update(
+        self, token, replacement, *, final=False, expires_at=None
+    ):
+        return self.request(
+            "stream_update",
+            token=token,
+            generation=PLUGIN._GENERATION,
+            replacement=replacement,
+            final=final,
+            expires_at=(time.time() + 5 if expires_at is None else expires_at),
+        )
+
+    def stream_cancel(self, token):
+        return self.request(
+            "stream_cancel",
+            token=token,
+            generation=PLUGIN._GENERATION,
+        )
+
+    def test_stream_partials_replace_the_owned_draft_at_an_empty_caret(self):
+        view = View("before  after", [Region(7, 7)])
+        capture, captured = self.stream_capture(view)
+        self.assertTrue(captured["ok"])
+        self.assertEqual(captured["before"], "before ")
+        self.assertEqual(captured["after"], " after")
+
+        _, first = self.stream_update(capture["request_id"], "hello")
+        self.assertTrue(first["ok"])
+        self.assertEqual(view.text, "before hello after")
+
+        _, second = self.stream_update(capture["request_id"], "hello world")
+        self.assertTrue(second["ok"])
+        self.assertEqual(view.text, "before hello world after")
+
+    def test_stream_final_consumes_the_session_without_duplicating_text(self):
+        view = View("", [Region(0, 0)])
+        capture, captured = self.stream_capture(view)
+        self.assertTrue(captured["ok"])
+        _, provisional = self.stream_update(capture["request_id"], "draft")
+        self.assertTrue(provisional["ok"])
+        _, final = self.stream_update(
+            capture["request_id"], "polished", final=True
+        )
+        self.assertTrue(final["ok"])
+        self.assertEqual(view.text, "polished")
+        _, replay = self.stream_update(
+            capture["request_id"], "duplicate", final=True
+        )
+        self.assertEqual(replay["error"], "invalid_request")
+        self.assertEqual(view.text, "polished")
+
+    def test_stream_cancel_restores_original_text_and_selection_orientation(self):
+        view = View("before TARGET after", [Region(13, 7)])
+        capture, captured = self.stream_capture(view)
+        self.assertEqual(captured["text"], "TARGET")
+        _, provisional = self.stream_update(capture["request_id"], "draft")
+        self.assertTrue(provisional["ok"])
+        _, cancelled = self.stream_cancel(capture["request_id"])
+        self.assertTrue(cancelled["ok"])
+        self.assertTrue(cancelled["restored"])
+        self.assertEqual(view.text, "before TARGET after")
+        self.assertEqual(
+            [(region.a, region.b) for region in view.sel()],
+            [(13, 7)],
+        )
+
+    def test_stream_user_edit_or_cursor_move_fails_closed(self):
+        for mutate in (
+            lambda view: setattr(view, "changes", view.changes + 1),
+            lambda view: setattr(view, "selections", Selection([Region(0, 0)])),
+        ):
+            view = View("before  after", [Region(7, 7)])
+            capture, captured = self.stream_capture(view)
+            self.assertTrue(captured["ok"])
+            _, provisional = self.stream_update(capture["request_id"], "draft")
+            self.assertTrue(provisional["ok"])
+            mutate(view)
+            _, response = self.stream_update(capture["request_id"], "unsafe")
+            self.assertEqual(response["error"], "selection_changed")
+            self.assertEqual(view.text, "before draft after")
+
+    def test_stream_rejects_multiple_carets_and_non_document_views(self):
+        _, multiple = self.stream_capture(
+            View("same", [Region(0, 0), Region(4, 4)])
+        )
+        self.assertEqual(multiple["error"], "multiple_selections")
+        _, widget = self.stream_capture(
+            View("Find query", [Region(0, 0)], element="find_input")
+        )
+        self.assertEqual(widget["error"], "unsupported_view")
+
+    def test_expired_stream_session_cannot_mutate_or_restore_later(self):
+        view = View("before  after", [Region(7, 7)])
+        capture, captured = self.stream_capture(view)
+        self.assertTrue(captured["ok"])
+        PLUGIN._STREAM_SESSIONS[capture["request_id"]]["created_at"] = (
+            time.time() - PLUGIN.SESSION_LIFETIME_S - 1
+        )
+        _, cancelled = self.stream_cancel(capture["request_id"])
+        self.assertFalse(cancelled["ok"])
+        self.assertEqual(view.text, "before  after")
+
+    def test_rendered_stream_draft_never_expires_before_guarded_restore(self):
+        view = View("before  after", [Region(7, 7)])
+        capture, captured = self.stream_capture(view)
+        self.assertTrue(captured["ok"])
+        _, provisional = self.stream_update(capture["request_id"], "draft")
+        self.assertTrue(provisional["ok"])
+        PLUGIN._STREAM_SESSIONS[capture["request_id"]]["created_at"] = (
+            time.time() - PLUGIN.SESSION_LIFETIME_S - 1
+        )
+        _, cancelled = self.stream_cancel(capture["request_id"])
+        self.assertTrue(cancelled["ok"])
+        self.assertTrue(cancelled["restored"])
+        self.assertEqual(view.text, "before  after")
+
+    def test_expired_update_keeps_a_rendered_draft_available_for_restore(self):
+        view = View("before  after", [Region(7, 7)])
+        capture, captured = self.stream_capture(view)
+        self.assertTrue(captured["ok"])
+        _, provisional = self.stream_update(capture["request_id"], "draft")
+        self.assertTrue(provisional["ok"])
+
+        _, expired = self.stream_update(
+            capture["request_id"], "late", expires_at=time.time() - 1
+        )
+        self.assertEqual(expired["error"], "expired")
+        self.assertIn(capture["request_id"], PLUGIN._STREAM_SESSIONS)
+
+        _, cancelled = self.stream_cancel(capture["request_id"])
+        self.assertTrue(cancelled["ok"])
+        self.assertTrue(cancelled["restored"])
+        self.assertEqual(view.text, "before  after")
+
+    def test_timed_out_main_command_is_cancelled_before_late_dispatch(self):
+        sublime = sys.modules["sublime"]
+        original_set_timeout = sublime.set_timeout
+        original_timeout = PLUGIN.COMMAND_TIMEOUT_S
+        callbacks = []
+        mutations = []
+        try:
+            sublime.set_timeout = lambda callback, delay=0: callbacks.append(
+                callback
+            )
+            PLUGIN.COMMAND_TIMEOUT_S = 0.01
+            result = PLUGIN._run_on_main(
+                lambda: mutations.append("ran") or {"ok": True}
+            )
+            self.assertEqual(result["error"], "command_timeout")
+            self.assertEqual(len(callbacks), 1)
+            callbacks[0]()
+            self.assertFalse(mutations)
+        finally:
+            sublime.set_timeout = original_set_timeout
+            PLUGIN.COMMAND_TIMEOUT_S = original_timeout
+
+    def test_stream_capture_rejects_an_oversized_selection_before_reading_it(self):
+        oversized = "x" * (PLUGIN.MAX_STREAM_SELECTION + 1)
+        _, response = self.stream_capture(
+            View(oversized, [Region(0, len(oversized))])
+        )
+        self.assertEqual(response["error"], "selection_too_long")
+        self.assertFalse(PLUGIN._STREAM_SESSIONS)
+
+    def test_stream_cancel_result_is_journaled_for_response_loss_recovery(self):
+        view = View("", [Region(0, 0)])
+        capture, captured = self.stream_capture(view)
+        self.assertTrue(captured["ok"])
+        cancel_request, cancelled = self.stream_cancel(capture["request_id"])
+        self.assertTrue(cancelled["ok"])
+        _, status = self.request(
+            "status", apply_request_id=cancel_request["request_id"]
+        )
+        self.assertTrue(status["known"])
+        self.assertTrue(status["result_ok"])
+
+    def test_bridge_rejects_a_same_user_process_without_velora_signature(self):
+        PLUGIN._peer_is_velora = REAL_PEER_IS_VELORA
+        _, response = self.stream_capture(View("", [Region(0, 0)]))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response.get("error"), "unauthorized")
+        self.assertFalse(PLUGIN._STREAM_SESSIONS)
 
     def test_socket_capture_and_exact_replacement(self):
         self.view = View("before TARGET after", [Region(7, 13)])
