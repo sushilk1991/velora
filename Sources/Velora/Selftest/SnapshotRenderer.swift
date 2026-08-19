@@ -31,6 +31,7 @@ enum SnapshotRenderer {
         let cases: [(String, HUDState)] = [
             ("hud-standby", .standby),
             ("hud-listening", .listening),
+            ("hud-stream-preview", .listening),
             ("hud-listening-text", .listening),
             ("hud-listening-9m", .listening),
             ("hud-listening-10m", .listening),
@@ -97,7 +98,13 @@ enum SnapshotRenderer {
                 model.sessionContext = HUDSessionContext(
                     appIcon: appIcon
                         ?? NSWorkspace.shared.icon(forFile: context.appPath),
-                    modeName: context.modeName)
+                    modeName: name == "hud-stream-preview"
+                        ? "Stream Preview" : context.modeName,
+                    livePreview: name == "hud-stream-preview")
+                if name == "hud-stream-preview" {
+                    model.liveTranscript =
+                        "Let's meet at 6 p.m. and review the launch notes."
+                }
             }
             if case .meeting = state {
                 model.recordingStart = Date(

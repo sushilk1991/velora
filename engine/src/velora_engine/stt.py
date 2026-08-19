@@ -55,7 +55,10 @@ PREVIEW_PAUSE_S = 0.3
 PREVIEW_BASE_INTERVAL_S = 1.5
 PREVIEW_MAX_INTERVAL_S = 4.0
 PREVIEW_MIN_NEW_S = 0.8
-PREVIEW_WINDOW_S = 10.0
+# Keep every word in the current uncommitted span visible. A shorter rolling
+# window makes earlier provisional words disappear during continuous speech;
+# the hard-segment cap already gives this snapshot a strict upper bound.
+PREVIEW_WINDOW_S = HARD_SEGMENT_S
 PREVIEW_BACKOFF = 1.5
 # Below this total duration, finalize re-decodes the WHOLE clip exactly like the
 # pre-segmenting code (segments were preview-only) so short/medium quality is

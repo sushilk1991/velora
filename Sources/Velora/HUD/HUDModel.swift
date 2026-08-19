@@ -98,8 +98,9 @@ enum HUDEdge: String, Codable {
 struct HUDSessionContext: Equatable {
     let appIcon: NSImage?
     let modeName: String
+    let livePreview: Bool
 
-    init(appIcon: NSImage?, modeName: String) {
+    init(appIcon: NSImage?, modeName: String, livePreview: Bool = false) {
         if let source = appIcon, let normalized = source.copy() as? NSImage {
             normalized.size = NSSize(
                 width: HUDGeometry.chipIconSide,
@@ -109,10 +110,13 @@ struct HUDSessionContext: Equatable {
             self.appIcon = nil
         }
         self.modeName = modeName
+        self.livePreview = livePreview
     }
 
     static func == (lhs: HUDSessionContext, rhs: HUDSessionContext) -> Bool {
-        lhs.appIcon === rhs.appIcon && lhs.modeName == rhs.modeName
+        lhs.appIcon === rhs.appIcon
+            && lhs.modeName == rhs.modeName
+            && lhs.livePreview == rhs.livePreview
     }
 }
 
@@ -131,6 +135,9 @@ final class HUDModel: ObservableObject {
     /// Context chip contents for the active session (nil until a session
     /// begins; the chip is simply absent then).
     @Published var sessionContext: HUDSessionContext?
+    /// Provisional text shown only for opaque Stream targets. It never enters
+    /// the target field until the authoritative final is ready.
+    @Published var liveTranscript = ""
     /// Waveform levels (not @Published — the Canvas polls it every frame via
     /// TimelineView; publishing per audio buffer would churn SwiftUI).
     let levels = WaveformLevelStore()
@@ -153,6 +160,7 @@ final class HUDModel: ObservableObject {
     /// Resets per-session UI state as a new recording starts.
     func beginSession(context: HUDSessionContext?) {
         sessionContext = context
+        liveTranscript = ""
     }
 
     private func resetElapsedTimer() {

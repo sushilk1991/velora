@@ -138,6 +138,13 @@ def test_terminal_long_prose_uses_smart_llm(config):
     assert "VERBATIM" in (gate.system_prompt or "")
 
 
+def test_cleanup_prompt_executes_unambiguous_meta_edit_commands():
+    prompt = formatting.STATIC_SYSTEM_PROMPT
+    assert "change the previous line" in prompt.lower()
+    assert "6pm not 3pm" in prompt.lower()
+    assert "meta-edit" in prompt.lower()
+
+
 def test_terminal_issue_report_allows_inferred_numbered_structure(config):
     raw = (
         "there are a few issues with this app the first is that saving is slow "

@@ -6,17 +6,20 @@ enum StreamTargetRouting {
         case accessibility
         case sublime
         case keystroke
+        case preview
         case unavailable
     }
 
     static func route(
         bundleID: String?,
         nativeTargetAvailable: Bool,
-        keystrokeTargetAvailable: Bool = false
+        keystrokeTargetAvailable: Bool = false,
+        previewTargetAvailable: Bool = false
     ) -> Route {
         if nativeTargetAvailable { return .accessibility }
         if bundleID == SublimeTextSelectionBridge.bundleID { return .sublime }
         if keystrokeTargetAvailable { return .keystroke }
+        if previewTargetAvailable { return .preview }
         return .unavailable
     }
 }
@@ -54,6 +57,20 @@ enum KeystrokeStreamDraftPolicy {
 enum StreamInputOwnership {
     static func isCurrent(_ capturedGeneration: UInt64) -> Bool {
         capturedGeneration == UserInputActivity.snapshot()
+    }
+}
+
+enum StreamPreviewOwnershipPolicy {
+    static func isCurrent(
+        capturedGeneration: UInt64,
+        currentGeneration: UInt64,
+        capturedBundleID: String,
+        frontmostBundleID: String?,
+        focusedElementMatches: Bool
+    ) -> Bool {
+        capturedGeneration == currentGeneration
+            && frontmostBundleID == capturedBundleID
+            && focusedElementMatches
     }
 }
 
@@ -745,6 +762,7 @@ final class KeystrokeStreamTypingSession: LiveStreamDraftSession {
 
 protocol LiveStreamDraftSession: AnyObject {
     var hasRenderedDraft: Bool { get }
+    var finalInsertionTarget: ScreenStreamPreviewTarget? { get }
     func update(_ text: String, mode: String?)
     func finish(
         _ text: String,
@@ -754,7 +772,69 @@ protocol LiveStreamDraftSession: AnyObject {
         completion: ((StreamTypingSession.CancellationResult) -> Void)?)
 }
 
+extension LiveStreamDraftSession {
+    var finalInsertionTarget: ScreenStreamPreviewTarget? { nil }
+}
+
 extension StreamTypingSession: LiveStreamDraftSession {}
+
+/// Safe fallback for terminal and canvas-backed inputs whose live text is not
+/// readable through Accessibility. Provisional revisions stay inside Velora's
+/// HUD; the authoritative final is inserted once by the normal delivery path.
+/// This deliberately never sends blind Backspaces into an opaque field.
+final class StreamPreviewTypingSession: LiveStreamDraftSession {
+    let finalInsertionTarget: ScreenStreamPreviewTarget?
+    private let ownershipCheck: () -> Bool
+    private let render: (String) -> Void
+    private var rendered = ""
+
+    init(
+        target: ScreenStreamPreviewTarget,
+        inputGeneration: UInt64 = UserInputActivity.snapshot(),
+        ownershipCheck: (() -> Bool)? = nil,
+        render: @escaping (String) -> Void
+    ) {
+        self.finalInsertionTarget = target
+        self.ownershipCheck = ownershipCheck ?? {
+            ScreenContext.streamPreviewTargetIsCurrent(
+                target,
+                inputGeneration: inputGeneration)
+        }
+        self.render = render
+    }
+
+    var hasRenderedDraft: Bool { !rendered.isEmpty }
+
+    func update(_ text: String, mode: String?) {
+        guard text != rendered else { return }
+        rendered = text
+        render(text)
+    }
+
+    func finish(
+        _ text: String,
+        mode: String?,
+        completion: @escaping (StreamTypingSession.FinishResult) -> Void
+    ) {
+        rendered = ""
+        render("")
+        guard ownershipCheck() else {
+            completion(.ownershipLost)
+            return
+        }
+        // No target draft exists to replace. Ask the controller to use the
+        // normal final-only insertion path after clearing the preview.
+        completion(.unavailable)
+    }
+
+    func cancel(
+        completion: ((StreamTypingSession.CancellationResult) -> Void)?
+    ) {
+        rendered = ""
+        render("")
+        completion?(.noDraft)
+    }
+}
 
 /// Live-draft adapter for Sublime's opaque editor surface. All document reads
 /// and mutations stay inside the authenticated plugin; socket work runs on a

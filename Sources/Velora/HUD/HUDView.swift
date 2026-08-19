@@ -1,8 +1,9 @@
 import SwiftUI
 
 /// One waveform-first capsule that truthfully reflects listening,
-/// transcribing, success, and recovery states. It never displays provisional
-/// transcript text; the target app receives only the authoritative final.
+/// transcribing, success, and recovery states. Ordinary dictation stays
+/// waveform-only; opaque Stream targets use the capsule for a non-mutating
+/// live preview before one authoritative final insertion.
 struct HUDView: View {
     @ObservedObject var model: HUDModel
 
@@ -43,6 +44,13 @@ struct HUDView: View {
         case .standby:
             return (HUDGeometry.standbySize, true)
         case .listening, .transcribing:
+            if context?.livePreview == true {
+                return (
+                    CGSize(
+                        width: HUDGeometry.maxListeningWidth,
+                        height: HUDGeometry.height),
+                    true)
+            }
             let width = min(
                 max(
                     HUDGeometry.controlRowWidth(chipWidth: Self.chipWidth(for: context)),
@@ -208,7 +216,37 @@ struct HUDView: View {
 
     // MARK: - Listening and transcribing
 
-    private var recordingContent: some View {
+    @ViewBuilder private var recordingContent: some View {
+        if model.sessionContext?.livePreview == true {
+            livePreviewContent
+        } else {
+            recordingControls
+        }
+    }
+
+    private var livePreviewContent: some View {
+        HStack(spacing: VeloraSpacing.s) {
+            Image(systemName: "waveform")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(VeloraBrand.iconGradient)
+                .frame(width: 18)
+            Text(model.liveTranscript.isEmpty ? "Listening…" : model.liveTranscript)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(
+                    model.liveTranscript.isEmpty
+                        ? hudSecondaryText : hudPrimaryText)
+                .lineLimit(2)
+                .truncationMode(.head)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            timerText
+        }
+        .padding(.horizontal, HUDGeometry.contentInsetH)
+        .frame(
+            width: HUDGeometry.maxListeningWidth,
+            height: HUDGeometry.height)
+    }
+
+    private var recordingControls: some View {
         ZStack(alignment: .topLeading) {
             contextChip
                 .frame(

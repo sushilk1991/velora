@@ -6084,6 +6084,17 @@ enum Selftest {
         expect(
             oversizedIcon.size == NSSize(width: 512, height: 512),
             "HUD icon normalization does not mutate the source app icon")
+        let previewContext = HUDSessionContext(
+            appIcon: nil, modeName: "Stream Preview", livePreview: true)
+        expect(
+            HUDView.capsuleMetrics(
+                for: .listening, context: previewContext).size.width
+                == HUDGeometry.maxListeningWidth,
+            "opaque-target Stream preview reserves the bounded wide capsule")
+        expect(
+            previewContext != HUDSessionContext(
+                appIcon: nil, modeName: "Stream Preview"),
+            "live-preview state participates in the HUD geometry cache key")
         expect(HUDGeometry.meetingTimerWidth == 52,
                "meeting timer retains its fixed multi-hour column")
         expect(HUDGeometry.meetingWidth == 260,

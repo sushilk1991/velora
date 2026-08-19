@@ -17,7 +17,7 @@ import velora_engine.cleanup_process as cleanup_process_mod
 import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_process import CleanupProcess
-from velora_engine.server import _join_chunks, _numbering_restarts
+from velora_engine.server import _join_chunks, _numbering_restarts, _project_partial
 
 SEG1 = "alpha one two three four five six"
 SEG2 = "beta seven eight nine ten eleven twelve"
@@ -183,12 +183,18 @@ async def test_streaming_pipeline_end_to_end(engine, segments):
     partials = []
     for _ in range(4):
         await client.send_audio(AUDIO)
-    # both segments emit a partial (whisper-style running text)
-    while len(partials) < 2:
+    # Raw words appear immediately; each completed cleanup then replaces only
+    # the stable prefix while the unconfirmed tail remains visible.
+    while not partials or partials[-1] != f"<{SEG1}> <{SEG2}>":
         evt = await client.recv(timeout=5)
         if evt.get("event") == "partial":
             partials.append(evt["text"])
-    assert partials == [SEG1, f"{SEG1} {SEG2}"]
+    assert partials == [
+        SEG1,
+        f"<{SEG1}>",
+        f"<{SEG1}> {SEG2}",
+        f"<{SEG1}> <{SEG2}>",
+    ]
     assert eng.session is not None
     await client.send_json({"cmd": "stop", "session": "st1"})
 
@@ -580,6 +586,27 @@ def test_numbering_restart_detection_checks_model_output_without_rewriting_it():
     assert _numbering_restarts(["1. First.\n2. Second.", "1. Third."])
     assert _numbering_restarts(["1. First.\n2. Second.", "4. Fourth."])
     assert _numbering_restarts(["2. Second.", "3. Third."])
+
+
+def test_smart_partial_replaces_stable_raw_prefix_with_cleaned_text():
+    assert _project_partial(
+        "let's meet at 3 pm no wait make that 6 pm next topic",
+        ["let's meet at 3 pm no wait make that 6 pm"],
+        ["Let's meet at 6 p.m."],
+    ) == "Let's meet at 6 p.m. next topic"
+
+
+def test_smart_partial_keeps_raw_when_chunk_mapping_is_not_exact():
+    raw = "a newly decoded hypothesis"
+    assert _project_partial(raw, ["different segment"], ["Clean."]) == raw
+
+
+def test_smart_partial_uses_only_contiguous_completed_chunks():
+    assert _project_partial(
+        f"{SEG1} {SEG2} {TAIL}",
+        [SEG1, SEG2],
+        ["Clean alpha."],
+    ) == f"Clean alpha. {SEG2} {TAIL}"
 
 
 async def test_streaming_numbering_restart_falls_back_to_whole_text(engine, monkeypatch):

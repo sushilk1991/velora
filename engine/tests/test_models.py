@@ -10,6 +10,18 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from velora_engine import models
 
 
+def test_ensure_downloaded_accepts_an_exact_local_snapshot(monkeypatch, tmp_path):
+    snapshot = tmp_path / "pinned-snapshot"
+    snapshot.mkdir()
+
+    def unexpected_download(**_kwargs):
+        raise AssertionError("a pinned local snapshot must not contact the Hub")
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", unexpected_download)
+
+    assert models.ensure_downloaded(str(snapshot)) == str(snapshot.resolve())
+
+
 def _write_valid_q8(monkeypatch, path: Path) -> None:
     payload = b"test q8 artifact"
     path.write_bytes(payload)

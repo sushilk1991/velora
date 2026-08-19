@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import statistics
 import subprocess
@@ -41,6 +43,28 @@ from velora_engine.formatting import (
 )
 
 MODEL_ID = "mlx-community/Qwen3.5-4B-MLX-8bit"
+MODEL_REVISION = "5319bbbe4f1cbe6c0b3c80f4f7de4f0338c3906d"
+S1_MINI_MODEL_ID = "superwhisper/s1-mini"
+S1_MINI_REVISION = "65f84bcda1d13df582c4a8443c1c5aa53c0c66db"
+PINNED_MODEL_REVISIONS = {
+    MODEL_ID: MODEL_REVISION,
+    S1_MINI_MODEL_ID: S1_MINI_REVISION,
+}
+PINNED_MODEL_WEIGHT_SHA256 = {
+    MODEL_ID: {
+        "model.safetensors":
+            "87c362fdb36bdee8e32ff5961bdceca58d26c2d9b00738543cc0e17e985b46ce",
+    },
+    S1_MINI_MODEL_ID: {
+        "model.safetensors":
+            "69d2057077ab4dc738aaaab75d2a8ffa141e3a09fb9d956198cfce46f381131a",
+    },
+}
+S1_MINI_SYSTEM_PROMPT = (
+    "You are a text normalizer for speech-to-text transcripts. The input begins "
+    "with a control line specifying the styling, structure, and context settings; "
+    "clean the transcript to match those settings and output only the cleaned text."
+)
 
 
 @dataclass(frozen=True)
@@ -85,6 +109,18 @@ CASES = (
         bundle_id="com.apple.Terminal",
         app_name="Terminal",
         required=("exact models", "live transcript"),
+    ),
+    Case(
+        "terminal_meta_edit_correction",
+        "I am just checking whether streaming content works or not. Yeah, it is working. "
+        "No, no, it is not working. But again, it feels like typing. So it's good. "
+        "I am confused that why this didn't work. in case of terminal. Also, let's meet "
+        "at 3pm. No, no, no, 6pm. 6pm not 3pm. Can you change the previous line and "
+        "make it 6pm?",
+        bundle_id="com.apple.Terminal",
+        app_name="Terminal",
+        required=("streaming content", "case of terminal", "let's meet at 6"),
+        forbidden=("3pm", "3 p.m.", "6pm not 3pm", "change the previous line"),
     ),
     Case(
         "names_and_numbers",
@@ -279,6 +315,98 @@ CASES = (
 )
 
 
+def s1_mini_prompt(case: Case) -> tuple[str, str]:
+    """Return S1-mini's documented input using production-observable context.
+
+    Velora has no explicit S1 prose/list preference today. The benchmark must
+    therefore use prose instead of leaking each fixture's expected list count
+    into the model request.
+    """
+    chat_bundles = {
+        "com.tinyspeck.slackmacgap",
+        "com.apple.MobileSMS",
+        "com.hnc.Discord",
+        "ru.keepcoder.Telegram",
+        "net.whatsapp.WhatsApp",
+    }
+    email_bundles = {
+        "com.apple.mail",
+        "com.microsoft.Outlook",
+        "com.readdle.SparkDesktop",
+        "com.readdle.smartemail-Mac",
+    }
+    styling = "semi-casual" if case.bundle_id in chat_bundles else "semi-formal"
+    structure = "prose"
+    context = "email" if case.bundle_id in email_bundles else "general"
+    control = (
+        f"[Styling: {styling}] [Structure: {structure}] [Context: {context}]"
+    )
+    return S1_MINI_SYSTEM_PROMPT, f"{control}\n{case.raw}"
+
+
+def resolve_benchmark_model(model_id: str) -> str:
+    """Resolve every repository model to an immutable local snapshot."""
+    local_path = Path(model_id).expanduser()
+    if local_path.exists():
+        return str(local_path.resolve())
+    revision = PINNED_MODEL_REVISIONS.get(model_id)
+    if revision is None:
+        raise ValueError(
+            f"benchmark model {model_id!r} has no immutable revision; "
+            "use a local snapshot or add a reviewed pin"
+        )
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        return snapshot_download(
+            repo_id=model_id,
+            revision=revision,
+            local_files_only=True,
+        )
+    except LocalEntryNotFoundError:
+        return snapshot_download(
+            repo_id=model_id,
+            revision=revision,
+        )
+
+
+def _file_sha256(path: Path) -> str:
+    resolved = path.resolve()
+    # Hugging Face stores LFS blobs under their SHA-256 object name. Using that
+    # content address avoids rereading multi-gigabyte weights on every run.
+    if (
+        resolved.parent.name == "blobs"
+        and re.fullmatch(r"[0-9a-f]{64}", resolved.name)
+    ):
+        return resolved.name
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def benchmark_model_evidence(
+    model_id: str, resolved_path: str
+) -> dict[str, Any]:
+    root = Path(resolved_path)
+    hashes = {
+        str(path.relative_to(root)): _file_sha256(path)
+        for path in sorted(root.rglob("*.safetensors"))
+    }
+    expected = PINNED_MODEL_WEIGHT_SHA256.get(model_id)
+    if expected is not None and hashes != expected:
+        raise RuntimeError(
+            f"weight hash mismatch for pinned benchmark model {model_id}: "
+            f"expected {expected}, got {hashes}"
+        )
+    return {
+        "resolved_revision": PINNED_MODEL_REVISIONS.get(model_id),
+        "weight_sha256": hashes,
+    }
+
+
 def validate(case: Case, output: str, applied: bool) -> list[str]:
     failures: list[str] = []
     if not applied:
@@ -457,9 +585,16 @@ async def _run_model(
     selected: set[str] | None,
     repeats: int,
 ) -> dict[str, Any]:
-    engine = CleanupProcess(model_id)
+    resolved_model = resolve_benchmark_model(model_id)
+    model_evidence = benchmark_model_evidence(model_id, resolved_model)
+    engine = CleanupProcess(resolved_model)
     started = time.perf_counter()
-    await engine.load_async(STATIC_SYSTEM_PROMPT)
+    warm_prompt = (
+        S1_MINI_SYSTEM_PROMPT
+        if model_id == S1_MINI_MODEL_ID
+        else STATIC_SYSTEM_PROMPT
+    )
+    await engine.load_async(warm_prompt)
     load_ms = int((time.perf_counter() - started) * 1000)
     after_load = await engine.memory_metrics(reset_peak=True)
     footprint_after_load = _physical_footprint(engine.pid)
@@ -500,23 +635,33 @@ async def _run_model(
                         and case.required_prompt not in (gate.system_prompt or "")
                     ):
                         case_failures.add(f"missing_prompt:{case.required_prompt}")
-                    candidates = build_prefill_prompt_candidates(
-                        config,
-                        bundle_id=case.bundle_id,
-                        app_name=case.app_name,
-                        explicit_mode=case.explicit_mode,
-                        romanize=gate.romanize,
-                    )
+                    if model_id == S1_MINI_MODEL_ID:
+                        request_prompt, request_text = s1_mini_prompt(case)
+                        control = request_text.split("\n", 1)[0]
+                        candidates = [
+                            (request_prompt, control + "\ntranscript"),
+                            (request_prompt, control + "\ndictation"),
+                        ]
+                    else:
+                        request_prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
+                        request_text = (
+                            gate.text
+                            if gate.romanize
+                            else encode_breaks(gate.text)
+                        )
+                        candidates = build_prefill_prompt_candidates(
+                            config,
+                            bundle_id=case.bundle_id,
+                            app_name=case.app_name,
+                            explicit_mode=case.explicit_mode,
+                            romanize=gate.romanize,
+                        )
                     results = []
                     outputs = []
                     for _ in range(repeats):
                         result = await engine.cleanup(
-                            (
-                                gate.text
-                                if gate.romanize
-                                else encode_breaks(gate.text)
-                            ),
-                            gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                            request_text,
+                            request_prompt,
                             timeout_ms=4000 if gate.romanize else None,
                             check_ratio=not gate.romanize,
                             allowed_terms=list(
@@ -572,6 +717,11 @@ async def _run_model(
                     "cache_hit": bool(results) and all(
                         result.cache_hit for result in results
                     ),
+                    "applied": bool(results) and all(
+                        result.applied for result in results
+                    ),
+                    "cleanup_result_text": results[0].text if results else "",
+                    "cleanup_reason": results[0].reason if results else None,
                     "unique_outputs": len(set(outputs)),
                     "output": outputs[0] if outputs else "",
                     "failures": sorted(case_failures),
@@ -599,6 +749,7 @@ async def _run_model(
     summary = {
         "event": "summary",
         "model": model_id,
+        **model_evidence,
         "cases": len(case_records),
         "failed_cases": [
             record["case"] for record in case_records if record["failures"]

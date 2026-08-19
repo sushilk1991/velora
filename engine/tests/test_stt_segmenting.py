@@ -278,17 +278,24 @@ def test_early_pause_preview_does_not_commit_segment_state(whisper):
     assert len(request.audio) == int((PREVIEW_MIN_SPAN_S + PREVIEW_PAUSE_S) * SAMPLE_RATE)
 
 
-def test_pending_preview_coalesces_to_latest_bounded_window(whisper):
+def test_pending_preview_keeps_the_full_uncommitted_span_until_hard_commit(whisper):
     backend, fake = whisper(["latest"], previews=True)
     feed_seconds(backend, PREVIEW_FIRST_S)
     first = backend.take_preview_request()
     assert first is not None
 
-    feed_seconds(backend, PREVIEW_WINDOW_S + 2)
+    # Stay just below the hard commit. A shorter rolling window would make
+    # words already shown in the Stream draft disappear until commit.
+    span_s = HARD_SEGMENT_S - 0.1
+    feed_seconds(backend, span_s - PREVIEW_FIRST_S)
     latest = backend.take_preview_request()
 
     assert latest is not None
-    assert len(latest.audio) == int(PREVIEW_WINDOW_S * SAMPLE_RATE)
+    assert PREVIEW_WINDOW_S == HARD_SEGMENT_S
+    assert len(latest.audio) >= int(
+        (span_s - stt_mod.PREVIEW_BASE_INTERVAL_S) * SAMPLE_RATE
+    )
+    assert len(latest.audio) <= int(span_s * SAMPLE_RATE)
     assert fake.calls == []
 
 

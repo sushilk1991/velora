@@ -85,6 +85,14 @@ struct ScreenKeystrokeStreamTarget {
     let boundary: TextSelectionBoundary?
 }
 
+/// Exact opaque field captured for Stream's non-mutating HUD preview. The
+/// element identity is retained so the final cannot land in another pane of
+/// the same terminal app.
+struct ScreenStreamPreviewTarget {
+    let bundleID: String
+    let element: AXUIElement
+}
+
 enum KeystrokeStreamTargetPolicy {
     static func mayCapture(
         role: String,
@@ -98,6 +106,27 @@ enum KeystrokeStreamTargetPolicy {
         guard isTextInput, editabilityProven else { return false }
         guard selectedRangeLength == 0 else { return false }
         return selectedText?.isEmpty ?? true
+    }
+}
+
+enum StreamPreviewTargetPolicy {
+    static func mayCapture(
+        bundleID: String,
+        role: String,
+        editabilityProven: Bool,
+        selectedRangeLength: Int?,
+        allowedBundleIDs: [String]
+    ) -> Bool {
+        let isAllowed = allowedBundleIDs.contains {
+            $0.caseInsensitiveCompare(bundleID) == .orderedSame
+        }
+        let isTextInput = role == kAXTextFieldRole
+            || role == kAXTextAreaRole
+            || role == kAXComboBoxRole
+        return isAllowed
+            && isTextInput
+            && editabilityProven
+            && selectedRangeLength == 0
     }
 }
 
@@ -499,6 +528,49 @@ enum ScreenContext {
             element: focused,
             location: selectedRange.location,
             boundary: selectionBoundary(of: focused))
+    }
+
+    /// Opaque terminal surfaces can accept a final insertion but cannot prove
+    /// ownership of a provisional range. They receive a live Velora preview,
+    /// never blind Backspaces, then the normal guarded final insertion.
+    static func streamPreviewTarget(
+        of app: NSRunningApplication?
+    ) -> ScreenStreamPreviewTarget? {
+        guard let app, let bundleID = app.bundleIdentifier,
+              let focused = focusedElement(of: app),
+              let role = axString(focused, kAXRoleAttribute),
+              let range = axRange(focused, kAXSelectedTextRangeAttribute)
+        else { return nil }
+        guard StreamPreviewTargetPolicy.mayCapture(
+            bundleID: bundleID,
+            role: role,
+            editabilityProven:
+                axAttributeIsSettable(focused, kAXValueAttribute)
+                || axBool(focused, kAXIsEditableAttribute) == true
+                || axElement(focused, kAXEditableAncestorAttribute) != nil
+                || axElement(focused, kAXHighestEditableAncestorAttribute) != nil,
+            selectedRangeLength: range.length,
+            allowedBundleIDs: AppConfig.shared.typingFallbackApps)
+        else { return nil }
+        return ScreenStreamPreviewTarget(
+            bundleID: bundleID,
+            element: focused)
+    }
+
+    static func streamPreviewTargetIsCurrent(
+        _ target: ScreenStreamPreviewTarget,
+        inputGeneration: UInt64
+    ) -> Bool {
+        let app = NSWorkspace.shared.frontmostApplication
+        let focused = focusedElement(of: app)
+        return StreamPreviewOwnershipPolicy.isCurrent(
+            capturedGeneration: inputGeneration,
+            currentGeneration: UserInputActivity.snapshot(),
+            capturedBundleID: target.bundleID,
+            frontmostBundleID: app?.bundleIdentifier,
+            focusedElementMatches: focused.map {
+                CFEqual($0, target.element)
+            } ?? false)
     }
 
     /// Proves the fallback caret is still immediately after the exact draft

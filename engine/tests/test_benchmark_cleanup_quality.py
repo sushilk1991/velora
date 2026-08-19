@@ -6,10 +6,68 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.benchmark_cleanup_quality import (  # noqa: E402
+    MODEL_ID,
+    MODEL_REVISION,
+    S1_MINI_MODEL_ID,
+    S1_MINI_REVISION,
     Case,
     evaluate_candidate,
+    resolve_benchmark_model,
+    s1_mini_prompt,
     validate,
 )
+
+
+def test_s1_mini_candidate_uses_exact_documented_control_shape():
+    system, user = s1_mini_prompt(Case(
+        "fixture",
+        "send the report by friday",
+        bundle_id="com.apple.mail",
+        numbered_items=3,
+    ))
+
+    assert system.startswith("You are a text normalizer")
+    assert user.startswith(
+        "[Styling: semi-formal] [Structure: prose] [Context: email]\n"
+    )
+    assert user.endswith("send the report by friday")
+
+
+def test_s1_mini_control_does_not_leak_the_expected_answer():
+    prose = s1_mini_prompt(Case(
+        "prose", "same input", numbered_items=0,
+    ))
+    list_expected = s1_mini_prompt(Case(
+        "list", "same input", numbered_items=3,
+    ))
+
+    assert prose == list_expected
+
+
+def test_benchmark_pins_baseline_and_candidate_snapshots(monkeypatch, tmp_path):
+    calls: list[dict] = []
+
+    def fake_snapshot_download(**kwargs):
+        calls.append(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(
+        "huggingface_hub.snapshot_download", fake_snapshot_download)
+
+    assert resolve_benchmark_model(MODEL_ID) == str(tmp_path)
+    assert resolve_benchmark_model(S1_MINI_MODEL_ID) == str(tmp_path)
+    assert calls == [
+        {
+            "repo_id": MODEL_ID,
+            "revision": MODEL_REVISION,
+            "local_files_only": True,
+        },
+        {
+            "repo_id": S1_MINI_MODEL_ID,
+            "revision": S1_MINI_REVISION,
+            "local_files_only": True,
+        },
+    ]
 
 
 def test_numbered_case_requires_expected_content_inside_list_items():

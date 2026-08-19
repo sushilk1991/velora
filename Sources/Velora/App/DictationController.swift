@@ -1370,6 +1370,7 @@ final class DictationController: NSObject {
     private func startRecording(
         locked: Bool, explicitMode: String? = nil, external: Bool = false,
         hudLabel: String? = nil, streamTyping: Bool = false,
+        livePreview: Bool = false,
         targetAppOverride: NSRunningApplication? = nil
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
@@ -1471,7 +1472,8 @@ final class DictationController: NSObject {
             appIcon: targetApp?.icon,
             modeName: hudLabel ?? explicitMode
                 ?? ModeApplicationIndex.shared.modeName(forBundleID: sessionContext?.bundleID)
-                ?? ModeCategory.displayName(forBundleID: sessionContext?.bundleID)))
+                ?? ModeCategory.displayName(forBundleID: sessionContext?.bundleID),
+            livePreview: livePreview))
 
         NSLog(
             "Velora: engine start session=%@ target=%@",
@@ -1965,7 +1967,8 @@ final class DictationController: NSObject {
         audio: String?,
         allowAutomaticInsertion: Bool = true,
         finalOutputAlreadyStaged: Bool = false,
-        historyAlreadyRecorded: Bool = false
+        historyAlreadyRecorded: Bool = false,
+        expectedTargetElement: AXUIElement? = nil
     ) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let context = sessionContext
@@ -2186,7 +2189,10 @@ final class DictationController: NSObject {
 
         let session = sessionID
         inserter.insert(
-            text, targetBundleID: context?.bundleID, mode: mode
+            text,
+            targetBundleID: context?.bundleID,
+            mode: mode,
+            expectedTargetElement: expectedTargetElement
         ) { [weak self] inserted in
             guard let self else { return }
             guard inserted else {
@@ -2284,7 +2290,9 @@ final class DictationController: NSObject {
                     cleanupWallMs: cleanupWallMs,
                     finalizationMs: finalizationMs, audio: audio,
                     finalOutputAlreadyStaged: true,
-                    historyAlreadyRecorded: true)
+                    historyAlreadyRecorded: true,
+                    expectedTargetElement:
+                        stream.draft.finalInsertionTarget?.element)
             case .ownershipLost:
                 self.phase = .idle
                 self.showNotice(
@@ -2592,10 +2600,15 @@ extension DictationController: HotkeyMonitorDelegate {
         let keystrokeTarget = shouldCaptureKeystrokeTarget
             ? ScreenContext.keystrokeStreamTarget(of: app)
             : nil
+        let previewTarget = shouldCaptureKeystrokeTarget
+            && keystrokeTarget == nil
+            ? ScreenContext.streamPreviewTarget(of: app)
+            : nil
         switch StreamTargetRouting.route(
             bundleID: app?.bundleIdentifier,
             nativeTargetAvailable: nativeTarget != nil,
-            keystrokeTargetAvailable: keystrokeTarget != nil
+            keystrokeTargetAvailable: keystrokeTarget != nil,
+            previewTargetAvailable: previewTarget != nil
         ) {
         case .accessibility:
             guard let nativeTarget else { return }
@@ -2622,6 +2635,23 @@ extension DictationController: HotkeyMonitorDelegate {
                     inputGeneration: inputGeneration),
                 app: app,
                 locked: locked)
+        case .preview:
+            guard let previewTarget else { return }
+            veloraLog(
+                "Velora: stream target route=preview app="
+                    + previewTarget.bundleID)
+            let draft = StreamPreviewTypingSession(
+                target: previewTarget,
+                inputGeneration: inputGeneration
+            ) { [weak self] text in
+                self?.hud.model.liveTranscript = text
+            }
+            startStreamRecording(
+                draft: draft,
+                app: app,
+                locked: locked,
+                hudLabel: "Stream Preview",
+                livePreview: true)
         case .unavailable:
             veloraLog(
                 "Velora: stream target unavailable in "
@@ -2714,15 +2744,18 @@ extension DictationController: HotkeyMonitorDelegate {
     private func startStreamRecording(
         draft: LiveStreamDraftSession,
         app: NSRunningApplication?,
-        locked: Bool
+        locked: Bool,
+        hudLabel: String = "Stream",
+        livePreview: Bool = false
     ) {
         let mode = ModeApplicationIndex.shared.modeName(
             forBundleID: app?.bundleIdentifier)
             ?? ModeCategory.displayName(forBundleID: app?.bundleIdentifier)
         guard startRecording(
             locked: locked,
-            hudLabel: "Stream",
+            hudLabel: hudLabel,
             streamTyping: true,
+            livePreview: livePreview,
             targetAppOverride: app)
         else {
             draft.cancel(completion: nil)

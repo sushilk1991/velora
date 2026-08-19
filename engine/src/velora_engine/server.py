@@ -173,6 +173,31 @@ def _join_chunks(parts: list[str]) -> str:
     return out.strip() + "\n" * min(2, trailing)
 
 
+def _project_partial(
+    raw_partial: str,
+    raw_chunks: list[str],
+    cleaned_chunks: list[str],
+) -> str:
+    """Replace only an exact, contiguous stable raw prefix with its cleanup.
+
+    The unconfirmed Whisper tail remains visible and revisable. If the current
+    hypothesis no longer begins with the committed segment text, keep it raw:
+    publishing a guessed splice would be worse than a briefly unpolished one.
+    """
+    raw_partial = raw_partial.strip()
+    count = min(len(raw_chunks), len(cleaned_chunks))
+    if not raw_partial or count == 0:
+        return raw_partial
+    raw_prefix = " ".join(raw_chunks[:count]).strip()
+    if raw_partial == raw_prefix:
+        tail = ""
+    elif raw_partial.startswith(raw_prefix + " "):
+        tail = raw_partial[len(raw_prefix) + 1 :]
+    else:
+        return raw_partial
+    return _join_chunks(cleaned_chunks[:count] + ([tail] if tail else []))
+
+
 def _numbering_restarts(parts: list[str]) -> bool:
     """Return True when independently cleaned chunks produce invalid numbering.
 
@@ -209,6 +234,7 @@ class Session:
         self.feeder: asyncio.Task[None] | None = None
         self.preview_task: asyncio.Task[None] | None = None
         self.last_partial = ""
+        self.last_raw_partial = ""
         self.cancelled = False
         self.samples = 0
         self.dropped = 0  # frames dropped because the queue was full
@@ -1110,7 +1136,28 @@ class Engine:
 
     async def _emit_partial(self, session: Session, partial: str | None) -> None:
         """Send one current-session partial, shared by stream and preview lanes."""
-        text = (partial or "").strip()
+        raw = (partial or "").strip()
+        if raw:
+            session.last_raw_partial = raw
+        await self._emit_projected_partial(session)
+
+    async def _emit_projected_partial(self, session: Session) -> None:
+        """Publish cleaned stable chunks plus the latest unconfirmed ASR tail."""
+        cleaned: list[str] = []
+        for task in session.chunk_tasks:
+            if (
+                not task.done()
+                or task.cancelled()
+                or task.exception() is not None
+                or not isinstance(task.result(), _ChunkResult)
+            ):
+                break
+            cleaned.append(task.result().text)
+        text = _project_partial(
+            session.last_raw_partial,
+            session.chunk_raws,
+            cleaned,
+        )
         if (
             not text
             or text == session.last_partial
@@ -1615,7 +1662,23 @@ class Engine:
             )
         )
         session.chunk_cancel_events[task] = cancel_event
+        task.add_done_callback(
+            lambda completed: self._chunk_cleanup_completed(session, completed)
+        )
         return task
+
+    def _chunk_cleanup_completed(
+        self,
+        session: Session,
+        task: asyncio.Task[_ChunkResult],
+    ) -> None:
+        if task.cancelled() or task.exception() is not None:
+            return
+        # The callback runs on the engine event loop. Re-projecting uses only
+        # tasks still present in the session's contiguous chunk list, so a
+        # cancelled task replaced by a cross-boundary correction cannot leak
+        # stale text back into the draft.
+        asyncio.create_task(self._emit_projected_partial(session))
 
     async def _clean_chunk_task(
         self,

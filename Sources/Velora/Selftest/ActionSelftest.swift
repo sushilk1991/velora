@@ -1122,6 +1122,13 @@ extension Selftest {
             "an editable field without an exact AX range uses guarded keystroke revisions")
         expect(
             StreamTargetRouting.route(
+                bundleID: "com.cmuxterm.app",
+                nativeTargetAvailable: false,
+                keystrokeTargetAvailable: false,
+                previewTargetAvailable: true) == .preview,
+            "an opaque terminal receives a live HUD preview without blind backspaces")
+        expect(
+            StreamTargetRouting.route(
                 bundleID: "com.example.opaque",
                 nativeTargetAvailable: false,
                 keystrokeTargetAvailable: false) == .unavailable,
@@ -1146,6 +1153,20 @@ extension Selftest {
                 selectedRangeLength: 0,
                 selectedText: ""),
             "an editable text area with a readable empty caret may use keystrokes")
+        expect(StreamPreviewTargetPolicy.mayCapture(
+            bundleID: "com.cmuxterm.app",
+            role: kAXTextAreaRole,
+            editabilityProven: true,
+            selectedRangeLength: 0,
+            allowedBundleIDs: AppConfig.defaultTypingFallbackApps),
+            "a known opaque terminal may use a non-mutating live preview")
+        expect(!StreamPreviewTargetPolicy.mayCapture(
+            bundleID: "com.example.opaque",
+            role: kAXTextAreaRole,
+            editabilityProven: true,
+            selectedRangeLength: 0,
+            allowedBundleIDs: AppConfig.defaultTypingFallbackApps),
+            "an unknown opaque canvas cannot opt into terminal preview")
         expect(
             !KeystrokeStreamTargetPolicy.mayCapture(
                 role: kAXTextAreaRole,
@@ -1180,6 +1201,75 @@ extension Selftest {
                 && !KeystrokeStreamDraftPolicy.acceptsProvisional(
                     String(repeating: "a", count: 501)),
             "keystroke drafts are bounded before cancellation can require a key storm")
+
+        let previewElement = AXUIElementCreateApplication(getpid())
+        let previewTarget = ScreenStreamPreviewTarget(
+            bundleID: "com.cmuxterm.app",
+            element: previewElement)
+        expect(
+            StreamPreviewOwnershipPolicy.isCurrent(
+                capturedGeneration: 7,
+                currentGeneration: 7,
+                capturedBundleID: "com.cmuxterm.app",
+                frontmostBundleID: "com.cmuxterm.app",
+                focusedElementMatches: true),
+            "an unchanged opaque terminal field remains eligible for final insertion")
+        expect(
+            !StreamPreviewOwnershipPolicy.isCurrent(
+                capturedGeneration: 7,
+                currentGeneration: 7,
+                capturedBundleID: "com.cmuxterm.app",
+                frontmostBundleID: "com.cmuxterm.app",
+                focusedElementMatches: false),
+            "switching fields inside the same terminal app invalidates preview ownership")
+
+        var previewText = ""
+        let previewSession = StreamPreviewTypingSession(
+            target: previewTarget,
+            ownershipCheck: { true }
+        ) {
+            previewText = $0
+        }
+        previewSession.update("meet at 3", mode: nil)
+        previewSession.update("meet at 6", mode: nil)
+        expect(
+            previewText == "meet at 6" && previewSession.hasRenderedDraft,
+            "opaque-target preview replaces its owned HUD text as hypotheses change")
+        var previewFinish: StreamTypingSession.FinishResult?
+        previewSession.finish("Meet at 6.", mode: nil) {
+            previewFinish = $0
+        }
+        expect(
+            previewText.isEmpty
+                && !previewSession.hasRenderedDraft
+                && previewFinish == .unavailable
+                && previewSession.finalInsertionTarget.map {
+                    CFEqual($0.element, previewElement)
+                } == true,
+            "preview clears and carries its exact field into normal final insertion")
+        let switchedPreviewElement = AXUIElementCreateApplication(getpid() + 1)
+        expect(
+            !TextInserter.expectedTargetMatches(
+                previewElement,
+                current: switchedPreviewElement),
+            "a same-app field switch after preview completion blocks final delivery")
+
+        let previewInputGeneration = UserInputActivity.snapshot()
+        let movedPreviewSession = StreamPreviewTypingSession(
+            target: previewTarget,
+            inputGeneration: previewInputGeneration,
+            ownershipCheck: {
+                StreamInputOwnership.isCurrent(previewInputGeneration)
+            },
+            render: { _ in })
+        UserInputActivity.mark()
+        var movedPreviewFinish: StreamTypingSession.FinishResult?
+        movedPreviewSession.finish("Must only be copied", mode: nil) {
+            movedPreviewFinish = $0
+        }
+        expect(
+            movedPreviewFinish == .ownershipLost,
+            "physical input during terminal preview prevents a later final insertion")
 
         let fakeElement = AXUIElementCreateApplication(getpid())
         let fakeTarget = ScreenKeystrokeStreamTarget(

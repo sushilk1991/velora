@@ -179,16 +179,31 @@ final class TextInserter {
         _ text: String,
         targetBundleID: String?,
         mode: String? = nil,
+        expectedTargetElement: AXUIElement? = nil,
         completion: ((Bool) -> Void)? = nil
     ) {
-        guard Self.deliveryAllowed(targetBundleID: targetBundleID) else {
+        guard Self.deliveryAllowed(
+            targetBundleID: targetBundleID,
+            targetElement: expectedTargetElement
+        ) else {
             NSLog("Velora: insertion aborted before boundary read — target is not safe")
             completion?(false)
             return
         }
         let frontmost = NSWorkspace.shared.frontmostApplication
         let targetStillFocused = targetBundleID == nil || frontmost?.bundleIdentifier == targetBundleID
-        let targetElement = targetStillFocused ? ScreenContext.focusedElement(of: frontmost) : nil
+        let currentTargetElement = targetStillFocused
+            ? ScreenContext.focusedElement(of: frontmost)
+            : nil
+        guard Self.expectedTargetMatches(
+            expectedTargetElement,
+            current: currentTargetElement
+        ) else {
+            NSLog("Velora: insertion aborted — original target field changed")
+            completion?(false)
+            return
+        }
+        let targetElement = expectedTargetElement ?? currentTargetElement
         // When the target exposes no AX caret, fall back to the memory of what
         // we just delivered there so consecutive dictations don't concatenate.
         let boundary = targetElement.flatMap { ScreenContext.selectionBoundary(of: $0) }
@@ -655,6 +670,14 @@ final class TextInserter {
             index = end
         }
         return chunks
+    }
+
+    static func expectedTargetMatches(
+        _ expected: AXUIElement?, current: AXUIElement?
+    ) -> Bool {
+        guard let expected else { return true }
+        guard let current else { return false }
+        return CFEqual(expected, current)
     }
 
     private static func deliveryAllowed(

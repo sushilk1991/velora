@@ -68,9 +68,9 @@ Acceptance evidence:
 
 ### Kivi-informed Stream Typing
 
-Kivi's useful gap was the feeling of immediate progress at the real cursor. Velora now exposes that as a separate shortcut, `Control-Shift-S`, instead of changing normal dictation. Whisper previews are enabled only when the focused app exposes a settable, readable Accessibility range. Unsupported apps skip the extra preview work and receive the polished final through the existing insertion path.
+Kivi's useful gap was the feeling of immediate progress at the real cursor. Velora now exposes that as a separate shortcut, `Control-Shift-S`, instead of changing normal dictation. Exact Accessibility/plugin targets receive an owned, replaceable draft. Known terminal inputs whose text is opaque receive the same revisable transcript inside Velora's HUD and one polished final insertion; they never receive unverified Backspaces. Non-input surfaces remain unavailable.
 
-Each provisional update must prove the same app, Accessibility element, UTF-16 range, current draft, caret, and physical-input generation. Velora types provisional text without touching the clipboard. The final is staged on the clipboard before the last replacement. If focus, cursor, text, secure input, or a real key or click changes, Velora stops rewriting and keeps the final recoverable on the clipboard. Cancellation retains the session until a still-owned original selection has been restored. Stream Typing and Action Mode cannot post keyboard events at the same time.
+Each in-field provisional update must prove the same app, Accessibility element, UTF-16 range, current draft, caret, and physical-input generation. Velora types that provisional text without touching the clipboard. The final is staged on the clipboard before the last replacement. If focus, cursor, text, secure input, or a real key or click changes, Velora stops rewriting and keeps the final recoverable on the clipboard. Cancellation retains the session until a still-owned original selection has been restored. Opaque-target HUD previews own no target text and clear before normal final delivery. Stream Typing and Action Mode cannot post keyboard events at the same time.
 
 Kivi also advertises name learning, per-app personas, selected-text voice editing, and mixed Hindi-English speech. Velora already had correction learning with a visible receipt, app-specific modes, exact-range Safe Voice Edit, local Whisper language detection, Romanization, and multilingual quality gates. Those paths were kept rather than duplicated.
 
@@ -99,7 +99,7 @@ Also absent but lower priority: Superwhisper's full explicit language list, micr
 - FluidVoice's arbitrary voice-controlled `zsh -c` and unauthenticated loopback HTTP. Velora.app remains the only privileged executor; control stays on a peer-checked owner-only Unix socket.
 - Automatic speaker identity. Speaker labels may be local and session-scoped, but identity requires a separate consent and biometric-data design.
 - A model buffet or model swap based on a competitor claim. Keep `whisper-large-v3-turbo` and `Qwen3.5-4B-MLX-8bit` until a pinned candidate clears the existing quality, latency, memory, Romanization, multilingual, and saved-audio gates.
-- Provisional text in ordinary dictation or the HUD. Live text is confined to the separate Stream Typing mode, where exact range ownership and final recovery can be enforced.
+- Provisional text in ordinary dictation. Live text is confined to the separate Stream Typing mode: exact targets use an owned draft, while opaque known terminals use a non-mutating HUD preview and one final insertion.
 - Broader Action authority before postconditions and failure recovery are trustworthy.
 
 ## Proof limits and blockers

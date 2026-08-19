@@ -215,6 +215,12 @@ def ensure_downloaded(model_id: str) -> str:
     Local-first: a complete cached snapshot is used without any network
     request — the Hub is only contacted when files are actually missing.
     """
+    local_path = Path(model_id).expanduser()
+    if local_path.exists():
+        resolved = str(local_path.resolve())
+        log.info("model loaded from pinned local path %s", resolved)
+        return resolved
+
     from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
