@@ -580,11 +580,27 @@ final class TextInserter {
                 down.post(tap: .cghidEventTap)
                 up.post(tap: .cghidEventTap)
                 postedDeletes += 1
-                usleep(2_000)
                 // Backspace semantics are target-defined. Prove that exactly
                 // one more grapheme disappeared before sending another, so a
                 // control that deletes a word/cluster cannot reach user text.
-                guard deletionProgressCheck(postedDeletes) else {
+                // Applying the posted event is asynchronous in real controls;
+                // wait briefly for the exact expected state instead of
+                // mistaking ordinary event-loop latency for ownership loss.
+                let progressDeadline = DispatchTime.now()
+                    + .milliseconds(100)
+                var deletionApplied = false
+                repeat {
+                    guard deliveryAllowed() else {
+                        finish(false)
+                        return
+                    }
+                    if deletionProgressCheck(postedDeletes) {
+                        deletionApplied = true
+                        break
+                    }
+                    usleep(2_000)
+                } while DispatchTime.now() < progressDeadline
+                guard deletionApplied else {
                     finish(false)
                     return
                 }

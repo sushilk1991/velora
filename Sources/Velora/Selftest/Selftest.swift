@@ -198,9 +198,11 @@ enum Selftest {
             return
         }
         let bundleID = "com.apple.TextEdit"
-        guard NSRunningApplication.runningApplications(
-                withBundleIdentifier: bundleID).isEmpty
-        else {
+        let attachesPreparedFixture = ProcessInfo.processInfo.environment[
+            "VELORA_STREAM_TYPING_E2E_ATTACHED_FIXTURE"] == "1"
+        let runningTextEdit = NSRunningApplication.runningApplications(
+            withBundleIdentifier: bundleID)
+        guard attachesPreparedFixture || runningTextEdit.isEmpty else {
             expect(false, "Stream Typing E2E requires TextEdit to be closed")
             return
         }
@@ -218,39 +220,70 @@ enum Selftest {
         }
         defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
 
-        guard let textEditURL = NSWorkspace.shared.urlForApplication(
-                withBundleIdentifier: bundleID)
-        else {
-            expect(false, "Stream Typing E2E finds TextEdit")
-            return
+        let app: NSRunningApplication
+        let element: AXUIElement
+        let ownsApp: Bool
+        if attachesPreparedFixture {
+            guard let attached = runningTextEdit.first,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier
+                    == attached.processIdentifier,
+                  let focused = ScreenContext.focusedElement(of: attached)
+            else {
+                expect(false, "Stream Typing E2E attaches only to focused TextEdit")
+                return
+            }
+            app = attached
+            element = focused
+            ownsApp = false
+        } else {
+            guard let textEditURL = NSWorkspace.shared.urlForApplication(
+                    withBundleIdentifier: bundleID)
+            else {
+                expect(false, "Stream Typing E2E finds TextEdit")
+                return
+            }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = true
+            configuration.addsToRecentItems = false
+            var launchedApp: NSRunningApplication?
+            var launchFinished = false
+            var launchError: Error?
+            NSWorkspace.shared.open(
+                [fixtureURL], withApplicationAt: textEditURL,
+                configuration: configuration
+            ) { openedApp, error in
+                launchedApp = openedApp
+                launchError = error
+                launchFinished = true
+            }
+            guard waitUntil(timeout: 5, { launchFinished }), launchError == nil,
+                  let launchedApp
+            else {
+                launchedApp?.forceTerminate()
+                expect(false, "TextEdit opened the Stream Typing fixture")
+                return
+            }
+            app = launchedApp
+            ownsApp = true
+            guard waitUntil(timeout: 5, {
+                      if NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                          == bundleID {
+                          return true
+                      }
+                      _ = launchedApp.activate()
+                      return false
+                  }),
+                  let focused = ScreenContext.focusedElement(of: launchedApp)
+            else {
+                launchedApp.forceTerminate()
+                expect(false, "TextEdit focused the Stream Typing fixture")
+                return
+            }
+            element = focused
         }
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.addsToRecentItems = false
-        var launchedApp: NSRunningApplication?
-        var launchFinished = false
-        var launchError: Error?
-        NSWorkspace.shared.open(
-            [fixtureURL], withApplicationAt: textEditURL,
-            configuration: configuration
-        ) { app, error in
-            launchedApp = app
-            launchError = error
-            launchFinished = true
+        defer {
+            if ownsApp { app.forceTerminate() }
         }
-        guard waitUntil(timeout: 5, { launchFinished }), launchError == nil,
-              let app = launchedApp,
-              waitUntil(timeout: 5, {
-                  NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                      == bundleID
-              }),
-              let element = ScreenContext.focusedElement(of: app)
-        else {
-            launchedApp?.forceTerminate()
-            expect(false, "TextEdit opened the fixture with a focused text element")
-            return
-        }
-        defer { app.forceTerminate() }
 
         guard AXUIElementSetAttributeValue(
                 element, kAXValueAttribute as CFString, prefix as CFString) == .success
@@ -364,6 +397,99 @@ enum Selftest {
         expect(
             ScreenContext.stringValue(of: element) == polished + " draft",
             "cursor loss leaves the last visible draft untouched")
+
+        // Force the universal fallback adapter even though TextEdit also
+        // supports the preferred mutable-AX path. This is a signed, real-app
+        // proof that Unicode events revise one bounded draft and cancellation
+        // removes only that verified draft.
+        let beforeKeystrokes = polished + " draft"
+        var keystrokeCaret = CFRange(
+            location: beforeKeystrokes.utf16.count, length: 0)
+        guard let keystrokeCaretValue = AXValueCreate(
+                .cfRange, &keystrokeCaret),
+              AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString,
+                keystrokeCaretValue) == .success,
+              let keystrokeTarget = ScreenContext.keystrokeStreamTarget(of: app)
+        else {
+            expect(false, "the keystroke fallback captures a real editable control")
+            return
+        }
+        let fallback = KeystrokeStreamTypingSession(target: keystrokeTarget)
+        let firstFallback = TextInsertionBoundary.adjusted(
+            "live words", boundary: keystrokeTarget.boundary, mode: "Note")
+        fallback.update("live words", mode: "Note")
+        expect(waitUntil(timeout: 3) {
+            ScreenContext.keystrokeStreamOwnsDraft(
+                firstFallback, target: keystrokeTarget)
+        }, "the keystroke fallback types its first provisional transcript")
+
+        let revisedFallback = TextInsertionBoundary.adjusted(
+            "live words revised", boundary: keystrokeTarget.boundary,
+            mode: "Note")
+        fallback.update("live words revised", mode: "Note")
+        expect(waitUntil(timeout: 3) {
+            ScreenContext.keystrokeStreamOwnsDraft(
+                revisedFallback, target: keystrokeTarget)
+        }, "the keystroke fallback revises the owned provisional transcript")
+
+        let finalFallback = TextInsertionBoundary.adjusted(
+            "Live words, final.", boundary: keystrokeTarget.boundary,
+            mode: "Note")
+        var fallbackFinish: StreamTypingSession.FinishResult?
+        fallback.finish("Live words, final.", mode: "Note") {
+            fallbackFinish = $0
+        }
+        expect(waitUntil(timeout: 3) { fallbackFinish != nil },
+               "the keystroke fallback polished final completes")
+        let fallbackValue = ScreenContext.stringValue(of: element)
+        expect(
+            fallbackFinish == .applied,
+            "the keystroke fallback verifies its polished final")
+        expect(
+            fallbackValue == beforeKeystrokes + finalFallback,
+            "the keystroke fallback leaves one polished final")
+        if fallbackValue != beforeKeystrokes + finalFallback {
+            print(
+                "keystroke fallback mismatch — finish=\(String(describing: fallbackFinish)) "
+                    + "expected=\(String(reflecting: beforeKeystrokes + finalFallback)) "
+                    + "actual=\(String(reflecting: fallbackValue))")
+        }
+
+        let beforeFallbackCancel = beforeKeystrokes + finalFallback
+        var cancellationCaret = CFRange(
+            location: beforeFallbackCancel.utf16.count, length: 0)
+        guard let cancellationCaretValue = AXValueCreate(
+                .cfRange, &cancellationCaret),
+              AXUIElementSetAttributeValue(
+                element, kAXSelectedTextRangeAttribute as CFString,
+                cancellationCaretValue) == .success,
+              let fallbackCancelTarget = ScreenContext.keystrokeStreamTarget(of: app)
+        else {
+            expect(false, "the keystroke cancellation fixture captures its caret")
+            return
+        }
+        let fallbackCancel = KeystrokeStreamTypingSession(
+            target: fallbackCancelTarget)
+        let cancellationDraft = TextInsertionBoundary.adjusted(
+            "temporary words", boundary: fallbackCancelTarget.boundary,
+            mode: "Note")
+        fallbackCancel.update("temporary words", mode: "Note")
+        expect(waitUntil(timeout: 3) {
+            ScreenContext.keystrokeStreamOwnsDraft(
+                cancellationDraft, target: fallbackCancelTarget)
+        }, "the keystroke cancellation fixture owns its draft")
+        var fallbackCancellation: StreamTypingSession.CancellationResult?
+        fallbackCancel.cancel { fallbackCancellation = $0 }
+        expect(waitUntil(timeout: 3) { fallbackCancellation != nil },
+               "the keystroke fallback cancellation completes")
+        expect(
+            fallbackCancellation == .restored
+                && ScreenContext.stringValue(of: element)
+                    == beforeFallbackCancel
+                && ScreenContext.keystrokeStreamOwnsDraft(
+                    "", target: fallbackCancelTarget),
+            "the keystroke fallback cancellation restores the exact field")
     }
 
     // MARK: - Finder file transcription
