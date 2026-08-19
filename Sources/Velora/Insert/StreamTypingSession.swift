@@ -5,15 +5,49 @@ enum StreamTargetRouting {
     enum Route: Equatable {
         case accessibility
         case sublime
+        case keystroke
         case unavailable
     }
 
     static func route(
-        bundleID: String?, nativeTargetAvailable: Bool
+        bundleID: String?,
+        nativeTargetAvailable: Bool,
+        keystrokeTargetAvailable: Bool = false
     ) -> Route {
         if nativeTargetAvailable { return .accessibility }
         if bundleID == SublimeTextSelectionBridge.bundleID { return .sublime }
+        if keystrokeTargetAvailable { return .keystroke }
         return .unavailable
+    }
+}
+
+/// Minimal physical-key revision between two provisional transcripts. Swift
+/// `Character` is used deliberately: one Backspace should remove one extended
+/// grapheme (including an emoji sequence), not one UTF-8/UTF-16 code unit.
+struct KeystrokeStreamRevision: Equatable {
+    let deleteCount: Int
+    let insertion: String
+
+    static func delta(from old: String, to new: String) -> Self {
+        let oldCharacters = Array(old)
+        let newCharacters = Array(new)
+        var common = 0
+        while common < oldCharacters.count,
+              common < newCharacters.count,
+              oldCharacters[common] == newCharacters[common] {
+            common += 1
+        }
+        return Self(
+            deleteCount: oldCharacters.count - common,
+            insertion: String(newCharacters.dropFirst(common)))
+    }
+}
+
+enum KeystrokeStreamDraftPolicy {
+    static let maxProvisionalCharacters = 500
+
+    static func acceptsProvisional(_ text: String) -> Bool {
+        text.count <= maxProvisionalCharacters
     }
 }
 
@@ -454,6 +488,258 @@ final class StreamTypingSession {
         for abandonment: StreamDraftPlan.Abandonment?
     ) -> FinishResult {
         abandonment == .ownershipLost ? .ownershipLost : .unavailable
+    }
+}
+
+/// Live-draft adapter for ordinary editable controls that accept physical key
+/// events but do not expose a mutable AX selection range. It keeps the smallest
+/// grapheme suffix revision, then verifies only the bounded draft and caret.
+/// It stops permanently if the app, focused element, draft, Secure Input state,
+/// or observed physical-input generation changes.
+final class KeystrokeStreamTypingSession: LiveStreamDraftSession {
+    typealias RevisionDelivery = (
+        KeystrokeStreamRevision,
+        @escaping () -> Bool,
+        @escaping (Int) -> Bool,
+        @escaping (TextInserter.KeystrokeRevisionOutcome) -> Void
+    ) -> Void
+
+    private struct Request {
+        let text: String
+        let mode: String?
+        let isFinal: Bool
+        let completion: ((StreamTypingSession.FinishResult) -> Void)?
+    }
+
+    private let target: ScreenKeystrokeStreamTarget
+    private let inputGeneration: UInt64
+    private let ownershipCheck: (String) -> Bool
+    private let safetyCheck: () -> Bool
+    private let revisionDelivery: RevisionDelivery
+    private var plan = StreamDraftPlan()
+    private var pending: Request?
+    private var busy = false
+    private var cancelRequested = false
+    private var cancelCompletion:
+        ((StreamTypingSession.CancellationResult) -> Void)?
+
+    init(
+        target: ScreenKeystrokeStreamTarget,
+        inputGeneration: UInt64 = UserInputActivity.snapshot(),
+        inserter: TextInserter = TextInserter(),
+        ownershipCheck: ((String) -> Bool)? = nil,
+        safetyCheck: (() -> Bool)? = nil,
+        revisionDelivery: RevisionDelivery? = nil
+    ) {
+        self.target = target
+        self.inputGeneration = inputGeneration
+        self.ownershipCheck = ownershipCheck ?? { draft in
+            ScreenContext.keystrokeStreamOwnsDraft(
+                draft, target: target)
+        }
+        self.safetyCheck = safetyCheck ?? { !SecureInput.isActive }
+        self.revisionDelivery = revisionDelivery ?? {
+            revision, deliveryCheck, deletionProgressCheck, completion in
+            inserter.applyKeystrokeRevisionDetailed(
+                revision,
+                targetBundleID: target.bundleID,
+                targetElement: target.element,
+                deliveryCheck: deliveryCheck,
+                deletionProgressCheck: deletionProgressCheck,
+                completion: completion)
+        }
+    }
+
+    var hasRenderedDraft: Bool { plan.rendered != nil }
+
+    func update(_ text: String, mode: String?) {
+        guard !cancelRequested, !plan.isAbandoned,
+              KeystrokeStreamDraftPolicy.acceptsProvisional(text)
+        else { return }
+        enqueue(Request(
+            text: text, mode: mode, isFinal: false, completion: nil))
+    }
+
+    func finish(
+        _ text: String,
+        mode: String?,
+        completion: @escaping (StreamTypingSession.FinishResult) -> Void
+    ) {
+        guard !cancelRequested else {
+            completion(.ownershipLost)
+            return
+        }
+        guard !plan.isAbandoned else {
+            completion(finishResult)
+            return
+        }
+        guard KeystrokeStreamDraftPolicy.acceptsProvisional(text) else {
+            // Do not create a multi-second Backspace liability. Remove the
+            // still-verified bounded draft, then let the controller deliver
+            // the long final once through its normal paste path.
+            cancel { result in
+                completion(result == .failed ? .ownershipLost : .unavailable)
+            }
+            return
+        }
+        enqueue(Request(
+            text: text, mode: mode, isFinal: true, completion: completion))
+    }
+
+    func cancel(
+        completion: ((StreamTypingSession.CancellationResult) -> Void)? = nil
+    ) {
+        if let completion {
+            let existing = cancelCompletion
+            cancelCompletion = { result in
+                existing?(result)
+                completion(result)
+            }
+        }
+        cancelRequested = true
+        pending = nil
+        guard !busy else { return }
+        revertDraftIfOwned()
+    }
+
+    private func enqueue(_ request: Request) {
+        if pending?.isFinal == true, !request.isFinal { return }
+        pending = request
+        drain()
+    }
+
+    private func drain() {
+        guard !busy else { return }
+        if cancelRequested {
+            revertDraftIfOwned()
+            return
+        }
+        guard let request = pending else { return }
+        pending = nil
+
+        let delivery = TextInsertionBoundary.adjusted(
+            request.text,
+            boundary: target.boundary,
+            mode: request.mode)
+        let ownershipValid = targetIsCurrent(plan.rendered ?? "")
+        let operation = plan.next(delivery, ownershipValid: ownershipValid)
+        switch operation {
+        case .abandon:
+            request.completion?(finishResult)
+            drain()
+        case .noChange:
+            request.completion?(.applied)
+            drain()
+        case .insert:
+            apply(delivery, replacing: "", request: request)
+        case .replace(let previous, _):
+            apply(delivery, replacing: previous, request: request)
+        }
+    }
+
+    private func apply(
+        _ delivery: String,
+        replacing previous: String,
+        request: Request
+    ) {
+        let revision = KeystrokeStreamRevision.delta(
+            from: previous, to: delivery)
+        let previousCharacters = Array(previous)
+        busy = true
+        revisionDelivery(
+            revision,
+            { [weak self] in self?.inputIsUnchanged == true },
+            { [weak self] deletedCount in
+                guard let self,
+                      deletedCount <= previousCharacters.count
+                else { return false }
+                return self.targetIsCurrent(String(
+                    previousCharacters.dropLast(deletedCount)))
+            }
+        ) { [weak self] outcome in
+            guard let self else { return }
+            let ownershipStillValid = self.targetIsCurrent(
+                outcome.completed ? delivery : previous)
+            self.busy = false
+            if outcome.completed, ownershipStillValid {
+                self.plan.commit(delivery)
+                if !self.cancelRequested {
+                    request.completion?(.applied)
+                }
+            } else if !request.isFinal,
+                      !outcome.postedAnyEvent,
+                      ownershipStillValid {
+                // A transient delivery refusal before a partial posted
+                // anything leaves the previously verified draft untouched.
+                // Keep the session live so the next partial/final can retry.
+            } else {
+                self.plan.abandonAfterFailedDelivery(
+                    postedUTF16Units: outcome.postedAnyEvent ? 1 : 0,
+                    ownershipStillValid: ownershipStillValid)
+                if !self.cancelRequested {
+                    request.completion?(self.finishResult)
+                }
+            }
+            self.drain()
+        }
+    }
+
+    private func revertDraftIfOwned() {
+        guard !plan.isAbandoned else {
+            finishCancellation(.failed)
+            return
+        }
+        guard let rendered = plan.rendered else {
+            finishCancellation(targetIsCurrent("") ? .noDraft : .failed)
+            return
+        }
+        guard targetIsCurrent(rendered) else {
+            finishCancellation(.failed)
+            return
+        }
+
+        busy = true
+        let renderedCharacters = Array(rendered)
+        revisionDelivery(
+            KeystrokeStreamRevision.delta(from: rendered, to: ""),
+            { [weak self] in self?.inputIsUnchanged == true },
+            { [weak self] deletedCount in
+                guard let self,
+                      deletedCount <= renderedCharacters.count
+                else { return false }
+                return self.targetIsCurrent(String(
+                    renderedCharacters.dropLast(deletedCount)))
+            }
+        ) { [weak self] outcome in
+            guard let self else { return }
+            self.finishCancellation(
+                outcome.completed && self.targetIsCurrent("")
+                    ? .restored : .failed)
+        }
+    }
+
+    private func targetIsCurrent(_ expectedDraft: String) -> Bool {
+        inputIsUnchanged
+            && safetyCheck()
+            && ownershipCheck(expectedDraft)
+    }
+
+    private var inputIsUnchanged: Bool {
+        inputGeneration == UserInputActivity.snapshot()
+    }
+
+    private var finishResult: StreamTypingSession.FinishResult {
+        plan.abandonment == .ownershipLost ? .ownershipLost : .unavailable
+    }
+
+    private func finishCancellation(
+        _ result: StreamTypingSession.CancellationResult
+    ) {
+        busy = false
+        plan.abandon()
+        let completion = cancelCompletion
+        cancelCompletion = nil
+        completion?(result)
     }
 }
 

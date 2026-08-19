@@ -29,6 +29,16 @@ final class TextInserter {
         let postedUTF16Units: Int
     }
 
+    struct KeystrokeRevisionOutcome: Equatable {
+        let completed: Bool
+        let postedDeleteCount: Int
+        let postedUTF16Units: Int
+
+        var postedAnyEvent: Bool {
+            postedDeleteCount > 0 || postedUTF16Units > 0
+        }
+    }
+
     /// Delay before restoring the user's pasteboard (docs/SPEC.md). Long
     /// enough for the target app to service the synthetic ⌘V; restore is
     /// additionally guarded by a `changeCount` check so a late paste (or a
@@ -506,6 +516,108 @@ final class TextInserter {
                     completed: true,
                     postedUTF16Units: postedUTF16Units))
             }
+        }
+    }
+
+    /// Applies a live revision as physical Backspace presses followed by
+    /// layout-independent Unicode key events. The app, focused element,
+    /// Secure Input state, and caller's physical-input generation are checked
+    /// before every key so a changing focus cannot receive the remaining tail.
+    func applyKeystrokeRevisionDetailed(
+        _ revision: KeystrokeStreamRevision,
+        targetBundleID: String,
+        targetElement: AXUIElement,
+        deliveryCheck: @escaping () -> Bool,
+        deletionProgressCheck: @escaping (Int) -> Bool,
+        completion: @escaping (KeystrokeRevisionOutcome) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var postedDeletes = 0
+            var postedUTF16Units = 0
+
+            func finish(_ completed: Bool) {
+                let outcome = KeystrokeRevisionOutcome(
+                    completed: completed,
+                    postedDeleteCount: postedDeletes,
+                    postedUTF16Units: postedUTF16Units)
+                let delay = completed ? 0.06 : 0
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + delay
+                ) { completion(outcome) }
+            }
+
+            func deliveryAllowed() -> Bool {
+                Self.deliveryAllowed(
+                    targetBundleID: targetBundleID,
+                    targetElement: targetElement)
+                    && deliveryCheck()
+            }
+
+            guard deliveryAllowed() else {
+                finish(false)
+                return
+            }
+            let source = CGEventSource(stateID: .combinedSessionState)
+            for _ in 0..<revision.deleteCount {
+                guard deliveryAllowed(),
+                      let down = CGEvent(
+                        keyboardEventSource: source,
+                        virtualKey: 51,
+                        keyDown: true),
+                      let up = CGEvent(
+                        keyboardEventSource: source,
+                        virtualKey: 51,
+                        keyDown: false)
+                else {
+                    finish(false)
+                    return
+                }
+                // Stream can run while its shortcut modifiers are physically
+                // held. Never inherit those flags: Control-Backspace or
+                // Option-Backspace can delete much more than one grapheme.
+                down.flags = []
+                up.flags = []
+                down.post(tap: .cghidEventTap)
+                up.post(tap: .cghidEventTap)
+                postedDeletes += 1
+                usleep(2_000)
+                // Backspace semantics are target-defined. Prove that exactly
+                // one more grapheme disappeared before sending another, so a
+                // control that deletes a word/cluster cannot reach user text.
+                guard deletionProgressCheck(postedDeletes) else {
+                    finish(false)
+                    return
+                }
+            }
+
+            for var chunk in Self.unicodeTypingChunks(revision.insertion) {
+                guard deliveryAllowed(),
+                      let down = CGEvent(
+                        keyboardEventSource: source,
+                        virtualKey: 0,
+                        keyDown: true),
+                      let up = CGEvent(
+                        keyboardEventSource: source,
+                        virtualKey: 0,
+                        keyDown: false)
+                else {
+                    finish(false)
+                    return
+                }
+                down.keyboardSetUnicodeString(
+                    stringLength: chunk.count,
+                    unicodeString: &chunk)
+                up.keyboardSetUnicodeString(
+                    stringLength: chunk.count,
+                    unicodeString: &chunk)
+                down.flags = []
+                up.flags = []
+                down.post(tap: .cghidEventTap)
+                up.post(tap: .cghidEventTap)
+                postedUTF16Units += chunk.count
+                usleep(2_000)
+            }
+            finish(true)
         }
     }
 

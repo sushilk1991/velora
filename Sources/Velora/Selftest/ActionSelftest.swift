@@ -1105,18 +1105,310 @@ extension Selftest {
         expect(
             StreamTargetRouting.route(
                 bundleID: SublimeTextSelectionBridge.bundleID,
-                nativeTargetAvailable: false) == .sublime,
+                nativeTargetAvailable: false,
+                keystrokeTargetAvailable: true) == .sublime,
             "Sublime routes through its exact bridge when AX exposes only a window")
         expect(
             StreamTargetRouting.route(
                 bundleID: "com.apple.TextEdit",
-                nativeTargetAvailable: true) == .accessibility,
+                nativeTargetAvailable: true,
+                keystrokeTargetAvailable: true) == .accessibility,
             "native editable controls keep the direct Accessibility stream path")
         expect(
             StreamTargetRouting.route(
                 bundleID: "com.example.opaque",
-                nativeTargetAvailable: false) == .unavailable,
-            "an opaque unsupported field is rejected instead of becoming normal dictation")
+                nativeTargetAvailable: false,
+                keystrokeTargetAvailable: true) == .keystroke,
+            "an editable field without an exact AX range uses guarded keystroke revisions")
+        expect(
+            StreamTargetRouting.route(
+                bundleID: "com.example.opaque",
+                nativeTargetAvailable: false,
+                keystrokeTargetAvailable: false) == .unavailable,
+            "a focused non-input surface is rejected instead of receiving backspaces")
+
+        expect(
+            KeystrokeStreamRevision.delta(from: "hello", to: "hello world")
+                == KeystrokeStreamRevision(deleteCount: 0, insertion: " world"),
+            "an extending partial types only its new suffix")
+        expect(
+            KeystrokeStreamRevision.delta(from: "hello world", to: "hello there")
+                == KeystrokeStreamRevision(deleteCount: 5, insertion: "there"),
+            "a corrected partial backspaces only the changed grapheme suffix")
+        expect(
+            KeystrokeStreamRevision.delta(from: "go 👨‍👩‍👧", to: "go 🙂")
+                == KeystrokeStreamRevision(deleteCount: 1, insertion: "🙂"),
+            "a composed emoji is one physical Backspace revision")
+        expect(
+            KeystrokeStreamTargetPolicy.mayCapture(
+                role: kAXTextAreaRole,
+                editabilityProven: true,
+                selectedRangeLength: 0,
+                selectedText: ""),
+            "an editable text area with a readable empty caret may use keystrokes")
+        expect(
+            !KeystrokeStreamTargetPolicy.mayCapture(
+                role: kAXTextAreaRole,
+                editabilityProven: true,
+                selectedRangeLength: nil,
+                selectedText: ""),
+            "selected text alone is insufficient without a readable caret position")
+        expect(
+            !KeystrokeStreamTargetPolicy.mayCapture(
+                role: kAXTextFieldRole,
+                editabilityProven: true,
+                selectedRangeLength: 4,
+                selectedText: ""),
+            "conflicting selection metadata cannot erase four selected characters")
+        expect(
+            !KeystrokeStreamTargetPolicy.mayCapture(
+                role: "AXGroup",
+                editabilityProven: true,
+                selectedRangeLength: 0,
+                selectedText: ""),
+            "a settable non-text surface cannot receive Stream backspaces")
+        expect(
+            !KeystrokeStreamTargetPolicy.mayCapture(
+                role: kAXTextFieldRole,
+                editabilityProven: false,
+                selectedRangeLength: 0,
+                selectedText: ""),
+            "a read-only text field cannot receive Stream keystrokes")
+        expect(
+            KeystrokeStreamDraftPolicy.acceptsProvisional(
+                String(repeating: "a", count: 500))
+                && !KeystrokeStreamDraftPolicy.acceptsProvisional(
+                    String(repeating: "a", count: 501)),
+            "keystroke drafts are bounded before cancellation can require a key storm")
+
+        let fakeElement = AXUIElementCreateApplication(getpid())
+        let fakeTarget = ScreenKeystrokeStreamTarget(
+            bundleID: "com.example.fixture",
+            element: fakeElement,
+            location: 0,
+            boundary: nil)
+        var fakeDocument = ""
+        let fakeDelivery: KeystrokeStreamTypingSession.RevisionDelivery = {
+            revision, deliveryCheck, deletionProgressCheck, completion in
+            guard deliveryCheck() else {
+                completion(.init(
+                    completed: false,
+                    postedDeleteCount: 0,
+                    postedUTF16Units: 0))
+                return
+            }
+            var characters = Array(fakeDocument)
+            if revision.deleteCount > 0 {
+                for deletedCount in 1...revision.deleteCount {
+                    characters.removeLast()
+                    fakeDocument = String(characters)
+                    guard deletionProgressCheck(deletedCount) else {
+                        completion(.init(
+                            completed: false,
+                            postedDeleteCount: deletedCount,
+                            postedUTF16Units: 0))
+                        return
+                    }
+                }
+            }
+            fakeDocument += revision.insertion
+            completion(.init(
+                completed: true,
+                postedDeleteCount: revision.deleteCount,
+                postedUTF16Units: revision.insertion.utf16.count))
+        }
+        let keystrokeSession = KeystrokeStreamTypingSession(
+            target: fakeTarget,
+            ownershipCheck: { fakeDocument == $0 },
+            safetyCheck: { true },
+            revisionDelivery: fakeDelivery)
+        keystrokeSession.update("hello world", mode: nil)
+        keystrokeSession.update("hello there", mode: nil)
+        var keystrokeFinish: StreamTypingSession.FinishResult?
+        keystrokeSession.finish("Hello there.", mode: nil) {
+            keystrokeFinish = $0
+        }
+        expect(
+            fakeDocument == "Hello there." && keystrokeFinish == .applied,
+            "keystroke partials revise in place through a fully changed polished final")
+        var keystrokeCancel: StreamTypingSession.CancellationResult?
+        keystrokeSession.cancel { keystrokeCancel = $0 }
+        expect(
+            fakeDocument.isEmpty && keystrokeCancel == .restored,
+            "cancelling a verified keystroke draft removes only that draft")
+
+        var aggressiveDocument = "X"
+        var aggressiveDeleteEvents = 0
+        let aggressiveSession = KeystrokeStreamTypingSession(
+            target: fakeTarget,
+            ownershipCheck: { aggressiveDocument == "X" + $0 },
+            safetyCheck: { true },
+            revisionDelivery: {
+                revision, _, deletionProgressCheck, completion in
+                if revision.deleteCount == 0 {
+                    aggressiveDocument += revision.insertion
+                    completion(.init(
+                        completed: true,
+                        postedDeleteCount: 0,
+                        postedUTF16Units: revision.insertion.utf16.count))
+                    return
+                }
+                // Model a custom text control whose first Backspace removes
+                // the entire two-grapheme draft instead of one grapheme.
+                aggressiveDocument = "X"
+                aggressiveDeleteEvents = 1
+                let valid = deletionProgressCheck(1)
+                completion(.init(
+                    completed: valid,
+                    postedDeleteCount: 1,
+                    postedUTF16Units: 0))
+            })
+        aggressiveSession.update("ab", mode: nil)
+        aggressiveSession.update("", mode: nil)
+        expect(
+            aggressiveDocument == "X" && aggressiveDeleteEvents == 1,
+            "ownership is checked after each Backspace before user text can be deleted")
+
+        var inFlightDocument = ""
+        var deferredRevision: KeystrokeStreamRevision?
+        var deferredCompletion:
+            ((TextInserter.KeystrokeRevisionOutcome) -> Void)?
+        var inFlightDeliveryCount = 0
+        let inFlightSession = KeystrokeStreamTypingSession(
+            target: fakeTarget,
+            ownershipCheck: { inFlightDocument == $0 },
+            safetyCheck: { true },
+            revisionDelivery: {
+                revision, deliveryCheck, deletionProgressCheck, completion in
+                inFlightDeliveryCount += 1
+                if inFlightDeliveryCount == 1 {
+                    guard deliveryCheck() else { return }
+                    deferredRevision = revision
+                    deferredCompletion = completion
+                    return
+                }
+                var characters = Array(inFlightDocument)
+                if revision.deleteCount > 0 {
+                    for deletedCount in 1...revision.deleteCount {
+                        characters.removeLast()
+                        inFlightDocument = String(characters)
+                        guard deletionProgressCheck(deletedCount) else {
+                            completion(.init(
+                                completed: false,
+                                postedDeleteCount: deletedCount,
+                                postedUTF16Units: 0))
+                            return
+                        }
+                    }
+                }
+                inFlightDocument += revision.insertion
+                completion(.init(
+                    completed: true,
+                    postedDeleteCount: revision.deleteCount,
+                    postedUTF16Units: revision.insertion.utf16.count))
+            })
+        inFlightSession.update("hello", mode: nil)
+        var inFlightCancellation: StreamTypingSession.CancellationResult?
+        inFlightSession.cancel { inFlightCancellation = $0 }
+        if let revision = deferredRevision,
+           let completion = deferredCompletion {
+            inFlightDocument += revision.insertion
+            completion(.init(
+                completed: true,
+                postedDeleteCount: revision.deleteCount,
+                postedUTF16Units: revision.insertion.utf16.count))
+        }
+        expect(
+            inFlightDocument.isEmpty
+                && inFlightCancellation == .restored
+                && inFlightDeliveryCount == 2,
+            "cancel waits for an in-flight revision, then removes the verified draft")
+
+        let unavailableSession = KeystrokeStreamTypingSession(
+            target: fakeTarget,
+            ownershipCheck: { _ in true },
+            safetyCheck: { true },
+            revisionDelivery: { _, _, _, completion in
+                completion(.init(
+                    completed: false,
+                    postedDeleteCount: 0,
+                    postedUTF16Units: 0))
+            })
+        unavailableSession.update("partial", mode: nil)
+        var unavailableFinish: StreamTypingSession.FinishResult?
+        unavailableSession.finish("final", mode: nil) {
+            unavailableFinish = $0
+        }
+        expect(
+            unavailableFinish == .unavailable,
+            "a first keystroke write that posts nothing retains normal final insertion")
+
+        var recoveredDocument = ""
+        var deliveryAttempt = 0
+        let recoveredSession = KeystrokeStreamTypingSession(
+            target: fakeTarget,
+            ownershipCheck: { recoveredDocument == $0 },
+            safetyCheck: { true },
+            revisionDelivery: { revision, _, _, completion in
+                deliveryAttempt += 1
+                guard deliveryAttempt > 1 else {
+                    completion(.init(
+                        completed: false,
+                        postedDeleteCount: 0,
+                        postedUTF16Units: 0))
+                    return
+                }
+                recoveredDocument = revision.insertion
+                completion(.init(
+                    completed: true,
+                    postedDeleteCount: revision.deleteCount,
+                    postedUTF16Units: revision.insertion.utf16.count))
+            })
+        recoveredSession.update("missed partial", mode: nil)
+        var recoveredFinish: StreamTypingSession.FinishResult?
+        recoveredSession.finish("final", mode: nil) {
+            recoveredFinish = $0
+        }
+        expect(
+            recoveredDocument == "final" && recoveredFinish == .applied,
+            "a zero-event partial failure does not poison a later successful final")
+
+        var longFinalDocument = ""
+        let longFinalSession = KeystrokeStreamTypingSession(
+            target: fakeTarget,
+            ownershipCheck: { longFinalDocument == $0 },
+            safetyCheck: { true },
+            revisionDelivery: {
+                revision, _, deletionProgressCheck, completion in
+                var characters = Array(longFinalDocument)
+                if revision.deleteCount > 0 {
+                    for deletedCount in 1...revision.deleteCount {
+                        characters.removeLast()
+                        longFinalDocument = String(characters)
+                        guard deletionProgressCheck(deletedCount) else {
+                            completion(.init(
+                                completed: false,
+                                postedDeleteCount: deletedCount,
+                                postedUTF16Units: 0))
+                            return
+                        }
+                    }
+                }
+                longFinalDocument += revision.insertion
+                completion(.init(
+                    completed: true,
+                    postedDeleteCount: revision.deleteCount,
+                    postedUTF16Units: revision.insertion.utf16.count))
+            })
+        longFinalSession.update(
+            String(repeating: "d", count: 500), mode: nil)
+        var longFinalResult: StreamTypingSession.FinishResult?
+        longFinalSession.finish(
+            String(repeating: "z", count: 501), mode: nil
+        ) { longFinalResult = $0 }
+        expect(
+            longFinalDocument.isEmpty && longFinalResult == .unavailable,
+            "a long final removes the bounded draft before normal one-shot insertion")
 
         let capturedInputGeneration = UserInputActivity.snapshot()
         expect(

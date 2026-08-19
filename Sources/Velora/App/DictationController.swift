@@ -1369,7 +1369,8 @@ final class DictationController: NSObject {
     @discardableResult
     private func startRecording(
         locked: Bool, explicitMode: String? = nil, external: Bool = false,
-        hudLabel: String? = nil, streamTyping: Bool = false
+        hudLabel: String? = nil, streamTyping: Bool = false,
+        targetAppOverride: NSRunningApplication? = nil
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
         guard streamCancellation == nil else {
@@ -1437,9 +1438,13 @@ final class DictationController: NSObject {
 
         // Context chip: the target app's actual icon + the client-side
         // detected mode label (ModeCategory mirrors the engine's map).
+        let liveApp = NSWorkspace.shared.frontmostApplication
+        let liveAppIsExternal = liveApp?.processIdentifier
+            != ProcessInfo.processInfo.processIdentifier
+        let liveExternalApp = liveAppIsExternal ? liveApp : nil
         let targetApp = external
             ? nil
-            : (contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication)
+            : (targetAppOverride ?? liveExternalApp ?? contextTracker.frontmost)
 
         // Enrich the app context with on-screen entities (current file, the
         // person/channel you're messaging, …) via the Accessibility API, so the
@@ -1447,7 +1452,9 @@ final class DictationController: NSObject {
         // never blocks capture.
         var enriched = external
             ? AppContext(bundleID: nil, appName: "Local agent")
-            : contextTracker.current
+            : AppContext(
+                bundleID: targetApp?.bundleIdentifier,
+                appName: targetApp?.localizedName)
         if !external {
             enriched.entities = ScreenContext.entities(
                 for: targetApp, category: ModeCategory.category(forBundleID: enriched.bundleID))
@@ -2576,17 +2583,26 @@ extension DictationController: HotkeyMonitorDelegate {
         guard phase == .idle, sublimeCaptureID == nil else { return }
         // Read the live owner first; the activation observer can trail a newly
         // focused editor by one run-loop turn.
+        let inputGeneration = UserInputActivity.snapshot()
         let app = NSWorkspace.shared.frontmostApplication
             ?? contextTracker.frontmost
         let nativeTarget = ScreenContext.streamTarget(of: app)
+        let shouldCaptureKeystrokeTarget = nativeTarget == nil
+            && app?.bundleIdentifier != SublimeTextSelectionBridge.bundleID
+        let keystrokeTarget = shouldCaptureKeystrokeTarget
+            ? ScreenContext.keystrokeStreamTarget(of: app)
+            : nil
         switch StreamTargetRouting.route(
             bundleID: app?.bundleIdentifier,
-            nativeTargetAvailable: nativeTarget != nil
+            nativeTargetAvailable: nativeTarget != nil,
+            keystrokeTargetAvailable: keystrokeTarget != nil
         ) {
         case .accessibility:
             guard let nativeTarget else { return }
             startStreamRecording(
-                draft: StreamTypingSession(target: nativeTarget),
+                draft: StreamTypingSession(
+                    target: nativeTarget,
+                    inputGeneration: inputGeneration),
                 app: app,
                 locked: locked)
         case .sublime:
@@ -2594,7 +2610,18 @@ extension DictationController: HotkeyMonitorDelegate {
             beginSublimeStreamCapture(
                 app: app,
                 locked: locked,
-                inputGeneration: UserInputActivity.snapshot())
+                inputGeneration: inputGeneration)
+        case .keystroke:
+            guard let keystrokeTarget else { return }
+            veloraLog(
+                "Velora: stream target route=keystroke app="
+                    + keystrokeTarget.bundleID)
+            startStreamRecording(
+                draft: KeystrokeStreamTypingSession(
+                    target: keystrokeTarget,
+                    inputGeneration: inputGeneration),
+                app: app,
+                locked: locked)
         case .unavailable:
             veloraLog(
                 "Velora: stream target unavailable in "
@@ -2695,7 +2722,8 @@ extension DictationController: HotkeyMonitorDelegate {
         guard startRecording(
             locked: locked,
             hudLabel: "Stream",
-            streamTyping: true)
+            streamTyping: true,
+            targetAppOverride: app)
         else {
             draft.cancel(completion: nil)
             return

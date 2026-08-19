@@ -71,7 +71,34 @@ struct ScreenStreamTarget {
     let element: AXUIElement
     let location: Int
     let originalText: String
-    let boundary: TextSelectionBoundary
+    let boundary: TextSelectionBoundary?
+}
+
+/// A focused text control that accepts physical keys but does not expose a
+/// settable Accessibility selection range. This intentionally permits only a
+/// proven empty selection: without an exact range Velora could restore text,
+/// but not the user's original selection, after cancellation.
+struct ScreenKeystrokeStreamTarget {
+    let bundleID: String
+    let element: AXUIElement
+    let location: Int
+    let boundary: TextSelectionBoundary?
+}
+
+enum KeystrokeStreamTargetPolicy {
+    static func mayCapture(
+        role: String,
+        editabilityProven: Bool,
+        selectedRangeLength: Int?,
+        selectedText: String?
+    ) -> Bool {
+        let isTextInput = role == kAXTextFieldRole
+            || role == kAXTextAreaRole
+            || role == kAXComboBoxRole
+        guard isTextInput, editabilityProven else { return false }
+        guard selectedRangeLength == 0 else { return false }
+        return selectedText?.isEmpty ?? true
+    }
 }
 
 /// Extracts lightweight entities from the frontmost app using the macOS
@@ -422,8 +449,7 @@ enum ScreenContext {
               let focused = focusedElement(of: app),
               let range = axRange(focused, kAXSelectedTextRangeAttribute),
               range.location >= 0, range.length >= 0, range.length <= 8_000,
-              axAttributeIsSettable(focused, kAXSelectedTextRangeAttribute),
-              let boundary = selectionBoundary(of: focused)
+              axAttributeIsSettable(focused, kAXSelectedTextRangeAttribute)
         else { return nil }
         let selected = range.length == 0
             ? ""
@@ -434,7 +460,69 @@ enum ScreenContext {
             element: focused,
             location: range.location,
             originalText: selected,
-            boundary: boundary)
+            boundary: selectionBoundary(of: focused))
+    }
+
+    /// Captures the guarded fallback target used when an editable control
+    /// accepts real keystrokes but cannot expose the exact mutable range that
+    /// `ScreenStreamTarget` requires. A role alone is insufficient (read-only
+    /// text has the same role), and an unknown selection is insufficient (the
+    /// first partial could destroy selected user text), so both editability and
+    /// an empty selection must be observable.
+    static func keystrokeStreamTarget(
+        of app: NSRunningApplication?
+    ) -> ScreenKeystrokeStreamTarget? {
+        guard let app, let bundleID = app.bundleIdentifier,
+              let focused = focusedElement(of: app),
+              let role = axString(focused, kAXRoleAttribute),
+              axParameterizedAttributeIsAvailable(
+                focused, kAXStringForRangeParameterizedAttribute)
+        else { return nil }
+
+        let selectedRange = axRange(focused, kAXSelectedTextRangeAttribute)
+        let selectedText = axRawString(focused, kAXSelectedTextAttribute)
+        guard let selectedRange, selectedRange.location >= 0 else { return nil }
+        guard KeystrokeStreamTargetPolicy.mayCapture(
+            role: role,
+            editabilityProven:
+                axAttributeIsSettable(focused, kAXValueAttribute)
+                || axBool(focused, kAXIsEditableAttribute) == true
+                || axElement(
+                    focused, kAXEditableAncestorAttribute) != nil
+                || axElement(
+                    focused, kAXHighestEditableAncestorAttribute) != nil,
+            selectedRangeLength: selectedRange.length,
+            selectedText: selectedText)
+        else { return nil }
+        return ScreenKeystrokeStreamTarget(
+            bundleID: bundleID,
+            element: focused,
+            location: selectedRange.location,
+            boundary: selectionBoundary(of: focused))
+    }
+
+    /// Proves the fallback caret is still immediately after the exact draft
+    /// Velora wrote. The range need not be settable; reading it plus the
+    /// bounded draft range is sufficient before Backspace-based revision.
+    static func keystrokeStreamOwnsDraft(
+        _ draft: String,
+        target: ScreenKeystrokeStreamTarget
+    ) -> Bool {
+        let app = NSWorkspace.shared.frontmostApplication
+        guard app?.bundleIdentifier == target.bundleID,
+              let focused = focusedElement(of: app),
+              CFEqual(focused, target.element),
+              let range = axRange(
+                focused, kAXSelectedTextRangeAttribute),
+              range.location == target.location + draft.utf16.count,
+              range.length == 0
+        else { return false }
+        if draft.isEmpty { return true }
+        return axStringForRange(
+            focused,
+            CFRange(
+                location: target.location,
+                length: draft.utf16.count)) == draft
     }
 
     /// The user has not moved or edited the original selection.
@@ -607,6 +695,30 @@ enum ScreenContext {
               let number = ref as? NSNumber
         else { return nil }
         return number.intValue
+    }
+
+    private static func axBool(
+        _ element: AXUIElement, _ attr: String
+    ) -> Bool? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, attr as CFString, &ref) == .success,
+              let number = ref as? NSNumber
+        else { return nil }
+        return number.boolValue
+    }
+
+    private static func axParameterizedAttributeIsAvailable(
+        _ element: AXUIElement, _ attr: String
+    ) -> Bool {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var names: CFArray?
+        guard AXUIElementCopyParameterizedAttributeNames(
+                element, &names) == .success,
+              let names = names as? [String]
+        else { return false }
+        return names.contains(attr)
     }
 
     private static func axStringForRange(

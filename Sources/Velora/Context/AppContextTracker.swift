@@ -26,12 +26,6 @@ final class AppContextTracker {
     private var observer: NSObjectProtocol?
     private(set) var frontmost: NSRunningApplication?
 
-    /// Current context snapshot (call at dictation start).
-    var current: AppContext {
-        let app = frontmost ?? NSWorkspace.shared.frontmostApplication
-        return AppContext(bundleID: app?.bundleIdentifier, appName: app?.localizedName)
-    }
-
     func start() {
         frontmost = NSWorkspace.shared.frontmostApplication
         observer = NSWorkspace.shared.notificationCenter.addObserver(
