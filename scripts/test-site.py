@@ -72,6 +72,7 @@ def main() -> None:
         "main",
         "top",
         "how-it-works",
+        "stream",
         "anywhere",
         "privacy",
         "iphone",
@@ -278,6 +279,12 @@ def main() -> None:
     )
     assert "meeting capture leaves call audio running" in public_source, (
         "the playback claim must preserve the meeting-capture boundary"
+    )
+    assert "Press ⌃⇧S" in html and "shows a live draft" in html, (
+        "Stream Typing must explain the shortcut and live user benefit"
+    )
+    assert "Terminals show the draft in Velora, then insert it when you finish" in html, (
+        "Stream Typing must describe the honest terminal behavior"
     )
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")

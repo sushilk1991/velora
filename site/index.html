@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
-  <meta name="description" content="Private voice typing for Mac. Hold Right Option, speak naturally, and clean text appears in any app—without cloud transcription.">
+  <meta name="description" content="Private voice typing for Mac. Dictate finished text or watch a live draft appear as you speak. No cloud transcription.">
   <meta property="og:title" content="Velora — private voice typing for Mac">
   <meta property="og:description" content="Say it once. Velora turns it into clean text in any Mac app, locally.">
   <meta property="og:type" content="website">
@@ -55,6 +55,7 @@
 
       <nav class="desktop-nav" aria-label="Primary navigation">
         <a href="#how-it-works">How it works</a>
+        <a href="#stream">Stream Typing</a>
         <a href="#anywhere">Anywhere</a>
         <a href="#privacy">Privacy</a>
         <a href="#iphone">iPhone</a>
@@ -73,6 +74,7 @@
           <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
           <nav aria-label="Mobile navigation">
             <a href="#how-it-works">How it works</a>
+            <a href="#stream">Stream Typing</a>
             <a href="#anywhere">Anywhere</a>
             <a href="#privacy">Privacy</a>
             <a href="#iphone">iPhone</a>
@@ -91,9 +93,8 @@
         <p class="eyebrow reveal" style="--reveal-order: 0"><span class="eyebrow-dot" aria-hidden="true"></span> Private voice typing for Mac</p>
         <h1 class="reveal" style="--reveal-order: 1">Say it once.<br><em>It’s already typed.</em></h1>
         <p class="hero-lede reveal" style="--reveal-order: 2">
-          Hold Right Option, talk the way you actually talk, and finished text lands
-          where your cursor already is. The speech model and the cleanup model both
-          run on your Mac.
+          Hold Right Option for finished text, or press ⌃⇧S to watch a live draft
+          while you speak. The speech model and cleanup model both run on your Mac.
         </p>
         <div class="hero-actions reveal" style="--reveal-order: 3">
           <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
@@ -245,7 +246,21 @@
       </div>
 
       <div class="bento">
-        <article class="tile tile-wide tile-meeting reveal" style="--reveal-order: 0">
+        <article class="tile tile-wide tile-stream reveal" id="stream" style="--reveal-order: 0">
+          <div class="tile-copy">
+            <p class="tile-kicker">New · Stream Typing</p>
+            <h3>Speak now. Fix it while you talk.</h3>
+            <p>Press ⌃⇧S. Velora shows a live draft, follows corrections like “3 p.m., no, 6 p.m.,” and finishes with clean text.</p>
+            <p class="stream-note">Editors update at your cursor. Terminals show the draft in Velora, then insert it when you finish.</p>
+          </div>
+          <div class="stream-preview" aria-hidden="true">
+            <span class="stream-status"><i></i> Listening</span>
+            <p>Let’s meet at <s>3 p.m.</s> <strong>6 p.m.</strong></p>
+            <span class="stream-shortcut">⌃⇧S</span>
+          </div>
+        </article>
+
+        <article class="tile tile-wide tile-meeting reveal" style="--reveal-order: 1">
           <div class="tile-copy">
             <p class="tile-kicker">Private meeting memory</p>
             <h3>Records the room. Never the screen.</h3>
@@ -259,7 +274,7 @@
           </div>
         </article>
 
-        <article class="tile tile-music reveal" style="--reveal-order: 1">
+        <article class="tile tile-music reveal" style="--reveal-order: 2">
           <p class="tile-kicker">AirPods, unharmed</p>
           <h3>Your music pauses itself.</h3>
           <p>For direct dictation, Velora pauses supported music players and resumes only what it paused. Browser video is excluded from automatic pause and resume. Meeting capture leaves call audio running.</p>
@@ -270,7 +285,7 @@
           </div>
         </article>
 
-        <article class="tile tile-edit reveal" style="--reveal-order: 2">
+        <article class="tile tile-edit reveal" style="--reveal-order: 3">
           <p class="tile-kicker">Voice edit</p>
           <h3>Select it. Say what to change.</h3>
           <p>Highlight a sentence, describe the edit out loud, and it is rewritten in place. If the result is wrong, ⌘Z puts it back exactly as it was.</p>
@@ -281,19 +296,19 @@
           </div>
         </article>
 
-        <article class="tile tile-lang reveal" style="--reveal-order: 3">
+        <article class="tile tile-lang reveal" style="--reveal-order: 4">
           <p class="tile-kicker">Languages</p>
           <h3><span class="big-number">99</span> languages, one model.</h3>
           <p>The default speech model is Whisper large-v3-turbo — multilingual, including Hindi and Indian English. Set a language or let Velora detect it.</p>
         </article>
 
-        <article class="tile tile-dict reveal" style="--reveal-order: 4">
+        <article class="tile tile-dict reveal" style="--reveal-order: 5">
           <p class="tile-kicker">Personal dictionary</p>
           <h3>It learns your nouns.</h3>
           <p>Teach it the names, products, and jargon it keeps mangling. Sync is optional, uses your own iCloud Drive, and carries confirmed terms — never audio or transcripts.</p>
         </article>
 
-        <article class="tile tile-history reveal" style="--reveal-order: 5">
+        <article class="tile tile-history reveal" style="--reveal-order: 6">
           <p class="tile-kicker">History</p>
           <h3>Nothing is thrown away.</h3>
           <p>Every dictation keeps its raw transcript alongside the cleaned result, searchable on your Mac. If cleanup got it wrong, the original is still there.</p>

@@ -1391,6 +1391,74 @@ html:not(.js) .theme-toggle { display: none; }
 
 .tile h3 { font-size: clamp(1.2rem, 2vw, 1.45rem); }
 
+.tile-stream {
+  align-content: space-between;
+  gap: 2rem;
+  border-color: color-mix(in oklch, var(--accent) 24%, var(--line));
+  background:
+    radial-gradient(100% 150% at 100% 0%, color-mix(in oklch, var(--accent) 18%, transparent), transparent 62%),
+    var(--accent-wash);
+}
+
+.tile-stream .tile-copy { display: grid; gap: 0.45rem; }
+.tile-stream .tile-copy h3 { max-width: 18ch; }
+.tile-stream p.stream-note { margin-top: 0.45rem; font-size: 1rem; }
+
+.stream-preview {
+  position: relative;
+  display: grid;
+  align-content: space-between;
+  min-height: 8.5rem;
+  gap: 1rem;
+  padding: 1.1rem 1.2rem;
+  border: 1px solid color-mix(in oklch, var(--accent) 28%, var(--line));
+  border-radius: 1.1rem;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.tile-stream .stream-preview p {
+  max-width: none;
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: clamp(1.05rem, 2.4vw, 1.4rem);
+  line-height: 1.4;
+}
+
+.stream-preview s { color: var(--ink-faint); text-decoration-color: var(--signal); }
+.stream-preview strong { color: var(--accent); font-weight: 650; }
+
+.stream-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+  width: fit-content;
+  color: var(--ink-soft);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.stream-status i {
+  width: 0.46rem;
+  height: 0.46rem;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 0 0.2rem var(--signal-wash);
+  animation: record-pulse 1.7s var(--ease-both) infinite;
+}
+
+.stream-shortcut {
+  position: absolute;
+  right: 0.8rem;
+  bottom: 0.75rem;
+  padding: 0.2rem 0.42rem;
+  border: 1px solid var(--line);
+  border-radius: 0.42rem;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.62rem;
+}
+
 .tile-meeting {
   align-content: space-between;
   gap: 2rem;
@@ -2080,6 +2148,7 @@ html:not(.js) .theme-toggle { display: none; }
   .modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile-wide { grid-column: span 2; }
+  .tile-stream { grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); align-items: end; }
   .tile-meeting { grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); align-items: end; }
   .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .steps li:nth-child(3) { grid-column: span 3; }
