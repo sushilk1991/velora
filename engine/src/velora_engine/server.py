@@ -108,12 +108,15 @@ MINE_STARTUP_DELAY_S = 60.0
 MEETING_PLAN_VERSION = 3
 
 # Meeting notes are a bounded transformation, but they are materially larger
-# than dictation cleanup. The previous input-proportional output allowance let
-# Qwen3.5-4B run until the 20s deadline, then mislabeled a transcript excerpt as
-# a ready summary. Bound output memory directly while retaining the measured
-# foreground-safe deadline.
+# than dictation cleanup. Keep each map context small enough that Qwen3.5-4B
+# cannot grow a multi-GB working cache from one long transcript slice. Partial
+# notes need less output than the final reducer; separate ceilings prevent a
+# verbose map from consuming the whole hard deadline.
 MEETING_NOTES_TIMEOUT_MS = 20_000
-MEETING_NOTES_MAX_TOKENS = 1_024
+MEETING_NOTES_CHUNK_CHARS = 4_000
+MEETING_NOTES_RETRY_CHUNK_CHARS = 2_000
+MEETING_NOTES_MAP_MAX_TOKENS = 384
+MEETING_NOTES_REDUCE_MAX_TOKENS = 512
 # The server advertises STT readiness before the cleanup worker finishes its
 # background warm-up. Relaunch recovery can therefore submit durable notes a
 # few seconds before Qwen is usable. Wait only for an existing, healthy worker;
@@ -516,21 +519,31 @@ class Engine:
             restart_when_safe()
         )
 
-    def _restart_if_cleanup_unhealthy(self) -> bool:
-        """Restart the sidecar after its unkillable cleanup worker wedges.
+    def _restart_if_cleanup_unhealthy(
+        self, *, include_recovering: bool = False
+    ) -> bool:
+        """Restart after cleanup wedges or misses a durable-job deadline.
 
-        The caller must first send the user's raw fallback/result. Reusing the
-        model from a replacement Python thread would violate MLX thread
-        ownership while the old worker may still be inside native code, so a
-        clean process restart is the only safe recovery boundary.
+        The caller must first send the user's raw fallback/result or leave its
+        durable job active for reconnect recovery. Reusing the model from a
+        replacement Python thread would violate MLX thread ownership while the
+        old worker may still be inside native code, so a clean process restart
+        is the only safe recovery boundary.
         """
         cleanup = self.cleanup
-        if cleanup is None or not getattr(cleanup, "unhealthy", False):
+        cleanup_failed = cleanup is not None and (
+            getattr(cleanup, "unhealthy", False)
+            or (
+                include_recovering
+                and getattr(cleanup, "recovering", False)
+            )
+        )
+        if not cleanup_failed:
             return False
         if self._cleanup_restart_scheduled:
             return True
         self._cleanup_restart_scheduled = True
-        log.error("cleanup worker is unhealthy — restarting engine after fallback")
+        log.error("cleanup worker is unavailable — restarting engine after fallback")
         self.shutdown.set()
         # `shutdown` normally lets `serve()` unwind cleanly. A wedged native
         # MLX call can also strand asyncio/executor teardown, which previously
@@ -3274,9 +3287,8 @@ class Engine:
         # contract parse_notes_json() enforces.
         schema_clause = (
             "Return JSON only with exact keys summary (string), decisions (array of "
-            "strings), and action_items (array of strings). Keep the summary to 3-6 "
-            "concise sentences and each array to at most 8 concise items. Use an empty "
-            "array when the transcript contains no explicit decision or action item."
+            "strings), and action_items (array of strings). Use an empty array when "
+            "the transcript contains no explicit decision or action item."
         )
         default_guidance = (
             "Create faithful meeting notes from this transcript chunk. "
@@ -3289,7 +3301,10 @@ class Engine:
         # but a completed meeting must never fail over prompt length skew.
         custom_guidance = str(msg.get("prompt") or "").strip()[:8_000]
         guidance = custom_guidance or default_guidance
-        map_prompt = f"{guidance}\n\n{schema_clause}"
+        map_prompt = (
+            f"{guidance} Keep this partial summary to 1-2 concise sentences and each "
+            f"array to at most 4 concise items.\n\n{schema_clause}"
+        )
         reduce_prompt = (
             "Merge these partial meeting notes without inventing facts or duplicates. "
             + (
@@ -3297,7 +3312,8 @@ class Engine:
                 if custom_guidance
                 else ""
             )
-            + schema_clause
+            + "Keep the summary to 3-6 concise sentences and each array to at most 8 "
+            + f"concise items. {schema_clause}"
         )
 
         async def fail(error: str, code: str = "failed") -> None:
@@ -3307,15 +3323,15 @@ class Engine:
             })
 
         async def generate(
-            user_text: str, prompt: str
-        ) -> tuple[dict[str, Any] | None, str | None]:
+            user_text: str, prompt: str, max_tokens: int
+        ) -> tuple[dict[str, Any] | None, str | None, bool]:
             while not self._meeting_notes_cancel:
                 if self.shutdown.is_set():
-                    return None, "engine shutting down"
+                    return None, "engine shutting down", False
                 while self.session is not None or self._starting or self._finalizing:
                     await asyncio.sleep(0.25)
                     if self._meeting_notes_cancel or self.shutdown.is_set():
-                        return None, "cancelled"
+                        return None, "cancelled", False
                 self._meeting_notes_preempt.clear()
                 # Dictation just released the machine (wait loop above), or a
                 # cleanup child respawned — recompute who gets demoted.
@@ -3326,35 +3342,35 @@ class Engine:
                 )
                 cleanup = self.cleanup or self._cleanup_loading
                 if cleanup is None:
-                    return None, "the local notes model is unavailable"
+                    return None, "the local notes model is unavailable", False
                 while not cleanup.loaded:
                     if (
                         self._meeting_notes_cancel
                         or self.shutdown.is_set()
                     ):
-                        return None, "cancelled"
+                        return None, "cancelled", False
                     if cleanup.unhealthy or (
                         asyncio.get_running_loop().time() >= model_ready_deadline
                     ):
-                        return None, "the local notes model is unavailable"
+                        return None, "the local notes model is unavailable", False
                     if self.session is not None or self._starting or self._finalizing:
                         break
                     await asyncio.sleep(0.1)
                     replacement = self.cleanup or self._cleanup_loading
                     if replacement is None:
-                        return None, "the local notes model is unavailable"
+                        return None, "the local notes model is unavailable", False
                     cleanup = replacement
                 if self.session is not None or self._starting or self._finalizing:
                     continue
                 result = await cleanup.cleanup(
                     user_text, prompt,
                     timeout_ms=MEETING_NOTES_TIMEOUT_MS,
-                    max_tokens=MEETING_NOTES_MAX_TOKENS,
+                    max_tokens=max_tokens,
                     check_ratio=False,
                     cancel_event=self._meeting_notes_preempt,
                 )
                 if self._meeting_notes_cancel or self.shutdown.is_set():
-                    return None, "cancelled"
+                    return None, "cancelled", False
                 if self._meeting_notes_preempt.is_set():
                     # A dictation interrupted generation. Retry this exact map
                     # chunk once the foreground session has finished.
@@ -3362,16 +3378,28 @@ class Engine:
                     continue
                 if not result.applied:
                     reason = str(getattr(result, "reason", None) or "no output")
-                    return None, f"local notes generation failed ({reason})"
+                    retryable = reason in {
+                        "length", "timeout", "timeout_hard", "timeout_queue",
+                    }
+                    return (
+                        None,
+                        f"local notes generation failed ({reason})",
+                        retryable,
+                    )
                 parsed = parse_notes_json(result.text)
                 if parsed is None:
-                    return None, "the local notes model returned malformed notes"
-                return parsed, None
-            return None, "cancelled"
+                    return (
+                        None,
+                        "the local notes model returned malformed notes",
+                        True,
+                    )
+                return parsed, None, False
+            return None, "cancelled", False
 
         self._begin_batch_job(lower_priority=False)
         try:
-            chunks = chunk_transcript(transcript)
+            chunks = chunk_transcript(
+                transcript, max_chars=MEETING_NOTES_CHUNK_CHARS)
             partials: list[dict[str, Any]] = []
             for index, chunk in enumerate(chunks):
                 if self.shutdown.is_set():
@@ -3380,19 +3408,70 @@ class Engine:
                 if self._meeting_notes_cancel:
                     await fail("cancelled", "cancelled")
                     return
-                notes, generation_error = await generate(chunk, map_prompt)
+                notes, generation_error, retryable = await generate(
+                    chunk, map_prompt, MEETING_NOTES_MAP_MAX_TOKENS)
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return
                 if self._meeting_notes_cancel:
                     await fail("cancelled", "cancelled")
                     return
-                if notes is None:
+                recovered: list[dict[str, Any]] = []
+                if notes is None and retryable:
+                    retry_chunks = chunk_transcript(
+                        chunk, max_chars=MEETING_NOTES_RETRY_CHUNK_CHARS)
+                    if len(retry_chunks) == 1:
+                        # A short tail cannot be split further, but one bounded
+                        # retry still recovers transient timeout/parse failures.
+                        retry_chunks = [chunk]
+                    if retry_chunks:
+                        log.warning(
+                            "meeting notes retrying chunk %d/%d as %d bounded piece(s)",
+                            index + 1, len(chunks), len(retry_chunks),
+                        )
+                        for retry_chunk in retry_chunks:
+                            retry_notes, retry_error, _ = await generate(
+                                retry_chunk,
+                                map_prompt,
+                                MEETING_NOTES_MAP_MAX_TOKENS,
+                            )
+                            if retry_notes is None:
+                                generation_error = retry_error or generation_error
+                                recovered = []
+                                break
+                            recovered.append(retry_notes)
+                # A cancellation or app shutdown can arrive while a retry is
+                # waiting for the replacement model. Do not reinterpret that
+                # explicit stop as another recovery failure.
+                if self.shutdown.is_set():
+                    await fail("engine shutting down", "engine_shutdown")
+                    return
+                if self._meeting_notes_cancel:
+                    await fail("cancelled", "cancelled")
+                    return
+                if notes is None and not recovered:
+                    # An unkillable Metal call cannot be repaired inside this
+                    # process. Keep the app's durable notes-only job active and
+                    # restart the sidecar; MeetingProcessor requeues that exact
+                    # transcript on reconnect. Sending meeting_notes_failed
+                    # first would turn the row back to ready+attention and lose
+                    # the automatic resume that the restart is meant to provide.
+                    if self._restart_if_cleanup_unhealthy(
+                        include_recovering=True
+                    ):
+                        log.warning(
+                            "meeting notes retaining %s for engine-restart recovery",
+                            meeting_id,
+                        )
+                        return
                     error = generation_error or "local notes generation failed"
                     log.warning("meeting notes failed for %s: %s", meeting_id, error)
                     await fail(error + "; retry to generate notes", "generation_failed")
                     return
-                partials.append(notes)
+                if recovered:
+                    partials.extend(recovered)
+                elif notes is not None:
+                    partials.append(notes)
                 await self._send({
                     "event": "meeting_notes_progress", "id": job_id,
                     "meeting_id": meeting_id,
@@ -3400,12 +3479,15 @@ class Engine:
                 })
             merged = merge_notes(partials)
             if len(partials) > 1:
-                reduced, reduce_error = await generate(
+                reduced, reduce_error, _ = await generate(
                     # merge_notes applies global size/item bounds before this
                     # model call. Passing every per-chunk response directly
                     # made a maximum-size transcript create an unbounded
                     # reducer context despite the per-call output-token cap.
-                    json.dumps(merged, ensure_ascii=False), reduce_prompt)
+                    json.dumps(merged, ensure_ascii=False),
+                    reduce_prompt,
+                    MEETING_NOTES_REDUCE_MAX_TOKENS,
+                )
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return

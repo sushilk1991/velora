@@ -837,7 +837,7 @@ async def test_meeting_notes_return_strict_structured_output(engine):
             assert kwargs["check_ratio"] is False
             assert kwargs["cancel_event"] is eng._meeting_notes_preempt
             assert kwargs["timeout_ms"] == 20_000
-            assert kwargs["max_tokens"] == 1_024
+            assert kwargs["max_tokens"] == 384
             return SimpleNamespace(
                 applied=True,
                 text=json.dumps({
@@ -872,6 +872,9 @@ async def test_meeting_notes_multi_chunk_reduce_failure_keeps_valid_map_notes(en
 
         async def cleanup(self, raw, system_prompt, **kwargs):
             self.calls += 1
+            if self.calls <= 2:
+                assert len(raw) <= 4_000
+                assert kwargs["max_tokens"] == 384
             if self.calls == 1:
                 return SimpleNamespace(
                     applied=True,
@@ -891,6 +894,7 @@ async def test_meeting_notes_multi_chunk_reduce_failure_keeps_valid_map_notes(en
                     }),
                 )
             reduced_input = json.loads(raw)
+            assert kwargs["max_tokens"] == 512
             assert isinstance(reduced_input, dict)
             assert set(reduced_input) == {"summary", "decisions", "action_items"}
             assert len(reduced_input["action_items"]) == 8
@@ -903,7 +907,7 @@ async def test_meeting_notes_multi_chunk_reduce_failure_keeps_valid_map_notes(en
     await client.recv_event("ready")
     await client.send_json({
         "cmd": "meeting_notes", "id": "multi", "meeting_id": "m-multi",
-        "transcript": "x" * 12_001,
+        "transcript": "x" * 4_001,
     })
     await client.recv_event("meeting_notes_accepted")
     ready = await client.recv_event("meeting_notes_ready")
@@ -913,6 +917,208 @@ async def test_meeting_notes_multi_chunk_reduce_failure_keeps_valid_map_notes(en
     assert ready["action_items"] == [
         "Run QA", "A2", "A3", "A4", "A5", "Deploy", "A7", "A8",
     ]
+
+
+async def test_meeting_notes_retries_failed_map_as_smaller_pieces(engine):
+    eng, sock = engine
+
+    class RetryCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[tuple[int, int]] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls.append((len(raw), kwargs["max_tokens"]))
+            if len(self.calls) == 1:
+                return SimpleNamespace(
+                    applied=False, text=raw, reason="timeout_hard")
+            if kwargs["max_tokens"] == 512:
+                return SimpleNamespace(
+                    applied=True,
+                    text=json.dumps({
+                        "summary": "Recovered final notes.",
+                        "decisions": ["Keep the bounded retry"],
+                        "action_items": [],
+                    }),
+                )
+            return SimpleNamespace(
+                applied=True,
+                text=json.dumps({
+                    "summary": f"Recovered part {len(self.calls) - 1}.",
+                    "decisions": [],
+                    "action_items": [],
+                }),
+            )
+
+    cleanup = RetryCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "retry-small", "meeting_id": "m-retry",
+        "transcript": "x" * 3_999,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    await client.recv_event("meeting_notes_progress")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    assert ready["summary"] == "Recovered final notes."
+    assert cleanup.calls[:3] == [(3_999, 384), (2_000, 384), (1_999, 384)]
+    assert cleanup.calls[3][1] == 512
+
+
+async def test_meeting_notes_retries_short_failed_map_once(engine):
+    eng, sock = engine
+
+    class RetryCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[tuple[int, int]] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls.append((len(raw), kwargs["max_tokens"]))
+            if len(self.calls) == 1:
+                return SimpleNamespace(
+                    applied=False, text=raw, reason="timeout_hard")
+            return SimpleNamespace(
+                applied=True,
+                text=json.dumps({
+                    "summary": "Recovered short tail.",
+                    "decisions": [],
+                    "action_items": [],
+                }),
+            )
+
+    cleanup = RetryCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "retry-tail",
+        "meeting_id": "m-retry-tail", "transcript": "x" * 1_500,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    await client.recv_event("meeting_notes_progress")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    assert ready["summary"] == "Recovered short tail."
+    assert cleanup.calls == [(1_500, 384), (1_500, 384)]
+
+
+async def test_meeting_notes_unhealthy_worker_restarts_without_failure_event(engine):
+    eng, _sock = engine
+
+    class UnhealthyCleanup:
+        loaded = True
+        unhealthy = False
+        calls = 0
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls += 1
+            self.loaded = False
+            self.unhealthy = True
+            return SimpleNamespace(
+                applied=False, text=raw, reason="timeout_hard")
+
+    cleanup = UnhealthyCleanup()
+    eng.cleanup = cleanup
+    eng._send = AsyncMock()
+    eng._meeting_notes_running = True
+
+    await eng._run_meeting_notes({
+        "id": "unhealthy-notes", "meeting_id": "m-unhealthy",
+        "transcript": "x" * 3_999,
+    })
+
+    sent = [call.args[0] for call in eng._send.await_args_list]
+    assert cleanup.calls == 1
+    assert eng.shutdown.is_set()
+    assert not any(item.get("event") == "meeting_notes_failed" for item in sent)
+    assert not eng._meeting_notes_running
+
+
+async def test_meeting_notes_recovering_worker_restarts_without_failure_event(
+    engine, monkeypatch
+):
+    from velora_engine import server as server_mod
+
+    eng, _sock = engine
+    monkeypatch.setattr(server_mod, "MEETING_NOTES_MODEL_READY_WAIT_S", 0.0)
+
+    class RecoveringCleanup:
+        loaded = True
+        unhealthy = False
+        recovering = False
+        calls = 0
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls += 1
+            self.loaded = False
+            self.recovering = True
+            return SimpleNamespace(
+                applied=False, text=raw, reason="timeout_hard")
+
+    cleanup = RecoveringCleanup()
+    eng.cleanup = cleanup
+    eng._send = AsyncMock()
+    eng._meeting_notes_running = True
+
+    await eng._run_meeting_notes({
+        "id": "recovering-notes", "meeting_id": "m-recovering",
+        "transcript": "x" * 3_999,
+    })
+
+    sent = [call.args[0] for call in eng._send.await_args_list]
+    assert cleanup.calls == 1
+    assert eng.shutdown.is_set()
+    assert not any(item.get("event") == "meeting_notes_failed" for item in sent)
+    assert not eng._meeting_notes_running
+
+
+async def test_meeting_notes_cancel_during_recovery_wait_does_not_restart(engine):
+    eng, sock = engine
+
+    class RecoveringCleanup:
+        unhealthy = False
+        recovering = False
+        calls = 0
+
+        def __init__(self):
+            self._loaded = True
+            self.retry_wait_started = asyncio.Event()
+
+        @property
+        def loaded(self):
+            if not self._loaded:
+                self.retry_wait_started.set()
+            return self._loaded
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls += 1
+            self._loaded = False
+            self.recovering = True
+            return SimpleNamespace(
+                applied=False, text=raw, reason="timeout_hard")
+
+    cleanup = RecoveringCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "cancel-recovery",
+        "meeting_id": "m-cancel-recovery", "transcript": "x" * 3_999,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    await asyncio.wait_for(cleanup.retry_wait_started.wait(), timeout=2)
+    await client.send_json({
+        "cmd": "meeting_notes_cancel", "id": "cancel-recovery",
+    })
+    failed = await client.recv_event("meeting_notes_failed")
+
+    assert failed["code"] == "cancelled"
+    assert cleanup.calls == 1
+    assert not eng.shutdown.is_set()
+    assert not eng._meeting_notes_running
 
 
 async def test_meeting_notes_schema_invalid_output_is_not_reported_as_ready(engine):
@@ -978,7 +1184,7 @@ async def test_meeting_notes_cancel_during_reduce_never_emits_ready(engine):
     await client.recv_event("ready")
     await client.send_json({
         "cmd": "meeting_notes", "id": "cancel-reduce",
-        "meeting_id": "m-cancel-reduce", "transcript": "x" * 12_001,
+        "meeting_id": "m-cancel-reduce", "transcript": "x" * 4_001,
     })
     await client.recv_event("meeting_notes_accepted")
     await asyncio.wait_for(reduce_started.wait(), timeout=2)
@@ -1081,7 +1287,8 @@ async def test_meeting_notes_truncates_oversized_prompt(engine):
     ready = await client.recv_event("meeting_notes_ready")
     assert ready["summary"] == "Trimmed"
     assert seen_prompts
-    assert seen_prompts[0].startswith("x" * 8_000 + "\n\nReturn JSON only")
+    assert seen_prompts[0].startswith("x" * 8_000 + " Keep this partial summary")
+    assert "Return JSON only with exact keys summary" in seen_prompts[0]
 
 
 async def test_meeting_notes_rejects_non_string_prompt(engine):
