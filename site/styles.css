@@ -10,6 +10,24 @@
    palette entirely.
    ========================================================================== */
 
+/* Display face — self-hosted, latin subset only (~15 KB each). Every other
+   role stays on system fonts, which are excellent on the Macs Velora targets. */
+@font-face {
+  font-family: "Instrument Serif";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("assets/instrument-serif-latin.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Instrument Serif";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("assets/instrument-serif-italic-latin.woff2") format("woff2");
+}
+
 :root {
   color-scheme: light dark;
 
@@ -33,6 +51,7 @@
   --accent: oklch(47% 0.22 292);
   --accent-press: oklch(40% 0.2 292);
   --accent-wash: oklch(93% 0.045 292);
+  --accent-2: oklch(60% 0.19 30);
   --on-accent: oklch(99% 0.008 292);
   --signal: oklch(58% 0.16 52);
   --signal-wash: oklch(94% 0.055 62);
@@ -69,7 +88,7 @@
   --shadow-accent-hover: 0 1px 2px oklch(40% 0.2 292 / 0.3), 0 14px 30px oklch(47% 0.22 292 / 0.32);
 
   /* Type ----------------------------------------------------------------- */
-  --font-display: ui-serif, "New York", "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+  --font-display: "Instrument Serif", ui-serif, "New York", "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
   --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 
@@ -112,6 +131,7 @@
   --accent: oklch(78% 0.15 292);
   --accent-press: oklch(86% 0.11 292);
   --accent-wash: oklch(28% 0.075 292);
+  --accent-2: oklch(78% 0.14 40);
   --on-accent: oklch(17% 0.04 292);
   --signal: oklch(80% 0.15 62);
   --signal-wash: oklch(30% 0.07 52);
@@ -158,6 +178,7 @@
   --accent: oklch(78% 0.15 292);
   --accent-press: oklch(86% 0.11 292);
   --accent-wash: oklch(28% 0.075 292);
+  --accent-2: oklch(78% 0.14 40);
   --on-accent: oklch(17% 0.04 292);
   --signal: oklch(80% 0.15 62);
   --signal-wash: oklch(30% 0.07 52);
@@ -193,6 +214,8 @@ html {
   scroll-behavior: smooth;
   scroll-padding-top: 6rem;
   -webkit-text-size-adjust: 100%;
+  /* The hero scene bleeds to 100vw; clip (not hidden) keeps sticky working. */
+  overflow-x: clip;
 }
 
 body {
@@ -240,11 +263,12 @@ a { -webkit-tap-highlight-color: transparent; }
 
 h1, h2, h3, p, dl, dd { margin-top: 0; }
 
+/* Instrument Serif ships one weight; asking for more would synthesize it. */
 h1, h2 {
   font-family: var(--font-display);
-  font-weight: 600;
-  line-height: 1.02;
-  letter-spacing: -0.032em;
+  font-weight: 400;
+  line-height: 1.0;
+  letter-spacing: -0.012em;
   text-wrap: balance;
 }
 
@@ -285,6 +309,17 @@ p { text-wrap: pretty; }
   color: var(--ink-soft);
   font-size: clamp(1rem, 1.5vw, 1.1rem);
   line-height: 1.62;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .skip-link {
@@ -341,9 +376,9 @@ p { text-wrap: pretty; }
   align-items: center;
   gap: 0.6rem;
   font-family: var(--font-display);
-  font-size: 1.28rem;
-  font-weight: 640;
-  letter-spacing: -0.02em;
+  font-size: 1.42rem;
+  font-weight: 400;
+  letter-spacing: -0.01em;
   text-decoration: none;
 }
 
@@ -626,25 +661,74 @@ p { text-wrap: pretty; }
    -------------------------------------------------------------------------- */
 
 .hero {
+  position: relative;
   display: grid;
   gap: clamp(3rem, 6vw, 5rem);
   width: min(100% - (var(--gutter) * 2), var(--shell));
   margin-inline: auto;
-  padding-block: clamp(3rem, 7vw, 6rem) clamp(4rem, 8vw, 7rem);
+  padding-block: clamp(3.5rem, 8vw, 7rem) clamp(4rem, 8vw, 7rem);
 }
 
-.hero-copy { align-self: center; }
+.hero-copy { position: relative; z-index: 1; align-self: center; }
+
+/* --------------------------------------------------------------------------
+   Voice field — the WebGL particle scene behind hero areas. The canvas is
+   injected by assets/scene.js; without JavaScript or WebGL the layer is just
+   this soft aurora, so nothing depends on the scene actually running.
+   -------------------------------------------------------------------------- */
+
+.hero-scene {
+  position: absolute;
+  inset: -4.5rem 0 0;
+  left: 50%;
+  z-index: 0;
+  width: 100vw;
+  overflow: hidden;
+  translate: -50%;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 46% at 50% 46%, color-mix(in oklch, var(--accent) 11%, transparent), transparent 70%),
+    radial-gradient(38% 34% at 72% 40%, color-mix(in oklch, var(--accent-2) 7%, transparent), transparent 72%);
+}
+
+.hero-scene canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Fade the field into the page at its edges so text never fights it. */
+.hero-scene::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background:
+    linear-gradient(to bottom, var(--bg), transparent 26%, transparent 68%, var(--bg) 97%);
+}
 
 h1 {
   margin-bottom: 1.4rem;
-  font-size: clamp(3rem, 7.4vw, 5.2rem);
+  font-size: clamp(3.4rem, 8.2vw, 6.1rem);
 }
 
 h1 em {
   display: inline-block;
   color: var(--accent);
   font-style: italic;
-  font-weight: 500;
+  font-weight: 400;
+}
+
+/* The italic line carries the voice→text identity: violet flowing into a
+   warm coral. Kept behind @supports so the plain accent colour is the
+   fallback, never invisible text. */
+@supports (-webkit-background-clip: text) or (background-clip: text) {
+  h1 em {
+    background: linear-gradient(96deg, var(--accent) 12%, var(--accent-2) 88%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: var(--accent);
+  }
 }
 
 .hero-lede {
@@ -696,6 +780,7 @@ h1 em {
 
 .hero-visual {
   position: relative;
+  z-index: 1;
   margin: 0;
   align-self: center;
 }
@@ -1459,6 +1544,94 @@ html:not(.js) .theme-toggle { display: none; }
   font-size: 0.62rem;
 }
 
+/* Action Mode tile ------------------------------------------------------- */
+
+.tile-action {
+  align-content: space-between;
+  gap: 2rem;
+  border-color: color-mix(in oklch, var(--accent-2) 26%, var(--line));
+  background:
+    radial-gradient(100% 150% at 0% 0%, color-mix(in oklch, var(--accent-2) 13%, transparent), transparent 62%),
+    var(--bg-raised);
+}
+
+.tile-action .tile-copy { display: grid; gap: 0.45rem; }
+.tile-action .tile-copy h3 { max-width: 20ch; }
+.tile-action .tile-kicker { color: var(--accent-2); }
+
+.action-demo {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 0.9rem;
+  min-height: 8.5rem;
+  padding: 1.1rem 1.2rem 2.1rem;
+  border: 1px solid color-mix(in oklch, var(--accent-2) 30%, var(--line));
+  border-radius: 1.1rem;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-sm);
+}
+
+.action-said {
+  margin: 0;
+  color: var(--ink-faint);
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  font-style: italic;
+}
+
+.action-steps {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: act;
+}
+
+.action-steps li {
+  position: relative;
+  padding-left: 1.6rem;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+  font-weight: 560;
+  counter-increment: act;
+}
+
+.action-steps li::before {
+  position: absolute;
+  left: 0;
+  top: 0.1rem;
+  display: grid;
+  width: 1.05rem;
+  height: 1.05rem;
+  place-items: center;
+  border: 1px solid color-mix(in oklch, var(--accent-2) 55%, transparent);
+  border-radius: 50%;
+  color: var(--accent-2);
+  content: counter(act);
+  font-family: var(--font-mono);
+  font-size: 0.56rem;
+  line-height: 1;
+}
+
+/* Steps tick in one by one when the tile scrolls into view. */
+.js .tile-action .action-steps li { opacity: 0; translate: 0 0.4rem; }
+
+.js .tile-action.is-visible .action-steps li {
+  animation: action-step 420ms var(--ease) forwards;
+  animation-delay: calc(0.5s + var(--i, 0) * 0.4s);
+}
+
+.action-steps li:nth-child(1) { --i: 0; }
+.action-steps li:nth-child(2) { --i: 1; }
+.action-steps li:nth-child(3) { --i: 2; }
+.action-steps li:nth-child(4) { --i: 3; }
+
+@keyframes action-step {
+  to { opacity: 1; translate: 0 0; }
+}
+
 .tile-meeting {
   align-content: space-between;
   gap: 2rem;
@@ -1471,6 +1644,8 @@ html:not(.js) .theme-toggle { display: none; }
 
 .tile-meeting:hover { border-color: transparent; }
 .tile-meeting .tile-kicker { color: oklch(82% 0.12 292); }
+/* The band ignores the page theme, so its link must too. */
+.tile-meeting .text-link { color: oklch(85% 0.1 292); }
 .tile-meeting p:not(.tile-kicker) { color: var(--on-feature-2); }
 .tile-meeting .tile-copy { display: grid; gap: 0.45rem; }
 .tile-meeting .tile-copy h3 { max-width: 16ch; }
@@ -1639,7 +1814,7 @@ html:not(.js) .theme-toggle { display: none; }
 }
 
 .edit-arrow { color: var(--ink-faint); font-size: 0.8rem; }
-.edit-after { font-weight: 600; }
+.edit-after { font-weight: 400; }
 
 .big-number {
   display: block;
@@ -1797,10 +1972,10 @@ html:not(.js) .theme-toggle { display: none; }
 .phone-head {
   margin: 0;
   font-family: var(--font-display);
-  font-size: 1.7rem;
-  font-weight: 600;
-  line-height: 1.1;
-  letter-spacing: -0.03em;
+  font-size: 1.8rem;
+  font-weight: 400;
+  line-height: 1.06;
+  letter-spacing: -0.012em;
 }
 
 .phone-card {
@@ -1967,8 +2142,8 @@ html:not(.js) .theme-toggle { display: none; }
   min-height: 3.75rem;
   padding: 1.15rem 3rem 1.15rem 0;
   font-family: var(--font-display);
-  font-size: clamp(1.1rem, 2.2vw, 1.45rem);
-  font-weight: 580;
+  font-size: clamp(1.25rem, 2.4vw, 1.6rem);
+  font-weight: 400;
   line-height: 1.3;
   list-style: none;
   cursor: pointer;
@@ -2114,6 +2289,434 @@ html:not(.js) .theme-toggle { display: none; }
 .site-footer nav a:hover { color: var(--ink); text-decoration: underline; }
 
 /* --------------------------------------------------------------------------
+   Feature index — an editorial contents list; every row is a page.
+   -------------------------------------------------------------------------- */
+
+.feature-index {
+  display: grid;
+  border-top: 1px solid var(--line-strong);
+}
+
+.findex {
+  position: relative;
+  display: grid;
+  grid-template-columns: 2.6rem minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.35rem 1rem;
+  padding: 1.15rem 0.35rem;
+  border-bottom: 1px solid var(--line);
+  text-decoration: none;
+  transition: background-color 200ms var(--ease-soft), padding-left 260ms var(--ease);
+}
+
+.findex:hover { background: color-mix(in oklch, var(--accent-wash) 55%, transparent); padding-left: 0.8rem; }
+
+.findex-num {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  transition: color 200ms var(--ease-soft);
+}
+
+.findex:hover .findex-num { color: var(--accent); }
+
+.findex h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: clamp(1.25rem, 2.6vw, 1.7rem);
+  font-weight: 400;
+  letter-spacing: -0.008em;
+}
+
+.findex p {
+  grid-column: 2;
+  max-width: 52ch;
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.88rem;
+}
+
+.findex-arrow {
+  grid-row: 1;
+  grid-column: 3;
+  color: var(--ink-faint);
+  font-size: 1.05rem;
+  transition: translate 260ms var(--ease), color 200ms var(--ease-soft);
+}
+
+.findex:hover .findex-arrow { translate: 0.35rem 0; color: var(--accent); }
+
+.findex-new {
+  margin-left: 0.55rem;
+  padding: 0.14rem 0.42rem;
+  border: 1px solid color-mix(in oklch, var(--accent) 45%, transparent);
+  border-radius: 0.35rem;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  vertical-align: 0.35em;
+}
+
+/* --------------------------------------------------------------------------
+   Comparison — the honest table and per-competitor verdict cards.
+   -------------------------------------------------------------------------- */
+
+.vs-scroll {
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-sm);
+  overflow-x: auto;
+}
+
+.vs-table {
+  width: 100%;
+  min-width: 46rem;
+  border-collapse: collapse;
+  font-size: 0.87rem;
+}
+
+.vs-table caption {
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink-faint);
+  font-size: 0.72rem;
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.vs-table th,
+.vs-table td {
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.vs-table tbody tr:last-child th,
+.vs-table tbody tr:last-child td { border-bottom: 0; }
+
+.vs-table thead th {
+  border-bottom: 1px solid var(--line-strong);
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+  font-weight: 400;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+}
+
+.vs-table tbody th {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.vs-table td { color: var(--ink-soft); }
+
+.vs-table .vs-velora {
+  background: color-mix(in oklch, var(--accent-wash) 45%, transparent);
+  color: var(--ink);
+}
+
+.vs-table thead .vs-velora { color: var(--accent); }
+
+.vs-mark {
+  display: inline-grid;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin-right: 0.45rem;
+  place-items: center;
+  border-radius: 50%;
+  font-size: 0.58rem;
+  font-weight: 900;
+  line-height: 1;
+  vertical-align: -0.14em;
+}
+
+.vs-yes { background: color-mix(in oklch, var(--good) 18%, transparent); color: var(--good); }
+.vs-no { background: color-mix(in oklch, var(--dot-red) 18%, transparent); color: var(--dot-red); }
+.vs-mid { background: color-mix(in oklch, var(--signal) 16%, transparent); color: var(--signal); }
+
+.vs-foot {
+  margin-top: 0.9rem;
+  color: var(--ink-faint);
+  font-size: 0.76rem;
+}
+
+.vs-cards { display: grid; gap: 1rem; margin-top: 2.5rem; }
+
+.vs-card {
+  display: grid;
+  align-content: start;
+  gap: 0.6rem;
+  padding: clamp(1.4rem, 3vw, 1.9rem);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  text-decoration: none;
+  transition: border-color 260ms var(--ease-soft), box-shadow 300ms var(--ease), translate 300ms var(--ease);
+}
+
+.vs-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-md);
+  translate: 0 -2px;
+}
+
+.vs-card h3 {
+  font-family: var(--font-display);
+  font-size: 1.45rem;
+  font-weight: 400;
+}
+
+.vs-card p { margin: 0; color: var(--ink-soft); font-size: 0.9rem; }
+
+.vs-card .text-link { margin-top: 0.4rem; }
+
+/* Pro / con columns used on the deep-dive pages. */
+
+.tally { display: grid; gap: 1rem; }
+
+.tally-col {
+  padding: clamp(1.3rem, 3vw, 1.8rem);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+}
+
+.tally-col h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  font-size: 0.78rem;
+  font-weight: 680;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.tally-col.is-for h3 { color: var(--good); }
+.tally-col.is-against h3 { color: var(--signal); }
+
+.tally-col ul {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tally-col li {
+  padding-left: 1.15rem;
+  position: relative;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.tally-col li::before {
+  position: absolute;
+  left: 0;
+  top: 0.12em;
+  font-size: 0.8em;
+  font-weight: 800;
+}
+
+.tally-col.is-for li::before { content: "✓"; color: var(--good); }
+.tally-col.is-against li::before { content: "→"; color: var(--signal); }
+
+.quote-strip {
+  margin: 0;
+  padding: clamp(1.5rem, 3.5vw, 2.4rem);
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  background: var(--bg-raised);
+}
+
+.quote-strip p {
+  margin: 0 0 0.6rem;
+  font-family: var(--font-display);
+  font-size: clamp(1.2rem, 2.4vw, 1.55rem);
+  font-style: italic;
+  line-height: 1.35;
+}
+
+.quote-strip cite {
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+  font-style: normal;
+}
+
+/* --------------------------------------------------------------------------
+   Subpages — feature and comparison pages share this layout language.
+   -------------------------------------------------------------------------- */
+
+.page-hero {
+  position: relative;
+  width: min(100% - (var(--gutter) * 2), var(--shell));
+  margin-inline: auto;
+  padding-block: clamp(3.5rem, 8vw, 6.5rem) clamp(3rem, 6vw, 5rem);
+}
+
+.page-hero-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 54rem;
+}
+
+.page-hero h1 { font-size: clamp(2.9rem, 6.8vw, 5rem); }
+
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 1.9rem;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+  font-weight: 560;
+}
+
+.crumbs a {
+  color: var(--ink-soft);
+  text-decoration: none;
+  transition: color 160ms var(--ease-soft);
+}
+
+.crumbs a:hover { color: var(--accent); }
+.crumbs span { opacity: 0.5; }
+.crumbs b { color: var(--ink); font-weight: 560; }
+
+.kbd {
+  display: inline-block;
+  padding: 0.08em 0.5em 0.12em;
+  border: 1px solid var(--line-strong);
+  border-radius: 0.4em;
+  background: var(--bg-raised);
+  box-shadow: 0 1.5px 0 var(--line-strong);
+  font-family: var(--font-mono);
+  font-size: 0.82em;
+  white-space: nowrap;
+}
+
+.detail-grid { display: grid; gap: 1rem; }
+
+.detail {
+  display: grid;
+  align-content: start;
+  gap: 0.5rem;
+  padding: clamp(1.4rem, 3vw, 2rem);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  transition: border-color 260ms var(--ease-soft), box-shadow 300ms var(--ease), translate 300ms var(--ease);
+}
+
+.detail:hover { border-color: var(--line-strong); box-shadow: var(--shadow-md); translate: 0 -2px; }
+
+.detail h3 { font-size: 1.14rem; }
+
+.detail p {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.detail .detail-kicker {
+  margin: 0 0 0.25rem;
+  color: var(--accent);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+/* "The fine print" — every feature page states its honest boundaries. */
+
+.truth {
+  padding: clamp(1.6rem, 3.5vw, 2.4rem);
+  border: 1px solid color-mix(in oklch, var(--signal) 32%, var(--line));
+  border-radius: var(--r-lg);
+  background: color-mix(in oklch, var(--signal-wash) 55%, transparent);
+}
+
+.truth h2 {
+  margin-bottom: 1.1rem;
+  font-size: clamp(1.55rem, 3vw, 2rem);
+}
+
+.truth ul {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.truth li {
+  position: relative;
+  max-width: 68ch;
+  padding-left: 1.25rem;
+  color: var(--ink-soft);
+  font-size: 0.93rem;
+}
+
+.truth li::before {
+  position: absolute;
+  left: 0;
+  top: 0.1em;
+  color: var(--signal);
+  content: "▪";
+  font-size: 0.8em;
+}
+
+/* Prev / next footer navigation between feature pages. */
+
+.page-next {
+  display: grid;
+  gap: 1px;
+  width: min(100% - (var(--gutter) * 2), var(--shell));
+  margin: 0 auto var(--section-pad);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--line);
+  overflow: hidden;
+}
+
+.page-next a {
+  display: grid;
+  gap: 0.3rem;
+  padding: clamp(1.3rem, 3vw, 1.8rem);
+  background: var(--bg-raised);
+  text-decoration: none;
+  transition: background-color 200ms var(--ease-soft);
+}
+
+.page-next a:hover { background: var(--accent-wash); }
+
+.page-next small {
+  color: var(--ink-faint);
+  font-size: 0.7rem;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.page-next b {
+  font-family: var(--font-display);
+  font-size: 1.3rem;
+  font-weight: 400;
+}
+
+.page-next .is-next { text-align: right; }
+
+/* --------------------------------------------------------------------------
    Scroll reveals — content is visible by default and only hidden once the
    progressive-enhancement gate confirms JavaScript is running.
    -------------------------------------------------------------------------- */
@@ -2145,6 +2748,11 @@ html:not(.js) .theme-toggle { display: none; }
 }
 
 @media (min-width: 40rem) {
+  .feature-index { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 3rem; }
+  .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .vs-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .tally { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-next { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile-wide { grid-column: span 2; }
@@ -2163,6 +2771,7 @@ html:not(.js) .theme-toggle { display: none; }
   .steps li:nth-child(3) { grid-column: auto; }
   .bento { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .tile-wide { grid-column: span 6; }
+  .tile-action { grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); align-items: end; }
   .tile-music { grid-column: span 3; }
   .tile-edit { grid-column: span 3; }
   .tile-lang { grid-column: span 2; }

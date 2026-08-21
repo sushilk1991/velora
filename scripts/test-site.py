@@ -334,7 +334,50 @@ def main() -> None:
         "the copied Homebrew command must match the visible command"
     )
 
-    print(f"site checks OK — {len(parser.local_assets)} local references")
+    # --- feature and comparison subpages -------------------------------------
+    subpages = sorted([*SITE.glob("features/*.html"), *SITE.glob("compare/*.html")])
+    assert len(subpages) >= 14, "the feature and comparison pages must exist"
+    for page in subpages:
+        sub_html = page.read_text(encoding="utf-8")
+        sub = SiteParser()
+        sub.feed(sub_html)
+        rel = page.relative_to(SITE).as_posix()
+
+        assert sub.h1_count == 1, f"{rel}: every page must have exactly one h1"
+        assert not sub.remote_executables, (
+            f"{rel}: scripts and styles must remain self-hosted: "
+            + ", ".join(sub.remote_executables)
+        )
+        assert len(sub.ids) == len(set(sub.ids)), f"{rel}: HTML ids must be unique"
+        assert sub.canonical_hrefs == [f"https://sushilk1991.github.io/velora/{rel}"], (
+            f"{rel}: the page must declare its own canonical URL"
+        )
+        broken_fragments = sorted(
+            href for href in sub.hrefs if href.startswith("#") and href[1:] not in sub.ids
+        )
+        assert not broken_fragments, (
+            f"{rel}: in-page links must resolve: " + ", ".join(broken_fragments)
+        )
+        missing_sub = sorted(
+            ref
+            for ref in sub.local_assets
+            # Directory links ("../") are navigation, not file assets.
+            if ref and not ref.endswith("/") and not (page.parent / ref).resolve().is_file()
+        )
+        assert not missing_sub, f"{rel}: missing local assets: " + ", ".join(missing_sub)
+        assert 'classList.add("js")' in sub_html and sub_html.index(
+            'classList.add("js")'
+        ) < sub_html.index('rel="stylesheet"'), (
+            f"{rel}: the stored theme must be applied before the stylesheet"
+        )
+        assert sub_html.count("https://github.com/sushilk1991/velora/releases/latest") >= 1, (
+            f"{rel}: every page must keep a download path"
+        )
+
+    print(
+        f"site checks OK — {len(parser.local_assets)} local references, "
+        f"{len(subpages)} subpages"
+    )
 
 
 if __name__ == "__main__":

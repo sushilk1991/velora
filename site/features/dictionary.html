@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Teach Velora your names, products, and jargon. It learns from your corrections, imports and exports CSV, and syncs only if you ask — via your own iCloud Drive.">
+  <meta property="og:title" content="Personal dictionary — Velora">
+  <meta property="og:description" content="Teach Velora your names, products, and jargon. It learns from your corrections, imports and exports CSV, and syncs only if you ask — via your own iCloud Drive.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/dictionary.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Personal dictionary — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/dictionary.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>Personal dictionary</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature</p>
+        <h1 class="reveal" style="--reveal-order: 2">It learns<br><em>your nouns.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Every field has its Priyas, Kubernetes-es, and product codenames that generic speech models mangle. Velora keeps a personal dictionary that fixes them — and learns new ones from the corrections you make.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">How it learns</p>
+        <h2>Corrections in, accuracy out.</h2>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">Vocabulary</p>
+          <h3>Terms the model should trust</h3>
+          <p>Add names, brands, and jargon once, and the speech model is nudged toward them on every dictation. Validated on entry, so a typo never becomes a permanent bias.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Replacements</p>
+          <h3>Always-wrong, auto-fixed</h3>
+          <p>When a term is transcribed wrong the same way every time, a replacement rule rewrites it after the fact — deterministic, visible, and editable.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">Learning</p>
+          <h3>Your edits teach it</h3>
+          <p>Velora mines the corrections you actually make and proposes dictionary entries with a visible receipt — you confirm what it learned; it never silently rewires itself.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Portable</p>
+          <h3>CSV in, CSV out</h3>
+          <p>Bring a term list from anywhere, export yours anytime. Optional sync uses your own iCloud Drive and carries confirmed terms only — never audio, never transcripts.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>The Whisper speech models consume the dictionary during transcription; the Parakeet models do not yet — their replacements still apply after the fact.</li>
+          <li>Sync is off by default. Turning it on uses your iCloud Drive, not a Velora server — there isn’t one.</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="modes.html"><small>Previous</small><b>App-aware modes</b></a>
+      <a class="is-next" href="history.html"><small>Next</small><b>History & recovery</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>

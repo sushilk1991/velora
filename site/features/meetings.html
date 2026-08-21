@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Consent-first recording of microphone and system audio, with local transcripts, speaker separation, and searchable notes. Audio only — never your screen.">
+  <meta property="og:title" content="Meeting notes — Velora">
+  <meta property="og:description" content="Consent-first recording of microphone and system audio, with local transcripts, speaker separation, and searchable notes. Audio only — never your screen.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/meetings.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Meeting notes — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/meetings.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>Meeting notes</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature</p>
+        <h1 class="reveal" style="--reveal-order: 2">Records the room.<br><em>Never the screen.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">After you confirm — every time — Velora captures your microphone and your Mac’s audio in two tracks, keeps a visible recording indicator running, and turns the meeting into a transcript and notes you can search. All of it stays on your Mac.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">What you get</p>
+        <h2>A meeting memory you actually own.</h2>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">Consent first</p>
+          <h3>No silent recording, ever</h3>
+          <p>Every capture starts with an explicit confirmation and runs with a persistent recording indicator. There is no auto-record setting to forget about — that is a design decision, not a missing feature.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Two tracks</p>
+          <h3>Your mic and the room</h3>
+          <p>Microphone and system audio are captured separately, so your voice and the other side stay distinct. Speaker separation labels who said what — without guessing at anyone’s identity.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">Local processing</p>
+          <h3>Transcript, notes, search</h3>
+          <p>The same on-device models produce a transcript and structured notes. Processing is resumable — a long meeting keeps its progress — and everything is searchable, replayable, exportable, and deletable from History.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Knows when it’s over</p>
+          <h3>Ends with the meeting</h3>
+          <p>When the meeting app releases your microphone, Velora offers to wrap up — scoped to the capture you approved, so it never lingers past the call.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>Velora captures audio only — never your screen, slides, or camera.</li>
+          <li>Call audio keeps playing during capture; meeting recording does not pause anyone’s playback.</li>
+          <li>Recording other people may require their consent where you live — the confirmation step is there for a reason.</li>
+          <li>Deleting a meeting from History permanently deletes its transcript and archived audio.</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="voice-edit.html"><small>Previous</small><b>Voice Edit</b></a>
+      <a class="is-next" href="modes.html"><small>Next</small><b>App-aware modes</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>

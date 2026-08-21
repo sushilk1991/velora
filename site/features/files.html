@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Right-click any audio or video file — MP3, WAV, M4A, MOV, MP4 — and open it with Velora for a local transcript. No upload, no per-minute pricing.">
+  <meta property="og:title" content="File transcription — Velora">
+  <meta property="og:description" content="Right-click any audio or video file — MP3, WAV, M4A, MOV, MP4 — and open it with Velora for a local transcript. No upload, no per-minute pricing.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/files.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>File transcription — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/files.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>File transcription</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature</p>
+        <h1 class="reveal" style="--reveal-order: 2">Any recording in.<br><em>A transcript out.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Voice memos, interview recordings, screen captures with a voice track — open them with Velora from Finder and get a transcript written next to the file. Locally, with no per-minute meter running.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">How it works</p>
+        <h2>Finder-native, queue-smart.</h2>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">Open With</p>
+          <h3>Right there in Finder</h3>
+          <p>Velora registers as a handler for common audio formats plus QuickTime and MPEG-4 video. Right-click → Open With → Velora, or use the in-app picker — same result.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Video too</p>
+          <h3>MOV and MP4 welcome</h3>
+          <p>Velora decodes the audio track out of video files locally — a screen recording or a lecture capture transcribes just like a voice memo.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">Orderly</p>
+          <h3>Busy is not broken</h3>
+          <p>Files opened before the engine is ready, or while another job runs, queue in order and process when their turn comes. Nothing is dropped on the floor.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Free</p>
+          <h3>No per-minute anything</h3>
+          <p>Batch transcription is a paid add-on in most tools. Here it’s the same local model you already downloaded — an hour of audio costs you compute, not money.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>Imported files currently produce a plain transcript — speaker labels and timestamps for arbitrary files are on the roadmap (meeting recordings made in Velora do get speaker separation).</li>
+          <li>DRM-protected media, directories, and remote URLs are refused by design.</li>
+          <li>Long files take local compute time; the job continues in the background and lands in History.</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="languages.html"><small>Previous</small><b>Languages & models</b></a>
+      <a class="is-next" href="privacy.html"><small>Next</small><b>The privacy model</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="An honest comparison of Mac dictation tools — Velora, Wispr Flow, Superwhisper, FluidVoice, and Apple Dictation — on privacy, price, cleanup, and openness.">
+  <meta property="og:title" content="Velora vs Wispr Flow, Superwhisper & more">
+  <meta property="og:description" content="An honest comparison of Mac dictation tools — Velora, Wispr Flow, Superwhisper, FluidVoice, and Apple Dictation — on privacy, price, cleanup, and openness.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/compare/index.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Velora vs the field — dictation apps compared</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/compare/index.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><b>Compare</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Checked August 2026</p>
+        <h1 class="reveal" style="--reveal-order: 2">Every voice tool,<br><em>one honest table.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Five ways to talk to your Mac, compared on the things that actually differ: where your audio goes, what polish costs, and whether you can verify any of it. Including what each tool does better than Velora.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="vs-scroll reveal">
+        <table class="vs-table">
+          <caption>Prices and claims checked August 2026 · corrections welcome via GitHub issues</caption>
+          <thead>
+            <tr>
+              <th scope="col"><span class="visually-hidden">Criterion</span></th>
+              <th scope="col" class="vs-velora">Velora</th>
+              <th scope="col">Wispr Flow</th>
+              <th scope="col">Superwhisper</th>
+              <th scope="col">FluidVoice</th>
+              <th scope="col">Apple Dictation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Price</th>
+              <td class="vs-velora">Free forever · MIT</td>
+              <td>Free: 2,000 words/week desktop · Pro $12–15/mo</td>
+              <td>Free tier · Pro $8.49/mo · $249.99 lifetime</td>
+              <td>Free · open source</td>
+              <td>Free · built in</td>
+            </tr>
+            <tr>
+              <th scope="row">Transcription runs</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>On your Mac, always</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>In their cloud, always</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>Local models available; cloud optional</td>
+              <td><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Local engines</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>On-device for supported languages</td>
+            </tr>
+            <tr>
+              <th scope="row">AI cleanup of your words</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Local LLM, free, automatic</td>
+              <td>Cloud, included</td>
+              <td>Small models free; advanced is Pro / your API key</td>
+              <td>Per-app prompts, local</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>None</td>
+            </tr>
+            <tr>
+              <th scope="row">Account required</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Never</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>Yes</td>
+              <td>No · licence unlocks Pro</td>
+              <td>No</td>
+              <td>Part of macOS</td>
+            </tr>
+            <tr>
+              <th scope="row">Open source</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>MIT, full app</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Yes</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+            </tr>
+            <tr>
+              <th scope="row">App-aware formatting</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Built-in + custom modes</td>
+              <td><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Yes</td>
+              <td><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Deep mode system</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>Per-app prompts</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+            </tr>
+            <tr>
+              <th scope="row">Meeting notes</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Local, consent-first, diarized</td>
+              <td>Cloud notetaker</td>
+              <td>Yes, with presets</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>File transcription with speakers</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+            </tr>
+            <tr>
+              <th scope="row">Spoken actions in apps</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Action Mode — bounded, local</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>Arbitrary shell commands</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>Siri, separate system</td>
+            </tr>
+            <tr>
+              <th scope="row">Platforms</th>
+              <td class="vs-velora">Mac (Apple Silicon)</td>
+              <td>Mac · Windows · iPhone · Android</td>
+              <td>Mac · Windows · iPhone</td>
+              <td>Mac</td>
+              <td>Every Apple device</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="vs-foot reveal">
+        “In their cloud, always” is Wispr Flow’s own wording — their data-controls page
+        states “transcription always occurs on the cloud.” Something wrong or outdated here?
+        <a href="https://github.com/sushilk1991/velora/issues">Open an issue</a> and it gets fixed.
+      </p>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">Credit where due</p>
+        <h2>What the others do better.</h2>
+        <p class="section-lede">
+          A comparison you can trust has to cut both ways. If your needs match these,
+          use the other tool — genuinely.
+        </p>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">Wispr Flow</p>
+          <h3>Reach and team polish</h3>
+          <p>Native apps on Mac, Windows, iPhone, and Android, enterprise compliance (SOC 2, HIPAA-ready), and a very polished onboarding. If you need dictation on Windows or a managed team rollout, Velora simply doesn’t do that.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Superwhisper</p>
+          <h3>Depth of configuration</h3>
+          <p>A longer track record, a bigger model catalogue, per-mode shortcuts and paste policies, deep links, and iOS + Windows apps. Power users who love tuning will find more dials there today.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">FluidVoice</p>
+          <h3>Hacker energy</h3>
+          <p>Open source like Velora, with multiple local engines and speaker-labelled file transcription. Its voice-triggered shell commands are powerful — Velora deliberately refuses that trade for a safer action model.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Apple Dictation</p>
+          <h3>Zero setup</h3>
+          <p>It’s already on your Mac and works offline for supported languages. If you dictate a sentence a week and don’t mind cleaning it up yourself, you may not need anything else.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">Deep dives</p>
+        <h2>The two comparisons people ask for.</h2>
+      </div>
+      <div class="vs-cards">
+        <a class="vs-card reveal" style="--reveal-order: 0" href="wispr-flow.html">
+          <h3>Velora vs Wispr Flow</h3>
+          <p>The architecture question: what “privacy mode” can and cannot mean when transcription lives in the cloud.</p>
+          <span class="text-link">Read it <span class="link-glyph" aria-hidden="true">→</span></span>
+        </a>
+        <a class="vs-card reveal" style="--reveal-order: 1" href="superwhisper.html">
+          <h3>Velora vs Superwhisper</h3>
+          <p>The closest competitor — also local-capable. The differences are the licence, the cleanup, and the price.</p>
+          <span class="text-link">Read it <span class="link-glyph" aria-hidden="true">→</span></span>
+        </a>
+        <a class="vs-card reveal" style="--reveal-order: 2" href="../features/privacy.html">
+          <h3>Velora’s privacy model</h3>
+          <p>The full ledger of what stays on your Mac and what ever touches the network — and how to verify it.</p>
+          <span class="text-link">Read it <span class="link-glyph" aria-hidden="true">→</span></span>
+        </a>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="../#compare"><small>Previous</small><b>Back to overview</b></a>
+      <a class="is-next" href="wispr-flow.html"><small>Next</small><b>Velora vs Wispr Flow</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="The app in front decides the format: Slack gets a message, Mail gets paragraphs, your terminal gets verbatim commands. Custom modes with a native app picker.">
+  <meta property="og:title" content="App-aware modes — Velora">
+  <meta property="og:description" content="The app in front decides the format: Slack gets a message, Mail gets paragraphs, your terminal gets verbatim commands. Custom modes with a native app picker.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/modes.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>App-aware modes — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/modes.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>App-aware modes</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature</p>
+        <h1 class="reveal" style="--reveal-order: 2">The app you’re in<br><em>decides the format.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Velora reads which app is in front and switches its writing rules to match — terse in Slack, structured in Mail, verbatim in the terminal. No toggles to remember mid-thought.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">The built-ins</p>
+        <h2>Four defaults that cover most of a workday.</h2>
+      </div>
+      <div class="modes">
+        <article class="mode reveal" style="--reveal-order: 0">
+          <header><h3>Message</h3><span class="mode-app">Slack · Messages · WhatsApp</span></header>
+          <p class="mode-said">“are we still on for thursday i can move things around if not”</p>
+          <p class="mode-got">Are we still on for Thursday? I can move things around if not</p>
+          <p class="mode-rule">Terse. No invented greeting. A short line keeps its missing full stop.</p>
+        </article>
+        <article class="mode reveal" style="--reveal-order: 1">
+          <header><h3>Email</h3><span class="mode-app">Mail · Outlook · Spark</span></header>
+          <p class="mode-said">“thanks for sending that over i read it last night separately we should talk about the pricing page”</p>
+          <p class="mode-got">Thanks for sending that over — I read it last night.<br><br>Separately, we should talk about the pricing page.</p>
+          <p class="mode-rule">Paragraph breaks where the topic shifts. Never invents a sign-off you didn’t say.</p>
+        </article>
+        <article class="mode reveal" style="--reveal-order: 2">
+          <header><h3>Note</h3><span class="mode-app">Notes · Obsidian · Bear</span></header>
+          <p class="mode-said">“first pull the logs second check the retry counter third file the ticket”</p>
+          <p class="mode-got">1. Pull the logs<br>2. Check the retry counter<br>3. File the ticket</p>
+          <p class="mode-rule">Spoken ordinals become a numbered list. Plain prose stays prose.</p>
+        </article>
+        <article class="mode reveal mode-code" style="--reveal-order: 3">
+          <header><h3>Code</h3><span class="mode-app">VS Code · Zed · Terminal</span></header>
+          <p class="mode-said">“git commit dash m fix the retry backoff”</p>
+          <p class="mode-got"><code>git commit -m "fix the retry backoff"</code></p>
+          <p class="mode-rule">Verbatim. Nothing capitalised, no trailing period — a period breaks a shell command.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">Make your own</p>
+        <h2>Custom modes, without the spreadsheet feeling.</h2>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">Native picker</p>
+          <h3>Point at apps, not bundle IDs</h3>
+          <p>Assign apps to a mode with a real multi-select picker with icons. An advanced field still accepts raw bundle IDs when you need one, matched case-insensitively.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">No ambiguity</p>
+          <h3>One app, one owner</h3>
+          <p>An app cannot silently belong to two modes — Velora rejects the conflict instead of quietly picking a winner. Assigning a whole browser warns you that it overrides site-aware routing.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">Visible truth</p>
+          <h3>The HUD names your mode</h3>
+          <p>A custom Slack mode called “Banter” shows up as Banter while you dictate — the pill never disagrees with what the engine is actually doing.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Plain files</p>
+          <h3>Modes are JSON you own</h3>
+          <p>Every mode lives as a readable JSON file in ~/.velora/modes — versionable, editable, portable. Built-ins are installed once and never overwritten behind your back.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>Per-mode shortcuts, paste policies, and tone controls are not there yet — the mode follows the app in front.</li>
+          <li>Per-site rules inside a browser are coarse today: assigning the whole browser to a mode overrides automatic site-aware routing, and Velora tells you so.</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="meetings.html"><small>Previous</small><b>Meeting notes</b></a>
+      <a class="is-next" href="dictionary.html"><small>Next</small><b>Personal dictionary</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>

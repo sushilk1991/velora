@@ -16,6 +16,8 @@
   <link rel="canonical" href="https://sushilk1991.github.io/velora/">
   <link rel="icon" href="assets/app-icon.png">
   <link rel="apple-touch-icon" href="assets/app-icon.png">
+  <link rel="preload" href="assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
   <script>
     document.documentElement.classList.add("js");
     try {
@@ -29,6 +31,7 @@
   </script>
   <link rel="stylesheet" href="styles.css">
   <script defer src="script.js"></script>
+  <script type="module" src="assets/scene.js"></script>
   <script type="application/ld+json">
     {
       "@context": "https://schema.org",
@@ -55,8 +58,8 @@
 
       <nav class="desktop-nav" aria-label="Primary navigation">
         <a href="#how-it-works">How it works</a>
-        <a href="#stream">Stream Typing</a>
-        <a href="#anywhere">Anywhere</a>
+        <a href="#features">Features</a>
+        <a href="#compare">Compare</a>
         <a href="#privacy">Privacy</a>
         <a href="#iphone">iPhone</a>
         <a href="#faq">FAQ</a>
@@ -74,8 +77,8 @@
           <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
           <nav aria-label="Mobile navigation">
             <a href="#how-it-works">How it works</a>
-            <a href="#stream">Stream Typing</a>
-            <a href="#anywhere">Anywhere</a>
+            <a href="#features">Features</a>
+            <a href="#compare">Compare</a>
             <a href="#privacy">Privacy</a>
             <a href="#iphone">iPhone</a>
             <a href="#faq">FAQ</a>
@@ -89,6 +92,7 @@
 
   <main id="main">
     <section class="hero" id="top">
+      <div class="hero-scene" data-voice-scene="hero" aria-hidden="true"></div>
       <div class="hero-copy">
         <p class="eyebrow reveal" style="--reveal-order: 0"><span class="eyebrow-dot" aria-hidden="true"></span> Private voice typing for Mac</p>
         <h1 class="reveal" style="--reveal-order: 1">Say it once.<br><em>It’s already typed.</em></h1>
@@ -252,6 +256,7 @@
             <h3>Speak now. Fix it while you talk.</h3>
             <p>Press ⌃⇧S. Velora shows a live draft, follows corrections like “3 p.m., no, 6 p.m.,” and finishes with clean text.</p>
             <p class="stream-note">Editors update at your cursor. Terminals show the draft in Velora, then insert it when you finish.</p>
+            <a class="text-link" href="features/stream-typing.html">How Stream Typing works <span class="link-glyph" aria-hidden="true">→</span></a>
           </div>
           <div class="stream-preview" aria-hidden="true">
             <span class="stream-status"><i></i> Listening</span>
@@ -260,11 +265,31 @@
           </div>
         </article>
 
-        <article class="tile tile-wide tile-meeting reveal" style="--reveal-order: 1">
+        <article class="tile tile-wide tile-action reveal" id="actions" style="--reveal-order: 1">
+          <div class="tile-copy">
+            <p class="tile-kicker">New · Action Mode</p>
+            <h3>Say what you want done. It gets done.</h3>
+            <p>Hold ⌃⇧A and speak — “message Priya on Slack that I’m running late.” Velora opens the app and works like an agent: a few steps at a time, reading what the screen actually says, correcting course when a shortcut doesn’t land. Say “draft” and it stops with the message written but unsent.</p>
+            <a class="text-link" href="features/action-mode.html">How Action Mode works <span class="link-glyph" aria-hidden="true">→</span></a>
+          </div>
+          <div class="action-demo" aria-hidden="true">
+            <p class="action-said">“message Priya on Slack that I’m running late”</p>
+            <ol class="action-steps">
+              <li>Open Slack</li>
+              <li>Find Priya</li>
+              <li>Type the message</li>
+              <li>Send</li>
+            </ol>
+            <span class="stream-shortcut">⌃⇧A</span>
+          </div>
+        </article>
+
+        <article class="tile tile-wide tile-meeting reveal" style="--reveal-order: 2">
           <div class="tile-copy">
             <p class="tile-kicker">Private meeting memory</p>
             <h3>Records the room. Never the screen.</h3>
             <p>After you confirm — every time — Velora captures microphone and computer audio, keeps a visible recording indicator running, and writes a transcript and notes you can search locally. It captures audio only.</p>
+            <a class="text-link" href="features/meetings.html">How meeting notes work <span class="link-glyph" aria-hidden="true">→</span></a>
           </div>
           <div class="meeting-hud" aria-hidden="true">
             <span class="record-ring"><i></i></span>
@@ -274,7 +299,7 @@
           </div>
         </article>
 
-        <article class="tile tile-music reveal" style="--reveal-order: 2">
+        <article class="tile tile-music reveal" style="--reveal-order: 3">
           <p class="tile-kicker">AirPods, unharmed</p>
           <h3>Your music pauses itself.</h3>
           <p>For direct dictation, Velora pauses supported music players and resumes only what it paused. Browser video is excluded from automatic pause and resume. Meeting capture leaves call audio running.</p>
@@ -285,10 +310,11 @@
           </div>
         </article>
 
-        <article class="tile tile-edit reveal" style="--reveal-order: 3">
+        <article class="tile tile-edit reveal" style="--reveal-order: 4">
           <p class="tile-kicker">Voice edit</p>
           <h3>Select it. Say what to change.</h3>
           <p>Highlight a sentence, describe the edit out loud, and it is rewritten in place. If the result is wrong, ⌘Z puts it back exactly as it was.</p>
+          <a class="text-link" href="features/voice-edit.html">How Voice Edit works <span class="link-glyph" aria-hidden="true">→</span></a>
           <div class="edit-demo" aria-hidden="true">
             <span class="edit-before"><mark>make this shorter and less formal</mark></span>
             <span class="edit-arrow">↓</span>
@@ -296,27 +322,110 @@
           </div>
         </article>
 
-        <article class="tile tile-lang reveal" style="--reveal-order: 4">
+        <article class="tile tile-lang reveal" style="--reveal-order: 5">
           <p class="tile-kicker">Languages</p>
           <h3><span class="big-number">99</span> languages, one model.</h3>
           <p>The default speech model is Whisper large-v3-turbo — multilingual, including Hindi and Indian English. Set a language or let Velora detect it.</p>
+          <a class="text-link" href="features/languages.html">Languages &amp; models <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
 
-        <article class="tile tile-dict reveal" style="--reveal-order: 5">
+        <article class="tile tile-dict reveal" style="--reveal-order: 6">
           <p class="tile-kicker">Personal dictionary</p>
           <h3>It learns your nouns.</h3>
           <p>Teach it the names, products, and jargon it keeps mangling. Sync is optional, uses your own iCloud Drive, and carries confirmed terms — never audio or transcripts.</p>
+          <a class="text-link" href="features/dictionary.html">How the dictionary works <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
 
-        <article class="tile tile-history reveal" style="--reveal-order: 6">
+        <article class="tile tile-history reveal" style="--reveal-order: 7">
           <p class="tile-kicker">History</p>
           <h3>Nothing is thrown away.</h3>
           <p>Every dictation keeps its raw transcript alongside the cleaned result, searchable on your Mac. If cleanup got it wrong, the original is still there.</p>
+          <a class="text-link" href="features/history.html">How history works <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
       </div>
     </section>
 
-    <section class="section privacy" id="privacy" data-index="04">
+    <section class="section features" id="features" data-index="04">
+      <div class="section-head reveal">
+        <p class="eyebrow">Everything, indexed</p>
+        <h2>Every feature has its own page.</h2>
+        <p class="section-lede">
+          No mystery-meat marketing. Each capability below gets a full page: how it
+          works, the exact shortcuts, and the honest boundaries of what it will not do.
+        </p>
+      </div>
+
+      <div class="feature-index reveal">
+        <a class="findex" href="features/dictation.html">
+          <span class="findex-num" aria-hidden="true">01</span>
+          <h3>Hold-to-talk dictation</h3>
+          <p>Hold Right Option, talk, release. Clean text lands at your cursor in any Mac app.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/stream-typing.html">
+          <span class="findex-num" aria-hidden="true">02</span>
+          <h3>Stream Typing<span class="findex-new">New</span></h3>
+          <p>⌃⇧S shows a live draft while you speak and follows your mid-sentence corrections.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/action-mode.html">
+          <span class="findex-num" aria-hidden="true">03</span>
+          <h3>Action Mode<span class="findex-new">New</span></h3>
+          <p>⌃⇧A turns a spoken sentence into real steps in real apps — locally, like an agent.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/voice-edit.html">
+          <span class="findex-num" aria-hidden="true">04</span>
+          <h3>Voice Edit</h3>
+          <p>Select text, say the change, get it rewritten in place — with ⌘Z as the exit.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/meetings.html">
+          <span class="findex-num" aria-hidden="true">05</span>
+          <h3>Meeting notes</h3>
+          <p>Consent-first capture of mic and system audio, with local transcripts and notes.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/modes.html">
+          <span class="findex-num" aria-hidden="true">06</span>
+          <h3>App-aware modes</h3>
+          <p>Slack gets a message, Mail gets paragraphs, your terminal gets verbatim commands.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/dictionary.html">
+          <span class="findex-num" aria-hidden="true">07</span>
+          <h3>Personal dictionary</h3>
+          <p>Your names, products, and jargon — learned from your corrections, synced only if you ask.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/history.html">
+          <span class="findex-num" aria-hidden="true">08</span>
+          <h3>History &amp; recovery</h3>
+          <p>Raw transcript and final text for every dictation, searchable and replayable on your Mac.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/languages.html">
+          <span class="findex-num" aria-hidden="true">09</span>
+          <h3>Languages &amp; models</h3>
+          <p>99 languages through Whisper, faster English-first options through Parakeet.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/files.html">
+          <span class="findex-num" aria-hidden="true">10</span>
+          <h3>File transcription</h3>
+          <p>Drop audio or video on Velora — MP3, WAV, MOV, MP4 — and get a local transcript.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+        <a class="findex" href="features/privacy.html">
+          <span class="findex-num" aria-hidden="true">11</span>
+          <h3>The privacy model</h3>
+          <p>Not a policy you trust — an architecture you can read. What leaves your Mac, and when.</p>
+          <span class="findex-arrow" aria-hidden="true">→</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="section privacy" id="privacy" data-index="05">
       <div class="privacy-grid">
         <div class="privacy-copy reveal">
           <p class="eyebrow">Private by architecture</p>
@@ -364,7 +473,115 @@
       </div>
     </section>
 
-    <section class="iphone" id="iphone" data-index="05">
+    <section class="section compare" id="compare" data-index="06">
+      <div class="section-head reveal">
+        <p class="eyebrow">The honest comparison</p>
+        <h2>Same job. Very different deals.</h2>
+        <p class="section-lede">
+          Dictation tools differ on three things: where your audio goes, what the
+          polish costs, and whether you can check. Here is the whole picture —
+          including what the others genuinely do better.
+        </p>
+      </div>
+
+      <div class="vs-scroll reveal">
+        <table class="vs-table">
+          <caption>Checked August 2026 · full detail on the comparison pages</caption>
+          <thead>
+            <tr>
+              <th scope="col"><span class="visually-hidden">Criterion</span></th>
+              <th scope="col" class="vs-velora">Velora</th>
+              <th scope="col">Wispr Flow</th>
+              <th scope="col">Superwhisper</th>
+              <th scope="col">Apple Dictation</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th scope="row">Price</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Free forever, MIT-licensed</td>
+              <td>Free tier capped at 2,000 words/week; Pro $12–15/mo</td>
+              <td>Free tier; Pro $8.49/mo or $249.99 lifetime</td>
+              <td>Free, built in</td>
+            </tr>
+            <tr>
+              <th scope="row">Where your audio goes</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Stays on your Mac</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>Their servers — “transcription always occurs on the cloud”</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>On-device with local models; optional cloud models</td>
+              <td><span class="vs-mark vs-mid" aria-hidden="true">~</span>On-device for supported languages</td>
+            </tr>
+            <tr>
+              <th scope="row">Account required</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Never</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>Yes</td>
+              <td>No account; licence unlocks Pro</td>
+              <td>Apple ID is part of macOS</td>
+            </tr>
+            <tr>
+              <th scope="row">AI cleanup of what you said</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Local LLM, included free</td>
+              <td>In the cloud</td>
+              <td>Advanced models are Pro; cloud models bill your own API key</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>None — raw transcription</td>
+            </tr>
+            <tr>
+              <th scope="row">Open source</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>All of it, on GitHub</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+            </tr>
+            <tr>
+              <th scope="row">Spoken actions in real apps</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Action Mode, local</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+            </tr>
+            <tr>
+              <th scope="row">Meeting notes</th>
+              <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Local, consent-first</td>
+              <td>Cloud notetaker</td>
+              <td>Yes</td>
+              <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>No</td>
+            </tr>
+            <tr>
+              <th scope="row">Platforms</th>
+              <td class="vs-velora">Mac (Apple Silicon)</td>
+              <td>Mac, Windows, iPhone, Android</td>
+              <td>Mac, Windows, iPhone</td>
+              <td>Every Apple device</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="vs-foot reveal">
+        The cloud quote is from Wispr Flow’s own data-controls page. Prices and claims
+        checked August 2026; corrections welcome —
+        <a href="https://github.com/sushilk1991/velora/issues">open an issue</a>.
+      </p>
+
+      <div class="vs-cards">
+        <a class="vs-card reveal" style="--reveal-order: 0" href="compare/wispr-flow.html">
+          <h3>Velora vs Wispr Flow</h3>
+          <p>Beautiful product, cloud architecture. Why “privacy mode” is not the same as your audio never leaving.</p>
+          <span class="text-link">Read the comparison <span class="link-glyph" aria-hidden="true">→</span></span>
+        </a>
+        <a class="vs-card reveal" style="--reveal-order: 1" href="compare/superwhisper.html">
+          <h3>Velora vs Superwhisper</h3>
+          <p>The closest competitor — also local-capable. The differences are the licence, the cleanup, and the price.</p>
+          <span class="text-link">Read the comparison <span class="link-glyph" aria-hidden="true">→</span></span>
+        </a>
+        <a class="vs-card reveal" style="--reveal-order: 2" href="compare/index.html">
+          <h3>The whole field</h3>
+          <p>Wispr Flow, Superwhisper, Apple Dictation, and open-source FluidVoice — one honest matrix.</p>
+          <span class="text-link">See every tool <span class="link-glyph" aria-hidden="true">→</span></span>
+        </a>
+      </div>
+    </section>
+
+    <section class="iphone" id="iphone" data-index="07">
       <div class="iphone-inner">
         <div class="phone reveal" aria-hidden="true">
           <span class="phone-key"></span>
@@ -403,7 +620,7 @@
       </div>
     </section>
 
-    <section class="section install" id="download" data-index="06">
+    <section class="section install" id="download" data-index="08">
       <div class="install-grid">
         <div class="install-copy reveal">
           <p class="eyebrow">Install</p>
@@ -438,7 +655,7 @@
       </div>
     </section>
 
-    <section class="section faq" id="faq" data-index="07">
+    <section class="section faq" id="faq" data-index="09">
       <div class="section-head reveal">
         <p class="eyebrow">Straight answers</p>
         <h2>Before you install.</h2>

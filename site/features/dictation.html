@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Hold Right Option, speak, release. Velora turns your speech into clean text at your cursor, in any Mac app — entirely on your Mac.">
+  <meta property="og:title" content="Hold-to-talk dictation — Velora">
+  <meta property="og:description" content="Hold Right Option, speak, release. Velora turns your speech into clean text at your cursor, in any Mac app — entirely on your Mac.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/dictation.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>Hold-to-talk dictation — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/dictation.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>Hold-to-talk dictation</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature · the core mechanic</p>
+        <h1 class="reveal" style="--reveal-order: 2">One key down.<br><em>Clean text out.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Hold Right Option, talk the way you actually talk — filler, pauses, changed minds — and release. What lands at your cursor is the sentence you meant, polished by models that never leave your Mac.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">The mechanics</p>
+        <h2>Built around how people actually speak.</h2>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">Hold</p>
+          <h3>Any key you like</h3>
+          <p>Right Option is the default; Fn/Globe, F19, or any recorded shortcut works too. A small pill appears near your cursor and never steals focus from the field you are typing into.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Talk</p>
+          <h3>Ramble freely</h3>
+          <p>Say “um,” pause, change your mind halfway through. Velora removes filler, applies your self-corrections — “three, actually make that three thirty” becomes “3:30” — and keeps your meaning intact.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">Release</p>
+          <h3>Pasted, and kept</h3>
+          <p>Cleanup runs locally and the result is pasted at your cursor. It also stays on the clipboard, so nothing is lost if the app you are in refuses an automatic paste.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Honest capture</p>
+          <h3>Ready means ready</h3>
+          <p>Recording only counts as started once real audio is flowing — Velora waits for the first converted audio buffer instead of trusting the session flag, so a flaky Bluetooth mic fails loudly instead of recording silence.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 4">
+          <p class="detail-kicker">Your music survives</p>
+          <h3>Playback pauses itself</h3>
+          <p>Velora pauses supported players like Apple Music and Spotify when dictation starts and resumes only what it paused — so AirPods do not drop into low-quality call audio mid-song. Browser video is excluded from automatic pause and resume.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 5">
+          <p class="detail-kicker">Structure, spoken</p>
+          <h3>Say the list, get the list</h3>
+          <p>“First… second… third…” becomes a numbered list. A topic shift becomes a paragraph. You never say “comma” or “new line” — and you never need to.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>Velora needs microphone, accessibility, and input-monitoring permissions — macOS asks on first launch.</li>
+          <li>Models download once during setup (the default speech model is 1.6 GB); after that, dictation is local.</li>
+          <li>Cleanup is a model, and models can be wrong — every dictation keeps its raw transcript in History so the original is never lost.</li>
+          <li>Requires an Apple Silicon Mac on macOS 14 or later.</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="../#features"><small>Previous</small><b>All features</b></a>
+      <a class="is-next" href="stream-typing.html"><small>Next</small><b>Stream Typing</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>

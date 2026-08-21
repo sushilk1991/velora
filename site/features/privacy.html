@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="Velora’s privacy is not a policy — it’s a missing network call. What runs locally, what touches the network and when, and how to verify all of it.">
+  <meta property="og:title" content="The privacy model — Velora">
+  <meta property="og:description" content="Velora’s privacy is not a policy — it’s a missing network call. What runs locally, what touches the network and when, and how to verify all of it.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/privacy.html">
+  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <title>The privacy model — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/privacy.html">
+  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="apple-touch-icon" href="../assets/app-icon.png">
+  <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <script>
+    document.documentElement.classList.add("js");
+    try {
+      var stored = localStorage.getItem("velora-theme");
+      if (stored === "dark" || stored === "light") {
+        document.documentElement.dataset.theme = stored;
+      }
+    } catch (error) {
+      /* Private browsing can refuse storage; the media query still applies. */
+    }
+  </script>
+  <link rel="stylesheet" href="../styles.css">
+  <script defer src="../script.js"></script>
+  <script type="module" src="../assets/scene.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to main content</a>
+
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="brand" href="../" aria-label="Velora home">
+        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <span>Velora</span>
+      </a>
+
+      <nav class="desktop-nav" aria-label="Primary navigation">
+        <a href="../#how-it-works">How it works</a>
+        <a href="../#features">Features</a>
+        <a href="../#compare">Compare</a>
+        <a href="../#privacy">Privacy</a>
+        <a href="../#faq">FAQ</a>
+      </nav>
+
+      <div class="header-actions">
+        <button class="theme-toggle" type="button" data-theme-toggle aria-label="Switch to dark theme">
+          <span class="theme-icon theme-icon-sun" aria-hidden="true"></span>
+          <span class="theme-icon theme-icon-moon" aria-hidden="true"></span>
+        </button>
+        <a class="nav-star" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+          <span class="star-mark" aria-hidden="true">★</span> Star
+        </a>
+        <details class="mobile-nav">
+          <summary aria-label="Open navigation"><span aria-hidden="true"></span></summary>
+          <nav aria-label="Mobile navigation">
+            <a href="../#how-it-works">How it works</a>
+            <a href="../#features">Features</a>
+            <a href="../#compare">Compare</a>
+            <a href="../#privacy">Privacy</a>
+            <a href="../#faq">FAQ</a>
+            <a href="../#download">Download</a>
+            <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+          </nav>
+        </details>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="page-hero" id="top">
+      <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
+      <div class="page-hero-inner">
+        <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>The privacy model</b>
+        </nav>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Private by architecture</p>
+        <h1 class="reveal" style="--reveal-order: 2">Not a policy.<br><em>A missing network call.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Most dictation tools promise privacy in a document you have to trust. Velora’s speech recognition and cleanup have nowhere to send your audio, because the models sit on your disk — and the source is on GitHub if you’d rather check than trust.</p>
+        <div class="hero-actions reveal" style="--reveal-order: 4">
+          <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
+            Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-quiet" href="../#download">Install options</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">The ledger</p>
+        <h2>What stays, and what ever touches the network.</h2>
+      </div>
+      <dl class="ledger reveal">
+        <div class="ledger-row is-local"><dt>Your voice</dt><dd>stays on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Transcripts &amp; history</dt><dd>stay on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Meeting audio &amp; notes</dt><dd>stay on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Voice Edit selections</dt><dd>stay on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Action Mode plans &amp; receipts</dt><dd>stay on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Accounts, telemetry, ads</dt><dd>do not exist</dd></div>
+        <div class="ledger-row is-net"><dt>Model download, first run</dt><dd>uses the network once</dd></div>
+        <div class="ledger-row is-net"><dt>Update checks</dt><dd>optional, can be turned off</dd></div>
+        <div class="ledger-row is-net"><dt>Dictionary sync</dt><dd>optional, your iCloud Drive</dd></div>
+      </dl>
+    </section>
+
+    <section class="section">
+      <div class="section-head reveal">
+        <p class="eyebrow">Why this holds</p>
+        <h2>Four structural guarantees.</h2>
+      </div>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">No server</p>
+          <h3>There’s nothing to send to</h3>
+          <p>Velora has no backend, no account system, and no telemetry endpoint. The models that hear and polish your words are files on your disk, loaded into your RAM.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Verifiable</p>
+          <h3>The source is the proof</h3>
+          <p>Velora is MIT-licensed and developed in the open. “Local-only” is a claim you can grep, build, and watch on a network monitor — not a marketing page.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">Consent surfaces</p>
+          <h3>Recording is always visible</h3>
+          <p>Meeting capture requires a confirmation every time and keeps a recording indicator on screen. Audio only — the screen is never captured.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Closed doors</p>
+          <h3>No open ports</h3>
+          <p>Local automation is off by default and speaks only over an owner-checked Unix socket — no HTTP listener, no URL scheme that types into your apps, no network port at all.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>The first-run model download and optional update checks are real network events — they fetch models and release notes, and send nothing about you.</li>
+          <li>Dictionary sync, if you enable it, uses your iCloud Drive under Apple’s terms — confirmed terms only, never audio or transcripts.</li>
+          <li>Privacy claims here describe Velora’s boundary. What other apps on your Mac do with text you paste into them is theirs.</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="page-next reveal" aria-label="More pages">
+      <a href="files.html"><small>Previous</small><b>File transcription</b></a>
+      <a class="is-next" href="../compare/index.html"><small>Next</small><b>The honest comparison</b></a>
+    </nav>
+
+    <section class="closing">
+      <div class="closing-inner">
+        <span class="closing-mark" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <p class="eyebrow">Free. Open source. Local.</p>
+        <h2>Stop typing. Keep writing.</h2>
+        <div class="hero-actions">
+          <a class="button button-onlight" href="https://github.com/sushilk1991/velora/releases/latest">
+            Get Velora for Mac <span class="button-glyph" aria-hidden="true">↓</span>
+          </a>
+          <a class="button button-ghost" href="https://github.com/sushilk1991/velora" target="_blank" rel="noreferrer">
+            <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
+          </a>
+        </div>
+        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <a class="brand" href="../">
+          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <span>Velora</span>
+        </a>
+        <p>Private voice typing for Mac.</p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/sushilk1991/velora">GitHub</a>
+        <a href="https://github.com/sushilk1991/velora/issues">Issues</a>
+        <a href="mailto:sushilk.1991@gmail.com?subject=Velora%20Support">Email support</a>
+        <a href="https://github.com/sushilk1991/velora/blob/main/LICENSE">MIT License</a>
+      </nav>
+      <p class="footer-meta">© <span data-current-year>2026</span> Velora · No analytics, no tracking pixels, no cookies.</p>
+    </div>
+  </footer>
+</body>
+</html>
