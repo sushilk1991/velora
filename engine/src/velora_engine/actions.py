@@ -39,6 +39,7 @@ import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
+from urllib.parse import unquote_plus
 
 from .cleanup import neutralize_control_tokens
 
@@ -119,6 +120,12 @@ PRESS_DENY_WORDS = frozenset((
     "block", "leave", "archive", "unsubscribe", "logout", "signout",
     "trash", "erase", "reset", "approve", "withdraw", "report", "mute",
     "unfollow", "subscribe",
+    # Web-commit verbs (2026-08-21 review): links are pressable in browsers
+    # now, and billing/settings pages commit through link-styled controls
+    # ("Cancel subscription", "Deactivate account", "Save changes", "Donate",
+    # "Renew", "Log off").
+    "cancel", "subscription", "deactivate", "disable", "donate",
+    "logoff", "save", "renew",
     # Localized labels for the same controls. macOS ships localized, and an
     # English-only list meant the navigation-only gate simply did not exist
     # on a French or Spanish Mac: press_element "Envoyer" and "Supprimer"
@@ -207,6 +214,47 @@ ALLOWED_URL_SCHEMES = (
 # exfiltration is not. With the session's 24-step budget this leaves only a
 # trickle, and it costs real commands nothing.
 MAX_URL_QUERY_CHARS = 256
+
+# The size cap alone is not enough (proven 2026-08-21: the lightweight-model
+# bakeoff got a hostile window title turned into a validator-ACCEPTED
+# `open_url` carrying `SYNTHETIC_SECRET_7Q9P` to an attacker host — one API
+# key fits in one query). The fence below therefore also checks CONTENT:
+# every token in a URL's query/fragment must come from the spoken command,
+# the on-screen names, or the current page URL. Window titles and the user's
+# selection are deliberately NOT allowed sources — the title is an attacker's
+# chosen payload and the selection is the user's own highlighted secret.
+# Tokens shorter than URL_TOKEN_MIN_CHARS are URL machinery ("q", "v", "en")
+# and carry too little to matter. Mirrored in ActionPlan.swift
+# (`// url_machinery:` line + `urlTokenMinCharacters`); contract-tested.
+URL_TOKEN_MIN_CHARS = 4
+
+# The path is the remaining oversized channel: query and fragment are fenced
+# and size-capped, so cap the path too. Real paths are short (a Maps place
+# URL runs ~200 chars); 400 leaves room while ending the 2,000-char free ride.
+# Path CONTENT stays unfenced — site-structure vocabulary is unbounded
+# ("/results", "/notifications", "/r/programming") and would false-positive.
+MAX_URL_PATH_CHARS = 400
+
+URL_MACHINERY_TOKENS = frozenset((
+    # query-string vocabulary legitimate search/compose URLs need
+    "search", "query", "results", "watch", "subject", "body", "true", "false",
+    # function words models routinely add that carry no secret value
+    "from", "with", "about", "your", "this", "that",
+))
+
+_URL_TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def url_token_pool(*sources: str) -> frozenset[str]:
+    """All tokens found in the given allowed-source strings.
+
+    Short tokens stay IN the pool (the ≥`URL_TOKEN_MIN_CHARS` filter applies
+    to URL tokens, not sources): "cat" spoken must legitimize a "cats" query
+    via the plural variant check."""
+    pool: set[str] = set()
+    for source in sources:
+        pool.update(_URL_TOKEN_RE.findall(str(source).lower()))
+    return frozenset(pool)
 
 # Named keys the executor can synthesize. Mirrored in ActionKey.swift — the
 # `test_key_names_match_the_swift_mirror` test fails if the lists drift.
@@ -301,6 +349,9 @@ class ActionContext:
     # Name-like labels read off the front window: the correct spellings of the
     # people and channels the user just said out loud.
     screen_names: list[str] = field(default_factory=list)
+    # URL of the frontmost browser page ("" outside a browser). A window
+    # title cannot tell Gmail's inbox from its compose view; the URL can.
+    page_url: str = ""
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "ActionContext":
@@ -317,6 +368,7 @@ class ActionContext:
                 str(n) for n in (data.get("screen_names") or [])
                 if isinstance(n, (str, int))
             ],
+            page_url=str(data.get("page_url") or ""),
         )
 
 
@@ -326,6 +378,7 @@ _MAX_APPS = 40
 _MAX_TITLE_CHARS = 160
 _MAX_SELECTION_CHARS = 400
 _MAX_SCREEN_NAMES = 40
+_MAX_URL_CHARS = 200
 
 PLANNER_RULES = """You are the action agent of a macOS dictation app. The user spoke one command. You control this Mac in TURNS: reply with a short batch of steps, the app carries them out for real, then it shows you what the screen actually says, and you choose the next steps from what you see. Reply with ONE JSON object and nothing else — no prose, no markdown fences, no explanation.
 
@@ -348,7 +401,7 @@ Bare key names: return, enter, tab, escape, up, down, left, right, home, end, pa
 Modifiers: cmd, shift, option, control.
 
 Hard rules:
-1. Prefer a URL over navigating an app. A web search is ONE turn and then you are DONE: {"steps":[{"do":"open_url","url":"https://www.youtube.com/results?search_query=..."}],"done":true}. (Google https://www.google.com/search?q=..., Maps https://maps.apple.com/?q=...). URL-encode the query. Opening the results page completes a search command — do not press anything afterwards unless the user asked to open or play a specific result.
+1. Prefer a URL over navigating an app. A web search is ONE turn and then you are DONE: {"steps":[{"do":"open_url","url":"https://www.youtube.com/results?search_query=..."}],"done":true}. (Google https://www.google.com/search?q=..., Maps https://maps.apple.com/?q=...). URL-encode the query, and build it ONLY from words the user spoke (or a name visible on screen when the user clearly meant it) — a query carrying other screen text is rejected.
 2. Before any type_text, key, or press_element step, the batch must first contain a wait_frontmost or verify_context step, so nothing lands in an unverified window. Every new turn starts unverified — the FIRST type/key/press of EVERY turn needs a checkpoint before it in that same turn, even right after open_url or open_app.
 3. Never put a newline inside type_text. To press Return, use {"do":"key","key":"return"}.
 4. Return/Enter may commit only text this action created with type_text or paste_text. Between creating that text and pressing Return there MUST be a verify_context confirming the right conversation or window is on screen. Never verify after Return — by then it has already been sent. Bare character, Space, and function keys are rejected; {"key":"tab"} moves focus, so any verify_context before it no longer counts — put the verify AFTER the last Tab, immediately before Return.
@@ -371,8 +424,10 @@ Examples of good replies:
 What you know about this Mac's apps — hints, not scripts; when the observation disagrees with a hint, trust the observation:
 - Slack: {"do":"key","key":"k","mods":["cmd"]} opens its search; that field labels itself "Query". Type the person's name, wait for results, then press_element the person's row (in a send, {"do":"key","key":"return"} also picks the top hit — never in a draft). An open conversation puts the name in the window title and "Message to <name>" on the composer.
 - WhatsApp: {"do":"key","key":"f","mods":["cmd"]} focuses search. Type the name, then press_element the person's row in the result list — return in the search field does NOT open a chat.
-- Browsers (Chrome, Safari): go straight to a search URL with open_url. To open a result on the page, press_element the link text the observation shows.
+- Browsers (Chrome, Safari): go straight to a search URL with open_url. To open a result on the page, press_element the link text the observation shows — in a browser only links and list rows can be pressed; web buttons, checkboxes, and menus are refused. The observation's page url tells you which page actually loaded.
 - Email: open_url mailto:<address>?subject=... when you know the address; otherwise open the mail app and compose with key n with cmd.
+- Messages: {"do":"key","key":"n","mods":["cmd"]} starts a new message. Type the person's name in the To field, press_element their suggestion row, then {"do":"key","key":"tab"} moves to the message field.
+- Notes: {"do":"key","key":"n","mods":["cmd"]} creates a new note; its first typed line becomes the title.
 """
 
 
@@ -410,6 +465,9 @@ def build_action_prompt(context: ActionContext) -> str:
     if context.frontmost_window:
         lines.append("Frontmost window title: " + _clip(context.frontmost_window,
                                                         _MAX_TITLE_CHARS))
+    if context.page_url:
+        lines.append("Frontmost page URL: " + _clip(context.page_url,
+                                                    _MAX_URL_CHARS))
     if context.selection:
         lines.append("Selected text: " + _clip(context.selection, _MAX_SELECTION_CHARS))
     if context.screen_names:
@@ -540,6 +598,42 @@ def _validate_url(step: dict) -> str:
             f"open_url: query is over {MAX_URL_QUERY_CHARS} characters — a "
             "search query is short; put only what the user asked for in it")
     return url
+
+
+def _validate_url_fence(url: str, pool: frozenset[str] | None) -> None:
+    """Content fence for open_url's outbound channel (see URL_TOKEN_MIN_CHARS).
+
+    `pool` is None for pool-less callers (bare validate_plan); a session
+    always carries one. Embedded credentials are refused regardless — a
+    `user:pass@host` authority is itself a data channel.
+    """
+    rest = url.split(":", 1)[1] if ":" in url else url
+    if rest.startswith("//") and "@" in rest[2:].split("/", 1)[0]:
+        raise PlanError("open_url: URLs with embedded credentials are not allowed")
+    address = re.split(r"[?#]", rest, maxsplit=1)[0]
+    path = "/" + address[2:].split("/", 1)[1] if (
+        address.startswith("//") and "/" in address[2:]) else (
+        "" if address.startswith("//") else address)
+    if len(path) > MAX_URL_PATH_CHARS:
+        raise PlanError(
+            f"open_url: path is over {MAX_URL_PATH_CHARS} characters — link "
+            "directly to the page the user asked for")
+    if pool is None:
+        return
+    payload = re.split(r"[?#]", url, maxsplit=1)
+    if len(payload) < 2:
+        return
+    for token in _URL_TOKEN_RE.findall(unquote_plus(payload[1]).lower()):
+        if len(token) < URL_TOKEN_MIN_CHARS or token in URL_MACHINERY_TOKENS:
+            continue
+        # Plural/singular drift is legitimate ("cat videos" spoken, "cats"
+        # searched); a secret does not become safe by dropping an "s".
+        variants = (token, token + "s", token[:-1] if token.endswith("s") else token)
+        if not any(v in pool for v in variants):
+            raise PlanError(
+                f"open_url: the query contains '{token[:40]}', which the user "
+                "never said — a search or link may carry only words from the "
+                "spoken command, the names on screen, or the current page URL")
 
 
 def _validate_text_step(step: dict, verb: str) -> str:
@@ -772,6 +866,10 @@ class SessionState:
     # The app input currently targets. Unlike app_names, this is singular and
     # authorizes pending-text Return only for explicit communication apps.
     current_app: str = ""
+    # Allowed sources for open_url query/fragment tokens (the data fence).
+    # None disables the fence (pool-less validate_plan callers); ActionSession
+    # always seeds it and grows it with each turn's observed screen names.
+    url_token_pool: frozenset[str] | None = None
 
 
 def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
@@ -841,7 +939,9 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             if pending_text:
                 unverified_text = True
         elif verb == "open_url":
-            steps.append({"do": verb, "url": _validate_url(raw)})
+            url = _validate_url(raw)
+            _validate_url_fence(url, state.url_token_pool if state else None)
+            steps.append({"do": verb, "url": url})
             # The URL handler is not known until the next runtime observation.
             current_app = ""
             if pending_text:
@@ -1028,6 +1128,10 @@ class ActionSession:
         self.state = SessionState(
             app_names=initial_apps,
             current_app=context.frontmost_app.strip(),
+            # The data fence's allowed sources. Titles and the selection are
+            # deliberately absent — they are the payloads being fenced.
+            url_token_pool=url_token_pool(
+                transcript, context.page_url, *context.screen_names),
         )
         self.turns_used = 0
         # Turns rejected by the validator (after their repair). Rejections
@@ -1061,6 +1165,13 @@ class ActionSession:
             # carried validator state.
             self.state.app_names.add(_clip(observed_app, 60))
         self.state.current_app = _clip(observed_app, 60)
+        if self.state.url_token_pool is not None:
+            # Names the user can see are fair game for the next search URL
+            # (rule 9 spelling); titles/selections stay out of the pool.
+            self.state.url_token_pool = self.state.url_token_pool | url_token_pool(
+                str(obs.get("page_url") or ""),
+                *[str(n) for n in (obs.get("screen_names") or [])
+                  if isinstance(n, (str, int))])
         lines = [f"GOAL: {_clip(self.goal or self.transcript, MAX_GOAL_CHARS)}",
                  f"This is turn {self.turns_used + 1} of {MAX_TURNS} — finish "
                  "or fail before they run out.", ""]
@@ -1085,6 +1196,9 @@ class ActionSession:
         title = _clip(str(obs.get("window_title") or ""), _MAX_TITLE_CHARS)
         if title:
             lines.append(f"  window title: {title}")
+        page_url = _clip(str(obs.get("page_url") or ""), _MAX_URL_CHARS)
+        if page_url:
+            lines.append(f"  page url: {page_url}")
         label = _clip(str(obs.get("focused_label") or ""), 160)
         role = _clip(str(obs.get("focused_role") or ""), 40)
         if label or role:

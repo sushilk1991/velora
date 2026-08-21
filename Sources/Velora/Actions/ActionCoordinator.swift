@@ -15,6 +15,10 @@ struct ActionContextSnapshot {
     /// Name-like labels visible in the front window — the correct spellings of
     /// the people and channels the user is about to name out loud.
     var screenNames: [String] = []
+    /// URL of the frontmost browser page, "" outside a browser. Web tasks
+    /// need it: the window title alone cannot tell Gmail's inbox from its
+    /// compose view.
+    var pageURL: String = ""
 
     var payload: [String: Any] {
         [
@@ -24,6 +28,7 @@ struct ActionContextSnapshot {
             "running_apps": runningApps,
             "selection": selection,
             "screen_names": screenNames,
+            "page_url": pageURL,
         ]
     }
 
@@ -33,7 +38,8 @@ struct ActionContextSnapshot {
         frontmost: NSRunningApplication?,
         windowTitle: String? = nil,
         selection: String = "",
-        screenNames: [String] = []
+        screenNames: [String] = [],
+        pageURL: String = ""
     ) -> ActionContextSnapshot {
         var snapshot = ActionContextSnapshot()
         let ownPID = ProcessInfo.processInfo.processIdentifier
@@ -50,6 +56,7 @@ struct ActionContextSnapshot {
         // and push the actual command out of view.
         snapshot.selection = String(selection.prefix(400))
         snapshot.screenNames = screenNames
+        snapshot.pageURL = String(pageURL.prefix(300))
         return snapshot
     }
 }

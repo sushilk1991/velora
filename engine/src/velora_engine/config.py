@@ -128,6 +128,169 @@ class Mode:
         )
 
 
+# ---- built-in mode refresh history -----------------------------------------
+#
+# `_ensure_builtin_modes` never overwrites an installed mode file, so improved
+# built-in prompts/app lists reach only fresh installs. `_refresh_builtin_modes`
+# closes that gap under a hard rule: an installed file is rewritten ONLY when
+# it parses semantically equal to a revision this repo previously shipped —
+# any user edit, however small, blocks the refresh for that file forever.
+#
+# When a packaged built-in changes, add its OLD content here and bump
+# _BUILTIN_MODES_REV.
+
+_BUILTIN_MODES_REV = 2
+
+_BUILTIN_MODE_SUPERSEDED: dict[str, tuple[dict[str, Any], ...]] = {
+    "email.json": (
+        {
+            "name": "Email",
+            "prompt": (
+                "The user is dictating an email. Use professional but natural "
+                "tone. Structure into short paragraphs where the speech shifts "
+                "topic. Keep any greeting or sign-off the user actually "
+                "dictated; never invent one."
+            ),
+            "formatting": "full",
+            "apps": [
+                "com.apple.mail",
+                "com.microsoft.Outlook",
+                "com.readdle.SparkDesktop",
+                "com.readdle.smartemail-Mac",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+    ),
+    "message.json": (
+        {
+            "name": "Message",
+            "prompt": (
+                "The user is dictating a casual chat message. Keep it terse and "
+                "conversational. Do not add greetings or sign-offs. Do not end a "
+                "single short sentence with a period. Lowercase-style informality "
+                "in the original should be preserved; do not make it formal."
+            ),
+            "formatting": "light",
+            "apps": [
+                "com.tinyspeck.slackmacgap",
+                "com.apple.MobileSMS",
+                "com.hnc.Discord",
+                "ru.keepcoder.Telegram",
+                "net.whatsapp.WhatsApp",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+    ),
+    "note.json": (
+        # v1 (first release through the Code/Terminal split).
+        {
+            "name": "Note",
+            "prompt": (
+                "The user is dictating a note. Markdown is allowed. Use a "
+                "bulleted list ONLY when the speech clearly enumerates items "
+                "(e.g. 'first... second...', 'one... two...'); otherwise keep "
+                "prose. Paragraph breaks on topic shifts."
+            ),
+            "formatting": "full",
+            "apps": [
+                "com.apple.Notes",
+                "md.obsidian",
+                "notion.id",
+                "net.shinyfrog.bear",
+                "com.lukilabs.lukiapp",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+        # v2 (numbered-list guidance, original five apps).
+        {
+            "name": "Note",
+            "prompt": (
+                "The user is dictating a note. Markdown is allowed. Use a "
+                "numbered list for ordered steps, priorities, or items "
+                "explicitly counted with ordinals such as 'first... second... "
+                "third...'. Use bullets only for a requested bullet list or a "
+                "simple unsequenced collection. If the speaker explicitly asks "
+                "for bare separate lines, do not add bullets or numbering. "
+                "Otherwise keep prose. Add paragraph breaks on topic shifts."
+            ),
+            "formatting": "full",
+            "apps": [
+                "com.apple.Notes",
+                "md.obsidian",
+                "notion.id",
+                "net.shinyfrog.bear",
+                "com.lukilabs.lukiapp",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+    ),
+    "code.json": (
+        # v1 (pre-split: formatting off, terminals folded in) — also covered by
+        # `_migrate_stale_builtins`, kept here so the ordering never matters.
+        {
+            "name": "Code",
+            "prompt": "",
+            "formatting": "off",
+            "apps": [
+                "com.microsoft.VSCode",
+                "com.todesktop.230313mzl4w4u92",
+                "com.apple.Terminal",
+                "com.googlecode.iterm2",
+                "com.mitchellh.ghostty",
+                "dev.warp.Warp-Stable",
+                "dev.zed.Zed",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+        # v2 (post-split, three editors).
+        {
+            "name": "Code",
+            "prompt": (
+                "The speaker is dictating into a code editor or terminal. Keep "
+                "code VERBATIM: do not capitalize identifiers, keywords, "
+                "commands, or flags, and never add a trailing period (it breaks "
+                "shell commands). Preserve casing, symbols, and operators "
+                "exactly. Convert a spoken symbol only when unmistakably "
+                "intended — 'dash m' → '-m', an extension like 'main dot py' → "
+                "'main.py'. Fix only obvious duplicate words and hesitation "
+                "fillers. When unsure, output exactly what was said."
+            ),
+            "formatting": "light",
+            "apps": [
+                "com.microsoft.VSCode",
+                "com.todesktop.230313mzl4w4u92",
+                "dev.zed.Zed",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+    ),
+    "terminal.json": (
+        {
+            "name": "Terminal",
+            "prompt": "",
+            "formatting": "off",
+            "apps": [
+                "com.apple.Terminal",
+                "com.googlecode.iterm2",
+                "com.mitchellh.ghostty",
+                "dev.warp.Warp-Stable",
+                "org.alacritty",
+                "net.kovidgoyal.kitty",
+                "com.cmuxterm.app",
+            ],
+            "vocabulary": [],
+            "replacements": {},
+        },
+    ),
+}
+
+
 class Config:
     """Engine configuration; call reload() when the app sends reload_config."""
 
@@ -294,6 +457,7 @@ class Config:
         self._load_auto_vocab()
         self._ensure_builtin_modes()
         self._migrate_stale_builtins()
+        self._refresh_builtin_modes()
         self._migrate_superseded_cleanup_model()
         self._load_modes()
 
@@ -465,6 +629,41 @@ class Config:
         "com.googlecode.iterm2", "com.mitchellh.ghostty", "dev.warp.Warp-Stable", "dev.zed.Zed",
     })
 
+    def _refresh_builtin_modes(self) -> None:
+        """Upgrade installed built-in mode files the user never customized.
+
+        A file is rewritten only when its parsed content equals either the
+        current packaged file (no-op) or one of the revisions previously
+        shipped (`_BUILTIN_MODE_SUPERSEDED`). Anything else is a user edit and
+        is permanently theirs. Guarded by an integer revision marker so the
+        directory is scanned once per shipped revision, and a user who
+        deliberately restores an old shape afterwards is never reverted."""
+        if self._config_corrupt:
+            return
+        if int(self.data.get("builtin_modes_rev") or 0) >= _BUILTIN_MODES_REV:
+            return
+        pkg = importlib.resources.files("velora_engine") / "modes_builtin"
+        for res in pkg.iterdir():
+            if not res.name.endswith(".json"):
+                continue
+            dest = self.modes_dir / res.name
+            if not dest.exists():
+                continue  # _ensure_builtin_modes installs missing files
+            try:
+                on_disk = json.loads(dest.read_text())
+                current = json.loads(res.read_text())
+            except Exception:  # noqa: BLE001 — a bad file is handled by _load_modes
+                continue
+            if on_disk == current:
+                continue
+            if any(on_disk == old
+                   for old in _BUILTIN_MODE_SUPERSEDED.get(res.name, ())):
+                dest.write_text(res.read_text())
+                log.info("refreshed built-in mode %s to the current revision",
+                         res.name)
+        self.data["builtin_modes_rev"] = _BUILTIN_MODES_REV
+        self.save(keys={"builtin_modes_rev"})
+
     def _migrate_superseded_cleanup_model(self) -> None:
         """One-time move off a writing model an older build shipped as a
         RAM-tier default.
@@ -544,6 +743,38 @@ class Config:
             except Exception as exc:  # noqa: BLE001
                 log.warning("skipping bad mode file %s: %s", path.name, exc)
         log.info("loaded %d modes: %s", len(self.modes), ", ".join(m.name for m in self.modes.values()))
+        self.unbound_builtin_apps = self._compute_unbound_builtin_apps()
+
+    def _compute_unbound_builtin_apps(self) -> frozenset[str]:
+        """Bundle ids a packaged built-in claims that the user's installed
+        copy of that mode does NOT — a deliberate unbind (review finding:
+        removing iTerm from Terminal mode used to mean Default, and the
+        category fallback silently re-captured it). The fallback in
+        `resolve_mode` skips these. Pristine installs are unaffected: the
+        refresh migration keeps their files equal to the packaged ones. For a
+        user-customized mode file this is deliberately conservative — apps
+        added to that built-in in later releases stay on Default too, because
+        the user has taken ownership of that mode's app list."""
+        unbound: set[str] = set()
+        try:
+            pkg = importlib.resources.files("velora_engine") / "modes_builtin"
+            for res in pkg.iterdir():
+                if not res.name.endswith(".json"):
+                    continue
+                try:
+                    packaged = Mode.from_dict(json.loads(res.read_text()))
+                except Exception:  # noqa: BLE001 — never block startup
+                    continue
+                installed = self.mode_by_name(packaged.name)
+                if installed is None:
+                    continue
+                installed_apps = {app.casefold() for app in installed.apps}
+                unbound.update(
+                    app.casefold() for app in packaged.apps
+                    if app.casefold() not in installed_apps)
+        except Exception:  # noqa: BLE001 — never block startup
+            return frozenset()
+        return frozenset(unbound)
 
     # ---- lookup ----
     def mode_by_name(self, name: str | None) -> Mode | None:

@@ -254,22 +254,33 @@ final class SystemActionHost: ActionHost {
         return ScreenContext.visibleNames(of: app)
     }
 
-    /// Press the navigation row/cell whose visible label matches. The
+    /// Press the navigation element whose visible label matches. The
     /// frontmost app must still be the one the plan verified; ScreenContext
-    /// also refuses every non-navigation AX role before AXPress.
+    /// also refuses every non-navigation AX role before AXPress. Communication
+    /// apps expose rows/cells; browsers additionally expose links (a search
+    /// result) — every other app refuses the verb outright.
     func pressElement(label: String, expecting bundleID: String?) -> Bool {
         guard Permissions.accessibilityGranted else { return false }
         guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
         else { return false }
-        guard ActionRuntimePolicy.isCommunicationBundle(app.bundleIdentifier) else {
-            return false
-        }
+        guard let roles = ActionRuntimePolicy.pressRoles(forBundleID: app.bundleIdentifier)
+        else { return false }
         if let bundleID, !bundleID.isEmpty, app.bundleIdentifier != bundleID {
             return false
         }
-        let pressed = ScreenContext.pressElement(labelled: label, in: app)
+        let pressed = ScreenContext.pressElement(labelled: label, in: app, roles: roles)
         if pressed { clearActionTextState() }
         return pressed
+    }
+
+    /// URL of the frontmost page when a browser is frontmost, else nil. Read
+    /// via AX only — no AppleScript, no new permission surface.
+    func frontmostPageURL() -> String? {
+        guard Permissions.accessibilityGranted,
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              ActionRuntimePolicy.isBrowserBundle(app.bundleIdentifier)
+        else { return nil }
+        return ScreenContext.pageURL(of: app, deep: true)?.absoluteString
     }
 
     // MARK: - Input

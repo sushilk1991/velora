@@ -135,7 +135,9 @@ coordinates): `open_app`, `open_url`, `wait_frontmost`, `verify_context`,
 `press_element`, `type_text`, `key`, `pause`. `press_element` activates the
 control whose visible label matches (AXPress, label-addressed, whole-word) —
 and refuses labels naming committing controls (send/delete/pay/confirm/…), so
-pressing can navigate but never deliver.
+pressing can navigate but never deliver. At runtime it is role- and
+app-scoped: AX rows/cells in communication bundles, rows/cells/links in
+browsers, nothing anywhere else.
 
 **The safety gate is implemented twice**, in `velora_engine/actions.py` and again
 in `Sources/Velora/Actions/ActionPlan.swift`. That is deliberate: the engine
@@ -253,13 +255,20 @@ changes length.
 Two stages, both local:
 
 1. **Deterministic gate (no LLM):** decides *if* and *how much* AI touches the text.
-   - mode resolution: explicit user mode > per-app rule from mode files > default.
+   - mode resolution: explicit user mode > per-app rule from mode files > category
+     fallback (`CATEGORY_BY_BUNDLE` → built-in Message/Email/Note/Code/Terminal,
+     so apps added after first run still resolve on frozen installs) > default.
+   - browsers refine by web app: the page URL host (AX `AXDocument`/`AXURL`,
+     https-only) or the trailing title segment picks a site slug (Gmail → Email,
+     Notion → Note, Slack web → Message…) — only while the resolved mode is
+     still Default, never over an explicit or user-bound mode. The HUD chip
+     mirrors the same refinement.
    - Raw stays formatting-off. Terminal input below 12 words stays model-free and command-safe (explicit new-line controls still work).
    - very short utterances (< ~6 words) → punctuation-only, never restructured.
 2. **LLM pass (Qwen3.5-4B MLX 8-bit on quality-tier Macs):** one prompt assembled from mode instructions, formatting strength, vocabulary hints, and app context. Code mode uses a conservative technical prompt; longer Terminal prose uses its terminal-aware prompt. Stable instructions and vocabulary precede volatile entities so the engine can prefill and snapshot the shared prefix. Strict rules are baked in: *transcribe-don't-answer*, preserve meaning, add no content, fix clear agreement/tense/speech artifacts, punctuate complete thoughts, apply self-corrections, and structure lists only when speech enumerates. Output is text only.
    - Anti-over-editing guard: if LLM output diverges too far from raw (length-ratio/similarity heuristic), fall back to raw. Principle #4 of the spec.
 
-Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|full, apps: [bundle ids], vocabulary: [...], replacements: {...}}`. Built-ins copied on first run; user-editable.
+Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|full, apps: [bundle ids], vocabulary: [...], replacements: {...}}`. Built-ins copied on first run; user-editable. Shipped built-in improvements reach existing installs through `_refresh_builtin_modes`: an installed file is rewritten only when it equals a previously shipped revision (`_BUILTIN_MODE_SUPERSEDED`), so any user edit permanently owns the file.
 
 ## Swift app modules (Sources/Velora/)
 

@@ -109,6 +109,10 @@ final class ActionLoopRunner {
             carried.appNames.insert(context.frontmostApp)
         }
         carried.currentApp = context.frontmostApp
+        // open_url data fence: titles and the selection stay out on purpose —
+        // they are the payloads being fenced.
+        carried.urlTokenPool = ActionPlan.urlTokenPool(
+            [transcript, context.pageURL] + context.screenNames)
         var fullTrace: [String] = []
         var completionEvidence = ActionCompletionEvidence()
         var lockedSends: Bool?
@@ -308,6 +312,14 @@ final class ActionLoopRunner {
             state.appNames.insert(name)
         }
         state.currentApp = front?.name ?? ""
+        let visibleNames = host.visibleNames()
+        let pageURL = host.frontmostPageURL() ?? ""
+        if state.urlTokenPool != nil {
+            // Names the user can see may enter the next search URL (screen
+            // spelling); titles/selections never do.
+            state.urlTokenPool?.formUnion(
+                ActionPlan.urlTokenPool(visibleNames + [pageURL]))
+        }
         var observation: [String: Any] = [
             "frontmost_app": front?.name ?? "",
             "frontmost_bundle": front?.bundleID ?? "",
@@ -315,7 +327,8 @@ final class ActionLoopRunner {
             "focused_label": host.focusedElementLabel() ?? "",
             "focused_role": host.focusedElementRole() ?? "",
             "selection": host.focusedSelectionLabel() ?? "",
-            "screen_names": host.visibleNames(),
+            "screen_names": visibleNames,
+            "page_url": pageURL,
             "executed": executed,
         ]
         if let failedStep {

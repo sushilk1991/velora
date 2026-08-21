@@ -78,6 +78,8 @@ enum ActionPlanError: Error, Equatable {
     case commitWithoutPendingText(step: Int, key: String)
     case bareSpace
     case unsafeBareKey(String)
+    case urlCarriesUnspokenData(token: String)
+    case urlEmbedsCredentials
 
     var message: String {
         switch self {
@@ -116,6 +118,10 @@ enum ActionPlanError: Error, Equatable {
             return "destructive key '\(key)' is not an Action Mode capability"
         case .commitWithoutPendingText(let step, let key):
             return "step \(step) cannot use \(key) to commit text this action did not create"
+        case .urlCarriesUnspokenData(let token):
+            return "the URL query carries '\(token)', which the user never said"
+        case .urlEmbedsCredentials:
+            return "URLs with embedded credentials are not allowed"
         case .bareSpace:
             return "bare Space can activate ambient controls; use type_text to enter spaces"
         case .unsafeBareKey(let key):
@@ -171,7 +177,7 @@ extension ActionPlan {
         /// Mirrored from `velora_engine/actions.py`; the engine test
         /// `test_press_denylist_matches_the_swift_mirror` reads the marker
         /// line below, so keep it in sync with this set.
-        // press_denylist: abmelden abschicken absenden accept acheter afmelden agree antworten apagar approve archivar archive archiver beantwoorden bestaetigen bestatigen betalen bevestigen bezahlen block borrar buy call cancella cerrarsesion checkout compartilhar compartir comprar condividi conferma confirm confirmar confirmer deconnecter delen delete discard disconnetti doorsturen effacer elimina eliminar eliminare encaminhar enviar envoyer erase excluir forward inoltra invia inviare kaufen kopen leave loeschen logout loschen mute order paga pagar pagare partager pay payer post publicar publier publish purchase reenviar remove reply repondre report reset responder rispondi sairdaconta sedeconnecter send senden share signout submit subscribe supprimer teilen transfer transferer trash tweet uitloggen unfollow unsubscribe verwijderen verzenden weiterleiten withdraw
+        // press_denylist: abmelden abschicken absenden accept acheter afmelden agree antworten apagar approve archivar archive archiver beantwoorden bestaetigen bestatigen betalen bevestigen bezahlen block borrar buy call cancel cancella cerrarsesion checkout compartilhar compartir comprar condividi conferma confirm confirmar confirmer deactivate deconnecter delen delete disable discard disconnetti donate doorsturen effacer elimina eliminar eliminare encaminhar enviar envoyer erase excluir forward inoltra invia inviare kaufen kopen leave loeschen logoff logout loschen mute order paga pagar pagare partager pay payer post publicar publier publish purchase reenviar remove renew reply repondre report reset responder rispondi sairdaconta save sedeconnecter send senden share signout submit subscribe subscription supprimer teilen transfer transferer trash tweet uitloggen unfollow unsubscribe verwijderen verzenden weiterleiten withdraw
         static let pressDenyWords: Set<String> = [
             "send", "submit", "post", "publish", "reply", "delete", "remove",
             "discard", "pay", "buy", "purchase", "order", "checkout", "confirm",
@@ -179,6 +185,12 @@ extension ActionPlan {
             "block", "leave", "archive", "unsubscribe", "logout", "signout",
             "trash", "erase", "reset", "approve", "withdraw", "report", "mute",
             "unfollow", "subscribe",
+            // Web-commit verbs (2026-08-21 review): links are pressable in
+            // browsers now, and billing/settings pages commit through
+            // link-styled controls ("Cancel subscription", "Deactivate
+            // account", "Save changes", "Donate", "Renew", "Log off").
+            "cancel", "subscription", "deactivate", "disable", "donate",
+            "logoff", "save", "renew",
             // Localized labels for the same controls. macOS ships localized,
             // and an English-only list meant this gate did not exist at all on
             // a French or Spanish Mac (audited bypass, 2026-08-04). Diacritics
@@ -258,6 +270,24 @@ extension ActionPlan {
         /// closed channel: the path is still uncapped below this length, and
         /// a determined plan can chunk across steps.
         static let maxURLQueryCharacters = 256
+        /// Content fence for that channel (2026-08-21 bakeoff: a hostile
+        /// window title became a validator-accepted open_url carrying a
+        /// canary secret to an attacker host). Query/fragment tokens of this
+        /// length or longer must come from the spoken command, on-screen
+        /// names, or the current page URL. Mirrors the engine's
+        /// URL_TOKEN_MIN_CHARS / URL_MACHINERY_TOKENS (contract-tested).
+        static let urlTokenMinCharacters = 4
+        /// The path is the remaining oversized channel once the query is
+        /// fenced and capped. Real paths are short; content stays unfenced
+        /// (site-structure vocabulary is unbounded). Mirrors the engine's
+        /// MAX_URL_PATH_CHARS.
+        static let maxURLPathCharacters = 400
+        // url_machinery: search query results watch subject body true false from with about your this that
+        static let urlMachineryTokens: Set<String> = [
+            "search", "query", "results", "watch", "subject", "body",
+            "true", "false",
+            "from", "with", "about", "your", "this", "that",
+        ]
         /// Total URL length, mirroring the engine's `_require_str` bound.
         /// Swift had no equivalent, so a 1,900-character path the engine
         /// refused would have been accepted here (review finding).
@@ -288,6 +318,25 @@ extension ActionPlan {
         /// Singular current input target. Historical/running `appNames` only
         /// filter verify terms and never authorize committing input.
         var currentApp = ""
+        /// Allowed sources for open_url query/fragment tokens (the data
+        /// fence). Nil disables the fence; the loop runner seeds it from the
+        /// transcript, screen names, and page URL, and grows it each turn.
+        var urlTokenPool: Set<String>?
+    }
+
+    /// All tokens found in allowed-source strings (lowercased alphanumeric
+    /// runs). Short tokens stay IN the pool — the `urlTokenMinCharacters`
+    /// filter applies to URL tokens, not sources: "cat" spoken must
+    /// legitimize a "cats" query via the plural variant check.
+    static func urlTokenPool(_ sources: [String]) -> Set<String> {
+        var pool: Set<String> = []
+        for source in sources {
+            for run in source.lowercased()
+                .split(whereSeparator: { !$0.isLetter && !$0.isNumber }) {
+                pool.insert(String(run))
+            }
+        }
+        return pool
     }
 
     /// True when the label names a control that would commit something.
@@ -398,6 +447,37 @@ extension ActionPlan {
                    raw.distance(from: raw.index(after: mark),
                                 to: raw.endIndex) > Limits.maxURLQueryCharacters {
                     throw ActionPlanError.badURL(String(raw.prefix(120)))
+                }
+                // A user:pass@host authority is itself a data channel.
+                guard url.user == nil, url.password == nil else {
+                    throw ActionPlanError.urlEmbedsCredentials
+                }
+                guard url.path.count <= Limits.maxURLPathCharacters else {
+                    throw ActionPlanError.badURL(String(raw.prefix(120)))
+                }
+                // Content fence: query/fragment tokens must come from the
+                // session's allowed sources (spoken command, screen names,
+                // page URL) — never from titles or the selection.
+                if let pool = state.urlTokenPool,
+                   let mark = raw.firstIndex(where: { $0 == "?" || $0 == "#" }) {
+                    let payload = String(raw[raw.index(after: mark)...])
+                        .replacingOccurrences(of: "+", with: " ")
+                    let decoded = payload.removingPercentEncoding ?? payload
+                    for run in decoded.lowercased()
+                        .split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+                    where run.count >= Limits.urlTokenMinCharacters
+                        && !Limits.urlMachineryTokens.contains(String(run)) {
+                        // Plural/singular drift is legitimate ("cat videos"
+                        // spoken, "cats" searched); a secret does not become
+                        // safe by dropping an "s".
+                        let token = String(run)
+                        let variants = [token, token + "s",
+                                        token.hasSuffix("s") ? String(token.dropLast()) : token]
+                        guard variants.contains(where: { pool.contains($0) }) else {
+                            throw ActionPlanError.urlCarriesUnspokenData(
+                                token: String(token.prefix(40)))
+                        }
+                    }
                 }
                 steps.append(.openURL(url))
                 // The URL handler is unknown until the runtime observation.

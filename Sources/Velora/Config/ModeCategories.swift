@@ -79,22 +79,48 @@ enum ModeCategory: String {
         "com.apple.MobileSMS": .chat,
         "com.hnc.Discord": .chat,
         "ru.keepcoder.Telegram": .chat,
+        "org.telegram.desktop": .chat,
         "net.whatsapp.WhatsApp": .chat,
+        "org.whispersystems.signal-desktop": .chat,
+        "com.microsoft.teams2": .chat,
+        "com.microsoft.teams": .chat,
+        "com.facebook.archon": .chat,  // Messenger
         // email
         "com.apple.mail": .email,
         "com.microsoft.Outlook": .email,
         "com.readdle.SparkDesktop": .email,
         "com.readdle.smartemail-Mac": .email,
-        // notes
+        "com.mimestream.Mimestream": .email,
+        // notes / documents
         "com.apple.Notes": .notes,
         "md.obsidian": .notes,
         "notion.id": .notes,
         "net.shinyfrog.bear": .notes,
-        "com.lukilabs.lukiapp": .notes,
+        "com.lukilabs.lukiapp": .notes,  // Craft
+        "com.apple.TextEdit": .notes,
+        "com.microsoft.Word": .notes,
+        "com.apple.iWork.Pages": .notes,
+        "com.agiletortoise.Drafts-OSX": .notes,
+        "com.culturedcode.ThingsMac": .notes,
         // code editors
         "com.microsoft.VSCode": .code,
         "com.todesktop.230313mzl4w4u92": .code,  // Cursor
         "dev.zed.Zed": .code,
+        "com.sublimetext.4": .code,
+        "com.sublimetext.3": .code,
+        "com.apple.dt.Xcode": .code,
+        "com.exafunction.windsurf": .code,
+        "com.jetbrains.intellij": .code,
+        "com.jetbrains.intellij.ce": .code,
+        "com.jetbrains.pycharm": .code,
+        "com.jetbrains.pycharm.ce": .code,
+        "com.jetbrains.WebStorm": .code,
+        "com.jetbrains.goland": .code,
+        "com.jetbrains.rider": .code,
+        "com.jetbrains.CLion": .code,
+        "com.jetbrains.PhpStorm": .code,
+        "com.jetbrains.rubymine": .code,
+        "com.jetbrains.datagrip": .code,
         // terminals
         "com.apple.Terminal": .terminal,
         "com.googlecode.iterm2": .terminal,
@@ -103,16 +129,46 @@ enum ModeCategory: String {
         "org.alacritty": .terminal,
         "net.kovidgoyal.kitty": .terminal,
         "com.cmuxterm.app": .terminal,  // cmux
+        "com.github.wez.wezterm": .terminal,
         // browsers
         "com.apple.Safari": .browser,
         "com.google.Chrome": .browser,
         "company.thebrowser.Browser": .browser,  // Arc
+        "company.thebrowser.dia": .browser,  // Dia
+        "org.mozilla.firefox": .browser,
+        "com.brave.Browser": .browser,
+        "com.microsoft.edgemac": .browser,
+        "com.vivaldi.Vivaldi": .browser,
+        "com.operasoftware.Opera": .browser,
+        "com.kagi.kagimacOS": .browser,  // Orion
+        "app.zen-browser.zen": .browser,
+    ]
+
+    /// Web-app site slug → category, mirroring the engine's `_SITE_CATEGORY`.
+    /// Lets the HUD chip say "Email" in Gmail instead of the generic
+    /// "Browser" — the same refinement the engine applies to the mode.
+    static let bySiteSlug: [String: ModeCategory] = [
+        "gmail": .email, "outlook": .email, "proton": .email,
+        "fastmail": .email, "superhuman": .email, "hey": .email,
+        "zoho": .email, "yahoo": .email,
+        "gdocs": .notes, "notion": .notes, "obsidian": .notes,
+        "linear": .notes, "keep": .notes, "evernote": .notes,
+        "onenote": .notes, "coda": .notes, "craft": .notes,
+        "confluence": .notes,
+        "slack": .chat, "discord": .chat, "whatsapp": .chat,
+        "messenger": .chat, "telegram": .chat, "teams": .chat,
+        "gchat": .chat, "instagram": .chat,
     ]
 
     /// Chip label for a bundle id. Unknown apps fall back to the engine's
-    /// default mode, presented as plain "Text".
-    static func displayName(forBundleID bundleID: String?) -> String {
+    /// default mode, presented as plain "Text". A browser with a detected
+    /// web-app site shows that site's category instead of "Browser".
+    static func displayName(forBundleID bundleID: String?, siteSlug: String? = nil) -> String {
         guard let bundleID, let category = byBundleID[bundleID] else { return "Text" }
+        if category == .browser, let siteSlug,
+           let refined = bySiteSlug[siteSlug.lowercased()] {
+            return refined.displayName
+        }
         return category.displayName
     }
 

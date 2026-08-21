@@ -7,7 +7,12 @@
     "md.obsidian",
     "notion.id",
     "net.shinyfrog.bear",
-    "com.lukilabs.lukiapp"
+    "com.lukilabs.lukiapp",
+    "com.apple.TextEdit",
+    "com.microsoft.Word",
+    "com.apple.iWork.Pages",
+    "com.agiletortoise.Drafts-OSX",
+    "com.culturedcode.ThingsMac"
   ],
   "vocabulary": [],
   "replacements": {}

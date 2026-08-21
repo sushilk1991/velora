@@ -149,6 +149,14 @@ enum ScreenContext {
         "AXRow", "AXCell",
     ]
 
+    /// Browser variant: links are the web's navigation primitive (a search
+    /// result, an article), so AXLink joins rows/cells there. Web buttons,
+    /// checkboxes, and menu items stay refused — a link whose label names a
+    /// committing verb is still rejected by the press denylist.
+    static let browserNavigationRoles: Set<String> = [
+        "AXRow", "AXCell", "AXLink",
+    ]
+
     static func isActionNavigationRole(_ role: String?) -> Bool {
         guard let role else { return false }
         return actionNavigationRoles.contains(role)
@@ -156,10 +164,29 @@ enum ScreenContext {
 
     /// Best-effort entities for the given app. Never throws; returns [] when
     /// AX is unavailable or the title yields nothing useful.
-    static func entities(for app: NSRunningApplication?, category: ModeCategory?) -> [ContextEntity] {
+    ///
+    /// For browsers, the page URL host is the authoritative web-app signal
+    /// (Notion and Linear tabs carry no product name in their titles) — the
+    /// window's `AXDocument` is one cheap AX read. `deepURL` additionally
+    /// walks from the focused element to a web area exposing `AXURL`; that
+    /// costs more IPC, so only off-hot-path callers ask for it.
+    static func entities(
+        for app: NSRunningApplication?,
+        category: ModeCategory?,
+        deepURL: Bool = false
+    ) -> [ContextEntity] {
         guard let app, app.processIdentifier > 0 else { return [] }
-        guard let title = focusedWindowTitle(pid: app.processIdentifier) else { return [] }
-        return parse(title: title, category: category, appName: app.localizedName)
+        var result = focusedWindowTitle(pid: app.processIdentifier).map {
+            parse(title: $0, category: category, appName: app.localizedName)
+        } ?? []
+        if category == .browser,
+           let slug = siteSlug(forHost: pageURL(of: app, deep: deepURL)?.host) {
+            // The URL outranks the title guess: a title can mention a product
+            // ("Gmail help"), the host cannot lie about where the user is.
+            result.removeAll { $0.type == "site" }
+            result.insert(ContextEntity(type: "site", value: slug), at: 0)
+        }
+        return Array(result.prefix(maxEntities))
     }
 
     /// Rich context = title entities PLUS short text near the text cursor read
@@ -169,7 +196,7 @@ enum ScreenContext {
     /// slice of the AX tree), so callers run it OFF the hot path (a background
     /// queue at session start, ready by the time recording stops).
     static func richEntities(for app: NSRunningApplication?, category: ModeCategory?) -> [ContextEntity] {
-        var result = entities(for: app, category: category)
+        var result = entities(for: app, category: category, deepURL: true)
         guard let app, app.processIdentifier > 0 else { return result }
         let nearby = nearbyText(pid: app.processIdentifier)
         // Cap total nearby chars so the prompt stays lean and private.
@@ -258,6 +285,7 @@ enum ScreenContext {
     static func pressElement(
         labelled label: String,
         in app: NSRunningApplication?,
+        roles: Set<String> = actionNavigationRoles,
         nodeBudget: Int = 900,
         deadline: TimeInterval = 1.5
     ) -> Bool {
@@ -280,12 +308,17 @@ enum ScreenContext {
             for attribute in [kAXTitleAttribute, kAXDescriptionAttribute] {
                 guard let text = axString(element, attribute),
                       AppMatcher.contextMatches([label], in: [text]) else { continue }
-                // The denylist must judge the element's FULL text, not the
-                // label the model asked for (review finding): "Priya Sharma"
-                // matches an element titled "Delete chat with Priya Sharma",
-                // and only the real title reveals what pressing it does.
-                guard !ActionPlan.pressLabelIsCommitting(text) else { continue }
-                if press(element) { return true }
+                // The denylist must judge the element's FULL text — BOTH
+                // attributes joined, not just the one that matched (review
+                // findings): "Priya Sharma" matches an element titled "Delete
+                // chat with Priya Sharma", and an element titled "Priya
+                // Sharma" can carry description "Delete conversation".
+                let fullText = [
+                    axString(element, kAXTitleAttribute),
+                    axString(element, kAXDescriptionAttribute),
+                ].compactMap { $0 }.joined(separator: " ")
+                guard !ActionPlan.pressLabelIsCommitting(fullText) else { continue }
+                if press(element, roles: roles) { return true }
                 // The text lives on a child; the pressable thing is the row.
                 // An ancestor that carries its OWN label gets the same
                 // judgment — an unlabeled container (the typical Electron
@@ -299,7 +332,7 @@ enum ScreenContext {
                     ].compactMap { $0 }.joined(separator: " ")
                     if !ancestorText.isEmpty,
                        ActionPlan.pressLabelIsCommitting(ancestorText) { break }
-                    if press(candidate) { return true }
+                    if press(candidate, roles: roles) { return true }
                     ancestor = axElement(candidate, kAXParentAttribute)
                 }
             }
@@ -313,8 +346,9 @@ enum ScreenContext {
 
     /// Performs AXPress only when both role and action prove this is an
     /// explicit navigation target. Buttons and generic containers are skipped.
-    private static func press(_ element: AXUIElement) -> Bool {
-        guard isActionNavigationRole(axString(element, kAXRoleAttribute)) else {
+    private static func press(_ element: AXUIElement, roles: Set<String>) -> Bool {
+        guard let role = axString(element, kAXRoleAttribute),
+              roles.contains(role) else {
             return false
         }
         var actionsRef: CFArray?
@@ -322,6 +356,52 @@ enum ScreenContext {
               let actions = actionsRef as? [String],
               actions.contains(kAXPressAction as String) else { return false }
         return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+    }
+
+    // MARK: - Page URL (browsers)
+
+    /// Accepts only web-page URLs and strips credentials. `file:`, `chrome:`,
+    /// `about:` and malformed strings are rejected — a non-web document path
+    /// is private and useless for site detection. Pure logic; selftested.
+    static func normalizedPageURL(_ raw: String?) -> URL? {
+        guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty,
+              var components = URLComponents(string: raw),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = components.host, !host.isEmpty
+        else { return nil }
+        components.user = nil
+        components.password = nil
+        return components.url
+    }
+
+    /// URL of the frontmost page in a browser, via Accessibility. The
+    /// window's `AXDocument` is the cheap path (one AX read; Chrome and
+    /// Safari expose the page URL there). `deep` additionally walks from the
+    /// focused element toward a web area exposing `AXURL` — more IPC, so the
+    /// hotkey path never asks for it. Best effort; nil is normal.
+    static func pageURL(of app: NSRunningApplication?, deep: Bool = false) -> URL? {
+        guard let app, app.processIdentifier > 0, Permissions.accessibilityGranted else {
+            return nil
+        }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        if let window = axElement(appElement, kAXFocusedWindowAttribute)
+            ?? axElements(appElement, kAXWindowsAttribute).first,
+           let url = normalizedPageURL(axURLString(window, kAXDocumentAttribute)) {
+            return url
+        }
+        guard deep else { return nil }
+        var element = axElement(appElement, kAXFocusedUIElementAttribute)
+        for _ in 0..<6 {
+            guard let current = element else { break }
+            if let url = normalizedPageURL(axURLString(current, kAXURLAttribute)) {
+                return url
+            }
+            element = axElement(current, kAXParentAttribute)
+        }
+        return nil
     }
 
     /// AX role of the app's focused element ("AXTextField", "AXTextArea").
@@ -755,6 +835,18 @@ enum ScreenContext {
         return t.isEmpty ? nil : t
     }
 
+    /// URL-valued attributes arrive as CFURL (`AXURL`) or as String
+    /// (`AXDocument`, app-dependent); accept both.
+    private static func axURLString(_ element: AXUIElement, _ attr: String) -> String? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, attr as CFString, &ref) == .success,
+              let ref else { return nil }
+        if let url = ref as? URL { return url.absoluteString }
+        if let string = ref as? String { return string }
+        return nil
+    }
+
     private static func axRawString(_ element: AXUIElement, _ attr: String) -> String? {
         AXUIElementSetMessagingTimeout(element, axTimeout)
         var ref: CFTypeRef?
@@ -921,7 +1013,7 @@ enum ScreenContext {
             // trailing title segment; surface it so the engine can pick a mode
             // (a browser is otherwise one undifferentiated bucket).
             var browserEntities = [ContextEntity(type: "page", value: head)]
-            if let site = site(in: segments) {
+            if let site = site(in: segments, appName: appName) {
                 browserEntities.insert(ContextEntity(type: "site", value: site), at: 0)
             }
             entities = browserEntities
@@ -933,20 +1025,97 @@ enum ScreenContext {
 
     /// Known web apps keyed by a case-insensitive substring of the window
     /// title's trailing segment. Value is a stable slug the engine maps to a
-    /// category/mode.
-    private static let siteKeywords: [(needle: String, slug: String)] = [
+    /// category/mode. Slugs must exist in the engine's `_SITE_CATEGORY`
+    /// (contract-tested from pytest against this source file).
+    static let siteKeywords: [(needle: String, slug: String)] = [
         ("gmail", "gmail"), ("outlook", "outlook"), ("proton", "proton"),
+        ("fastmail", "fastmail"), ("superhuman", "superhuman"),
+        ("zoho mail", "zoho"), ("yahoo mail", "yahoo"),
         ("google docs", "gdocs"), ("notion", "notion"), ("obsidian", "obsidian"),
-        ("linear", "linear"),
+        ("linear", "linear"), ("google keep", "keep"), ("evernote", "evernote"),
+        ("onenote", "onenote"), ("confluence", "confluence"),
         ("slack", "slack"), ("discord", "discord"), ("whatsapp", "whatsapp"),
-        ("messenger", "messenger"),
+        ("messenger", "messenger"), ("telegram", "telegram"),
+        ("microsoft teams", "teams"), ("google chat", "gchat"),
+        ("instagram", "instagram"),
     ]
 
-    /// Detects a known site from the LAST title segment only — that's where the
-    /// web-app identifier lives ("Inbox - Gmail"). Scanning every segment let
-    /// page-content words hijack the mode ("GitHub … - YouTube").
-    private static func site(in segments: [String]) -> String? {
-        guard let last = segments.last?.lowercased() else { return nil }
+    /// Known web apps keyed by URL host (exact host or any subdomain of it).
+    /// The host cannot lie about where the user is, so this outranks the
+    /// title keywords — and it covers web apps whose tab titles carry no
+    /// product name at all (Notion, Linear, Craft, Coda, HEY).
+    static let siteHosts: [(host: String, slug: String)] = [
+        ("mail.google.com", "gmail"),
+        ("outlook.live.com", "outlook"), ("outlook.office.com", "outlook"),
+        ("outlook.office365.com", "outlook"),
+        ("mail.proton.me", "proton"),
+        ("app.fastmail.com", "fastmail"),
+        ("mail.superhuman.com", "superhuman"),
+        ("app.hey.com", "hey"),
+        ("mail.zoho.com", "zoho"),
+        ("mail.yahoo.com", "yahoo"),
+        ("docs.google.com", "gdocs"),
+        ("notion.so", "notion"), ("notion.site", "notion"),
+        ("publish.obsidian.md", "obsidian"),
+        ("linear.app", "linear"),
+        ("keep.google.com", "keep"),
+        ("evernote.com", "evernote"),
+        ("onenote.com", "onenote"),
+        ("coda.io", "coda"),
+        ("craft.do", "craft"),
+        ("app.slack.com", "slack"),
+        ("discord.com", "discord"),
+        ("web.whatsapp.com", "whatsapp"),
+        ("messenger.com", "messenger"),
+        ("web.telegram.org", "telegram"),
+        ("teams.microsoft.com", "teams"), ("teams.live.com", "teams"),
+        ("chat.google.com", "gchat"),
+        ("instagram.com", "instagram"),
+    ]
+
+    /// Slug for a page host, or nil. Suffix-matched so `usw2.notion.so`
+    /// still reads as Notion; a bare `www.` is ignored.
+    static func siteSlug(forHost rawHost: String?) -> String? {
+        guard var host = rawHost?.lowercased(), !host.isEmpty else { return nil }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        for entry in siteHosts
+        where host == entry.host || host.hasSuffix("." + entry.host) {
+            return entry.slug
+        }
+        return nil
+    }
+
+    /// Browser product names that trail a window title. Chrome and Safari
+    /// don't suffix their titles; Firefox and Edge do — and Edge inserts a
+    /// zero-width space in "Microsoft Edge".
+    private static let browserProductNames: [String] = [
+        "google chrome", "chrome", "safari", "mozilla firefox", "firefox",
+        "microsoft edge", "edge", "brave", "vivaldi", "opera", "orion",
+        "arc", "dia", "zen",
+    ]
+
+    /// Detects a known site from the trailing title segment — that's where the
+    /// web-app identifier lives ("Inbox - Gmail"). The browser's own trailing
+    /// name is dropped first ("… — Mozilla Firefox"), and the candidate must
+    /// be short and name-like: scanning long segments let page-content words
+    /// hijack the mode ("How to use Gmail").
+    static func site(in segments: [String], appName: String?) -> String? {
+        func normalized(_ segment: String) -> String {
+            segment.replacingOccurrences(of: "\u{200B}", with: "").lowercased()
+        }
+        var trailing = segments
+        while trailing.count > 1, let last = trailing.last.map(normalized) {
+            let isAppName = appName.map { last == $0.lowercased() } ?? false
+            let isBrowserName = browserProductNames.contains { name in
+                last == name
+                    || last.hasSuffix(" " + name) || last.hasPrefix(name + " ")
+            }
+            guard isAppName || isBrowserName else { break }
+            trailing.removeLast()
+        }
+        guard let last = trailing.last.map(normalized),
+              last.count <= 34, last.split(separator: " ").count <= 3
+        else { return nil }
         for entry in siteKeywords where last.contains(entry.needle) {
             return entry.slug
         }
@@ -989,7 +1158,9 @@ extension ScreenContext {
         AXUIElementSetMessagingTimeout(appElement, 1.0)
         if let window = axElement(appElement, kAXFocusedWindowAttribute) {
             out["window_title"] = axString(window, kAXTitleAttribute) ?? ""
+            out["window_document"] = axURLString(window, kAXDocumentAttribute) ?? ""
         }
+        out["page_url"] = pageURL(of: app, deep: true)?.absoluteString ?? ""
         guard let focused = axElement(appElement, kAXFocusedUIElementAttribute) else {
             out["focused"] = "none"
             return out

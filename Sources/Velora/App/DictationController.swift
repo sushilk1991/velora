@@ -480,7 +480,8 @@ final class DictationController: NSObject {
             frontmost: frontmost,
             windowTitle: ScreenContext.windowTitle(of: frontmost),
             selection: ScreenContext.selectedText(of: frontmost)?.text ?? "",
-            screenNames: ScreenContext.visibleNames(of: frontmost))
+            screenNames: ScreenContext.visibleNames(of: frontmost),
+            pageURL: actionPageURL(of: frontmost))
 
         actionRequestID = requestID
         actions.perform(
@@ -520,6 +521,13 @@ final class DictationController: NSObject {
         }
     }
 
+    /// Page URL for the action planner's first-turn context — browsers only,
+    /// same policy as the per-turn observation.
+    private func actionPageURL(of app: NSRunningApplication?) -> String {
+        guard ActionRuntimePolicy.isBrowserBundle(app?.bundleIdentifier) else { return "" }
+        return ScreenContext.pageURL(of: app, deep: true)?.absoluteString ?? ""
+    }
+
     /// Cancels the running action. With a `requestID`, only the action that
     /// request started — a client that was refused as busy must not be able to
     /// cancel the plan it lost the race to.
@@ -549,7 +557,8 @@ final class DictationController: NSObject {
             frontmost: origin,
             windowTitle: ScreenContext.windowTitle(of: origin),
             selection: ScreenContext.selectedText(of: origin)?.text ?? "",
-            screenNames: names)
+            screenNames: names,
+            pageURL: actionPageURL(of: origin))
         showNotice(symbol: "wand.and.stars", message: "Working on it…")
         NSLog("Velora: voice action — %@", command)
         // allowSend: holding the Action hotkey and speaking the command is the
@@ -1477,7 +1486,11 @@ final class DictationController: NSObject {
             appIcon: targetApp?.icon,
             modeName: hudLabel ?? explicitMode
                 ?? ModeApplicationIndex.shared.modeName(forBundleID: sessionContext?.bundleID)
-                ?? ModeCategory.displayName(forBundleID: sessionContext?.bundleID),
+                ?? ModeCategory.displayName(
+                    forBundleID: sessionContext?.bundleID,
+                    // Detected web app (Gmail, Notion…): the chip mirrors the
+                    // engine's site→mode refinement instead of saying "Browser".
+                    siteSlug: enriched.entities.first { $0.type == "site" }?.value),
             livePreview: livePreview))
 
         NSLog(

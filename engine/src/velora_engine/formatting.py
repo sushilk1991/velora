@@ -25,42 +25,79 @@ CATEGORY_BY_BUNDLE: dict[str, str] = {
     "com.apple.MobileSMS": "chat",
     "com.hnc.Discord": "chat",
     "ru.keepcoder.Telegram": "chat",
+    "org.telegram.desktop": "chat",
     "net.whatsapp.WhatsApp": "chat",
+    "org.whispersystems.signal-desktop": "chat",
+    "com.microsoft.teams2": "chat",
+    "com.microsoft.teams": "chat",
+    "com.facebook.archon": "chat",  # Messenger
     # email
     "com.apple.mail": "email",
     "com.microsoft.Outlook": "email",
     "com.readdle.SparkDesktop": "email",
     "com.readdle.smartemail-Mac": "email",
-    # notes
+    "com.mimestream.Mimestream": "email",
+    # notes / documents
     "com.apple.Notes": "notes",
     "md.obsidian": "notes",
     "notion.id": "notes",
     "net.shinyfrog.bear": "notes",
-    "com.lukilabs.lukiapp": "notes",
-    # code editors → Code mode (light LLM cleanup); terminals → Terminal mode
-    # (formatting off / verbatim). Both share the "code" category so the
-    # shell-safety trailing-period strip applies to either.
+    "com.lukilabs.lukiapp": "notes",  # Craft
+    "com.apple.TextEdit": "notes",
+    "com.microsoft.Word": "notes",
+    "com.apple.iWork.Pages": "notes",
+    "com.agiletortoise.Drafts-OSX": "notes",
+    "com.culturedcode.ThingsMac": "notes",
+    # code editors → Code mode (light LLM cleanup)
     "com.microsoft.VSCode": "code",
     "com.todesktop.230313mzl4w4u92": "code",  # Cursor
-    "com.apple.Terminal": "code",
-    "com.googlecode.iterm2": "code",
-    "com.mitchellh.ghostty": "code",
-    "dev.warp.Warp-Stable": "code",
     "dev.zed.Zed": "code",
-    "org.alacritty": "code",
-    "net.kovidgoyal.kitty": "code",
-    "com.cmuxterm.app": "code",  # cmux
-    # browsers → default
+    "com.sublimetext.4": "code",
+    "com.sublimetext.3": "code",
+    "com.apple.dt.Xcode": "code",
+    "com.exafunction.windsurf": "code",
+    "com.jetbrains.intellij": "code",
+    "com.jetbrains.intellij.ce": "code",
+    "com.jetbrains.pycharm": "code",
+    "com.jetbrains.pycharm.ce": "code",
+    "com.jetbrains.WebStorm": "code",
+    "com.jetbrains.goland": "code",
+    "com.jetbrains.rider": "code",
+    "com.jetbrains.CLion": "code",
+    "com.jetbrains.PhpStorm": "code",
+    "com.jetbrains.rubymine": "code",
+    "com.jetbrains.datagrip": "code",
+    # terminals → Terminal mode (formatting off / verbatim). "terminal" shares
+    # code's shell-safety rules (trailing-period strip) but resolves to the
+    # Terminal built-in so new terminal apps get smart-terminal, not cleanup.
+    "com.apple.Terminal": "terminal",
+    "com.googlecode.iterm2": "terminal",
+    "com.mitchellh.ghostty": "terminal",
+    "dev.warp.Warp-Stable": "terminal",
+    "org.alacritty": "terminal",
+    "net.kovidgoyal.kitty": "terminal",
+    "com.cmuxterm.app": "terminal",  # cmux
+    "com.github.wez.wezterm": "terminal",
+    # browsers → default (refined per-site below)
     "com.apple.Safari": "browser",
     "com.google.Chrome": "browser",
     "company.thebrowser.Browser": "browser",  # Arc
+    "company.thebrowser.dia": "browser",  # Dia
+    "org.mozilla.firefox": "browser",
+    "com.brave.Browser": "browser",
+    "com.microsoft.edgemac": "browser",
+    "com.vivaldi.Vivaldi": "browser",
+    "com.operasoftware.Opera": "browser",
+    "com.kagi.kagimacOS": "browser",  # Orion
+    "app.zen-browser.zen": "browser",
 }
 
 CATEGORY_DESCRIPTIONS = {
     "chat": "a casual chat message",
     "email": "an email",
     "notes": "a note or document",
-    "code": "a code editor or terminal",
+    "code": "a code editor",
+    "terminal": "a terminal",
     "browser": "a web browser",
 }
 
@@ -120,6 +157,18 @@ def category_for_bundle(bundle_id: str | None) -> str | None:
 # --- mode resolution: explicit > per-app bundle-id match > default ----------
 
 
+# Category → the built-in mode that serves it. Used both by the resolve_mode
+# fallback below and (lower-cased) by the browser site refinement. "browser"
+# is deliberately absent: an unrefined browser stays on the default mode.
+_CATEGORY_BUILTIN_MODE = {
+    "chat": "Message",
+    "email": "Email",
+    "notes": "Note",
+    "code": "Code",
+    "terminal": "Terminal",
+}
+
+
 def resolve_mode(config: Config, bundle_id: str | None, explicit_mode: str | None) -> Mode:
     mode = config.mode_by_name(explicit_mode)
     if mode is not None:
@@ -127,10 +176,18 @@ def resolve_mode(config: Config, bundle_id: str | None, explicit_mode: str | Non
     mode = config.mode_for_bundle(bundle_id)
     if mode is not None:
         return mode
-    # category fallback for known bundle ids that user mode files don't claim
+    # Category fallback for known bundle ids that user mode files don't claim.
+    # Installed mode files are frozen at first run, so every bundle id added to
+    # CATEGORY_BY_BUNDLE after that would otherwise silently fall to Default.
+    # A bundle the user deliberately REMOVED from a built-in's app list is
+    # never re-captured (config.unbound_builtin_apps).
+    if bundle_id and bundle_id.strip().casefold() in getattr(
+            config, "unbound_builtin_apps", frozenset()):
+        return config.default_mode()
     category = category_for_bundle(bundle_id)
-    if category == "code":
-        mode = config.mode_by_name("Code")
+    fallback = _CATEGORY_BUILTIN_MODE.get(category or "")
+    if fallback:
+        mode = config.mode_by_name(fallback)
         if mode is not None:
             return mode
     return config.default_mode()
@@ -827,8 +884,9 @@ _TAG_TRIGGER = re.compile(
     re.IGNORECASE,
 )
 
-# Categories where @-tagging is meaningful (Cursor/editors, chat @-mentions).
-_TAGGABLE = {"code", "chat"}
+# Categories where @-tagging is meaningful (Cursor/editors, chat @-mentions,
+# @path mentions to a terminal AI assistant).
+_TAGGABLE = {"code", "chat", "terminal"}
 
 # Browser web-app site slug (from ScreenContext) → category, then category →
 # built-in mode name (lowercased mode-file key).
@@ -837,10 +895,14 @@ _TAGGABLE = {"code", "chat"}
 # fall through to the default mode.
 _SITE_CATEGORY = {
     "gmail": "email", "outlook": "email", "proton": "email",
+    "fastmail": "email", "superhuman": "email", "hey": "email",
+    "zoho": "email", "yahoo": "email",
     "gdocs": "notes", "notion": "notes", "obsidian": "notes", "linear": "notes",
+    "keep": "notes", "evernote": "notes", "onenote": "notes",
+    "coda": "notes", "craft": "notes", "confluence": "notes",
     "slack": "chat", "discord": "chat", "whatsapp": "chat", "messenger": "chat",
+    "telegram": "chat", "teams": "chat", "gchat": "chat", "instagram": "chat",
 }
-_CATEGORY_MODE = {"chat": "message", "email": "email", "notes": "note", "code": "code"}
 
 
 def _site_mode(config: Config, entities: list[dict[str, str]] | None) -> tuple[Mode, str] | None:
@@ -854,7 +916,7 @@ def _site_mode(config: Config, entities: list[dict[str, str]] | None) -> tuple[M
     category = _SITE_CATEGORY.get(site)
     if not category:
         return None
-    mode = config.modes.get(_CATEGORY_MODE.get(category, ""))
+    mode = config.mode_by_name(_CATEGORY_BUILTIN_MODE.get(category, ""))
     return (mode, category) if mode else None
 
 
@@ -1031,7 +1093,7 @@ def run_gate(
         out = _tidy_whitespace(apply_spoken_commands(text))
         out = apply_replacements(out, replacements)
         out = apply_tags(out, entities, category)
-        if mode.name.lower() == "code" or category == "code":
+        if mode.name.lower() == "code" or category in ("code", "terminal"):
             # A trailing period breaks shell commands; STT adds one reflexively.
             out = re.sub(r"(?<!\.)\.$", "", out)
         return GateResult(

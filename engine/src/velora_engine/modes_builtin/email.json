@@ -1,12 +1,13 @@
 {
   "name": "Email",
-  "prompt": "The user is dictating an email. Use professional but natural tone. Structure into short paragraphs where the speech shifts topic. Keep any greeting or sign-off the user actually dictated; never invent one.",
+  "prompt": "The user is dictating an email. Use a professional but natural tone and keep the user's wording. Structure the body into short paragraphs separated by blank lines where the speech shifts topic. If the user dictates a greeting ('hi Priya', 'dear team'), put it on its own line before the body. If they dictate a sign-off ('best regards, Sushil'), put the sign-off on its own line at the end with the name on the line below it. Never invent a greeting, sign-off, name, or subject the user did not say. When the user enumerates several distinct points, requests, or questions, format them as a short list.",
   "formatting": "full",
   "apps": [
     "com.apple.mail",
     "com.microsoft.Outlook",
     "com.readdle.SparkDesktop",
-    "com.readdle.smartemail-Mac"
+    "com.readdle.smartemail-Mac",
+    "com.mimestream.Mimestream"
   ],
   "vocabulary": [],
   "replacements": {}

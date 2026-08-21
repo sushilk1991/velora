@@ -5,7 +5,22 @@
   "apps": [
     "com.microsoft.VSCode",
     "com.todesktop.230313mzl4w4u92",
-    "dev.zed.Zed"
+    "dev.zed.Zed",
+    "com.sublimetext.4",
+    "com.sublimetext.3",
+    "com.apple.dt.Xcode",
+    "com.exafunction.windsurf",
+    "com.jetbrains.intellij",
+    "com.jetbrains.intellij.ce",
+    "com.jetbrains.pycharm",
+    "com.jetbrains.pycharm.ce",
+    "com.jetbrains.WebStorm",
+    "com.jetbrains.goland",
+    "com.jetbrains.rider",
+    "com.jetbrains.CLion",
+    "com.jetbrains.PhpStorm",
+    "com.jetbrains.rubymine",
+    "com.jetbrains.datagrip"
   ],
   "vocabulary": [],
   "replacements": {}

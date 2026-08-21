@@ -7,7 +7,12 @@
     "com.apple.MobileSMS",
     "com.hnc.Discord",
     "ru.keepcoder.Telegram",
-    "net.whatsapp.WhatsApp"
+    "org.telegram.desktop",
+    "net.whatsapp.WhatsApp",
+    "org.whispersystems.signal-desktop",
+    "com.microsoft.teams2",
+    "com.microsoft.teams",
+    "com.facebook.archon"
   ],
   "vocabulary": [],
   "replacements": {}

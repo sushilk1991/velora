@@ -9,7 +9,8 @@
     "dev.warp.Warp-Stable",
     "org.alacritty",
     "net.kovidgoyal.kitty",
-    "com.cmuxterm.app"
+    "com.cmuxterm.app",
+    "com.github.wez.wezterm"
   ],
   "vocabulary": [],
   "replacements": {}

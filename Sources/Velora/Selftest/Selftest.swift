@@ -106,6 +106,7 @@ enum Selftest {
         testKeyboardShortcutMapping()
         testSafeVoiceEditSelection()
         testModeCategories()
+        testScreenContextSites()
         testModeApplicationAssignments()
         testVoiceCommands()
         testStreak()
@@ -5975,6 +5976,123 @@ enum Selftest {
         expect(ModeCategory.displayName(forBundleID: "com.example.unknown") == "Text",
                "unknown app falls back to Text")
         expect(ModeCategory.displayName(forBundleID: nil) == "Text", "nil bundle falls back to Text")
+        // 2026-08-21 coverage expansion: new chat/email/notes/code/terminal
+        // apps land on their categories.
+        for (bundleID, name) in [
+            ("org.whispersystems.signal-desktop", "Message"),
+            ("com.microsoft.teams2", "Message"),
+            ("org.telegram.desktop", "Message"),
+            ("com.mimestream.Mimestream", "Email"),
+            ("com.apple.TextEdit", "Notes"),
+            ("com.microsoft.Word", "Notes"),
+            ("com.sublimetext.4", "Code"),
+            ("com.apple.dt.Xcode", "Code"),
+            ("com.jetbrains.pycharm", "Code"),
+            ("com.github.wez.wezterm", "Terminal"),
+            ("org.mozilla.firefox", "Browser"),
+            ("com.brave.Browser", "Browser"),
+            ("com.microsoft.edgemac", "Browser"),
+        ] {
+            expect(ModeCategory.displayName(forBundleID: bundleID) == name,
+                   "\(bundleID) maps to \(name)")
+        }
+        // Site-slug chip refinement: a browser showing a known web app reads
+        // as that app's category, mirroring the engine's mode refinement.
+        expect(ModeCategory.displayName(forBundleID: "com.google.Chrome", siteSlug: "gmail")
+               == "Email", "Chrome+gmail chip reads Email")
+        expect(ModeCategory.displayName(forBundleID: "com.google.Chrome", siteSlug: "notion")
+               == "Notes", "Chrome+notion chip reads Notes")
+        expect(ModeCategory.displayName(forBundleID: "com.google.Chrome", siteSlug: "slack")
+               == "Message", "Chrome+slack chip reads Message")
+        expect(ModeCategory.displayName(forBundleID: "com.google.Chrome", siteSlug: nil)
+               == "Browser", "Chrome without a site stays Browser")
+        expect(ModeCategory.displayName(forBundleID: "com.google.Chrome", siteSlug: "nope")
+               == "Browser", "unknown slug stays Browser")
+        expect(ModeCategory.displayName(forBundleID: "com.apple.mail", siteSlug: "notion")
+               == "Email", "site slugs refine browsers only")
+        // Every slug the chip can refine to must exist in the engine mirror
+        // direction too: the Swift slug table and site tables agree.
+        let emittable = Set(ScreenContext.siteKeywords.map(\.slug))
+            .union(ScreenContext.siteHosts.map(\.slug))
+        for slug in ModeCategory.bySiteSlug.keys {
+            expect(emittable.contains(slug),
+                   "chip slug \(slug) is emittable by ScreenContext")
+        }
+        for slug in emittable {
+            expect(ModeCategory.bySiteSlug[slug] != nil,
+                   "emittable slug \(slug) has a chip category")
+        }
+    }
+
+    private static func testScreenContextSites() {
+        // URL-host detection: exact host, subdomain, www strip, unknown.
+        expect(ScreenContext.siteSlug(forHost: "mail.google.com") == "gmail",
+               "gmail host detected")
+        expect(ScreenContext.siteSlug(forHost: "www.notion.so") == "notion",
+               "www-prefixed notion host detected")
+        expect(ScreenContext.siteSlug(forHost: "usw2.notion.so") == "notion",
+               "notion subdomain detected")
+        expect(ScreenContext.siteSlug(forHost: "linear.app") == "linear",
+               "linear host detected")
+        expect(ScreenContext.siteSlug(forHost: "teams.microsoft.com") == "teams",
+               "teams host detected")
+        expect(ScreenContext.siteSlug(forHost: "evilnotion.so") == nil,
+               "lookalike host is not suffix-matched")
+        expect(ScreenContext.siteSlug(forHost: "example.com") == nil,
+               "unknown host yields no slug")
+        expect(ScreenContext.siteSlug(forHost: nil) == nil, "nil host yields no slug")
+
+        // Page-URL normalization: web schemes only, credentials stripped.
+        expect(ScreenContext.normalizedPageURL("https://mail.google.com/mail/u/0/#inbox")?
+                .host == "mail.google.com", "https URL accepted")
+        expect(ScreenContext.normalizedPageURL("file:///Users/me/secret.txt") == nil,
+               "file URL rejected")
+        expect(ScreenContext.normalizedPageURL("chrome://settings") == nil,
+               "chrome scheme rejected")
+        expect(ScreenContext.normalizedPageURL("about:blank") == nil,
+               "about scheme rejected")
+        expect(ScreenContext.normalizedPageURL("not a url") == nil,
+               "garbage rejected")
+        let cleaned = ScreenContext.normalizedPageURL("https://user:pw@example.com/a")
+        expect(cleaned?.user == nil && cleaned?.password == nil,
+               "credentials stripped from page URL")
+
+        // Title-based site detection: trailing browser names dropped, long
+        // page-content segments never hijack the site.
+        expect(ScreenContext.site(in: ["Inbox (5)", "s@example.com", "Gmail"],
+                                  appName: "Google Chrome") == "gmail",
+               "Gmail trailing segment detected")
+        expect(ScreenContext.site(in: ["Inbox (5)", "Gmail", "Mozilla Firefox"],
+                                  appName: "Firefox") == "gmail",
+               "Firefox suffix dropped before site detection")
+        expect(ScreenContext.site(in: ["Doc", "Google Docs", "Microsoft\u{200B} Edge"],
+                                  appName: "Microsoft Edge") == "gdocs",
+               "Edge zero-width-space suffix dropped")
+        expect(ScreenContext.site(in: ["How to use Gmail effectively"],
+                                  appName: "Google Chrome") == nil,
+               "long page-content segment cannot hijack the site")
+        expect(ScreenContext.site(in: ["#general", "Slack"],
+                                  appName: "Safari") == "slack",
+               "Slack web detected")
+        expect(ScreenContext.site(in: ["Google Chrome"],
+                                  appName: "Google Chrome") == nil,
+               "bare browser-name title yields nothing")
+
+        // Browser press policy: links join rows/cells in browsers only;
+        // send authority (communication bundles) is untouched.
+        expect(ActionRuntimePolicy.pressRoles(forBundleID: "com.google.Chrome")?
+                .contains("AXLink") == true, "browser press allows links")
+        expect(ActionRuntimePolicy.pressRoles(forBundleID: "com.tinyspeck.slackmacgap")
+               == ScreenContext.actionNavigationRoles,
+               "communication press stays rows/cells")
+        expect(ActionRuntimePolicy.pressRoles(forBundleID: "com.apple.TextEdit") == nil,
+               "other apps cannot press at all")
+        expect(!ActionRuntimePolicy.isCommunicationBundle("com.google.Chrome"),
+               "browsers gain no send authority")
+        for bundleID in ["com.apple.Safari", "org.mozilla.firefox", "app.zen-browser.zen"] {
+            expect(ActionRuntimePolicy.isBrowserBundle(bundleID),
+                   "\(bundleID) recognized as a browser")
+        }
     }
 
     private static func testModeApplicationAssignments() {

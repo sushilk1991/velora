@@ -71,7 +71,7 @@ def test_terminal_short_command_stays_verbatim(config):
         assert gate.use_llm is False
         assert gate.reason == "formatting_off"
         assert gate.text == "git rebase dash dash interactive head tilde three"
-    assert formatting.category_for_bundle("com.googlecode.iterm2") == "code"
+    assert formatting.category_for_bundle("com.googlecode.iterm2") == "terminal"
     assert formatting.category_for_bundle("com.google.Chrome") == "browser"
 
 
@@ -1291,3 +1291,137 @@ def test_postprocess_preserves_literal_duplicate_list_markers(config):
     quoted = 'He wrote "1. Keep this"\n1. Then he left.'
     assert postprocess(literal, gate) == literal
     assert postprocess(quoted, gate) == quoted
+
+
+# ---- category coverage: terminals split out, new apps mapped (2026-08-21) ----
+
+
+def test_terminal_bundles_have_their_own_category():
+    from velora_engine.formatting import category_for_bundle
+    assert category_for_bundle("com.apple.Terminal") == "terminal"
+    assert category_for_bundle("com.googlecode.iterm2") == "terminal"
+    assert category_for_bundle("com.github.wez.wezterm") == "terminal"
+    assert category_for_bundle("com.microsoft.VSCode") == "code"
+
+
+def test_new_bundles_resolve_their_builtin_mode_without_an_apps_binding(config):
+    """A bundle known only to CATEGORY_BY_BUNDLE must still land on its
+    category's built-in mode. This is the upgrade scenario: installed mode
+    files are frozen at first run, so their apps lists predate these ids."""
+    for mode in config.modes.values():
+        mode.apps.clear()
+    for bundle, mode_name in [
+        ("org.whispersystems.signal-desktop", "Message"),
+        ("com.microsoft.teams2", "Message"),
+        ("com.mimestream.Mimestream", "Email"),
+        ("com.apple.TextEdit", "Note"),
+        ("com.apple.dt.Xcode", "Code"),
+        ("com.sublimetext.4", "Code"),
+        ("com.github.wez.wezterm", "Terminal"),
+    ]:
+        assert config.mode_for_bundle(bundle) is None, f"{bundle} unexpectedly bound"
+        assert resolve_mode(config, bundle, None).name == mode_name, bundle
+
+
+def test_category_fallback_never_overrides_a_user_binding(config):
+    config.modes["message"].apps.remove("org.whispersystems.signal-desktop")
+    config.modes["note"].apps.append("org.whispersystems.signal-desktop")
+    assert resolve_mode(config, "org.whispersystems.signal-desktop", None).name == "Note"
+
+
+def test_terminal_category_strips_reflexive_trailing_period(config):
+    """Raw (formatting off) in a terminal app: the shell-safety strip that
+    covered category 'code' must also cover the split-out 'terminal'."""
+    g = run_gate("git status.", config, "com.googlecode.iterm2", "iTerm2", "Raw")
+    assert g.text == "git status"
+
+
+def test_smart_terminal_still_engages_for_new_terminal_bundles(config):
+    long_prose = ("please look at why the reconnect logic keeps dropping the "
+                  "socket after resume and fix the backoff so it stops")
+    g = run_gate(long_prose, config, "com.github.wez.wezterm", "WezTerm", None)
+    assert g.reason == "smart_terminal"
+
+
+def test_new_browser_bundles_get_site_refinement(config):
+    for bundle in ["org.mozilla.firefox", "com.brave.Browser", "com.microsoft.edgemac"]:
+        g = run_gate("...", config, bundle, "Browser", None,
+                     [{"type": "site", "value": "gmail"}])
+        assert g.mode.name == "Email", bundle
+
+
+def test_new_site_slugs_map_to_modes(config):
+    chrome = "com.google.Chrome"
+    for slug, mode_name in [
+        ("telegram", "Message"), ("teams", "Message"), ("gchat", "Message"),
+        ("instagram", "Message"), ("fastmail", "Email"), ("superhuman", "Email"),
+        ("hey", "Email"), ("zoho", "Email"), ("yahoo", "Email"),
+        ("keep", "Note"), ("evernote", "Note"), ("onenote", "Note"),
+        ("coda", "Note"), ("craft", "Note"), ("confluence", "Note"),
+    ]:
+        g = run_gate("...", config, chrome, "Chrome", None,
+                     [{"type": "site", "value": slug}])
+        assert g.mode.name == mode_name, slug
+
+
+# ---- Swift mirrors: category table and site slugs must not drift ----
+
+
+def _swift_source(name):
+    from pathlib import Path
+    path = Path(__file__).resolve().parents[2] / "Sources/Velora" / name
+    if not path.exists():
+        import pytest
+        pytest.skip("swift sources not available (installed engine)")
+    return path.read_text()
+
+
+def test_bundle_category_table_matches_the_swift_mirror():
+    import re
+    source = _swift_source("Config/ModeCategories.swift")
+    table = source.split("byBundleID: [String: ModeCategory] = [", 1)[1]
+    table = table.split("]", 1)[0]
+    swift = dict(re.findall(r'"([^"]+)":\s*\.(\w+)', table))
+    assert swift, "failed to parse ModeCategories.swift"
+    assert swift == formatting.CATEGORY_BY_BUNDLE, (
+        f"engine-only: {set(formatting.CATEGORY_BY_BUNDLE) - set(swift)}, "
+        f"swift-only: {set(swift) - set(formatting.CATEGORY_BY_BUNDLE)}, "
+        f"category-mismatch: { {k for k in swift if k in formatting.CATEGORY_BY_BUNDLE and swift[k] != formatting.CATEGORY_BY_BUNDLE[k]} }")
+
+
+def test_site_slugs_match_the_swift_mirror():
+    """Every slug the Swift side can emit (title keywords + URL hosts) must
+    resolve in the engine's _SITE_CATEGORY, and vice versa — a slug only one
+    side knows is a silent no-op."""
+    import re
+    source = _swift_source("Context/ScreenContext.swift")
+    slugs = set()
+    for anchor in ["siteKeywords", "siteHosts"]:
+        table = source.split(anchor, 1)[1].split("= [", 1)[1].split("]", 1)[0]
+        slugs |= {m for _, m in re.findall(r'\("([^"]+)",\s*(?:slug:\s*)?"([^"]+)"\)', table)}
+    assert slugs, "failed to parse ScreenContext.swift site tables"
+    assert slugs == set(formatting._SITE_CATEGORY), (
+        f"engine-only: {set(formatting._SITE_CATEGORY) - slugs}, "
+        f"swift-only: {slugs - set(formatting._SITE_CATEGORY)}")
+
+
+def test_site_categories_all_resolve_to_builtin_modes(config):
+    for slug, category in formatting._SITE_CATEGORY.items():
+        mode_name = formatting._CATEGORY_BUILTIN_MODE.get(category)
+        assert mode_name, f"{slug}: category {category} has no mode mapping"
+        assert config.mode_by_name(mode_name) is not None, slug
+
+
+def test_site_chip_table_matches_the_engine_categories():
+    """ModeCategory.bySiteSlug (the HUD chip refinement) must agree with the
+    engine's _SITE_CATEGORY in coverage AND category values — a drifted value
+    would make the chip disagree with the mode actually applied."""
+    import re
+    source = _swift_source("Config/ModeCategories.swift")
+    table = source.split("bySiteSlug: [String: ModeCategory] = [", 1)[1].split("]", 1)[0]
+    swift = dict(re.findall(r'"([^"]+)":\s*\.(\w+)', table))
+    assert swift, "failed to parse ModeCategories.swift bySiteSlug"
+    assert swift == formatting._SITE_CATEGORY, (
+        f"engine-only: {set(formatting._SITE_CATEGORY) - set(swift)}, "
+        f"swift-only: {set(swift) - set(formatting._SITE_CATEGORY)}, "
+        f"value-mismatch: { {k for k in swift if formatting._SITE_CATEGORY.get(k) not in (None, swift[k])} }")

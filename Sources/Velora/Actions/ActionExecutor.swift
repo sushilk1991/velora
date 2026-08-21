@@ -25,6 +25,27 @@ enum ActionRuntimePolicy {
         guard let bundleID else { return false }
         return communicationBundleIDs.contains(bundleID.lowercased())
     }
+
+    /// Browser identities, derived from the category table so a browser added
+    /// there is automatically press- and URL-capable here.
+    static let browserBundleIDs: Set<String> = Set(
+        ModeCategory.byBundleID
+            .filter { $0.value == .browser }
+            .map { $0.key.lowercased() })
+
+    static func isBrowserBundle(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return browserBundleIDs.contains(bundleID.lowercased())
+    }
+
+    /// AX roles press_element may press in this app, or nil when the app
+    /// supports no pressing at all. Send authority is NOT this list —
+    /// Return/Enter stays gated on `isCommunicationBundle` alone.
+    static func pressRoles(forBundleID bundleID: String?) -> Set<String>? {
+        if isCommunicationBundle(bundleID) { return ScreenContext.actionNavigationRoles }
+        if isBrowserBundle(bundleID) { return ScreenContext.browserNavigationRoles }
+        return nil
+    }
 }
 
 /// Everything the executor needs from the machine. Split out from the executor
@@ -52,6 +73,8 @@ protocol ActionHost: AnyObject {
     /// Name-like labels visible in the frontmost window — what the model gets
     /// to look at between turns.
     func visibleNames() -> [String]
+    /// URL of the frontmost page when a browser is frontmost, else nil.
+    func frontmostPageURL() -> String?
     /// Press the on-screen control whose label matches. Label-addressed AX
     /// action — never a coordinate, never a synthesized click.
     func pressElement(label: String, expecting bundleID: String?) -> Bool
