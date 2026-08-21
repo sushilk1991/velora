@@ -44,6 +44,7 @@ test-sublime-plugin:
 
 test-release-scripts:
 	./scripts/test-signing-config.sh
+	./scripts/test-publish-release.sh
 
 test-coverage:
 	cd engine && uv run pytest -q --cov=velora_engine --cov-branch \

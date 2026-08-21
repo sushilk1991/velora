@@ -33,7 +33,9 @@ coverage.xml
 htmlcov/
 
 # Editor / tool local state
-.claude/
+# Local agent state stays out; shared project skills are versioned.
+.claude/*
+!.claude/skills/
 .know/
 .vscode/
 .idea/

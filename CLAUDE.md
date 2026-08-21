@@ -38,7 +38,13 @@ swift build -c release                       # compile (fast iteration)
 cp -R build/Velora.app /Applications/         # install (quit the running app first)
 ./scripts/make-dmg.sh                         # Developer ID sign + notarize the DMG
 ./scripts/verify-dmg.sh build/Velora-<version>.dmg
+./scripts/publish-release.sh                  # GitHub release + Homebrew tap (BOTH, always)
 ```
+
+**Releasing:** use the `release` skill (or follow `docs/RELEASING.md`). A
+release is not done until BOTH the GitHub release (`/releases/latest` feeds
+the in-app updater) and the Homebrew tap cask serve the new version —
+`publish-release.sh` enforces the order and is safe to re-run.
 
 The bundled engine re-syncs to `~/Library/Application Support/Velora/engine` on
 relaunch when the `.velora-build` stamp changes (preserves the `.venv`).
