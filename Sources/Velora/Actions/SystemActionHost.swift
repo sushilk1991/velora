@@ -2,6 +2,24 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+enum ActionTypingProgress {
+    /// Exact Action-owned text that must precede the next typing chunk. Invalid
+    /// progress—including a UTF-16 offset inside a surrogate pair—fails closed.
+    static func expectedDraft(
+        priorDraft: String,
+        insertion: String,
+        postedUTF16Units: Int
+    ) -> String? {
+        let insertionUnits = Array(insertion.utf16)
+        guard postedUTF16Units >= 0,
+              postedUTF16Units <= insertionUnits.count else { return nil }
+        let prefixUnits = Array(insertionUnits.prefix(postedUTF16Units))
+        let prefix = String(decoding: prefixUnits, as: UTF16.self)
+        guard Array(prefix.utf16) == prefixUnits else { return nil }
+        return priorDraft + prefix
+    }
+}
+
 /// The real machine behind `ActionExecutor`.
 ///
 /// Two macOS behaviours shape this file:
@@ -19,9 +37,42 @@ import Foundation
 final class SystemActionHost: ActionHost {
     private let inserter: TextInserter
     private var accessibilityEnabledPIDs = Set<pid_t>()
+    /// Exact AX field and exact text written by this Action invocation. The
+    /// field survives planner turns, but is reset before the next user action.
+    private var actionTextTarget: ScreenKeystrokeStreamTarget?
+    private var actionDraft = ""
 
     init(inserter: TextInserter) {
         self.inserter = inserter
+    }
+
+    func beginActionInputSession() {
+        clearActionTextState()
+    }
+
+    private func clearActionTextState() {
+        actionTextTarget = nil
+        actionDraft = ""
+    }
+
+    private func expectedBundle(_ expected: String?, matches actual: String) -> Bool {
+        guard let expected, !expected.isEmpty else { return true }
+        return expected == actual
+    }
+
+    private func actionDraftIsOwned(
+        _ draft: String,
+        target: ScreenKeystrokeStreamTarget,
+        waitingUpTo timeout: TimeInterval
+    ) -> Bool {
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0, timeout)
+        repeat {
+            if ScreenContext.keystrokeStreamOwnsDraft(draft, target: target) {
+                return true
+            }
+            guard ProcessInfo.processInfo.systemUptime < deadline else { return false }
+            Thread.sleep(forTimeInterval: 0.01)
+        } while true
     }
 
     /// Runs `work` on the main thread and returns its result.
@@ -203,37 +254,51 @@ final class SystemActionHost: ActionHost {
         return ScreenContext.visibleNames(of: app)
     }
 
-    /// Press the control whose visible label matches. The frontmost app must
-    /// still be the one the plan verified — same gate as a keystroke, because
-    /// a press in the wrong app is just as irreversible.
+    /// Press the navigation row/cell whose visible label matches. The
+    /// frontmost app must still be the one the plan verified; ScreenContext
+    /// also refuses every non-navigation AX role before AXPress.
     func pressElement(label: String, expecting bundleID: String?) -> Bool {
         guard Permissions.accessibilityGranted else { return false }
         guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
         else { return false }
+        guard ActionRuntimePolicy.isCommunicationBundle(app.bundleIdentifier) else {
+            return false
+        }
         if let bundleID, !bundleID.isEmpty, app.bundleIdentifier != bundleID {
             return false
         }
-        return ScreenContext.pressElement(labelled: label, in: app)
+        let pressed = ScreenContext.pressElement(labelled: label, in: app)
+        if pressed { clearActionTextState() }
+        return pressed
     }
 
     // MARK: - Input
 
-    /// Whether the frontmost app currently has a focused element at all. When
-    /// AX is unreadable we answer true: refusing to type because we could not
-    /// read the tree would break apps that expose nothing, and the frontmost +
-    /// secure-input checks still stand.
+    /// Captures one proven editable AX field with a readable empty caret. A
+    /// generic focused element is insufficient: a synthesized "e" on Gmail's
+    /// document surface is an ambient keyboard shortcut, not text insertion.
     var hasFocusedTextTarget: Bool {
-        guard Permissions.accessibilityGranted,
-              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
-              app.processIdentifier > 0 else { return true }
-        let appElement = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(appElement, 0.5)
-        var focused: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            appElement, kAXFocusedUIElementAttribute as CFString, &focused)
-        // Only a definitive "there is no focused element" blocks typing; an
-        // error (busy app, no AX server) is not evidence of absence.
-        if status == .noValue || (status == .success && focused == nil) { return false }
+        guard Permissions.accessibilityGranted else {
+            clearActionTextState()
+            return false
+        }
+        if let target = actionTextTarget {
+            guard ScreenContext.keystrokeStreamOwnsDraft(actionDraft, target: target) else {
+                clearActionTextState()
+                return false
+            }
+            return true
+        }
+        guard let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.processIdentifier > 0,
+              let target = ScreenContext.keystrokeStreamTarget(of: app),
+              ScreenContext.keystrokeStreamOwnsDraft("", target: target)
+        else {
+            clearActionTextState()
+            return false
+        }
+        actionTextTarget = target
+        actionDraft = ""
         return true
     }
 
@@ -255,22 +320,61 @@ final class SystemActionHost: ActionHost {
     }
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
-        guard canPostInput else { return false }
-        if let bundleID, !bundleID.isEmpty,
-           onMain({ NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) != bundleID {
+        guard canPostInput, hasFocusedTextTarget,
+              let target = actionTextTarget,
+              expectedBundle(bundleID, matches: target.bundleID),
+              ScreenContext.keystrokeStreamOwnsDraft(actionDraft, target: target)
+        else {
+            clearActionTextState()
             return false
         }
+        let priorDraft = actionDraft
+        let resultingDraft = priorDraft + text
         // Synchronous by design: the executor's next step (often Return) must
         // not race the characters into the field.
         let finished = DispatchSemaphore(value: 0)
         var succeeded = false
-        inserter.insertViaTyping(text, targetBundleID: bundleID, completion: { ok in
-            succeeded = ok
-            finished.signal()
-        })
+        inserter.insertViaTyping(
+            text,
+            targetBundleID: target.bundleID,
+            targetElement: target.element,
+            initialDeliveryCheck: {
+                ScreenContext.keystrokeStreamOwnsDraft(priorDraft, target: target)
+            },
+            continuationDeliveryCheck: { [weak self] postedUTF16Units in
+                guard let self,
+                      let expectedDraft = ActionTypingProgress.expectedDraft(
+                        priorDraft: priorDraft,
+                        insertion: text,
+                        postedUTF16Units: postedUTF16Units)
+                else { return false }
+                // The first check observes the unchanged starting caret. For
+                // later chunks, briefly allow the target app's AX tree to
+                // catch up with the event that was just posted.
+                return self.actionDraftIsOwned(
+                    expectedDraft,
+                    target: target,
+                    waitingUpTo: postedUTF16Units == 0 ? 0 : 0.2)
+            },
+            completion: { ok in
+                succeeded = ok
+                finished.signal()
+            })
         let deadline = DispatchTime.now() + .milliseconds(max(3_000, text.count * 12))
-        guard finished.wait(timeout: deadline) == .success else { return false }
-        return succeeded
+        guard finished.wait(timeout: deadline) == .success, succeeded else {
+            clearActionTextState()
+            return false
+        }
+
+        // AX delivery is asynchronous relative to the posted CGEvent. Give the
+        // app a short bounded window to expose the resulting caret and text,
+        // then retain only a draft whose exact element and contents are proven.
+        if actionDraftIsOwned(resultingDraft, target: target, waitingUpTo: 0.5) {
+            actionDraft = resultingDraft
+            return true
+        }
+        clearActionTextState()
+        return false
     }
 
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool {
@@ -281,12 +385,30 @@ final class SystemActionHost: ActionHost {
 
     func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags,
                   expecting bundleID: String?) -> Bool {
-        guard canPostInput else { return false }
-        if let bundleID, !bundleID.isEmpty,
-           onMain({ NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) != bundleID {
+        let committing = keyCode == ActionKey.keyCode(for: "return")
+            || keyCode == ActionKey.keyCode(for: "enter")
+        if committing {
+            guard let target = actionTextTarget,
+                  !actionDraft.isEmpty,
+                  expectedBundle(bundleID, matches: target.bundleID),
+                  ScreenContext.keystrokeStreamOwnsDraft(actionDraft, target: target)
+            else {
+                clearActionTextState()
+                return false
+            }
+        }
+        guard canPostInput else {
+            if committing { clearActionTextState() }
             return false
         }
-        return inserter.pressKey(keyCode, flags: flags)
+        if let bundleID, !bundleID.isEmpty,
+           onMain({ NSWorkspace.shared.frontmostApplication?.bundleIdentifier }) != bundleID {
+            if committing { clearActionTextState() }
+            return false
+        }
+        let pressed = inserter.pressKey(keyCode, flags: flags)
+        if committing { clearActionTextState() }
+        return pressed
     }
 
     func sleep(ms: Int) {

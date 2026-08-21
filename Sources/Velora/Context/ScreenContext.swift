@@ -141,6 +141,19 @@ enum ScreenContext {
     /// Max entities returned; keeps the prompt/vocabulary bounded.
     private static let maxEntities = 4
 
+    /// AXPress is a generic control action. Action Mode exposes it only for
+    /// roles whose semantics are navigation, never mutation or submission.
+    /// Groups are intentionally excluded: an unlabeled group can wrap a row,
+    /// but it can just as easily wrap a destructive button cluster.
+    static let actionNavigationRoles: Set<String> = [
+        "AXRow", "AXCell",
+    ]
+
+    static func isActionNavigationRole(_ role: String?) -> Bool {
+        guard let role else { return false }
+        return actionNavigationRoles.contains(role)
+    }
+
     /// Best-effort entities for the given app. Never throws; returns [] when
     /// AX is unavailable or the title yields nothing useful.
     static func entities(for app: NSRunningApplication?, category: ModeCategory?) -> [ContextEntity] {
@@ -230,9 +243,10 @@ enum ScreenContext {
         return names
     }
 
-    /// Finds and presses the control whose visible label matches `label` — a
-    /// chat row in a search list, a link in results. Label-addressed only;
-    /// there is deliberately no press-by-coordinate anywhere in Action Mode.
+    /// Finds and presses the navigation row/cell whose visible label
+    /// matches `label`. Label-addressed only; there is deliberately no
+    /// press-by-coordinate anywhere in Action Mode, and non-navigation roles
+    /// are refused even when their labels pass planning validation.
     ///
     /// Matching is `AppMatcher.contextMatches` (whole-word, ALL terms), the
     /// same rule `verify_context` lives by, so "Priya" cannot press
@@ -297,9 +311,12 @@ enum ScreenContext {
         return false
     }
 
-    /// Performs AXPress if the element advertises it. Never presses blind:
-    /// an element without the action is skipped, not force-pressed.
+    /// Performs AXPress only when both role and action prove this is an
+    /// explicit navigation target. Buttons and generic containers are skipped.
     private static func press(_ element: AXUIElement) -> Bool {
+        guard isActionNavigationRole(axString(element, kAXRoleAttribute)) else {
+            return false
+        }
         var actionsRef: CFArray?
         guard AXUIElementCopyActionNames(element, &actionsRef) == .success,
               let actions = actionsRef as? [String],

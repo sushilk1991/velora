@@ -19,6 +19,27 @@ enum PlannedTurn {
     case failure(reason: String, code: String)
 }
 
+/// Aggregates typed executor evidence across model turns. A successful host
+/// call proves only that the call was accepted. The events remain available
+/// for a future caller-supplied, goal-bound postcondition; they are not turned
+/// into user-facing completion text here.
+private struct ActionCompletionEvidence {
+    private(set) var events: [ActionEvidenceEvent] = []
+    private(set) var hadEffect = false
+
+    mutating func record(_ result: ActionRunResult) {
+        for event in result.evidence {
+            events.append(event)
+            switch event {
+            case .appOpenRequested, .unverifiedEffect:
+                hadEffect = true
+            case .frontmostConfirmed:
+                break
+            }
+        }
+    }
+}
+
 /// Drives one action end to end: batch → machine → observation → next batch.
 ///
 /// This loop replaced the v1 one-shot plan after a morning of field failures
@@ -78,8 +99,18 @@ final class ActionLoopRunner {
     }
 
     func run(transcript: String, context: ActionContextSnapshot) -> ActionResult {
+        // SystemActionHost persists across planner turns and user actions.
+        // Draft ownership must cross turns in this run, but never leak into
+        // the next action invocation.
+        host.beginActionInputSession()
         var carried = ActionPlan.BatchState()
+        carried.appNames.formUnion(context.runningApps)
+        if !context.frontmostApp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            carried.appNames.insert(context.frontmostApp)
+        }
+        carried.currentApp = context.frontmostApp
         var fullTrace: [String] = []
+        var completionEvidence = ActionCompletionEvidence()
         var lockedSends: Bool?
         var lockedGoal = ""
         var turnsUsed = 0
@@ -109,7 +140,8 @@ final class ActionLoopRunner {
                     reply = planner.observe(gatherObservation(
                         executed: fullTrace,
                         failedStep: "steps rejected before running: \(reason) "
-                            + "— propose different steps"))
+                            + "— propose different steps",
+                        state: &carried))
                     continue
                 }
                 planner.end()
@@ -123,21 +155,22 @@ final class ActionLoopRunner {
                     // draft into a send would sidestep the consent the caller
                     // actually gave.
                     lockedSends = sends
-                    lockedGoal = goal
+                    lockedGoal = String(ActionPlan.sanitize(goal).prefix(200))
                 }
 
                 if stepsJSON.isEmpty {
                     planner.end()
                     // A FIRST turn that reports done without doing anything is
-                    // the planner shrugging, and this used to reach the user
-                    // as success. From turn 2 an observation has been seen, so
-                    // "already met" is a real answer. The engine refuses this
-                    // too; keeping the app's own check is the point of having
-                    // two (review finding, 2026-08-04).
-                    return done && turnsUsed > 1
-                        ? .completed(goal: lockedGoal, trace: fullTrace)
-                        : .failed(reason: "the planner returned nothing to do",
-                                  trace: fullTrace)
+                    // the planner shrugging. On later turns `done` may stop the
+                    // loop, but only the accumulated executor evidence decides
+                    // whether that stop is verified completion.
+                    guard done, turnsUsed > 1 else {
+                        return .failed(reason: "the planner returned nothing to do",
+                                       trace: fullTrace)
+                    }
+                    return completionResult(
+                        goal: lockedGoal, trace: fullTrace,
+                        evidence: completionEvidence)
                 }
 
                 let batchObject: [String: Any] = [
@@ -177,7 +210,8 @@ final class ActionLoopRunner {
                     asks += 1
                     reply = planner.observe(gatherObservation(
                         executed: fullTrace,
-                        failedStep: "steps rejected before running: \(message)"))
+                        failedStep: "steps rejected before running: \(message)",
+                        state: &carried))
                     continue
                 }
 
@@ -201,6 +235,7 @@ final class ActionLoopRunner {
                 lock.unlock()
 
                 fullTrace.append(contentsOf: result.trace)
+                completionEvidence.record(result)
                 // Runtime truth, not batch intent: only steps that actually
                 // completed update the carried safety state.
                 carried = ActionPlan.state(after: plan,
@@ -211,7 +246,9 @@ final class ActionLoopRunner {
                 case .completed:
                     if done {
                         planner.end()
-                        return .completed(goal: lockedGoal, trace: fullTrace)
+                        return completionResult(
+                            goal: lockedGoal, trace: fullTrace,
+                            evidence: completionEvidence)
                     }
                     guard turnsUsed < Self.maxTurns, host.now() < deadline else {
                         planner.end()
@@ -221,7 +258,7 @@ final class ActionLoopRunner {
                     }
                     asks += 1
                     reply = planner.observe(gatherObservation(
-                        executed: fullTrace, failedStep: nil))
+                        executed: fullTrace, failedStep: nil, state: &carried))
 
                 case .cancelled:
                     planner.end()
@@ -239,18 +276,38 @@ final class ActionLoopRunner {
                     asks += 1
                     reply = planner.observe(gatherObservation(
                         executed: fullTrace,
-                        failedStep: result.trace.last ?? reason))
+                        failedStep: result.trace.last ?? reason,
+                        state: &carried))
                 }
             }
         }
+    }
+
+    private func completionResult(
+        goal: String,
+        trace: [String],
+        evidence: ActionCompletionEvidence
+    ) -> ActionResult {
+        guard evidence.hadEffect else {
+            return .failed(
+                reason: "the planner returned nothing effective to do",
+                trace: trace)
+        }
+        return .performedUnverified(goal: goal, trace: trace)
     }
 
     /// What the model gets to look at between turns. Every string is read off
     /// the user's screen; the engine defangs each one before it reaches the
     /// prompt.
     private func gatherObservation(executed: [String],
-                                   failedStep: String?) -> [String: Any] {
+                                   failedStep: String?,
+                                   state: inout ActionPlan.BatchState) -> [String: Any] {
         let front = host.frontmostApp()
+        if let name = front?.name,
+           !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            state.appNames.insert(name)
+        }
+        state.currentApp = front?.name ?? ""
         var observation: [String: Any] = [
             "frontmost_app": front?.name ?? "",
             "frontmost_bundle": front?.bundleID ?? "",

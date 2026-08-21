@@ -2,10 +2,38 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+/// Runtime-only identities for actions that can navigate or commit content in
+/// communication apps. Display names are deliberately absent: only the actual
+/// frontmost bundle can satisfy this policy.
+enum ActionRuntimePolicy {
+    static let communicationBundleIDs: Set<String> = [
+        "com.apple.mail",
+        "com.apple.mobilesms",
+        "com.facebook.archon",
+        "com.hnc.discord",
+        "com.microsoft.teams",
+        "com.microsoft.teams2",
+        "com.slack.slack",
+        "com.tinyspeck.slackmacgap",
+        "net.whatsapp.whatsapp",
+        "org.telegram.desktop",
+        "org.whispersystems.signal-desktop",
+        "ru.keepcoder.telegram",
+    ]
+
+    static func isCommunicationBundle(_ bundleID: String?) -> Bool {
+        guard let bundleID else { return false }
+        return communicationBundleIDs.contains(bundleID.lowercased())
+    }
+}
+
 /// Everything the executor needs from the machine. Split out from the executor
 /// so the step logic — which is where a bug sends a message to the wrong person
 /// — can be exercised headlessly against a scripted host.
 protocol ActionHost: AnyObject {
+    /// Clears exact text-target/draft ownership at the boundary between user
+    /// actions. The host itself survives across planner turns within one run.
+    func beginActionInputSession()
     /// Launch or switch to an app; returns the name it actually resolved to.
     func openApp(named name: String) -> String?
     func openURL(_ url: URL) -> Bool
@@ -36,9 +64,9 @@ protocol ActionHost: AnyObject {
     /// False when a keystroke must not be synthesized right now (permission
     /// missing, or a password field has secure input up).
     var canPostInput: Bool { get }
-    /// True when something on screen can actually receive typed characters.
-    /// A frontmost app with no focused element (TextEdit with no open document,
-    /// an app showing only a toolbar) swallows synthesized text silently.
+    /// True only after the host captures a proven editable AX text field with
+    /// a readable empty selection. Generic focused surfaces can interpret
+    /// synthesized characters as application shortcuts.
     var hasFocusedTextTarget: Bool { get }
     /// True when the login window owns the screen. Nothing can be driven then,
     /// and the generic "app didn't come to the front" failure would send the
@@ -61,6 +89,23 @@ enum ActionOutcome: Equatable {
     var isSuccess: Bool { self == .completed }
 }
 
+/// Machine observations emitted by the executor for deterministic completion
+/// decisions. These are deliberately typed events, not strings recovered from
+/// the human-readable trace.
+enum ActionEvidenceEvent: Equatable {
+    case appOpenRequested(requested: String, resolved: String)
+    case frontmostConfirmed(requested: String, actual: String, bundleID: String)
+    case unverifiedEffect(ActionEffectKind)
+}
+
+enum ActionEffectKind: Equatable {
+    case openURL
+    case typeText
+    case pasteText
+    case key
+    case pressElement
+}
+
 struct ActionRunResult: Equatable {
     let outcome: ActionOutcome
     /// One line per attempted step, for the log and for tests.
@@ -69,6 +114,7 @@ struct ActionRunResult: Equatable {
     /// state from THIS, not from the batch as written — a verify_context that
     /// failed at runtime must not count as having verified anything.
     let executedSteps: Int
+    let evidence: [ActionEvidenceEvent]
 }
 
 /// Runs a validated plan, re-checking safety at every step.
@@ -116,13 +162,14 @@ final class ActionExecutor {
 
     func run(_ plan: ActionPlan) -> ActionRunResult {
         var trace: [String] = []
+        var evidence: [ActionEvidenceEvent] = []
 
         /// Failure at `index`: exactly the steps before it completed.
         func failed(_ index: Int, _ reason: String,
                     recoverable: Bool) -> ActionRunResult {
             ActionRunResult(
                 outcome: .failed(step: index, reason: reason, recoverable: recoverable),
-                trace: trace, executedSteps: index)
+                trace: trace, executedSteps: index, evidence: evidence)
         }
 
         guard plan.isExecutable else {
@@ -138,7 +185,7 @@ final class ActionExecutor {
         for (index, step) in plan.steps.enumerated() {
             if cancelled {
                 return ActionRunResult(outcome: .cancelled(step: index), trace: trace,
-                                       executedSteps: index)
+                                       executedSteps: index, evidence: evidence)
             }
             // Permission and secure-input state can change mid-plan (the user
             // clicks a password field between steps).
@@ -162,6 +209,9 @@ final class ActionExecutor {
                 // off the per-chunk target check inside TextInserter.
                 expectedAppName = nil
                 expectedBundleID = nil
+                evidence.append(.appOpenRequested(
+                    requested: Self.evidenceText(name, limit: 120),
+                    resolved: Self.evidenceText(resolved, limit: 120)))
                 trace.append("open_app \(resolved)")
 
             case .openURL(let url):
@@ -173,6 +223,7 @@ final class ActionExecutor {
                 // must re-establish focus before it may type.
                 expectedAppName = nil
                 expectedBundleID = nil
+                evidence.append(.unverifiedEffect(.openURL))
                 trace.append("open_url \(url.scheme ?? "?")")
 
             case .waitFrontmost(let app, let timeoutMs):
@@ -184,6 +235,10 @@ final class ActionExecutor {
                 }
                 expectedAppName = front.name
                 expectedBundleID = front.bundleID
+                evidence.append(.frontmostConfirmed(
+                    requested: Self.evidenceText(app, limit: 120),
+                    actual: Self.evidenceText(front.name, limit: 120),
+                    bundleID: Self.evidenceText(front.bundleID, limit: 256)))
                 trace.append("wait_frontmost \(front.name)")
 
             case .verifyContext(let terms):
@@ -279,6 +334,8 @@ final class ActionExecutor {
                     trace.append("type_text: refused")
                     return failed(index, "couldn't type that text", recoverable: false)
                 }
+                evidence.append(.unverifiedEffect(
+                    step == .pasteText(text) ? .pasteText : .typeText))
                 trace.append("type_text \(text.count) chars")
 
             case .key(let name, let mods, let repeatCount):
@@ -286,6 +343,16 @@ final class ActionExecutor {
                     trace.append("key \(name): focus lost")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",
                                   recoverable: false)
+                }
+                if ActionPlan.Limits.committingKeys.contains(name) {
+                    guard let bundleID = expectedBundleID,
+                          ActionRuntimePolicy.isCommunicationBundle(bundleID) else {
+                        trace.append("key \(name): untrusted communication bundle")
+                        return failed(
+                            index,
+                            "the active app is not an approved communication app",
+                            recoverable: false)
+                    }
                 }
                 guard let code = ActionKey.keyCode(for: name) else {
                     trace.append("key \(name): unmappable")
@@ -295,7 +362,8 @@ final class ActionExecutor {
                 for iteration in 0..<repeatCount {
                     if cancelled {
                         return ActionRunResult(outcome: .cancelled(step: index),
-                                               trace: trace, executedSteps: index)
+                                               trace: trace, executedSteps: index,
+                                               evidence: evidence)
                     }
                     guard host.pressKey(code, flags: flags,
                                         expecting: expectedBundleID) else {
@@ -304,12 +372,14 @@ final class ActionExecutor {
                     }
                     if repeatCount > 1 { host.sleep(ms: 30) }
                 }
+                evidence.append(.unverifiedEffect(.key))
                 trace.append("key \(mods.joined(separator: "+"))\(mods.isEmpty ? "" : "+")\(name)"
                              + (repeatCount > 1 ? " x\(repeatCount)" : ""))
 
             case .pressElement(let label):
-                // AXPress is not a synthesized keystroke, so `canPostInput`
-                // (secure input) deliberately does not apply — but a screen
+                // The host exposes AXPress only for structurally safe
+                // navigation roles. It is not a synthesized keystroke, so
+                // `canPostInput` deliberately does not apply — but a screen
                 // that locked mid-batch must still stop it.
                 guard !host.screenIsLocked else {
                     trace.append("press_element \(label): screen locked")
@@ -328,6 +398,7 @@ final class ActionExecutor {
                     return failed(index, "couldn't find '\(label)' on screen",
                                   recoverable: true)
                 }
+                evidence.append(.unverifiedEffect(.pressElement))
                 trace.append("press_element \(label)")
 
             case .pause(let ms):
@@ -336,7 +407,7 @@ final class ActionExecutor {
             }
         }
         return ActionRunResult(outcome: .completed, trace: trace,
-                               executedSteps: plan.steps.count)
+                               executedSteps: plan.steps.count, evidence: evidence)
     }
 
     /// True when the app the plan focused is still frontmost. When focus was
@@ -352,6 +423,13 @@ final class ActionExecutor {
             return AppMatcher.normalize(front.name) == AppMatcher.normalize(expectedAppName)
         }
         return false
+    }
+
+    /// Evidence may become user-visible once goal-bound postconditions exist.
+    /// Bound and defang it at capture time so that future code cannot
+    /// accidentally render an app-authored control/bidi payload verbatim.
+    private static func evidenceText(_ text: String, limit: Int) -> String {
+        String(ActionPlan.sanitize(text).prefix(limit))
     }
 
     private func waitForFrontmost(

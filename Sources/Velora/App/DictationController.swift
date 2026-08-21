@@ -501,10 +501,13 @@ final class DictationController: NSObject {
                     code: "send_not_allowed",
                     message: "This plan sends a message. Re-run with --allow-send if "
                         + "that is what you want: " + plan.describedSteps.joined(separator: " → "))))
-            case .completed(let goal, let trace):
-                completion(.success([
-                    "ok": true, "executed": execute, "goal": goal, "trace": trace,
-                ]))
+            case .completed, .performedUnverified:
+                guard let payload = result.controlSuccessPayload(execute: execute) else {
+                    completion(.failure(ControlFailure(
+                        code: "action_failed", message: "Action result was unavailable")))
+                    return
+                }
+                completion(.success(payload))
             case .cancelled:
                 completion(.failure(ControlFailure(
                     code: "cancelled", message: "The action was cancelled")))
@@ -554,17 +557,19 @@ final class DictationController: NSObject {
         actions.perform(transcript: command, context: context,
                         execute: true, allowSend: true) { [weak self] result in
             guard let self else { return }
+            if let notice = result.voiceCompletionNotice {
+                self.showNotice(symbol: notice.symbol, message: notice.message)
+                return
+            }
             switch result {
-            case .completed(let goal, _):
-                self.showNotice(
-                    symbol: "checkmark.circle",
-                    message: goal.isEmpty ? "Done" : String(goal.prefix(60)))
             case .planned, .needsSendApproval:
                 self.showNotice(symbol: "checkmark.circle", message: "Planned")
             case .cancelled:
                 self.showNotice(symbol: "xmark.circle", message: "Action cancelled")
             case .failed(let reason, _):
                 self.showError(String(reason.prefix(80)))
+            case .completed, .performedUnverified:
+                break
             }
         }
     }

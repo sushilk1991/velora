@@ -16,10 +16,22 @@ final class FakeActionHost: ActionHost {
     var visibleNamesValue: [String] = []
     /// Labels that `pressElement` can find on the fake screen.
     var pressableLabels: Set<String> = []
+    var pressableRoles: [String: String] = [:]
     var canPostInput = true
     var screenIsLocked = false
     /// Whether anything on screen can receive typed characters.
     var hasTextTarget = true
+    /// Deterministic AX fixtures for Action Mode's exact editable-target gate.
+    /// Production obtains these from ScreenContext; the fake keeps executor
+    /// regressions headless.
+    var textTargetReadable = true
+    var textTargetRole = kAXTextFieldRole as String
+    var textTargetEditable = true
+    var selectedRangeLength: Int? = 0
+    var selectedText: String? = ""
+    var ownsDraft = true
+    var loseDraftOwnershipAfterTyping = false
+    var loseDraftOwnershipAfterContextRead = false
     var typingSucceeds = true
     var keyPressSucceeds = true
     var openURLSucceeds = true
@@ -36,6 +48,12 @@ final class FakeActionHost: ActionHost {
     private(set) var pressedLabels: [String] = []
     private var frontmostReads = 0
     private var clock: TimeInterval = 0
+    private var actionDraft = ""
+
+    func beginActionInputSession() {
+        actionDraft = ""
+        ownsDraft = true
+    }
 
     func openApp(named name: String) -> String? {
         log.append("openApp(\(name))")
@@ -58,18 +76,38 @@ final class FakeActionHost: ActionHost {
         return frontmost
     }
 
-    func frontmostWindowTitle() -> String? { windowTitle }
+    func frontmostWindowTitle() -> String? {
+        defer {
+            if loseDraftOwnershipAfterContextRead {
+                loseDraftOwnershipAfterContextRead = false
+                ownsDraft = false
+            }
+        }
+        return windowTitle
+    }
     func focusedElementLabel() -> String? { elementLabel }
     func focusedSelectionLabel() -> String? { selectionLabel }
     func focusedElementRole() -> String? { focusedRole }
     func visibleNames() -> [String] { visibleNamesValue }
-    var hasFocusedTextTarget: Bool { hasTextTarget }
+    var hasFocusedTextTarget: Bool {
+        hasTextTarget
+            && textTargetReadable
+            && ownsDraft
+            && KeystrokeStreamTargetPolicy.mayCapture(
+                role: textTargetRole,
+                editabilityProven: textTargetEditable,
+                selectedRangeLength: selectedRangeLength,
+                selectedText: selectedText)
+    }
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
+        guard hasFocusedTextTarget else { return false }
         log.append("type(\(text))")
         typed.append(text)
+        actionDraft += text
         onStep?("type(\(text))")
-        return typingSucceeds
+        if loseDraftOwnershipAfterTyping { ownsDraft = false }
+        return typingSucceeds && ownsDraft
     }
 
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool {
@@ -78,15 +116,30 @@ final class FakeActionHost: ActionHost {
 
     func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags,
                   expecting bundleID: String?) -> Bool {
+        let committing = keyCode == ActionKey.keyCode(for: "return")
+            || keyCode == ActionKey.keyCode(for: "enter")
+        if committing, actionDraft.isEmpty || !ownsDraft { return false }
         log.append("key(\(keyCode))")
         keys.append((keyCode, flags))
-        return keyPressSucceeds
+        guard keyPressSucceeds else { return false }
+        if committing {
+            actionDraft = ""
+            ownsDraft = true
+        }
+        return true
     }
 
     func pressElement(label: String, expecting bundleID: String?) -> Bool {
         log.append("press(\(label))")
+        guard ActionRuntimePolicy.isCommunicationBundle(frontmost?.bundleID) else {
+            return false
+        }
         guard pressableLabels.contains(label) else { return false }
+        let role = pressableRoles[label] ?? (kAXRowRole as String)
+        guard ScreenContext.isActionNavigationRole(role) else { return false }
         pressedLabels.append(label)
+        actionDraft = ""
+        ownsDraft = true
         onStep?("press(\(label))")
         return true
     }
@@ -192,6 +245,7 @@ extension Selftest {
         testActionExecutorPressElement()
         testActionLoopRecovery()
         testActionLoopSafetyRails()
+        testActionCompletionEvidence()
         testAgentTaskLedger()
         testAgentSessionManagerKeepsTheCoreBoundary()
         testSecondaryHotkeyRouting()
@@ -249,6 +303,22 @@ extension Selftest {
 
             var context = ActionContextSnapshot()
             context.frontmostApp = "Finder"
+            if case .success(let unverifiedID) = recovered.begin(
+                command: "open example", context: context,
+                execute: true, allowSend: false
+            ) {
+                recovered.finish(
+                    taskID: unverifiedID,
+                    result: .performedUnverified(
+                        goal: "open example", trace: ["open_url https"]),
+                    durationMs: 4)
+                recovered.flush()
+                expect(recovered.recent().first(where: { $0.id == unverifiedID })?.status
+                        == .unverified,
+                       "the ledger stores performed-but-unverified as its own status")
+            } else {
+                expect(false, "the ledger starts the unverified fixture")
+            }
             for index in 0..<3 {
                 let started = recovered.begin(
                     command: "task \(index)", context: context,
@@ -374,27 +444,26 @@ extension Selftest {
             """) != nil, "'\(label)' is an ordinary row and still presses")
         }
 
-        // --- Space activates the focused control. type → tab → space
-        // delivered a message past the press denylist, the verify gate, and
-        // the draft lock at once.
+        // --- Bare Space activates ambient controls, including pre-existing
+        // form content the action did not create, so it is not a key capability.
         expect(decodePlanError("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
           {"do":"type_text","text":"secret"},
           {"do":"key","key":"tab"},{"do":"key","key":"space"}]}
-        """) == .sendInDraft(step: 3),
-        "a draft cannot deliver by tabbing to the button and pressing Space")
+        """) == .bareSpace,
+        "a draft cannot activate a button with bare Space")
 
         expect(decodePlanError("""
         {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
           {"do":"type_text","text":"hi"},{"do":"key","key":"space"}]}
-        """) == .unverifiedSend(step: 2),
-        "an unverified Space cannot deliver typed text in a send either")
+        """) == .bareSpace,
+        "a send cannot activate a button with bare Space either")
 
-        expect(decodePlan("""
+        expect(decodePlanError("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
           {"do":"key","key":"tab"},{"do":"key","key":"space"}]}
-        """) != nil,
-        "Space with nothing typed is navigation and stays ungated")
+        """) == .bareSpace,
+        "Space with nothing typed cannot activate ambient content")
 
         // --- Tab moves focus, so a verify before it no longer describes
         // where a Return lands.
@@ -413,17 +482,18 @@ extension Selftest {
           {"do":"key","key":"return"}]}
         """) != nil, "verifying after the last Tab still sends")
 
-        // Space must not clear pending text: clearing on the "it typed a
-        // space" reading would leave the text pending but ungated.
+        // A rejected batch never mutates the carried state with its earlier
+        // type/verify steps.
         var spaceState = ActionPlan.BatchState()
-        expect(decodeBatch("""
+        expect(decodeBatchError("""
         {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
           {"do":"type_text","text":"hi"},
           {"do":"verify_context","expect":["Priya"]},
           {"do":"key","key":"space"}]}
-        """, state: &spaceState) != nil, "a verified Space in a send is allowed")
-        expect(spaceState.pendingText && spaceState.unverifiedText,
-               "Space leaves the text pending and re-arms the gate")
+        """, state: &spaceState) == .bareSpace,
+        "bare Space is rejected even after verified text")
+        expect(!spaceState.pendingText && !spaceState.unverifiedText,
+               "a rejected Space batch leaves carried state unchanged")
 
         // --- the rules above must survive the TURN BOUNDARY. decode()'s
         // `probe` state is discarded by the loop; `state(after:)` is what
@@ -464,6 +534,42 @@ extension Selftest {
                    "an executed arrow key carries the re-armed gate too")
         } else {
             expect(false, "the arrow fixture decodes")
+        }
+
+        if let targeted = decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Google Chrome"},
+          {"do":"type_text","text":"hello"}]}
+        """) {
+            let carried = ActionPlan.state(after: targeted,
+                                           executedCount: targeted.steps.count,
+                                           seed: ActionPlan.BatchState())
+            var next = carried
+            expect(decodeBatchError("""
+            {"steps":[{"do":"verify_context","expect":["Chrome"]},
+              {"do":"key","key":"return"}]}
+            """, state: &next) == .weakVerifyTerm("Chrome"),
+            "runtime-carried target app alias cannot authorize Return")
+        } else {
+            expect(false, "the target-app carry fixture decodes")
+        }
+
+        if let shortcut = decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"k","mods":["cmd"]}]}
+        """) {
+            let carried = ActionPlan.state(after: shortcut,
+                                           executedCount: shortcut.steps.count,
+                                           seed: ActionPlan.BatchState())
+            var next = carried
+            expect(decodeBatchError("""
+            {"steps":[{"do":"wait_frontmost","app":"Slack"},
+              {"do":"key","key":"return"}]}
+            """, state: &next) == .unverifiedSend(step: 1),
+            "modified-key state remains carried across turns")
+        } else {
+            expect(false, "the modified-key carry fixture decodes")
         }
 
         // --- open_url is an outbound channel: the prompt holds the
@@ -544,11 +650,45 @@ extension Selftest {
         {"steps":[{"do":"wait_frontmost","app":"Slack"},{"do":"key","key":"return"}]}
         """, state: &state) == .unverifiedSend(step: 1),
         "a bare Return in the NEXT turn cannot commit last turn's text")
+        expect(decodeBatchError("""
+        {"steps":[{"do":"verify_context","expect":["Slack"]},
+          {"do":"key","key":"return"}]}
+        """, state: &state) == .weakVerifyTerm("Slack"),
+        "the target app from the prior turn is too generic to authorize Return")
         expect(decodeBatch("""
         {"steps":[{"do":"verify_context","expect":["Himesh"]},
           {"do":"key","key":"return"}]}
         """, state: &state) != nil,
         "verifying first makes the same Return acceptable (in a sending action)")
+
+        for (app, alias) in [
+            ("Google Chrome", "Chrome"),
+            ("Slack Beta", "Slack"),
+            ("Visual Studio Code", "Code"),
+        ] {
+            var aliasState = ActionPlan.BatchState()
+            _ = decodeBatch("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"\(app)"}]}
+            """, state: &aliasState)
+            expect(decodeBatchError("""
+            {"steps":[{"do":"verify_context","expect":["\(alias)"]}]}
+            """, state: &aliasState) == .weakVerifyTerm(alias),
+            "\(alias) cannot stand in for the specific target within \(app)")
+        }
+        for (app, specificTerm) in [
+            ("Mail", "Gmail"),
+            ("Code", "Codecademy"),
+            ("Messages", "Messages from Himesh"),
+            ("Chrome", "Google Chrome Beta"),
+        ] {
+            var specificState = ActionPlan.BatchState(appNames: [app])
+            expect(decodeBatch("""
+            {"sends":false,"steps":[
+              {"do":"verify_context","expect":["\(specificTerm)"]},
+              {"do":"type_text","text":"hello"}]}
+            """, state: &specificState) != nil,
+            "\(specificTerm) remains a specific term when \(app) is known")
+        }
 
         // The text budget is for the whole action, not per turn.
         var textState = ActionPlan.BatchState()
@@ -589,6 +729,73 @@ extension Selftest {
     // MARK: - Send-gate hardening (adversarial review round 2)
 
     private static func testSendGateHardening() {
+        // `key` is not a generic app-command escape hatch. In Finder this
+        // exact non-sending batch moves every selected item to Trash.
+        expect(decodePlanError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Finder"},
+          {"do":"key","key":"a","mods":["cmd"]},
+          {"do":"key","key":"delete","mods":["cmd"]}]}
+        """) == .destructiveKey("delete"),
+        "Finder command-A then command-Delete is rejected")
+
+        for chord in [
+            "cmd+w", "cmd+q", "cmd+s", "cmd+x", "cmd+v", "cmd+l", "cmd+shift+k",
+        ] {
+            let parts = chord.split(separator: "+").map(String.init)
+            let key = parts.last ?? ""
+            let mods = parts.dropLast().map { "\"\($0)\"" }.joined(separator: ",")
+            expect(decodePlanError("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Finder"},
+              {"do":"key","key":"\(key)","mods":[\(mods)]}]}
+            """) == .unsafeKeyChord(chord), "\(chord) remains outside the capability set")
+        }
+        for key in ["delete", "forward_delete"] {
+            expect(decodePlanError("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Mail"},
+              {"do":"key","key":"a","mods":["cmd"]},
+              {"do":"key","key":"\(key)"}]}
+            """) == .destructiveKey(key),
+            "bare \(key) cannot mass-delete selected content")
+        }
+
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Mail"},
+          {"do":"key","key":"n","mods":["cmd"]}]}
+        """) != nil, "command-N remains available for the documented compose flow")
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Safari"},
+          {"do":"key","key":"t","mods":["cmd"]}]}
+        """) != nil, "command-T remains available for reversible tab navigation")
+
+        let safeBareKeys: Set<String> = [
+            "escape", "tab", "up", "down", "left", "right",
+            "home", "end", "page_up", "page_down",
+        ]
+        for key in safeBareKeys {
+            expect(decodePlan("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Finder"},
+              {"do":"key","key":"\(key)"}]}
+            """) != nil, "bare \(key) remains available for navigation")
+        }
+        for key in ActionKey.allNames
+            where !safeBareKeys.contains(key) && !["return", "enter"].contains(key) {
+            let jsonKey = key
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            expect(decodePlanError("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Finder"},
+              {"do":"key","key":"\(jsonKey)"}]}
+            """) != nil, "bare \(key) is outside the explicit navigation set")
+        }
+
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"open_url","url":"https://example.com"}]}
+        """) != nil, "open_url replaces command-L browser navigation")
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Mail"},
+          {"do":"paste_text","text":"bounded clipboard text"}]}
+        """) != nil, "paste_text replaces unbounded command-V")
+
         // ⌘Return is Send in Gmail/Slack/GitHub/Linear — it must be as
         // committing as bare Return, not a free pass.
         expect(decodePlanError("""
@@ -598,19 +805,74 @@ extension Selftest {
         """) == .unverifiedSend(step: 2),
         "a modified Return is still a send and still needs the verify")
 
-        // ⌘V pastes and bare printable keys type: both arm the gate.
+        // Bounded paste_text arms the gate; bare character keys are rejected.
         expect(decodePlanError("""
         {"steps":[{"do":"wait_frontmost","app":"Slack"},
-          {"do":"key","key":"v","mods":["cmd"]},
+          {"do":"paste_text","text":"clipboard contents"},
           {"do":"key","key":"return"}]}
         """) == .unverifiedSend(step: 2),
         "pasted clipboard contents cannot be committed unverified")
+
+        expect(decodePlanError("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Terminal"},
+          {"do":"type_text","text":"rm -rf important-project"},
+          {"do":"verify_context","expect":["sushil"]},
+          {"do":"key","key":"return"}]}
+        """) == .commitOutsideCommunicationApp(step: 3, app: "Terminal"),
+        "pending text cannot execute in Terminal under the sends flag")
+        expect(decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"return"}]}
+        """) != nil,
+        "verified communication text remains committable in Slack")
+        expect(decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack Beta"},
+          {"do":"type_text","text":"hello"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"return"}]}
+        """) != nil,
+        "a branded Slack display name reaches the runtime bundle gate")
+
+        for (key, mods) in [
+            ("return", ""), ("enter", ""),
+            ("return", "\"cmd\""), ("enter", "\"cmd\""),
+        ] {
+            expect(decodePlanError("""
+            {"sends":false,"steps":[
+              {"do":"open_url","url":"sms:?body=prefilled"},
+              {"do":"wait_frontmost","app":"Messages"},
+              {"do":"key","key":"\(key)","mods":[\(mods)]}]}
+            """) == .commitWithoutPendingText(step: 2, key: key),
+            "\(mods.isEmpty ? "bare" : "command") \(key) cannot submit URL-prefilled text")
+        }
+        for key in ["return", "space"] {
+            let expected: ActionPlanError = key == "space"
+                ? .bareSpace
+                : .commitWithoutPendingText(step: 2, key: key)
+            expect(decodePlanError("""
+            {"sends":false,"steps":[
+              {"do":"open_url","url":"https://example.com/form"},
+              {"do":"wait_frontmost","app":"Google Chrome"},
+              {"do":"key","key":"\(key)"}]}
+            """) == expected,
+            "bare \(key) cannot activate a form with ambient content")
+        }
+        expect(decodePlanError("""
+        {"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"k","mods":["cmd"]},
+          {"do":"key","key":"return"}]}
+        """) == .unverifiedSend(step: 4),
+        "a shortcut that opens a new surface re-arms the target check")
         expect(decodePlanError("""
         {"steps":[{"do":"wait_frontmost","app":"Slack"},
           {"do":"key","key":"h"},
           {"do":"key","key":"return"}]}
-        """) == .unverifiedSend(step: 2),
-        "characters typed via bare key steps cannot be committed unverified")
+        """) == .unsafeBareKey("h"),
+        "characters cannot be smuggled through bare key steps")
 
         // A draft refuses committing keys outright once text is pending —
         // even verified. Navigation goes through press_element.
@@ -652,6 +914,7 @@ extension Selftest {
         let host = FakeActionHost()
         host.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
         host.pressableLabels = ["Shivangi Singh"]
+        host.pressableRoles["Shivangi Singh"] = "AXRow"
         guard let plan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
           {"do":"press_element","label":"Shivangi Singh"}]}
@@ -662,6 +925,69 @@ extension Selftest {
         let result = ActionExecutor(host: host).run(plan)
         expect(result.outcome == .completed, "a findable label is pressed")
         expect(host.pressedLabels == ["Shivangi Singh"], "the press reaches the host")
+
+        for label in ["Save Changes", "Continue"] {
+            let button = FakeActionHost()
+            button.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+            button.pressableLabels = [label]
+            button.pressableRoles[label] = "AXButton"
+            guard let buttonPlan = decodePlan("""
+            {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+              {"do":"press_element","label":"\(label)"}]}
+            """) else {
+                expect(false, "the structurally unsafe \(label) fixture decodes")
+                continue
+            }
+            let buttonResult = ActionExecutor(host: button).run(buttonPlan)
+            expect(!buttonResult.outcome.isSuccess,
+                   "an AXButton labelled \(label) is refused at runtime")
+            expect(button.pressedLabels.isEmpty,
+                   "the runtime role gate does not press \(label)")
+        }
+
+        let link = FakeActionHost()
+        link.frontmost = ("Safari", "com.apple.Safari")
+        link.pressableLabels = ["Continue"]
+        link.pressableRoles["Continue"] = "AXLink"
+        if let linkPlan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Safari"},
+          {"do":"press_element","label":"Continue"}]}
+        """) {
+            let linkResult = ActionExecutor(host: link).run(linkPlan)
+            expect(!linkResult.outcome.isSuccess && link.pressedLabels.isEmpty,
+                   "a browser ARIA Continue link is not an Action navigation target")
+        } else {
+            expect(false, "the link navigation fixture decodes")
+        }
+
+        let browserRow = FakeActionHost()
+        browserRow.frontmost = ("Safari", "com.apple.Safari")
+        browserRow.pressableLabels = ["Article"]
+        browserRow.pressableRoles["Article"] = "AXRow"
+        if let browserRowPlan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Safari"},
+          {"do":"press_element","label":"Article"}]}
+        """) {
+            let browserRowResult = ActionExecutor(host: browserRow).run(browserRowPlan)
+            expect(!browserRowResult.outcome.isSuccess && browserRow.pressedLabels.isEmpty,
+                   "even an AXRow is refused outside an approved communication bundle")
+        } else {
+            expect(false, "the non-communication row fixture decodes")
+        }
+
+        let cell = FakeActionHost()
+        cell.frontmost = ("Mail", "com.apple.mail")
+        cell.pressableLabels = ["Himesh Singh"]
+        cell.pressableRoles["Himesh Singh"] = "AXCell"
+        if let cellPlan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Mail"},
+          {"do":"press_element","label":"Himesh Singh"}]}
+        """) {
+            expect(ActionExecutor(host: cell).run(cellPlan).outcome == .completed,
+                   "a native communication-app AXCell remains navigable")
+        } else {
+            expect(false, "the communication cell fixture decodes")
+        }
 
         // The label isn't on screen → recoverable: the model should look again
         // and try something else, not the user.
@@ -727,8 +1053,9 @@ extension Selftest {
                                       execute: true, allowSend: false)
         let result = runner.run(transcript: "message Shivangi about traffic",
                                 context: loopContext())
-        guard case .completed(_, let trace) = result else {
-            expect(false, "the loop recovers and completes, got \(result)")
+        guard case .performedUnverified(_, let trace) = result else {
+            expect(false, "the loop recovers and reports its typed draft as unverified, "
+                   + "got \(result)")
             return
         }
         expect(host.pressedLabels == ["Shivangi Singh"],
@@ -749,6 +1076,73 @@ extension Selftest {
     }
 
     private static func testActionLoopSafetyRails() {
+        // An already-frontmost app name is not a target identity. It must not
+        // clear the send gate merely because no open_app/wait_frontmost step
+        // named the app inside this first batch.
+        let initialHost = FakeActionHost()
+        initialHost.frontmost = ("Google Chrome", "com.google.Chrome")
+        initialHost.windowTitle = "New Tab - Google Chrome"
+        let initialPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: true, goal: "g", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Chrome"]},
+             {"do":"type_text","text":"hello"},
+             {"do":"verify_context","expect":["Chrome"]},
+             {"do":"key","key":"return"}]
+            """), done: false),
+            .failure(reason: "stop", code: "failed"),
+        ])
+        var initialContext = loopContext()
+        initialContext.frontmostApp = "Google Chrome"
+        initialContext.frontmostBundle = "com.google.Chrome"
+        let initialRunner = ActionLoopRunner(host: initialHost, planner: initialPlanner,
+                                             execute: true, allowSend: true)
+        _ = initialRunner.run(transcript: "t", context: initialContext)
+        expect(initialHost.typed.isEmpty && initialHost.keys.isEmpty,
+               "initial app-name-only verification cannot authorize Return")
+        expect((initialPlanner.observations.first?["failed_step"] as? String)?
+                   .contains("rejected") == true,
+               "the initial app-name-only batch is rejected before execution")
+
+        // Runtime-observed identity is carried too, even when no target step
+        // named the app in an earlier batch.
+        let observedHost = FakeActionHost()
+        observedHost.frontmost = ("Google Chrome", "com.google.Chrome")
+        observedHost.windowTitle = "New Tab - Google Chrome"
+        let observedPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "g", steps: jsonSteps("""
+            [{"do":"pause","ms":10}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Chrome"]},
+             {"do":"type_text","text":"hello"}]
+            """), done: false),
+            .failure(reason: "stop", code: "failed"),
+        ])
+        let observedRunner = ActionLoopRunner(host: observedHost,
+                                              planner: observedPlanner,
+                                              execute: true, allowSend: false)
+        _ = observedRunner.run(transcript: "t", context: loopContext())
+        expect(observedHost.typed.isEmpty,
+               "observed app-name-only verification is rejected before typing")
+
+        let runningHost = FakeActionHost()
+        runningHost.frontmost = ("Sublime Text", "com.sublimetext.4")
+        let runningPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "g", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Chrome"]},
+             {"do":"type_text","text":"hello"}]
+            """), done: false),
+            .failure(reason: "stop", code: "failed"),
+        ])
+        var runningContext = loopContext()
+        runningContext.runningApps.append("Google Chrome")
+        let runningRunner = ActionLoopRunner(host: runningHost,
+                                             planner: runningPlanner,
+                                             execute: true, allowSend: false)
+        _ = runningRunner.run(transcript: "t", context: runningContext)
+        expect(runningHost.typed.isEmpty,
+               "running-app aliases are identity filters, never focus authorization")
+
         // 1. The runtime-truth rail. Turn 1 types and its verify FAILS at
         //    runtime — decode-time state says "verified", the machine says no.
         //    A bare Return next turn must be rejected, or the loop reintroduces
@@ -916,7 +1310,9 @@ extension Selftest {
         ])
         let rejRunner = ActionLoopRunner(host: rejHost, planner: rejPlanner,
                                          execute: true, allowSend: false)
-        if case .completed = rejRunner.run(transcript: "t", context: loopContext()) {
+        if case .performedUnverified = rejRunner.run(
+            transcript: "t", context: loopContext()
+        ) {
             expect(rejPlanner.observations.count == 2,
                    "the rejection cost one extra ask, not the whole action")
             expect((rejPlanner.observations[1]["failed_step"] as? String)?
@@ -924,10 +1320,11 @@ extension Selftest {
                    "the next ask names the rejection so the model can react")
             expect(rejHost.typed == ["hi"], "the recovered turn still ran")
         } else {
-            expect(false, "a plan_invalid reply must be retried with an observation")
+            expect(false, "a recovered typed action remains explicitly unverified")
         }
 
-        // 7. done together with final steps completes without another ask.
+        // 7. done together with final steps stops without another ask, but
+        //    typed text remains unverified until exact readback exists.
         let finishHost = FakeActionHost()
         finishHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
         finishHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
@@ -942,13 +1339,202 @@ extension Selftest {
         ])
         let finishRunner = ActionLoopRunner(host: finishHost, planner: finishPlanner,
                                             execute: true, allowSend: false)
-        if case .completed = finishRunner.run(transcript: "t",
-                                              context: loopContext()) {
+        if case .performedUnverified = finishRunner.run(
+            transcript: "t", context: loopContext()
+        ) {
             expect(finishPlanner.observations.isEmpty,
                    "a final batch marked done skips the extra round-trip")
             expect(finishHost.typed == ["on my way"], "the final steps still ran")
         } else {
-            expect(false, "a done-with-steps turn completes the loop")
+            expect(false, "done stops the loop but cannot verify typed text")
+        }
+    }
+
+    /// A model's `done` bit is a request to stop, not evidence that the
+    /// machine reached the requested postcondition. These fixtures assert the
+    /// smallest evidence contract before its implementation exists.
+    private static func testActionCompletionEvidence() {
+        let waitHost = FakeActionHost()
+        waitHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        let waitPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open Slack", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"}]
+            """), done: true),
+        ])
+        let waitResult = ActionLoopRunner(host: waitHost, planner: waitPlanner,
+                                          execute: true, allowSend: false)
+            .run(transcript: "open Slack", context: loopContext())
+        if case .failed(let reason, _) = waitResult {
+            expect(reason.contains("nothing effective"),
+                   "a wait-only stop explains that no effective action ran")
+        } else {
+            expect(false, "a wait-only batch is not execution, got \(waitResult)")
+        }
+
+        let openHost = FakeActionHost()
+        openHost.appsByName["Mail"] = ("Mail", "com.apple.mail")
+        let openPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "send the email", steps: jsonSteps("""
+            [{"do":"open_app","app":"Mail"},
+             {"do":"wait_frontmost","app":"Mail"}]
+            """), done: true),
+        ])
+        let openResult = ActionLoopRunner(host: openHost, planner: openPlanner,
+                                          execute: true, allowSend: false)
+            .run(transcript: "send the email", context: loopContext())
+        if case .performedUnverified(let goal, _) = openResult {
+            expect(goal == "send the email",
+                   "an under-planned request remains explicitly unverified")
+        } else {
+            expect(false, "app focus evidence is not bound to the user's request")
+        }
+
+        let crossTurnHost = FakeActionHost()
+        crossTurnHost.appsByName["Mail"] = ("Mail", "com.apple.mail")
+        let crossTurnPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open Mail", steps: jsonSteps("""
+            [{"do":"open_app","app":"Mail"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Mail"}]
+            """), done: true),
+        ])
+        let crossTurnResult = ActionLoopRunner(
+            host: crossTurnHost, planner: crossTurnPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open Mail", context: loopContext())
+        if case .performedUnverified(let goal, _) = crossTurnResult {
+            expect(goal == "open Mail",
+                   "cross-turn evidence is retained without claiming goal completion")
+        } else {
+            expect(false, "cross-turn app evidence remains unverified")
+        }
+
+        let urlHost = FakeActionHost()
+        let urlPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open example", steps: jsonSteps("""
+            [{"do":"open_url","url":"https://example.com"}]
+            """), done: true),
+        ])
+        let urlResult = ActionLoopRunner(host: urlHost, planner: urlPlanner,
+                                         execute: true, allowSend: false)
+            .run(transcript: "open example", context: loopContext())
+        expect(urlHost.openedURLs.count == 1, "the accepted URL step still executes")
+        if case .performedUnverified = urlResult {} else {
+            expect(false, "open_url without observed transition stays unverified")
+        }
+
+        let laterHost = FakeActionHost()
+        let laterPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open example", steps: jsonSteps("""
+            [{"do":"open_url","url":"https://example.com"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: [], done: true),
+        ])
+        let laterResult = ActionLoopRunner(host: laterHost, planner: laterPlanner,
+                                           execute: true, allowSend: false)
+            .run(transcript: "open example", context: loopContext())
+        if case .performedUnverified = laterResult {} else {
+            expect(false, "a later empty done cannot upgrade unverified execution")
+        }
+
+        let recoveryHost = FakeActionHost()
+        recoveryHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        recoveryHost.windowTitle = "general (Channel) - Slack"
+        let recoveryPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open Himesh in Slack", steps: jsonSteps("""
+            [{"do":"open_app","app":"Slack"},
+             {"do":"wait_frontmost","app":"Slack"},
+             {"do":"verify_context","expect":["Himesh"]}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: [], done: true),
+        ])
+        let recoveryResult = ActionLoopRunner(
+            host: recoveryHost, planner: recoveryPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open Himesh in Slack", context: loopContext())
+        if case .performedUnverified = recoveryResult {} else {
+            expect(false, "a recoverable failure followed by empty done cannot complete")
+        }
+
+        let pausePlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "wait", steps: jsonSteps("""
+            [{"do":"pause","ms":10}]
+            """), done: true),
+        ])
+        let pauseResult = ActionLoopRunner(
+            host: FakeActionHost(), planner: pausePlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "wait", context: loopContext())
+        if case .failed(let reason, _) = pauseResult {
+            expect(reason.contains("nothing effective"),
+                   "pause-only done is not reported as execution")
+        } else {
+            expect(false, "pause-only done must fail as no effective action")
+        }
+
+        let verifyHost = FakeActionHost()
+        verifyHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        verifyHost.windowTitle = "Himesh Singh (DM) - Slack"
+        let verifyPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "inspect Himesh", steps: jsonSteps("""
+            [{"do":"verify_context","expect":["Himesh"]}]
+            """), done: true),
+        ])
+        let verifyResult = ActionLoopRunner(
+            host: verifyHost, planner: verifyPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "inspect Himesh", context: loopContext())
+        if case .failed(let reason, _) = verifyResult {
+            expect(reason.contains("nothing effective"),
+                   "verify-only done is not reported as execution")
+        } else {
+            expect(false, "verify-only done must fail as no effective action")
+        }
+
+        let unverified = ActionResult.performedUnverified(
+            goal: "open example", trace: ["open_url https://example.com"])
+        let payload = unverified.controlSuccessPayload(execute: true)
+        expect(payload?["executed"] as? Bool == true
+               && payload?["completed"] as? Bool == false
+               && payload?["verified"] as? Bool == false,
+               "CLI truthfully separates execution from verified completion")
+        let notice = unverified.voiceCompletionNotice
+        expect(notice?.symbol != "checkmark.circle",
+               "voice execution without evidence never receives a success checkmark")
+
+        let unsafeGoal = "\u{202E}" + String(repeating: "x", count: 300)
+        let boundedPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: unsafeGoal, steps: jsonSteps("""
+            [{"do":"open_url","url":"https://example.com"}]
+            """), done: true),
+        ])
+        let boundedResult = ActionLoopRunner(
+            host: FakeActionHost(), planner: boundedPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open example", context: loopContext())
+        if case .performedUnverified(let goal, _) = boundedResult {
+            expect(goal.count == 200 && !goal.contains("\u{202E}"),
+                   "unverified goal text is sanitized and bounded locally")
+        } else {
+            expect(false, "the bounded-goal fixture remains performed and unverified")
+        }
+
+        let evidenceHost = FakeActionHost()
+        let unsafeAppName = "\u{202E}" + String(repeating: "z", count: 180)
+        evidenceHost.appsByName["Mail"] = (unsafeAppName, "com.example.mail")
+        if let evidencePlan = decodePlan("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Mail"}]}
+        """) {
+            let evidence = ActionExecutor(host: evidenceHost).run(evidencePlan).evidence
+            if case .appOpenRequested(_, let resolved)? = evidence.first {
+                expect(resolved.count == 120 && !resolved.contains("\u{202E}"),
+                       "structured evidence text is sanitized and bounded at capture")
+            } else {
+                expect(false, "the executor emits typed app-open evidence")
+            }
+        } else {
+            expect(false, "the bounded-evidence fixture decodes")
         }
     }
 
@@ -1669,6 +2255,31 @@ extension Selftest {
                     && !decoded.contains("\u{FFFD}")
             },
             "Unicode typing never splits an emoji surrogate pair across events")
+
+        var observedTypingProgress: Int?
+        let continuationAllowed = TextInserter.continuationIsAllowed(
+            afterPostedUTF16Units: 20,
+            check: { postedUTF16Units in
+                observedTypingProgress = postedUTF16Units
+                return false
+            })
+        expect(!continuationAllowed && observedTypingProgress == 20,
+               "every typing continuation receives the exact posted UTF-16 progress")
+
+        let longActionText = String(repeating: "a", count: 41) + "🙂"
+        expect(
+            ActionTypingProgress.expectedDraft(
+                priorDraft: "old-",
+                insertion: longActionText,
+                postedUTF16Units: 20)
+                == "old-" + String(repeating: "a", count: 20),
+            "Action typing proves the exact draft plus already-posted chunk prefix")
+        expect(
+            ActionTypingProgress.expectedDraft(
+                priorDraft: "old-",
+                insertion: longActionText,
+                postedUTF16Units: 42) == nil,
+            "Action typing refuses progress that splits an inserted surrogate pair")
     }
 
     // MARK: - CLI / control surface
@@ -1794,9 +2405,9 @@ extension Selftest {
         // Modifier spellings a small model actually produces.
         let aliases = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Slack"},
-          {"do":"key","key":"K","mods":["Command","Shift"]}]}
+          {"do":"key","key":"K","mods":["Command"]}]}
         """)
-        expect(aliases?.steps.last == .key(name: "k", mods: ["cmd", "shift"], repeatCount: 1),
+        expect(aliases?.steps.last == .key(name: "k", mods: ["cmd"], repeatCount: 1),
                "'Command' normalizes to cmd and the key lowercases")
 
         let clamped = decodePlan("""
@@ -2087,6 +2698,36 @@ extension Selftest {
         expect(wrongChat.typed == ["Himesh"],
                "only the switcher query was typed — the message never reached the wrong person")
 
+        // 2b. The model-requested display name is not runtime authority. A
+        // fuzzy match can bring a Slack-named wrapper forward, but only the
+        // known Slack bundle may receive a committing Return.
+        let slackShell = FakeActionHost()
+        slackShell.appsByName["Slack"] = ("SlackShell", "com.example.slackshell")
+        slackShell.windowTitle = "Himesh Singh (DM) - SlackShell"
+        slackShell.elementLabel = "Message Himesh Singh"
+        let slackShellResult = ActionExecutor(host: slackShell).run(plan)
+        expect(!slackShellResult.outcome.isSuccess,
+               "a fuzzy SlackShell display-name match cannot authorize Return")
+        expect(slackShell.keys.count == 1,
+               "SlackShell may receive the search shortcut but no committing Return")
+
+        let realSlack = FakeActionHost()
+        realSlack.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+        realSlack.windowTitle = "Himesh Singh (DM) - Slack"
+        realSlack.elementLabel = "Message Himesh Singh"
+        let realSlackResult = ActionExecutor(host: realSlack).run(plan)
+        expect(realSlackResult.outcome == .completed && realSlack.keys.count == 3,
+               "the real Slack bundle retains the verified send flow")
+
+        let alternateSlack = FakeActionHost()
+        alternateSlack.appsByName["Slack"] = ("Slack", "com.slack.Slack")
+        alternateSlack.windowTitle = "Himesh Singh (DM) - Slack"
+        alternateSlack.elementLabel = "Message Himesh Singh"
+        let alternateSlackResult = ActionExecutor(host: alternateSlack).run(plan)
+        expect(alternateSlackResult.outcome == .completed
+               && alternateSlack.keys.count == 3,
+               "the supported com.slack.Slack bundle retains the verified send flow")
+
         // 3. The user switches apps mid-plan → the remaining input is refused.
         let stolen = FakeActionHost()
         stolen.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
@@ -2135,6 +2776,84 @@ extension Selftest {
                "typing with nothing focused fails instead of reporting success")
         expect(noTarget.typed.isEmpty,
                "no characters are sent when there is nowhere for them to land")
+
+        func runTextTargetFixture(_ configure: (FakeActionHost) -> Void) -> FakeActionHost {
+            let fixture = FakeActionHost()
+            fixture.frontmost = ("Google Chrome", "com.google.Chrome")
+            configure(fixture)
+            guard let textPlan = decodePlan("""
+            {"sends":false,"steps":[
+              {"do":"wait_frontmost","app":"Google Chrome"},
+              {"do":"type_text","text":"e"}]}
+            """) else {
+                expect(false, "the focused text-target fixture decodes")
+                return fixture
+            }
+            let result = ActionExecutor(host: fixture).run(textPlan)
+            expect(!result.outcome.isSuccess,
+                   "an unproven focused target refuses Action text")
+            expect(fixture.typed.isEmpty,
+                   "an unproven focused target receives no ambient shortcut character")
+            return fixture
+        }
+
+        _ = runTextTargetFixture { gmail in
+            gmail.windowTitle = "Inbox - Gmail"
+            gmail.textTargetRole = "AXGroup"
+        }
+        _ = runTextTargetFixture { unreadable in
+            unreadable.textTargetReadable = false
+        }
+        _ = runTextTargetFixture { selection in
+            selection.selectedRangeLength = 3
+            selection.selectedText = "old"
+        }
+
+        let editable = FakeActionHost()
+        editable.frontmost = ("Google Chrome", "com.google.Chrome")
+        if let editablePlan = decodePlan("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Google Chrome"},
+          {"do":"type_text","text":"e"}]}
+        """) {
+            expect(ActionExecutor(host: editable).run(editablePlan).outcome == .completed
+                   && editable.typed == ["e"],
+                   "an editable field with a readable empty caret accepts Action text")
+        } else {
+            expect(false, "the editable empty-caret fixture decodes")
+        }
+
+        let switchedDuringTyping = FakeActionHost()
+        switchedDuringTyping.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        switchedDuringTyping.loseDraftOwnershipAfterTyping = true
+        if let switchedPlan = decodePlan("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"}]}
+        """) {
+            expect(!ActionExecutor(host: switchedDuringTyping).run(switchedPlan).outcome.isSuccess,
+                   "switching the exact target during typing fails the text step")
+        } else {
+            expect(false, "the during-typing focus-switch fixture decodes")
+        }
+
+        let switchedBeforeReturn = FakeActionHost()
+        switchedBeforeReturn.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        switchedBeforeReturn.windowTitle = "Himesh Singh (DM) - Slack"
+        switchedBeforeReturn.loseDraftOwnershipAfterContextRead = true
+        if let commitPlan = decodePlan("""
+        {"sends":true,"steps":[
+          {"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"key","key":"return"}]}
+        """) {
+            let commitResult = ActionExecutor(host: switchedBeforeReturn).run(commitPlan)
+            expect(!commitResult.outcome.isSuccess && switchedBeforeReturn.keys.isEmpty,
+                   "Return refuses a draft whose exact field ownership was lost")
+        } else {
+            expect(false, "the before-Return focus-switch fixture decodes")
+        }
 
         // 5. Cancel is honoured between steps.
         let cancelHost = FakeActionHost()

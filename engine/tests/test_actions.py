@@ -212,10 +212,10 @@ def test_key_names_and_modifiers_are_validated():
         ]))
     out = actions.validate_plan(plan(steps=[
         {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "key", "key": "K", "mods": ["Cmd", "shift"]},
+        {"do": "key", "key": "K", "mods": ["Cmd"]},
     ]))
     assert out["steps"][1]["key"] == "k"
-    assert out["steps"][1]["mods"] == ["cmd", "shift"]
+    assert out["steps"][1]["mods"] == ["cmd"]
 
 
 def test_key_repeat_is_bounded():
@@ -224,6 +224,96 @@ def test_key_repeat_is_bounded():
             {"do": "wait_frontmost", "app": "Slack"},
             {"do": "key", "key": "down", "repeat": 99},
         ]))
+
+
+def test_modified_key_chords_are_an_explicit_safe_capability():
+    """A generic chord primitive is an arbitrary app command surface. In
+    Finder, select-all followed by command-delete moves every item to Trash,
+    even when the planner labels the action as a non-sending draft."""
+    with pytest.raises(actions.PlanError, match="destructive"):
+        actions.validate_plan(plan(sends=False, steps=[
+            {"do": "wait_frontmost", "app": "Finder"},
+            {"do": "key", "key": "a", "mods": ["cmd"]},
+            {"do": "key", "key": "delete", "mods": ["cmd"]},
+        ]))
+    for key, mods in (
+        ("w", ["cmd"]), ("q", ["cmd"]), ("s", ["cmd"]),
+        ("x", ["cmd"]), ("v", ["cmd"]), ("l", ["cmd"]),
+        ("k", ["cmd", "shift"]),
+    ):
+        with pytest.raises(actions.PlanError, match="chord"):
+            actions.validate_plan(plan(sends=False, steps=[
+                {"do": "wait_frontmost", "app": "Finder"},
+                {"do": "key", "key": key, "mods": mods},
+            ]))
+    for key in ("delete", "forward_delete"):
+        with pytest.raises(actions.PlanError, match="destructive"):
+            actions.validate_plan(plan(sends=False, steps=[
+                {"do": "wait_frontmost", "app": "Mail"},
+                {"do": "key", "key": "a", "mods": ["cmd"]},
+                {"do": "key", "key": key},
+            ]))
+
+
+def test_safe_modified_key_chords_preserve_bounded_workflows():
+    allowed = [
+        ("f", ["cmd"]), ("k", ["cmd"]),
+        ("n", ["cmd"]), ("t", ["cmd"]),
+        ("a", ["cmd"]), ("c", ["cmd"]),
+        ("tab", ["shift"]), ("left", ["option"]), ("down", ["cmd"]),
+    ]
+    for key, mods in allowed:
+        out = actions.validate_plan(plan(sends=False, steps=[
+            {"do": "wait_frontmost", "app": "Finder"},
+            {"do": "key", "key": key, "mods": mods},
+        ]))
+        assert out["steps"][-1]["key"] == key
+
+
+def test_bare_keys_are_an_explicit_navigation_capability():
+    allowed = {
+        "escape", "tab", "up", "down", "left", "right",
+        "home", "end", "page_up", "page_down",
+    }
+    for key in allowed:
+        out = actions.validate_plan(plan(sends=False, steps=[
+            {"do": "wait_frontmost", "app": "Finder"},
+            {"do": "key", "key": key},
+        ]))
+        assert out["steps"][-1]["key"] == key
+
+    # Return/Enter have their separate action-owned-text gate. Every other
+    # known bare key is outside the capability set, including F1-F12.
+    for key in set(actions.KEY_NAMES) - allowed - {"return", "enter"}:
+        with pytest.raises(actions.PlanError):
+            actions.validate_plan(plan(sends=False, steps=[
+                {"do": "wait_frontmost", "app": "Finder"},
+                {"do": "key", "key": key},
+            ]))
+
+
+def test_safe_modified_key_chords_match_the_swift_mirror():
+    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
+    if not swift.exists():
+        pytest.skip("swift sources not available (installed engine)")
+    marker = "// safe_modified_key_chords: "
+    line = next(ln for ln in swift.read_text().splitlines() if marker in ln)
+    mirrored = set(line.split(marker, 1)[1].split())
+    engine = {
+        "+".join([*sorted(mods), key])
+        for key, mods in actions.SAFE_MODIFIED_KEY_CHORDS
+    }
+    assert mirrored == engine
+
+
+def test_communication_apps_match_the_swift_mirror():
+    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
+    if not swift.exists():
+        pytest.skip("swift sources not available (installed engine)")
+    marker = "// communication_apps_normalized: "
+    line = next(ln for ln in swift.read_text().splitlines() if marker in ln)
+    mirrored = set(line.split(marker, 1)[1].split())
+    assert mirrored == set(actions.COMMUNICATION_APPS_NORMALIZED)
 
 
 def test_input_before_a_focus_checkpoint_is_rejected():
@@ -354,6 +444,14 @@ def test_modified_keys_are_not_treated_as_sends():
         {"do": "key", "key": "k", "mods": ["cmd"]},
     ]))
     assert len(out["steps"]) == 3
+    with pytest.raises(actions.PlanError, match="commit"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "hi"},
+            {"do": "verify_context", "expect": ["Himesh"]},
+            {"do": "key", "key": "k", "mods": ["cmd"]},
+            {"do": "key", "key": "return"},
+        ]))
 
 
 def test_url_scheme_allowlist_excludes_scripting_bridges():
@@ -399,17 +497,15 @@ def test_modified_return_is_still_a_send():
         ]))
 
 
-def test_printable_keys_and_paste_shortcut_arm_the_send_gate():
-    """Review finding: `key v with cmd` (paste) and bare printable keys put
-    text into the field without type_text, leaving the send gate disarmed —
-    a later bare Return then committed clipboard contents unverified."""
+def test_paste_text_arms_the_send_gate_and_bare_characters_are_rejected():
+    """paste_text is the bounded text path; a bare character key is not."""
     with pytest.raises(actions.PlanError, match="commit"):
         actions.validate_plan(plan(steps=[
             {"do": "wait_frontmost", "app": "Slack"},
-            {"do": "key", "key": "v", "mods": ["cmd"]},
+            {"do": "paste_text", "text": "clipboard contents"},
             {"do": "key", "key": "return"},
         ]))
-    with pytest.raises(actions.PlanError, match="commit"):
+    with pytest.raises(actions.PlanError, match="bare key"):
         actions.validate_plan(plan(steps=[
             {"do": "wait_frontmost", "app": "Slack"},
             {"do": "key", "key": "h"},
@@ -418,7 +514,7 @@ def test_printable_keys_and_paste_shortcut_arm_the_send_gate():
     # Still fine once verified — the gate wants a check, not a ban.
     out = actions.validate_plan(plan(steps=[
         {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "key", "key": "v", "mods": ["cmd"]},
+        {"do": "paste_text", "text": "clipboard contents"},
         {"do": "verify_context", "expect": ["Himesh"]},
         {"do": "key", "key": "return"},
     ]))
@@ -456,13 +552,13 @@ def test_a_draft_session_never_commits_typed_text():
             {"do": "verify_context", "expect": ["Himesh"]},
             {"do": "key", "key": "return"},
         ]))
-    # With nothing pending a Return is navigation, not delivery.
-    out = actions.validate_plan(plan(sends=False, steps=[
-        {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "verify_context", "expect": ["Himesh"]},
-        {"do": "key", "key": "return"},
-    ]))
-    assert out["steps"][-1]["key"] == "return"
+    # With nothing action-owned pending, Return could submit ambient content.
+    with pytest.raises(actions.PlanError, match="did not create"):
+        actions.validate_plan(plan(sends=False, steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "verify_context", "expect": ["Himesh"]},
+            {"do": "key", "key": "return"},
+        ]))
 
 
 def test_committing_keys_cannot_repeat():
@@ -495,11 +591,11 @@ def test_key_chord_and_swapped_modifiers_normalize():
         {"do": "wait_frontmost", "app": "Slack"},
         {"do": "key", "key": "cmd+k"},
         {"do": "key", "key": "cmd", "mods": ["k"]},
-        {"do": "key", "key": "shift+cmd+k"},
+        {"do": "key", "key": "command+k"},
     ]))
     assert out["steps"][1] == {"do": "key", "key": "k", "mods": ["cmd"]}
     assert out["steps"][2] == {"do": "key", "key": "k", "mods": ["cmd"]}
-    assert out["steps"][3] == {"do": "key", "key": "k", "mods": ["shift", "cmd"]}
+    assert out["steps"][3] == {"do": "key", "key": "k", "mods": ["cmd"]}
 
 
 def test_key_swap_never_invents_a_keystroke():
@@ -1360,19 +1456,18 @@ def test_press_element_invalidates_focus():
         ]))
 
 
-def test_printable_keys_match_the_swift_mirror():
-    """Both validators must agree on which bare keys count as typing, or one
-    side's send gate stays disarmed where the other's fires."""
+def test_safe_bare_keys_match_the_swift_mirror():
+    """Both validators expose the same complete bare-key capability set."""
     swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
     if not swift.exists():
         pytest.skip("swift sources not available (installed engine)")
     source = swift.read_text()
-    marker = "// printable_keys: "
+    marker = "// safe_bare_keys: "
     line = next(ln for ln in source.splitlines() if marker in ln)
     mirrored = set(line.split(marker, 1)[1].split())
-    assert mirrored == set(actions.PRINTABLE_KEYS), (
-        f"engine-only: {set(actions.PRINTABLE_KEYS) - mirrored}, "
-        f"swift-only: {mirrored - set(actions.PRINTABLE_KEYS)}")
+    assert mirrored == set(actions.SAFE_BARE_KEYS), (
+        f"engine-only: {set(actions.SAFE_BARE_KEYS) - mirrored}, "
+        f"swift-only: {mirrored - set(actions.SAFE_BARE_KEYS)}")
 
 
 def test_press_denylist_matches_the_swift_mirror():
@@ -1455,6 +1550,185 @@ def test_session_verify_in_a_later_turn_clears_the_carried_text():
         {"do": "key", "key": "return"},
     ])
     assert out["steps"][-1]["key"] == "return"
+
+
+def test_session_rejects_app_name_as_verify_term_across_turns():
+    """The target app named in turn N remains too generic to authorize a
+    Return in turn N+1; a new batch must not erase that identity."""
+    sess = session()
+    accept(sess, [
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hello there"},
+    ], goal="g", sends=True)
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": ["Slack"]},
+            {"do": "key", "key": "return"},
+        ])
+
+
+def test_session_rejects_initial_frontmost_app_as_verify_term():
+    """An already-frontmost app name proves only which app is open, not the
+    conversation or document that a Return would affect."""
+    sess = session(context=ctx(
+        frontmost_app="Slack",
+        frontmost_bundle="com.tinyspeck.slackmacgap",
+        frontmost_window="general (Channel) - Slack",
+    ))
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": ["Slack"]},
+            {"do": "type_text", "text": "hello there"},
+            {"do": "verify_context", "expect": ["Slack"]},
+            {"do": "key", "key": "return"},
+        ], goal="g", sends=True)
+
+
+def test_session_rejects_observed_frontmost_app_as_verify_term():
+    """The actual app reported between turns is also session identity, even
+    when no open_app or wait_frontmost step named it."""
+    sess = session()
+    accept(sess, [{"do": "pause", "ms": 10}], goal="g", sends=True)
+    sess.observation_message(observation(frontmost_app="Slack"))
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": ["Slack"]},
+            {"do": "type_text", "text": "hello there"},
+            {"do": "verify_context", "expect": ["Slack"]},
+            {"do": "key", "key": "return"},
+        ])
+
+
+@pytest.mark.parametrize(("app", "alias"), [
+    ("Google Chrome", "Chrome"),
+    ("Slack Beta", "Slack"),
+    ("Visual Studio Code", "Code"),
+])
+def test_session_rejects_initial_frontmost_app_alias(app, alias):
+    sess = session(context=ctx(frontmost_app=app))
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": [alias]},
+            {"do": "type_text", "text": "hello there"},
+        ], goal="g", sends=False)
+
+
+@pytest.mark.parametrize(("app", "specific_term"), [
+    ("Mail", "Gmail"),
+    ("Code", "Codecademy"),
+    ("Messages", "Messages from Himesh"),
+    ("Chrome", "Google Chrome Beta"),
+])
+def test_app_name_filter_preserves_longer_specific_terms(app, specific_term):
+    sess = session(context=ctx(running_apps=[app]))
+    out = accept(sess, [
+        {"do": "verify_context", "expect": [specific_term]},
+        {"do": "type_text", "text": "hello there"},
+    ], goal="g", sends=False)
+    assert out["steps"][0]["expect"] == [specific_term]
+
+
+def test_session_rejects_target_app_alias_across_turns():
+    sess = session()
+    accept(sess, [
+        {"do": "wait_frontmost", "app": "Google Chrome"},
+        {"do": "type_text", "text": "hello there"},
+    ], goal="g", sends=True)
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": ["Chrome"]},
+            {"do": "key", "key": "return"},
+        ])
+
+
+def test_session_rejects_observed_frontmost_app_alias():
+    sess = session()
+    accept(sess, [{"do": "pause", "ms": 10}], goal="g", sends=False)
+    sess.observation_message(observation(frontmost_app="Google Chrome"))
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": ["Chrome"]},
+            {"do": "type_text", "text": "hello there"},
+        ])
+
+
+def test_session_rejects_running_app_alias_as_verify_term():
+    sess = session(context=ctx(running_apps=["Google Chrome", "Sublime Text"]))
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": ["Chrome"]},
+            {"do": "type_text", "text": "hello there"},
+        ], goal="g", sends=False)
+
+
+def test_return_with_pending_text_requires_a_communication_app():
+    with pytest.raises(actions.PlanError, match="communication app"):
+        actions.validate_plan(plan(sends=True, steps=[
+            {"do": "wait_frontmost", "app": "Terminal"},
+            {"do": "type_text", "text": "rm -rf important-project"},
+            {"do": "verify_context", "expect": ["sushil"]},
+            {"do": "key", "key": "return"},
+        ]))
+    out = actions.validate_plan(plan(sends=True, steps=[
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hello there"},
+        {"do": "verify_context", "expect": ["Himesh"]},
+        {"do": "key", "key": "return"},
+    ]))
+    assert out["steps"][-1]["key"] == "return"
+
+    branded = actions.validate_plan(plan(sends=True, steps=[
+        {"do": "wait_frontmost", "app": "Slack Beta"},
+        {"do": "type_text", "text": "hello there"},
+        {"do": "verify_context", "expect": ["Himesh"]},
+        {"do": "key", "key": "return"},
+    ]))
+    assert branded["steps"][-1]["key"] == "return"
+
+
+@pytest.mark.parametrize(("key", "mods"), [
+    ("return", []),
+    ("enter", []),
+    ("return", ["cmd"]),
+    ("enter", ["cmd"]),
+])
+def test_committing_key_requires_text_created_by_this_action(key, mods):
+    """A URL can prefill content the action never typed. Return must not
+    submit that ambient content, even when the scheme targets Messages."""
+    with pytest.raises(actions.PlanError, match="did not create"):
+        actions.validate_plan(plan(sends=False, steps=[
+            {"do": "open_url", "url": "sms:?body=prefilled"},
+            {"do": "wait_frontmost", "app": "Messages"},
+            {"do": "key", "key": key, "mods": mods},
+        ]))
+
+
+@pytest.mark.parametrize("key", ["return", "space"])
+def test_browser_activation_key_without_action_text_is_rejected(key):
+    """Return/Space can submit a focused web form with pre-existing content;
+    type_text is the only supported way to create committable text."""
+    with pytest.raises(actions.PlanError, match=(
+            "did not create" if key == "return" else "bare Space")):
+        actions.validate_plan(plan(sends=False, steps=[
+            {"do": "open_url", "url": "https://example.com/form"},
+            {"do": "wait_frontmost", "app": "Google Chrome"},
+            {"do": "key", "key": key},
+        ]))
+
+
+def test_modified_key_state_carries_across_turns():
+    sess = session()
+    accept(sess, [
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "hello there"},
+        {"do": "verify_context", "expect": ["Himesh"]},
+        {"do": "key", "key": "k", "mods": ["cmd"]},
+    ], goal="g", sends=True)
+    with pytest.raises(actions.PlanError, match="commit"):
+        accept(sess, [
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "key", "key": "return"},
+        ])
 
 
 def test_session_each_turn_reestablishes_focus():
@@ -1610,10 +1884,10 @@ def test_space_after_typing_needs_a_verify_in_a_send():
     ], sends=True)
 
 
-def test_space_is_ungated_when_nothing_has_been_typed():
-    """Tab-to-a-row then Space-to-open is ordinary navigation and must keep
-    working, or the model routes around the gate."""
-    assert not _refused([
+def test_space_is_rejected_when_nothing_has_been_typed():
+    """Space can activate a pre-existing focused form or destructive control;
+    Action Mode has bounded type_text and press_element replacements."""
+    assert _refused([
         {"do": "wait_frontmost", "app": "Slack"},
         {"do": "key", "key": "tab"},
         {"do": "key", "key": "space"},
@@ -1644,17 +1918,18 @@ def test_verify_after_the_last_tab_still_sends():
     ], sends=True)
 
 
-def test_space_does_not_clear_pending_text():
-    """Clearing on the 'it typed a space' reading would leave the text pending
-    but ungated — the same hole one step further along."""
+def test_rejected_space_does_not_mutate_carried_state():
+    """A rejected batch is transactional: its earlier type step must not leak
+    pending state into the repair turn."""
     state = actions.SessionState()
-    actions.validate_plan({"goal": "g", "sends": True, "steps": [
-        {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "type_text", "text": "hi"},
-        {"do": "verify_context", "expect": ["Priya"]},
-        {"do": "key", "key": "space"},
-    ]}, state=state)
-    assert state.pending_text and state.unverified_text
+    with pytest.raises(actions.PlanError, match="bare Space"):
+        actions.validate_plan({"goal": "g", "sends": True, "steps": [
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "hi"},
+            {"do": "verify_context", "expect": ["Priya"]},
+            {"do": "key", "key": "space"},
+        ]}, state=state)
+    assert not state.pending_text and not state.unverified_text
 
 
 def test_open_url_bounds_the_query_as_an_egress_channel():
@@ -1734,8 +2009,13 @@ def test_arrow_keys_re_arm_the_send_gate():
 
 
 def test_arrow_keys_are_free_before_anything_is_typed():
-    """Scrolling a list is not a send; gating it would refuse working plans."""
+    """Scrolling a list remains available, but Return cannot activate its
+    pre-existing selection without text created by this action."""
     assert not _refused([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "key", "key": "down", "repeat": 3},
+    ], sends=True)
+    assert _refused([
         {"do": "wait_frontmost", "app": "Slack"},
         {"do": "key", "key": "down", "repeat": 3},
         {"do": "key", "key": "return"},

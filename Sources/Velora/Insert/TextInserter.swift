@@ -450,7 +450,7 @@ final class TextInserter {
         targetBundleID: String? = nil,
         targetElement: AXUIElement? = nil,
         initialDeliveryCheck: (() -> Bool)? = nil,
-        continuationDeliveryCheck: (() -> Bool)? = nil,
+        continuationDeliveryCheck: ((Int) -> Bool)? = nil,
         completion: ((Bool) -> Void)? = nil
     ) {
         insertViaTypingDetailed(
@@ -464,6 +464,27 @@ final class TextInserter {
         }
     }
 
+    /// Source-compatible adapter for Stream Typing's input-generation guard.
+    /// Action Mode uses the progress-aware overload above; Stream does not
+    /// derive AX draft ownership from the posted prefix here.
+    func insertViaTyping(
+        _ text: String,
+        targetBundleID: String? = nil,
+        targetElement: AXUIElement? = nil,
+        initialDeliveryCheck: (() -> Bool)? = nil,
+        continuationDeliveryCheck: @escaping () -> Bool,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        let progressCheck: (Int) -> Bool = { _ in continuationDeliveryCheck() }
+        insertViaTyping(
+            text,
+            targetBundleID: targetBundleID,
+            targetElement: targetElement,
+            initialDeliveryCheck: initialDeliveryCheck,
+            continuationDeliveryCheck: progressCheck,
+            completion: completion)
+    }
+
     /// Detailed variant used by Stream Typing, where "nothing was posted"
     /// and "a prefix may have been posted" require different safe fallbacks.
     func insertViaTypingDetailed(
@@ -471,7 +492,7 @@ final class TextInserter {
         targetBundleID: String? = nil,
         targetElement: AXUIElement? = nil,
         initialDeliveryCheck: (() -> Bool)? = nil,
-        continuationDeliveryCheck: (() -> Bool)? = nil,
+        continuationDeliveryCheck: ((Int) -> Bool)? = nil,
         completion: @escaping (TypingOutcome) -> Void
     ) {
         // Typing is slow for long strings; keep it off the main thread.
@@ -490,12 +511,14 @@ final class TextInserter {
             let chunks = Self.unicodeTypingChunks(text)
             var postedUTF16Units = 0
             for var chunk in chunks {
-                // A long terminal dictation spans many events. Stop before each
-                // chunk if the user changes apps or enters a secure field so
-                // the tail cannot spill into an unrelated/password target.
+                // A long insertion spans many events. Stop before each chunk
+                // if the target or caller-owned progress changed so the tail
+                // cannot spill after a focus, caret, or selection move.
                 guard Self.deliveryAllowed(
                     targetBundleID: targetBundleID, targetElement: targetElement
-                ), continuationDeliveryCheck?() ?? true
+                ), Self.continuationIsAllowed(
+                    afterPostedUTF16Units: postedUTF16Units,
+                    check: continuationDeliveryCheck)
                 else {
                     NSLog("Velora: typing aborted at utf16=%ld/%ld — target no longer safe",
                           postedUTF16Units, text.utf16.count)
@@ -532,6 +555,36 @@ final class TextInserter {
                     postedUTF16Units: postedUTF16Units))
             }
         }
+    }
+
+    /// Source-compatible adapter for callers whose independent continuation
+    /// guard does not depend on typing progress.
+    func insertViaTypingDetailed(
+        _ text: String,
+        targetBundleID: String? = nil,
+        targetElement: AXUIElement? = nil,
+        initialDeliveryCheck: (() -> Bool)? = nil,
+        continuationDeliveryCheck: @escaping () -> Bool,
+        completion: @escaping (TypingOutcome) -> Void
+    ) {
+        let progressCheck: (Int) -> Bool = { _ in continuationDeliveryCheck() }
+        insertViaTypingDetailed(
+            text,
+            targetBundleID: targetBundleID,
+            targetElement: targetElement,
+            initialDeliveryCheck: initialDeliveryCheck,
+            continuationDeliveryCheck: progressCheck,
+            completion: completion)
+    }
+
+    /// Calls the continuation guard with the number of UTF-16 units already
+    /// posted. Keeping the progress at this seam lets callers prove the exact
+    /// expected caret and text prefix before every subsequent chunk.
+    static func continuationIsAllowed(
+        afterPostedUTF16Units postedUTF16Units: Int,
+        check: ((Int) -> Bool)?
+    ) -> Bool {
+        check?(postedUTF16Units) ?? true
     }
 
     /// Applies a live revision as physical Backspace presses followed by

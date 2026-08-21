@@ -13,9 +13,9 @@ enum ActionStep: Equatable {
     case pasteText(String)
     case key(name: String, mods: [String], repeatCount: Int)
     case pause(ms: Int)
-    /// Press the on-screen control whose visible label matches — a chat row in
-    /// a search list, a link in results. Label-addressed, never a coordinate,
-    /// and never a committing control (the label denylist below).
+    /// Press the on-screen navigation element whose visible label matches — a
+    /// row/cell in a search list or a link in results. Runtime role checks
+    /// reject buttons and other controls even when their labels appear safe.
     case pressElement(label: String)
 
     /// Steps that put characters or keystrokes into another app.
@@ -72,6 +72,12 @@ enum ActionPlanError: Error, Equatable {
     case committingPressLabel(String)
     case sendInDraft(step: Int)
     case committingKeyRepeats(step: Int)
+    case unsafeKeyChord(String)
+    case commitOutsideCommunicationApp(step: Int, app: String)
+    case destructiveKey(String)
+    case commitWithoutPendingText(step: Int, key: String)
+    case bareSpace
+    case unsafeBareKey(String)
 
     var message: String {
         switch self {
@@ -102,6 +108,18 @@ enum ActionPlanError: Error, Equatable {
             return "step \(step) would commit typed text, but this is a draft"
         case .committingKeyRepeats(let step):
             return "step \(step) repeats a committing key"
+        case .unsafeKeyChord(let chord):
+            return "modified chord '\(chord)' is not an allowed Action Mode capability"
+        case .commitOutsideCommunicationApp(let step, let app):
+            return "step \(step) would commit pending text in \(app), not a communication app"
+        case .destructiveKey(let key):
+            return "destructive key '\(key)' is not an Action Mode capability"
+        case .commitWithoutPendingText(let step, let key):
+            return "step \(step) cannot use \(key) to commit text this action did not create"
+        case .bareSpace:
+            return "bare Space can activate ambient controls; use type_text to enter spaces"
+        case .unsafeBareKey(let key):
+            return "bare key '\(key)' is not an allowed Action Mode capability"
         }
     }
 }
@@ -134,17 +152,14 @@ extension ActionPlan {
         /// GitHub, Linear; treating only bare Return as committing was a
         /// reviewed bypass. ⌘K stays a shortcut: its key is k, not return.
         static let committingKeys: Set<String> = ["return", "enter"]
-        /// Unmodified keys that put a character into the focused field; a
-        /// `key` step with one of these (or ⌘V, which pastes) arms the send
-        /// gate exactly like type_text. Mirrored from the engine; the pytest
-        /// contract test reads the marker line below.
-        // printable_keys: a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 space comma period slash minus equal semicolon quote left_bracket right_bracket backslash grave
-        static let printableKeys: Set<String> = [
-            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-            "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
-            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "space",
-            "comma", "period", "slash", "minus", "equal", "semicolon", "quote",
-            "left_bracket", "right_bracket", "backslash", "grave",
+        static let destructiveKeys: Set<String> = ["delete", "forward_delete"]
+        /// The complete unmodified-key surface. Text entry uses bounded
+        /// type_text/paste_text; all other bare keys are app command surfaces.
+        /// Return/Enter remain only behind their action-owned-text gate.
+        // safe_bare_keys: down end enter escape home left page_down page_up return right tab up
+        static let safeBareKeys: Set<String> = [
+            "escape", "tab", "up", "down", "left", "right",
+            "home", "end", "page_up", "page_down", "return", "enter",
         ]
         /// press_element label bounds, mirrored from the engine.
         static let minPressLabelCharacters = 3
@@ -202,12 +217,6 @@ extension ActionPlan {
             "إرسال", "حذف", "تأكيد", "שלח", "מחק",
             "αποστολή", "διαγραφή", "ส่ง", "ลบ",
         ]
-        /// Keys that ACTIVATE the focused control. A bare Space presses the
-        /// focused button, so `type_text` → `key tab` → `key space` delivered
-        /// a message past every send defense at once (audited bypass,
-        /// 2026-08-04). Gated only while text is pending: a Space with
-        /// nothing typed is ordinary navigation.
-        static let activationKeys: Set<String> = ["space"]
         /// Keys that MOVE FOCUS OR THE SELECTED ROW without committing. Tab
         /// was the other half of the Space bypass; the arrows are the same
         /// hole one key over, aimed at the exact surface the verify gate was
@@ -219,6 +228,29 @@ extension ActionPlan {
         static let focusMovingKeys: Set<String> = [
             "tab", "up", "down", "left", "right",
             "home", "end", "page_up", "page_down",
+        ]
+        /// A modified key is an app command surface. Keep only Action Mode's
+        /// explicit search, reversible compose/tab, copy,
+        /// selection and navigation capabilities. Save/close/quit/cut/delete
+        /// and unknown chords stay unreachable.
+        // safe_modified_key_chords: cmd+a cmd+c cmd+down cmd+end cmd+enter cmd+f cmd+home cmd+k cmd+left cmd+n cmd+page_down cmd+page_up cmd+return cmd+right cmd+t cmd+up option+down option+end option+home option+left option+page_down option+page_up option+right option+up shift+down shift+end shift+home shift+left shift+page_down shift+page_up shift+right shift+tab shift+up
+        static let safeModifiedKeyChords: Set<String> = [
+            "cmd+a", "cmd+c", "cmd+f", "cmd+k", "cmd+n", "cmd+t",
+            "shift+tab", "cmd+return", "cmd+enter",
+            "cmd+up", "cmd+down", "cmd+left", "cmd+right",
+            "cmd+home", "cmd+end", "cmd+page_up", "cmd+page_down",
+            "option+up", "option+down", "option+left", "option+right",
+            "option+home", "option+end", "option+page_up", "option+page_down",
+            "shift+up", "shift+down", "shift+left", "shift+right",
+            "shift+home", "shift+end", "shift+page_up", "shift+page_down",
+        ]
+        /// Return/Enter with pending text is executable authority in a shell,
+        /// browser, or editor. Restrict it to these explicit native messaging
+        /// targets. This marker is mirrored by the engine test.
+        // communication_apps_normalized: discord mail messages messenger microsoftteams signal slack teams telegram whatsapp
+        static let communicationAppsNormalized: Set<String> = [
+            "discord", "mail", "messages", "messenger", "microsoftteams",
+            "signal", "slack", "teams", "telegram", "whatsapp",
         ]
         /// Everything after a URL's first `?` or `#` is payload, not address.
         /// Bounds open_url as an outbound channel without trying to judge
@@ -250,6 +282,12 @@ extension ActionPlan {
         /// "Is there typed text a committing key would deliver." Cleared
         /// only by the committing key itself.
         var pendingText = false
+        /// App names observed or targeted in any turn. These are too generic
+        /// to satisfy verify_context even after a batch boundary.
+        var appNames: Set<String> = []
+        /// Singular current input target. Historical/running `appNames` only
+        /// filter verify terms and never authorize committing input.
+        var currentApp = ""
     }
 
     /// True when the label names a control that would commit something.
@@ -303,7 +341,8 @@ extension ActionPlan {
         var focusEstablished = false
         var totalText = state.totalText
         var totalPause = 0  // per batch: pauses bound UI settling, not the action
-        var appNames: [String] = []
+        var appNames = Array(state.appNames)
+        var currentApp = state.currentApp
         /// True once text has been typed that a Return would commit, with no
         /// verify_context since it changed or the screen moved. Seeded from
         /// the previous turns.
@@ -331,6 +370,7 @@ extension ActionPlan {
             case "open_app":
                 let app = String(try string("app").prefix(120))
                 appNames.append(app)
+                currentApp = app
                 steps.append(.openApp(app))
                 // Switching apps invalidates any earlier checkpoint: the plan
                 // must confirm the app actually came forward before typing —
@@ -360,6 +400,8 @@ extension ActionPlan {
                     throw ActionPlanError.badURL(String(raw.prefix(120)))
                 }
                 steps.append(.openURL(url))
+                // The URL handler is unknown until the runtime observation.
+                currentApp = ""
                 if pendingText { unverifiedText = true }
 
             case "wait_frontmost":
@@ -367,6 +409,7 @@ extension ActionPlan {
                 let timeout = min(max(requested, 1), Limits.maxWaitMs)
                 let app = String(try string("app").prefix(120))
                 appNames.append(app)
+                currentApp = app
                 steps.append(.waitFrontmost(app: app, timeoutMs: timeout))
                 focusEstablished = true
 
@@ -385,16 +428,17 @@ extension ActionPlan {
                 guard !terms.isEmpty else {
                     throw ActionPlanError.missingField(step: index, field: "expect")
                 }
-                let appTerms = Set(appNames.map(AppMatcher.normalize))
                 // Weak terms are dropped, not fatal: a two-letter word or the
-                // app's own name must never SATISFY a check, but it must not
+                // app's name/alias must never SATISFY a check, but it must not
                 // veto the terms that do identify the target either. ("message
                 // Himesh, say Hi" yields ["Himesh", "Hi"].) What remains is
                 // strictly stronger than no verification.
                 let usable = terms.filter { term in
                     let normalized = AppMatcher.normalize(term)
+                    let matchesKnownApp = AppMatcher.bestMatch(
+                        for: term, in: appNames) != nil
                     return normalized.count >= Limits.minVerifyTermCharacters
-                        && !appTerms.contains(normalized)
+                        && !matchesKnownApp
                 }
                 guard !usable.isEmpty else {
                     throw ActionPlanError.weakVerifyTerm(terms.joined(separator: ", "))
@@ -436,6 +480,9 @@ extension ActionPlan {
                 guard ActionKey.keyCode(for: name) != nil else {
                     throw ActionPlanError.unknownKey(name)
                 }
+                guard !Limits.destructiveKeys.contains(name) else {
+                    throw ActionPlanError.destructiveKey(name)
+                }
                 var mods: [String] = []
                 for rawMod in (step["mods"] as? [Any] ?? []) {
                     guard let text = rawMod as? String else {
@@ -447,6 +494,18 @@ extension ActionPlan {
                     }
                     if !mods.contains(canonical) { mods.append(canonical) }
                 }
+                if name == "space", mods.isEmpty {
+                    throw ActionPlanError.bareSpace
+                }
+                if mods.isEmpty, !Limits.safeBareKeys.contains(name) {
+                    throw ActionPlanError.unsafeBareKey(name)
+                }
+                if !mods.isEmpty {
+                    let chord = (mods.sorted() + [name]).joined(separator: "+")
+                    guard Limits.safeModifiedKeyChords.contains(chord) else {
+                        throw ActionPlanError.unsafeKeyChord(chord)
+                    }
+                }
                 // `as? Int` would bridge JSON `true` to 1; require a real number.
                 let repeatCount = (step["repeat"] as? NSNumber).map {
                     CFNumberIsFloatType($0) || CFGetTypeID($0) == CFBooleanGetTypeID()
@@ -455,21 +514,32 @@ extension ActionPlan {
                 guard repeatCount >= 1, repeatCount <= Limits.maxKeyRepeat else {
                     throw ActionPlanError.repeatOutOfRange(repeatCount)
                 }
-                // A bare Space presses the focused control, so once text is
-                // pending it can deliver exactly like Return and must clear
-                // the same gate. With nothing typed it is plain navigation.
-                let activating = mods.isEmpty
-                    && Limits.activationKeys.contains(name) && pendingText
-                let committing = Limits.committingKeys.contains(name) || activating
+                let committing = Limits.committingKeys.contains(name)
                 if committing {
                     guard repeatCount == 1 else {
                         // One validated Return must not become twelve.
                         throw ActionPlanError.committingKeyRepeats(step: index)
                     }
+                    guard pendingText else {
+                        throw ActionPlanError.commitWithoutPendingText(
+                            step: index, key: name)
+                    }
                     if isDraft, pendingText {
                         // A draft never commits — navigation goes through
                         // press_element, never a Return that might deliver.
                         throw ActionPlanError.sendInDraft(step: index)
+                    }
+                    let communicationNames = Array(
+                        Limits.communicationAppsNormalized)
+                    let matchesCommunicationApp = AppMatcher.bestMatch(
+                        for: currentApp, in: communicationNames) != nil
+                        || communicationNames.contains { name in
+                            AppMatcher.bestMatch(for: name, in: [currentApp]) != nil
+                        }
+                    if pendingText, !isDraft, !matchesCommunicationApp {
+                        throw ActionPlanError.commitOutsideCommunicationApp(
+                            step: index,
+                            app: currentApp.isEmpty ? "unknown app" : currentApp)
                     }
                     if unverifiedText {
                         // The failure this prevents: a swallowed ⌘K meant the
@@ -480,22 +550,15 @@ extension ActionPlan {
                     }
                 }
                 steps.append(.key(name: name, mods: mods, repeatCount: repeatCount))
-                if activating {
-                    // Deliberately does NOT clear pendingText the way Return
-                    // does: we cannot tell whether the Space pressed a button
-                    // or typed a space, and clearing on the typed-a-space
-                    // reading would leave the text pending but ungated — the
-                    // same hole one step further along.
-                    unverifiedText = true
-                } else if committing {
+                if committing {
                     unverifiedText = false
                     pendingText = false
-                } else if (mods.isEmpty && Limits.printableKeys.contains(name))
-                            || (name == "v" && mods.contains("cmd")) {
-                    // A bare printable key types a character; ⌘V pastes. Text
-                    // is now pending exactly as if type_text had run.
+                } else if !mods.isEmpty, pendingText,
+                          !(name == "c" && Set(mods) == Set(["cmd"])) {
+                    // Every allowed modified chord except Copy moves focus,
+                    // changes selection, or opens a new surface. The prior
+                    // verification no longer describes Return's target.
                     unverifiedText = true
-                    pendingText = true
                 } else if Limits.focusMovingKeys.contains(name), pendingText {
                     // Focus moved, so the check that covered the pending text
                     // no longer describes where a committing key would land.
@@ -543,6 +606,8 @@ extension ActionPlan {
         state.totalText = totalText
         state.unverifiedText = unverifiedText
         state.pendingText = pendingText
+        state.appNames.formUnion(appNames)
+        state.currentApp = currentApp
 
         let goal = (plan["goal"] as? String).map { String(ActionPlan.sanitize($0).prefix(200)) }
         return ActionPlan(goal: goal ?? "",
@@ -575,25 +640,31 @@ extension ActionPlan {
             case .verifyContext:
                 next.unverifiedText = false
             case .key(let name, let mods, _):
-                // The activation and focus-moving branches must mirror
+                // The committing and focus-moving branches must mirror
                 // `decode` exactly: this function is what actually carries
                 // state BETWEEN turns, so a rule that lives only in decode
                 // evaporates at the batch boundary and the next turn's
                 // Return goes ungated (review finding, 2026-08-04).
-                if mods.isEmpty, Limits.activationKeys.contains(name),
-                   next.pendingText {
-                    next.unverifiedText = true
-                } else if Limits.committingKeys.contains(name) {
+                if Limits.committingKeys.contains(name) {
                     next.unverifiedText = false
                     next.pendingText = false
-                } else if (mods.isEmpty && Limits.printableKeys.contains(name))
-                            || (name == "v" && mods.contains("cmd")) {
+                } else if !mods.isEmpty, next.pendingText,
+                          !(name == "c" && Set(mods) == Set(["cmd"])) {
                     next.unverifiedText = true
-                    next.pendingText = true
                 } else if Limits.focusMovingKeys.contains(name), next.pendingText {
                     next.unverifiedText = true
                 }
-            case .pressElement, .openApp, .openURL:
+            case .openApp(let app):
+                next.appNames.insert(app)
+                next.currentApp = app
+                if next.pendingText { next.unverifiedText = true }
+            case .waitFrontmost(let app, _):
+                next.appNames.insert(app)
+                next.currentApp = app
+            case .openURL:
+                next.currentApp = ""
+                if next.pendingText { next.unverifiedText = true }
+            case .pressElement:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.

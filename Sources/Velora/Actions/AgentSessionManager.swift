@@ -141,7 +141,8 @@ final class AgentSessionManager {
         switch result {
         case .planned(let plan), .needsSendApproval(let plan):
             trace = plan.describedSteps
-        case .completed(_, let lines), .failed(_, let lines):
+        case .completed(_, let lines), .performedUnverified(_, let lines),
+             .failed(_, let lines):
             trace = lines
         case .cancelled:
             trace = []

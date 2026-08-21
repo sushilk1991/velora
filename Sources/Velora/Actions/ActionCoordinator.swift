@@ -61,9 +61,63 @@ enum ActionResult {
     /// The plan would deliver something to another person and the caller had
     /// not agreed to that. Nothing ran.
     case needsSendApproval(ActionPlan)
+    /// Reserved for a caller-supplied, goal-bound postcondition. The current
+    /// Action loop has no such contract and never constructs this case.
     case completed(goal: String, trace: [String])
+    /// Steps ran, but the executor did not observe enough structured evidence
+    /// to prove the requested postcondition.
+    case performedUnverified(goal: String, trace: [String])
     case failed(reason: String, trace: [String])
     case cancelled
+}
+
+struct ActionVoiceCompletionNotice: Equatable {
+    let symbol: String
+    let message: String
+}
+
+extension ActionResult {
+    /// Successful transport payload for CLI callers. Execution and verified
+    /// completion are independent facts and stay independent on the wire.
+    func controlSuccessPayload(execute: Bool) -> [String: Any]? {
+        switch self {
+        case .completed(let goal, let trace):
+            return [
+                "ok": true,
+                "executed": execute,
+                "completed": true,
+                "verified": true,
+                "goal": goal,
+                "trace": trace,
+            ]
+        case .performedUnverified(let goal, let trace):
+            return [
+                "ok": true,
+                "executed": true,
+                "completed": false,
+                "verified": false,
+                "goal": goal,
+                "trace": trace,
+            ]
+        default:
+            return nil
+        }
+    }
+
+    var voiceCompletionNotice: ActionVoiceCompletionNotice? {
+        switch self {
+        case .completed(let goal, _):
+            return ActionVoiceCompletionNotice(
+                symbol: "checkmark.circle",
+                message: goal.isEmpty ? "Done" : String(goal.prefix(60)))
+        case .performedUnverified:
+            return ActionVoiceCompletionNotice(
+                symbol: "circle.dashed",
+                message: "Action ran; completion wasn't verified")
+        default:
+            return nil
+        }
+    }
 }
 
 extension ActionPlan {
@@ -298,6 +352,9 @@ final class ActionCoordinator {
         case .completed(let goal, let trace):
             for line in trace { veloraLog("Velora: action · \(line)") }
             veloraLog("Velora: action completed — \(goal)")
+        case .performedUnverified(let goal, let trace):
+            for line in trace { veloraLog("Velora: action · \(line)") }
+            veloraLog("Velora: action ran without completion evidence — \(goal)")
         case .failed(let reason, let trace):
             for line in trace { veloraLog("Velora: action · \(line)") }
             veloraLog("Velora: action failed — \(reason)")
