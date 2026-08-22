@@ -1231,6 +1231,11 @@ extension ScreenContext {
         out["windows_count"] = (windowsRef as? [AXUIElement])?.count ?? -1
         out["enable_error"] = Int(AXUIElementSetAttributeValue(
             appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue).rawValue)
+        out["enable_eui_error"] = Int(AXUIElementSetAttributeValue(
+            appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue).rawValue)
+        var retryRef: CFTypeRef?
+        out["focused_window_error_after_enable"] = Int(AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedWindowAttribute as CFString, &retryRef).rawValue)
         if let window = axElement(appElement, kAXFocusedWindowAttribute) {
             out["window_title"] = axString(window, kAXTitleAttribute) ?? ""
             out["window_document"] = axURLString(window, kAXDocumentAttribute) ?? ""
