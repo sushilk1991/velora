@@ -240,8 +240,8 @@ enum ScreenContext {
         }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
-        guard let window = axElement(appElement, kAXFocusedWindowAttribute)
-            ?? axElements(appElement, kAXWindowsAttribute).first else { return [] }
+        guard let window = focusedOrFirstWindow(
+            appElement, pid: app.processIdentifier) else { return [] }
 
         let stopAt = Date().addingTimeInterval(deadline)
         var names: [String] = []
@@ -294,8 +294,8 @@ enum ScreenContext {
         }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
-        guard let window = axElement(appElement, kAXFocusedWindowAttribute)
-            ?? axElements(appElement, kAXWindowsAttribute).first else { return false }
+        guard let window = focusedOrFirstWindow(
+            appElement, pid: app.processIdentifier) else { return false }
 
         let stopAt = Date().addingTimeInterval(deadline)
         var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
@@ -376,23 +376,65 @@ enum ScreenContext {
         return components.url
     }
 
+    /// PIDs whose Chromium accessibility switch this process has flipped.
+    /// One set call per app instance is enough; the attribute is harmless on
+    /// apps that don't implement it (the set simply fails).
+    private static var accessibilityEnabledPIDs = Set<pid_t>()
+    private static let accessibilityEnabledLock = NSLock()
+
+    /// Chromium (Chrome, Brave, Edge, Electron) builds its AX tree only when
+    /// an assistive client announces itself — until then even the focused
+    /// window read returns nothing (verified live 2026-08-22: Chrome + Gmail
+    /// gave no window at all, so title-based site detection never worked in
+    /// Chrome). `AXManualAccessibility` is Chromium's documented switch for
+    /// exactly this, without the window-manager side effects of VoiceOver's
+    /// `AXEnhancedUserInterface`. The tree builds asynchronously, so the
+    /// caller's CURRENT read may still miss; the next one succeeds.
+    static func enableChromiumAccessibility(_ appElement: AXUIElement, pid: pid_t) {
+        accessibilityEnabledLock.lock()
+        let firstTime = accessibilityEnabledPIDs.insert(pid).inserted
+        accessibilityEnabledLock.unlock()
+        guard firstTime else { return }
+        AXUIElementSetAttributeValue(
+            appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
+    /// The frontmost window, waking a dormant Chromium AX server if needed.
+    private static func focusedOrFirstWindow(
+        _ appElement: AXUIElement, pid: pid_t
+    ) -> AXUIElement? {
+        if let window = axElement(appElement, kAXFocusedWindowAttribute)
+            ?? axElements(appElement, kAXWindowsAttribute).first {
+            return window
+        }
+        enableChromiumAccessibility(appElement, pid: pid)
+        return axElement(appElement, kAXFocusedWindowAttribute)
+            ?? axElements(appElement, kAXWindowsAttribute).first
+    }
+
     /// URL of the frontmost page in a browser, via Accessibility. The
-    /// window's `AXDocument` is the cheap path (one AX read; Chrome and
-    /// Safari expose the page URL there). `deep` additionally walks from the
-    /// focused element toward a web area exposing `AXURL` — more IPC, so the
-    /// hotkey path never asks for it. Best effort; nil is normal.
+    /// window's `AXDocument` is the cheap path where a browser exposes it;
+    /// `deep` additionally searches the window for the web area's `AXURL`
+    /// (Safari exposes the page URL there and not on the window — verified
+    /// live) and checks the focused element's ancestors. Deep costs more AX
+    /// IPC, so the hotkey path never asks for it. Best effort; nil is normal.
     static func pageURL(of app: NSRunningApplication?, deep: Bool = false) -> URL? {
         guard let app, app.processIdentifier > 0, Permissions.accessibilityGranted else {
             return nil
         }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
-        if let window = axElement(appElement, kAXFocusedWindowAttribute)
-            ?? axElements(appElement, kAXWindowsAttribute).first,
+        let window = focusedOrFirstWindow(appElement, pid: app.processIdentifier)
+        if let window,
            let url = normalizedPageURL(axURLString(window, kAXDocumentAttribute)) {
             return url
         }
         guard deep else { return nil }
+        // The web area carries AXURL; find it under the window. Bounded like
+        // every other tree walk here — browser trees are enormous.
+        if let window, let url = webAreaURL(under: window) {
+            return url
+        }
         var element = axElement(appElement, kAXFocusedUIElementAttribute)
         for _ in 0..<6 {
             guard let current = element else { break }
@@ -400,6 +442,27 @@ enum ScreenContext {
                 return url
             }
             element = axElement(current, kAXParentAttribute)
+        }
+        return nil
+    }
+
+    /// Breadth-first search for an `AXWebArea` exposing `AXURL`. Web areas
+    /// sit shallow (window → group/scroll/tab content → web area), so the
+    /// budget stays small.
+    private static func webAreaURL(under window: AXUIElement) -> URL? {
+        var queue: [(element: AXUIElement, depth: Int)] = [(window, 0)]
+        var visited = 0
+        while !queue.isEmpty, visited < 80 {
+            let (element, depth) = queue.removeFirst()
+            visited += 1
+            if axString(element, kAXRoleAttribute) == "AXWebArea",
+               let url = normalizedPageURL(axURLString(element, kAXURLAttribute)) {
+                return url
+            }
+            guard depth < 7 else { continue }
+            for child in (axChildren(element) ?? []).prefix(12) {
+                queue.append((child, depth + 1))
+            }
         }
         return nil
     }
@@ -433,14 +496,14 @@ enum ScreenContext {
         // beachballing target app (Xcode indexing, Electron GC) could otherwise
         // stall dictation start. Cap both calls hard.
         AXUIElementSetMessagingTimeout(appElement, 0.25)
-        var windowRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            appElement, kAXFocusedWindowAttribute as CFString, &windowRef) == .success,
-            let windowRef,
-            // A buggy third-party AX server can return .success with a non-window
-            // CFType; verify before the cast so a bad app can't crash Velora.
-            CFGetTypeID(windowRef) == AXUIElementGetTypeID() else { return nil }
-        let window = windowRef as! AXUIElement  // checked above
+        var window = axElement(appElement, kAXFocusedWindowAttribute)
+        if window == nil {
+            // A dormant Chromium AX server returns nothing at all until an
+            // assistive client announces itself; wake it and retry once.
+            enableChromiumAccessibility(appElement, pid: pid)
+            window = axElement(appElement, kAXFocusedWindowAttribute)
+        }
+        guard let window else { return nil }
         // Timeouts do NOT propagate to returned elements (see axTimeout note):
         // without this, the title read below runs at the ~6s system default on
         // the hotkey hot path — a beachballing app would freeze dictation start.
@@ -1156,6 +1219,18 @@ extension ScreenContext {
         ]
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 1.0)
+        out["pid"] = Int(app.processIdentifier)
+        // Raw AXError codes: when an app yields no window, the code says WHY
+        // (-25204 not responding, -25205 unsupported, -25211 API disabled…).
+        var focusedRef: CFTypeRef?
+        out["focused_window_error"] = Int(AXUIElementCopyAttributeValue(
+            appElement, kAXFocusedWindowAttribute as CFString, &focusedRef).rawValue)
+        var windowsRef: CFTypeRef?
+        out["windows_error"] = Int(AXUIElementCopyAttributeValue(
+            appElement, kAXWindowsAttribute as CFString, &windowsRef).rawValue)
+        out["windows_count"] = (windowsRef as? [AXUIElement])?.count ?? -1
+        out["enable_error"] = Int(AXUIElementSetAttributeValue(
+            appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue).rawValue)
         if let window = axElement(appElement, kAXFocusedWindowAttribute) {
             out["window_title"] = axString(window, kAXTitleAttribute) ?? ""
             out["window_document"] = axURLString(window, kAXDocumentAttribute) ?? ""
