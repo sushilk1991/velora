@@ -517,7 +517,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     }
                     let front = self.contextTracker.frontmost
                         ?? NSWorkspace.shared.frontmostApplication
-                    completion(.success(ScreenContext.axDump(of: front)))
+                    var dump = ScreenContext.axDump(of: front)
+                    dump["background"] = CuaDiagnostics.dump(
+                        transport: CuaSocketTransport(), app: front)
+                    completion(.success(dump))
                 }
                 return {}
             })

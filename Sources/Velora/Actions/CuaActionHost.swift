@@ -287,6 +287,62 @@ enum CuaPressPick {
     }
 }
 
+/// Background-routing state for `velora ax-probe`. Read-only: it never
+/// starts a daemon, never activates anything, and never types. The project's
+/// rule is to extend the probe before guessing at accessibility behaviour —
+/// this answers "could an action drive this app in the background, and if
+/// not, which gate said no?" in one command.
+enum CuaDiagnostics {
+    static func dump(transport: CuaTransport,
+                     app: NSRunningApplication?) -> [String: Any] {
+        var out: [String: Any] = [
+            "installed": CuaDriver.isInstalled,
+            "signature_trusted": CuaDriver.isInstalled
+                ? CuaDriver.signatureIsTrusted : false,
+            "socket": CuaDriver.socketPath,
+        ]
+        let healthy = CuaDriverDaemon.isHealthy(transport: transport)
+        out["daemon_healthy"] = healthy
+        guard healthy, let app, app.processIdentifier > 0 else { return out }
+        let pid = Int(app.processIdentifier)
+        out["probe_pid"] = pid
+        out["probe_app"] = app.localizedName ?? ""
+        guard case .success(let listed) = transport.call(
+            "list_windows", arguments: [:], timeout: 3),
+              let windows = listed["windows"] as? [[String: Any]] else {
+            out["windows_error"] = true
+            return out
+        }
+        out["windows_for_pid"] = windows.filter { ($0["pid"] as? Int) == pid }.count
+        guard let picked = CuaWindowPick.choose(windows, pid: pid) else {
+            out["window_pick"] = "none (no document-sized layer-0 window)"
+            return out
+        }
+        out["window_id"] = picked.id
+        out["window_title"] = picked.title ?? ""
+        guard case .success(let state) = transport.call(
+            "get_window_state",
+            arguments: ["pid": pid, "window_id": picked.id,
+                        "include_screenshot": false, "max_elements": 2000],
+            timeout: 3) else {
+            out["snapshot_error"] = true
+            return out
+        }
+        let snapshot = CuaSnapshot.parse(state)
+        out["degraded"] = snapshot.degraded
+        out["elements"] = snapshot.elements.count
+        out["total_elements"] = state["total_element_count"] as? Int ?? -1
+        out["elements_complete_flag"] = state["elements_complete"] as? Bool ?? false
+        out["complete"] = snapshot.complete
+        if let element = snapshot.primaryTextElement {
+            out["text_target"] = "\(element.role)#\(element.index)"
+        } else {
+            out["text_target"] = "none (ambiguous, web-backed, or absent)"
+        }
+        return out
+    }
+}
+
 /// `ActionHost` that runs an Action against a background window through the
 /// Cua Driver daemon when that is possible, and behaves exactly like the
 /// classic foreground host when it is not.
