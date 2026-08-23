@@ -3330,6 +3330,22 @@ extension Selftest {
             expect(false, "isError inside ok:true is a failure, never an "
                        + "empty success")
         }
+        // A REFUSAL arrives the same way, but carries a structured reason —
+        // captured live: press_key against an off-Space window.
+        let refusal = """
+        {"ok":true,"result":{"isError":true,\
+        "content":[{"type":"text","text":"background input refused"}],\
+        "structuredContent":{"code":"off_space_or_ax_unresolved",\
+        "effect":"refused"}}}
+        """
+        if case .failure(.daemonError(let message)) = CuaDriver.parseResponse(
+            Data(refusal.utf8)) {
+            expect(message == "off_space_or_ax_unresolved",
+                   "a refusal reports its CODE — that says what to do next, "
+                       + "the prose does not")
+        } else {
+            expect(false, "a refusal is a failure")
+        }
 
         guard let request = CuaDriver.encodeRequest(
             tool: "click", arguments: ["pid": 7]) else {

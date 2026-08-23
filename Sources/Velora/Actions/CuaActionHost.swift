@@ -953,6 +953,10 @@ final class BackgroundRoutingActionHost: ActionHost {
         return bundleID.lowercased() == targetBundleID
     }
 
+    /// A refusal normally arrives as a transport failure now — the driver
+    /// marks it `isError` and the parser turns that into `.daemonError` with
+    /// the refusal code. This stays as depth for any tool that reports a
+    /// refusal inside an otherwise-successful reply.
     private func isRefused(_ reply: [String: Any]) -> Bool {
         if reply["refusal"] != nil { return true }
         if (reply["status"] as? String) == "refused" { return true }

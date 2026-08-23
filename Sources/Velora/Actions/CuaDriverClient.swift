@@ -123,9 +123,15 @@ enum CuaDriver {
         // every snapshot came back "fine, no elements", which reads exactly
         // like a window with nothing in it.
         if (result["isError"] as? Bool) == true {
+            // Refusals arrive this way too, carrying a structured reason —
+            // "off_space_or_ax_unresolved" says far more about what to do
+            // next than the prose does, so prefer it when present.
+            let structured = result["structuredContent"] as? [String: Any]
+            let code = (structured?["code"] as? String)
+                ?? (structured?["reason"] as? String)
             let text = ((result["content"] as? [[String: Any]])?
-                .first?["text"] as? String) ?? "tool error"
-            return .failure(.daemonError(text))
+                .first?["text"] as? String)
+            return .failure(.daemonError(code ?? text ?? "tool error"))
         }
         if let structured = result["structuredContent"] as? [String: Any] {
             return .success(structured)
