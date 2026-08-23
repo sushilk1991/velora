@@ -111,6 +111,15 @@ corroborating what the live probes showed:
   background" setting is the user's off switch; users who want the surface
   gone entirely should leave it off, or run the daemon in `bounded` mode
   themselves.
+- **Velora's side of that surface is authenticated even though the socket
+  is not.** Before spawning, the bundle at `/Applications/CuaDriver.app`
+  must satisfy Cua's Developer ID requirement (`/Applications` is
+  admin-writable without authentication, and a spawned child inherits
+  Velora's TCC responsibility — an unverified binary there would have run
+  under Velora's Accessibility grant with no prompt). Before sending a
+  single byte, the socket's peer pid is checked against the same
+  requirement, so a squatting process cannot collect typed text or feed
+  Velora forged snapshots.
 - **No isolation, and none claimed on the host.** The agent drives the real
   logged-in apps and profiles. "Without interrupting you" means input
   routing, not a sandbox. True isolation is a separate Cua product (Lume
