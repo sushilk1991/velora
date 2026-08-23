@@ -118,15 +118,35 @@ enum CuaDriver {
         guard let result = object["result"] as? [String: Any] else {
             return .failure(.malformedResponse)
         }
+        // A TOOL error rides inside a successful envelope. Treating it as an
+        // empty success is how a wrong argument key hid for a whole round:
+        // every snapshot came back "fine, no elements", which reads exactly
+        // like a window with nothing in it.
+        if (result["isError"] as? Bool) == true {
+            let text = ((result["content"] as? [[String: Any]])?
+                .first?["text"] as? String) ?? "tool error"
+            return .failure(.daemonError(text))
+        }
         if let structured = result["structuredContent"] as? [String: Any] {
             return .success(structured)
+        }
+        // No structured payload and no error marker: the tool answered with
+        // something this client cannot ground an action on.
+        guard result["content"] == nil else {
+            return .failure(.malformedResponse)
         }
         return .success(result)
     }
 
+    /// The wire shape is `{"method":"call","name":<tool>,"args":{…}}`.
+    ///
+    /// The key is `args`, and getting it wrong fails SILENTLY in the worst
+    /// way: the daemon still answers `ok:true`, but with an `isError`
+    /// content saying the required fields are missing. Verified live against
+    /// driver 0.21.0 — `arguments`, `input`, and `params` are all ignored.
     static func encodeRequest(tool: String, arguments: [String: Any]) -> Data? {
         let payload: [String: Any] = [
-            "method": "call", "name": tool, "arguments": arguments,
+            "method": "call", "name": tool, "args": arguments,
         ]
         guard JSONSerialization.isValidJSONObject(payload),
               var data = try? JSONSerialization.data(withJSONObject: payload)

@@ -3315,6 +3315,22 @@ extension Selftest {
         } else {
             expect(false, "garbage bytes are malformedResponse, never a crash")
         }
+        // A TOOL error arrives inside a SUCCESSFUL envelope. Reading it as an
+        // empty success is how a wrong argument key hid for a whole round —
+        // every window snapshot looked like "fine, nothing in it".
+        let toolError = """
+        {"ok":true,"result":{"isError":true,\
+        "content":[{"type":"text","text":"Missing required integer field: pid"}]}}
+        """
+        if case .failure(.daemonError(let message)) = CuaDriver.parseResponse(
+            Data(toolError.utf8)) {
+            expect(message.contains("Missing required integer field"),
+                   "a tool error is surfaced verbatim, not swallowed")
+        } else {
+            expect(false, "isError inside ok:true is a failure, never an "
+                       + "empty success")
+        }
+
         guard let request = CuaDriver.encodeRequest(
             tool: "click", arguments: ["pid": 7]) else {
             expect(false, "requests encode")
@@ -3325,7 +3341,13 @@ extension Selftest {
             as? [String: Any]
         expect((decoded?["method"] as? String) == "call"
                && (decoded?["name"] as? String) == "click",
-               "requests use the daemon's {method:call,name,arguments} shape")
+               "requests use the daemon's {method:call,name,args} shape")
+        // The key is `args`. Verified live against driver 0.21.0:
+        // `arguments`, `input` and `params` are all silently ignored, and
+        // the tool then fails for missing required fields.
+        expect((decoded?["args"] as? [String: Any])?["pid"] as? Int == 7,
+               "tool parameters travel under `args` — the one key the daemon "
+                   + "actually reads")
     }
 
     private static func testCuaKeyMap() {
