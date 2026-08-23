@@ -3146,6 +3146,7 @@ extension Selftest {
 
     static func testBackgroundActions() {
         testTypedTextAppearsInTheTrace()
+        testCuaSocketRefusesAnImpostor()
         testCuaProtocolFraming()
         testCuaKeyMap()
         testCuaWindowPick()
@@ -3218,6 +3219,78 @@ extension Selftest {
         expect((longObserved?.unicodeScalars.count ?? 999) <= 140,
                "decomposed text is bounded in code points, the unit the "
                    + "engine's clip actually counts")
+    }
+
+    /// The driver socket has no credential of its own, so Velora verifies the
+    /// peer's code signature before writing anything. Proving that check
+    /// ACCEPTS the real daemon is not enough — a control that always returns
+    /// true would pass that test and protect nothing. Here the real transport
+    /// is pointed at a socket this process is listening on: the peer is
+    /// Velora itself, which is emphatically not Cua's driver, so the call
+    /// must be refused before a byte goes out.
+    private static func testCuaSocketRefusesAnImpostor() {
+        // Short by necessity: `sun_path` is 104 bytes, and the per-user temp
+        // directory alone is longer than that.
+        let path = "/tmp/velora-cua-\(UUID().uuidString.prefix(8)).sock"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        try? FileManager.default.removeItem(atPath: path)
+
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard listener >= 0 else {
+            expect(false, "the impostor socket can be created")
+            return
+        }
+        defer { close(listener) }
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let bound = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+            path.withCString { cString -> Bool in
+                let capacity = MemoryLayout.size(ofValue: pointer.pointee)
+                guard strlen(cString) < capacity else { return false }
+                _ = memcpy(pointer, cString, strlen(cString) + 1)
+                return true
+            }
+        }
+        guard bound else {
+            expect(false, "the impostor socket path fits in sockaddr_un")
+            return
+        }
+        let didBind = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { raw in
+                bind(listener, raw, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard didBind == 0, listen(listener, 4) == 0 else {
+            expect(false, "the impostor socket listens")
+            return
+        }
+        // Accept in the background so connect() completes; the impostor never
+        // gets to reply, because nothing should ever be written to it.
+        var acceptedBytes = -1
+        let accepted = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            let peer = accept(listener, nil, nil)
+            if peer >= 0 {
+                var timeout = timeval(tv_sec: 1, tv_usec: 0)
+                _ = setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+                               socklen_t(MemoryLayout<timeval>.size))
+                var buffer = [UInt8](repeating: 0, count: 256)
+                acceptedBytes = read(peer, &buffer, buffer.count)
+                close(peer)
+            }
+            accepted.signal()
+        }
+
+        let transport = CuaSocketTransport(socketPath: path)
+        let result = transport.call("check_permissions", arguments: [:],
+                                    timeout: 2)
+        if case .failure(.notRunning) = result {
+        } else {
+            expect(false, "an unverified socket peer is refused")
+        }
+        _ = accepted.wait(timeout: .now() + 3)
+        expect(acceptedBytes <= 0,
+               "nothing is written to a peer that failed the signature check")
     }
 
     private static func testCuaProtocolFraming() {

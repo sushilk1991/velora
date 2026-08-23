@@ -159,6 +159,15 @@ final class CuaSocketTransport: CuaTransport {
     /// far above any observed response yet still refuses a runaway stream.
     static let maxResponseBytes = 8 << 20
 
+    private let socketPath: String
+
+    /// The path is injectable so the selftest can point the real transport
+    /// at a socket it controls and prove the peer check REFUSES an impostor
+    /// — the direction of a security control that must never be assumed.
+    init(socketPath: String = CuaDriver.socketPath) {
+        self.socketPath = socketPath
+    }
+
     func call(_ tool: String, arguments: [String: Any],
               timeout: TimeInterval) -> Result<[String: Any], CuaDriverError> {
         guard let request = CuaDriver.encodeRequest(tool: tool, arguments: arguments)
@@ -172,7 +181,7 @@ final class CuaSocketTransport: CuaTransport {
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
-        let path = CuaDriver.socketPath
+        let path = socketPath
         let ok = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
             path.withCString { cString in
                 let capacity = MemoryLayout.size(ofValue: pointer.pointee)
