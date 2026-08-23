@@ -3145,6 +3145,7 @@ final class FakeCuaTransport: CuaTransport {
 extension Selftest {
 
     static func testBackgroundActions() {
+        testRoutedActionEndToEnd()
         testTypedTextAppearsInTheTrace()
         testCuaSocketRefusesAnImpostor()
         testCuaProtocolFraming()
@@ -3219,6 +3220,60 @@ extension Selftest {
         expect((longObserved?.unicodeScalars.count ?? 999) <= 140,
                "decomposed text is bounded in code points, the unit the "
                    + "engine's clip actually counts")
+    }
+
+    /// One whole routed action, planner to driver: the pieces were each
+    /// tested alone, which is exactly the shape of coverage that let a
+    /// broken transport look healthy. This drives ActionLoopRunner over the
+    /// real executor and the real routing host, with only the daemon and the
+    /// planner faked, and asserts the text reached the BACKGROUND window —
+    /// while the system host is never asked to bring anything forward.
+    private static func testRoutedActionEndToEnd() {
+        let system = FakeActionHost()
+        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        system.appsByName["Notes"] = ("Notes", "com.apple.notes")
+        let transport = FakeCuaTransport()
+        scriptNotesWorld(transport)
+        transport.responses["type_text"] = [
+            "effect": "confirmed", "delivery": ["mode": "background"],
+        ]
+        let host = makeRoutedHost(system: system, transport: transport)
+        let planner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "write a note", steps: [
+                ["do": "open_app", "app": "Notes"],
+                ["do": "wait_frontmost", "app": "Notes"],
+                ["do": "verify_context", "expect": ["My Note"]],
+                ["do": "type_text", "text": "packing list"],
+            ], done: true),
+        ])
+        let runner = ActionLoopRunner(host: host, planner: planner,
+                                      execute: true, allowSend: false)
+        var context = ActionContextSnapshot()
+        context.frontmostApp = "Ghostty"
+        context.frontmostBundle = "com.mitchellh.ghostty"
+        let result = runner.run(transcript: "in Notes write my packing list",
+                                context: context)
+
+        switch result {
+        case .performedUnverified(_, let trace):
+            expect(trace.contains { $0.hasPrefix("type_text") },
+                   "a routed action runs end to end and types")
+            expect(trace.contains { $0.hasPrefix("verify_context ok") },
+                   "and verifies against the background window's own title")
+        default:
+            expect(false, "a routed action completes; got \(result)")
+        }
+        // The whole point: the user's screen was never touched.
+        expect(!system.log.contains { $0.hasPrefix("openApp") },
+               "the system host never activated anything")
+        expect(system.typed.isEmpty,
+               "nothing was typed through the foreground path")
+        let typeCall = transport.calls.last { $0.tool == "type_text" }
+        expect((typeCall?.arguments["text"] as? String) == "packing list"
+               && (typeCall?.arguments["pid"] as? Int) == 500,
+               "the text reached the driver, addressed to the target pid")
+        expect((typeCall?.arguments["element_token"] as? String) != nil,
+               "addressed to an exact element, never the pid's focus")
     }
 
     /// The driver socket has no credential of its own, so Velora verifies the
