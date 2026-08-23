@@ -151,8 +151,16 @@ struct CuaSnapshot: Equatable {
         return chosen
     }
 
+    /// Index lookup that TOLERATES a malformed reply. `uniqueKeysWithValues`
+    /// traps on a repeated index, so a garbled driver response — or a
+    /// same-user process squatting the socket — could crash the app instead
+    /// of being refused (review finding).
+    var elementsByIndex: [Int: CuaElement] {
+        Dictionary(elements.map { ($0.index, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
     func hasWebAreaAncestor(_ element: CuaElement) -> Bool {
-        let byIndex = Dictionary(uniqueKeysWithValues: elements.map { ($0.index, $0) })
+        let byIndex = elementsByIndex
         var cursor = element.parentIndex
         var hops = 0
         while let index = cursor, hops < 64 {
@@ -251,7 +259,9 @@ enum CuaWindowPick {
 enum CuaPressPick {
     static func candidate(in elements: [CuaElement], label: String,
                           roles: Set<String>) -> CuaElement? {
-        let byIndex = Dictionary(uniqueKeysWithValues: elements.map { ($0.index, $0) })
+        // Duplicate indices must refuse, not trap (review finding).
+        let byIndex = Dictionary(elements.map { ($0.index, $0) },
+                                 uniquingKeysWith: { first, _ in first })
         for element in elements {
             // Match on the app-authored label only — a folded field VALUE
             // matching the spoken label must never make an element pressable.
@@ -308,6 +318,10 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let backgroundEnabled: () -> Bool
     /// Injectable so the selftest can gate health without spawning a daemon.
     private let ensureDaemon: (CuaTransport) -> Bool
+    /// Resolves a spoken app name using Velora's own knowledge, so routing
+    /// can be ruled out before a daemon is ever started. Returning nil just
+    /// means "can't tell from here" — the driver decides.
+    private let localResolve: (String) -> (name: String, bundleID: String)?
     /// Native activation/hide for the materialization flash — injectable so
     /// the selftest never touches real apps. No synthesized keystrokes: a
     /// keystroke-based hide could land in the user's app if activation
@@ -328,9 +342,21 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// steps (review finding).
     private var everReady = false
     private var flashUsed = false
+    /// Flashes across the whole action, however many targets it visits.
+    private var flashCount = 0
+    private static let maximumFlashes = 2
     private var readinessStarted: TimeInterval?
-    /// Text this action itself delivered to the target — the background
-    /// analog of the foreground draft: committing keys refuse without it.
+    /// The exact element this action is writing into, pinned the first time
+    /// one is chosen. Without it the "lone editable" rule is relative to
+    /// whatever the tree looks like right now: a plan can verify against a
+    /// sidebar search field and then type into the document body that
+    /// materialized a step later, or the reverse (review finding). The
+    /// foreground host pins one AX element for the whole action; so does
+    /// this one.
+    private var pinnedElement: (index: Int, role: String)?
+    /// Text this action itself delivered to the pinned element — the
+    /// background analog of the foreground draft: committing keys refuse
+    /// without it, and it is dropped whenever the element or target changes.
     private var backgroundDraft = ""
 
     init(system: ActionHost, transport: CuaTransport,
@@ -340,26 +366,39 @@ final class BackgroundRoutingActionHost: ActionHost {
          activateApp: @escaping (Int) -> Void
             = BackgroundRoutingActionHost.activateOnMain,
          hideApp: @escaping (Int) -> Bool
-            = BackgroundRoutingActionHost.hideOnMain) {
+            = BackgroundRoutingActionHost.hideOnMain,
+         localResolve: @escaping (String) -> (name: String, bundleID: String)?
+            = BackgroundRoutingActionHost.resolveRunningApp) {
         self.system = system
         self.transport = transport
         self.backgroundEnabled = backgroundEnabled
         self.ensureDaemon = ensureDaemon
         self.activateApp = activateApp
         self.hideApp = hideApp
+        self.localResolve = localResolve
+    }
+
+    /// Best-effort local identity for a spoken app name: the running apps
+    /// are what a background action almost always means, and they carry
+    /// their bundle ids already.
+    static func resolveRunningApp(named name: String)
+        -> (name: String, bundleID: String)? {
+        let work: () -> (name: String, bundleID: String)? = {
+            let running = NSWorkspace.shared.runningApplications.filter {
+                $0.activationPolicy == .regular && $0.localizedName != nil
+            }
+            guard let index = AppMatcher.bestMatch(
+                for: name, in: running.map { $0.localizedName ?? "" }),
+                  let bundleID = running[index].bundleIdentifier else { return nil }
+            return (running[index].localizedName ?? name, bundleID)
+        }
+        return Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
     }
 
     func beginActionInputSession() {
-        routed = false
-        targetPID = 0
-        targetWindowID = nil
-        targetName = ""
-        targetBundleID = ""
-        targetReady = false
-        everReady = false
+        unroute()
         flashUsed = false
-        readinessStarted = nil
-        backgroundDraft = ""
+        flashCount = 0
         system.beginActionInputSession()
     }
 
@@ -373,13 +412,27 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard backgroundEnabled() else {
             return system.openApp(named: name)
         }
+        let frontmost = system.frontmostApp()
+        // Pre-gate with Velora's OWN app knowledge before touching the
+        // driver. Starting the daemon is itself a cost — it is a same-user
+        // automation surface with its own telemetry — so an action that was
+        // never going to route (the app the user is in, a chat app, a
+        // browser) must not bring one up (review finding). The driver's
+        // answer is still authoritative below; this only avoids the spawn.
+        if let local = localResolve(name),
+           !BackgroundActionGate.shouldRoute(
+            enabled: true, targetName: local.name,
+            targetBundleID: local.bundleID,
+            frontmostName: frontmost?.name,
+            frontmostBundleID: frontmost?.bundleID) {
+            return system.openApp(named: name)
+        }
         // Resolve the target BEFORE deciding, so the gate judges the actual
         // app (bundle id included), not the spoken words.
         guard ensureDaemon(transport),
               let resolved = resolveApp(named: name) else {
             return system.openApp(named: name)
         }
-        let frontmost = system.frontmostApp()
         guard BackgroundActionGate.shouldRoute(
             enabled: true,
             targetName: resolved.name,
@@ -454,6 +507,14 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetReady = false
         everReady = false
         readinessStarted = nil
+        // A new target is a new window, a new element, and a new draft:
+        // text delivered to the previous app must never authorize a commit
+        // here (review finding — `unroute` cleared this, retargeting did
+        // not). The materialization allowance travels with the target, but
+        // the per-action ceiling still applies.
+        pinnedElement = nil
+        backgroundDraft = ""
+        flashUsed = false
         return true
     }
 
@@ -535,11 +596,12 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// USER'S app). Permitted once per action and only before the target has
     /// ever been ready — never between input steps.
     private func maybeFlash() {
-        guard !everReady, !flashUsed,
+        guard !everReady, !flashUsed, flashCount < Self.maximumFlashes,
               let started = readinessStarted,
               now() - started > Self.flashAfterSeconds,
               !system.screenIsLocked else { return }
         flashUsed = true
+        flashCount += 1
         activateApp(targetPID)
         system.sleep(ms: 700)
         // Only hide what actually came forward. If activation was refused,
@@ -566,8 +628,12 @@ final class BackgroundRoutingActionHost: ActionHost {
               case .success(let reply) = transport.call(
                 "list_windows", arguments: [:], timeout: Self.callTimeout),
               let windows = reply["windows"] as? [[String: Any]],
+              // Scoped by pid as well as id: WindowServer recycles window
+              // ids, and a reissued id would feed ANOTHER app's title into
+              // verify_context (review finding).
               let row = windows.first(where: {
                   ($0["window_id"] as? Int) == windowID
+                      && ($0["pid"] as? Int) == targetPID
               }),
               let title = row["title"] as? String else { return nil }
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -601,11 +667,31 @@ final class BackgroundRoutingActionHost: ActionHost {
         return freshPrimaryTextElement()?.element.role
     }
 
+    /// The pinned element, re-read from a fresh tree. The first successful
+    /// call pins; every later call must find the SAME element (index and
+    /// role) or it refuses — a window whose editable surfaces changed under
+    /// the action is not a target the plan ever verified.
     private func freshPrimaryTextElement()
         -> (snapshot: CuaSnapshot, element: CuaElement)? {
         guard let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
               let element = snapshot.primaryTextElement else { return nil }
+        if let pinnedElement {
+            guard pinnedElement.index == element.index,
+                  pinnedElement.role == element.role else {
+                // The draft belonged to the element that just went away.
+                backgroundDraft = ""
+                return nil
+            }
+        } else {
+            pinnedElement = (element.index, element.role)
+        }
         return (snapshot, element)
+    }
+
+    /// False while routed: the window being driven is deliberately NOT in
+    /// front of the user, so its labels cannot vouch for URL content.
+    var screenNamesAreUserVisible: Bool {
+        routed ? false : system.screenNamesAreUserVisible
     }
 
     func visibleNames() -> [String] {
@@ -653,6 +739,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetReady = false
         everReady = false
         readinessStarted = nil
+        pinnedElement = nil
         backgroundDraft = ""
     }
 

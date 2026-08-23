@@ -73,6 +73,13 @@ protocol ActionHost: AnyObject {
     /// Name-like labels visible in the frontmost window — what the model gets
     /// to look at between turns.
     func visibleNames() -> [String]
+    /// True when `visibleNames()` really is what the USER can see. The
+    /// open_url data fence admits screen names as "the spelling on screen",
+    /// which only holds for a window in front of the user; labels read out
+    /// of a background window the user cannot see are not that, and letting
+    /// them authorize URL content would reopen the exfiltration class the
+    /// fence exists to close.
+    var screenNamesAreUserVisible: Bool { get }
     /// URL of the frontmost page when a browser is frontmost, else nil.
     func frontmostPageURL() -> String?
     /// Press the on-screen control whose label matches. Label-addressed AX
@@ -134,8 +141,14 @@ enum ActionEffectKind: Equatable {
 
 struct ActionRunResult: Equatable {
     let outcome: ActionOutcome
-    /// One line per attempted step, for the log and for tests.
+    /// One line per attempted step — the DURABLE rendering, safe for the
+    /// log file and the task ledger. Typed text appears as a count only.
     let trace: [String]
+    /// The same lines with the plan's typed text quoted, for the planner's
+    /// next observation and nothing else. A bare "5 chars" left the model
+    /// unable to tell its words were already in, and it retyped chunks
+    /// until the turn budget died (observed live).
+    let observationTrace: [String]
     /// How many steps fully completed. The loop recomputes its carried safety
     /// state from THIS, not from the batch as written — a verify_context that
     /// failed at runtime must not count as having verified anything.
@@ -188,14 +201,24 @@ final class ActionExecutor {
 
     func run(_ plan: ActionPlan) -> ActionRunResult {
         var trace: [String] = []
+        /// Parallel to `trace`, differing only where a line carries content
+        /// that must not reach a durable sink.
+        var observationTrace: [String] = []
         var evidence: [ActionEvidenceEvent] = []
+
+        /// Appends one line to both renderings.
+        func note(_ line: String, observed: String? = nil) {
+            trace.append(line)
+            observationTrace.append(observed ?? line)
+        }
 
         /// Failure at `index`: exactly the steps before it completed.
         func failed(_ index: Int, _ reason: String,
                     recoverable: Bool) -> ActionRunResult {
             ActionRunResult(
                 outcome: .failed(step: index, reason: reason, recoverable: recoverable),
-                trace: trace, executedSteps: index, evidence: evidence)
+                trace: trace, observationTrace: observationTrace,
+                executedSteps: index, evidence: evidence)
         }
 
         guard plan.isExecutable else {
@@ -204,19 +227,20 @@ final class ActionExecutor {
         // Checked up front rather than per step: on a locked Mac every plan
         // fails, and it should say why instead of blaming the target app.
         guard !host.screenIsLocked else {
-            trace.append("blocked: screen locked")
+            note("blocked: screen locked")
             return failed(0, "the screen is locked", recoverable: false)
         }
 
         for (index, step) in plan.steps.enumerated() {
             if cancelled {
                 return ActionRunResult(outcome: .cancelled(step: index), trace: trace,
+                                       observationTrace: observationTrace,
                                        executedSteps: index, evidence: evidence)
             }
             // Permission and secure-input state can change mid-plan (the user
             // clicks a password field between steps).
             if step.isInput, !host.canPostInput {
-                trace.append("blocked: input not permitted")
+                note("blocked: input not permitted")
                 return failed(index, "keyboard input is not permitted right now",
                               recoverable: false)
             }
@@ -224,7 +248,7 @@ final class ActionExecutor {
             switch step {
             case .openApp(let name):
                 guard let resolved = host.openApp(named: name) else {
-                    trace.append("open_app \(name): not found")
+                    note("open_app \(name): not found")
                     return failed(index, "couldn't find an app called \(name)",
                                   recoverable: true)
                 }
@@ -238,11 +262,11 @@ final class ActionExecutor {
                 evidence.append(.appOpenRequested(
                     requested: Self.evidenceText(name, limit: 120),
                     resolved: Self.evidenceText(resolved, limit: 120)))
-                trace.append("open_app \(resolved)")
+                note("open_app \(resolved)")
 
             case .openURL(let url):
                 guard host.openURL(url) else {
-                    trace.append("open_url \(url.scheme ?? "?"): failed")
+                    note("open_url \(url.scheme ?? "?"): failed")
                     return failed(index, "couldn't open that link", recoverable: true)
                 }
                 // A URL hands off to whichever app owns the scheme; the plan
@@ -250,12 +274,12 @@ final class ActionExecutor {
                 expectedAppName = nil
                 expectedBundleID = nil
                 evidence.append(.unverifiedEffect(.openURL))
-                trace.append("open_url \(url.scheme ?? "?")")
+                note("open_url \(url.scheme ?? "?")")
 
             case .waitFrontmost(let app, let timeoutMs):
                 guard let front = waitForFrontmost(app, timeoutMs: timeoutMs) else {
                     let actual = host.frontmostApp()?.name ?? "nothing"
-                    trace.append("wait_frontmost \(app): timed out (front: \(actual))")
+                    note("wait_frontmost \(app): timed out (front: \(actual))")
                     return failed(index, "\(app) didn't come to the front",
                                   recoverable: true)
                 }
@@ -265,7 +289,7 @@ final class ActionExecutor {
                     requested: Self.evidenceText(app, limit: 120),
                     actual: Self.evidenceText(front.name, limit: 120),
                     bundleID: Self.evidenceText(front.bundleID, limit: 256)))
-                trace.append("wait_frontmost \(front.name)")
+                note("wait_frontmost \(front.name)")
 
             case .verifyContext(let terms):
                 // Read frontmost, then the labels, then frontmost again. The
@@ -274,12 +298,12 @@ final class ActionExecutor {
                 // the reads a focus change mid-step would let the plan verify
                 // one app's title and then type into another's window.
                 guard let before = host.frontmostApp() else {
-                    trace.append("verify_context: no frontmost app")
+                    note("verify_context: no frontmost app")
                     return failed(index, "couldn't read the active window",
                                   recoverable: false)
                 }
                 if expectedAppName != nil || expectedBundleID != nil, !focusStillHeld() {
-                    trace.append("verify_context: focus lost before the check")
+                    note("verify_context: focus lost before the check")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",
                                   recoverable: false)
                 }
@@ -302,12 +326,12 @@ final class ActionExecutor {
                 }
                 guard let after = host.frontmostApp(),
                       after.bundleID == before.bundleID, after.name == before.name else {
-                    trace.append("verify_context: focus moved while reading the screen")
+                    note("verify_context: focus moved while reading the screen")
                     return failed(index, "the active window changed mid-check",
                                   recoverable: false)
                 }
                 guard AppMatcher.contextMatches(terms, in: [title, label, selection]) else {
-                    trace.append("verify_context \(terms.joined(separator: "+")): "
+                    note("verify_context \(terms.joined(separator: "+")): "
                                  + "no match in '\(title ?? "")' / '\(label ?? "")'"
                                  + " / '\(selection ?? "")'")
                     // Recoverable BY DESIGN: this is the observation the loop
@@ -325,7 +349,7 @@ final class ActionExecutor {
                 // Record WHAT satisfied the check, not just that it did. A
                 // check that passes for the wrong reason is invisible
                 // otherwise, and this one guards a message to a human.
-                trace.append("verify_context ok [\(terms.joined(separator: "+"))] "
+                note("verify_context ok [\(terms.joined(separator: "+"))] "
                              + "title='\(title ?? "")' label='\(label ?? "")' "
                              + "selection='\(selection ?? "")'")
 
@@ -336,7 +360,7 @@ final class ActionExecutor {
                 // TextEdit had no document, so the text went nowhere and the
                 // run still claimed it had typed 17 characters.
                 guard host.hasFocusedTextTarget else {
-                    trace.append("type_text: nothing focused to type into")
+                    note("type_text: nothing focused to type into")
                     // Recoverable: the next turn can open a compose field or
                     // press the element that would focus one.
                     return failed(
@@ -346,7 +370,7 @@ final class ActionExecutor {
                         recoverable: true)
                 }
                 guard focusStillHeld() else {
-                    trace.append("type_text: focus lost")
+                    note("type_text: focus lost")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",
                                   recoverable: false)
                 }
@@ -357,34 +381,34 @@ final class ActionExecutor {
                     ok = host.typeText(text, expecting: expectedBundleID)
                 }
                 guard ok else {
-                    trace.append("type_text: refused")
+                    note("type_text: refused")
                     return failed(index, "couldn't type that text", recoverable: false)
                 }
                 evidence.append(.unverifiedEffect(
                     step == .pasteText(text) ? .pasteText : .typeText))
-                // The text itself, not just a count. The trace is what the
-                // planner sees between turns, and a bare "5 chars" gives it
-                // no way to tell whether the words it meant to write are
-                // already in — observed live: a 4B planner retyped chunks
-                // until the turn budget ran out. This is the plan's OWN
-                // text, never anything read off the screen, so echoing it
-                // back adds no untrusted content.
-                // Bounded to fit inside the engine's 140-char clip of an
-                // executed line, so the quoted text is never cut mid-word by
-                // the prompt builder.
-                trace.append("type_text \(text.count) chars: "
-                             + "\"\(Self.evidenceText(text, limit: 100))\"")
+                // The planner gets the text, the log gets the count. A bare
+                // count gave the model no way to tell its words were already
+                // in, and it retyped chunks until the turn budget ran out
+                // (observed live) — but message and note bodies must not
+                // land in a durable log file. This is the plan's OWN text,
+                // never anything read off the screen, so putting it in the
+                // observation adds no untrusted content. Bounded in UNICODE
+                // SCALARS so the engine's 140-code-point clip of an executed
+                // line cannot cut it mid-quote.
+                note("type_text \(text.count) chars",
+                     observed: "type_text \(text.count) chars: "
+                         + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
 
             case .key(let name, let mods, let repeatCount):
                 guard focusStillHeld() else {
-                    trace.append("key \(name): focus lost")
+                    note("key \(name): focus lost")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",
                                   recoverable: false)
                 }
                 if ActionPlan.Limits.committingKeys.contains(name) {
                     guard let bundleID = expectedBundleID,
                           ActionRuntimePolicy.isCommunicationBundle(bundleID) else {
-                        trace.append("key \(name): untrusted communication bundle")
+                        note("key \(name): untrusted communication bundle")
                         return failed(
                             index,
                             "the active app is not an approved communication app",
@@ -392,26 +416,28 @@ final class ActionExecutor {
                     }
                 }
                 guard let code = ActionKey.keyCode(for: name) else {
-                    trace.append("key \(name): unmappable")
+                    note("key \(name): unmappable")
                     return failed(index, "can't press \(name)", recoverable: false)
                 }
                 let flags = ActionModifier.flags(for: mods)
                 for iteration in 0..<repeatCount {
                     if cancelled {
                         return ActionRunResult(outcome: .cancelled(step: index),
-                                               trace: trace, executedSteps: index,
+                                               trace: trace,
+                                               observationTrace: observationTrace,
+                                               executedSteps: index,
                                                evidence: evidence)
                     }
                     guard host.pressKey(name: name, mods: mods, keyCode: code,
                                         flags: flags,
                                         expecting: expectedBundleID) else {
-                        trace.append("key \(name): failed at \(iteration)")
+                        note("key \(name): failed at \(iteration)")
                         return failed(index, "couldn't press \(name)", recoverable: false)
                     }
                     if repeatCount > 1 { host.sleep(ms: 30) }
                 }
                 evidence.append(.unverifiedEffect(.key))
-                trace.append("key \(mods.joined(separator: "+"))\(mods.isEmpty ? "" : "+")\(name)"
+                note("key \(mods.joined(separator: "+"))\(mods.isEmpty ? "" : "+")\(name)"
                              + (repeatCount > 1 ? " x\(repeatCount)" : ""))
 
             case .pressElement(let label):
@@ -420,31 +446,32 @@ final class ActionExecutor {
                 // `canPostInput` deliberately does not apply — but a screen
                 // that locked mid-batch must still stop it.
                 guard !host.screenIsLocked else {
-                    trace.append("press_element \(label): screen locked")
+                    note("press_element \(label): screen locked")
                     return failed(index, "the screen is locked", recoverable: false)
                 }
                 guard focusStillHeld() else {
-                    trace.append("press_element \(label): focus lost")
+                    note("press_element \(label): focus lost")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",
                                   recoverable: false)
                 }
                 guard host.pressElement(label: label,
                                         expecting: expectedBundleID) else {
-                    trace.append("press_element \(label): not found")
+                    note("press_element \(label): not found")
                     // Recoverable BY DESIGN: "that label isn't on screen" is
                     // exactly the observation the next turn should react to.
                     return failed(index, "couldn't find '\(label)' on screen",
                                   recoverable: true)
                 }
                 evidence.append(.unverifiedEffect(.pressElement))
-                trace.append("press_element \(label)")
+                note("press_element \(label)")
 
             case .pause(let ms):
                 host.sleep(ms: ms)
-                trace.append("pause \(ms)ms")
+                note("pause \(ms)ms")
             }
         }
         return ActionRunResult(outcome: .completed, trace: trace,
+                               observationTrace: observationTrace,
                                executedSteps: plan.steps.count, evidence: evidence)
     }
 
@@ -468,6 +495,17 @@ final class ActionExecutor {
     /// accidentally render an app-authored control/bidi payload verbatim.
     private static func evidenceText(_ text: String, limit: Int) -> String {
         String(ActionPlan.sanitize(text).prefix(limit))
+    }
+
+    /// Bounds by unicode scalars rather than graphemes. The engine clips an
+    /// executed line at 140 PYTHON code points; 90 graphemes of decomposed
+    /// text can be far more than that, so the guarantee has to be measured
+    /// in the same unit the clipper uses (review finding).
+    private static func evidenceText(_ text: String, scalarLimit: Int) -> String {
+        let sanitized = ActionPlan.sanitize(text)
+        let scalars = sanitized.unicodeScalars
+        guard scalars.count > scalarLimit else { return sanitized }
+        return String(String.UnicodeScalarView(scalars.prefix(scalarLimit)))
     }
 
     private func waitForFrontmost(

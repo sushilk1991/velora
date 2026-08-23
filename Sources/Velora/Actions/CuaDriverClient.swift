@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// Client for the Cua Driver daemon (github.com/trycua — `com.trycua.driver`),
 /// an MIT-licensed computer-use daemon the user installs separately. It can
@@ -25,6 +26,27 @@ enum CuaDriver {
 
     static var isInstalled: Bool {
         FileManager.default.isExecutableFile(atPath: appBinaryPath)
+    }
+
+    /// The driver's Developer ID identity. `/Applications` is writable by
+    /// admin users without authentication, and a spawned child inherits
+    /// Velora's TCC responsibility — so an unverified binary at this path
+    /// would run under Velora's Accessibility grant with no prompt (review
+    /// finding). Nothing is spawned unless the bundle really is Cua's.
+    static let requirement = "identifier \"com.trycua.driver\" and anchor apple generic "
+        + "and certificate leaf[subject.OU] = \"YCK386LBJ7\""
+
+    static var signatureIsTrusted: Bool {
+        let url = URL(fileURLWithPath: "/Applications/CuaDriver.app") as CFURL
+        var staticCode: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess,
+              let staticCode else { return false }
+        var requirementRef: SecRequirement?
+        guard SecRequirementCreateWithString(
+                requirement as CFString, [], &requirementRef) == errSecSuccess,
+              let requirementRef else { return false }
+        return SecStaticCodeCheckValidity(
+            staticCode, [], requirementRef) == errSecSuccess
     }
 
     /// Parses one response line. The daemon wraps MCP-shaped results:
@@ -216,6 +238,11 @@ enum CuaDriverDaemon {
     static func ensureRunning(transport: CuaTransport) -> Bool {
         if isHealthy(transport: transport) { return true }
         guard CuaDriver.isInstalled else { return false }
+        guard CuaDriver.signatureIsTrusted else {
+            veloraLog("Velora: refusing to start cua-driver — the bundle at "
+                      + "/Applications/CuaDriver.app is not signed by Cua AI")
+            return false
+        }
         lock.lock()
         let alreadySpawned = spawned?.isRunning == true
         lock.unlock()

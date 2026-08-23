@@ -44,6 +44,8 @@ final class FakeActionHost: ActionHost {
     private(set) var log: [String] = []
     private(set) var typed: [String] = []
     private(set) var keys: [(CGKeyCode, CGEventFlags)] = []
+    /// The plan's own key vocabulary, as the hosts now receive it.
+    private(set) var keysByName: [(name: String, mods: [String])] = []
     private(set) var openedURLs: [URL] = []
     private(set) var pressedLabels: [String] = []
     private var frontmostReads = 0
@@ -89,6 +91,9 @@ final class FakeActionHost: ActionHost {
     func focusedSelectionLabel() -> String? { selectionLabel }
     func focusedElementRole() -> String? { focusedRole }
     func visibleNames() -> [String] { visibleNamesValue }
+    /// Mirrors the production foreground host: these come off the window in
+    /// front of the user. A test can flip it to model a background host.
+    var screenNamesAreUserVisible = true
     /// URL the fake browser page reports, or nil outside a browser.
     var pageURLValue: String?
     func frontmostPageURL() -> String? { pageURLValue }
@@ -119,8 +124,12 @@ final class FakeActionHost: ActionHost {
 
     func pressKey(name: String, mods: [String], keyCode: CGKeyCode,
                   flags: CGEventFlags, expecting bundleID: String?) -> Bool {
-        let committing = keyCode == ActionKey.keyCode(for: "return")
-            || keyCode == ActionKey.keyCode(for: "enter")
+        // Judge by NAME through the production table, exactly as both real
+        // hosts do. Deriving it from `keyCode` instead let the fake agree
+        // with production only by coincidence, so a name/keycode mismatch
+        // would pass here and behave differently for real (review finding).
+        keysByName.append((name, mods))
+        let committing = ActionPlan.Limits.committingKeys.contains(name.lowercased())
         if committing, actionDraft.isEmpty || !ownsDraft { return false }
         log.append("key(\(keyCode))")
         keys.append((keyCode, flags))
@@ -3169,12 +3178,46 @@ extension Selftest {
             return
         }
         let result = ActionExecutor(host: host).run(plan)
-        let typed = result.trace.first { $0.hasPrefix("type_text") }
-        expect(typed?.contains("\"Background hello from Velora\"") == true,
-               "the trace quotes what was typed, so the planner can tell its "
-                   + "words are already in")
-        expect((typed?.count ?? 999) <= 140,
-               "the traced line survives the engine's executed-line clip")
+        let observed = result.observationTrace.first { $0.hasPrefix("type_text") }
+        expect(observed?.contains("\"Background hello from Velora\"") == true,
+               "the observation quotes what was typed, so the planner can tell "
+                   + "its words are already in")
+        expect((observed?.unicodeScalars.count ?? 999) <= 140,
+               "the observed line survives the engine's 140-code-point clip")
+        // The durable rendering — log file, task ledger — keeps the count and
+        // drops the content: Action Mode composes messages, and those bodies
+        // must not land in a 0644 log (review finding).
+        let logged = result.trace.first { $0.hasPrefix("type_text") }
+        expect(logged == "type_text 28 chars",
+               "the durable trace reports the length, never the text")
+        expect(result.trace.count == result.observationTrace.count,
+               "the two renderings stay line-for-line parallel")
+
+        // A grapheme bound is not a code-point bound: 100 decomposed
+        // characters are 200 code points, and the engine clips code points.
+        let combining = String(repeating: "e\u{0301}", count: 120)
+        let longJSON = """
+        {"goal":"type a note","sends":false,"steps":[
+          {"do":"open_app","app":"TextEdit"},
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"verify_context","expect":["notes.txt"]},
+          {"do":"type_text","text":"\(combining)"}
+        ]}
+        """
+        let longHost = FakeActionHost()
+        longHost.appsByName["TextEdit"] = ("TextEdit", "com.apple.textedit")
+        longHost.frontmost = ("TextEdit", "com.apple.textedit")
+        longHost.windowTitle = "notes.txt"
+        guard let longPlan = decodePlan(longJSON) else {
+            expect(false, "FIXTURE: the decomposed-text plan decodes")
+            return
+        }
+        let longResult = ActionExecutor(host: longHost).run(longPlan)
+        let longObserved = longResult.observationTrace
+            .first { $0.hasPrefix("type_text") }
+        expect((longObserved?.unicodeScalars.count ?? 999) <= 140,
+               "decomposed text is bounded in code points, the unit the "
+                   + "engine's clip actually counts")
     }
 
     private static func testCuaProtocolFraming() {
@@ -3351,6 +3394,25 @@ extension Selftest {
         ])
         expect(!overclaimed.complete,
                "a reported count never outvotes the elements actually parsed")
+        // A malformed reply — or a same-user process squatting the socket —
+        // must be refused, never crash the app (review finding: building a
+        // uniquing dictionary from duplicate indices traps).
+        let duplicated = CuaSnapshot.parse([
+            "element_count": 3, "total_element_count": 3,
+            "elements": [
+                ["element_index": 0, "role": "AXWindow", "element_token": "s:0"],
+                ["element_index": 1, "role": "AXWebArea", "parent_index": 0,
+                 "element_token": "s:1"],
+                ["element_index": 1, "role": "AXTextArea", "parent_index": 1,
+                 "element_token": "s:1b"],
+            ],
+        ])
+        expect(duplicated.elements.count == 3,
+               "duplicate element indices parse without trapping")
+        _ = duplicated.primaryTextElement
+        _ = CuaPressPick.candidate(in: duplicated.elements, label: "anything",
+                                   roles: ["AXRow"])
+        expect(true, "selection over a duplicated tree completes safely")
         let flagOnly = CuaSnapshot.parse([
             "elements_complete": true,
             "elements": [["element_index": 0, "role": "AXTextArea",
@@ -3509,17 +3571,40 @@ extension Selftest {
         }
     }
 
+    /// Counts daemon starts, so a test can prove a non-routable action never
+    /// brings the automation surface up.
+    final class FakeDaemonStarter {
+        private(set) var starts = 0
+        var healthy = true
+        func ensure() -> Bool {
+            starts += 1
+            return healthy
+        }
+    }
+
     private static func makeRoutedHost(
         system: FakeActionHost, transport: FakeCuaTransport,
         enabled: Bool = true, healthy: Bool = true,
-        screen: FakeScreenOwnership? = nil
+        screen: FakeScreenOwnership? = nil,
+        starter: FakeDaemonStarter? = nil,
+        localApps: [String: String] = ["Notes": "com.apple.Notes",
+                                       "Slack": "com.tinyspeck.slackmacgap"]
     ) -> BackgroundRoutingActionHost {
         BackgroundRoutingActionHost(
             system: system, transport: transport,
             backgroundEnabled: { enabled },
-            ensureDaemon: { _ in healthy },
+            ensureDaemon: { _ in
+                if let starter { return starter.ensure() }
+                return healthy
+            },
             activateApp: { pid in screen?.activate(pid) },
-            hideApp: { pid in screen?.hide(pid) ?? true })
+            hideApp: { pid in screen?.hide(pid) ?? true },
+            localResolve: { name in
+                guard let index = AppMatcher.bestMatch(
+                    for: name, in: Array(localApps.keys)) else { return nil }
+                let key = Array(localApps.keys)[index]
+                return (key, localApps[key] ?? "")
+            })
     }
 
     private static func noteWindowState(
@@ -3840,6 +3925,88 @@ extension Selftest {
             _ = host.openApp(named: "Notes")
             expect(system.log.contains("openApp(Notes)"),
                    "acting on the app the user is in stays foreground")
+        }
+
+        // The element is PINNED, not re-derived: a window whose editable
+        // surfaces change under the action must refuse, or a plan can verify
+        // against a search field and then type into a document body.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            expect(host.focusedElementRole() == "AXTextArea",
+                   "the first look pins the document body")
+            expect(host.typeText("hello", expecting: nil), "typing lands")
+            // The body disappears; a search field is now the lone editable.
+            transport.responses["get_window_state"] = [
+                "snapshot_id": "s2", "element_count": 2,
+                "total_element_count": 2, "degraded": false,
+                "elements": [
+                    ["element_index": 0, "role": "AXWindow", "label": "My Note",
+                     "element_token": "s2:0"],
+                    ["element_index": 7, "role": "AXSearchField", "value": "",
+                     "parent_index": 0, "element_token": "s2:7",
+                     "enabled": true],
+                ],
+            ]
+            expect(!host.typeText("secret", expecting: nil),
+                   "a different element than the pinned one refuses the write")
+            expect(!host.hasFocusedTextTarget,
+                   "and reports no target rather than silently retargeting")
+            transport.responses["press_key"] = ["effect": "unverifiable"]
+            expect(!host.pressKey(name: "return", mods: [], keyCode: 36,
+                                  flags: [], expecting: nil),
+                   "the draft died with the element it was typed into")
+        }
+
+        // Labels harvested from a window the user cannot see must not be
+        // able to authorize outbound URL content.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            expect(host.screenNamesAreUserVisible,
+                   "before routing, screen names ARE what the user sees")
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            expect(!host.screenNamesAreUserVisible,
+                   "a background window's labels are payloads, not spelling — "
+                       + "they must not feed the open_url token pool")
+            host.beginActionInputSession()
+            expect(host.screenNamesAreUserVisible,
+                   "the next action starts trusting the foreground again")
+        }
+
+        // Starting the daemon is itself a cost — a same-user automation
+        // surface with its own telemetry. An action that was never going to
+        // route must not bring one up.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
+            system.appsByName["Notes"] = ("Notes", "com.apple.notes")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let starter = FakeDaemonStarter()
+            let host = makeRoutedHost(system: system, transport: transport,
+                                      starter: starter)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Slack")
+            expect(starter.starts == 0,
+                   "a chat-app action never starts the driver daemon")
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(starter.starts == 1,
+                   "an action that does route starts it exactly once")
         }
 
         // The next action starts unrouted even after a routed one.

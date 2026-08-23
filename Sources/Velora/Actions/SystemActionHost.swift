@@ -259,6 +259,10 @@ final class SystemActionHost: ActionHost {
         return ScreenContext.visibleNames(of: app)
     }
 
+    /// These come off the frontmost window, which is by definition what the
+    /// user is looking at.
+    var screenNamesAreUserVisible: Bool { true }
+
     /// Press the navigation element whose visible label matches. The
     /// frontmost app must still be the one the plan verified; ScreenContext
     /// also refuses every non-navigation AX role before AXPress. Communication
@@ -401,8 +405,10 @@ final class SystemActionHost: ActionHost {
 
     func pressKey(name: String, mods: [String], keyCode: CGKeyCode,
                   flags: CGEventFlags, expecting bundleID: String?) -> Bool {
-        let committing = keyCode == ActionKey.keyCode(for: "return")
-            || keyCode == ActionKey.keyCode(for: "enter")
+        // One definition of "commits text", shared with the background host:
+        // the policy table, judged on the plan's own key name. The old
+        // keycode inference agreed only by coincidence (review finding).
+        let committing = ActionPlan.Limits.committingKeys.contains(name.lowercased())
         if committing {
             guard let target = actionTextTarget,
                   !actionDraft.isEmpty,

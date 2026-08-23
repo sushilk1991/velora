@@ -114,6 +114,10 @@ final class ActionLoopRunner {
         carried.urlTokenPool = ActionPlan.urlTokenPool(
             [transcript, context.pageURL] + context.screenNames)
         var fullTrace: [String] = []
+        /// What the PLANNER is shown between turns. Identical to `fullTrace`
+        /// except where a line carries the plan's typed text, which belongs
+        /// in the next prompt but never in the log or the task ledger.
+        var observationTrace: [String] = []
         var completionEvidence = ActionCompletionEvidence()
         var lockedSends: Bool?
         var lockedGoal = ""
@@ -142,7 +146,7 @@ final class ActionLoopRunner {
                    asks < Self.maxTurns + 2, host.now() < deadline, !isCancelled {
                     asks += 1
                     reply = planner.observe(gatherObservation(
-                        executed: fullTrace,
+                        executed: observationTrace,
                         failedStep: "steps rejected before running: \(reason) "
                             + "— propose different steps",
                         state: &carried))
@@ -213,7 +217,7 @@ final class ActionLoopRunner {
                     }
                     asks += 1
                     reply = planner.observe(gatherObservation(
-                        executed: fullTrace,
+                        executed: observationTrace,
                         failedStep: "steps rejected before running: \(message)",
                         state: &carried))
                     continue
@@ -239,6 +243,7 @@ final class ActionLoopRunner {
                 lock.unlock()
 
                 fullTrace.append(contentsOf: result.trace)
+                observationTrace.append(contentsOf: result.observationTrace)
                 completionEvidence.record(result)
                 // Runtime truth, not batch intent: only steps that actually
                 // completed update the carried safety state.
@@ -262,7 +267,8 @@ final class ActionLoopRunner {
                     }
                     asks += 1
                     reply = planner.observe(gatherObservation(
-                        executed: fullTrace, failedStep: nil, state: &carried))
+                        executed: observationTrace, failedStep: nil,
+                        state: &carried))
 
                 case .cancelled:
                     planner.end()
@@ -279,8 +285,8 @@ final class ActionLoopRunner {
                     // smarter than a retry.
                     asks += 1
                     reply = planner.observe(gatherObservation(
-                        executed: fullTrace,
-                        failedStep: result.trace.last ?? reason,
+                        executed: observationTrace,
+                        failedStep: result.observationTrace.last ?? reason,
                         state: &carried))
                 }
             }
@@ -316,9 +322,12 @@ final class ActionLoopRunner {
         let pageURL = host.frontmostPageURL() ?? ""
         if state.urlTokenPool != nil {
             // Names the user can see may enter the next search URL (screen
-            // spelling); titles/selections never do.
+            // spelling); titles/selections never do. A host driving a window
+            // the user cannot see contributes nothing here — those labels
+            // are payloads, not spelling.
+            let admissible = host.screenNamesAreUserVisible ? visibleNames : []
             state.urlTokenPool?.formUnion(
-                ActionPlan.urlTokenPool(visibleNames + [pageURL]))
+                ActionPlan.urlTokenPool(admissible + [pageURL]))
         }
         var observation: [String: Any] = [
             "frontmost_app": front?.name ?? "",
