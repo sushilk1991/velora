@@ -287,6 +287,7 @@ final class SettingsModel: ObservableObject {
         streamTypingEnabled = config.streamTypingEnabled
         actionHotkey = config.actionHotkey
         actionsEnabled = config.actionsEnabled
+        backgroundActions = config.backgroundActions
         voiceEdit = config.voiceEdit
         hotkeyMode = config.hotkeyMode
         inputDeviceUID = config.inputDeviceUID
@@ -423,6 +424,7 @@ final class SettingsModel: ObservableObject {
         streamTypingEnabled = imported.shortcuts.streamTypingEnabled
         actionHotkey = imported.shortcuts.action
         actionsEnabled = imported.shortcuts.actionsEnabled
+        backgroundActions = imported.shortcuts.backgroundActions
         voiceEdit = imported.shortcuts.voiceEdit
         hotkeyMode = imported.shortcuts.behavior
 
@@ -975,6 +977,13 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, actionsEnabled != oldValue else { return }
             config.actionsEnabled = actionsEnabled
             NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var backgroundActions: Bool {
+        didSet {
+            guard !applyingImportedSettings, backgroundActions != oldValue else { return }
+            config.backgroundActions = backgroundActions
         }
     }
 

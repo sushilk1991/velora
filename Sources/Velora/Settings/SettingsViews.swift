@@ -811,6 +811,17 @@ struct ShortcutsSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
+                if CuaDriver.isInstalled {
+                    Toggle(isOn: $model.backgroundActions) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Work in the background")
+                            Text("When an action targets another app, Velora drives it through your Cua Driver without taking over your screen or keyboard. Messaging apps and browsers still run in front.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .disabled(!model.actionsEnabled)
+                }
             } header: {
                 Text("Voice actions")
             } footer: {

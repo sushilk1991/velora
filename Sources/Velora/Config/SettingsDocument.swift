@@ -150,6 +150,9 @@ extension SettingsDocument {
         /// Action Mode: hold, speak a command, Velora carries it out.
         var action: Hotkey
         var actionsEnabled: Bool
+        /// Run Actions against a background window (via the user-installed
+        /// Cua Driver) instead of taking over the screen, when possible.
+        var backgroundActions: Bool
 
         static let defaults = Shortcuts(
             dictation: .rightOption,
@@ -159,13 +162,15 @@ extension SettingsDocument {
             streamTypingEnabled: true,
             behavior: .hold,
             action: .controlShiftA,
-            actionsEnabled: true)
+            actionsEnabled: true,
+            backgroundActions: true)
 
         // Older settings have neither Stream Typing nor Action Mode keys;
         // decoding fills them rather than resetting unrelated preferences.
         init(dictation: Hotkey, editSelection: Hotkey, voiceEdit: Bool,
              streamTyping: Hotkey, streamTypingEnabled: Bool,
-             behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool) {
+             behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool,
+             backgroundActions: Bool) {
             self.dictation = dictation
             self.editSelection = editSelection
             self.voiceEdit = voiceEdit
@@ -174,6 +179,7 @@ extension SettingsDocument {
             self.behavior = behavior
             self.action = action
             self.actionsEnabled = actionsEnabled
+            self.backgroundActions = backgroundActions
         }
 
         init(from decoder: Decoder) throws {
@@ -186,6 +192,8 @@ extension SettingsDocument {
                 ?? Shortcuts.defaultActionHotkey
             actionsEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .actionsEnabled) ?? true
+            backgroundActions = try container.decodeIfPresent(
+                Bool.self, forKey: .backgroundActions) ?? true
             streamTyping = try container.decodeIfPresent(
                 Hotkey.self, forKey: .streamTyping)
                 ?? Shortcuts.defaultStreamHotkey(

@@ -783,6 +783,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationWillTerminate(_ notification: Notification) {
         UpdateInstaller.shared.installOnQuitIfReady()
+        // A driver daemon Velora started is a same-user automation surface;
+        // it should not outlive the app that needed it.
+        CuaDriverDaemon.stopIfVeloraStarted()
         dictation?.cancelForTermination()
         transcriber?.cancelForTermination()
         meetingCoordinator?.stop()

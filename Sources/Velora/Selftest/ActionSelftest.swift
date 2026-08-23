@@ -117,8 +117,8 @@ final class FakeActionHost: ActionHost {
         typeText(text, expecting: bundleID)
     }
 
-    func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags,
-                  expecting bundleID: String?) -> Bool {
+    func pressKey(name: String, mods: [String], keyCode: CGKeyCode,
+                  flags: CGEventFlags, expecting bundleID: String?) -> Bool {
         let committing = keyCode == ActionKey.keyCode(for: "return")
             || keyCode == ActionKey.keyCode(for: "enter")
         if committing, actionDraft.isEmpty || !ownsDraft { return false }
@@ -257,6 +257,7 @@ extension Selftest {
         testActionShortcutSettingsMigration()
         testStreamDraftRevisionPolicy()
         testActionCLIParsing()
+        testBackgroundActions()
     }
 
     private static func testAgentTaskLedger() {
@@ -3101,4 +3102,766 @@ extension Selftest {
       {"do":"type_text","text":"running five late"}
     ]}
     """
+}
+
+// MARK: - Background action routing (Cua Driver)
+
+/// Scripted driver daemon. Responses are queued per tool; the call log keeps
+/// tool + arguments so tests can assert what would have reached the daemon.
+final class FakeCuaTransport: CuaTransport {
+    private(set) var calls: [(tool: String, arguments: [String: Any])] = []
+    /// Constant response per tool, unless a queued response exists.
+    var responses: [String: [String: Any]] = [:]
+    /// One-shot responses consumed before `responses`.
+    var queued: [String: [[String: Any]]] = [:]
+    /// Tools that fail at the transport layer.
+    var failing: Set<String> = []
+
+    func call(_ tool: String, arguments: [String: Any],
+              timeout: TimeInterval) -> Result<[String: Any], CuaDriverError> {
+        calls.append((tool, arguments))
+        if failing.contains(tool) { return .failure(.notRunning) }
+        if var queue = queued[tool], !queue.isEmpty {
+            let response = queue.removeFirst()
+            queued[tool] = queue
+            return .success(response)
+        }
+        if let response = responses[tool] { return .success(response) }
+        return .failure(.daemonError("unscripted tool \(tool)"))
+    }
+
+    func callCount(_ tool: String) -> Int { calls.filter { $0.tool == tool }.count }
+}
+
+extension Selftest {
+
+    static func testBackgroundActions() {
+        testTypedTextAppearsInTheTrace()
+        testCuaProtocolFraming()
+        testCuaKeyMap()
+        testCuaWindowPick()
+        testCuaSnapshotParsing()
+        testCuaPressPick()
+        testBackgroundActionGate()
+        testBackgroundRoutingHost()
+    }
+
+    /// The planner only learns what an action has already written from the
+    /// executed trace. A bare character count let a small planner retype the
+    /// same chunk until the turn budget ran out (observed live, 2026-08-23),
+    /// so the trace quotes the plan's own text — bounded to survive the
+    /// engine's 140-character clip of an executed line.
+    private static func testTypedTextAppearsInTheTrace() {
+        let host = FakeActionHost()
+        host.appsByName["TextEdit"] = ("TextEdit", "com.apple.textedit")
+        host.frontmost = ("TextEdit", "com.apple.textedit")
+        host.windowTitle = "notes.txt"
+        let json = """
+        {"goal":"type a note","sends":false,"steps":[
+          {"do":"open_app","app":"TextEdit"},
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"verify_context","expect":["notes.txt"]},
+          {"do":"type_text","text":"Background hello from Velora"}
+        ]}
+        """
+        guard let plan = decodePlan(json) else {
+            expect(false, "FIXTURE: the trace plan decodes")
+            return
+        }
+        let result = ActionExecutor(host: host).run(plan)
+        let typed = result.trace.first { $0.hasPrefix("type_text") }
+        expect(typed?.contains("\"Background hello from Velora\"") == true,
+               "the trace quotes what was typed, so the planner can tell its "
+                   + "words are already in")
+        expect((typed?.count ?? 999) <= 140,
+               "the traced line survives the engine's executed-line clip")
+    }
+
+    private static func testCuaProtocolFraming() {
+        let ok = """
+        {"ok":true,"result":{"content":[{"type":"text","text":"x"}],\
+        "structuredContent":{"width":100}}}
+        """
+        if case .success(let payload) = CuaDriver.parseResponse(Data(ok.utf8)) {
+            expect((payload["width"] as? Int) == 100,
+                   "driver responses unwrap to structuredContent")
+        } else {
+            expect(false, "a well-formed ok response parses")
+        }
+        if case .failure(.daemonError(let message)) = CuaDriver.parseResponse(
+            Data("{\"ok\":false,\"error\":\"no such tool\"}".utf8)) {
+            expect(message == "no such tool", "daemon errors carry their message")
+        } else {
+            expect(false, "an ok:false response is a daemonError")
+        }
+        if case .failure(.malformedResponse) = CuaDriver.parseResponse(
+            Data("not json".utf8)) {
+        } else {
+            expect(false, "garbage bytes are malformedResponse, never a crash")
+        }
+        guard let request = CuaDriver.encodeRequest(
+            tool: "click", arguments: ["pid": 7]) else {
+            expect(false, "requests encode")
+            return
+        }
+        expect(request.last == 0x0A, "requests are newline-terminated")
+        let decoded = (try? JSONSerialization.jsonObject(with: request))
+            as? [String: Any]
+        expect((decoded?["method"] as? String) == "call"
+               && (decoded?["name"] as? String) == "click",
+               "requests use the daemon's {method:call,name,arguments} shape")
+    }
+
+    private static func testCuaKeyMap() {
+        expect(CuaKeyMap.driverKey(forPlanKey: "enter") == "return",
+               "enter translates to the driver's return")
+        expect(CuaKeyMap.driverKey(forPlanKey: "page_up") == "pageup"
+               && CuaKeyMap.driverKey(forPlanKey: "page_down") == "pagedown",
+               "page keys translate to the driver's spelling")
+        expect(CuaKeyMap.driverKey(forPlanKey: "forward_delete") == nil,
+               "keys outside the driver vocabulary refuse instead of guessing")
+        expect(CuaKeyMap.driverKey(forPlanKey: "comma") == nil,
+               "worded punctuation is not in the driver vocabulary")
+        expect(CuaKeyMap.driverKey(forPlanKey: "k") == "k"
+               && CuaKeyMap.driverKey(forPlanKey: "7") == "7",
+               "letters and digits pass through")
+        expect(CuaKeyMap.driverKey(forPlanKey: "f5") == "f5"
+               && CuaKeyMap.driverKey(forPlanKey: "f12") == "f12",
+               "function keys pass through")
+        expect(CuaKeyMap.driverModifiers(["cmd", "control", "shift"])
+               == ["cmd", "ctrl", "shift"],
+               "modifier names translate (control -> ctrl)")
+    }
+
+    private static func testCuaWindowPick() {
+        func window(_ pid: Int, _ id: Int, layer: Int = 0, z: Int,
+                    width: Double, height: Double,
+                    title: String? = nil) -> [String: Any] {
+            var raw: [String: Any] = [
+                "pid": pid, "window_id": id, "layer": layer, "z_index": z,
+                "bounds": ["width": width, "height": height],
+            ]
+            if let title { raw["title"] = title }
+            return raw
+        }
+        let windows = [
+            // Bigger, but further back: size is not what "the window" means.
+            window(9, 1, z: 100, width: 1400, height: 900, title: "Back"),
+            window(9, 2, z: 400, width: 700, height: 500, title: "Front"),
+            // The shapes observed live on TextEdit: full-width 30px menu-bar
+            // strips and a 64px save-panel accessory view. Both pass any
+            // area-only filter, and both sit ABOVE the document in z-order.
+            window(9, 3, z: 900, width: 3360, height: 30),
+            window(9, 6, z: 950, width: 724, height: 64,
+                   title: "Save Panel Accessory View"),
+            window(8, 4, z: 999, width: 2000, height: 2000),
+            window(9, 5, layer: 3, z: 999, width: 2000, height: 2000),
+        ]
+        let pick = CuaWindowPick.choose(windows, pid: 9)
+        expect(pick?.id == 2 && pick?.title == "Front",
+               "the topmost document window wins — z-order, not area, is what "
+                   + "the app itself would bring forward, and chrome strips "
+                   + "sitting above it are not documents")
+        let hiddenOnly = CuaWindowPick.choose(
+            [window(9, 1, z: 5, width: 900, height: 700, title: "Doc")], pid: 9)
+        expect(hiddenOnly?.id == 1, "an off-screen window is still drivable")
+        expect(CuaWindowPick.choose(windows, pid: 77) == nil,
+               "no window for the pid means no pick")
+        let stripsOnly = CuaWindowPick.choose(
+            [window(9, 3, z: 9, width: 3360, height: 30),
+             window(9, 6, z: 10, width: 724, height: 64, title: "Accessory")],
+            pid: 9)
+        expect(stripsOnly == nil,
+               "with only chrome-sized windows the pick refuses, never guesses")
+        // A titled document outranks an untitled overlay even when the
+        // overlay is on top.
+        let overlay = CuaWindowPick.choose(
+            [window(9, 1, z: 10, width: 900, height: 700, title: "Doc"),
+             window(9, 2, z: 800, width: 900, height: 700)], pid: 9)
+        expect(overlay?.id == 1,
+               "a titled document outranks an untitled overlay above it")
+    }
+
+    private static func testCuaSnapshotParsing() {
+        // The real driver's reply shape, captured live from TextEdit.
+        let payload: [String: Any] = [
+            "snapshot_id": "s00000004",
+            "degraded": false,
+            "elements_complete": false,
+            "element_count": 3, "total_element_count": 3,
+            "elements": [
+                ["element_index": 0, "role": "AXWindow", "label": "bgtype.txt",
+                 "element_token": "s00000004:0"],
+                ["element_index": 1, "role": "AXTextArea", "label": "seed line",
+                 "value": "seed line", "parent_index": 0,
+                 "element_token": "s00000004:1"],
+                ["element_index": 2, "role": "AXButton", "enabled": true,
+                 "parent_index": 0, "element_token": "s00000004:2"],
+            ],
+        ]
+        let snapshot = CuaSnapshot.parse(payload)
+        expect(snapshot.id == "s00000004" && !snapshot.degraded
+               && snapshot.elements.count == 3,
+               "snapshots parse id, degraded, and elements")
+        expect(snapshot.hasEditableTextElement,
+               "an AXTextArea counts as somewhere for text to go")
+        let degraded = CuaSnapshot.parse(["degraded": true, "elements": []])
+        expect(degraded.degraded && !degraded.hasEditableTextElement,
+               "a degraded snapshot offers nothing to type into")
+        // A tool-level refusal is not a healthy empty window.
+        let refused = CuaSnapshot.parse([
+            "status": "refused",
+            "refusal": ["code": "window_id_not_found"],
+        ])
+        expect(refused.degraded,
+               "a refused snapshot reads as degraded, never as an empty window")
+        // A truncated walk can MANUFACTURE uniqueness: one of two text areas
+        // cut off looks unambiguous. Selection refuses on an incomplete tree.
+        let truncated = CuaSnapshot.parse([
+            "elements_complete": false,
+            "element_count": 1, "total_element_count": 900,
+            "elements": [["element_index": 0, "role": "AXTextArea",
+                          "element_token": "s:0"]],
+        ])
+        expect(!truncated.complete && truncated.primaryTextElement == nil,
+               "a truncated tree can manufacture uniqueness — refuse it")
+        // Driver 0.21.0 reports `elements_complete: false` even on a walk
+        // that plainly finished (verified live: 67 of 67). Believing the flag
+        // over the counts would refuse EVERY background target, so the counts
+        // decide and the flag only ever adds completeness.
+        let wholeTree = CuaSnapshot.parse([
+            "elements_complete": false,
+            "element_count": 2, "total_element_count": 2,
+            "elements": [
+                ["element_index": 0, "role": "AXWindow", "element_token": "s:0"],
+                ["element_index": 1, "role": "AXTextArea", "value": "",
+                 "parent_index": 0, "element_token": "s:1"],
+            ],
+        ])
+        expect(wholeTree.complete && wholeTree.primaryTextElement?.index == 1,
+               "a walk holding as many elements as the tree has IS complete, "
+                   + "whatever elements_complete claims")
+        // The driver reports several different count fields; only the nodes
+        // actually parsed can be vouched for. A reply that CLAIMS a full
+        // count but ships fewer elements is truncated.
+        let overclaimed = CuaSnapshot.parse([
+            "element_count": 9, "total_element_count": 9,
+            "elements": [["element_index": 0, "role": "AXTextArea",
+                          "element_token": "s:0"]],
+        ])
+        expect(!overclaimed.complete,
+               "a reported count never outvotes the elements actually parsed")
+        let flagOnly = CuaSnapshot.parse([
+            "elements_complete": true,
+            "elements": [["element_index": 0, "role": "AXTextArea",
+                          "element_token": "s:0"]],
+        ])
+        expect(flagOnly.complete,
+               "a driver that does set the flag is still believed")
+
+        func text(_ index: Int, _ role: String, value: String? = nil,
+                  parent: Int? = nil) -> CuaElement {
+            CuaElement(index: index, token: "s:\(index)", role: role,
+                       label: nil, value: value, parentIndex: parent,
+                       enabled: true)
+        }
+        let noteWindow = CuaSnapshot(id: "s", degraded: false, complete: true,
+                                     elements: [
+            text(0, "AXTextArea", value: "body"),
+            text(1, "AXSearchField"),
+        ])
+        expect(noteWindow.primaryTextElement?.index == 0,
+               "the document body outranks a toolbar search field")
+        let twoBodies = CuaSnapshot(id: "s", degraded: false, complete: true,
+                                    elements: [
+            text(0, "AXTextArea"), text(1, "AXTextArea"),
+        ])
+        expect(twoBodies.primaryTextElement == nil,
+               "two equal text bodies are ambiguous — refuse, never guess")
+        // Web content echo-confirms AX writes without the DOM seeing them —
+        // the driver refuses to trust readback there, and so must Velora.
+        let webView = CuaSnapshot(id: "s", degraded: false, complete: true,
+                                  elements: [
+            text(0, "AXGroup"),
+            text(1, "AXWebArea", parent: 0),
+            text(2, "AXTextArea", value: "", parent: 1),
+        ])
+        expect(webView.primaryTextElement == nil,
+               "a text element under an AXWebArea is never a background target")
+
+        // The driver folds a text area's VALUE into its label; anything the
+        // plan itself typed must never come back as an app-authored label.
+        let folded = CuaElement(index: 0, token: "s:0", role: "AXTextArea",
+                                label: "typed by the plan",
+                                value: "typed by the plan",
+                                parentIndex: nil, enabled: true)
+        expect(folded.authoredLabel == nil,
+               "a label identical to the value is not an authored label")
+        let authored = CuaElement(index: 0, token: "s:0", role: "AXTextField",
+                                  label: "Message Himesh", value: "draft",
+                                  parentIndex: nil, enabled: true)
+        expect(authored.authoredLabel == "Message Himesh",
+               "a label distinct from the value is app-authored")
+    }
+
+    private static func testCuaPressPick() {
+        func element(_ index: Int, _ role: String, label: String?,
+                     parent: Int? = nil) -> CuaElement {
+            CuaElement(index: index, token: "s:\(index)", role: role,
+                       label: label, value: nil, parentIndex: parent,
+                       enabled: true)
+        }
+        let roles: Set<String> = ["AXRow", "AXCell"]
+        let rowWithChildText = [
+            element(0, "AXWindow", label: nil),
+            element(1, "AXRow", label: nil, parent: 0),
+            element(2, "AXStaticText", label: "Priya Sharma", parent: 1),
+        ]
+        expect(CuaPressPick.candidate(in: rowWithChildText,
+                                      label: "Priya Sharma",
+                                      roles: roles)?.index == 1,
+               "the pressable ancestor row is chosen when text lives on a child")
+        expect(CuaPressPick.candidate(in: rowWithChildText, label: "Priya",
+                                      roles: roles)?.index == 1,
+               "matching follows AppMatcher whole-word rules")
+        let priyanka = [element(0, "AXRow", label: "Priyanka Verma")]
+        expect(CuaPressPick.candidate(in: priyanka, label: "Priya",
+                                      roles: roles) == nil,
+               "Priya cannot press Priyanka — same rule as the foreground path")
+        let committing = [element(0, "AXRow", label: "Delete chat with Priya")]
+        expect(CuaPressPick.candidate(in: committing, label: "Priya",
+                                      roles: roles) == nil,
+               "the committing-verb denylist is judged in the background too")
+        let committingAncestor = [
+            element(0, "AXRow", label: "Unsubscribe from Priya"),
+            element(1, "AXStaticText", label: "Priya", parent: 0),
+        ]
+        expect(CuaPressPick.candidate(in: committingAncestor, label: "Priya",
+                                      roles: roles) == nil,
+               "a committing ancestor stops the walk instead of being pressed")
+        let button = [element(0, "AXButton", label: "Priya")]
+        expect(CuaPressPick.candidate(in: button, label: "Priya",
+                                      roles: roles) == nil,
+               "roles outside the allowed set are refused")
+    }
+
+    private static func testBackgroundActionGate() {
+        func route(_ bundleID: String, target: String = "Notes",
+                   front: String? = "Ghostty",
+                   frontBundle: String? = "com.mitchellh.ghostty",
+                   enabled: Bool = true) -> Bool {
+            BackgroundActionGate.shouldRoute(
+                enabled: enabled, targetName: target, targetBundleID: bundleID,
+                frontmostName: front, frontmostBundleID: frontBundle)
+        }
+        expect(route("com.apple.notes"),
+               "a native app that is not frontmost routes to the background")
+        expect(!route("com.apple.notes", enabled: false),
+               "the setting turns routing off")
+        // Production tables, not copies: a bundle added to the communication
+        // or browser sets must change this behavior automatically.
+        expect(!route("com.tinyspeck.slackmacgap"),
+               "communication apps keep the foreground evidence chain")
+        expect(!route("com.google.chrome"),
+               "browsers keep the foreground path (web AX is unverifiable)")
+        expect(!route("com.apple.notes", target: "Notes", front: "Notes",
+                      frontBundle: "com.apple.notes"),
+               "acting on the app the user is in stays foreground")
+        // Bundle identity is the guard; display names disagree across
+        // AppKit/driver often enough that name matching alone fails open.
+        expect(!route("com.microsoft.vscode", target: "Visual Studio Code",
+                      front: "Code", frontBundle: "com.microsoft.VSCode"),
+               "the same app under two display names is caught by bundle id")
+        // Fail closed: an unreadable frontmost app is not permission to drive
+        // something else "in the background" of it.
+        expect(!route("com.apple.notes", front: nil, frontBundle: nil),
+               "an unreadable frontmost app blocks routing")
+    }
+
+    /// Records what the flash actually did to the screen, so a test can
+    /// assert the user's app was left alone.
+    final class FakeScreenOwnership {
+        private(set) var activations: [Int] = []
+        private(set) var hides: [Int] = []
+        /// Whether activating actually succeeds (macOS activation is
+        /// advisory — it can be refused).
+        var activationSucceeds = true
+        var hideSucceeds = true
+        let system: FakeActionHost
+        let targetIdentity: (name: String, bundleID: String)
+
+        init(system: FakeActionHost,
+             targetIdentity: (name: String, bundleID: String)) {
+            self.system = system
+            self.targetIdentity = targetIdentity
+        }
+
+        func activate(_ pid: Int) {
+            activations.append(pid)
+            if activationSucceeds { system.frontmost = targetIdentity }
+        }
+
+        func hide(_ pid: Int) -> Bool {
+            hides.append(pid)
+            guard hideSucceeds else { return false }
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            return true
+        }
+    }
+
+    private static func makeRoutedHost(
+        system: FakeActionHost, transport: FakeCuaTransport,
+        enabled: Bool = true, healthy: Bool = true,
+        screen: FakeScreenOwnership? = nil
+    ) -> BackgroundRoutingActionHost {
+        BackgroundRoutingActionHost(
+            system: system, transport: transport,
+            backgroundEnabled: { enabled },
+            ensureDaemon: { _ in healthy },
+            activateApp: { pid in screen?.activate(pid) },
+            hideApp: { pid in screen?.hide(pid) ?? true })
+    }
+
+    private static func noteWindowState(
+        snapshot: String = "s00000001", value: String = ""
+    ) -> [String: Any] {
+        // Shaped like the REAL driver 0.21.0 reply, flag quirk included:
+        // `elements_complete` is false on a finished walk, and the counts are
+        // what actually say the tree is whole. A fixture that set the flag
+        // true would exercise a path production never sees.
+        [
+            "snapshot_id": snapshot, "degraded": false,
+            "elements_complete": false,
+            "element_count": 2, "total_element_count": 2,
+            "elements": [
+                ["element_index": 0, "role": "AXWindow", "label": "My Note",
+                 "element_token": "\(snapshot):0"],
+                ["element_index": 1, "role": "AXTextArea", "value": value,
+                 "parent_index": 0, "element_token": "\(snapshot):1",
+                 "enabled": true],
+            ],
+        ]
+    }
+
+    private static func scriptNotesWorld(_ transport: FakeCuaTransport) {
+        transport.responses["list_apps"] = ["apps": [
+            ["name": "Notes", "bundle_id": "com.apple.Notes",
+             "pid": 500, "running": true],
+            ["name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
+             "pid": 501, "running": true],
+        ]]
+        transport.responses["list_windows"] = ["windows": [
+            ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+             "bounds": ["width": 800.0, "height": 600.0], "title": "My Note"],
+        ]]
+        transport.responses["get_window_state"] = noteWindowState()
+    }
+
+    private static func testBackgroundRoutingHost() {
+        // The happy path: another app, native, daemon healthy — the action
+        // routes to the background and the system host never activates
+        // anything.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            expect(host.openApp(named: "Notes") == "Notes",
+                   "a background open resolves the driver's app name")
+            expect(!system.log.contains { $0.hasPrefix("openApp") },
+                   "the system host never activates a background target")
+            let front = host.frontmostApp()
+            expect(front?.name == "Notes"
+                   && front?.bundleID == "com.apple.notes",
+                   "once the window resolves, the target IS the frontmost")
+            expect(host.frontmostWindowTitle() == "My Note",
+                   "observations read the target window, not the user's")
+            expect(host.hasFocusedTextTarget,
+                   "an editable element in the target window permits typing")
+            expect(host.focusedElementRole() == "AXTextArea",
+                   "the observation reports the element typing will address — "
+                       + "without it the planner waits for focus forever")
+
+            transport.responses["type_text"] = ["effect": "confirmed",
+                                                "delivery": ["mode": "background"]]
+            expect(host.typeText("hello", expecting: "com.apple.notes"),
+                   "a driver-confirmed background type succeeds")
+            let typeCall = transport.calls.last { $0.tool == "type_text" }
+            expect((typeCall?.arguments["pid"] as? Int) == 500
+                   && (typeCall?.arguments["window_id"] as? Int) == 9,
+                   "typing is addressed to the exact target window")
+            expect((typeCall?.arguments["element_token"] as? String) == "s00000001:1",
+                   "typing names the window's text element — the pid's focused "
+                       + "element can live in a different window")
+            expect(!host.typeText("hello", expecting: "com.other.app"),
+                   "typing for a different expected bundle is refused")
+
+            // Press stays policy-gated: Notes grants no press roles, so the
+            // driver must never even be asked.
+            let clicksBefore = transport.callCount("click")
+            expect(!host.pressElement(label: "My Note", expecting: "com.apple.notes"),
+                   "press_element obeys ActionRuntimePolicy in the background")
+            expect(transport.callCount("click") == clicksBefore,
+                   "a policy-refused press sends nothing to the driver")
+
+            transport.responses["press_key"] = ["effect": "unverifiable",
+                                                "delivery": ["mode": "background"]]
+            expect(host.pressKey(name: "tab", mods: [], keyCode: 48,
+                                 flags: [], expecting: "com.apple.notes"),
+                   "a background key press is delivered by name")
+            let keyCall = transport.calls.last { $0.tool == "press_key" }
+            expect((keyCall?.arguments["key"] as? String) == "tab",
+                   "the plan's key name reaches the driver's vocabulary")
+            expect(!host.pressKey(name: "comma", mods: [], keyCode: 43,
+                                  flags: [], expecting: "com.apple.notes"),
+                   "an untranslatable key refuses instead of guessing")
+            // A committing key needs THIS action's own pending text — the
+            // background analog of the foreground draft gate. "hello" landed
+            // above, so Return is allowed exactly once.
+            expect(host.pressKey(name: "return", mods: [], keyCode: 36,
+                                 flags: [], expecting: "com.apple.notes"),
+                   "Return commits the text this action delivered")
+            expect(!host.pressKey(name: "return", mods: [], keyCode: 36,
+                                  flags: [], expecting: "com.apple.notes"),
+                   "a second Return has no draft of its own to commit")
+        }
+
+        // Committing keys are refused outright when the action never typed.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["press_key"] = ["effect": "unverifiable"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            let before = transport.callCount("press_key")
+            expect(!host.pressKey(name: "return", mods: [], keyCode: 36,
+                                  flags: [], expecting: nil),
+                   "Return without an owned draft is refused in the background")
+            expect(transport.callCount("press_key") == before,
+                   "the refused commit never reaches the driver")
+        }
+
+        // Unverifiable typing is trusted ONLY when the element it addressed
+        // actually CHANGED. Text that was already there proves nothing.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            transport.responses["type_text"] = ["effect": "unverifiable"]
+            expect(!host.typeText("missing", expecting: nil),
+                   "unverifiable typing with no readback evidence fails")
+            // The document ALREADY says "landed" and nothing changes: a
+            // "does the text appear?" check would certify a write that never
+            // happened.
+            transport.responses["get_window_state"] =
+                noteWindowState(snapshot: "s00000002", value: "landed already")
+            expect(!host.typeText("landed", expecting: nil),
+                   "pre-existing text is not proof of delivery")
+            // Now the element's value genuinely grows.
+            transport.queued["get_window_state"] = [
+                noteWindowState(snapshot: "s00000003", value: "landed already"),
+                noteWindowState(snapshot: "s00000004",
+                                value: "landed already landed"),
+            ]
+            expect(host.typeText("landed", expecting: nil),
+                   "a changed value carrying the insertion IS proof")
+        }
+
+        // An app that has never been activated sits AX-unresolved (live
+        // finding, macOS 26). After a grace period the host may activate it
+        // ONCE — front, materialize, hide — and then resolve; the flash never
+        // repeats within an action.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let screen = FakeScreenOwnership(
+                system: system,
+                targetIdentity: ("Notes", "com.apple.notes"))
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let resolved = transport.responses["get_window_state"]!
+            transport.responses["get_window_state"] = ["degraded": true,
+                                                       "elements": []]
+            let host = makeRoutedHost(system: system, transport: transport,
+                                      screen: screen)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(host.frontmostApp() == nil,
+                   "an unresolved target is not ready yet")
+            expect(screen.activations.isEmpty,
+                   "no flash inside the grace period")
+            system.sleep(ms: 1300)
+            _ = host.frontmostApp()
+            expect(screen.activations == [500] && screen.hides == [500],
+                   "a persistently unresolved target is activated once, then "
+                       + "hidden again")
+            expect(system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "the user's app owns the screen again after the flash")
+            transport.responses["get_window_state"] = resolved
+            expect(host.frontmostApp()?.name == "Notes",
+                   "the target resolves after materialization")
+            // Once the target has been ready, a later degradation must FAIL
+            // the step — never steal focus between typing steps.
+            system.sleep(ms: 5000)
+            transport.responses["get_window_state"] = ["degraded": true,
+                                                       "elements": []]
+            _ = host.frontmostApp()
+            _ = host.frontmostApp()
+            expect(screen.activations == [500],
+                   "the flash never repeats, and never fires mid-action")
+        }
+
+        // Activation is advisory. If the target refuses to come forward, the
+        // flash must NOT hide whatever is actually frontmost — that would
+        // hide the user's own app.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let screen = FakeScreenOwnership(
+                system: system,
+                targetIdentity: ("Notes", "com.apple.notes"))
+            screen.activationSucceeds = false
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["get_window_state"] = ["degraded": true,
+                                                       "elements": []]
+            let host = makeRoutedHost(system: system, transport: transport,
+                                      screen: screen)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            system.sleep(ms: 1300)
+            _ = host.frontmostApp()
+            expect(screen.activations == [500] && screen.hides.isEmpty,
+                   "a refused activation hides nothing — the user's app is safe")
+            expect(system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "the user's app is still frontmost")
+        }
+
+        // A target whose window stops resolving reads as lost, not as fine —
+        // and the action must NOT quietly retarget another window of the
+        // same app, even when one exists.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(host.frontmostApp() != nil, "target resolves first")
+            transport.responses["get_window_state"] = [
+                "refusal": ["code": "window_id_not_found"], "status": "refused",
+            ]
+            transport.responses["list_windows"] = ["windows": [
+                ["pid": 500, "window_id": 77, "layer": 0, "is_on_screen": true,
+                 "bounds": ["width": 900.0, "height": 700.0],
+                 "title": "Another Note"],
+            ]]
+            expect(host.frontmostApp() == nil,
+                   "a vanished target window reads as no frontmost app")
+            expect(host.frontmostApp() == nil,
+                   "the action never re-picks a different window of the app")
+            let windowIDs = transport.calls.filter { $0.tool == "get_window_state" }
+                .compactMap { $0.arguments["window_id"] as? Int }
+            expect(!windowIDs.contains(77),
+                   "the replacement window is never even snapshotted")
+        }
+
+        // Fallback matrix: each of these must land on the classic host.
+        func expectSystemFallback(
+            _ label: String, appName: String = "Notes",
+            configure: (FakeActionHost, FakeCuaTransport) -> Void = { _, _ in },
+            enabled: Bool = true, healthy: Bool = true
+        ) {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByName[appName] = (appName, "com.fake.\(appName.lowercased())")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            configure(system, transport)
+            let host = makeRoutedHost(system: system, transport: transport,
+                                      enabled: enabled, healthy: healthy)
+            host.beginActionInputSession()
+            expect(host.openApp(named: appName) == appName
+                   && system.log.contains("openApp(\(appName))"),
+                   label)
+        }
+        // The un-routed router must be a TRANSPARENT wrapper: every host verb
+        // delegates. (A refactor once made un-routed typing fail closed —
+        // which would have broken every foreground action's typing.)
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Notes", "com.apple.notes")
+            system.appsByName["Notes"] = ("Notes", "com.apple.notes")
+            let host = makeRoutedHost(system: system,
+                                      transport: FakeCuaTransport())
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")  // same app -> stays foreground
+            expect(host.typeText("hi", expecting: nil)
+                   && system.typed == ["hi"],
+                   "un-routed typing delegates to the system host")
+            expect(host.pasteText("there", expecting: nil)
+                   && system.typed == ["hi", "there"],
+                   "un-routed pasting delegates to the system host")
+            expect(host.pressKey(name: "escape", mods: [], keyCode: 53,
+                                 flags: [], expecting: nil),
+                   "un-routed key presses delegate to the system host")
+        }
+        expectSystemFallback("routing disabled falls back to the system host",
+                             enabled: false)
+        expectSystemFallback("an unhealthy daemon falls back to the system host",
+                             healthy: false)
+        expectSystemFallback("a dead transport falls back to the system host",
+                             configure: { _, transport in
+                                 transport.failing.insert("list_apps")
+                             })
+        expectSystemFallback("communication targets fall back to the foreground",
+                             appName: "Slack")
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Notes", "com.apple.notes")
+            system.appsByName["Notes"] = ("Notes", "com.apple.notes")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(system.log.contains("openApp(Notes)"),
+                   "acting on the app the user is in stays foreground")
+        }
+
+        // The next action starts unrouted even after a routed one.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByName["Notes"] = ("Notes", "com.apple.notes")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var enabled = true
+            let host = BackgroundRoutingActionHost(
+                system: system, transport: transport,
+                backgroundEnabled: { enabled },
+                ensureDaemon: { _ in true })
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(host.frontmostApp()?.name == "Notes", "first action routed")
+            enabled = false
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(system.log.contains("openApp(Notes)"),
+                   "beginActionInputSession resets routing for the next action")
+        }
+    }
 }

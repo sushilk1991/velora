@@ -186,6 +186,33 @@ the screen disagree, the screen wins, and an app nobody wrote a hint for is
 still navigable by looking. Web searches resolve to a single `open_url`, which
 is faster and far more reliable than walking a UI.
 
+**Background execution (optional).** When the user has the open-source
+[Cua Driver](https://cua.ai/cua-driver) installed,
+`BackgroundRoutingActionHost` can deliver an action to a background window —
+the user keeps cursor, focus, and keyboard while the action runs "over
+there". Routing is decided once per action at `open_app` and only when the target is
+a *different* app than the one the user is in (by bundle id, failing closed
+when the frontmost app cannot be read), is neither a communication app nor a
+browser, and the driver daemon is healthy — its socket answers and it holds a
+usable Accessibility grant, which a daemon spawned by Velora inherits from
+Velora. Everything else falls back to the classic foreground host, as does
+the rest of an action after an `open_url` or a switch to a non-routable app.
+
+Web content is refused at the element level rather than by app category: any
+text element under an `AXWebArea` is never a background target, because
+Electron and embedded web views echo-confirm AX writes the DOM never saw —
+the same reason the driver itself marks those writes unverifiable. Typing
+addresses the target window's own text element by snapshot token (the
+driver's default target, the pid's focused element, can live in a different
+window of the same app) and counts as delivered only when the driver confirms
+by value readback, or that same element's value changes to include the
+insertion. An ambiguous window, an ambiguous element, or a truncated
+accessibility tree refuses instead of guessing. The planner, the validator,
+and every budget above are unchanged: the driver is an actuator, never an
+authority. Mechanism notes, the live-verified driver behavior, and its
+security posture live in
+`docs/research/2026-08-23-cua-driver-background-actions.md`.
+
 ## Local control protocol (CLI and MCP)
 
 The installed `Resources/bin/velora` executable is a symlink to the app binary. Only that exact bundle-relative `Resources/bin/velora` location (or an explicit `--cli`) selects headless one-shot/MCP mode rather than AppKit; merely renaming a copy of the app binary does not. It connects to `~/.velora/control.sock`; the running app remains the authority for every request.

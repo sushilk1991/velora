@@ -494,7 +494,8 @@ final class AppConfig {
             behavior: HotkeyMode(
                 rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold,
             action: SettingsDocument.Shortcuts.defaultActionHotkey,
-            actionsEnabled: true)
+            actionsEnabled: true,
+            backgroundActions: true)
         document.settings.updates = .init(
             checkAutomatically: defaults.bool(forKey: Key.updateChecks),
             installAutomatically: defaults.bool(forKey: Key.autoInstallUpdates))
@@ -787,6 +788,14 @@ final class AppConfig {
     var actionsEnabled: Bool {
         get { readSetting(\.shortcuts.actionsEnabled) }
         set { updateSettings { $0.shortcuts.actionsEnabled = newValue } }
+    }
+
+    /// Actions drive a background window through the user's Cua Driver when
+    /// one is installed, leaving the user's cursor and focus alone. A no-op
+    /// when the driver is absent.
+    var backgroundActions: Bool {
+        get { readSetting(\.shortcuts.backgroundActions) }
+        set { updateSettings { $0.shortcuts.backgroundActions = newValue } }
     }
 
     var activeActionHotkey: Hotkey? { actionsEnabled ? actionHotkey : nil }

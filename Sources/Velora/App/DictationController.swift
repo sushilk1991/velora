@@ -181,9 +181,17 @@ final class DictationController: NSObject {
     private var actionsStorage: AgentSessionManager?
     private var actions: AgentSessionManager {
         if let actionsStorage { return actionsStorage }
+        // The routing host adds background delivery (via the user-installed
+        // Cua Driver) around the classic foreground host; with the driver
+        // absent or the setting off it IS the classic host.
         let manager = AgentSessionManager(
             client: supervisor.client,
-            host: SystemActionHost(inserter: inserter))
+            host: BackgroundRoutingActionHost(
+                system: SystemActionHost(inserter: inserter),
+                transport: CuaSocketTransport(),
+                backgroundEnabled: { [config] in
+                    config.backgroundActions && CuaDriver.isInstalled
+                }))
         actionsStorage = manager
         return manager
     }

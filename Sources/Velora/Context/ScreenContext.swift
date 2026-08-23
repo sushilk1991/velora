@@ -518,7 +518,9 @@ enum ScreenContext {
 
     /// Keeps strings that could plausibly be a person, channel, or app name and
     /// drops UI prose. A sentence is not a name, and neither is a single letter.
-    private static func nameCandidate(_ raw: String) -> String? {
+    /// Internal (not private) because the background action host applies the
+    /// SAME policy to driver window snapshots — one rule, two readers.
+    static func nameCandidate(_ raw: String) -> String? {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.count >= 2, text.count <= 40 else { return nil }
         let words = text.split(separator: " ")

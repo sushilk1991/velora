@@ -82,8 +82,11 @@ protocol ActionHost: AnyObject {
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
     /// that commits a send is the one keystroke that must not be posted a
-    /// moment after focus moved.
-    func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags, expecting bundleID: String?) -> Bool
+    /// moment after focus moved. The plan's own key name and modifier words
+    /// ride along because a background host delivers by NAME (the driver's
+    /// vocabulary), while the foreground host posts the key CODE.
+    func pressKey(name: String, mods: [String], keyCode: CGKeyCode,
+                  flags: CGEventFlags, expecting bundleID: String?) -> Bool
     /// False when a keystroke must not be synthesized right now (permission
     /// missing, or a password field has secure input up).
     var canPostInput: Bool { get }
@@ -359,7 +362,18 @@ final class ActionExecutor {
                 }
                 evidence.append(.unverifiedEffect(
                     step == .pasteText(text) ? .pasteText : .typeText))
-                trace.append("type_text \(text.count) chars")
+                // The text itself, not just a count. The trace is what the
+                // planner sees between turns, and a bare "5 chars" gives it
+                // no way to tell whether the words it meant to write are
+                // already in — observed live: a 4B planner retyped chunks
+                // until the turn budget ran out. This is the plan's OWN
+                // text, never anything read off the screen, so echoing it
+                // back adds no untrusted content.
+                // Bounded to fit inside the engine's 140-char clip of an
+                // executed line, so the quoted text is never cut mid-word by
+                // the prompt builder.
+                trace.append("type_text \(text.count) chars: "
+                             + "\"\(Self.evidenceText(text, limit: 100))\"")
 
             case .key(let name, let mods, let repeatCount):
                 guard focusStillHeld() else {
@@ -388,7 +402,8 @@ final class ActionExecutor {
                                                trace: trace, executedSteps: index,
                                                evidence: evidence)
                     }
-                    guard host.pressKey(code, flags: flags,
+                    guard host.pressKey(name: name, mods: mods, keyCode: code,
+                                        flags: flags,
                                         expecting: expectedBundleID) else {
                         trace.append("key \(name): failed at \(iteration)")
                         return failed(index, "couldn't press \(name)", recoverable: false)

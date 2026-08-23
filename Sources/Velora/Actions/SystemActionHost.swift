@@ -399,8 +399,8 @@ final class SystemActionHost: ActionHost {
         typeText(text, expecting: bundleID)
     }
 
-    func pressKey(_ keyCode: CGKeyCode, flags: CGEventFlags,
-                  expecting bundleID: String?) -> Bool {
+    func pressKey(name: String, mods: [String], keyCode: CGKeyCode,
+                  flags: CGEventFlags, expecting bundleID: String?) -> Bool {
         let committing = keyCode == ActionKey.keyCode(for: "return")
             || keyCode == ActionKey.keyCode(for: "enter")
         if committing {
