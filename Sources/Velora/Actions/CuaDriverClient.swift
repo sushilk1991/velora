@@ -41,12 +41,63 @@ enum CuaDriver {
         var staticCode: SecStaticCode?
         guard SecStaticCodeCreateWithPath(url, [], &staticCode) == errSecSuccess,
               let staticCode else { return false }
-        var requirementRef: SecRequirement?
-        guard SecRequirementCreateWithString(
-                requirement as CFString, [], &requirementRef) == errSecSuccess,
-              let requirementRef else { return false }
+        guard let requirementRef = codeRequirement() else { return false }
         return SecStaticCodeCheckValidity(
             staticCode, [], requirementRef) == errSecSuccess
+    }
+
+    static func codeRequirement() -> SecRequirement? {
+        var requirementRef: SecRequirement?
+        guard SecRequirementCreateWithString(
+                requirement as CFString, [], &requirementRef) == errSecSuccess
+        else { return nil }
+        return requirementRef
+    }
+
+    private static let peerLock = NSLock()
+    private static var trustedPeerPIDs = Set<pid_t>()
+
+    /// Verifies that the process on the other end of the socket really is
+    /// Cua's driver, by asking the kernel for the peer's pid and checking
+    /// THAT process against the Developer ID requirement.
+    ///
+    /// The socket carries no credential of its own, so without this any
+    /// process running as this user could squat the path, receive every
+    /// `type_text` payload, and hand back the snapshots Velora's delivery
+    /// evidence is built from (review finding). Same-user is not a trust
+    /// boundary; a verified code signature is.
+    static func peerIsTrusted(fd: Int32) -> Bool {
+        var pid: pid_t = 0
+        var length = socklen_t(MemoryLayout<pid_t>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0,
+              pid > 0 else { return false }
+        peerLock.lock()
+        let known = trustedPeerPIDs.contains(pid)
+        peerLock.unlock()
+        // Cached per pid: a signature check costs milliseconds and every
+        // action makes many calls. A pid cannot change its code, and a
+        // recycled pid belongs to a process that has to pass this again.
+        if known { return true }
+        guard let requirementRef = codeRequirement() else { return false }
+        var code: SecCode?
+        let attributes = [kSecGuestAttributePid: NSNumber(value: pid)] as CFDictionary
+        guard SecCodeCopyGuestWithAttributes(
+                nil, attributes, [], &code) == errSecSuccess,
+              let code,
+              SecCodeCheckValidity(code, [], requirementRef) == errSecSuccess
+        else { return false }
+        peerLock.lock()
+        trustedPeerPIDs.insert(pid)
+        peerLock.unlock()
+        return true
+    }
+
+    /// Forgets cached peer trust — called when a daemon Velora started exits,
+    /// so a recycled pid is never trusted on the strength of its predecessor.
+    static func forgetTrustedPeers() {
+        peerLock.lock()
+        trustedPeerPIDs.removeAll()
+        peerLock.unlock()
     }
 
     /// Parses one response line. The daemon wraps MCP-shaped results:
@@ -149,6 +200,11 @@ final class CuaSocketTransport: CuaTransport {
             }
         }
         guard connected == 0 else { return .failure(.notRunning) }
+        // Nothing is written until the far end proves it is Cua's driver.
+        guard CuaDriver.peerIsTrusted(fd: fd) else {
+            CuaSocketTransport.reportUntrustedPeerOnce()
+            return .failure(.notRunning)
+        }
 
         var remaining = request
         while !remaining.isEmpty {
@@ -187,6 +243,21 @@ final class CuaSocketTransport: CuaTransport {
         return CuaDriver.parseResponse(response)
     }
 
+    private static let noticeLock = NSLock()
+    private static var reportedUntrustedPeer = false
+
+    /// Once per launch: a squatted socket is a security event worth seeing in
+    /// the log, but it must not become a per-call spam loop.
+    static func reportUntrustedPeerOnce() {
+        noticeLock.lock()
+        let first = !reportedUntrustedPeer
+        reportedUntrustedPeer = true
+        noticeLock.unlock()
+        guard first else { return }
+        veloraLog("Velora: something other than Cua's driver is answering the "
+                  + "driver socket — background actions are disabled")
+    }
+
     private static func timeval(seconds: TimeInterval) -> Foundation.timeval {
         let whole = Int(seconds)
         let microseconds = Int32((seconds - Double(whole)) * 1_000_000)
@@ -215,6 +286,7 @@ enum CuaDriverDaemon {
         let process = spawned
         spawned = nil
         lock.unlock()
+        CuaDriver.forgetTrustedPeers()
         guard let process, process.isRunning else { return }
         process.terminate()
         veloraLog("Velora: stopped the cua-driver daemon it started")
