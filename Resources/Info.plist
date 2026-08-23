@@ -42,11 +42,13 @@
 	<key>CFBundleShortVersionString</key>
 	<string>0.17.0</string>
 	<key>CFBundleVersion</key>
-	<string>227</string>
+	<string>228</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Velora asks your browser for the current page address so dictation can pick the right writing style (email in Gmail, notes in Notion). Everything stays on this Mac.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Velora captures computer audio only after you confirm a meeting recording, so it can create a local transcript and notes.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>

@@ -176,11 +176,22 @@ enum ScreenContext {
         deepURL: Bool = false
     ) -> [ContextEntity] {
         guard let app, app.processIdentifier > 0 else { return [] }
-        var result = focusedWindowTitle(pid: app.processIdentifier).map {
+        // URL first: for Apple-Events browsers this also warms the tab-title
+        // cache the fallback below reads.
+        var slugFromURL: String?
+        if category == .browser {
+            slugFromURL = siteSlug(forHost: pageURL(of: app, deep: deepURL)?.host)
+        }
+        var title = focusedWindowTitle(pid: app.processIdentifier)
+        if title == nil, category == .browser {
+            // Chrome exposes no AX window at all; its tab title arrives with
+            // the same Apple Event that fetched the URL.
+            title = BrowserPage.cachedInfo(bundleID: app.bundleIdentifier)?.title
+        }
+        var result = title.map {
             parse(title: $0, category: category, appName: app.localizedName)
         } ?? []
-        if category == .browser,
-           let slug = siteSlug(forHost: pageURL(of: app, deep: deepURL)?.host) {
+        if let slug = slugFromURL {
             // The URL outranks the title guess: a title can mention a product
             // ("Gmail help"), the host cannot lie about where the user is.
             result.removeAll { $0.type == "site" }
@@ -215,7 +226,12 @@ enum ScreenContext {
     /// entity parser answers a different one.
     static func windowTitle(of app: NSRunningApplication?) -> String? {
         guard let app, app.processIdentifier > 0 else { return nil }
-        return focusedWindowTitle(pid: app.processIdentifier)
+        if let title = focusedWindowTitle(pid: app.processIdentifier) {
+            return title
+        }
+        // Chromium browsers: last tab title from the Apple-Events cache
+        // (non-blocking here; deep readers fetch fresh).
+        return BrowserPage.cachedInfo(bundleID: app.bundleIdentifier)?.title
     }
 
     /// Short, name-like labels visible in the app's front window — the sidebar
@@ -382,19 +398,24 @@ enum ScreenContext {
     private static var accessibilityEnabledPIDs = Set<pid_t>()
     private static let accessibilityEnabledLock = NSLock()
 
-    /// Chromium (Chrome, Brave, Edge, Electron) builds its AX tree only when
-    /// an assistive client announces itself — until then even the focused
-    /// window read returns nothing (verified live 2026-08-22: Chrome + Gmail
-    /// gave no window at all, so title-based site detection never worked in
-    /// Chrome). `AXManualAccessibility` is Chromium's documented switch for
-    /// exactly this, without the window-manager side effects of VoiceOver's
-    /// `AXEnhancedUserInterface`. The tree builds asynchronously, so the
-    /// caller's CURRENT read may still miss; the next one succeeds.
+    /// Chromium builds its AX tree on demand. The documented trigger for
+    /// "platform API consumers" is a trusted client reading the APPLICATION
+    /// element's AXRole (`accessibilityRole` override in Chromium's
+    /// chrome_browser_application_mac.mm) — that enables native-API mode
+    /// without flipping Chrome into full screen-reader mode the way
+    /// `AXEnhancedUserInterface` would. `AXManualAccessibility` is set too:
+    /// it is a no-op on Chrome proper (Electron-only attribute) but wakes
+    /// Electron apps whose trees start dormant. The tree builds
+    /// asynchronously, so the caller's CURRENT read may still miss; the next
+    /// one succeeds.
     static func enableChromiumAccessibility(_ appElement: AXUIElement, pid: pid_t) {
         accessibilityEnabledLock.lock()
         let firstTime = accessibilityEnabledPIDs.insert(pid).inserted
         accessibilityEnabledLock.unlock()
         guard firstTime else { return }
+        var roleRef: CFTypeRef?
+        AXUIElementCopyAttributeValue(
+            appElement, kAXRoleAttribute as CFString, &roleRef)
         AXUIElementSetAttributeValue(
             appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
     }
@@ -419,9 +440,30 @@ enum ScreenContext {
     /// live) and checks the focused element's ancestors. Deep costs more AX
     /// IPC, so the hotkey path never asks for it. Best effort; nil is normal.
     static func pageURL(of app: NSRunningApplication?, deep: Bool = false) -> URL? {
-        guard let app, app.processIdentifier > 0, Permissions.accessibilityGranted else {
-            return nil
+        guard let app, app.processIdentifier > 0 else { return nil }
+        if let url = axPageURL(of: app, deep: deep) {
+            return url
         }
+        if BrowserPage.usesAppleScript(app.bundleIdentifier) {
+            // Chromium's accessibility engine sleeps until something enables
+            // it (verified live: with it awake, the window's AXDocument holds
+            // the URL; after a browser restart it sleeps again). The Apple
+            // Events road survives restarts once the user consents. Deep
+            // callers (background/rich context, Action Mode) wait briefly for
+            // a fresh read; the hotkey path takes the cache and kicks a
+            // refresh so the stop-time gate sees the real URL.
+            if deep { return BrowserPage.info(app)?.url }
+            let cached = BrowserPage.cachedInfo(bundleID: app.bundleIdentifier)?.url
+            BrowserPage.refresh(app)
+            return cached
+        }
+        return nil
+    }
+
+    /// The accessibility half of `pageURL`: window `AXDocument`, then (deep)
+    /// the web area's `AXURL` and the focused element's ancestors.
+    private static func axPageURL(of app: NSRunningApplication, deep: Bool) -> URL? {
+        guard Permissions.accessibilityGranted else { return nil }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
         let window = focusedOrFirstWindow(appElement, pid: app.processIdentifier)
@@ -1166,15 +1208,21 @@ enum ScreenContext {
         func normalized(_ segment: String) -> String {
             segment.replacingOccurrences(of: "\u{200B}", with: "").lowercased()
         }
-        var trailing = segments
-        while trailing.count > 1, let last = trailing.last.map(normalized) {
-            let isAppName = appName.map { last == $0.lowercased() } ?? false
-            let isBrowserName = browserProductNames.contains { name in
-                last == name
-                    || last.hasSuffix(" " + name) || last.hasPrefix(name + " ")
+        func isBrowserish(_ segment: String) -> Bool {
+            let value = normalized(segment)
+            if let appName, value == appName.lowercased() { return true }
+            return browserProductNames.contains { name in
+                value == name
+                    || value.hasSuffix(" " + name) || value.hasPrefix(name + " ")
             }
-            guard isAppName || isBrowserName else { break }
-            trailing.removeLast()
+        }
+        var trailing = segments
+        // Cut at the LAST browser-name segment: Chrome with multiple profiles
+        // appends "Google Chrome – <profile>", so the browser's name is not
+        // necessarily the final segment (seen live: "… - Gmail - Google
+        // Chrome – Sushil").
+        if let cut = trailing.lastIndex(where: isBrowserish), cut > 0 {
+            trailing = Array(trailing[..<cut])
         }
         guard let last = trailing.last.map(normalized),
               last.count <= 34, last.split(separator: " ").count <= 3
@@ -1240,6 +1288,27 @@ extension ScreenContext {
             out["window_title"] = axString(window, kAXTitleAttribute) ?? ""
             out["window_document"] = axURLString(window, kAXDocumentAttribute) ?? ""
         }
+        if let bundleID = app.bundleIdentifier?.lowercased(),
+           BrowserPage.usesAppleScript(bundleID) {
+            out["automation_status"] = BrowserPage.permissionStatus(bundleID: bundleID)
+            let read = BrowserPage.debugRead(bundleID: bundleID)
+            out["ae_read_error"] = read.code
+            out["ae_read_url"] = read.url
+        }
+        // Client-vs-pair isolation: a trivial event to Finder. -1743 here too
+        // means this process cannot send ANY Apple Event; a script error like
+        // -1728 or a name string means delivery works and the block is
+        // target-specific.
+        out["ae_finder_status"] = BrowserPage.permissionStatus(bundleID: "com.apple.finder")
+        out["ae_finder_probe"] = BrowserPage.debugProbeFinder()
+        // Which targets refuse: browsers vs ordinary apps.
+        out["ae_pair_status"] = [
+            "chrome": BrowserPage.permissionStatus(bundleID: "com.google.chrome"),
+            "safari": BrowserPage.permissionStatus(bundleID: "com.apple.safari"),
+            "zen": BrowserPage.permissionStatus(bundleID: "app.zen-browser.zen"),
+            "notes": BrowserPage.permissionStatus(bundleID: "com.apple.notes"),
+            "slack": BrowserPage.permissionStatus(bundleID: "com.tinyspeck.slackmacgap"),
+        ]
         out["page_url"] = pageURL(of: app, deep: true)?.absoluteString ?? ""
         guard let focused = axElement(appElement, kAXFocusedUIElementAttribute) else {
             out["focused"] = "none"

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Unrestricted entitlements only: dev builds sign without a
+	     provisioning profile, so the restricted iCloud/app-identifier keys
+	     from Velora.entitlements cannot appear here. Apple Events is needed
+	     even for non-hardened builds — without it in the signature, macOS 26
+	     answers every send with errAEEventNotPermitted before TCC is even
+	     consulted (no consent prompt ever appears). -->
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+</dict>
+</plist>

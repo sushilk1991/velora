@@ -185,6 +185,9 @@ if [[ "${VELORA_DISTRIBUTION:-0}" == "1" ]]; then
   echo "Distribution signing with: $IDENTITY"
 else
   SIGN_ARGS+=(--sign "$IDENTITY")
+  # Unrestricted entitlements only (no profile in dev): Apple Events must be
+  # in the signature or macOS refuses every send promptlessly (-1743).
+  APP_SIGN_ARGS+=(--entitlements Resources/Velora-dev.entitlements)
 fi
 # Sign the nested uv binary explicitly (Resources/ binaries are sealed as
 # resources, not nested code; re-sign it before the outer seal is computed).

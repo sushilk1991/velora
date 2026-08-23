@@ -6077,6 +6077,65 @@ enum Selftest {
         expect(ScreenContext.site(in: ["Google Chrome"],
                                   appName: "Google Chrome") == nil,
                "bare browser-name title yields nothing")
+        expect(ScreenContext.site(
+            in: ["Inbox (35)", "sushilk.1991@gmail.com", "Gmail",
+                 "Google Chrome", "Sushil"],
+            appName: "Google Chrome") == "gmail",
+               "a Chrome profile suffix after the browser name is dropped")
+        expect(ScreenContext.site(
+            in: ["(7) YouTube", "Google Chrome", "Sushil"],
+            appName: "Google Chrome") == nil,
+               "profile handling does not invent sites for unmapped pages")
+
+        // Apple-Events browser reads (Chromium refuses AX): the bundle set,
+        // the script shape, and the cache freshness policy are pure logic.
+        expect(BrowserPage.usesAppleScript("com.google.Chrome"),
+               "Chrome reads via Apple Events")
+        expect(BrowserPage.usesAppleScript("COM.GOOGLE.CHROME"),
+               "bundle match is case-insensitive")
+        expect(!BrowserPage.usesAppleScript("com.apple.Safari"),
+               "Safari stays on AX — no Automation prompt for it")
+        expect(!BrowserPage.usesAppleScript("app.zen-browser.zen"),
+               "Gecko stays on AX — no Automation prompt for it")
+        expect(!BrowserPage.usesAppleScript(nil), "nil bundle never scripts")
+        for bundleID in BrowserPage.appleScriptBundleIDs {
+            expect(bundleID == bundleID.lowercased(),
+                   "\(bundleID) stored lowercased")
+            expect(ActionRuntimePolicy.isBrowserBundle(bundleID),
+                   "\(bundleID) is a known browser bundle")
+        }
+        let source = BrowserPage.scriptSource(bundleID: "com.google.chrome")
+        expect(source.contains("application id \"com.google.chrome\"")
+               && source.contains("URL of active tab of front window")
+               && source.contains("title of active tab of front window"),
+               "the script asks only for the frontmost tab's URL and title")
+
+        // Staleness: a process older than its binary (Chrome auto-updated
+        // underneath it) fails every road promptlessly — never a denial.
+        let launched = Date(timeIntervalSince1970: 10_000)
+        expect(BrowserPage.processIsStale(
+            launchDate: launched, binaryModified: launched.addingTimeInterval(600)),
+               "a process older than its binary is stale")
+        expect(!BrowserPage.processIsStale(
+            launchDate: launched, binaryModified: launched.addingTimeInterval(-600)),
+               "a process newer than its binary is healthy")
+        expect(!BrowserPage.processIsStale(launchDate: nil, binaryModified: Date()),
+               "unknown launch date never reads as stale")
+
+        var pageCache = BrowserPageCache()
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        pageCache.store(bundleID: "com.google.chrome",
+                        url: URL(string: "https://mail.google.com/mail"),
+                        title: "Inbox", at: t0)
+        expect(pageCache.fresh(bundleID: "COM.GOOGLE.CHROME",
+                               at: t0.addingTimeInterval(2), maxAge: 3)?.title
+               == "Inbox", "a fresh entry is served case-insensitively")
+        expect(pageCache.fresh(bundleID: "com.google.chrome",
+                               at: t0.addingTimeInterval(10), maxAge: 3) == nil,
+               "a stale entry is worse than none — tab switches are constant")
+        expect(pageCache.fresh(bundleID: "com.brave.browser",
+                               at: t0, maxAge: 3) == nil,
+               "an unknown browser has no entry")
 
         // Browser press policy: links join rows/cells in browsers only;
         // send authority (communication bundles) is untouched.

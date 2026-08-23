@@ -157,6 +157,11 @@ final class SystemActionHost: ActionHost {
         guard Permissions.accessibilityGranted,
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               app.processIdentifier > 0 else { return nil }
+        if BrowserPage.usesAppleScript(app.bundleIdentifier) {
+            // Chromium exposes no AX window; the tab title rides the same
+            // Apple Event as the page URL (executor queue — waiting is fine).
+            return BrowserPage.info(app)?.title
+        }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.5)
         var windowRef: CFTypeRef?
