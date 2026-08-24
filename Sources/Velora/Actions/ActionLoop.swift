@@ -121,6 +121,8 @@ final class ActionLoopRunner {
         var completionEvidence = ActionCompletionEvidence()
         var lockedSends: Bool?
         var lockedGoal = ""
+        /// The last runtime failure a step actually hit, in the user's terms.
+        var lastStepFailure: String?
         var turnsUsed = 0
         // Every planner call, accepted or rejected. Rejected turns consume no
         // engine turn, so this is the bound that stops a model stuck on an
@@ -153,8 +155,18 @@ final class ActionLoopRunner {
                     continue
                 }
                 planner.end()
-                return code == "cancelled" ? .cancelled
-                                           : .failed(reason: reason, trace: fullTrace)
+                if code == "cancelled" { return .cancelled }
+                // A session-lifecycle refusal describes the PROTOCOL, not the
+                // action: "action: session already finished" told the user
+                // nothing about the app having no text field on screen. Only
+                // that class is substituted, and only by a failure from the
+                // batch that just ran — a turn limit or an unavailable model
+                // is the authoritative reason and must reach the user as
+                // itself.
+                if code == "no_session", let lastStepFailure {
+                    return .failed(reason: lastStepFailure, trace: fullTrace)
+                }
+                return .failed(reason: reason, trace: fullTrace)
 
             case .turn(let sends, let goal, let stepsJSON, let done):
                 turnsUsed += 1
@@ -253,6 +265,10 @@ final class ActionLoopRunner {
 
                 switch result.outcome {
                 case .completed:
+                    // A batch that ran clean supersedes whatever went wrong
+                    // before it; keeping the old reason would report a solved
+                    // problem as the cause of a later one.
+                    lastStepFailure = nil
                     if done {
                         planner.end()
                         return completionResult(
@@ -275,6 +291,7 @@ final class ActionLoopRunner {
                     return .cancelled
 
                 case .failed(_, let reason, let recoverable):
+                    lastStepFailure = reason
                     guard recoverable, turnsUsed < Self.maxTurns,
                           host.now() < deadline, !isCancelled else {
                         planner.end()

@@ -750,6 +750,12 @@ final class BackgroundRoutingActionHost: ActionHost {
         routed ? false : system.screenNamesAreUserVisible
     }
 
+    /// While routed, `wait_frontmost` is polling this host's own readiness —
+    /// re-opening the app would drop the pinned window (`openTargetApp` resets
+    /// `targetWindowID`/`everReady`/`pinnedElement`) or `unroute()` into the
+    /// foreground path and take the screen.
+    var isDrivingInBackground: Bool { routed }
+
     func visibleNames() -> [String] {
         guard routed else { return system.visibleNames() }
         guard let snapshot = snapshotTarget(maxElements: Self.snapshotElements)

@@ -740,6 +740,14 @@ extension ActionPlan {
                 if next.pendingText { next.unverifiedText = true }
             case .waitFrontmost(let app, _):
                 next.appNames.insert(app)
+                // Naming a DIFFERENT app moves the screen: the executor asks
+                // that app to come forward when the wait would otherwise time
+                // out. Same re-arm as open_app — a verification made about the
+                // previous app cannot describe where a Return would land.
+                if next.pendingText,
+                   !AppMatcher.namesSameApp(next.currentApp, app) {
+                    next.unverifiedText = true
+                }
                 next.currentApp = app
             case .openURL:
                 next.currentApp = ""

@@ -312,10 +312,13 @@ VERBS = (
 # preceding focus checkpoint in the same plan.
 INPUT_VERBS = ("type_text", "paste_text", "key")
 FOCUS_VERBS = ("wait_frontmost", "verify_context")
-# Verbs that actually change something. wait_frontmost, verify_context and
-# pause only look and wait, so a first turn built solely from them has done
-# nothing — and `done: true` on it was reported to the user as success
-# (audited, 2026-08-04).
+# Verbs that advance the GOAL. A first turn built solely from the others has
+# accomplished nothing the user asked for, and `done: true` on it was reported
+# as success (audited, 2026-08-04).
+# wait_frontmost is deliberately absent even though the executor may now
+# activate the named app to satisfy it: bringing a window forward is how a plan
+# gets somewhere, never the somewhere itself. "Play pop music" is not done
+# because Music is in front.
 EFFECTIVE_VERBS = ("open_app", "open_url", "type_text", "paste_text",
                    "key", "press_element")
 # press_element also acts on the frontmost app, so it needs the same checkpoint
@@ -952,6 +955,16 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                 timeout = DEFAULT_WAIT_MS
             app = _require_str(raw, "app", verb, 120)
             app_names.append(app)
+            # Naming a DIFFERENT app moves the screen: the executor now asks
+            # that app to come forward when the wait would otherwise time out,
+            # so this is navigation, not observation, and it invalidates a
+            # verification made about the previous app exactly as `open_app`
+            # does. Without this, a plan could verify a recipient in one
+            # messenger and land the Return in another.
+            if pending_text and not (
+                    app_name_matches(current_app, app)
+                    or app_name_matches(app, current_app)):
+                unverified_text = True
             current_app = app
             steps.append({"do": verb, "app": app,
                           "timeout_ms": min(timeout, MAX_WAIT_MS)})
@@ -1002,9 +1015,15 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                     # typed into the conversation already on screen — and this
                     # Return sends it to the wrong person. Checking afterwards
                     # is checking too late.
+                    # Say what to write instead. The bare rule was rejected
+                    # twice a turn for five turns straight against a live
+                    # WhatsApp send while the model reproposed the same shape:
+                    # a validator that only says "no" teaches nothing.
                     raise PlanError(
                         f"step {index}: '{name}' would commit typed text that "
-                        "no verify_context step has confirmed")
+                        "no verify_context step has confirmed — put a "
+                        "verify_context step naming what should now be on "
+                        "screen between the type_text and the key")
             step = {"do": verb, "key": name, "mods": mods}
             if repeat > 1:
                 step["repeat"] = repeat
@@ -1289,6 +1308,11 @@ class ActionSession:
         self.sends = sends
         self.goal = goal
         self.turns_used += 1
-        if parsed["done"]:
-            self.finished = True
+        # `done` is a PREDICTION about steps that have not run yet. Closing the
+        # session on it stranded the caller whenever that last batch then failed
+        # for a recoverable reason: the loop asked for one more look and got
+        # "action session already finished", which is what the user saw instead
+        # of what actually went wrong. The caller closes the session with
+        # `end`; MAX_TURNS still bounds it, and `sends` is still locked to turn
+        # one, so nothing here widens what an action may do.
         return {"steps": steps, "done": parsed["done"]}

@@ -94,6 +94,8 @@ final class FakeActionHost: ActionHost {
     /// Mirrors the production foreground host: these come off the window in
     /// front of the user. A test can flip it to model a background host.
     var screenNamesAreUserVisible = true
+    /// Set to model the Cua routing host, which drives an off-screen window.
+    var isDrivingInBackground = false
     /// URL the fake browser page reports, or nil outside a browser.
     var pageURLValue: String?
     func frontmostPageURL() -> String? { pageURLValue }
@@ -256,6 +258,7 @@ extension Selftest {
         testAppMatching()
         testActionExecutorHappyPath()
         testActionExecutorSafetyRails()
+        testWaitFrontmostBringsTheAppForward()
         testActionExecutorPressElement()
         testActionLoopRecovery()
         testActionLoopSafetyRails()
@@ -585,6 +588,47 @@ extension Selftest {
             "modified-key state remains carried across turns")
         } else {
             expect(false, "the modified-key carry fixture decodes")
+        }
+
+        // The executor now asks a named app to come forward when a wait would
+        // otherwise time out, so wait_frontmost moves the screen. Naming a
+        // DIFFERENT app has to invalidate a verification the same way open_app
+        // does, in this copy of the validator as well as the engine's —
+        // otherwise a plan verifies the recipient in one messenger and lands
+        // the Return in another.
+        if let crossApp = decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"running late"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"wait_frontmost","app":"Discord"}]}
+        """) {
+            var next = ActionPlan.state(after: crossApp,
+                                        executedCount: crossApp.steps.count,
+                                        seed: ActionPlan.BatchState())
+            expect(next.unverifiedText,
+                   "waiting for a different app re-arms the send gate")
+            expect(decodeBatchError("""
+            {"steps":[{"do":"wait_frontmost","app":"Discord"},
+              {"do":"key","key":"return"}]}
+            """, state: &next) == .unverifiedSend(step: 1),
+            "a Return after waiting for another app is refused")
+        } else {
+            expect(false, "the cross-app wait fixture decodes")
+        }
+
+        if let sameApp = decodePlan("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"running late"},
+          {"do":"verify_context","expect":["Himesh"]},
+          {"do":"wait_frontmost","app":"slack"}]}
+        """) {
+            let carried = ActionPlan.state(after: sameApp,
+                                           executedCount: sameApp.steps.count,
+                                           seed: ActionPlan.BatchState())
+            expect(!carried.unverifiedText,
+                   "re-confirming the app you are already in costs nothing")
+        } else {
+            expect(false, "the same-app wait fixture decodes")
         }
 
         // --- open_url is an outbound channel: the prompt holds the
@@ -2776,6 +2820,84 @@ extension Selftest {
         } else {
             expect(false, "the search plan decodes")
         }
+    }
+
+    /// A checkpoint that only ever waits cannot rescue a plan whose app is
+    /// behind another window. Observed live: "play pop music on the Music app"
+    /// spent all eight turns on identical eight-second `wait_frontmost`
+    /// timeouts and reached `open_app` only on the turn it ran out. Waiting
+    /// now asks once — the same activation `open_app` does, with the same app
+    /// name — and an app that still refuses still fails closed.
+    private static func testWaitFrontmostBringsTheAppForward() {
+        let waiting = FakeActionHost()
+        waiting.frontmost = ("Sublime Text", "com.sublimetext.4")
+        waiting.appsByName["Music"] = ("Music", "com.apple.Music")
+        let plan = ActionPlan(
+            goal: "play music", sends: false,
+            steps: [.waitFrontmost(app: "Music", timeoutMs: 200)],
+            unsupported: nil)
+        let result = ActionExecutor(host: waiting).run(plan)
+        expect(result.outcome == .completed,
+               "waiting for a running app brings it forward instead of timing out")
+        expect(waiting.log.filter { $0 == "openApp(Music)" }.count == 1,
+               "the app is asked forward exactly once")
+        // The recovery may have LAUNCHED the app. A turn that did that and
+        // then failed must not report "nothing effective to do".
+        expect(
+            result.evidence.contains {
+                if case .appOpenRequested(_, let resolved) = $0 {
+                    return resolved == "Music"
+                }
+                return false
+            },
+            "bringing the app forward is recorded as a real effect")
+
+        // An app that will not come forward must not be asked once per step.
+        let refusing = FakeActionHost()
+        refusing.frontmost = ("Sublime Text", "com.sublimetext.4")
+        refusing.appsByName["Music"] = ("Music", "com.apple.Music")
+        refusing.frontmostAfterReads =
+            (reads: 0, value: ("Sublime Text", "com.sublimetext.4"))
+        let twoWaits = ActionPlan(
+            goal: "play music", sends: false,
+            steps: [
+                .waitFrontmost(app: "Music", timeoutMs: 100),
+                .waitFrontmost(app: "Music", timeoutMs: 100),
+            ],
+            unsupported: nil)
+        let refusedResult = ActionExecutor(host: refusing).run(twoWaits)
+        expect(refusedResult.outcome == .failed(
+            step: 0, reason: "Music didn't come to the front", recoverable: true),
+               "an app that will not come forward still fails closed")
+        expect(refusing.log.filter { $0 == "openApp(Music)" }.count == 1,
+               "one focus recovery per batch, not one per waiting step")
+        expect(
+            refusedResult.observationTrace.contains {
+                $0.contains("do not wait for it again")
+            },
+            "the planner is told waiting again will not help")
+
+        // Background routing must be left alone. There the wait is polling the
+        // host's own readiness; asking it to open the app again would drop the
+        // pinned window it is already typing into, or unroute and take the
+        // user's screen — the one thing background execution promises not to
+        // do. Review finding.
+        let routed = FakeActionHost()
+        routed.isDrivingInBackground = true
+        routed.frontmost = ("Sublime Text", "com.sublimetext.4")
+        routed.appsByName["Music"] = ("Music", "com.apple.Music")
+        routed.frontmostAfterReads =
+            (reads: 0, value: ("Sublime Text", "com.sublimetext.4"))
+        let routedResult = ActionExecutor(host: routed).run(
+            ActionPlan(
+                goal: "play music", sends: false,
+                steps: [.waitFrontmost(app: "Music", timeoutMs: 100)],
+                unsupported: nil))
+        expect(routedResult.outcome == .failed(
+            step: 0, reason: "Music didn't come to the front", recoverable: true),
+               "a background wait that never becomes ready still fails closed")
+        expect(routed.log.allSatisfy { $0 != "openApp(Music)" },
+               "a background-routed wait never re-opens the app")
     }
 
     private static func testActionExecutorSafetyRails() {

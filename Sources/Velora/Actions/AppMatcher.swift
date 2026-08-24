@@ -52,6 +52,18 @@ enum AppMatcher {
         return prefixHit ?? wordPrefixHit ?? substringHit
     }
 
+    /// Whether two spoken/observed app names refer to the same app, in either
+    /// direction ("Chrome" ↔ "Google Chrome"). Mirrors the engine validator's
+    /// `app_name_matches` pair test, which decides whether a step moved the
+    /// plan to a different app.
+    static func namesSameApp(_ one: String, _ other: String) -> Bool {
+        guard !normalize(one).isEmpty, !normalize(other).isEmpty else {
+            return false
+        }
+        return bestMatch(for: one, in: [other]) != nil
+            || bestMatch(for: other, in: [one]) != nil
+    }
+
     /// Splits text into normalized words. Comparison happens word by word so a
     /// verify term cannot match across a boundary.
     static func words(_ text: String) -> [String] {

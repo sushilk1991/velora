@@ -540,6 +540,39 @@ def test_navigation_rearms_the_send_gate_while_text_is_pending():
             ]))
 
 
+def test_waiting_for_a_different_app_rearms_the_send_gate():
+    """`wait_frontmost` stopped being a passive verb.
+
+    The executor now asks the named app to come forward when the wait would
+    otherwise time out, so naming a DIFFERENT app moves the screen exactly as
+    `open_app` does. Without re-arming, a plan could verify the recipient in
+    one messenger and land the Return in another — the very failure
+    test_navigation_rearms_the_send_gate_while_text_is_pending exists to stop.
+    """
+    with pytest.raises(actions.PlanError, match="commit"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "running late"},
+            {"do": "verify_context", "expect": ["Priya"]},
+            {"do": "wait_frontmost", "app": "Discord"},
+            {"do": "key", "key": "return"},
+        ]))
+
+
+def test_waiting_for_the_same_app_is_still_a_plain_checkpoint():
+    """Re-confirming the app you are already in moves nothing, and an alias
+    for it ("Slack" for "Slack Beta") is the same app — neither may cost a
+    plan its verification."""
+    for again in ("Slack", "slack"):
+        actions.validate_plan(plan(steps=[
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "running late"},
+            {"do": "verify_context", "expect": ["Priya"]},
+            {"do": "wait_frontmost", "app": again},
+            {"do": "key", "key": "return"},
+        ]))
+
+
 def test_a_draft_session_never_commits_typed_text():
     """sends=false was consent-level only — the review showed a sends=false
     session could still type+verify+Return, which IS a send. A draft now
@@ -1133,7 +1166,8 @@ async def test_done_batch_keeps_model_switch_busy_until_action_end(
 
     eng, sock = engine
     planner = SwitchablePlanner(
-        turn(FIRST_BATCH, done=True, goal="finish after these steps", sends=False))
+        turn(FIRST_BATCH, done=True, goal="finish after these steps", sends=False),
+        turn(FIRST_BATCH))
     replacement = SwitchablePlanner()
     replacement.model_id = "test/action-new"
     eng.cleanup = planner
@@ -1165,9 +1199,13 @@ async def test_done_batch_keeps_model_switch_busy_until_action_end(
     rejected = await client.recv()
     assert rejected["event"] == "error" and "busy" in rejected["message"]
 
+    # `done` was a prediction. If the batch it described failed at runtime the
+    # loop is entitled to another look, and the worker is still ours.
     await send_observe(client)
-    finished = await client.recv_event("action_failed")
-    assert finished["code"] == "no_session"
+    another = await client.recv_event("action_turn")
+    assert [step["do"] for step in another["steps"]] == [
+        step["do"] for step in FIRST_BATCH
+    ]
     await client.send_json({
         "cmd": "set_model", "kind": "cleanup", "model": replacement.model_id,
     })
@@ -1776,11 +1814,31 @@ def test_session_turn_cap_is_enforced():
         accept(sess, [{"do": "wait_frontmost", "app": "Slack"}])
 
 
-def test_session_done_reply_ends_it():
+def test_session_done_reply_does_not_close_the_session():
+    """`done` is the model's PREDICTION about steps that have not run yet.
+
+    Closing on it stranded the caller whenever that batch then failed for a
+    recoverable reason: the loop asked for one more look and the engine
+    answered "action session already finished", which is the message the user
+    got instead of "TextEdit has no text field to type into" (reproduced live).
+    The caller closes the session; MAX_TURNS still bounds it.
+    """
     sess = session()
     accept(sess, FIRST_BATCH, goal="g", sends=False)
     out = accept(sess, None, done=True)
     assert out["done"] is True and out["steps"] == []
+    assert not sess.finished
+    # ...so the loop can still come back with what actually happened.
+    recovered = accept(sess, FIRST_BATCH)
+    assert recovered["steps"][0]["do"] == "open_app"
+
+
+def test_session_model_failure_reply_still_ends_it():
+    """A model that gives up HAS finished — only the prediction is provisional."""
+    sess = session()
+    accept(sess, FIRST_BATCH, goal="g", sends=False)
+    out = sess.accept_reply(json.dumps({"fail": "cannot do that"}))
+    assert out["fail"] == "cannot do that"
     assert sess.finished
 
 

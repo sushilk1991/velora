@@ -80,6 +80,15 @@ protocol ActionHost: AnyObject {
     /// them authorize URL content would reopen the exfiltration class the
     /// fence exists to close.
     var screenNamesAreUserVisible: Bool { get }
+    /// True while the host is driving a window the user cannot see.
+    ///
+    /// A `wait_frontmost` that has not been satisfied must not try to fix
+    /// focus in that mode: there, the wait is polling the background target's
+    /// readiness, and asking the host to open the app again would either
+    /// unpin the window it is already typing into or fall back to the
+    /// foreground and take the user's screen — the one thing background
+    /// execution promises not to do.
+    var isDrivingInBackground: Bool { get }
     /// URL of the frontmost page when a browser is frontmost, else nil.
     func frontmostPageURL() -> String?
     /// Press the on-screen control whose label matches. Label-addressed AX
@@ -108,6 +117,11 @@ protocol ActionHost: AnyObject {
     func sleep(ms: Int)
     /// Monotonic seconds, for wait timeouts.
     func now() -> TimeInterval
+}
+
+extension ActionHost {
+    /// Foreground hosts drive the window the user is looking at.
+    var isDrivingInBackground: Bool { false }
 }
 
 enum ActionOutcome: Equatable {
@@ -173,6 +187,10 @@ final class ActionExecutor {
     /// How long a `verify_context` step waits for the screen to catch up
     /// before deciding the state it wanted never arrived.
     static let verifySettleSeconds: TimeInterval = 2.5
+    /// How long a named app gets to come forward on its own before Velora
+    /// asks it to, and how long it then gets to arrive.
+    static let focusRecoveryAfterMs = 700
+    static let focusRecoveryTimeoutMs = 3000
 
     private let host: ActionHost
     /// Written on the main queue by `cancel()`, read on the executor's
@@ -188,6 +206,10 @@ final class ActionExecutor {
     /// The app the plan has established focus on, and its bundle id once seen.
     private var expectedAppName: String?
     private var expectedBundleID: String?
+    /// One focus recovery per batch. An app that refuses to come forward twice
+    /// is not going to come forward a third time, and each attempt costs the
+    /// user real seconds.
+    private var triedFocusRecovery = false
 
     init(host: ActionHost) {
         self.host = host
@@ -277,9 +299,46 @@ final class ActionExecutor {
                 note("open_url \(url.scheme ?? "?")")
 
             case .waitFrontmost(let app, let timeoutMs):
-                guard let front = waitForFrontmost(app, timeoutMs: timeoutMs) else {
+                // Waiting alone never made anything happen. A plan that
+                // checkpoints before opening its app — which a small planner
+                // writes constantly — burned every turn on an eight-second
+                // wait for a window nobody had asked for (observed live:
+                // seven identical timeouts, then `open_app` on the last turn).
+                // Ask once, then keep waiting. This grants no new power: it is
+                // the same activation `open_app` performs with the same app
+                // name, and in background-routing mode the host keeps driving
+                // the off-screen window instead of taking the screen.
+                // Never in background mode: there the wait polls this host's
+                // own readiness, and re-opening would unpin the window being
+                // driven or fall back to the foreground and take the screen.
+                let mayRecoverFocus = !host.isDrivingInBackground
+                    && !triedFocusRecovery
+                // Ask early. Recovering only after the full timeout expired
+                // meant the user watched the whole eight seconds elapse before
+                // anything was attempted.
+                let firstLook = mayRecoverFocus
+                    ? min(timeoutMs, Self.focusRecoveryAfterMs) : timeoutMs
+                var front = waitForFrontmost(app, timeoutMs: firstLook)
+                if front == nil, !cancelled, mayRecoverFocus {
+                    triedFocusRecovery = true
+                    if let resolved = host.openApp(named: app) {
+                        note("wait_frontmost \(app): asked \(resolved) to come forward")
+                        // Recorded like any other activation. It may have
+                        // LAUNCHED the app; a turn that did that and then
+                        // failed must not report "nothing effective to do".
+                        evidence.append(.appOpenRequested(
+                            requested: Self.evidenceText(app, limit: 120),
+                            resolved: Self.evidenceText(resolved, limit: 120)))
+                        front = waitForFrontmost(
+                            app,
+                            timeoutMs: max(timeoutMs - firstLook,
+                                           Self.focusRecoveryTimeoutMs))
+                    }
+                }
+                guard let front else {
                     let actual = host.frontmostApp()?.name ?? "nothing"
-                    note("wait_frontmost \(app): timed out (front: \(actual))")
+                    note("wait_frontmost \(app): timed out (front: \(actual)) — "
+                         + "\(app) will not come forward; do not wait for it again")
                     return failed(index, "\(app) didn't come to the front",
                                   recoverable: true)
                 }
@@ -360,7 +419,14 @@ final class ActionExecutor {
                 // TextEdit had no document, so the text went nowhere and the
                 // run still claimed it had typed 17 characters.
                 guard host.hasFocusedTextTarget else {
-                    note("type_text: nothing focused to type into")
+                    // Name the remedy, not just the symptom. "nothing focused"
+                    // sent the planner hunting for a menu item called "New
+                    // Document" over and over; what it needed to know is that
+                    // an empty app wants a new document opened first.
+                    note("type_text: nothing focused to type into — "
+                         + "\(expectedAppName ?? "that app") has no text field "
+                         + "on screen; open a document (key n with cmd) or "
+                         + "press a field first, then type")
                     // Recoverable: the next turn can open a compose field or
                     // press the element that would focus one.
                     return failed(
@@ -456,7 +522,17 @@ final class ActionExecutor {
                 }
                 guard host.pressElement(label: label,
                                         expecting: expectedBundleID) else {
-                    note("press_element \(label): not found")
+                    // Name the remedy. Observed live: an app that launched
+                    // without a document has no text area, and the planner
+                    // spent every remaining turn pressing a MENU item called
+                    // "New Document" — which press_element cannot reach by
+                    // design. Repeating the bare "not found" taught it
+                    // nothing, so it repeated the step.
+                    note("press_element \(label): not found — nothing on "
+                         + "screen has that label, and menu items cannot be "
+                         + "pressed. Use a key shortcut instead (a new "
+                         + "document is key n with cmd), or press a label "
+                         + "listed in screen_names")
                     // Recoverable BY DESIGN: "that label isn't on screen" is
                     // exactly the observation the next turn should react to.
                     return failed(index, "couldn't find '\(label)' on screen",
