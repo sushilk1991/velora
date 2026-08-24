@@ -122,6 +122,36 @@ useful diagnostic baseline, not clean comparative evidence; investigate hash
 changes and use a smaller controlled idle replay before accepting an
 optimization. Keep all manifests and reports in `/tmp` and out of git.
 
+## Stream Typing against a real app (`--stream-e2e`)
+
+Stream Typing's correctness is mostly a property of the *target app*, not of
+Velora: whether an Accessibility write is readable back on the next line, and
+how quickly, differs per app. Native AppKit answers synchronously; Chromium and
+every Electron app answer from another process, later. A suite that only ever
+tested TextEdit passed for a year while Stream Typing was broken in Chrome,
+Slack, VS Code, and every Electron chat app.
+
+```bash
+swift build -c release
+./.build/release/Velora --stream-e2e TextEdit      # native AppKit
+./.build/release/Velora --stream-e2e front         # focus a field, 3s countdown
+./.build/release/Velora --stream-e2e front --dry-run   # describe only, type nothing
+./.build/release/Velora --stream-e2e front --revert    # type, then restore the field
+```
+
+It feeds a scripted partial sequence through the real `StreamTypingSession` and
+prints, after every revision, what the target reported back — the selected
+range, the readable field value, and which ownership condition failed. `PASS`
+means the whole polished final landed.
+
+Run it against at least one **native** and one **Chromium/Electron** target
+before shipping a change to `StreamTypingSession`, `TextInserter`, or the
+`ScreenContext` stream helpers. Use `--dry-run` or `--revert` against any app
+holding the user's own work; `--revert` leaves the field exactly as found.
+
+The headless `VELORA_STREAM_TYPING_E2E=1 ./.build/release/Velora --selftest`
+gate covers the same path against TextEdit and runs in the normal suite.
+
 ## Coverage rules
 
 - Every production bug gets a regression at the lowest layer that reproduces

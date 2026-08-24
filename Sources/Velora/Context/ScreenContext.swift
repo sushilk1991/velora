@@ -829,20 +829,168 @@ enum ScreenContext {
         ) == draft
     }
 
+    /// Which of `streamOwnsDraft`'s conditions is false, for logs and the
+    /// `--stream-e2e` probe. Diagnostic only: nothing branches on this, so a
+    /// stale read here can never widen what Velora is willing to type over.
+    static func streamDraftOwnershipDiagnosis(
+        _ draft: String, target: ScreenStreamTarget
+    ) -> String {
+        let app = NSWorkspace.shared.frontmostApplication
+        guard app?.bundleIdentifier == target.bundleID else {
+            return "frontmost is \(app?.bundleIdentifier ?? "nothing")"
+        }
+        guard let focused = focusedElement(of: app) else {
+            return "no focused element"
+        }
+        guard CFEqual(focused, target.element) else {
+            return "focused element identity changed"
+        }
+        guard let range = axRange(focused, kAXSelectedTextRangeAttribute) else {
+            return "no selected range"
+        }
+        let expected = target.location + draft.utf16.count
+        guard range.location == expected, range.length == 0 else {
+            return "caret at (\(range.location),\(range.length)), expected (\(expected),0)"
+        }
+        let readBack = axStringForRange(
+            target.element,
+            CFRange(location: target.location, length: draft.utf16.count))
+        guard let readBack else { return "draft range unreadable" }
+        guard readBack == draft else {
+            return "draft text differs (\(readBack.utf16.count) vs "
+                + "\(draft.utf16.count) utf16 units)"
+        }
+        return "ownership intact"
+    }
+
     /// Selects only the exact provisional draft after proving its contents and
     /// caret. A user keystroke/click invalidates the separate generation guard
     /// before this method is called.
-    static func selectStreamDraft(_ draft: String, target: ScreenStreamTarget) -> Bool {
-        guard streamOwnsDraft(draft, target: target) else { return false }
+    ///
+    /// Asynchronous because the confirming read may have to wait — see
+    /// `settle`.
+    static func selectStreamDraft(
+        _ draft: String,
+        target: ScreenStreamTarget,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard streamOwnsDraft(draft, target: target) else {
+            completion(false)
+            return
+        }
         var range = CFRange(location: target.location, length: draft.utf16.count)
         guard let value = AXValueCreate(.cfRange, &range),
               AXUIElementSetAttributeValue(
                 target.element,
                 kAXSelectedTextRangeAttribute as CFString,
                 value) == .success
-        else { return false }
-        return streamSelectionMatches(
-            target, location: target.location, text: draft)
+        else {
+            completion(false)
+            return
+        }
+        settle(
+            until: {
+                streamSelectionMatches(
+                    target, location: target.location, text: draft)
+            },
+            completion: completion)
+    }
+
+    /// How long an AX write may take to become visible to a reader before
+    /// Velora treats it as not having happened.
+    ///
+    /// Chromium-family targets — Chrome and every Electron app — apply a
+    /// selection change in the renderer process and acknowledge it
+    /// asynchronously. The read immediately after a *successful* set still
+    /// returns the OLD range. Reading once therefore turns "not yet" into "not
+    /// true": Velora abandoned a draft it still owned, stopped typing after the
+    /// first partial, and left the draft selected so the user's next keystroke
+    /// wiped it. Reproduced live in Chrome and in Electron (see
+    /// `--stream-e2e`).
+    ///
+    /// Polling cannot loosen the guarantee. Only the exact expected state ever
+    /// returns true, and a timeout still fails closed — the wait just stops
+    /// mistaking latency for a lost draft.
+    static let streamSettleSeconds: TimeInterval = 0.4
+    private static let streamPollSeconds: TimeInterval = 0.01
+
+    /// Polls `condition` on the main queue until it holds or the budget runs
+    /// out, calling back with the answer. Costs exactly one read against a
+    /// synchronous target.
+    ///
+    /// It does NOT block the caller, and that is the whole point. Sleeping was
+    /// the obvious implementation and the wrong one: Velora's hotkey CGEvent
+    /// tap is a source on the **main** run loop (`HotkeyMonitor`), and that
+    /// callback is what increments `UserInputActivity` — the guard that
+    /// notices the user typing mid-draft. Sleeping the main thread would make
+    /// that guard read "nothing happened" for exactly as long as the wait, and
+    /// macOS additionally disables a tap that stalls
+    /// (`.tapDisabledByTimeout`, already handled in HotkeyMonitor because it
+    /// happens): the events lost during such a stall never arrive at all.
+    /// A wait that blinds the safety guard is not a safe wait.
+    ///
+    /// The budget bounds the waiting, not the work: the final evaluation
+    /// starts before the deadline and may finish after it.
+    static func settle(
+        until condition: @escaping () -> Bool,
+        seconds: TimeInterval = streamSettleSeconds,
+        completion: @escaping (Bool) -> Void
+    ) {
+        let deadline = Date().addingTimeInterval(seconds)
+        func attempt() {
+            if condition() {
+                completion(true)
+                return
+            }
+            guard Date() < deadline else {
+                completion(false)
+                return
+            }
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + streamPollSeconds, execute: attempt)
+        }
+        attempt()
+    }
+
+    /// Undoes Velora's own selection when a revision is abandoned after the
+    /// draft was selected for replacement. Without this the draft stays
+    /// highlighted and the user's next keystroke replaces it — the "it typed
+    /// something and then it vanished" report.
+    ///
+    /// `generation` is the physical-input generation this draft was owned at.
+    /// A selection that merely *looks* like the one Velora would have set is
+    /// not proof Velora set it — the user could have selected the same range
+    /// themselves (⌘A in a field holding only the draft produces an exact
+    /// match). Only the generation separates "ours" from "identical", so a
+    /// changed one means hands off.
+    static func collapseStreamDraftSelection(
+        _ draft: String,
+        target: ScreenStreamTarget,
+        ownedAtGeneration generation: UInt64,
+        completion: (() -> Void)? = nil
+    ) {
+        guard StreamInputOwnership.isCurrent(generation) else {
+            completion?()
+            return
+        }
+        settle(until: {
+            streamSelectionMatches(
+                target, location: target.location, text: draft)
+        }) { matched in
+            guard matched, StreamInputOwnership.isCurrent(generation) else {
+                completion?()
+                return
+            }
+            var caret = CFRange(
+                location: target.location + draft.utf16.count, length: 0)
+            if let value = AXValueCreate(.cfRange, &caret) {
+                AXUIElementSetAttributeValue(
+                    target.element,
+                    kAXSelectedTextRangeAttribute as CFString,
+                    value)
+            }
+            completion?()
+        }
     }
 
     private static func streamSelectionMatches(

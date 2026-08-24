@@ -497,11 +497,23 @@ final class TextInserter {
     ) {
         // Typing is slow for long strings; keep it off the main thread.
         DispatchQueue.global(qos: .userInitiated).async {
+            // Split so the log names WHICH gate refused: "the target moved" and
+            // "the caller's own precondition failed" need different fixes, and
+            // a single combined guard made both invisible.
             guard Self.deliveryAllowed(
-                    targetBundleID: targetBundleID,
-                    targetElement: targetElement),
-                  initialDeliveryCheck?() ?? true
+                targetBundleID: targetBundleID, targetElement: targetElement)
             else {
+                NSLog("Velora: typing refused before the first key — "
+                      + "target not deliverable (%@)", targetBundleID ?? "any app")
+                DispatchQueue.main.async {
+                    completion(TypingOutcome(completed: false, postedUTF16Units: 0))
+                }
+                return
+            }
+            guard initialDeliveryCheck?() ?? true else {
+                NSLog("Velora: typing refused before the first key — "
+                      + "the caller's delivery check declined (%ld chars pending)",
+                      text.count)
                 DispatchQueue.main.async {
                     completion(TypingOutcome(completed: false, postedUTF16Units: 0))
                 }

@@ -319,9 +319,17 @@ final class StreamTypingSession {
         let ownershipValid = inputIsUnchanged && (
             plan.rendered.map { ScreenContext.streamOwnsDraft($0, target: target) }
                 ?? ScreenContext.streamOriginalIsCurrent(target))
+        let wasAbandoned = plan.isAbandoned
         let operation = plan.next(delivery, ownershipValid: ownershipValid)
         switch operation {
         case .abandon:
+            if !wasAbandoned {
+                NSLog("Velora: stream draft abandoned in %@ before typing — "
+                      + "ownership check failed (userInput=%@, hadDraft=%@)",
+                      target.bundleID,
+                      inputIsUnchanged ? "unchanged" : "changed",
+                      plan.rendered == nil ? "no" : "yes")
+            }
             request.completion?(finishResult(for: plan.abandonment))
             drain()
         case .noChange:
@@ -331,26 +339,58 @@ final class StreamTypingSession {
             typeRevision(
                 delivery,
                 replacing: target.originalText,
+                selectionIsOurs: false,
                 target: target,
                 request: request)
         case .replace(let previous, _):
-            guard ScreenContext.selectStreamDraft(previous, target: target) else {
-                plan.abandon()
-                request.completion?(.ownershipLost)
-                drain()
-                return
+            // Confirming the selection can take a beat on a Chromium-backed
+            // target, so this is asynchronous — which means a cancel or a newer
+            // partial can now arrive mid-flight. Hold the queue with `busy`
+            // exactly as a running revision would.
+            busy = true
+            ScreenContext.selectStreamDraft(previous, target: target) {
+                [weak self] selected in
+                guard let self else { return }
+                self.busy = false
+                guard !self.cancelRequested else {
+                    // Esc landed while we waited. The revert path owns the
+                    // draft from here.
+                    self.drain()
+                    return
+                }
+                guard selected else {
+                    NSLog("Velora: stream draft lost — could not reselect the "
+                          + "%ld-char draft in %@ (%@)",
+                          previous.count, target.bundleID,
+                          ScreenContext.streamDraftOwnershipDiagnosis(
+                            previous, target: target))
+                    self.plan.abandon()
+                    request.completion?(.ownershipLost)
+                    // The selection may still land after the verify gave up.
+                    // Put the caret back so an abandoned draft is never left
+                    // highlighted for the user's next keystroke to erase.
+                    ScreenContext.collapseStreamDraftSelection(
+                        previous, target: target,
+                        ownedAtGeneration: self.inputGeneration
+                    ) { [weak self] in
+                        self?.drain()
+                    }
+                    return
+                }
+                self.typeRevision(
+                    delivery,
+                    replacing: previous,
+                    selectionIsOurs: true,
+                    target: target,
+                    request: request)
             }
-            typeRevision(
-                delivery,
-                replacing: previous,
-                target: target,
-                request: request)
         }
     }
 
     private func typeRevision(
         _ delivery: String,
         replacing selectedText: String,
+        selectionIsOurs: Bool,
         target: ScreenStreamTarget,
         request: Request
     ) {
@@ -372,9 +412,23 @@ final class StreamTypingSession {
             // Give the target's event loop one beat to apply the last Unicode
             // event, then prove the exact draft and caret before claiming it.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
-                let applied = outcome.completed
-                    && self.inputIsUnchanged
-                    && ScreenContext.streamOwnsDraft(delivery, target: target)
+                // Settle rather than read once: the same asynchronous
+                // Chromium/Electron accessibility that delays a selection also
+                // delays the typed text and caret becoming readable. A
+                // delivery that never happened skips the wait entirely.
+                let mayHaveApplied = outcome.completed && self.inputIsUnchanged
+                let confirm: (@escaping (Bool) -> Void) -> Void = { done in
+                    guard mayHaveApplied else {
+                        done(false)
+                        return
+                    }
+                    ScreenContext.settle(until: {
+                        ScreenContext.streamOwnsDraft(delivery, target: target)
+                    }, completion: done)
+                }
+                confirm { applied in
+                // `busy` stays set across the confirmation above, so a partial
+                // arriving mid-wait queues instead of interleaving.
                 self.busy = false
                 if applied {
                     self.plan.commit(delivery)
@@ -385,6 +439,14 @@ final class StreamTypingSession {
                     let ownershipStillValid = self.inputIsUnchanged
                         && ScreenContext.streamSelectionIsCurrent(
                             selectedText, target: target)
+                    NSLog("Velora: stream draft abandoned in %@ — typed=%@ "
+                          + "posted=%ld/%ld userInputUnchanged=%@ ownsDraft=%@",
+                          target.bundleID,
+                          outcome.completed ? "yes" : "no",
+                          outcome.postedUTF16Units, delivery.utf16.count,
+                          self.inputIsUnchanged ? "yes" : "no",
+                          ScreenContext.streamOwnsDraft(delivery, target: target)
+                              ? "yes" : "no")
                     self.plan.abandonAfterFailedDelivery(
                         postedUTF16Units: outcome.postedUTF16Units,
                         ownershipStillValid: ownershipStillValid)
@@ -392,8 +454,23 @@ final class StreamTypingSession {
                     if !self.cancelRequested {
                         request.completion?(failure)
                     }
+                    if selectionIsOurs, outcome.postedUTF16Units == 0 {
+                        // Nothing was typed over the selection Velora made, so
+                        // restoring the caret restores exactly what the user
+                        // had before this revision started. Refuses on its own
+                        // if the input generation moved — this path is reached
+                        // precisely when it may have.
+                        ScreenContext.collapseStreamDraftSelection(
+                            selectedText, target: target,
+                            ownedAtGeneration: self.inputGeneration
+                        ) { [weak self] in
+                            self?.drain()
+                        }
+                        return
+                    }
                 }
                 self.drain()
+                }
             }
         }
     }
@@ -417,12 +494,27 @@ final class StreamTypingSession {
                     ? .failed : .noDraft)
             return
         }
-        guard let target, inputIsUnchanged,
-              ScreenContext.selectStreamDraft(rendered, target: target) else {
+        guard let target, inputIsUnchanged else {
             finishCancellation(.failed)
             return
         }
+        // Held across the asynchronous reselect so a partial arriving mid-Esc
+        // cannot start a revision on top of the restoration.
         busy = true
+        ScreenContext.selectStreamDraft(rendered, target: target) {
+            [weak self] selected in
+            guard let self else { return }
+            guard selected else {
+                self.finishCancellation(.failed)
+                return
+            }
+            self.restoreOverSelectedDraft(rendered, target: target)
+        }
+    }
+
+    private func restoreOverSelectedDraft(
+        _ rendered: String, target: ScreenStreamTarget
+    ) {
         if target.originalText.isEmpty {
             guard inserter.pressKey(51) else {
                 finishCancellation(.failed)
@@ -448,14 +540,21 @@ final class StreamTypingSession {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) {
                         // Restore the exact selection, not merely its text and
                         // a caret after it. If ownership changed, fail closed.
-                        guard inserted, self.inputIsUnchanged,
-                              ScreenContext.selectStreamDraft(
-                                target.originalText, target: target) else {
+                        guard inserted, self.inputIsUnchanged else {
                             self.finishCancellation(.failed)
                             return
                         }
-                        self.verifyRestoration(
-                            target: target, attemptsRemaining: 4)
+                        ScreenContext.selectStreamDraft(
+                            target.originalText, target: target
+                        ) { [weak self] restored in
+                            guard let self else { return }
+                            guard restored else {
+                                self.finishCancellation(.failed)
+                                return
+                            }
+                            self.verifyRestoration(
+                                target: target, attemptsRemaining: 4)
+                        }
                     }
                 })
         }
@@ -675,8 +774,29 @@ final class KeystrokeStreamTypingSession: LiveStreamDraftSession {
             }
         ) { [weak self] outcome in
             guard let self else { return }
-            let ownershipStillValid = self.targetIsCurrent(
-                outcome.completed ? delivery : previous)
+            // Same asynchronous-accessibility hazard as the AX route: a
+            // Chromium-backed field updates the caret this check reads from
+            // another process, after this callback. Settle on the ownership
+            // read only — the input-generation and Secure Input guards are
+            // decided facts, and re-checked after the wait so a keystroke
+            // during it still fails closed.
+            let confirm: (@escaping (Bool) -> Void) -> Void = { done in
+                guard outcome.completed else {
+                    done(self.targetIsCurrent(previous))
+                    return
+                }
+                guard self.inputIsUnchanged, self.safetyCheck() else {
+                    done(false)
+                    return
+                }
+                ScreenContext.settle(until: { self.ownershipCheck(delivery) }) {
+                    owns in
+                    // Re-check after the wait: the run loop kept turning, so a
+                    // keystroke during it is visible here and must still lose.
+                    done(owns && self.inputIsUnchanged && self.safetyCheck())
+                }
+            }
+            confirm { ownershipStillValid in
             self.busy = false
             if outcome.completed, ownershipStillValid {
                 self.plan.commit(delivery)
@@ -698,6 +818,7 @@ final class KeystrokeStreamTypingSession: LiveStreamDraftSession {
                 }
             }
             self.drain()
+            }
         }
     }
 

@@ -169,6 +169,7 @@ enum Selftest {
         testMediaPlaybackSupportedPlayers()
         testInsertionBoundary()
         testInsertionContinuation()
+        testStreamSettle()
         if ProcessInfo.processInfo.environment["VELORA_STREAM_TYPING_E2E"] == "1" {
             testLiveStreamTypingInsertion()
         }
@@ -188,6 +189,53 @@ enum Selftest {
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// An Accessibility write is not always readable back on the next line.
+    /// Chromium and every Electron app apply a selection change in the renderer
+    /// and acknowledge it asynchronously, so reading once made Velora treat its
+    /// own successful write as a lost draft: Stream Typing stopped after the
+    /// first partial in Chrome, Slack, VS Code, Hermes — and left the draft
+    /// selected for the next keystroke to erase. Waiting must not soften what
+    /// counts as ownership; it must only stop counting latency as loss.
+    private static func testStreamSettle() {
+        var reads = 0
+        var immediate: Bool?
+        ScreenContext.settle(until: { reads += 1; return true }) { immediate = $0 }
+        expect(immediate == true,
+               "a target that answers immediately settles on the first read")
+        expect(reads == 1, "an immediate answer costs exactly one read")
+
+        var remaining = 5
+        var delayed: Bool?
+        ScreenContext.settle(until: {
+            remaining -= 1
+            return remaining <= 0
+        }) { delayed = $0 }
+        expect(waitUntil(timeout: 2) { delayed != nil }
+                   && delayed == true,
+               "a state that appears a few polls late still counts")
+
+        var refused: Bool?
+        ScreenContext.settle(until: { false }, seconds: 0.05) { refused = $0 }
+        expect(waitUntil(timeout: 2) { refused != nil } && refused == false,
+               "a state that never appears still fails closed")
+
+        // The property the whole rewrite exists for. Velora's hotkey CGEvent
+        // tap is a source on the MAIN run loop and is what increments
+        // UserInputActivity — the guard that notices the user typing mid-draft.
+        // A settle that blocked the main thread would leave that guard reading
+        // "nothing happened" for the length of the wait. So work queued behind
+        // a running settle must still run while it waits.
+        var settled = false
+        var ranDuringSettle = false
+        ScreenContext.settle(until: { settled }, seconds: 1) { _ in }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            ranDuringSettle = true
+            settled = true
+        }
+        expect(waitUntil(timeout: 2) { ranDuringSettle },
+               "the main queue keeps running while a settle waits")
     }
 
     /// Opt-in signed/install-surface proof against a real TextEdit AX target.
@@ -266,15 +314,23 @@ enum Selftest {
             }
             app = launchedApp
             ownsApp = true
-            guard waitUntil(timeout: 5, {
-                      if NSWorkspace.shared.frontmostApplication?.bundleIdentifier
-                          == bundleID {
-                          return true
+            // Frontmost and "has a focused text area" are separate events: the
+            // AX tree lags activation, and reading the element once the instant
+            // frontmost flips found nil often enough to fail this test on a
+            // healthy machine — a guard that cries wolf protects nothing. Wait
+            // for both to hold at the same moment instead.
+            var focusedElement: AXUIElement?
+            guard waitUntil(timeout: 15, {
+                      guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                          == bundleID
+                      else {
+                          _ = launchedApp.activate()
+                          return false
                       }
-                      _ = launchedApp.activate()
-                      return false
+                      focusedElement = ScreenContext.focusedElement(of: launchedApp)
+                      return focusedElement != nil
                   }),
-                  let focused = ScreenContext.focusedElement(of: launchedApp)
+                  let focused = focusedElement
             else {
                 launchedApp.forceTerminate()
                 expect(false, "TextEdit focused the Stream Typing fixture")

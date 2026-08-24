@@ -27,6 +27,14 @@ if CommandLine.arguments.contains("--update-e2e") {
     exit(UpdateE2E.run(install: CommandLine.arguments.contains("--install")))
 }
 
+// Headless Stream Typing end-to-end: feeds a scripted partial sequence through
+// the real StreamTypingSession against a real app window and reports what the
+// target reported back. Needs Accessibility. See StreamE2E.
+if let streamIndex = CommandLine.arguments.firstIndex(of: "--stream-e2e") {
+    exit(StreamE2E.run(
+        arguments: Array(CommandLine.arguments.dropFirst(streamIndex + 1))))
+}
+
 // Headless UI snapshots: renders HUD states + Settings panes to PNGs in the
 // given directory (offscreen — nothing appears on the user's display).
 if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
