@@ -1796,6 +1796,32 @@ def test_session_observation_message_carries_the_loop_state():
     assert "Query" in msg                      # what is focused
 
 
+def test_observation_demands_a_fresh_focus_checkpoint_each_turn():
+    """Every batch gets a NEW executor, whose focus state starts empty, so a
+    turn that types without its own wait_frontmost/verify_context is rejected
+    by the validator AND would refuse at runtime.
+
+    The system prompt says so once, at the top. The between-turns note is the
+    text nearest the model's reply, and leaving the rule out of it is what a
+    4B planner actually acts on: observed live, the model answered a plain
+    "type this in TextEdit" with wait_frontmost eight turns running, its
+    type_text rejected each time, until the turn budget ran out.
+    """
+    sess = session()
+    accept(sess, FIRST_BATCH, goal="find Shivangi", sends=False)
+    msg = sess.observation_message(observation())
+    lowered = msg.lower()
+    assert "starts unverified" in lowered
+    assert "wait_frontmost" in lowered and "verify_context" in lowered
+    # It must say the rule holds even when the app is already in front —
+    # that is exactly the case the model talked itself out of.
+    assert "already in front" in lowered
+    # And that the checkpoint and the work belong to the SAME turn. Saying
+    # only "checkpoint first" produced the opposite failure live: the model
+    # sent a lone wait_frontmost every turn until the budget ran out.
+    assert "same steps" in lowered
+
+
 def test_session_observation_is_defanged():
     """Screen text is attacker-reachable; an observation must never be able to
     forge a chat-template turn or smuggle instructions in as structure."""

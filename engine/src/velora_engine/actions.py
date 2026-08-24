@@ -1104,8 +1104,16 @@ NEXT_TURN_NOTE = (
     'achieved, reply {"done": true} and nothing else. Otherwise compare the '
     "window title and focused element with the GOAL's target — if the wrong "
     'conversation or page is on screen, navigate to the right one before any '
-    'type_text. Reply with the next steps as JSON, or {"fail": "<why>"} if '
-    'it cannot be done.'
+    'type_text. THIS TURN STARTS UNVERIFIED: a checkpoint from an earlier '
+    'turn does not carry over, so put wait_frontmost or verify_context '
+    'FIRST and then the work — the typing, the key, the press — in these '
+    'SAME steps, even when the app is already in front. A turn holding only '
+    'a checkpoint achieves nothing and wastes one of the few turns left; '
+    'work without a checkpoint in front of it is rejected. Shape: '
+    '{"steps":[{"do":"wait_frontmost","app":"Notes"},'
+    '{"do":"type_text","text":"the words to write"}]}. '
+    'Reply with the next steps as JSON, or {"fail": "<why>"} if it cannot '
+    'be done.'
 )
 
 

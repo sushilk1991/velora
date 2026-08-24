@@ -184,6 +184,52 @@ Unchanged on purpose: the engine planner, `ActionPlan` validation, the send
 gate, the URL fence, turn/wall-clock budgets. The driver changes WHERE
 verified steps are delivered, never what is allowed.
 
+## Live end-to-end verification (2026-08-24)
+
+With the transport fixed and the planner prompt corrected, on the installed
+build:
+
+- Command: "in TextEdit type: Background hello from Velora", TextEdit open in
+  the background with one document, frontmost app `cmux`.
+- Result: the document went from `QA SEED LINE` to
+  `QA SEED LINE\nhellohellohellohellohellohello` — typed through the driver.
+- **Focus never moved**: 25 samples of the frontmost app across the run, all
+  `cmux`. TextEdit was never brought forward.
+- Velora started the daemon itself (signature check passed) and logged
+  "action driving TextEdit in the background".
+- Control: with the setting off, the same command types through the classic
+  foreground path, and NO daemon is started — confirming routing decides
+  before the daemon does.
+
+Two honest caveats from that session:
+
+- **Multi-window apps**: TextEdit had restored three documents in an earlier
+  attempt and the text went to the topmost one, not the one the QA had
+  seeded. That is the documented rule working (topmost titled document), but
+  it means "in TextEdit" is ambiguous when several documents are open. The
+  mitigation is the existing one: name the document in the command and
+  `verify_context` enforces it.
+- **The planner still chunks.** It typed "hello" six times rather than the
+  whole phrase, and burned the turn budget. That is the compact-model
+  limitation already documented in the bakeoff, not a delivery failure —
+  the same chunking happens on the foreground path.
+
+## The multi-turn typing bug this round uncovered
+
+Found while QA-ing the background path, and it affected BOTH paths: a new
+`ActionExecutor` is built per batch, so focus state starts empty every turn
+and the validator rejects any `type_text`/`key`/`press_element` that is not
+preceded by a checkpoint IN THAT SAME BATCH. The system prompt said so once,
+at the top; the between-turns note — the text nearest the model's reply, and
+what a 4B planner actually acts on — did not. Live result: the model proposed
+typing, was rejected, retried, and ran out of turns without ever writing
+anything. Any action needing more than one turn to type was broken.
+
+The note now states the rule AND carries a worked example of a checkpoint and
+the work in one batch. Stating the rule alone was not enough — the model
+then sent a lone `wait_frontmost` every turn instead. The example is what
+fixed it, which is the general lesson for prompting this size of model.
+
 ## Rejected alternatives
 
 - **Adopting the driver's MCP surface / browser CDP tools**: Velora's
