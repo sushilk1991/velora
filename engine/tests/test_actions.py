@@ -1820,6 +1820,11 @@ def test_observation_demands_a_fresh_focus_checkpoint_each_turn():
     # only "checkpoint first" produced the opposite failure live: the model
     # sent a lone wait_frontmost every turn until the budget ran out.
     assert "same steps" in lowered
+    # The worked example must be unmistakably a TEMPLATE. Shipping it with
+    # realistic filler text made a 4B planner type the filler verbatim into
+    # the user's document (observed live on the 0.18.0 build).
+    assert "placeholders to replace" in lowered
+    assert "the words to write" not in lowered
 
 
 def test_session_observation_is_defanged():

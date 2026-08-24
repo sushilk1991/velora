@@ -1109,11 +1109,14 @@ NEXT_TURN_NOTE = (
     'FIRST and then the work — the typing, the key, the press — in these '
     'SAME steps, even when the app is already in front. A turn holding only '
     'a checkpoint achieves nothing and wastes one of the few turns left; '
-    'work without a checkpoint in front of it is rejected. Shape: '
-    '{"steps":[{"do":"wait_frontmost","app":"Notes"},'
-    '{"do":"type_text","text":"the words to write"}]}. '
-    'Reply with the next steps as JSON, or {"fail": "<why>"} if it cannot '
-    'be done.'
+    'work without a checkpoint in front of it is rejected. Shape — the '
+    'angle brackets are placeholders to replace, never text to type: '
+    '{"steps":[{"do":"wait_frontmost","app":"<app name>"},'
+    '{"do":"type_text","text":"<the words the GOAL asks for>"}]}. '
+    'Type the WHOLE wording the GOAL asks for in ONE type_text step — never '
+    'a word or two at a time, and never text DONE SO FAR already shows was '
+    'typed; if it is all in, reply {"done": true}. Reply with the next '
+    'steps as JSON, or {"fail": "<why>"} if it cannot be done.'
 )
 
 
