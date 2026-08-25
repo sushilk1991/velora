@@ -158,6 +158,21 @@ final class SystemActionHost: ActionHost {
         }
     }
 
+    func openApp(named name: String, bundleID: String, pid: Int) -> String? {
+        clearActionTextState()
+        return onMain {
+            guard pid > 0,
+                  let app = NSRunningApplication(
+                    processIdentifier: pid_t(pid)),
+                  app.activationPolicy == .regular,
+                  app.bundleIdentifier?.caseInsensitiveCompare(bundleID)
+                    == .orderedSame else { return nil }
+            self.activate(app)
+            self.enableAccessibility(for: app)
+            return app.localizedName ?? name
+        }
+    }
+
     private func activate(_ app: NSRunningApplication) {
         // Cooperative activation: ask the system to hand our activation right
         // to the target, then request the switch. Without the yield a menubar

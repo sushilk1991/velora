@@ -44,6 +44,8 @@ protocol ActionHost: AnyObject {
     func prepareForActionPlan(sends: Bool)
     /// Launch or switch to an app; returns the name it actually resolved to.
     func openApp(named name: String) -> String?
+    /// Switch to the already-resolved running app without fuzzy re-resolution.
+    func openApp(named name: String, bundleID: String, pid: Int) -> String?
     func openURL(_ url: URL) -> Bool
     /// (localizedName, bundleIdentifier) of the frontmost app.
     func frontmostApp() -> (name: String, bundleID: String)?
@@ -128,6 +130,9 @@ extension ActionHost {
     var isDrivingInBackground: Bool { false }
     func endActionInputSession() {}
     func prepareForActionPlan(sends: Bool) {}
+    func openApp(named name: String, bundleID: String, pid: Int) -> String? {
+        nil
+    }
     func uiSnapshot() -> ActionUISnapshot? { nil }
     func pressElement(index: Int, snapshotID: String, label: String,
                       role: String, expecting bundleID: String?) -> Bool {

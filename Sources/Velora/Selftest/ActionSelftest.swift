@@ -7,6 +7,7 @@ import Foundation
 final class FakeActionHost: ActionHost {
     /// Frontmost app after each `openApp`, keyed by the requested name.
     var appsByName: [String: (name: String, bundleID: String)] = [:]
+    var appsByPID: [Int: (name: String, bundleID: String, windowID: Int)] = [:]
     var frontmost: (name: String, bundleID: String)?
     var windowTitle: String?
     var elementLabel: String?
@@ -79,6 +80,18 @@ final class FakeActionHost: ActionHost {
         log.append("openApp(\(name))")
         guard let resolved = appsByName[name] else { return nil }
         frontmost = resolved
+        return resolved.name
+    }
+
+    func openApp(named name: String, bundleID: String, pid: Int) -> String? {
+        log.append("openExact(\(pid))")
+        guard let resolved = appsByPID[pid],
+              resolved.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame
+        else { return nil }
+        frontmost = (resolved.name, resolved.bundleID)
+        foregroundWindowValue = ActionWindowIdentity(
+            name: resolved.name, bundleID: resolved.bundleID,
+            pid: pid, windowID: resolved.windowID)
         return resolved.name
     }
 
@@ -6154,7 +6167,8 @@ extension Selftest {
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            system.appsByName["Notes"] = ("Notes", "com.apple.Notes")
+            system.appsByName["Notes"] = ("Notes impostor", "com.example.notes")
+            system.appsByPID[500] = ("Notes", "com.apple.Notes", 9)
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": [
@@ -6164,12 +6178,6 @@ extension Selftest {
                  "bounds": ["width": 800.0, "height": 600.0],
                  "title": "My Note", "on_current_space": false],
             ]]
-            transport.responses["bring_to_front"] = presentationReply(500, 9)
-            transport.onCall = { tool in
-                if tool == "bring_to_front" {
-                    system.frontmost = ("Notes", "com.apple.Notes")
-                }
-            }
             var daemonStops = 0
             let host = makeRoutedHost(
                 system: system, transport: transport,
@@ -6182,6 +6190,10 @@ extension Selftest {
                    "off-Space fallback does not claim background readiness")
             expect(daemonStops == 1,
                    "off-Space fallback releases its private Cua child")
+            expect(transport.callCount("bring_to_front") == 0,
+                   "off-Space fallback delegates after Cua teardown")
+            expect(system.log == ["openExact(500)"],
+                   "off-Space fallback preserves resolved PID and bundle")
         }
 
         // A target whose window stops resolving reads as lost, not as fine —
