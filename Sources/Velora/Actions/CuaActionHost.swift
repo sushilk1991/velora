@@ -716,13 +716,23 @@ final class BackgroundRoutingActionHost: ActionHost {
         else { return .invalid }
         guard windows.allSatisfy({ validWindow($0, pid: resolved.pid) })
         else { return .invalid }
-        let current = windows.filter {
+        // WindowServer chrome strips can omit Space membership. Ignore those,
+        // but fail closed when an actual document-sized candidate omits it.
+        let unknown = windows.filter {
+            exactFlag($0["on_current_space"]) == nil
+        }
+        guard CuaWindowPick.choose(unknown, pid: resolved.pid) == nil
+        else { return .invalid }
+        let known = windows.filter {
+            exactFlag($0["on_current_space"]) != nil
+        }
+        let current = known.filter {
             exactFlag($0["on_current_space"]) == true
         }
         if let window = CuaWindowPick.choose(current, pid: resolved.pid) {
             return .found(pid: resolved.pid, windowID: window.id)
         }
-        guard let window = CuaWindowPick.choose(windows, pid: resolved.pid)
+        guard let window = CuaWindowPick.choose(known, pid: resolved.pid)
         else { return .missing }
         return .offSpace(pid: resolved.pid, windowID: window.id)
     }
@@ -731,7 +741,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard exactInt(raw["pid"]) == pid,
               exactInt(raw["window_id"]).map({ $0 > 0 }) == true,
               exactInt(raw["layer"]) == 0,
-              exactFlag(raw["on_current_space"]) != nil,
               let bounds = raw["bounds"] as? [String: Any],
               exactNumber(bounds["width"]).map({ $0 >= 0 }) == true,
               exactNumber(bounds["height"]).map({ $0 >= 0 }) == true

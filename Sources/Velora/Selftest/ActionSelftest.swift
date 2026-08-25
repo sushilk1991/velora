@@ -6158,6 +6158,8 @@ extension Selftest {
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": [
+                ["pid": 500, "window_id": 8, "layer": 0, "z_index": 11,
+                 "bounds": ["width": 3360.0, "height": 30.0]],
                 ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
                  "bounds": ["width": 800.0, "height": 600.0],
                  "title": "My Note", "on_current_space": false],
