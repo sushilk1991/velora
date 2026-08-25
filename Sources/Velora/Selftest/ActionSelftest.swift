@@ -47,6 +47,7 @@ final class FakeActionHost: ActionHost {
 
     /// Fires after each host call, so a test can change the world mid-plan.
     var onStep: ((String) -> Void)?
+    var onSleep: ((Int) -> Void)?
 
     private(set) var log: [String] = []
     private(set) var typed: [String] = []
@@ -231,6 +232,7 @@ final class FakeActionHost: ActionHost {
     func sleep(ms: Int) {
         sleepCalls.append(ms)
         clock += Double(ms) / 1000
+        onSleep?(ms)
         if let target = textTargetAfterSleepCalls,
            sleepCalls.count >= target {
             hasTextTarget = true
@@ -5239,9 +5241,6 @@ extension Selftest {
         expect(host.uiSnapshot() == nil,
                "a replay after reset poisons the new routed session")
         transport.responses["list_windows"] = ["windows": [
-            ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-             "bounds": ["width": 800.0, "height": 600.0],
-             "title": "My Note"],
             ["pid": 501, "window_id": 10, "layer": 0, "z_index": 11,
              "bounds": ["width": 800.0, "height": 600.0],
              "title": "Slack"],
@@ -5414,6 +5413,16 @@ extension Selftest {
             ]
         }
 
+        func processPresentationReply(_ pid: Int) -> [String: Any] {
+            [
+                "status": "activated",
+                "code": "bring_to_front_process_verified",
+                "activated": true, "request_accepted": true,
+                "process_activated": true,
+                "pid": pid, "window_id": NSNull(), "path": "cocoa",
+            ]
+        }
+
         // The happy path: another app, native, daemon healthy — the action
         // routes to the background and the system host never activates
         // anything.
@@ -5426,8 +5435,8 @@ extension Selftest {
             host.beginActionInputSession()
             expect(host.openApp(named: "Notes") == "Notes",
                    "a background open resolves the driver's app name")
-            expect(transport.callCount("launch_app") == 1,
-                   "a running target is hidden-launched so a window exists")
+            expect(transport.callCount("launch_app") == 0,
+                   "a running target with a usable window is not relaunched")
             expect(!system.log.contains { $0.hasPrefix("openApp") },
                    "the system host never activates a background target")
             let front = host.frontmostApp()
@@ -5508,6 +5517,105 @@ extension Selftest {
                    "window materialization preserves the user's foreground app")
         }
 
+        // Electron can activate several seconds after launch_app already
+        // claimed suppression. The launch path must keep guarding the prior
+        // exact window through that late activation window.
+        do {
+            let expectedSettleMs = 8_000
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["list_windows"] = ["windows": []]
+            transport.responses["bring_to_front"] = presentationReply(700, 70)
+            transport.responses["launch_app"] = [
+                "pid": 500, "bundle_id": "com.apple.Notes",
+                "name": "Notes", "windows": [],
+                "launch_state": [
+                    "requested": true, "process_running": true,
+                    "window_ready": false,
+                ],
+                "self_activation_suppressed": false,
+            ]
+            transport.onCall = { tool in
+                if tool == "launch_app" {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                    transport.responses["list_windows"] = ["windows": [[
+                        "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+                        "bounds": ["width": 800.0, "height": 600.0],
+                        "title": "My Note",
+                    ]]]
+                }
+                if tool == "bring_to_front" {
+                    system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+                }
+            }
+            system.onSleep = { _ in
+                guard system.sleepCalls.count == 10 else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            expect(host.openApp(named: "Notes") == "Notes",
+                   "failed suppression and late activation both recover")
+            expect(system.sleepCalls.reduce(0, +) == expectedSettleMs
+                   && transport.callCount("bring_to_front") == 2
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "hidden launch guards the exact prior window for eight seconds")
+        }
+
+        // A user may switch apps while the exceptional launch guard is
+        // running. Protect the newly chosen app from a later Electron
+        // activation even when it has no ordinary WindowServer window.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["list_windows"] = ["windows": []]
+            transport.responses["bring_to_front"] = processPresentationReply(800)
+            transport.onCall = { tool in
+                if tool == "launch_app" {
+                    transport.responses["list_windows"] = ["windows": [[
+                        "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+                        "bounds": ["width": 800.0, "height": 600.0],
+                        "title": "My Note",
+                    ]]]
+                }
+                if tool == "bring_to_front" {
+                    system.frontmost = ("Finder", "com.apple.finder")
+                }
+            }
+            system.onSleep = { _ in
+                if system.sleepCalls.count == 5 {
+                    system.frontmost = ("Finder", "com.apple.finder")
+                    system.foregroundWindowValue = nil
+                    var apps = transport.responses["list_apps"]?["apps"]
+                        as? [[String: Any]] ?? []
+                    apps.append([
+                        "name": "Finder", "bundle_id": "com.apple.finder",
+                        "pid": 800, "running": true, "active": true,
+                    ])
+                    transport.responses["list_apps"] = ["apps": apps]
+                }
+                if system.sleepCalls.count == 10 {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                }
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            expect(host.openApp(named: "Notes") == "Notes"
+                   && system.frontmost?.bundleID == "com.apple.finder"
+                   && transport.callCount("bring_to_front") == 1,
+                   "late activation restores the app the user switched to")
+        }
+
         // Search and navigation stay off-screen. Only the engine-attested
         // presentation step may call bring_to_front, exactly once, and a bad
         // response restores the precise window that owned focus beforehand.
@@ -5531,21 +5639,62 @@ extension Selftest {
                 snapshotID: snapshot.id, bundleID: snapshot.bundleID,
                 windowID: windowID)
                 && transport.callCount("bring_to_front") == 0,
-                   "handoff refuses before touching focus without an exact prior window")
-            system.foregroundWindowValue = ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 70)
+                   "handoff refuses when the prior app cannot be identified")
+            var apps = transport.responses["list_apps"]?["apps"]
+                as? [[String: Any]] ?? []
+            apps.append([
+                "name": "Ghostty", "bundle_id": "com.mitchellh.ghostty",
+                "pid": 700, "running": true, "active": true,
+            ])
+            transport.responses["list_apps"] = ["apps": apps]
             transport.responses["bring_to_front"] = presentationReply(500, windowID)
             expect(host.presentUI(
                 snapshotID: snapshot.id, bundleID: snapshot.bundleID,
                 windowID: windowID),
-                   "the exact attested target window is presented")
+                   "the target presents when the prior app has no ordinary window")
             expect(transport.callCount("bring_to_front") == 1,
                    "successful final presentation brings the target forward once")
             expect(!host.isDrivingInBackground,
                    "successful presentation switches the next turn to native AX")
             expect(transport.callCount("type_text") == 0,
                    "the presentation turn contains no deferred content")
+        }
+
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot(),
+                  let windowID = snapshot.windowID else {
+                expect(false, "the app-only restore fixture has routed evidence")
+                return
+            }
+            system.foregroundWindowValue = nil
+            var apps = transport.responses["list_apps"]?["apps"]
+                as? [[String: Any]] ?? []
+            apps.append([
+                "name": "Ghostty", "bundle_id": "com.mitchellh.ghostty",
+                "pid": 700, "running": true, "active": true,
+            ])
+            transport.responses["list_apps"] = ["apps": apps]
+            transport.queued["bring_to_front"] = [
+                ["status": "partial", "pid": 500, "window_id": windowID],
+                processPresentationReply(700),
+            ]
+            expect(!host.presentUI(
+                snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                windowID: windowID),
+                   "a failed handoff restores a prior app without a window")
+            let handoffs = transport.calls.filter { $0.tool == "bring_to_front" }
+            expect(handoffs.count == 2
+                   && handoffs[1].arguments["pid"] as? Int == 700
+                   && handoffs[1].arguments["window_id"] == nil,
+                   "app-only restoration is PID-bound and independently verified")
         }
 
         let mandatory: [(String, String, Any)] = [
@@ -6047,8 +6196,9 @@ extension Selftest {
         expectSystemFallback("routing disabled falls back to the system host",
                              enabled: false)
         for failure in [
-            "daemon", "transport", "resolution", "launch", "launch_identity",
-            "launch_pid_identity", "launch_focus", "launch_focus_changed",
+            "daemon", "transport", "resolution", "app_state",
+            "window_identity", "launch", "launch_identity",
+            "launch_pid_identity", "launch_focus_changed",
         ] {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -6059,11 +6209,27 @@ extension Selftest {
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["bring_to_front"] = presentationReply(700, 70)
+            if failure.hasPrefix("launch") {
+                transport.responses["list_windows"] = ["windows": []]
+            }
             var healthy = true
             if failure == "daemon" { healthy = false }
             if failure == "transport" { transport.failing.insert("list_apps") }
             if failure == "resolution" {
                 transport.responses["list_apps"] = ["apps": []]
+            }
+            if failure == "app_state" {
+                transport.responses["list_apps"] = ["apps": [[
+                    "name": "Notes", "bundle_id": "com.apple.Notes",
+                    "pid": 500, "running": false,
+                ]]]
+            }
+            if failure == "window_identity" {
+                transport.responses["list_windows"] = ["windows": [[
+                    "pid": 999, "window_id": 9, "layer": 0, "z_index": 10,
+                    "bounds": ["width": 800.0, "height": 600.0],
+                    "title": "Impostor",
+                ]]]
             }
             if failure == "launch" {
                 transport.responses["list_apps"] = ["apps": [[
@@ -6094,25 +6260,6 @@ extension Selftest {
                     "self_activation_suppressed": true,
                 ]
             }
-            if failure == "launch_focus" {
-                transport.responses["launch_app"] = [
-                    "pid": 500, "bundle_id": "com.apple.Notes",
-                    "name": "Notes", "windows": [],
-                    "launch_state": [
-                        "requested": true, "process_running": true,
-                        "window_ready": false,
-                    ],
-                    "self_activation_suppressed": false,
-                ]
-                transport.onCall = { tool in
-                    if tool == "launch_app" {
-                        system.frontmost = ("Notes", "com.apple.notes")
-                    }
-                    if tool == "bring_to_front" {
-                        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-                    }
-                }
-            }
             if failure == "launch_focus_changed" {
                 transport.onCall = { tool in
                     guard tool == "launch_app" else { return }
@@ -6125,11 +6272,8 @@ extension Selftest {
             let expectedFrontmost = failure == "launch_focus_changed"
                 ? "com.apple.finder" : "com.mitchellh.ghostty"
             let opened = host.openApp(named: "Notes")
-            let callsRestore = failure != "launch_focus"
-                || transport.callCount("bring_to_front") == 1
             expect(opened == nil
                    && system.frontmost?.bundleID == expectedFrontmost
-                   && callsRestore
                    && !system.log.contains("openApp(Notes)"),
                    "eligible background \(failure) failure never activates foreground")
         }

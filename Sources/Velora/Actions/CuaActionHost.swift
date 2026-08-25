@@ -399,11 +399,11 @@ enum CuaDiagnostics {
 ///
 /// The routing decision is made once per action, at `openApp`: a target that
 /// is a different native app, the plan cannot deliver content, the feature is
-/// enabled, and the daemon is healthy is launched WITHOUT activation and
-/// driven in the background; the user's cursor, focus, and typing are never
-/// touched. Explicit foreground cases—current app, sending, browsers, or a
-/// disabled setting—delegate to `SystemActionHost`. Driver failures fail
-/// closed so they never turn an eligible background action into activation.
+/// enabled, and the daemon is healthy is driven through an existing window.
+/// A windowless target is launched under a bounded focus guard. Explicit
+/// foreground cases—current app, sending, browsers, or a disabled setting—
+/// delegate to `SystemActionHost`. Driver failures fail closed so they never
+/// turn an eligible background action into activation.
 ///
 /// Validation is unchanged on purpose: the same `ActionPlan` decode, the same
 /// `ActionRuntimePolicy`, the same executor invariants run against this host.
@@ -417,9 +417,13 @@ final class BackgroundRoutingActionHost: ActionHost {
     private static let callTimeout: TimeInterval = 3.0
     private static let maximumSnapshotIDs = 512
     private static let maximumSnapshotIDBytes = 128
+    private static let launchSettleMs = 8_000
+    private static let launchPollMs = 100
     private static let presentationTool = "bring_to_front"
     private static let presentationCode =
         "bring_to_front_exact_window_verified"
+    private static let processPresentationCode =
+        "bring_to_front_process_verified"
     private let system: ActionHost
     private let transport: CuaTransport
     private let backgroundEnabled: () -> Bool
@@ -618,6 +622,26 @@ final class BackgroundRoutingActionHost: ActionHost {
     private struct ResolvedApp {
         let name: String
         let bundleID: String
+        let pid: Int
+        let running: Bool
+    }
+
+    private enum WindowProbe {
+        case found(pid: Int, windowID: Int)
+        case missing
+        case invalid
+    }
+
+    private enum FocusTarget {
+        case app(bundleID: String, pid: Int)
+        case window(ActionWindowIdentity)
+
+        var bundleID: String {
+            switch self {
+            case .app(let bundleID, _): return bundleID
+            case .window(let window): return window.bundleID
+            }
+        }
     }
 
     private func resolveApp(named name: String) -> ResolvedApp? {
@@ -626,35 +650,85 @@ final class BackgroundRoutingActionHost: ActionHost {
               let apps = reply["apps"] as? [[String: Any]] else { return nil }
         let names = apps.map { ($0["name"] as? String) ?? "" }
         guard let index = AppMatcher.bestMatch(for: name, in: names),
-              let bundleID = apps[index]["bundle_id"] as? String else { return nil }
-        return ResolvedApp(name: names[index], bundleID: bundleID)
+              let bundleID = apps[index]["bundle_id"] as? String,
+              let pid = exactInt(apps[index]["pid"]), pid >= 0,
+              let running = exactFlag(apps[index]["running"]),
+              (running && pid > 0) || (!running && pid == 0)
+        else { return nil }
+        return ResolvedApp(
+            name: names[index], bundleID: bundleID,
+            pid: pid, running: running)
     }
 
     private func activateTarget(_ resolved: ResolvedApp) -> Bool {
-        // Cua's macOS contract says launch_app is the hidden-window
-        // materializer even when the process already exists. list_apps only
-        // proves a pid; Slack can remain running with zero windows after its
-        // last window closes, which left wait_frontmost polling nothing.
-        guard let prior = system.foregroundWindow(),
-              prior.pid > 0, prior.windowID > 0,
-              let frontBefore = system.frontmostApp(),
-              prior.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
-                == .orderedSame,
+        guard let frontBefore = system.frontmostApp(),
               frontBefore.bundleID.caseInsensitiveCompare(resolved.bundleID)
                 != .orderedSame else { return false }
+
+        switch existingWindow(resolved) {
+        case .found(let pid, let windowID):
+            guard let frontAfter = system.frontmostApp(),
+                  frontAfter.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
+                    == .orderedSame else { return false }
+            beginRoute(resolved, pid: pid, windowID: windowID)
+            return true
+        case .missing:
+            return launchTarget(resolved, frontBefore: frontBefore)
+        case .invalid:
+            return false
+        }
+    }
+
+    private func existingWindow(_ resolved: ResolvedApp) -> WindowProbe {
+        guard resolved.running, resolved.pid > 0 else { return .missing }
+        guard let liveBundleID = bundleForPID(resolved.pid),
+              liveBundleID.caseInsensitiveCompare(resolved.bundleID)
+                == .orderedSame else { return .invalid }
+        guard case .success(let reply) = transport.call(
+            "list_windows", arguments: ["pid": resolved.pid],
+            timeout: Self.callTimeout),
+              let windows = reply["windows"] as? [[String: Any]]
+        else { return .invalid }
+        guard windows.allSatisfy({ validWindow($0, pid: resolved.pid) })
+        else { return .invalid }
+        guard let window = CuaWindowPick.choose(windows, pid: resolved.pid)
+        else { return .missing }
+        return .found(pid: resolved.pid, windowID: window.id)
+    }
+
+    private func validWindow(_ raw: [String: Any], pid: Int) -> Bool {
+        guard exactInt(raw["pid"]) == pid,
+              exactInt(raw["window_id"]).map({ $0 > 0 }) == true,
+              exactInt(raw["layer"]) == 0,
+              let bounds = raw["bounds"] as? [String: Any],
+              exactNumber(bounds["width"]).map({ $0 >= 0 }) == true,
+              exactNumber(bounds["height"]).map({ $0 >= 0 }) == true
+        else { return false }
+        return true
+    }
+
+    private func launchTarget(
+        _ resolved: ResolvedApp,
+        frontBefore: (name: String, bundleID: String)
+    ) -> Bool {
+        // launch_app can report suppression before Electron's delayed
+        // activation. Capture an independently owned restoration target and
+        // keep guarding it through the driver's late-activation interval.
+        guard let prior = captureFocus(frontBefore) else { return false }
         let launchResult = transport.call(
             "launch_app", arguments: ["bundle_id": resolved.bundleID],
             timeout: 10)
         guard case .success(let launched) = launchResult else {
-            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
             return false
         }
         let focusSuppressed = exactFlag(launched["self_activation_suppressed"])
-        guard focusSuppressed == true else {
-            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+        guard focusSuppressed != nil else {
+            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
             return false
         }
         guard let pid = exactInt(launched["pid"]), pid > 0,
+              !resolved.running || pid == resolved.pid,
               let launchedBundleID = launched["bundle_id"] as? String,
               launchedBundleID.caseInsensitiveCompare(resolved.bundleID)
                 == .orderedSame,
@@ -664,20 +738,90 @@ final class BackgroundRoutingActionHost: ActionHost {
               let liveBundleID = bundleForPID(pid),
               liveBundleID.caseInsensitiveCompare(resolved.bundleID)
                 == .orderedSame else {
-            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
             return false
         }
-        guard let frontAfter = system.frontmostApp(),
-              frontAfter.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
-                == .orderedSame else {
-            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+        if focusSuppressed == false,
+           !restoreLaunchFocus(prior, targetBundleID: resolved.bundleID) {
             return false
         }
+        guard settleLaunchFocus(prior, targetBundleID: resolved.bundleID) else {
+            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            return false
+        }
+
+        beginRoute(resolved, pid: pid, windowID: nil)
+        return true
+    }
+
+    private func settleLaunchFocus(
+        _ prior: FocusTarget, targetBundleID: String
+    ) -> Bool {
+        var protected = prior
+        let pollCount = Self.launchSettleMs / Self.launchPollMs
+        for _ in 0..<pollCount {
+            system.sleep(ms: Self.launchPollMs)
+            guard let front = system.frontmostApp() else {
+                guard restoreFocus(protected) else { return false }
+                continue
+            }
+            if front.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame {
+                guard restoreFocus(protected) else { return false }
+                continue
+            }
+            if front.bundleID.caseInsensitiveCompare(protected.bundleID)
+                == .orderedSame {
+                if let current = captureWindow(front) {
+                    protected = current
+                }
+                continue
+            }
+            guard let current = captureFocus(front) else { return false }
+            protected = current
+        }
+        return true
+    }
+
+    private func captureFocus(
+        _ front: (name: String, bundleID: String)
+    ) -> FocusTarget? {
+        if let window = captureWindow(front) { return window }
+        guard case .success(let reply) = transport.call(
+            "list_apps", arguments: [:], timeout: Self.callTimeout),
+              let apps = reply["apps"] as? [[String: Any]] else { return nil }
+        let matches = apps.filter {
+            guard let bundleID = $0["bundle_id"] as? String else { return false }
+            return bundleID.caseInsensitiveCompare(front.bundleID) == .orderedSame
+                && exactFlag($0["running"]) == true
+                && exactFlag($0["active"]) == true
+        }
+        guard matches.count == 1,
+              let pid = exactInt(matches[0]["pid"]), pid > 0,
+              let liveBundleID = bundleForPID(pid),
+              liveBundleID.caseInsensitiveCompare(front.bundleID) == .orderedSame
+        else { return nil }
+        return .app(bundleID: front.bundleID, pid: pid)
+    }
+
+    private func captureWindow(
+        _ front: (name: String, bundleID: String)
+    ) -> FocusTarget? {
+        guard let window = system.foregroundWindow(),
+              window.pid > 0, window.windowID > 0,
+              window.bundleID.caseInsensitiveCompare(front.bundleID) == .orderedSame
+        else { return nil }
+        return .window(window)
+    }
+
+    private func beginRoute(
+        _ resolved: ResolvedApp, pid: Int, windowID: Int?
+    ) {
         routed = true
         targetPID = pid
         targetName = resolved.name
         targetBundleID = resolved.bundleID.lowercased()
-        targetWindowID = nil
+        targetWindowID = windowID
         targetReady = false
         everReady = false
         // A new target is a new window, a new element, and a new draft:
@@ -689,22 +833,20 @@ final class BackgroundRoutingActionHost: ActionHost {
         routedUISnapshot = nil
         resetSnapshotLineage()
         backgroundDraft = ""
-        return true
     }
 
     private func restoreLaunchFocus(
-        _ prior: ActionWindowIdentity, targetBundleID: String
-    ) {
+        _ prior: FocusTarget, targetBundleID: String
+    ) -> Bool {
         guard let front = system.frontmostApp() else {
-            _ = restore(prior)
-            return
+            return restoreFocus(prior)
         }
         if front.bundleID.caseInsensitiveCompare(prior.bundleID) == .orderedSame {
-            return
+            return true
         }
         guard front.bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame
-        else { return }
-        _ = restore(prior)
+        else { return true }
+        return restoreFocus(prior)
     }
 
     // MARK: - Target readiness (drives the executor's wait_frontmost poll)
@@ -1078,8 +1220,10 @@ final class BackgroundRoutingActionHost: ActionHost {
               cached.observation.windowID == windowID,
               cached.pid == targetPID, cached.windowID == windowID,
               cached.bundleID == targetBundleID,
-              let prior = system.foregroundWindow(),
-              prior.pid > 0, prior.windowID > 0
+              let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(targetBundleID)
+                != .orderedSame,
+              let prior = captureFocus(front)
         else { return false }
 
         let result = transport.call(Self.presentationTool, arguments: [
@@ -1088,7 +1232,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard case .success(let reply) = result,
               presentationMatches(reply, pid: targetPID, windowID: windowID)
         else {
-            _ = restore(prior)
+            _ = restoreFocus(prior)
             unroute()
             return false
         }
@@ -1096,7 +1240,22 @@ final class BackgroundRoutingActionHost: ActionHost {
         return true
     }
 
-    private func restore(_ prior: ActionWindowIdentity) -> Bool {
+    private func restoreFocus(_ target: FocusTarget) -> Bool {
+        switch target {
+        case .app(let bundleID, let pid):
+            guard let liveBundleID = bundleForPID(pid),
+                  liveBundleID.caseInsensitiveCompare(bundleID) == .orderedSame,
+                  case .success(let reply) = transport.call(
+                    Self.presentationTool, arguments: ["pid": pid],
+                    timeout: Self.callTimeout)
+            else { return false }
+            return processMatches(reply, pid: pid)
+        case .window(let window):
+            return restoreWindow(window)
+        }
+    }
+
+    private func restoreWindow(_ prior: ActionWindowIdentity) -> Bool {
         guard case .success(let reply) = transport.call(
             Self.presentationTool, arguments: [
                 "pid": prior.pid, "window_id": prior.windowID,
@@ -1104,6 +1263,18 @@ final class BackgroundRoutingActionHost: ActionHost {
         else { return false }
         return presentationMatches(
             reply, pid: prior.pid, windowID: prior.windowID)
+    }
+
+    private func processMatches(_ reply: [String: Any], pid: Int) -> Bool {
+        guard reply["status"] as? String == "activated",
+              reply["code"] as? String == Self.processPresentationCode,
+              exactFlag(reply["activated"]) == true,
+              exactFlag(reply["request_accepted"]) == true,
+              exactFlag(reply["process_activated"]) == true,
+              exactInt(reply["pid"]) == pid,
+              reply["window_id"] is NSNull
+        else { return false }
+        return true
     }
 
     private func presentationMatches(
@@ -1171,6 +1342,13 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard let number = raw as? NSNumber,
               CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
+    }
+
+    private func exactNumber(_ raw: Any?) -> Double? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value = number.doubleValue
+        return value.isFinite ? value : nil
     }
 
     private func sameElementIdentity(
