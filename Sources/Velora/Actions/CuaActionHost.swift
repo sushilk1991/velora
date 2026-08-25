@@ -426,6 +426,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// Injectable so the selftest can gate health without spawning a daemon.
     private let ensureDaemon: (CuaTransport) -> Bool
     private let endDaemon: () -> Void
+    private let bundleForPID: (Int) -> String?
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
     /// means "can't tell from here" — the driver decides.
@@ -481,6 +482,9 @@ final class BackgroundRoutingActionHost: ActionHost {
             = CuaDriverDaemon.ensureRunning,
          endDaemon: @escaping () -> Void
             = CuaDriverDaemon.stopIfVeloraStarted,
+         bundleForPID: @escaping (Int) -> String? = { pid in
+            NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
+         },
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
             = BackgroundRoutingActionHost.resolveRunningApp) {
         self.system = system
@@ -488,6 +492,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.backgroundEnabled = backgroundEnabled
         self.ensureDaemon = ensureDaemon
         self.endDaemon = endDaemon
+        self.bundleForPID = bundleForPID
         self.localResolve = localResolve
     }
 
@@ -613,8 +618,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     private struct ResolvedApp {
         let name: String
         let bundleID: String
-        let pid: Int
-        let running: Bool
     }
 
     private func resolveApp(named name: String) -> ResolvedApp? {
@@ -624,22 +627,51 @@ final class BackgroundRoutingActionHost: ActionHost {
         let names = apps.map { ($0["name"] as? String) ?? "" }
         guard let index = AppMatcher.bestMatch(for: name, in: names),
               let bundleID = apps[index]["bundle_id"] as? String else { return nil }
-        return ResolvedApp(
-            name: names[index],
-            bundleID: bundleID,
-            pid: (apps[index]["pid"] as? Int) ?? 0,
-            running: (apps[index]["running"] as? Bool) ?? false)
+        return ResolvedApp(name: names[index], bundleID: bundleID)
     }
 
     private func activateTarget(_ resolved: ResolvedApp) -> Bool {
-        var pid = resolved.pid
-        if !resolved.running || pid <= 0 {
-            guard case .success(let launched) = transport.call(
-                "launch_app", arguments: ["bundle_id": resolved.bundleID],
-                timeout: 10),
-                  let launchedPID = launched["pid"] as? Int, launchedPID > 0
-            else { return false }
-            pid = launchedPID
+        // Cua's macOS contract says launch_app is the hidden-window
+        // materializer even when the process already exists. list_apps only
+        // proves a pid; Slack can remain running with zero windows after its
+        // last window closes, which left wait_frontmost polling nothing.
+        guard let prior = system.foregroundWindow(),
+              prior.pid > 0, prior.windowID > 0,
+              let frontBefore = system.frontmostApp(),
+              prior.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
+                == .orderedSame,
+              frontBefore.bundleID.caseInsensitiveCompare(resolved.bundleID)
+                != .orderedSame else { return false }
+        let launchResult = transport.call(
+            "launch_app", arguments: ["bundle_id": resolved.bundleID],
+            timeout: 10)
+        guard case .success(let launched) = launchResult else {
+            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            return false
+        }
+        let focusSuppressed = exactFlag(launched["self_activation_suppressed"])
+        guard focusSuppressed == true else {
+            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            return false
+        }
+        guard let pid = exactInt(launched["pid"]), pid > 0,
+              let launchedBundleID = launched["bundle_id"] as? String,
+              launchedBundleID.caseInsensitiveCompare(resolved.bundleID)
+                == .orderedSame,
+              let launchState = launched["launch_state"] as? [String: Any],
+              exactFlag(launchState["requested"]) == true,
+              exactFlag(launchState["process_running"]) == true,
+              let liveBundleID = bundleForPID(pid),
+              liveBundleID.caseInsensitiveCompare(resolved.bundleID)
+                == .orderedSame else {
+            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            return false
+        }
+        guard let frontAfter = system.frontmostApp(),
+              frontAfter.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
+                == .orderedSame else {
+            restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
+            return false
         }
         routed = true
         targetPID = pid
@@ -658,6 +690,21 @@ final class BackgroundRoutingActionHost: ActionHost {
         resetSnapshotLineage()
         backgroundDraft = ""
         return true
+    }
+
+    private func restoreLaunchFocus(
+        _ prior: ActionWindowIdentity, targetBundleID: String
+    ) {
+        guard let front = system.frontmostApp() else {
+            _ = restore(prior)
+            return
+        }
+        if front.bundleID.caseInsensitiveCompare(prior.bundleID) == .orderedSame {
+            return
+        }
+        guard front.bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame
+        else { return }
+        _ = restore(prior)
     }
 
     // MARK: - Target readiness (drives the executor's wait_frontmost poll)
