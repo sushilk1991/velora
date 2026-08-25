@@ -381,7 +381,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             engineReady: { [weak supervisor] in supervisor?.isReady ?? false },
             typingWPM: { AppConfig.shared.typingWPM },
             restartBlockReason: { [weak self] in
-                self?.restartBlockReason() ?? "Velora is unavailable"
+                guard let self else { return "Velora is unavailable" }
+                return self.restartBlockReason()
             },
             transcribeFile: { [weak self] arguments, completion in
                 let requestID = UUID()
