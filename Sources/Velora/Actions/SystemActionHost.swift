@@ -93,6 +93,11 @@ final class SystemActionHost: ActionHost {
         actionUISnapshot = nil
     }
 
+    func endActionInputSession() {
+        targetState.reset()
+        actionUISnapshot = nil
+    }
+
     private func clearActionTextState() {
         targetState.clearTarget()
     }

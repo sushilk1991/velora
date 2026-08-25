@@ -112,6 +112,7 @@ final class ActionLoopRunner {
         // Draft ownership must cross turns in this run, but never leak into
         // the next action invocation.
         host.beginActionInputSession()
+        defer { host.endActionInputSession() }
         progress(.readingScreen)
         var context = context
         context.uiSnapshot = host.uiSnapshot()

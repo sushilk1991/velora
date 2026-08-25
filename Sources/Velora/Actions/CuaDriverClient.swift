@@ -1,6 +1,43 @@
 import Foundation
 import Security
 
+struct CuaProcessIdentity: Hashable {
+    let pid: pid_t
+    let startSeconds: UInt64
+    let startMicroseconds: UInt64
+
+    /// PID plus kernel start time prevents force-killing a recycled PID.
+    static func capture(pid: pid_t) -> CuaProcessIdentity? {
+        guard pid > 0 else { return nil }
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else {
+            return nil
+        }
+        return CuaProcessIdentity(
+            pid: pid, startSeconds: info.pbi_start_tvsec,
+            startMicroseconds: info.pbi_start_tvusec)
+    }
+
+    var isCurrent: Bool { Self.capture(pid: pid) == self }
+}
+
+struct CuaPeerTrustCache {
+    private var identities = Set<CuaProcessIdentity>()
+
+    func contains(_ identity: CuaProcessIdentity) -> Bool {
+        identities.contains(identity)
+    }
+
+    mutating func insert(_ identity: CuaProcessIdentity) {
+        identities.insert(identity)
+    }
+
+    mutating func removeAll() {
+        identities.removeAll()
+    }
+}
+
 /// Client for the Cua Driver daemon (github.com/trycua — `com.trycua.driver`),
 /// an MIT-licensed computer-use daemon the user installs separately. It can
 /// deliver clicks and text to a CHOSEN window without moving the cursor or
@@ -14,14 +51,40 @@ import Security
 /// that govern the foreground path — the driver is an actuator, never an
 /// authority.
 enum CuaDriver {
-    /// Fixed by the driver; `cua-driver serve` refuses a second bind, so
-    /// discovering a live socket here means a healthy daemon.
-    static var socketPath: String {
-        NSHomeDirectory() + "/Library/Caches/cua-driver/cua-driver.sock"
-    }
+    private static let safeEnvironmentNames: Set<String> = [
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL",
+        "TMPDIR", "TMP", "TEMP", "LANG",
+    ]
 
     static var appBinaryPath: String {
         "/Applications/CuaDriver.app/Contents/MacOS/cua-driver"
+    }
+
+    static func socketPathFits(_ path: String) -> Bool {
+        var address = sockaddr_un()
+        return withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+            path.utf8.count < MemoryLayout.size(ofValue: pointer.pointee)
+        }
+    }
+
+    /// Builds the child's entire environment. Ambient driver authority and
+    /// loader hooks never cross the embedding boundary.
+    static func safeEnvironment(
+        from inherited: [String: String], bundleID: String?, hostPID: pid_t
+    ) -> [String: String] {
+        var environment: [String: String] = [:]
+        for (name, value) in inherited {
+            guard safeEnvironmentNames.contains(name)
+                    || name.hasPrefix("LC_") else { continue }
+            environment[name] = value
+        }
+        environment["CUA_DRIVER_EMBEDDED"] = "1"
+        environment["CUA_DRIVER_HOST_BUNDLE_ID"] = bundleID
+            ?? "com.sushil.velora"
+        environment["CUA_DRIVER_RS_TELEMETRY_ENABLED"] = "false"
+        environment["CUA_DRIVER_RS_UPDATE_CHECK"] = "false"
+        environment["CUA_DRIVER_EMBEDDED_HOST_PID"] = String(hostPID)
+        return environment
     }
 
     static var isInstalled: Bool {
@@ -55,7 +118,7 @@ enum CuaDriver {
     }
 
     private static let peerLock = NSLock()
-    private static var trustedPeerPIDs = Set<pid_t>()
+    private static var trustedPeers = CuaPeerTrustCache()
 
     /// Verifies that the process on the other end of the socket really is
     /// Cua's driver, by asking the kernel for the peer's pid and checking
@@ -66,17 +129,18 @@ enum CuaDriver {
     /// `type_text` payload, and hand back the snapshots Velora's delivery
     /// evidence is built from (review finding). Same-user is not a trust
     /// boundary; a verified code signature is.
-    static func peerIsTrusted(fd: Int32) -> Bool {
+    static func peerIsTrusted(fd: Int32, expectedPID: pid_t? = nil) -> Bool {
         var pid: pid_t = 0
         var length = socklen_t(MemoryLayout<pid_t>.size)
         guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0,
-              pid > 0 else { return false }
+              pid > 0, let identity = CuaProcessIdentity.capture(pid: pid)
+        else { return false }
+        if let expectedPID, pid != expectedPID { return false }
         peerLock.lock()
-        let known = trustedPeerPIDs.contains(pid)
+        let known = trustedPeers.contains(identity)
         peerLock.unlock()
-        // Cached per pid: a signature check costs milliseconds and every
-        // action makes many calls. A pid cannot change its code, and a
-        // recycled pid belongs to a process that has to pass this again.
+        // Cached per kernel process generation: a signature check costs
+        // milliseconds, while a recycled pid always misses this cache.
         if known { return true }
         guard let requirementRef = codeRequirement() else { return false }
         var code: SecCode?
@@ -84,10 +148,11 @@ enum CuaDriver {
         guard SecCodeCopyGuestWithAttributes(
                 nil, attributes, [], &code) == errSecSuccess,
               let code,
-              SecCodeCheckValidity(code, [], requirementRef) == errSecSuccess
+              SecCodeCheckValidity(code, [], requirementRef) == errSecSuccess,
+              CuaProcessIdentity.capture(pid: pid) == identity
         else { return false }
         peerLock.lock()
-        trustedPeerPIDs.insert(pid)
+        trustedPeers.insert(identity)
         peerLock.unlock()
         return true
     }
@@ -96,7 +161,7 @@ enum CuaDriver {
     /// so a recycled pid is never trusted on the strength of its predecessor.
     static func forgetTrustedPeers() {
         peerLock.lock()
-        trustedPeerPIDs.removeAll()
+        trustedPeers.removeAll()
         peerLock.unlock()
     }
 
@@ -177,6 +242,11 @@ protocol CuaTransport: AnyObject {
               timeout: TimeInterval) -> Result<[String: Any], CuaDriverError>
 }
 
+struct CuaSocketIdentity {
+    let path: String
+    let ownedPID: pid_t?
+}
+
 /// One connection per call, like the driver's own CLI. Connect latency to a
 /// local unix socket is microseconds; a persistent connection would only add
 /// reconnect states to get wrong.
@@ -185,14 +255,37 @@ final class CuaSocketTransport: CuaTransport {
     /// far above any observed response yet still refuses a runaway stream.
     static let maxResponseBytes = 8 << 20
 
-    private let socketPath: String
+    private let socketProvider: () -> CuaSocketIdentity?
 
     /// The path is injectable so the selftest can point the real transport
     /// at a socket it controls and prove the peer check REFUSES an impostor
     /// — the direction of a security control that must never be assumed.
-    init(socketPath: String = CuaDriver.socketPath) {
-        self.socketPath = socketPath
+    convenience init() {
+        self.init(socketIdentityProvider: {
+            CuaDriverDaemon.transportSocketIdentity
+        })
     }
+
+    convenience init(socketPath: String) {
+        self.init(socketIdentityProvider: {
+            CuaSocketIdentity(path: socketPath, ownedPID: nil)
+        })
+    }
+
+    init(socketPathProvider: @escaping () -> String?) {
+        self.socketProvider = {
+            socketPathProvider().map {
+                CuaSocketIdentity(path: $0, ownedPID: nil)
+            }
+        }
+    }
+
+    init(socketIdentityProvider: @escaping () -> CuaSocketIdentity?) {
+        self.socketProvider = socketIdentityProvider
+    }
+
+    var resolvedSocketPath: String? { socketProvider()?.path }
+    var resolvedSocketIdentity: CuaSocketIdentity? { socketProvider() }
 
     func call(_ tool: String, arguments: [String: Any],
               timeout: TimeInterval) -> Result<[String: Any], CuaDriverError> {
@@ -207,7 +300,13 @@ final class CuaSocketTransport: CuaTransport {
 
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
-        let path = socketPath
+        guard let socketIdentity = resolvedSocketIdentity else {
+            return .failure(.notRunning)
+        }
+        let path = socketIdentity.path
+        guard CuaDriver.socketPathFits(path) else {
+            return .failure(.notRunning)
+        }
         let ok = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
             path.withCString { cString in
                 let capacity = MemoryLayout.size(ofValue: pointer.pointee)
@@ -236,7 +335,9 @@ final class CuaSocketTransport: CuaTransport {
         }
         guard connected == 0 else { return .failure(.notRunning) }
         // Nothing is written until the far end proves it is Cua's driver.
-        guard CuaDriver.peerIsTrusted(fd: fd) else {
+        guard CuaDriver.peerIsTrusted(
+            fd: fd, expectedPID: socketIdentity.ownedPID
+        ) else {
             CuaSocketTransport.reportUntrustedPeerOnce()
             return .failure(.notRunning)
         }
@@ -300,37 +401,447 @@ final class CuaSocketTransport: CuaTransport {
     }
 }
 
-/// Daemon lifecycle. If the user already runs a daemon (for another agent),
-/// Velora uses it as-is and never touches its lifetime. Otherwise Velora
-/// spawns one as a child process — a child inherits Velora's TCC
-/// responsibility, so the daemon reads AX trees under the Accessibility grant
-/// Velora already holds and no new permission dialog appears.
-///
-/// A daemon Velora started, Velora stops on quit. The driver's socket carries
-/// no per-connection credential, so while a daemon is up any process running
-/// as this user can drive every app on the desktop. That surface is worth
-/// having only while Velora is actually using it.
-enum CuaDriverDaemon {
-    private static let lock = NSLock()
-    private static var spawned: Process?
+struct CuaDaemonLaunch {
+    let executableURL: URL
+    let arguments: [String]
+    let environment: [String: String]
+    let socketPath: String
+}
 
-    /// Called from `applicationWillTerminate`. A daemon Velora did not start
-    /// is left alone — another client may be attached to it.
-    static func stopIfVeloraStarted() {
-        lock.lock()
-        let process = spawned
-        spawned = nil
-        lock.unlock()
-        CuaDriver.forgetTrustedPeers()
-        guard let process, process.isRunning else { return }
-        process.terminate()
-        veloraLog("Velora: stopped the cua-driver daemon it started")
+struct CuaEndpointIdentity: Equatable {
+    let device: UInt64
+    let inode: UInt64
+}
+
+enum CuaEndpoint {
+    /// Captures the unlink authority only after readiness: exact 0600 socket,
+    /// exact device, exact inode.
+    static func identity(at path: String) -> CuaEndpointIdentity? {
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFSOCK,
+              metadata.st_mode & 0o777 == 0o600 else { return nil }
+        return CuaEndpointIdentity(
+            device: UInt64(metadata.st_dev), inode: UInt64(metadata.st_ino))
     }
 
-    /// True when a daemon answers AND holds a usable Accessibility grant.
-    /// The permission check matters for a daemon someone else started: it may
-    /// run under an identity with no AX access, and every window read would
-    /// return empty trees that look like "nothing on screen" to the planner.
+    static func removeOwned(at path: String, identity: CuaEndpointIdentity) {
+        guard self.identity(at: path) == identity else { return }
+        _ = unlink(path)
+    }
+}
+
+protocol CuaChildProcess: AnyObject {
+    var processIdentifier: pid_t { get }
+    var isRunning: Bool { get }
+    var hasLivenessChannel: Bool { get }
+    func run() throws
+    func closeLiveness()
+    func terminate()
+    func forceTerminate() -> Bool
+}
+
+private final class FoundationCuaChild: CuaChildProcess {
+    private let process = Process()
+    private let livenessPipe = Pipe()
+    private var livenessWriter: FileHandle?
+    private var startIdentity: CuaProcessIdentity?
+
+    init(launch: CuaDaemonLaunch) {
+        process.executableURL = launch.executableURL
+        process.arguments = launch.arguments
+        process.environment = launch.environment
+        process.standardInput = livenessPipe.fileHandleForReading
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        livenessWriter = livenessPipe.fileHandleForWriting
+    }
+
+    var processIdentifier: pid_t { process.processIdentifier }
+    var isRunning: Bool { process.isRunning }
+    var hasLivenessChannel: Bool { livenessWriter != nil }
+
+    func run() throws {
+        try process.run()
+        livenessPipe.fileHandleForReading.closeFile()
+        startIdentity = CuaProcessIdentity.capture(pid: process.processIdentifier)
+    }
+
+    func closeLiveness() {
+        livenessWriter?.closeFile()
+        livenessWriter = nil
+    }
+
+    func terminate() { process.terminate() }
+
+    func forceTerminate() -> Bool {
+        guard process.isRunning, let startIdentity, startIdentity.isCurrent
+        else { return false }
+        return kill(startIdentity.pid, SIGKILL) == 0
+    }
+}
+
+struct CuaDaemonRuntime {
+    let driverInstalled: () -> Bool
+    let signatureIsTrusted: () -> Bool
+    let bundleIdentifier: () -> String?
+    let environment: () -> [String: String]
+    let makeSocketPath: () -> String
+    let socketExists: (String) -> Bool
+    let endpointIdentity: (String) -> CuaEndpointIdentity?
+    let makeProcess: (CuaDaemonLaunch) -> CuaChildProcess
+    let removeSocket: (String, CuaEndpointIdentity) -> Void
+    let wait: (TimeInterval) -> Void
+
+    static let production = CuaDaemonRuntime(
+        driverInstalled: { CuaDriver.isInstalled },
+        signatureIsTrusted: { CuaDriver.signatureIsTrusted },
+        bundleIdentifier: { Bundle.main.bundleIdentifier },
+        environment: { ProcessInfo.processInfo.environment },
+        makeSocketPath: {
+            "/tmp/velora-cua-\(getpid())-\(UUID().uuidString).sock"
+        },
+        socketExists: { FileManager.default.fileExists(atPath: $0) },
+        endpointIdentity: { CuaEndpoint.identity(at: $0) },
+        makeProcess: { FoundationCuaChild(launch: $0) },
+        removeSocket: { path, identity in
+            CuaEndpoint.removeOwned(at: path, identity: identity)
+        },
+        wait: { Thread.sleep(forTimeInterval: $0) })
+}
+
+/// Owns one private embedded driver child for the duration of an Action.
+/// A separately run daemon is neither contacted nor controlled.
+final class CuaDaemonController {
+    private static let healthAttempts = 10
+    private static let healthInterval: TimeInterval = 0.25
+    private static let stopAttempts = 10
+    private static let stopInterval: TimeInterval = 0.05
+    private static let socketAttempts = 4
+    private static let fallbackBundleID = "com.sushil.velora"
+
+    private let runtime: CuaDaemonRuntime
+    private let state = NSCondition()
+    private var child: CuaChildProcess?
+    private var socketPath: String?
+    private var endpointIdentity: CuaEndpointIdentity?
+    private var connectionEnabled = false
+    private var stopping = false
+    private var startingGeneration: Int?
+    private var nextGeneration = 0
+    private var startCancelled = false
+    private var lastStartGeneration = 0
+    private var lastStartSucceeded = false
+
+    init(runtime: CuaDaemonRuntime) {
+        self.runtime = runtime
+    }
+
+    var activeSocketPath: String? {
+        activeSocketIdentity?.path
+    }
+
+    var activeSocketIdentity: CuaSocketIdentity? {
+        socketIdentity(requireEndpoint: true)
+    }
+
+    var transportSocketIdentity: CuaSocketIdentity? {
+        socketIdentity(requireEndpoint: false)
+    }
+
+    private func socketIdentity(requireEndpoint: Bool) -> CuaSocketIdentity? {
+        state.lock()
+        guard let child else {
+            state.unlock()
+            return nil
+        }
+        if !child.isRunning {
+            connectionEnabled = false
+            state.unlock()
+            CuaDriver.forgetTrustedPeers()
+            return nil
+        }
+        guard connectionEnabled, !stopping, let socketPath,
+              !requireEndpoint || endpointIdentity != nil else {
+            state.unlock()
+            return nil
+        }
+        let pid = child.processIdentifier
+        state.unlock()
+        guard pid > 0 else { return nil }
+        return CuaSocketIdentity(path: socketPath, ownedPID: pid)
+    }
+
+    func ensureRunning(transport: CuaTransport) -> Bool {
+        state.lock()
+        while stopping { state.wait() }
+        if let generation = startingGeneration {
+            while startingGeneration == generation { state.wait() }
+            let succeeded = lastStartGeneration == generation
+                && lastStartSucceeded
+                && child?.isRunning == true
+                && endpointIdentity != nil
+                && connectionEnabled
+                && !stopping
+            state.unlock()
+            return succeeded
+        }
+        if let child, child.isRunning {
+            let mayConnect = connectionEnabled && endpointIdentity != nil
+            state.unlock()
+            return mayConnect
+        }
+        var stalePath: String?
+        var staleIdentity: CuaEndpointIdentity?
+        if child != nil {
+            stalePath = socketPath
+            staleIdentity = endpointIdentity
+            child = nil
+            socketPath = nil
+            endpointIdentity = nil
+            connectionEnabled = false
+            stopping = false
+        }
+        nextGeneration += 1
+        let generation = nextGeneration
+        startingGeneration = generation
+        startCancelled = false
+        state.unlock()
+        if let stalePath, let staleIdentity {
+            runtime.removeSocket(stalePath, staleIdentity)
+        }
+        CuaDriver.forgetTrustedPeers()
+        return startOwned(generation, transport: transport)
+    }
+
+    private func startOwned(
+        _ generation: Int, transport: CuaTransport
+    ) -> Bool {
+        guard runtime.driverInstalled() else {
+            finishStart(generation)
+            return false
+        }
+        guard runtime.signatureIsTrusted() else {
+            finishStart(generation)
+            veloraLog("Velora: refusing to start cua-driver — the bundle at "
+                      + "/Applications/CuaDriver.app is not signed by Cua AI")
+            return false
+        }
+        guard !isStartCancelled(generation) else {
+            finishStart(generation)
+            return false
+        }
+        var path: String?
+        for _ in 0..<Self.socketAttempts {
+            let candidate = runtime.makeSocketPath()
+            guard candidate.hasPrefix("/tmp/"),
+                  CuaDriver.socketPathFits(candidate) else { continue }
+            guard !runtime.socketExists(candidate) else { continue }
+            path = candidate
+            break
+        }
+        guard let path else {
+            finishStart(generation)
+            veloraLog("Velora: refusing an invalid private cua-driver socket path")
+            return false
+        }
+        guard !isStartCancelled(generation) else {
+            finishStart(generation)
+            return false
+        }
+
+        let bundleID = runtime.bundleIdentifier() ?? Self.fallbackBundleID
+        let environment = CuaDriver.safeEnvironment(
+            from: runtime.environment(), bundleID: bundleID,
+            hostPID: getpid())
+        let launch = CuaDaemonLaunch(
+            executableURL: URL(fileURLWithPath: CuaDriver.appBinaryPath),
+            arguments: [
+                "serve", "--embedded", "--parent-liveness-stdio",
+                "--no-permissions-gate",
+                "--socket", path, "--host-bundle-id", bundleID,
+                "--permission-mode", "standard", "--no-overlay",
+            ],
+            environment: environment,
+            socketPath: path)
+        let process = runtime.makeProcess(launch)
+        do {
+            try process.run()
+        } catch {
+            if process.isRunning {
+                state.lock()
+                child = process
+                socketPath = path
+                endpointIdentity = nil
+                connectionEnabled = false
+                state.unlock()
+                failStart(generation, process: process, path: path)
+            } else {
+                process.closeLiveness()
+                finishStart(generation)
+            }
+            veloraLog("Velora: could not start cua-driver — \(error.localizedDescription)")
+            return false
+        }
+        state.lock()
+        let stillStarting = startingGeneration == generation
+        child = process
+        socketPath = path
+        endpointIdentity = nil
+        connectionEnabled = stillStarting && !startCancelled
+        state.unlock()
+        guard stillStarting, process.hasLivenessChannel,
+              !isStartCancelled(generation) else {
+            failStart(generation, process: process, path: path)
+            return false
+        }
+        veloraLog("Velora: started a private cua-driver child for this action")
+
+        for _ in 0..<Self.healthAttempts {
+            guard process.isRunning, !isStartCancelled(generation) else {
+                failStart(generation, process: process, path: path)
+                return false
+            }
+            if Self.isHealthy(transport: transport),
+               let identity = runtime.endpointIdentity(path) {
+                state.lock()
+                let sameChild = startingGeneration == generation
+                    && child === process && process.isRunning
+                    && connectionEnabled && !stopping
+                    && !startCancelled
+                if sameChild {
+                    endpointIdentity = identity
+                    startingGeneration = nil
+                    lastStartGeneration = generation
+                    lastStartSucceeded = true
+                    state.broadcast()
+                }
+                state.unlock()
+                if sameChild { return true }
+                failStart(
+                    generation, process: process, path: path,
+                    identity: identity)
+                return false
+            }
+            runtime.wait(Self.healthInterval)
+        }
+        failStart(generation, process: process, path: path)
+        return false
+    }
+
+    func stopOwned() {
+        state.lock()
+        while true {
+            while stopping { state.wait() }
+            guard startingGeneration != nil else { break }
+            startCancelled = true
+            connectionEnabled = false
+            state.broadcast()
+            while startingGeneration != nil { state.wait() }
+        }
+        guard let process = child else {
+            state.unlock()
+            CuaDriver.forgetTrustedPeers()
+            return
+        }
+        let path = socketPath
+        let identity = endpointIdentity
+        stopping = true
+        connectionEnabled = false
+        state.unlock()
+        CuaDriver.forgetTrustedPeers()
+
+        guard stopChild(process) else {
+            state.lock()
+            stopping = false
+            state.broadcast()
+            state.unlock()
+            veloraLog("Velora: cua-driver child did not exit; private socket retained")
+            return
+        }
+        state.lock()
+        if child === process {
+            child = nil
+            socketPath = nil
+            endpointIdentity = nil
+        }
+        stopping = false
+        state.broadcast()
+        state.unlock()
+        if let path, let identity { runtime.removeSocket(path, identity) }
+        veloraLog("Velora: stopped the private cua-driver child")
+    }
+
+    private func failStart(
+        _ generation: Int, process: CuaChildProcess,
+        path: String, identity: CuaEndpointIdentity? = nil
+    ) {
+        state.lock()
+        if child === process {
+            connectionEnabled = false
+            endpointIdentity = identity
+        }
+        state.unlock()
+        let stopped = stopChild(process)
+
+        state.lock()
+        if child === process, stopped {
+            child = nil
+            socketPath = nil
+            endpointIdentity = nil
+        }
+        if startingGeneration == generation {
+            startingGeneration = nil
+            lastStartGeneration = generation
+            lastStartSucceeded = false
+            startCancelled = false
+        }
+        state.broadcast()
+        state.unlock()
+        CuaDriver.forgetTrustedPeers()
+        if stopped, let identity {
+            runtime.removeSocket(path, identity)
+        }
+    }
+
+    private func finishStart(_ generation: Int) {
+        state.lock()
+        if startingGeneration == generation {
+            startingGeneration = nil
+            lastStartGeneration = generation
+            lastStartSucceeded = false
+            startCancelled = false
+        }
+        state.broadcast()
+        state.unlock()
+        CuaDriver.forgetTrustedPeers()
+    }
+
+    private func isStartCancelled(_ generation: Int) -> Bool {
+        state.lock()
+        defer { state.unlock() }
+        return startingGeneration != generation || startCancelled
+    }
+
+    private func stopChild(_ process: CuaChildProcess) -> Bool {
+        process.closeLiveness()
+        waitForExit(process)
+        if process.isRunning { process.terminate() }
+        waitForExit(process)
+        if process.isRunning {
+            _ = process.forceTerminate()
+            waitForExit(process)
+        }
+        return !process.isRunning
+    }
+
+    private func waitForExit(_ process: CuaChildProcess) {
+        for _ in 0..<Self.stopAttempts {
+            if !process.isRunning { return }
+            runtime.wait(Self.stopInterval)
+        }
+    }
+
     static func isHealthy(transport: CuaTransport,
                           timeout: TimeInterval = 1.0) -> Bool {
         guard case .success(let permissions) = transport.call(
@@ -338,43 +849,29 @@ enum CuaDriverDaemon {
         else { return false }
         return (permissions["accessibility"] as? Bool) == true
     }
+}
 
-    /// Health-checks, spawning the daemon first if the driver is installed
-    /// but idle. Bounded: one spawn attempt, ~2.5 s worst case, called off
-    /// the main thread (the action loop's queue).
+enum CuaDriverDaemon {
+    private static let controller = CuaDaemonController(runtime: .production)
+
+    static var activeSocketPath: String? { controller.activeSocketPath }
+    static var activeSocketIdentity: CuaSocketIdentity? {
+        controller.activeSocketIdentity
+    }
+    static var transportSocketIdentity: CuaSocketIdentity? {
+        controller.transportSocketIdentity
+    }
+
+    static func stopIfVeloraStarted() {
+        controller.stopOwned()
+    }
+
+    static func isHealthy(transport: CuaTransport,
+                          timeout: TimeInterval = 1.0) -> Bool {
+        CuaDaemonController.isHealthy(transport: transport, timeout: timeout)
+    }
+
     static func ensureRunning(transport: CuaTransport) -> Bool {
-        if isHealthy(transport: transport) { return true }
-        guard CuaDriver.isInstalled else { return false }
-        guard CuaDriver.signatureIsTrusted else {
-            veloraLog("Velora: refusing to start cua-driver — the bundle at "
-                      + "/Applications/CuaDriver.app is not signed by Cua AI")
-            return false
-        }
-        lock.lock()
-        let alreadySpawned = spawned?.isRunning == true
-        lock.unlock()
-        if !alreadySpawned {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: CuaDriver.appBinaryPath)
-            process.arguments = ["serve"]
-            process.standardInput = FileHandle.nullDevice
-            process.standardOutput = FileHandle.nullDevice
-            process.standardError = FileHandle.nullDevice
-            do {
-                try process.run()
-            } catch {
-                veloraLog("Velora: could not start cua-driver — \(error.localizedDescription)")
-                return false
-            }
-            lock.lock()
-            spawned = process
-            lock.unlock()
-            veloraLog("Velora: started cua-driver daemon for background actions")
-        }
-        for _ in 0..<10 {
-            Thread.sleep(forTimeInterval: 0.25)
-            if isHealthy(transport: transport) { return true }
-        }
-        return false
+        controller.ensureRunning(transport: transport)
     }
 }

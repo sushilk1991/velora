@@ -41,6 +41,7 @@ final class FakeActionHost: ActionHost {
     var typingSucceeds = true
     var keyPressSucceeds = true
     var openURLSucceeds = true
+    var presentUISucceeds = false
     /// Set to make `frontmostApp()` change after N reads (focus stolen).
     var frontmostAfterReads: (reads: Int, value: (name: String, bundleID: String)?)?
 
@@ -56,6 +57,8 @@ final class FakeActionHost: ActionHost {
     private(set) var pressedLabels: [String] = []
     private(set) var pressedUIIndices: [Int] = []
     private(set) var sleepCalls: [Int] = []
+    private(set) var endInputCount = 0
+    private(set) var presentUICalls = 0
     private var frontmostReads = 0
     private var clock: TimeInterval = 0
     private var actionDraft = ""
@@ -63,6 +66,12 @@ final class FakeActionHost: ActionHost {
     func beginActionInputSession() {
         actionDraft = ""
         ownsDraft = true
+    }
+
+    func endActionInputSession() {
+        endInputCount += 1
+        actionDraft = ""
+        ownsDraft = false
     }
 
     func openApp(named name: String) -> String? {
@@ -87,6 +96,11 @@ final class FakeActionHost: ActionHost {
     }
     var foregroundWindowValue: ActionWindowIdentity?
     func foregroundWindow() -> ActionWindowIdentity? { foregroundWindowValue }
+
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+        presentUICalls += 1
+        return presentUISucceeds
+    }
 
     func frontmostWindowTitle() -> String? {
         defer {
@@ -1647,6 +1661,8 @@ extension Selftest {
         expect(first["page_url"] as? String == "https://web.whatsapp.com/",
                "the observation carries the frontmost page URL")
         expect(planner.ended, "the session is closed when the loop finishes")
+        expect(host.endInputCount == 1,
+               "a performed action ends the input session once")
 
         let stuckHost = FakeActionHost()
         stuckHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
@@ -1790,11 +1806,13 @@ extension Selftest {
                                           execute: true, allowSend: false)
         let sendResult = sendRunner.run(transcript: "t", context: loopContext())
         if case .needsSendApproval = sendResult {
-            expect(sendHost.log.isEmpty, "nothing executes without send consent")
+        expect(sendHost.log.isEmpty, "nothing executes without send consent")
             expect(sendPlanner.ended, "the refused session is closed")
         } else {
             expect(false, "a sending action without consent is refused, got \(sendResult)")
         }
+        expect(sendHost.endInputCount == 1,
+               "send approval refusal ends the input session once")
 
         // 3. A model that never says done runs out of turns, not forever.
         let capHost = FakeActionHost()
@@ -1839,6 +1857,8 @@ extension Selftest {
         } else {
             expect(false, "blocked input must fail the loop")
         }
+        expect(fatalHost.endInputCount == 1,
+               "an executor failure ends the input session once")
 
         // 5. Dry run: the first batch comes back described, nothing executes.
         let dryHost = FakeActionHost()
@@ -1857,6 +1877,8 @@ extension Selftest {
         } else {
             expect(false, "a dry run reports the planned batch")
         }
+        expect(dryHost.endInputCount == 1,
+               "dry-run return ends the input session once")
 
         // 6. Cancel mid-batch stops the loop, not just the batch.
         let cancelHost = FakeActionHost()
@@ -1888,6 +1910,30 @@ extension Selftest {
         } else {
             expect(false, "cancel must end the loop as cancelled")
         }
+        expect(cancelHost.endInputCount == 1,
+               "cancel ends the input session once")
+
+        let handoffHost = FakeActionHost()
+        handoffHost.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        handoffHost.uiSnapshotValue = ActionUISnapshot(
+            id: "slack-handoff", source: .cua, appName: "Slack",
+            bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Hemesh",
+            windowID: 44, complete: false, elements: [])
+        let handoffPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "draft", steps: [[
+                "do": "present_ui", "snapshot": "slack-handoff",
+                "bundle_id": "com.tinyspeck.slackmacgap", "window_id": 44,
+            ]], done: false),
+            .failure(reason: "presentation refused", code: "failed"),
+        ])
+        _ = ActionLoopRunner(
+            host: handoffHost, planner: handoffPlanner,
+            execute: true, allowSend: false).run(
+                transcript: "Draft a message for Hemesh on Slack",
+                context: loopContext())
+        expect(handoffHost.presentUICalls == 1
+               && handoffHost.endInputCount == 1,
+               "a refused final presentation still ends the input session once")
 
         // 7b. An engine-side rejection (plan_invalid) is not the end: the
         //     loop asks again with a fresh observation carrying the reason.
@@ -3919,11 +3965,94 @@ final class FakeCuaTransport: CuaTransport {
     }
 }
 
+final class FakeCuaChild: CuaChildProcess {
+    let processIdentifier: pid_t
+    var isRunning = false
+    var hasLivenessChannel = true
+    var staysAliveOnTerminate = false
+    var forceSucceeds = true
+    var onForce: (() -> Void)?
+    private(set) var runCount = 0
+    private(set) var terminateCount = 0
+    private(set) var forceCount = 0
+    private(set) var events: [String] = []
+
+    init(processIdentifier: pid_t) {
+        self.processIdentifier = processIdentifier
+    }
+
+    func run() throws {
+        runCount += 1
+        isRunning = true
+        events.append("run")
+    }
+
+    func closeLiveness() {
+        guard hasLivenessChannel else { return }
+        hasLivenessChannel = false
+        events.append("close_liveness")
+    }
+
+    func terminate() {
+        terminateCount += 1
+        events.append("terminate")
+        if !staysAliveOnTerminate { isRunning = false }
+    }
+
+    func forceTerminate() -> Bool {
+        forceCount += 1
+        events.append("force")
+        onForce?()
+        if forceSucceeds { isRunning = false }
+        return forceSucceeds
+    }
+}
+
+final class HealthyCuaTransport: CuaTransport {
+    func call(_ tool: String, arguments: [String: Any],
+              timeout: TimeInterval) -> Result<[String: Any], CuaDriverError> {
+        .success(["accessibility": true])
+    }
+}
+
+final class BlockingCuaTransport: CuaTransport {
+    let entered = DispatchSemaphore(value: 0)
+    let release = DispatchSemaphore(value: 0)
+    private let result: Result<[String: Any], CuaDriverError>
+    private let lock = NSLock()
+    private var calls = 0
+
+    init(result: Result<[String: Any], CuaDriverError>) {
+        self.result = result
+    }
+
+    var callCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls
+    }
+
+    func call(_ tool: String, arguments: [String: Any],
+              timeout: TimeInterval) -> Result<[String: Any], CuaDriverError> {
+        lock.lock()
+        calls += 1
+        let isFirstCall = calls == 1
+        lock.unlock()
+        if isFirstCall {
+            entered.signal()
+            _ = release.wait(timeout: .now() + 2)
+        }
+        return result
+    }
+}
+
 extension Selftest {
 
     static func testBackgroundActions() {
         testRoutedActionEndToEnd()
         testTypedTextAppearsInTheTrace()
+        testPrivateCuaLifecycle()
+        testCuaEndpointOwnership()
         testCuaSocketRefusesAnImpostor()
         testCuaProtocolFraming()
         testCuaKeyMap()
@@ -3933,6 +4062,434 @@ extension Selftest {
         testBackgroundActionGate()
         testSnapshotLineage()
         testBackgroundRoutingHost()
+    }
+
+    private static func testCuaEndpointOwnership() {
+        func bindSocket(at path: String) -> Int32? {
+            let descriptor = socket(AF_UNIX, SOCK_STREAM, 0)
+            guard descriptor >= 0 else { return nil }
+            var address = sockaddr_un()
+            address.sun_family = sa_family_t(AF_UNIX)
+            let copied = withUnsafeMutablePointer(to: &address.sun_path) { pointer in
+                path.withCString { source -> Bool in
+                    guard strlen(source) < MemoryLayout.size(
+                        ofValue: pointer.pointee) else { return false }
+                    _ = memcpy(pointer, source, strlen(source) + 1)
+                    return true
+                }
+            }
+            guard copied else { close(descriptor); return nil }
+            let result = withUnsafePointer(to: &address) { pointer in
+                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                    bind(descriptor, $0,
+                         socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard result == 0, chmod(path, 0o600) == 0 else {
+                close(descriptor)
+                return nil
+            }
+            return descriptor
+        }
+
+        let path = "/tmp/velora-cua-owner-\(UUID().uuidString.prefix(8)).sock"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        guard let first = bindSocket(at: path),
+              let firstIdentity = CuaEndpoint.identity(at: path) else {
+            expect(false, "a private Unix endpoint can be captured")
+            return
+        }
+        defer { close(first) }
+        expect(unlink(path) == 0, "the first endpoint can be unlinked")
+        guard let replacement = bindSocket(at: path),
+              let replacementIdentity = CuaEndpoint.identity(at: path) else {
+            expect(false, "a replacement Unix endpoint can be captured")
+            return
+        }
+        defer { close(replacement) }
+        expect(firstIdentity != replacementIdentity,
+               "a replacement endpoint has a different device/inode identity")
+        CuaEndpoint.removeOwned(at: path, identity: firstIdentity)
+        expect(CuaEndpoint.identity(at: path) == replacementIdentity,
+               "cleanup leaves a replacement endpoint untouched")
+        CuaEndpoint.removeOwned(at: path, identity: replacementIdentity)
+        expect(CuaEndpoint.identity(at: path) == nil,
+               "cleanup unlinks the exact captured 0600 socket")
+    }
+
+    private static func testPrivateCuaLifecycle() {
+        let root = "/tmp/velora-cua-test-\(UUID().uuidString.prefix(8))"
+        let collisionPath = root + "-external.sock"
+        let privatePath = root + "-owned.sock"
+        FileManager.default.createFile(atPath: collisionPath, contents: Data())
+        defer {
+            try? FileManager.default.removeItem(atPath: privatePath)
+            try? FileManager.default.removeItem(atPath: collisionPath)
+        }
+
+        let child = FakeCuaChild(processIdentifier: 4242)
+        child.staysAliveOnTerminate = true
+        var launch: CuaDaemonLaunch?
+        var removed: [String] = []
+        var socketCandidates = [collisionPath, privatePath]
+        let runtime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { "com.sushil.velora" },
+            environment: { ["PATH": "/usr/bin", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "true"] },
+            makeSocketPath: { socketCandidates.removeFirst() },
+            socketExists: { FileManager.default.fileExists(atPath: $0) },
+            endpointIdentity: { _ in
+                CuaEndpointIdentity(device: 1, inode: 11)
+            },
+            makeProcess: { config in launch = config; return child },
+            removeSocket: { path, _ in
+                removed.append(path)
+                try? FileManager.default.removeItem(atPath: path)
+            },
+            wait: { _ in })
+        let controller = CuaDaemonController(runtime: runtime)
+        let socket = CuaSocketTransport(socketIdentityProvider: {
+            controller.transportSocketIdentity
+        })
+        expect(socket.resolvedSocketPath == nil,
+               "the transport has no shared/global fallback")
+
+        let transport = FakeCuaTransport()
+        transport.responses["check_permissions"] = ["accessibility": true]
+        expect(controller.ensureRunning(transport: transport),
+               "a healthy owned child becomes available")
+        expect(controller.ensureRunning(transport: transport)
+               && child.runCount == 1,
+               "a duplicate ensure reuses the owned child instead of spawning")
+        FileManager.default.createFile(atPath: privatePath, contents: Data())
+        expect(socket.resolvedSocketPath == privatePath,
+               "the transport resolves the active private socket dynamically")
+        expect(socket.resolvedSocketIdentity?.ownedPID == 4242
+               && controller.activeSocketIdentity?.ownedPID == 4242,
+               "the private socket is bound to the exact owned child pid")
+        expect(launch?.arguments == [
+            "serve", "--embedded", "--parent-liveness-stdio",
+            "--no-permissions-gate",
+            "--socket", privatePath, "--host-bundle-id", "com.sushil.velora",
+            "--permission-mode", "standard", "--no-overlay",
+        ] && launch?.socketPath == privatePath
+               && launch?.executableURL.path == CuaDriver.appBinaryPath,
+               "the owned child uses the exact embedded private-socket launch")
+        expect(child.hasLivenessChannel,
+               "the child retains a dedicated parent-liveness writer")
+        let pipeProbe = CuaDaemonRuntime.production.makeProcess(
+            CuaDaemonLaunch(
+                executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                arguments: [], environment: [:], socketPath: privatePath))
+        expect(pipeProbe.hasLivenessChannel,
+               "the production child owns a non-null stdin liveness pipe")
+        pipeProbe.closeLiveness()
+        expect(launch?.environment["CUA_DRIVER_EMBEDDED"] == "1"
+               && launch?.environment["CUA_DRIVER_HOST_BUNDLE_ID"]
+                    == "com.sushil.velora"
+               && launch?.environment["CUA_DRIVER_RS_TELEMETRY_ENABLED"] == "false"
+               && launch?.environment["CUA_DRIVER_RS_UPDATE_CHECK"] == "false"
+               && launch?.environment["PATH"] == "/usr/bin",
+               "the child disables telemetry and updates while preserving its environment")
+        let hostile = CuaDriver.safeEnvironment(from: [
+            "PATH": "/usr/bin", "LC_ALL": "en_US.UTF-8",
+            "CUA_DRIVER_MCP_HTTP_TOKEN": "steal",
+            "CUA_DRIVER_MCP_HTTP_PORT": "9999",
+            "CUA_DRIVER_PERMISSION_MODE": "unrestricted",
+            "CUA_DRIVER_DANGEROUSLY_BYPASS_APPROVALS": "1",
+            "CUA_DRIVER_POLICY_FILE": "/tmp/forged",
+            "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+            "LD_PRELOAD": "/tmp/evil.so", "NODE_OPTIONS": "--require evil",
+        ], bundleID: "com.sushil.velora", hostPID: 99)
+        expect(hostile["PATH"] == "/usr/bin"
+               && hostile["LC_ALL"] == "en_US.UTF-8"
+               && hostile["CUA_DRIVER_EMBEDDED_HOST_PID"] == "99"
+               && hostile["CUA_DRIVER_PERMISSION_MODE"] == nil
+               && hostile["CUA_DRIVER_MCP_HTTP_TOKEN"] == nil
+               && hostile["CUA_DRIVER_MCP_HTTP_PORT"] == nil
+               && hostile["DYLD_INSERT_LIBRARIES"] == nil
+               && hostile["LD_PRELOAD"] == nil
+               && hostile["NODE_OPTIONS"] == nil,
+               "embedded launch drops ambient authority and injection variables")
+        let noncanonical = CuaDriver.safeEnvironment(
+            from: ["path": "/tmp/untrusted"],
+            bundleID: "com.sushil.velora", hostPID: 99)
+        expect(noncanonical["PATH"] == nil,
+               "embedded launch allowlists canonical environment names only")
+        if let processIdentity = CuaProcessIdentity.capture(pid: getpid()) {
+            let forged = CuaProcessIdentity(
+                pid: processIdentity.pid,
+                startSeconds: processIdentity.startSeconds + 1,
+                startMicroseconds: processIdentity.startMicroseconds)
+            expect(processIdentity.isCurrent && !forged.isCurrent,
+                   "force-kill identity includes the process start generation")
+        } else {
+            expect(false, "the process generation can be captured")
+        }
+        expect(privatePath.hasPrefix("/tmp/")
+               && CuaDriver.socketPathFits(privatePath),
+               "the owned socket is a short absolute path under /tmp")
+
+        controller.stopOwned()
+        expect(child.events.suffix(3) == [
+            "close_liveness", "terminate", "force",
+        ] && child.forceCount == 1,
+               "cleanup closes parent liveness before bounded escalation")
+        expect(controller.activeSocketPath == nil
+               && socket.resolvedSocketPath == nil,
+               "cleanup resets the dynamic socket path")
+        expect(removed == [privatePath]
+               && !FileManager.default.fileExists(atPath: privatePath),
+               "cleanup removes only the explicit private socket after exit")
+        expect(FileManager.default.fileExists(atPath: collisionPath),
+               "an occupied external socket is skipped and untouched")
+        controller.stopOwned()
+        expect(child.terminateCount == 1 && removed == [privatePath],
+               "owned-child cleanup is idempotent")
+
+        let concurrentPath = root + "-concurrent.sock"
+        let concurrentChild = FakeCuaChild(processIdentifier: 4444)
+        let concurrentRuntime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { nil }, environment: { [:] },
+            makeSocketPath: { concurrentPath }, socketExists: { _ in false },
+            endpointIdentity: { _ in
+                CuaEndpointIdentity(device: 2, inode: 22)
+            },
+            makeProcess: { _ in concurrentChild },
+            removeSocket: { _, _ in }, wait: { _ in })
+        let concurrentController = CuaDaemonController(runtime: concurrentRuntime)
+        let concurrentTransport = BlockingCuaTransport(
+            result: .success(["accessibility": true]))
+        let concurrentGroup = DispatchGroup()
+        let resultLock = NSLock()
+        var concurrentResults: [Bool] = []
+        concurrentGroup.enter()
+        DispatchQueue.global().async {
+            let result = concurrentController.ensureRunning(
+                transport: concurrentTransport)
+            resultLock.lock()
+            concurrentResults.append(result)
+            resultLock.unlock()
+            concurrentGroup.leave()
+        }
+        _ = concurrentTransport.entered.wait(timeout: .now() + 2)
+        concurrentGroup.enter()
+        DispatchQueue.global().async {
+            let result = concurrentController.ensureRunning(
+                transport: concurrentTransport)
+            resultLock.lock()
+            concurrentResults.append(result)
+            resultLock.unlock()
+            concurrentGroup.leave()
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+        concurrentTransport.release.signal()
+        expect(concurrentGroup.wait(timeout: .now() + 2) == .success
+               && concurrentResults.count == 2
+               && concurrentResults.allSatisfy { $0 }
+               && concurrentChild.runCount == 1,
+               "concurrent ensure calls share one successful owned start")
+        concurrentChild.isRunning = false
+        expect(concurrentController.activeSocketIdentity == nil,
+               "an unexpected child exit immediately disables its identity")
+        expect(concurrentController.ensureRunning(
+                transport: HealthyCuaTransport())
+               && concurrentChild.runCount == 2,
+               "a dead child is replaced by one new authenticated generation")
+        concurrentController.stopOwned()
+
+        let failedPath = root + "-concurrent-failure.sock"
+        let failedChild = FakeCuaChild(processIdentifier: 4488)
+        let failedRuntime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { nil }, environment: { [:] },
+            makeSocketPath: { failedPath }, socketExists: { _ in false },
+            endpointIdentity: { _ in
+                CuaEndpointIdentity(device: 5, inode: 55)
+            },
+            makeProcess: { _ in failedChild },
+            removeSocket: { _, _ in }, wait: { _ in })
+        let failedController = CuaDaemonController(runtime: failedRuntime)
+        let failedTransport = BlockingCuaTransport(
+            result: .success(["accessibility": false]))
+        let failedGroup = DispatchGroup()
+        let failedLock = NSLock()
+        var failedResults: [Bool] = []
+        failedGroup.enter()
+        DispatchQueue.global().async {
+            let result = failedController.ensureRunning(
+                transport: failedTransport)
+            failedLock.lock()
+            failedResults.append(result)
+            failedLock.unlock()
+            failedGroup.leave()
+        }
+        _ = failedTransport.entered.wait(timeout: .now() + 2)
+        failedGroup.enter()
+        DispatchQueue.global().async {
+            let result = failedController.ensureRunning(
+                transport: failedTransport)
+            failedLock.lock()
+            failedResults.append(result)
+            failedLock.unlock()
+            failedGroup.leave()
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+        failedTransport.release.signal()
+        expect(failedGroup.wait(timeout: .now() + 2) == .success
+               && failedResults.count == 2
+               && failedResults.allSatisfy { !$0 }
+               && failedChild.runCount == 1
+               && !failedChild.isRunning
+               && failedController.activeSocketIdentity == nil
+               && failedController.transportSocketIdentity == nil,
+               "concurrent failed starts share one joined child and result")
+
+        let cancelPath = root + "-cancel-start.sock"
+        let cancelChild = FakeCuaChild(processIdentifier: 4499)
+        let cancelRuntime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { nil }, environment: { [:] },
+            makeSocketPath: { cancelPath }, socketExists: { _ in false },
+            endpointIdentity: { _ in
+                CuaEndpointIdentity(device: 6, inode: 66)
+            },
+            makeProcess: { _ in cancelChild },
+            removeSocket: { _, _ in }, wait: { _ in })
+        let cancelController = CuaDaemonController(runtime: cancelRuntime)
+        let cancelTransport = BlockingCuaTransport(
+            result: .success(["accessibility": false]))
+        let startDone = DispatchSemaphore(value: 0)
+        let stopDone = DispatchSemaphore(value: 0)
+        var startResult = true
+        DispatchQueue.global().async {
+            startResult = cancelController.ensureRunning(
+                transport: cancelTransport)
+            startDone.signal()
+        }
+        _ = cancelTransport.entered.wait(timeout: .now() + 2)
+        DispatchQueue.global().async {
+            cancelController.stopOwned()
+            stopDone.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.05)
+        cancelTransport.release.signal()
+        expect(startDone.wait(timeout: .now() + 2) == .success
+               && stopDone.wait(timeout: .now() + 2) == .success
+               && !startResult && cancelTransport.callCount == 1
+               && !cancelChild.isRunning
+               && cancelController.activeSocketIdentity == nil
+               && cancelController.transportSocketIdentity == nil,
+               "stop during startup cancels health retries and joins the child")
+
+        let joinPath = root + "-join.sock"
+        let joinChild = FakeCuaChild(processIdentifier: 4545)
+        joinChild.staysAliveOnTerminate = true
+        let forceEntered = DispatchSemaphore(value: 0)
+        let releaseForce = DispatchSemaphore(value: 0)
+        joinChild.onForce = {
+            forceEntered.signal()
+            _ = releaseForce.wait(timeout: .now() + 2)
+        }
+        let joinRuntime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { nil }, environment: { [:] },
+            makeSocketPath: { joinPath }, socketExists: { _ in false },
+            endpointIdentity: { _ in
+                CuaEndpointIdentity(device: 4, inode: 44)
+            },
+            makeProcess: { _ in joinChild },
+            removeSocket: { _, _ in }, wait: { _ in })
+        let joinController = CuaDaemonController(runtime: joinRuntime)
+        expect(joinController.ensureRunning(transport: HealthyCuaTransport()),
+               "the joined-stop fixture starts")
+        let firstStopDone = DispatchSemaphore(value: 0)
+        let secondStopDone = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            joinController.stopOwned()
+            firstStopDone.signal()
+        }
+        _ = forceEntered.wait(timeout: .now() + 2)
+        DispatchQueue.global().async {
+            joinController.stopOwned()
+            secondStopDone.signal()
+        }
+        expect(secondStopDone.wait(timeout: .now() + 0.05) == .timedOut,
+               "a concurrent stop joins the in-progress child shutdown")
+        releaseForce.signal()
+        expect(firstStopDone.wait(timeout: .now() + 2) == .success
+               && secondStopDone.wait(timeout: .now() + 2) == .success
+               && joinChild.terminateCount == 1,
+               "joined callers return only after the owned child is stopped")
+
+        let retryPath = root + "-retry.sock"
+        defer { try? FileManager.default.removeItem(atPath: retryPath) }
+        let retryChild = FakeCuaChild(processIdentifier: 4343)
+        retryChild.staysAliveOnTerminate = true
+        retryChild.forceSucceeds = false
+        var retryRemoved: [String] = []
+        let retryRuntime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { nil }, environment: { [:] },
+            makeSocketPath: { retryPath },
+            socketExists: { FileManager.default.fileExists(atPath: $0) },
+            endpointIdentity: { _ in
+                CuaEndpointIdentity(device: 3, inode: 33)
+            },
+            makeProcess: { _ in retryChild },
+            removeSocket: { path, _ in
+                retryRemoved.append(path)
+                try? FileManager.default.removeItem(atPath: path)
+            },
+            wait: { _ in })
+        let retryController = CuaDaemonController(runtime: retryRuntime)
+        expect(retryController.ensureRunning(transport: transport),
+               "the retry fixture starts an owned child")
+        FileManager.default.createFile(atPath: retryPath, contents: Data())
+        retryController.stopOwned()
+        expect(retryChild.isRunning && retryRemoved.isEmpty
+               && retryController.activeSocketPath == nil,
+               "a failed exact-pid stop disables access but retains ownership")
+        retryChild.forceSucceeds = true
+        retryController.stopOwned()
+        expect(!retryChild.isRunning && retryChild.terminateCount == 2
+               && retryRemoved == [retryPath],
+               "a later cleanup retries the retained child and socket")
+
+        let unreadyPath = root + "-unready.sock"
+        defer { try? FileManager.default.removeItem(atPath: unreadyPath) }
+        let unreadyChild = FakeCuaChild(processIdentifier: 4646)
+        var unreadyRemoved = false
+        let unreadyRuntime = CuaDaemonRuntime(
+            driverInstalled: { true }, signatureIsTrusted: { true },
+            bundleIdentifier: { nil }, environment: { [:] },
+            makeSocketPath: { unreadyPath }, socketExists: { _ in false },
+            endpointIdentity: { _ in nil },
+            makeProcess: { _ in unreadyChild },
+            removeSocket: { _, _ in unreadyRemoved = true }, wait: { _ in })
+        let unreadyController = CuaDaemonController(runtime: unreadyRuntime)
+        expect(!unreadyController.ensureRunning(
+                transport: HealthyCuaTransport()),
+               "readiness refuses without an authenticated 0600 endpoint")
+        expect(!unreadyChild.isRunning
+               && unreadyController.activeSocketIdentity == nil
+               && unreadyController.transportSocketIdentity == nil,
+               "failed readiness synchronously joins its owned child")
+        FileManager.default.createFile(atPath: unreadyPath, contents: Data())
+        expect(!unreadyRemoved
+               && FileManager.default.fileExists(atPath: unreadyPath),
+               "an unauthenticated endpoint path is never deleted")
+
+        let trustedGeneration = CuaProcessIdentity(
+            pid: 777, startSeconds: 10, startMicroseconds: 20)
+        let recycledGeneration = CuaProcessIdentity(
+            pid: 777, startSeconds: 11, startMicroseconds: 20)
+        var trustCache = CuaPeerTrustCache()
+        trustCache.insert(trustedGeneration)
+        expect(trustCache.contains(trustedGeneration)
+               && !trustCache.contains(recycledGeneration),
+               "peer trust cache misses a recycled pid generation")
     }
 
     /// The planner only learns what an action has already written from the
@@ -4015,7 +4572,10 @@ extension Selftest {
         transport.responses["type_text"] = [
             "effect": "confirmed", "delivery": ["mode": "background"],
         ]
-        let host = makeRoutedHost(system: system, transport: transport)
+        var endDaemonCount = 0
+        let host = makeRoutedHost(
+            system: system, transport: transport,
+            endDaemon: { endDaemonCount += 1 })
         let planner = FakeTurnPlanner(turns: [
             .turn(sends: false, goal: "write a note", steps: [
                 ["do": "open_app", "app": "Notes"],
@@ -4052,6 +4612,8 @@ extension Selftest {
                "the text reached the driver, addressed to the target pid")
         expect((typeCall?.arguments["element_token"] as? String) != nil,
                "addressed to an exact element, never the pid's focus")
+        expect(endDaemonCount == 1 && system.endInputCount == 1,
+               "a routed action stops its child and clears native state once")
     }
 
     /// The driver socket has no credential of its own, so Velora verifies the
@@ -4062,6 +4624,16 @@ extension Selftest {
     /// Velora itself, which is emphatically not Cua's driver, so the call
     /// must be refused before a byte goes out.
     private static func testCuaSocketRefusesAnImpostor() {
+        var peers = [Int32](repeating: -1, count: 2)
+        if socketpair(AF_UNIX, SOCK_STREAM, 0, &peers) == 0 {
+            expect(!CuaDriver.peerIsTrusted(
+                fd: peers[0], expectedPID: getpid() + 1),
+                   "a peer outside the owned pid is rejected")
+            close(peers[0])
+            close(peers[1])
+        } else {
+            expect(false, "the owned-pid peer fixture can be created")
+        }
         // Short by necessity: `sun_path` is 104 bytes, and the per-user temp
         // directory alone is longer than that.
         let path = "/tmp/velora-cua-\(UUID().uuidString.prefix(8)).sock"
@@ -4500,6 +5072,7 @@ extension Selftest {
         system: FakeActionHost, transport: FakeCuaTransport,
         enabled: Bool = true, healthy: Bool = true,
         starter: FakeDaemonStarter? = nil,
+        endDaemon: @escaping () -> Void = {},
         localApps: [String: String] = ["Notes": "com.apple.Notes",
                                        "Slack": "com.tinyspeck.slackmacgap"]
     ) -> BackgroundRoutingActionHost {
@@ -4509,7 +5082,7 @@ extension Selftest {
             ensureDaemon: { _ in
                 if let starter { return starter.ensure() }
                 return healthy
-            }, localResolve: { name in
+            }, endDaemon: endDaemon, localResolve: { name in
                 guard let index = AppMatcher.bestMatch(
                     for: name, in: Array(localApps.keys)) else { return nil }
                 let key = Array(localApps.keys)[index]

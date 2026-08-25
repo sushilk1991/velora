@@ -349,7 +349,7 @@ enum CuaDiagnostics {
             "installed": CuaDriver.isInstalled,
             "signature_trusted": CuaDriver.isInstalled
                 ? CuaDriver.signatureIsTrusted : false,
-            "socket": CuaDriver.socketPath,
+            "socket": CuaDriverDaemon.activeSocketPath ?? "",
         ]
         let healthy = CuaDriverDaemon.isHealthy(transport: transport)
         out["daemon_healthy"] = healthy
@@ -425,6 +425,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let backgroundEnabled: () -> Bool
     /// Injectable so the selftest can gate health without spawning a daemon.
     private let ensureDaemon: (CuaTransport) -> Bool
+    private let endDaemon: () -> Void
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
     /// means "can't tell from here" — the driver decides.
@@ -478,12 +479,15 @@ final class BackgroundRoutingActionHost: ActionHost {
          backgroundEnabled: @escaping () -> Bool,
          ensureDaemon: @escaping (CuaTransport) -> Bool
             = CuaDriverDaemon.ensureRunning,
+         endDaemon: @escaping () -> Void
+            = CuaDriverDaemon.stopIfVeloraStarted,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
             = BackgroundRoutingActionHost.resolveRunningApp) {
         self.system = system
         self.transport = transport
         self.backgroundEnabled = backgroundEnabled
         self.ensureDaemon = ensureDaemon
+        self.endDaemon = endDaemon
         self.localResolve = localResolve
     }
 
@@ -508,6 +512,13 @@ final class BackgroundRoutingActionHost: ActionHost {
         unroute()
         contentMayCommit = false
         system.beginActionInputSession()
+    }
+
+    func endActionInputSession() {
+        unroute()
+        contentMayCommit = false
+        system.endActionInputSession()
+        endDaemon()
     }
 
     func prepareForActionPlan(sends: Bool) {

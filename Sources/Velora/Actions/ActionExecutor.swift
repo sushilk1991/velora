@@ -37,6 +37,8 @@ protocol ActionHost: AnyObject {
     /// Clears exact text-target/draft ownership at the boundary between user
     /// actions. The host itself survives across planner turns within one run.
     func beginActionInputSession()
+    /// Drops every retained input capability and any owned automation child.
+    func endActionInputSession()
     /// Tells a routing host whether this immutable action may commit content.
     /// Sending actions stay foreground regardless of app identity.
     func prepareForActionPlan(sends: Bool)
@@ -124,6 +126,7 @@ protocol ActionHost: AnyObject {
 extension ActionHost {
     /// Foreground hosts drive the window the user is looking at.
     var isDrivingInBackground: Bool { false }
+    func endActionInputSession() {}
     func prepareForActionPlan(sends: Bool) {}
     func uiSnapshot() -> ActionUISnapshot? { nil }
     func pressElement(index: Int, snapshotID: String, label: String,
