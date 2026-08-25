@@ -2887,6 +2887,15 @@ class Engine:
                 try:
                     reply_text = result.text
                     parsed = actions.parse_turn(reply_text)
+                    if actions.turn_requires_ui_presentation(parsed, session):
+                        token = uuid.uuid4().hex
+                        session.state.allowed_ui_attestation = token
+                        parsed = actions.attach_ui_presentation(
+                            parsed, session.current_ui_snapshot, token)
+                        reply_text = json.dumps(
+                            parsed, ensure_ascii=False, separators=(",", ":"))
+                        turn = session.accept_reply(reply_text)
+                        break
                     review_refusal_reason = ""
                     if actions.turn_requires_ui_action_review(parsed, session):
                         review_prompt = actions.build_ui_action_review_prompt(
@@ -3012,10 +3021,7 @@ class Engine:
                                 "UI action reviewer refused: "
                                 + review_refusal_reason)
                     if actions.turn_requires_target_verifier(parsed, session):
-                        if not session.current_ui_snapshot.get("complete"):
-                            authoritative_ui_refusal = True
-                            raise actions.PlanError(
-                                "target verifier: structured UI is incomplete")
+                        authoritative_ui_refusal = True
                         verifier_prompt = actions.build_target_verifier_prompt(
                             session.current_ui_snapshot)
                         verifier_message = actions.target_verifier_message(

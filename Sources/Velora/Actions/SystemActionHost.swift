@@ -20,6 +20,48 @@ enum ActionTypingProgress {
     }
 }
 
+/// One action's typing capability. Once exact target proof is requested,
+/// losing that element cannot reopen generic focused-field capture.
+struct ActionTextTargetState {
+    private(set) var target: ScreenKeystrokeStreamTarget?
+    private(set) var draft = ""
+    private var verificationRequired = false
+
+    var mayCaptureGeneric: Bool { !verificationRequired }
+
+    mutating func reset() {
+        target = nil
+        draft = ""
+        verificationRequired = false
+    }
+
+    mutating func requireVerification() {
+        verificationRequired = true
+        clearTarget()
+    }
+
+    mutating func pin(_ target: ScreenKeystrokeStreamTarget) {
+        verificationRequired = true
+        self.target = target
+        draft = ""
+    }
+
+    mutating func captureGeneric(_ target: ScreenKeystrokeStreamTarget) {
+        guard mayCaptureGeneric else { return }
+        self.target = target
+        draft = ""
+    }
+
+    mutating func updateDraft(_ draft: String) {
+        self.draft = draft
+    }
+
+    mutating func clearTarget() {
+        target = nil
+        draft = ""
+    }
+}
+
 /// The real machine behind `ActionExecutor`.
 ///
 /// Two macOS behaviours shape this file:
@@ -39,8 +81,7 @@ final class SystemActionHost: ActionHost {
     private var accessibilityEnabledPIDs = Set<pid_t>()
     /// Exact AX field and exact text written by this Action invocation. The
     /// field survives planner turns, but is reset before the next user action.
-    private var actionTextTarget: ScreenKeystrokeStreamTarget?
-    private var actionDraft = ""
+    private var targetState = ActionTextTargetState()
     private var actionUISnapshot: ScreenActionUISnapshot?
 
     init(inserter: TextInserter) {
@@ -48,13 +89,12 @@ final class SystemActionHost: ActionHost {
     }
 
     func beginActionInputSession() {
-        clearActionTextState()
+        targetState.reset()
         actionUISnapshot = nil
     }
 
     private func clearActionTextState() {
-        actionTextTarget = nil
-        actionDraft = ""
+        targetState.clearTarget()
     }
 
     private func expectedBundle(_ expected: String?, matches actual: String) -> Bool {
@@ -92,7 +132,8 @@ final class SystemActionHost: ActionHost {
     // MARK: - Apps
 
     func openApp(named name: String) -> String? {
-        onMain {
+        clearActionTextState()
+        return onMain {
             // Prefer an already-running app: it is the one with the user's windows.
             let running = NSWorkspace.shared.runningApplications.filter {
                 $0.activationPolicy == .regular && $0.localizedName != nil
@@ -121,7 +162,8 @@ final class SystemActionHost: ActionHost {
     }
 
     func openURL(_ url: URL) -> Bool {
-        onMain { NSWorkspace.shared.open(url) }
+        clearActionTextState()
+        return onMain { NSWorkspace.shared.open(url) }
     }
 
     func frontmostApp() -> (name: String, bundleID: String)? {
@@ -134,6 +176,27 @@ final class SystemActionHost: ActionHost {
             // already-frontmost Slack never enabled it at all.
             self.enableAccessibility(for: app)
             return (name, app.bundleIdentifier ?? "")  // "" == unknown; never matched
+        }
+    }
+
+    func foregroundWindow() -> ActionWindowIdentity? {
+        onMain {
+            guard let app = NSWorkspace.shared.frontmostApplication,
+                  let name = app.localizedName,
+                  let bundleID = app.bundleIdentifier,
+                  let rows = CGWindowListCopyWindowInfo(
+                    [.optionOnScreenOnly, .excludeDesktopElements],
+                    CGWindowID(kCGNullWindowID)) as? [[String: Any]],
+                  let row = rows.first(where: {
+                      ($0[kCGWindowOwnerPID as String] as? Int)
+                          == Int(app.processIdentifier)
+                          && ($0[kCGWindowLayer as String] as? Int) == 0
+                  }),
+                  let windowID = row[kCGWindowNumber as String] as? Int
+            else { return nil }
+            return ActionWindowIdentity(
+                name: name, bundleID: bundleID,
+                pid: Int(app.processIdentifier), windowID: windowID)
         }
     }
 
@@ -316,8 +379,10 @@ final class SystemActionHost: ActionHost {
     }
 
     func verifyElement(index: Int, snapshotID: String, label: String,
-                       role: String, expecting bundleID: String?,
-                       requiresFocus: Bool) -> Bool {
+                       role: String, target: String,
+                       expecting bundleID: String?,
+                       purpose: ActionVerificationPurpose) -> Bool {
+        if purpose == .target { targetState.requireVerification() }
         guard Permissions.accessibilityGranted,
               let snapshot = actionUISnapshot,
               snapshot.observation.source == .native,
@@ -326,9 +391,31 @@ final class SystemActionHost: ActionHost {
               app.bundleIdentifier == snapshot.observation.bundleID,
               expectedBundle(bundleID, matches: snapshot.observation.bundleID)
         else { return false }
-        return ScreenContext.verifyActionElement(
-            index: index, label: label, role: role, in: snapshot,
-            requiresFocus: requiresFocus)
+        guard ScreenContext.verifyActionElement(
+            index: index, label: label, role: role, target: target,
+            in: snapshot, purpose: purpose) else { return false }
+        guard purpose == .target else { return true }
+        guard let pinned = Self.verifiedTextTarget(
+            purpose: purpose, index: index, snapshot: snapshot,
+            capture: { bundleID, element in
+                ScreenContext.keystrokeStreamTarget(
+                    bundleID: bundleID, element: element)
+            }) else { return false }
+        targetState.pin(pinned)
+        return true
+    }
+
+    /// Converts target proof into one exact local typing capability. Goal
+    /// proof deliberately has no path to this capture closure.
+    static func verifiedTextTarget(
+        purpose: ActionVerificationPurpose,
+        index: Int,
+        snapshot: ScreenActionUISnapshot,
+        capture: (String, AXUIElement) -> ScreenKeystrokeStreamTarget?
+    ) -> ScreenKeystrokeStreamTarget? {
+        guard purpose == .target,
+              let element = snapshot.elementsByIndex[index] else { return nil }
+        return capture(snapshot.observation.bundleID, element)
     }
 
     /// URL of the frontmost page when a browser is frontmost, else nil. Read
@@ -351,14 +438,16 @@ final class SystemActionHost: ActionHost {
             clearActionTextState()
             return false
         }
-        if let target = actionTextTarget {
-            guard ScreenContext.keystrokeStreamOwnsDraft(actionDraft, target: target) else {
+        if let target = targetState.target {
+            guard ScreenContext.keystrokeStreamOwnsDraft(
+                targetState.draft, target: target) else {
                 clearActionTextState()
                 return false
             }
             return true
         }
-        guard let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+        guard targetState.mayCaptureGeneric,
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               app.processIdentifier > 0,
               let target = ScreenContext.keystrokeStreamTarget(of: app),
               ScreenContext.keystrokeStreamOwnsDraft("", target: target)
@@ -366,8 +455,7 @@ final class SystemActionHost: ActionHost {
             clearActionTextState()
             return false
         }
-        actionTextTarget = target
-        actionDraft = ""
+        targetState.captureGeneric(target)
         return true
     }
 
@@ -390,14 +478,15 @@ final class SystemActionHost: ActionHost {
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
         guard canPostInput, hasFocusedTextTarget,
-              let target = actionTextTarget,
+              let target = targetState.target,
               expectedBundle(bundleID, matches: target.bundleID),
-              ScreenContext.keystrokeStreamOwnsDraft(actionDraft, target: target)
+              ScreenContext.keystrokeStreamOwnsDraft(
+                targetState.draft, target: target)
         else {
             clearActionTextState()
             return false
         }
-        let priorDraft = actionDraft
+        let priorDraft = targetState.draft
         let resultingDraft = priorDraft + text
         // Synchronous by design: the executor's next step (often Return) must
         // not race the characters into the field.
@@ -439,7 +528,7 @@ final class SystemActionHost: ActionHost {
         // app a short bounded window to expose the resulting caret and text,
         // then retain only a draft whose exact element and contents are proven.
         if actionDraftIsOwned(resultingDraft, target: target, waitingUpTo: 0.5) {
-            actionDraft = resultingDraft
+            targetState.updateDraft(resultingDraft)
             return true
         }
         clearActionTextState()
@@ -459,10 +548,11 @@ final class SystemActionHost: ActionHost {
         // keycode inference agreed only by coincidence (review finding).
         let committing = ActionPlan.Limits.committingKeys.contains(name.lowercased())
         if committing {
-            guard let target = actionTextTarget,
-                  !actionDraft.isEmpty,
+            guard let target = targetState.target,
+                  !targetState.draft.isEmpty,
                   expectedBundle(bundleID, matches: target.bundleID),
-                  ScreenContext.keystrokeStreamOwnsDraft(actionDraft, target: target)
+                  ScreenContext.keystrokeStreamOwnsDraft(
+                    targetState.draft, target: target)
             else {
                 clearActionTextState()
                 return false
@@ -478,7 +568,7 @@ final class SystemActionHost: ActionHost {
             return false
         }
         let pressed = inserter.pressKey(keyCode, flags: flags)
-        if committing { clearActionTextState() }
+        if pressed { clearActionTextState() }
         return pressed
     }
 

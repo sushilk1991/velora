@@ -401,8 +401,9 @@ enum CuaDiagnostics {
 /// is a different native app, the plan cannot deliver content, the feature is
 /// enabled, and the daemon is healthy is launched WITHOUT activation and
 /// driven in the background; the user's cursor, focus, and typing are never
-/// touched. Everything else (acting on the current app, sending, browsers, or
-/// a missing/sick driver) falls through to `SystemActionHost` unchanged.
+/// touched. Explicit foreground cases—current app, sending, browsers, or a
+/// disabled setting—delegate to `SystemActionHost`. Driver failures fail
+/// closed so they never turn an eligible background action into activation.
 ///
 /// Validation is unchanged on purpose: the same `ActionPlan` decode, the same
 /// `ActionRuntimePolicy`, the same executor invariants run against this host.
@@ -416,10 +417,9 @@ final class BackgroundRoutingActionHost: ActionHost {
     private static let callTimeout: TimeInterval = 3.0
     private static let maximumSnapshotIDs = 512
     private static let maximumSnapshotIDBytes = 128
-    /// How long `frontmostApp` polling lets a fresh window stay AX-unresolved
-    /// before the one permitted materialization flash.
-    private static let flashAfterSeconds: TimeInterval = 1.2
-
+    private static let presentationTool = "bring_to_front"
+    private static let presentationCode =
+        "bring_to_front_exact_window_verified"
     private let system: ActionHost
     private let transport: CuaTransport
     private let backgroundEnabled: () -> Bool
@@ -429,13 +429,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// can be ruled out before a daemon is ever started. Returning nil just
     /// means "can't tell from here" — the driver decides.
     private let localResolve: (String) -> (name: String, bundleID: String)?
-    /// Native activation/hide for the materialization flash — injectable so
-    /// the selftest never touches real apps. No synthesized keystrokes: a
-    /// keystroke-based hide could land in the user's app if activation
-    /// silently failed (review finding).
-    private let activateApp: (Int) -> Void
-    private let hideApp: (Int) -> Bool
-
     // Routed-target state, reset every action.
     private var routed = false
     private var contentMayCommit = false
@@ -444,16 +437,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     private var targetName = ""
     private var targetBundleID = ""
     private var targetReady = false
-    /// True once readiness has succeeded at least once this action. The
-    /// materialization flash is permitted ONLY before that — a mid-action
-    /// degradation must fail the step, never steal focus between typing
-    /// steps (review finding).
+    /// True once readiness has succeeded at least once this action.
     private var everReady = false
-    private var flashUsed = false
-    /// Flashes across the whole action, however many targets it visits.
-    private var flashCount = 0
-    private static let maximumFlashes = 2
-    private var readinessStarted: TimeInterval?
     /// The exact element this action is writing into, pinned the first time
     /// one is chosen. Without it the "lone editable" rule is relative to
     /// whatever the tree looks like right now: a plan can verify against a
@@ -493,18 +478,12 @@ final class BackgroundRoutingActionHost: ActionHost {
          backgroundEnabled: @escaping () -> Bool,
          ensureDaemon: @escaping (CuaTransport) -> Bool
             = CuaDriverDaemon.ensureRunning,
-         activateApp: @escaping (Int) -> Void
-            = BackgroundRoutingActionHost.activateOnMain,
-         hideApp: @escaping (Int) -> Bool
-            = BackgroundRoutingActionHost.hideOnMain,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
             = BackgroundRoutingActionHost.resolveRunningApp) {
         self.system = system
         self.transport = transport
         self.backgroundEnabled = backgroundEnabled
         self.ensureDaemon = ensureDaemon
-        self.activateApp = activateApp
-        self.hideApp = hideApp
         self.localResolve = localResolve
     }
 
@@ -528,8 +507,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     func beginActionInputSession() {
         unroute()
         contentMayCommit = false
-        flashUsed = false
-        flashCount = 0
         system.beginActionInputSession()
     }
 
@@ -546,6 +523,9 @@ final class BackgroundRoutingActionHost: ActionHost {
         // controller), keeping this host's behavior machine-independent for
         // the selftest.
         guard backgroundEnabled() else {
+            return system.openApp(named: name)
+        }
+        guard !contentMayCommit else {
             return system.openApp(named: name)
         }
         let frontmost = system.frontmostApp()
@@ -567,9 +547,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         // Resolve the target BEFORE deciding, so the gate judges the actual
         // app (bundle id included), not the spoken words.
         guard ensureDaemon(transport),
-              let resolved = resolveApp(named: name) else {
-            return system.openApp(named: name)
-        }
+              let resolved = resolveApp(named: name) else { return nil }
         guard BackgroundActionGate.shouldRoute(
             enabled: true, contentMayCommit: contentMayCommit,
             targetName: resolved.name,
@@ -579,31 +557,46 @@ final class BackgroundRoutingActionHost: ActionHost {
             return system.openApp(named: name)
         }
         guard activateTarget(resolved) else {
-            return system.openApp(named: name)
+            return nil
         }
         veloraLog("Velora: action driving \(resolved.name) in the background")
         return resolved.name
     }
 
     /// A later `open_app` inside an already-routed action. A target the gate
-    /// still accepts becomes the new background target; anything else ends
-    /// background mode and runs classically for the rest of the action —
-    /// refusing outright would fail plans that legitimately move on to a
-    /// browser or a foreground-only target (review finding).
+    /// still accepts becomes the new background target. Only a deliberately
+    /// foreground-only target ends routing and delegates; routing failures do
+    /// not silently activate a different app on the user's screen.
     private func openTargetApp(named name: String) -> String? {
         let frontmost = system.frontmostApp()
-        if let resolved = resolveApp(named: name),
-           BackgroundActionGate.shouldRoute(
+        if let local = localResolve(name),
+           !BackgroundActionGate.shouldRoute(
+            enabled: true, contentMayCommit: contentMayCommit,
+            targetName: local.name,
+            targetBundleID: local.bundleID,
+            frontmostName: frontmost?.name,
+            frontmostBundleID: frontmost?.bundleID) {
+            unroute()
+            return system.openApp(named: name)
+        }
+        guard let resolved = resolveApp(named: name) else {
+            unroute()
+            return nil
+        }
+        guard BackgroundActionGate.shouldRoute(
             enabled: true, contentMayCommit: contentMayCommit,
             targetName: resolved.name,
             targetBundleID: resolved.bundleID,
             frontmostName: frontmost?.name,
-            frontmostBundleID: frontmost?.bundleID),
-           activateTarget(resolved) {
-            return resolved.name
+            frontmostBundleID: frontmost?.bundleID) else {
+            unroute()
+            return system.openApp(named: name)
         }
-        unroute()
-        return system.openApp(named: name)
+        guard activateTarget(resolved) else {
+            unroute()
+            return nil
+        }
+        return resolved.name
     }
 
     private struct ResolvedApp {
@@ -644,7 +637,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetWindowID = nil
         targetReady = false
         everReady = false
-        readinessStarted = nil
         // A new target is a new window, a new element, and a new draft:
         // text delivered to the previous app must never authorize a commit
         // here (review finding — `unroute` cleared this, retargeting did
@@ -654,7 +646,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         routedUISnapshot = nil
         resetSnapshotLineage()
         backgroundDraft = ""
-        flashUsed = false
         return true
     }
 
@@ -685,7 +676,6 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private func advanceReadiness() -> Bool {
         guard snapshotLineage == .valid else { return false }
-        if readinessStarted == nil { readinessStarted = now() }
         // Re-picking is allowed ONLY while the target has never been ready:
         // a cold-launched app's real document window can appear after the
         // first look. Once ready, the window is pinned for the rest of the
@@ -697,10 +687,7 @@ final class BackgroundRoutingActionHost: ActionHost {
             targetWindowID = window.id
         }
         guard let snapshot = snapshotTarget(maxElements: 10) else { return false }
-        if snapshot.degraded {
-            maybeFlash()
-            return false
-        }
+        if snapshot.degraded { return false }
         targetReady = true
         everReady = true
         return true
@@ -762,38 +749,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func resetSnapshotLineage() {
         observedSnapshotIDs.removeAll(keepingCapacity: true)
         snapshotLineage = .valid
-    }
-
-    /// An app that has never been activated since launch sits AX-unresolved:
-    /// WindowServer knows its windows, the AX tree reports none (observed
-    /// live on macOS 26 for both cold launches AND apps opened backgrounded
-    /// earlier). The one fix is one brief activation: activate it, let AX
-    /// materialize, hide it again — hiding hands focus back to the user's
-    /// app. Native NSRunningApplication calls only, each step verified
-    /// against the real frontmost app before the next (review findings: a
-    /// synthesized ⌘H after a silently failed activation would hide the
-    /// USER'S app). Permitted once per action and only before the target has
-    /// ever been ready — never between input steps.
-    private func maybeFlash() {
-        guard !everReady, !flashUsed, flashCount < Self.maximumFlashes,
-              let started = readinessStarted,
-              now() - started > Self.flashAfterSeconds,
-              !system.screenIsLocked else { return }
-        flashUsed = true
-        flashCount += 1
-        activateApp(targetPID)
-        system.sleep(ms: 700)
-        // Only hide what actually came forward. If activation was refused,
-        // the user's app is still frontmost and must not be touched.
-        guard system.frontmostApp()?.bundleID.lowercased() == targetBundleID else {
-            veloraLog("Velora: background target refused activation — "
-                      + "leaving the screen alone")
-            return
-        }
-        if !hideApp(targetPID) {
-            veloraLog("Velora: could not hide the background target after "
-                      + "materializing it")
-        }
     }
 
     // MARK: - Observations
@@ -962,7 +917,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetBundleID = ""
         targetReady = false
         everReady = false
-        readinessStarted = nil
         pinnedElement = nil
         routedUISnapshot = nil
         resetSnapshotLineage()
@@ -1040,15 +994,125 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     func verifyElement(index: Int, snapshotID: String, label: String,
-                       role: String, expecting bundleID: String?,
-                       requiresFocus: Bool) -> Bool {
+                       role: String, target: String,
+                       expecting bundleID: String?,
+                       purpose: ActionVerificationPurpose) -> Bool {
         guard !routed else {
             routedUISnapshot = nil
             return false
         }
         return system.verifyElement(
             index: index, snapshotID: snapshotID, label: label,
-            role: role, expecting: bundleID, requiresFocus: requiresFocus)
+            role: role, target: target, expecting: bundleID,
+            purpose: purpose)
+    }
+
+    func foregroundWindow() -> ActionWindowIdentity? {
+        routed ? nil : system.foregroundWindow()
+    }
+
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+        guard routed, snapshotLineage == .valid, targetReady,
+              let cached = routedUISnapshot,
+              cached.observation.source == .cua,
+              cached.observation.id == snapshotID,
+              cached.observation.bundleID.lowercased() == bundleID.lowercased(),
+              cached.observation.windowID == windowID,
+              cached.pid == targetPID, cached.windowID == windowID,
+              cached.bundleID == targetBundleID,
+              let prior = system.foregroundWindow(),
+              prior.pid > 0, prior.windowID > 0
+        else { return false }
+
+        let result = transport.call(Self.presentationTool, arguments: [
+            "pid": targetPID, "window_id": windowID,
+        ], timeout: Self.callTimeout)
+        guard case .success(let reply) = result,
+              presentationMatches(reply, pid: targetPID, windowID: windowID)
+        else {
+            _ = restore(prior)
+            unroute()
+            return false
+        }
+        unroute()
+        return true
+    }
+
+    private func restore(_ prior: ActionWindowIdentity) -> Bool {
+        guard case .success(let reply) = transport.call(
+            Self.presentationTool, arguments: [
+                "pid": prior.pid, "window_id": prior.windowID,
+            ], timeout: Self.callTimeout)
+        else { return false }
+        return presentationMatches(
+            reply, pid: prior.pid, windowID: prior.windowID)
+    }
+
+    private func presentationMatches(
+        _ reply: [String: Any], pid: Int, windowID: Int
+    ) -> Bool {
+        guard reply["status"] as? String == "activated",
+              reply["code"] as? String == Self.presentationCode,
+              exactFlag(reply["activated"]) == true,
+              exactFlag(reply["request_accepted"]) == true,
+              exactFlag(reply["process_activated"]) == true,
+              exactInt(reply["pid"]) == pid,
+              exactInt(reply["window_id"]) == windowID,
+              let effect = reply["exact_window_effect"] as? [String: Any],
+              exactFlag(effect["verified"]) == true,
+              exactFlag(effect["focused"]) == true,
+              exactFlag(effect["frontmost_ordinary"]) == true,
+              exactFlag(effect["target_visible_ordinary"]) == true,
+              let observed = reply["observed"] as? [String: Any],
+              exactInt(observed["frontmost_pid"]) == pid,
+              exactInt(observed["focused_window_id"]) == windowID,
+              exactInt(observed["frontmost_ordinary_window_id"]) == windowID,
+              derivedFrontmostPID(observed, targetPID: pid) == pid
+        else { return false }
+        return true
+    }
+
+    private func derivedFrontmostPID(
+        _ observed: [String: Any], targetPID: Int
+    ) -> Int? {
+        guard let workspaceRaw = observed["workspace_frontmost_pid"],
+              let privateRaw = observed["front_process_matches_target"]
+        else { return nil }
+        let workspace = nullablePID(workspaceRaw)
+        let privateMatch = nullableFlag(privateRaw)
+        guard workspace.valid, privateMatch.valid else { return nil }
+
+        // Cua's private front-process result is authoritative when available.
+        // AppKit's workspace PID may lag behind a successful private check.
+        if let matches = privateMatch.value {
+            return matches ? targetPID : nil
+        }
+        return workspace.value
+    }
+
+    private func nullablePID(_ raw: Any) -> (valid: Bool, value: Int?) {
+        if raw is NSNull { return (true, nil) }
+        guard let value = exactInt(raw) else { return (false, nil) }
+        return (true, value)
+    }
+
+    private func nullableFlag(_ raw: Any) -> (valid: Bool, value: Bool?) {
+        if raw is NSNull { return (true, nil) }
+        guard let value = exactFlag(raw) else { return (false, nil) }
+        return (true, value)
+    }
+
+    private func exactInt(_ raw: Any?) -> Int? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number) else { return nil }
+        return number.intValue
+    }
+
+    private func exactFlag(_ raw: Any?) -> Bool? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
     }
 
     private func sameElementIdentity(
@@ -1174,28 +1238,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     func now() -> TimeInterval { system.now() }
 
     // MARK: - Helpers
-
-    /// Cooperative activation on the main thread. A menubar app's plain
-    /// `activate()` is frequently ignored on macOS 14+; yielding first is
-    /// what makes the request likely to be granted — the same mechanism
-    /// `SystemActionHost.activate` relies on. Safe to `sync` here: the
-    /// executor runs on a background queue that main never waits on.
-    private static func activateOnMain(pid: Int) {
-        let work = {
-            guard let app = NSRunningApplication(processIdentifier: pid_t(pid))
-            else { return }
-            NSApp?.yieldActivation(to: app)
-            app.activate(options: [])
-        }
-        Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
-    }
-
-    private static func hideOnMain(pid: Int) -> Bool {
-        let work: () -> Bool = {
-            NSRunningApplication(processIdentifier: pid_t(pid))?.hide() ?? false
-        }
-        return Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
-    }
 
     private func expectedMatchesTarget(_ bundleID: String?) -> Bool {
         guard let bundleID, !bundleID.isEmpty else { return true }

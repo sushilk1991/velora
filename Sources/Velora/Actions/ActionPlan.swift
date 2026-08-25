@@ -16,6 +16,9 @@ enum ActionStep: Equatable {
     /// confirming where text would go does not prove the user's whole task.
     case verifyGoal(snapshotID: String, index: Int, role: String,
                     label: String, target: String)
+    /// Engine-attested transition from exact routed-window evidence to the
+    /// same window in front. The controller vocabulary never includes it.
+    case presentUI(snapshotID: String, bundleID: String, windowID: Int)
     case typeText(String)
     /// Navigation/query text, never message/document content and never
     /// eligible for Return/Enter commit authority.
@@ -99,6 +102,7 @@ enum ActionPlanError: Error, Equatable {
     case incompleteStructuredUI(step: Int)
     case partialUIUnmentioned(step: Int)
     case invalidStructuredUICapability(step: Int)
+    case invalidUIPresentation(step: Int)
     case pressRequiresFreshObservation(step: Int)
     case committingPressLabel(String)
     case sendInDraft(step: Int)
@@ -144,6 +148,8 @@ enum ActionPlanError: Error, Equatable {
             return "step \(step) cites a partial UI label absent from the command"
         case .invalidStructuredUICapability(let step):
             return "step \(step) does not cite an exact current UI capability"
+        case .invalidUIPresentation(let step):
+            return "step \(step) does not cite the exact routed UI window"
         case .pressRequiresFreshObservation(let step):
             return "step \(step) presses UI; observe the fresh screen before any later step"
         case .committingPressLabel(let label):
@@ -400,6 +406,31 @@ extension ActionPlan {
         "the", "to", "with",
     ]
 
+    // recipient_intent: comment dm email mail message post reply text | draft prepare write + chat channel comment conversation discord dm email gmail imessage mail messenger post recipient reply signal slack teams telegram thread whatsapp
+    private static let contentWords: Set<String> = [
+        "comment", "dm", "email", "mail", "message", "post", "reply", "text",
+    ]
+    private static let contextWords: Set<String> = [
+        "chat", "channel", "comment", "conversation", "discord", "dm",
+        "email", "gmail", "imessage", "mail", "messenger", "post",
+        "recipient", "reply", "signal", "slack", "teams", "telegram",
+        "thread", "whatsapp",
+    ]
+    private static let composeWords: Set<String> = ["draft", "prepare", "write"]
+
+    static func isRecipientContent(
+        _ command: String, bundleID: String?
+    ) -> Bool {
+        guard let category = ModeCategory.category(forBundleID: bundleID)
+        else { return false }
+        guard category == .chat || category == .email else { return false }
+        let words = Set(AppMatcher.words(command))
+        let hasIntent = !words.intersection(contentWords).isEmpty
+            || !words.intersection(composeWords).isEmpty
+        return hasIntent
+            && !words.intersection(contextWords).isEmpty
+    }
+
     private static func commandMentionsUILabel(
         _ label: String, command: String
     ) -> Bool {
@@ -448,6 +479,42 @@ extension ActionPlan {
                   element.actions.contains(capability) else {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
+        }
+    }
+
+    private static func validateVerifyUI(
+        snapshotID: String, index: Int, role: String, label: String,
+        target: String, purpose: ActionVerificationPurpose,
+        state: BatchState, step: Int
+    ) throws {
+        guard state.requireUITargetVerification,
+              let snapshot = state.structuredUISnapshot,
+              snapshot.id == snapshotID,
+              let element = snapshot.elements.first(where: { $0.index == index }),
+              element.role == role,
+              AppMatcher.normalize(element.label ?? "")
+                == AppMatcher.normalize(label),
+              AppMatcher.bestMatch(for: target, in: [label]) != nil,
+              AppMatcher.bestMatch(for: target, in: [state.spokenCommand]) != nil
+        else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
+
+        switch purpose {
+        case .target:
+            guard snapshot.source == .native,
+                  !snapshot.bundleID.isEmpty,
+                  !snapshot.windowTitle.isEmpty || snapshot.windowID != nil,
+                  ScreenContext.isEditableActionRole(role), element.focused
+            else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
+            if snapshot.complete,
+               !ActionUIEvidencePolicy.mayVerify(
+                index: index, in: snapshot.elements) {
+                throw ActionPlanError.invalidStructuredUICapability(step: step)
+            }
+        case .goal:
+            guard snapshot.complete,
+                  ActionUIEvidencePolicy.mayVerify(
+                    index: index, in: snapshot.elements)
+            else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
         }
     }
 
@@ -512,6 +579,10 @@ extension ActionPlan {
         var pendingText = state.pendingText
         /// Drafts refuse committing keys once text is pending, outright.
         let isDraft = (plan["sends"] as? Bool) == false
+        let needsTargetProof = state.requireUITargetVerification
+            && (!isDraft || ActionPlan.isRecipientContent(
+                state.spokenCommand,
+                bundleID: state.structuredUISnapshot?.bundleID))
         var uiTargetVerified = false
 
         for (index, raw) in rawSteps.enumerated() {
@@ -657,7 +728,13 @@ extension ActionPlan {
                         >= Limits.minVerifyTermCharacters else {
                     throw ActionPlanError.weakVerifyTerm(target)
                 }
-                if step["purpose"] as? String == "goal" {
+                let purpose: ActionVerificationPurpose =
+                    step["purpose"] as? String == "goal" ? .goal : .target
+                try ActionPlan.validateVerifyUI(
+                    snapshotID: snapshotID, index: number.intValue,
+                    role: role, label: label, target: target,
+                    purpose: purpose, state: state, step: index)
+                if purpose == .goal {
                     steps.append(.verifyGoal(
                         snapshotID: snapshotID, index: number.intValue,
                         role: role, label: label, target: target))
@@ -694,8 +771,7 @@ extension ActionPlan {
                 if verb == "search_text" {
                     steps.append(.searchText(cleaned))
                 } else {
-                    if state.requireUITargetVerification,
-                       !isDraft, !uiTargetVerified {
+                    if needsTargetProof, !uiTargetVerified {
                         throw ActionPlanError.contentBeforeTargetVerification(step: index)
                     }
                     steps.append(verb == "type_text"
@@ -761,8 +837,7 @@ extension ActionPlan {
                         // press_element, never a Return that might deliver.
                         throw ActionPlanError.sendInDraft(step: index)
                     }
-                    if state.requireUITargetVerification,
-                       !isDraft, !uiTargetVerified {
+                    if needsTargetProof, !uiTargetVerified {
                         throw ActionPlanError.contentBeforeTargetVerification(
                             step: index)
                     }
@@ -867,6 +942,29 @@ extension ActionPlan {
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
 
+            case "present_ui":
+                guard rawSteps.count == 1, index == 0,
+                      state.requireUITargetVerification,
+                      isDraft,
+                      let snapshot = state.structuredUISnapshot,
+                      ActionPlan.isRecipientContent(
+                        state.spokenCommand, bundleID: snapshot.bundleID),
+                      snapshot.source == .cua,
+                      let windowNumber = step["window_id"] as? NSNumber,
+                      CFGetTypeID(windowNumber) != CFBooleanGetTypeID(),
+                      !CFNumberIsFloatType(windowNumber),
+                      windowNumber.intValue > 0,
+                      let bundleID = step["bundle_id"] as? String,
+                      snapshot.id == step["snapshot"] as? String,
+                      snapshot.windowID == windowNumber.intValue,
+                      snapshot.bundleID.lowercased() == bundleID.lowercased()
+                else { throw ActionPlanError.invalidUIPresentation(step: index) }
+                steps.append(.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: windowNumber.intValue))
+                focusEstablished = false
+                uiTargetVerified = false
+
             default:
                 throw ActionPlanError.unknownVerb(verb)
             }
@@ -885,7 +983,7 @@ extension ActionPlan {
                           steps: steps,
                           unsupported: nil,
                           requiresUITargetVerification:
-                              state.requireUITargetVerification)
+                              needsTargetProof)
     }
 
     /// The carried state as it stands after only the first `executedCount`
@@ -947,7 +1045,7 @@ extension ActionPlan {
             case .openURL:
                 next.currentApp = ""
                 if next.pendingText { next.unverifiedText = true }
-            case .pressElement, .pressUI:
+            case .pressElement, .pressUI, .presentUI:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.

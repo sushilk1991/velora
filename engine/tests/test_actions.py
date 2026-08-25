@@ -887,6 +887,38 @@ async def test_action_start_returns_the_first_turn(engine):
     assert "open_app" in prompt
 
 
+async def test_cua_draft_presents_once(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(turn([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "Sunny is available"},
+    ], goal="draft for Hemesh", sends=False, done=True))
+    raw = _structured_send_ui("Hemesh")
+    raw.update({
+        "complete": False, "source": "cua", "window_id": 44,
+        "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
+    })
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="Draft a message for Hemesh on Slack",
+        context={
+            "frontmost_app": "Slack",
+            "frontmost_bundle": "com.tinyspeck.slackmacgap",
+            "ui_snapshot": raw,
+        },
+    )
+
+    evt = await client.recv_event("action_turn")
+    assert evt["done"] is False
+    assert evt["steps"] == [{
+        "do": "present_ui", "snapshot": "snap-1",
+        "bundle_id": "com.tinyspeck.slackmacgap", "window_id": 44,
+    }]
+    assert len(eng.cleanup.calls) == 1
+
+
 async def test_action_controller_waits_for_replacement_without_rejection(engine):
     eng, sock = engine
     eng.cleanup = RecoveringPlanner(
@@ -1029,11 +1061,9 @@ async def test_action_start_chains_controller_and_target_verifier(engine):
         "the verifier gets action shape, not message content")
 
 
-async def test_incomplete_ui_skips_target_verifier_and_inline_repair(engine):
-    """A verifier cannot accept an incomplete tree. Do not spend two more
-    model calls asking it, then repairing the controller against the same tree.
-    A fresh observation remains available to recover from transient AX lag.
-    """
+async def test_partial_ui_target_refusal_skips_inline_repair(engine):
+    """Partial native UI may prove one focused target, but a verifier refusal
+    still defers all content and does not repair against the same tree."""
     controller = turn([
         {"do": "wait_frontmost", "app": "Slack"},
         {"do": "type_text", "text": "hi"},
@@ -1045,7 +1075,10 @@ async def test_incomplete_ui_skips_target_verifier_and_inline_repair(engine):
     incomplete["window_title"] = "Hemesh Singh (DM) - Masonry - Slack"
     incomplete["complete"] = False
     eng, sock = engine
-    eng.cleanup = FakePlanner(controller)
+    eng.cleanup = FakePlanner(
+        controller,
+        '{"safe":false,"reason":"focused composer absent"}',
+    )
     client = await connect(sock)
     await client.recv_event("ready")
     await send_start(
@@ -1060,8 +1093,8 @@ async def test_incomplete_ui_skips_target_verifier_and_inline_repair(engine):
     event = await client.recv_event("action_failed")
 
     assert event["code"] == "plan_invalid"
-    assert "structured UI is incomplete" in event["error"]
-    assert len(eng.cleanup.calls) == 1
+    assert "focused composer absent" in event["error"]
+    assert len(eng.cleanup.calls) == 2
 
 
 async def test_partial_ui_reviewer_can_approve_exact_navigation(engine):
@@ -2585,8 +2618,9 @@ def test_session_prompt_describes_the_loop_not_recipes():
     assert "press_element" in prompt
     assert "done" in prompt
     assert "Follow them step for step" not in prompt
-    for verb in actions.VERBS:
+    for verb in set(actions.VERBS) - {"present_ui"}:
         assert verb in prompt
+    assert "present_ui" not in prompt
 
 
 # ============ audited bypasses (2026-08-04) — regression tests ============
@@ -3265,6 +3299,7 @@ def test_forged_attestation_cannot_upgrade_inactive_sidebar_match():
         current_app="WhatsApp", ui_snapshot_id="snap-1",
         ui_elements={item["index"]: item for item in snapshot["elements"]},
         ui_snapshot_complete=True, allowed_ui_attestation="token-1",
+        spoken_command="send hi to Shivangi Gupta",
         require_ui_target_verification=True)
     with pytest.raises(actions.PlanError, match="repeated collection member"):
         actions.validate_plan({
@@ -3309,6 +3344,190 @@ def test_production_session_refuses_message_content_before_target_attestation():
                 {"do": "type_text", "text": "hi"},
             ],
         }))
+
+
+def test_draft_recipient_gate():
+    snapshot = actions.normalize_ui_snapshot(_structured_send_ui("Hemesh"))
+    base = dict(
+        current_app="Slack", ui_snapshot_id="snap-1",
+        ui_elements={item["index"]: item for item in snapshot["elements"]},
+        ui_snapshot_complete=True, ui_snapshot_source="native",
+        ui_snapshot_bundle_id="com.tinyspeck.slackmacgap",
+        ui_snapshot_window_title="Hemesh - Slack",
+        allowed_ui_attestation="token-1",
+        require_ui_target_verification=True,
+    )
+    draft = actions.SessionState(
+        **base,
+        spoken_command=("Draft a message for Hemesh on Slack. Mention that "
+                        "the new build of Sunny is available."),
+    )
+    with pytest.raises(actions.PlanError, match="independent target verifier"):
+        actions.validate_plan({
+            "goal": "draft for Hemesh", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Slack"},
+                {"do": "type_text", "text": "Sunny is available"},
+            ],
+        }, state=draft)
+
+    local_base = dict(base, ui_snapshot_bundle_id="com.apple.Notes")
+    local_commands = [
+        "Write a local note in Notes about Sunny",
+        "Write a Slack integration note in Notes",
+        "Draft an email outline in Notes",
+        "Write a reply in Notes",
+    ]
+    for command in local_commands:
+        local = actions.SessionState(**local_base, spoken_command=command)
+        accepted = actions.validate_plan({
+            "goal": "write a local note", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Notes"},
+                {"do": "type_text", "text": "Sunny is available"},
+            ],
+        }, state=local)
+        assert accepted["steps"][-1]["do"] == "type_text"
+
+
+def test_recipient_mirror():
+    cases = [
+        ("Write this text in Notes", "com.apple.Notes", False),
+        ("Write a message in Notes", "com.apple.Notes", False),
+        ("Draft a message for Hemesh on Slack. Mention that the new build "
+         "of Sunny is available.", "com.tinyspeck.slackmacgap", True),
+        ("Draft a message for Hemesh on Slack", "com.apple.Notes", False),
+        ("Draft an email outline in Notes", "com.apple.Notes", False),
+        ("Write a reply in Notes", "com.apple.Notes", False),
+        ("Draft a message for Hemesh on Slack", "com.example.unknown", False),
+        ("Draft_a_message_for_Hemesh_on_Slack",
+         "com.tinyspeck.slackmacgap", True),
+        ("Draft an email to Hemesh", "com.apple.mail", True),
+    ]
+    for transcript, bundle_id, expected in cases:
+        assert actions.is_recipient_content(transcript, bundle_id) is expected
+
+    swift = (Path(__file__).resolve().parents[2]
+             / "Sources/Velora/Actions/ActionPlan.swift").read_text()
+    marker = "// recipient_intent: "
+    line = next(item for item in swift.splitlines() if marker in item)
+    content, compose_context = line.split(marker, 1)[1].split(" | ")
+    compose, context = compose_context.split(" + ")
+    assert set(content.split()) == actions._COMMUNICATION_CONTENT_WORDS
+    assert set(compose.split()) == actions._COMPOSE_WORDS
+    assert set(context.split()) == actions._COMMUNICATION_CONTEXT_WORDS
+
+
+def test_partial_target_proof():
+    raw = _structured_send_ui("Hemesh")
+    raw["complete"] = False
+    snapshot = actions.normalize_ui_snapshot(raw)
+    verdict = json.dumps({
+        "safe": True, "target": "Hemesh",
+        "evidence": {"index": 30, "role": "AXTextArea",
+                     "label": "Message to Hemesh"},
+    })
+    evidence = actions.parse_target_verdict(
+        verdict, snapshot, "Draft a message for Hemesh on Slack")
+    assert evidence["index"] == 30
+
+    cua = dict(raw, source="cua", window_id=44)
+    with pytest.raises(actions.PlanError, match="native"):
+        actions.parse_target_verdict(
+            verdict, actions.normalize_ui_snapshot(cua),
+            "Draft a message for Hemesh on Slack")
+    wrong = dict(raw)
+    wrong["elements"] = [dict(item) for item in raw["elements"]]
+    wrong["elements"][-1]["focused"] = False
+    with pytest.raises(actions.PlanError, match="focused editable"):
+        actions.parse_target_verdict(
+            verdict, actions.normalize_ui_snapshot(wrong),
+            "Draft a message for Hemesh on Slack")
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        actions.parse_goal_verdict(verdict, snapshot, "open Hemesh on Slack")
+
+
+def test_present_ui_attestation():
+    raw = _structured_send_ui("Hemesh")
+    raw.update({
+        "complete": False, "source": "cua", "window_id": 44,
+        "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
+    })
+    snapshot = actions.normalize_ui_snapshot(raw)
+    context = actions.ActionContext.from_dict({"ui_snapshot": raw})
+    session = actions.ActionSession(
+        "Draft a message for Hemesh on Slack", context,
+        require_target_verifier=True)
+    parsed = actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "type_text", "text": "Sunny is available"},
+    ], goal="draft for Hemesh", sends=False, done=True))
+
+    assert actions.turn_requires_ui_presentation(parsed, session)
+
+    for bundle_id in ("com.apple.Notes", "com.example.unknown"):
+        local_raw = dict(raw, bundle_id=bundle_id)
+        local_session = actions.ActionSession(
+            "Draft a message for Hemesh on Slack",
+            actions.ActionContext.from_dict({"ui_snapshot": local_raw}),
+            require_target_verifier=True)
+        assert not actions.turn_requires_ui_presentation(parsed, local_session)
+
+    attached = actions.attach_ui_presentation(parsed, snapshot, "token-1")
+    assert attached["done"] is False
+    assert [step["do"] for step in attached["steps"]] == ["present_ui"]
+    session.state.allowed_ui_attestation = "token-1"
+    accepted = session.accept_reply(json.dumps(attached))
+    assert session.sends is False
+    assert accepted["steps"] == [{
+        "do": "present_ui", "snapshot": "snap-1",
+        "bundle_id": "com.tinyspeck.slackmacgap", "window_id": 44,
+    }]
+
+    forged = actions.ActionSession(
+        "Draft a message for Hemesh on Slack", context,
+        require_target_verifier=True)
+    with pytest.raises(actions.PlanError, match="attestation"):
+        forged.accept_reply(json.dumps(attached))
+
+
+def test_present_ui_draft_gate():
+    command = "Draft a message for Hemesh on Slack"
+
+    def state(bundle_id, *, requires_proof=True):
+        return actions.SessionState(
+            ui_snapshot_id="snap-1", ui_snapshot_source="cua",
+            ui_snapshot_bundle_id=bundle_id, ui_snapshot_window_id=44,
+            spoken_command=command, allowed_ui_attestation="token-1",
+            require_ui_target_verification=requires_proof)
+
+    def plan(bundle_id, *, sends=False):
+        return {
+            "goal": "draft for Hemesh", "sends": sends,
+            "steps": [{
+                "do": "present_ui", "snapshot": "snap-1",
+                "bundle_id": bundle_id, "window_id": 44,
+                "attestation": "token-1",
+            }],
+        }
+
+    slack = "com.tinyspeck.slackmacgap"
+    accepted = actions.validate_plan(plan(slack), state=state(slack))
+    assert accepted["sends"] is False
+    assert accepted["steps"][0]["do"] == "present_ui"
+
+    for bundle_id in ("com.apple.Notes", "com.example.unknown"):
+        with pytest.raises(actions.PlanError, match="recipient draft"):
+            actions.validate_plan(plan(bundle_id), state=state(bundle_id))
+
+    with pytest.raises(actions.PlanError, match="recipient draft"):
+        actions.validate_plan(plan(slack), state=state(slack, requires_proof=False))
+    with pytest.raises(actions.PlanError, match="recipient draft"):
+        actions.validate_plan(plan(slack, sends=True), state=state(slack))
+    missing_sends = plan(slack)
+    missing_sends.pop("sends")
+    with pytest.raises(actions.PlanError, match="recipient draft"):
+        actions.validate_plan(missing_sends, state=state(slack))
 
 
 def test_unknown_app_also_refuses_content_before_target_attestation():
@@ -3371,6 +3590,7 @@ def test_verifier_attestation_brackets_content_and_commit():
         current_app="WhatsApp", ui_snapshot_id="snap-1",
         ui_elements={item["index"]: item for item in snapshot["elements"]},
         ui_snapshot_complete=True, allowed_ui_attestation="token-1",
+        spoken_command="send hi to Shivangi Gupta",
         require_ui_target_verification=True)
     out = actions.validate_plan(attached, state=state)
     assert out["steps"][1]["do"] == "verify_ui"

@@ -18,6 +18,18 @@ enum ActionRuntimePolicy {
 
 }
 
+enum ActionVerificationPurpose: Equatable {
+    case target
+    case goal
+}
+
+struct ActionWindowIdentity: Equatable {
+    let name: String
+    let bundleID: String
+    let pid: Int
+    let windowID: Int
+}
+
 /// Everything the executor needs from the machine. Split out from the executor
 /// so the step logic — which is where a bug sends a message to the wrong person
 /// — can be exercised headlessly against a scripted host.
@@ -77,8 +89,13 @@ protocol ActionHost: AnyObject {
                       role: String, expecting bundleID: String?) -> Bool
     /// Re-read exact model-selected evidence without performing an action.
     func verifyElement(index: Int, snapshotID: String, label: String,
-                       role: String, expecting bundleID: String?,
-                       requiresFocus: Bool) -> Bool
+                       role: String, target: String,
+                       expecting bundleID: String?,
+                       purpose: ActionVerificationPurpose) -> Bool
+    /// Exact ordinary window currently in front, including WindowServer id.
+    func foregroundWindow() -> ActionWindowIdentity?
+    /// Present an engine-attested routed window and leave it in front.
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool
     func typeText(_ text: String, expecting bundleID: String?) -> Bool
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
@@ -114,8 +131,13 @@ extension ActionHost {
         pressElement(label: label, expecting: bundleID)
     }
     func verifyElement(index: Int, snapshotID: String, label: String,
-                       role: String, expecting bundleID: String?,
-                       requiresFocus: Bool) -> Bool {
+                       role: String, target: String,
+                       expecting bundleID: String?,
+                       purpose: ActionVerificationPurpose) -> Bool {
+        false
+    }
+    func foregroundWindow() -> ActionWindowIdentity? { nil }
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
         false
     }
 }
@@ -149,6 +171,7 @@ enum ActionEffectKind: Equatable {
     case pasteText
     case key
     case pressElement
+    case presentUI
 }
 
 struct ActionRunResult: Equatable {
@@ -445,8 +468,8 @@ final class ActionExecutor {
                 }
                 guard host.verifyElement(
                     index: elementIndex, snapshotID: snapshotID,
-                    label: label, role: role, expecting: expectedBundleID,
-                    requiresFocus: true),
+                    label: label, role: role, target: target,
+                    expecting: expectedBundleID, purpose: .target),
                       let after = host.frontmostApp(),
                       after.bundleID == before.bundleID, after.name == before.name
                 else {
@@ -470,8 +493,8 @@ final class ActionExecutor {
                 }
                 guard host.verifyElement(
                     index: elementIndex, snapshotID: snapshotID,
-                    label: label, role: role, expecting: expectedBundleID,
-                    requiresFocus: false),
+                    label: label, role: role, target: target,
+                    expecting: expectedBundleID, purpose: .goal),
                       let after = host.frontmostApp(),
                       after.bundleID == before.bundleID, after.name == before.name
                 else {
@@ -488,7 +511,7 @@ final class ActionExecutor {
             case .typeText(let text), .pasteText(let text), .searchText(let text):
                 let isSearch: Bool
                 if case .searchText = step { isSearch = true } else { isSearch = false }
-                if !isSearch, plan.sends, plan.requiresUITargetVerification,
+                if !isSearch, plan.requiresUITargetVerification,
                    !verifiedUITarget {
                     note("type_text: target verifier has not confirmed the recipient")
                     return failed(
@@ -553,6 +576,21 @@ final class ActionExecutor {
                 note("\(verb) \(text.count) chars",
                      observed: "\(verb) \(text.count) chars: "
                          + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
+
+            case .presentUI(let snapshotID, let bundleID, let windowID):
+                guard host.presentUI(
+                    snapshotID: snapshotID, bundleID: bundleID,
+                    windowID: windowID) else {
+                    note("present_ui: exact handoff refused")
+                    return failed(
+                        index, "the target window could not be presented safely",
+                        recoverable: false)
+                }
+                expectedAppName = nil
+                expectedBundleID = nil
+                verifiedUITarget = false
+                evidence.append(.unverifiedEffect(.presentUI))
+                note("present_ui \(bundleID) [\(windowID)]")
 
             case .key(let name, let mods, let repeatCount):
                 guard focusStillHeld() else {
@@ -667,6 +705,7 @@ final class ActionExecutor {
         case .verifyContext: return "Checking screen"
         case .verifyUI: return "Confirming recipient"
         case .verifyGoal: return "Confirming completion"
+        case .presentUI: return "Presenting target"
         case .typeText, .pasteText: return "Typing message"
         case .searchText: return "Searching"
         case .key(let name, _, _):

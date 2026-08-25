@@ -178,7 +178,7 @@ enum ScreenContext {
         depthBudget: Int = actionTreeDepthBudget,
         deadline: TimeInterval = 1.2
     ) -> ScreenActionUISnapshot? {
-        guard let app, app.processIdentifier > 0,
+        guard nodeBudget > 0, let app, app.processIdentifier > 0,
               Permissions.accessibilityGranted else { return nil }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.3)
@@ -206,44 +206,14 @@ enum ScreenContext {
             let index = nextIndex
             nextIndex += 1
             AXUIElementSetMessagingTimeout(item.element, 0.2)
-
-            let role = axString(item.element, kAXRoleAttribute) ?? "AXUnknown"
-            let authored = [
-                axString(item.element, kAXTitleAttribute),
-                axString(item.element, kAXDescriptionAttribute),
-                axString(item.element, kAXPlaceholderValueAttribute),
-            ]
-                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                .filter { !$0.isEmpty }
-            var rawActions = axActionNames(item.element)
-            if isEditableActionRole(role) {
-                var settable = DarwinBoolean(false)
-                if AXUIElementIsAttributeSettable(
-                    item.element, kAXFocusedAttribute as CFString,
-                    &settable) == .success, settable.boolValue {
-                    rawActions.append("AXFocus")
-                }
-            }
-            let actions = modelActionNames(from: rawActions)
-            let label = actionUILabel(
-                role: role, authored: authored, actions: actions)
-            // AXSelected is useful only on labelled destinations. Limiting
-            // this extra read keeps the generic tree within the same latency
-            // budget even in large Electron windows.
-            let selected = label != nil
-                && axBool(item.element, kAXSelectedAttribute) == true
             let focused = focusedElement.map {
                 CFEqual($0, item.element)
             } ?? false
-            records.append(ActionUIElement(
+            records.append(actionUIRecord(
+                item.element,
                 index: index,
                 parentIndex: item.parent,
                 depth: item.depth,
-                role: role,
-                label: label,
-                frame: axFrame(item.element),
-                actions: actions,
-                selected: selected,
                 focused: focused))
             references[index] = item.element
 
@@ -256,6 +226,20 @@ enum ScreenContext {
                 queue.append((child, index, item.depth + 1))
             }
             if children.count > 60 { truncated = true }
+        }
+
+        if let focusedElement,
+           !references.values.contains(where: { CFEqual($0, focusedElement) }) {
+            AXUIElementSetMessagingTimeout(focusedElement, 0.2)
+            let focusedRecord = actionUIRecord(
+                focusedElement, index: nextIndex, parentIndex: nil,
+                depth: 0, focused: true)
+            if retainFocusedRecord(
+                focusedRecord, reference: focusedElement,
+                nodeBudget: nodeBudget, records: &records,
+                references: &references) {
+                truncated = true
+            }
         }
 
         let title = axString(window, kAXTitleAttribute) ?? ""
@@ -271,6 +255,62 @@ enum ScreenContext {
             applicationElement: appElement,
             focusedWindow: window,
             elementsByIndex: references)
+    }
+
+    private static func actionUIRecord(
+        _ element: AXUIElement,
+        index: Int,
+        parentIndex: Int?,
+        depth: Int,
+        focused: Bool
+    ) -> ActionUIElement {
+        let role = axString(element, kAXRoleAttribute) ?? "AXUnknown"
+        let authored = [
+            axString(element, kAXTitleAttribute),
+            axString(element, kAXDescriptionAttribute),
+            axString(element, kAXPlaceholderValueAttribute),
+        ]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var rawActions = axActionNames(element)
+        if isEditableActionRole(role) {
+            var settable = DarwinBoolean(false)
+            if AXUIElementIsAttributeSettable(
+                element, kAXFocusedAttribute as CFString,
+                &settable) == .success, settable.boolValue {
+                rawActions.append("AXFocus")
+            }
+        }
+        let actions = modelActionNames(from: rawActions)
+        let label = actionUILabel(
+            role: role, authored: authored, actions: actions)
+        let selected = label != nil
+            && axBool(element, kAXSelectedAttribute) == true
+        return ActionUIElement(
+            index: index, parentIndex: parentIndex, depth: depth,
+            role: role, label: label, frame: axFrame(element),
+            actions: actions, selected: selected, focused: focused)
+    }
+
+    /// Keeps affirmative focus evidence inside the model cap. A late focused
+    /// element replaces the last BFS record; callers mark that tree partial.
+    static func retainFocusedRecord(
+        _ record: ActionUIElement,
+        reference: AXUIElement,
+        nodeBudget: Int,
+        records: inout [ActionUIElement],
+        references: inout [Int: AXUIElement]
+    ) -> Bool {
+        if references.values.contains(where: { CFEqual($0, reference) }) {
+            return false
+        }
+        guard nodeBudget > 0 else { return false }
+        if records.count >= nodeBudget, let displaced = records.popLast() {
+            references.removeValue(forKey: displaced.index)
+        }
+        records.append(record)
+        references[record.index] = reference
+        return true
     }
 
     /// Project authored AX labels into the model-facing interaction tree.
@@ -376,23 +416,31 @@ enum ScreenContext {
         index: Int,
         label: String,
         role: String,
+        target: String,
         in snapshot: ScreenActionUISnapshot,
-        requiresFocus: Bool = false
+        purpose: ActionVerificationPurpose
     ) -> Bool {
-        guard snapshot.observation.complete,
-              focusedWindowIsCurrent(snapshot),
+        guard focusedWindowIsCurrent(snapshot),
               snapshot.observation.elements.contains(where: {
             $0.index == index
         }),
-              ActionUIEvidencePolicy.mayVerify(
-                index: index, in: snapshot.observation.elements),
               let element = snapshot.elementsByIndex[index],
               axString(element, kAXRoleAttribute) == role else { return false }
-        if requiresFocus {
-            guard isEditableActionRole(role),
+        switch purpose {
+        case .target:
+            guard snapshot.observation.source == .native,
+                  !snapshot.observation.bundleID.isEmpty,
+                  !snapshot.observation.windowTitle.isEmpty
+                    || snapshot.observation.windowID != nil,
+                  isEditableActionRole(role),
                   let focused = axElement(
                     snapshot.applicationElement, kAXFocusedUIElementAttribute),
                   CFEqual(focused, element) else { return false }
+        case .goal:
+            guard snapshot.observation.complete,
+                  ActionUIEvidencePolicy.mayVerify(
+                    index: index, in: snapshot.observation.elements)
+            else { return false }
         }
         let authored = [
             axString(element, kAXTitleAttribute),
@@ -402,8 +450,12 @@ enum ScreenContext {
         let currentLabel = actionUILabel(
             role: role, authored: authored,
             actions: modelActionNames(from: axActionNames(element)))
-        return AppMatcher.normalize(currentLabel ?? "")
-            == AppMatcher.normalize(label)
+        guard AppMatcher.normalize(currentLabel ?? "")
+                == AppMatcher.normalize(label) else { return false }
+        if purpose == .target {
+            return AppMatcher.bestMatch(for: target, in: [label]) != nil
+        }
+        return true
     }
 
     private static func focusedWindowIsCurrent(
@@ -954,32 +1006,59 @@ enum ScreenContext {
         of app: NSRunningApplication?
     ) -> ScreenKeystrokeStreamTarget? {
         guard let app, let bundleID = app.bundleIdentifier,
-              let focused = focusedElement(of: app),
-              let role = axString(focused, kAXRoleAttribute),
+              let focused = focusedElement(of: app) else { return nil }
+        return keystrokeStreamTarget(
+            bundleID: bundleID, element: focused)
+    }
+
+    /// Captures only the already-verified AX object, never a fresh generic
+    /// focus lookup that could resolve to another field after verification.
+    static func keystrokeStreamTarget(
+        bundleID: String,
+        element: AXUIElement
+    ) -> ScreenKeystrokeStreamTarget? {
+        let app = NSWorkspace.shared.frontmostApplication
+        guard let focused = focusedElement(of: app),
+              keystrokeTargetMatches(
+                bundleID: bundleID, element: element,
+                currentBundleID: app?.bundleIdentifier,
+                currentElement: focused),
+              let role = axString(element, kAXRoleAttribute),
               axParameterizedAttributeIsAvailable(
-                focused, kAXStringForRangeParameterizedAttribute)
+                element, kAXStringForRangeParameterizedAttribute)
         else { return nil }
 
-        let selectedRange = axRange(focused, kAXSelectedTextRangeAttribute)
-        let selectedText = axRawString(focused, kAXSelectedTextAttribute)
+        let selectedRange = axRange(element, kAXSelectedTextRangeAttribute)
+        let selectedText = axRawString(element, kAXSelectedTextAttribute)
         guard let selectedRange, selectedRange.location >= 0 else { return nil }
         guard KeystrokeStreamTargetPolicy.mayCapture(
             role: role,
             editabilityProven:
-                axAttributeIsSettable(focused, kAXValueAttribute)
-                || axBool(focused, kAXIsEditableAttribute) == true
+                axAttributeIsSettable(element, kAXValueAttribute)
+                || axBool(element, kAXIsEditableAttribute) == true
                 || axElement(
-                    focused, kAXEditableAncestorAttribute) != nil
+                    element, kAXEditableAncestorAttribute) != nil
                 || axElement(
-                    focused, kAXHighestEditableAncestorAttribute) != nil,
+                    element, kAXHighestEditableAncestorAttribute) != nil,
             selectedRangeLength: selectedRange.length,
             selectedText: selectedText)
         else { return nil }
         return ScreenKeystrokeStreamTarget(
             bundleID: bundleID,
-            element: focused,
+            element: element,
             location: selectedRange.location,
-            boundary: selectionBoundary(of: focused))
+            boundary: selectionBoundary(of: element))
+    }
+
+    /// Pure identity seam shared by runtime ownership and the selftest.
+    static func keystrokeTargetMatches(
+        bundleID: String,
+        element: AXUIElement,
+        currentBundleID: String?,
+        currentElement: AXUIElement?
+    ) -> Bool {
+        guard currentBundleID == bundleID, let currentElement else { return false }
+        return CFEqual(currentElement, element)
     }
 
     /// Opaque terminal surfaces can accept a final insertion but cannot prove
@@ -1033,17 +1112,19 @@ enum ScreenContext {
         target: ScreenKeystrokeStreamTarget
     ) -> Bool {
         let app = NSWorkspace.shared.frontmostApplication
-        guard app?.bundleIdentifier == target.bundleID,
-              let focused = focusedElement(of: app),
-              CFEqual(focused, target.element),
+        let focused = focusedElement(of: app)
+        guard keystrokeTargetMatches(
+            bundleID: target.bundleID, element: target.element,
+            currentBundleID: app?.bundleIdentifier,
+            currentElement: focused),
               let range = axRange(
-                focused, kAXSelectedTextRangeAttribute),
+                target.element, kAXSelectedTextRangeAttribute),
               range.location == target.location + draft.utf16.count,
               range.length == 0
         else { return false }
         if draft.isEmpty { return true }
         return axStringForRange(
-            focused,
+            target.element,
             CFRange(
                 location: target.location,
                 length: draft.utf16.count)) == draft
