@@ -576,11 +576,17 @@ final class BackgroundRoutingActionHost: ActionHost {
             frontmostBundleID: frontmost?.bundleID) else {
             return system.openApp(named: name)
         }
-        guard activateTarget(resolved) else {
+        switch activateTarget(resolved) {
+        case .routed:
+            veloraLog("Velora: action driving \(resolved.name) in the background")
+            return resolved.name
+        case .foreground(let pid, let windowID):
+            let presented = presentTarget(pid: pid, windowID: windowID)
+            endDaemon()
+            return presented ? resolved.name : nil
+        case .failed:
             return nil
         }
-        veloraLog("Velora: action driving \(resolved.name) in the background")
-        return resolved.name
     }
 
     /// A later `open_app` inside an already-routed action. A target the gate
@@ -612,11 +618,18 @@ final class BackgroundRoutingActionHost: ActionHost {
             unroute()
             return system.openApp(named: name)
         }
-        guard activateTarget(resolved) else {
+        switch activateTarget(resolved) {
+        case .routed:
+            return resolved.name
+        case .foreground(let pid, let windowID):
+            unroute()
+            let presented = presentTarget(pid: pid, windowID: windowID)
+            endDaemon()
+            return presented ? resolved.name : nil
+        case .failed:
             unroute()
             return nil
         }
-        return resolved.name
     }
 
     private struct ResolvedApp {
@@ -628,8 +641,15 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private enum WindowProbe {
         case found(pid: Int, windowID: Int)
+        case offSpace(pid: Int, windowID: Int)
         case missing
         case invalid
+    }
+
+    private enum RouteResult {
+        case routed
+        case foreground(pid: Int, windowID: Int)
+        case failed
     }
 
     private enum FocusTarget {
@@ -660,22 +680,27 @@ final class BackgroundRoutingActionHost: ActionHost {
             pid: pid, running: running)
     }
 
-    private func activateTarget(_ resolved: ResolvedApp) -> Bool {
+    private func activateTarget(_ resolved: ResolvedApp) -> RouteResult {
         guard let frontBefore = system.frontmostApp(),
               frontBefore.bundleID.caseInsensitiveCompare(resolved.bundleID)
-                != .orderedSame else { return false }
+                != .orderedSame else { return .failed }
 
         switch existingWindow(resolved) {
         case .found(let pid, let windowID):
             guard let frontAfter = system.frontmostApp(),
                   frontAfter.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
-                    == .orderedSame else { return false }
+                    == .orderedSame else { return .failed }
             beginRoute(resolved, pid: pid, windowID: windowID)
-            return true
+            return .routed
+        case .offSpace(let pid, let windowID):
+            // Cua refuses every exact background-input route across macOS
+            // Spaces. Foreground once instead of polling an impossible target.
+            return .foreground(pid: pid, windowID: windowID)
         case .missing:
             return launchTarget(resolved, frontBefore: frontBefore)
+                ? .routed : .failed
         case .invalid:
-            return false
+            return .failed
         }
     }
 
@@ -691,15 +716,22 @@ final class BackgroundRoutingActionHost: ActionHost {
         else { return .invalid }
         guard windows.allSatisfy({ validWindow($0, pid: resolved.pid) })
         else { return .invalid }
+        let current = windows.filter {
+            exactFlag($0["on_current_space"]) == true
+        }
+        if let window = CuaWindowPick.choose(current, pid: resolved.pid) {
+            return .found(pid: resolved.pid, windowID: window.id)
+        }
         guard let window = CuaWindowPick.choose(windows, pid: resolved.pid)
         else { return .missing }
-        return .found(pid: resolved.pid, windowID: window.id)
+        return .offSpace(pid: resolved.pid, windowID: window.id)
     }
 
     private func validWindow(_ raw: [String: Any], pid: Int) -> Bool {
         guard exactInt(raw["pid"]) == pid,
               exactInt(raw["window_id"]).map({ $0 > 0 }) == true,
               exactInt(raw["layer"]) == 0,
+              exactFlag(raw["on_current_space"]) != nil,
               let bounds = raw["bounds"] as? [String: Any],
               exactNumber(bounds["width"]).map({ $0 >= 0 }) == true,
               exactNumber(bounds["height"]).map({ $0 >= 0 }) == true
@@ -849,6 +881,21 @@ final class BackgroundRoutingActionHost: ActionHost {
         return restoreFocus(prior)
     }
 
+    private func presentTarget(pid: Int, windowID: Int) -> Bool {
+        guard let front = system.frontmostApp(),
+              let prior = captureFocus(front) else { return false }
+        let result = transport.call(Self.presentationTool, arguments: [
+            "pid": pid, "window_id": windowID,
+        ], timeout: Self.callTimeout)
+        guard case .success(let reply) = result,
+              presentationMatches(reply, pid: pid, windowID: windowID)
+        else {
+            _ = restoreFocus(prior)
+            return false
+        }
+        return true
+    }
+
     // MARK: - Target readiness (drives the executor's wait_frontmost poll)
 
     /// In routed mode the "frontmost app" IS the background target — but only
@@ -913,6 +960,10 @@ final class BackgroundRoutingActionHost: ActionHost {
             "get_window_state", arguments: arguments, timeout: Self.callTimeout)
         else { return nil }
         let snapshot = CuaSnapshot.parse(reply)
+        // An unresolved Cua observation is non-actionable and carries no
+        // lineage while Electron enables AX. Retry that exact shape; degraded
+        // replies that do carry IDs still participate in replay detection.
+        if snapshot.degraded, snapshot.id?.isEmpty != false { return snapshot }
         guard let snapshotID = snapshot.id, !snapshotID.isEmpty else {
             poisonSnapshotLineage()
             return nil

@@ -5167,7 +5167,8 @@ extension Selftest {
         ]]
         transport.responses["list_windows"] = ["windows": [
             ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-             "bounds": ["width": 800.0, "height": 600.0], "title": "My Note"],
+             "bounds": ["width": 800.0, "height": 600.0], "title": "My Note",
+             "on_current_space": true],
         ]]
         transport.responses["get_window_state"] = noteWindowState()
     }
@@ -5243,7 +5244,7 @@ extension Selftest {
         transport.responses["list_windows"] = ["windows": [
             ["pid": 501, "window_id": 10, "layer": 0, "z_index": 11,
              "bounds": ["width": 800.0, "height": 600.0],
-             "title": "Slack"],
+             "title": "Slack", "on_current_space": true],
         ]]
         expect(host.openApp(named: "Slack") == "Slack",
                "an explicit retarget resets poisoned lineage")
@@ -5389,6 +5390,29 @@ extension Selftest {
                && missingReadyTransport.callCount("type_text") == 0
                && missingReadyTransport.callCount("press_key") == 0,
                "missing readiness lineage never reaches the driver again")
+
+        let degradedIDTransport = FakeCuaTransport()
+        scriptNotesWorld(degradedIDTransport)
+        degradedIDTransport.freshWindowSnapshots = false
+        degradedIDTransport.responses["get_window_state"] = [
+            "snapshot_id": "s00000001", "degraded": true, "elements": [],
+        ]
+        let degradedIDHost = makeRoutedHost(
+            system: system, transport: degradedIDTransport)
+        degradedIDHost.beginActionInputSession()
+        _ = degradedIDHost.openApp(named: "Notes")
+        expect(degradedIDHost.frontmostApp() == nil,
+               "degraded readiness remains non-actionable")
+        degradedIDTransport.responses["get_window_state"] = noteWindowState()
+        expect(degradedIDHost.frontmostApp() == nil,
+               "a healthy reply cannot replay a degraded snapshot ID")
+        let degradedIDReads = degradedIDTransport.callCount("get_window_state")
+        degradedIDTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000002")
+        expect(degradedIDHost.frontmostApp() == nil
+               && degradedIDTransport.callCount("get_window_state")
+                   == degradedIDReads,
+               "degraded snapshot replay poisons later routed evidence")
     }
 
     private static func testBackgroundRoutingHost() {
@@ -6096,6 +6120,7 @@ extension Selftest {
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
+            transport.freshWindowSnapshots = false
             let resolved = transport.responses["get_window_state"]!
             transport.responses["get_window_state"] = ["degraded": true,
                                                        "elements": []]
@@ -6121,6 +6146,40 @@ extension Selftest {
             _ = host.frontmostApp()
             expect(transport.callCount("bring_to_front") == 0,
                    "later degradation also leaves foreground ownership alone")
+        }
+
+        // Cua refuses every background route for a window on another macOS
+        // Space. Do not enter a readiness loop that can never resolve: use
+        // the foreground host once and release the per-action daemon.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByName["Notes"] = ("Notes", "com.apple.Notes")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["list_windows"] = ["windows": [
+                ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+                 "bounds": ["width": 800.0, "height": 600.0],
+                 "title": "My Note", "on_current_space": false],
+            ]]
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            transport.onCall = { tool in
+                if tool == "bring_to_front" {
+                    system.frontmost = ("Notes", "com.apple.Notes")
+                }
+            }
+            var daemonStops = 0
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                endDaemon: { daemonStops += 1 })
+            host.beginActionInputSession()
+            expect(host.openApp(named: "Notes") == "Notes",
+                   "an off-Space target falls back to foreground execution")
+            expect(!host.isDrivingInBackground
+                   && system.frontmost?.bundleID == "com.apple.Notes",
+                   "off-Space fallback does not claim background readiness")
+            expect(daemonStops == 1,
+                   "off-Space fallback releases its private Cua child")
         }
 
         // A target whose window stops resolving reads as lost, not as fine —
