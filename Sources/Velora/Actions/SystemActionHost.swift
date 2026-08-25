@@ -293,12 +293,13 @@ final class SystemActionHost: ActionHost {
                       role: String, expecting bundleID: String?) -> Bool {
         guard Permissions.accessibilityGranted,
               let snapshot = actionUISnapshot,
+              snapshot.observation.source == .native,
               snapshot.observation.id == snapshotID,
-              snapshot.observation.complete,
               let record = snapshot.observation.elements.first(where: {
                   $0.index == index
               }),
               record.role == role,
+              !record.actions.contains(ActionUICapability.cuaClick),
               AppMatcher.normalize(record.label ?? "")
                 == AppMatcher.normalize(label),
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
@@ -319,6 +320,7 @@ final class SystemActionHost: ActionHost {
                        requiresFocus: Bool) -> Bool {
         guard Permissions.accessibilityGranted,
               let snapshot = actionUISnapshot,
+              snapshot.observation.source == .native,
               snapshot.observation.id == snapshotID,
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               app.bundleIdentifier == snapshot.observation.bundleID,

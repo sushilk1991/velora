@@ -1,6 +1,17 @@
 import ApplicationServices
 import Foundation
 
+enum ActionUICapability {
+    static let axFocus = "AXFocus"
+    static let axPress = kAXPressAction as String
+    static let cuaClick = "CuaClick"
+}
+
+enum ActionUISnapshotSource: String {
+    case native
+    case cua
+}
+
 /// Framework-neutral UI evidence passed across the Swift/engine boundary.
 /// The model reasons over these records; only the Swift host retains the
 /// corresponding AXUIElement references and therefore the authority to act.
@@ -12,11 +23,13 @@ struct ActionUIElement: Equatable {
     let label: String?
     let frame: CGRect?
     let actions: [String]
+    let enabled: Bool
     /// Generic active-context evidence. A matching label without either flag
     /// can be a sidebar row, search result, or other available destination;
     /// it does not prove that destination is currently open.
     let selected: Bool
     let focused: Bool
+    let inWebContent: Bool
 
     init(
         index: Int,
@@ -26,8 +39,10 @@ struct ActionUIElement: Equatable {
         label: String?,
         frame: CGRect?,
         actions: [String],
+        enabled: Bool = true,
         selected: Bool = false,
-        focused: Bool = false
+        focused: Bool = false,
+        inWebContent: Bool = false
     ) {
         self.index = index
         self.parentIndex = parentIndex
@@ -36,8 +51,10 @@ struct ActionUIElement: Equatable {
         self.label = label
         self.frame = frame
         self.actions = actions
+        self.enabled = enabled
         self.selected = selected
         self.focused = focused
+        self.inWebContent = inWebContent
     }
 
     var payload: [String: Any] {
@@ -59,10 +76,12 @@ struct ActionUIElement: Equatable {
             ]
         }
         if !actions.isEmpty { out["actions"] = actions }
+        if !enabled { out["enabled"] = false }
         // Omit false flags from the prompt payload. Their absence means the
         // element is not active and avoids two low-value tokens per node.
         if selected { out["selected"] = true }
         if focused { out["focused"] = true }
+        if inWebContent { out["in_web_content"] = true }
         return out
     }
 }
@@ -135,21 +154,40 @@ enum ActionUIEvidencePolicy {
 
 struct ActionUISnapshot: Equatable {
     let id: String
+    let source: ActionUISnapshotSource
     let appName: String
     let bundleID: String
     let windowTitle: String
+    let windowID: Int?
     let complete: Bool
     let elements: [ActionUIElement]
 
+    init(id: String, source: ActionUISnapshotSource = .native,
+         appName: String, bundleID: String,
+         windowTitle: String, windowID: Int? = nil, complete: Bool,
+         elements: [ActionUIElement]) {
+        self.id = id
+        self.source = source
+        self.appName = appName
+        self.bundleID = bundleID
+        self.windowTitle = windowTitle
+        self.windowID = windowID
+        self.complete = complete
+        self.elements = elements
+    }
+
     var payload: [String: Any] {
-        [
+        var out: [String: Any] = [
             "id": id,
+            "source": source.rawValue,
             "app_name": appName,
             "bundle_id": bundleID,
             "window_title": windowTitle,
             "complete": complete,
             "elements": elements.map(\.payload),
         ]
+        if let windowID { out["window_id"] = windowID }
+        return out
     }
 }
 
@@ -158,5 +196,6 @@ struct ActionUISnapshot: Equatable {
 struct ScreenActionUISnapshot {
     let observation: ActionUISnapshot
     let applicationElement: AXUIElement
+    let focusedWindow: AXUIElement
     let elementsByIndex: [Int: AXUIElement]
 }

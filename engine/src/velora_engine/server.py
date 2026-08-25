@@ -2889,10 +2889,6 @@ class Engine:
                     parsed = actions.parse_turn(reply_text)
                     review_refusal_reason = ""
                     if actions.turn_requires_ui_action_review(parsed, session):
-                        if not session.current_ui_snapshot.get("complete"):
-                            authoritative_ui_refusal = True
-                            raise actions.PlanError(
-                                "UI action reviewer: structured UI is incomplete")
                         review_prompt = actions.build_ui_action_review_prompt(
                             session.current_ui_snapshot)
                         review_message = actions.ui_action_review_message(

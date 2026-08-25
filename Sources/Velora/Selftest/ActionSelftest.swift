@@ -1258,18 +1258,71 @@ extension Selftest {
                "structured UI cannot degrade back to a fuzzy label rescan")
 
         var incompleteState = ActionPlan.BatchState()
+        let partialNative = ActionUISnapshot(
+            id: snapshot.id, appName: snapshot.appName,
+            bundleID: snapshot.bundleID, windowTitle: snapshot.windowTitle,
+            complete: false, elements: snapshot.elements)
         incompleteState.structuredUIAvailable = true
         incompleteState.structuredUIComplete = false
+        incompleteState.spokenCommand = "open Shivangi Gupta chat"
+        incompleteState.structuredUISnapshot = partialNative
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_ui","snapshot":"snapshot-1","index":14,
+           "role":"AXButton","label":"Shivangi Gupta"}]}
+        """, state: &incompleteState) != nil,
+               "a partial tree can carry an exact indexed capability")
+
+        let cuaSnapshot = ActionUISnapshot(
+            id: "cua-snapshot", source: .cua, appName: "Notes",
+            bundleID: "com.apple.notes", windowTitle: "My Note", windowID: 9,
+            complete: false, elements: [
+                ActionUIElement(
+                    index: 2, parentIndex: 0, depth: 1, role: "AXButton",
+                    label: "Open Sidebar", frame: nil,
+                    actions: [ActionUICapability.cuaClick]),
+            ])
+        var cuaState = ActionPlan.BatchState()
+        cuaState.structuredUIAvailable = true
+        cuaState.structuredUIComplete = false
+        cuaState.structuredUISnapshot = cuaSnapshot
+        cuaState.spokenCommand = "open Notes sidebar"
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Notes"},
+          {"do":"press_ui","snapshot":"cua-snapshot","index":2,
+           "role":"AXButton","label":"Open Sidebar"}]}
+        """, state: &cuaState) != nil,
+               "Swift accepts CuaClick only from an exact Cua window snapshot")
+
+        var forgedNativeState = cuaState
+        forgedNativeState.structuredUISnapshot = ActionUISnapshot(
+            id: cuaSnapshot.id, appName: cuaSnapshot.appName,
+            bundleID: cuaSnapshot.bundleID, windowTitle: cuaSnapshot.windowTitle,
+            windowID: cuaSnapshot.windowID, complete: false,
+            elements: cuaSnapshot.elements)
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"Notes"},
+          {"do":"press_ui","snapshot":"cua-snapshot","index":2,
+           "role":"AXButton","label":"Open Sidebar"}]}
+        """, state: &forgedNativeState)
+               == .invalidStructuredUICapability(step: 1),
+               "Swift refuses CuaClick when a native snapshot claims it")
+        var unrelatedPartialState = ActionPlan.BatchState()
+        unrelatedPartialState.structuredUIAvailable = true
+        unrelatedPartialState.structuredUIComplete = false
+        unrelatedPartialState.spokenCommand = "open Priya chat"
+        unrelatedPartialState.structuredUISnapshot = partialNative
         expect(decodeBatchError("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
           {"do":"press_ui","snapshot":"snapshot-1","index":14,
            "role":"AXButton","label":"Shivangi Gupta"}]}
-        """, state: &incompleteState) == .incompleteStructuredUI(step: 1),
-               "an incomplete structured tree cannot mint an indexed action")
+        """, state: &unrelatedPartialState) == .partialUIUnmentioned(step: 1),
+               "Swift requires only immutable command mention before review")
 
         var chainedPressState = ActionPlan.BatchState()
         chainedPressState.structuredUIAvailable = true
         chainedPressState.structuredUIComplete = true
+        chainedPressState.structuredUISnapshot = snapshot
         expect(decodeBatchError("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
           {"do":"press_ui","snapshot":"snapshot-1","index":14,
@@ -3623,6 +3676,10 @@ final class FakeCuaTransport: CuaTransport {
     var queued: [String: [[String: Any]]] = [:]
     /// Tools that fail at the transport layer.
     var failing: Set<String> = []
+    /// Most host tests model a healthy driver, which mints every snapshot ID
+    /// once. Replay tests disable this and supply exact IDs themselves.
+    var freshWindowSnapshots = false
+    private var snapshotSequence = 0
 
     func call(_ tool: String, arguments: [String: Any],
               timeout: TimeInterval) -> Result<[String: Any], CuaDriverError> {
@@ -3631,13 +3688,28 @@ final class FakeCuaTransport: CuaTransport {
         if var queue = queued[tool], !queue.isEmpty {
             let response = queue.removeFirst()
             queued[tool] = queue
-            return .success(response)
+            return .success(freshened(response, for: tool))
         }
-        if let response = responses[tool] { return .success(response) }
+        if let response = responses[tool] {
+            return .success(freshened(response, for: tool))
+        }
         return .failure(.daemonError("unscripted tool \(tool)"))
     }
 
     func callCount(_ tool: String) -> Int { calls.filter { $0.tool == tool }.count }
+
+    private func freshened(
+        _ response: [String: Any], for tool: String
+    ) -> [String: Any] {
+        guard freshWindowSnapshots, tool == "get_window_state" else {
+            return response
+        }
+        snapshotSequence += 1
+        var result = response
+        result["snapshot_id"] = String(
+            format: "fixture-%08d", snapshotSequence)
+        return result
+    }
 }
 
 extension Selftest {
@@ -3652,6 +3724,7 @@ extension Selftest {
         testCuaSnapshotParsing()
         testCuaPressPick()
         testBackgroundActionGate()
+        testSnapshotLineage()
         testBackgroundRoutingHost()
     }
 
@@ -4001,17 +4074,26 @@ extension Selftest {
                  "element_token": "s00000004:0"],
                 ["element_index": 1, "role": "AXTextArea", "label": "seed line",
                  "value": "seed line", "parent_index": 0,
-                 "element_token": "s00000004:1"],
+                 "element_token": "s00000004:1", "depth": 3,
+                 "frame": ["x": 10.0, "y": 20.0, "w": 300.0, "h": 40.0],
+                 "enabled": true, "selected": true],
                 ["element_index": 2, "role": "AXButton", "enabled": true,
-                 "parent_index": 0, "element_token": "s00000004:2"],
+                 "parent_index": 0, "element_token": "s00000004:2",
+                 "in_web_content": true],
             ],
         ]
         let snapshot = CuaSnapshot.parse(payload)
         expect(snapshot.id == "s00000004" && !snapshot.degraded
                && snapshot.elements.count == 3,
                "snapshots parse id, degraded, and elements")
-        expect(snapshot.hasEditableTextElement,
-               "an AXTextArea counts as somewhere for text to go")
+        expect(snapshot.elements[1].depth == 3
+               && snapshot.elements[1].frame == CGRect(
+                    x: 10, y: 20, width: 300, height: 40)
+               && snapshot.elements[1].selected
+               && snapshot.elements[2].inWebContent,
+               "Cua structured identity and state fields survive parsing")
+        expect(!snapshot.hasEditableTextElement,
+               "a partial tree cannot prove a unique text target")
         let degraded = CuaSnapshot.parse(["degraded": true, "elements": []])
         expect(degraded.degraded && !degraded.hasEditableTextElement,
                "a degraded snapshot offers nothing to type into")
@@ -4032,10 +4114,8 @@ extension Selftest {
         ])
         expect(!truncated.complete && truncated.primaryTextElement == nil,
                "a truncated tree can manufacture uniqueness — refuse it")
-        // Driver 0.21.0 reports `elements_complete: false` even on a walk
-        // that plainly finished (verified live: 67 of 67). Believing the flag
-        // over the counts would refuse EVERY background target, so the counts
-        // decide and the flag only ever adds completeness.
+        // Counts describe only the actionable projection and cannot prove the
+        // driver's whole AX walk was exhaustive.
         let wholeTree = CuaSnapshot.parse([
             "elements_complete": false,
             "element_count": 2, "total_element_count": 2,
@@ -4045,9 +4125,8 @@ extension Selftest {
                  "parent_index": 0, "element_token": "s:1"],
             ],
         ])
-        expect(wholeTree.complete && wholeTree.primaryTextElement?.index == 1,
-               "a walk holding as many elements as the tree has IS complete, "
-                   + "whatever elements_complete claims")
+        expect(!wholeTree.complete && wholeTree.primaryTextElement == nil,
+               "matching Cua counts never manufacture whole-tree completeness")
         // The driver reports several different count fields; only the nodes
         // actually parsed can be vouched for. A reply that CLAIMS a full
         // count but ships fewer elements is truncated.
@@ -4267,15 +4346,15 @@ extension Selftest {
     }
 
     private static func noteWindowState(
-        snapshot: String = "s00000001", value: String = ""
+        snapshot: String = "s00000001", value: String = "",
+        elementsComplete: Bool = true, buttonToken: String? = nil
     ) -> [String: Any] {
-        // Shaped like the REAL driver 0.21.0 reply, flag quirk included:
-        // `elements_complete` is false on a finished walk, and the counts are
-        // what actually say the tree is whole. A fixture that set the flag
-        // true would exercise a path production never sees.
+        // An explicitly exhaustive native-window fixture. Production Cua
+        // 0.21 currently leaves this flag false; matching counts must not
+        // manufacture it.
         [
             "snapshot_id": snapshot, "degraded": false,
-            "elements_complete": false,
+            "elements_complete": elementsComplete,
             "element_count": 3, "total_element_count": 3,
             "elements": [
                 ["element_index": 0, "role": "AXWindow", "label": "My Note",
@@ -4284,13 +4363,15 @@ extension Selftest {
                  "parent_index": 0, "element_token": "\(snapshot):1",
                  "enabled": true],
                 ["element_index": 2, "role": "AXButton", "label": "Open Sidebar",
-                 "parent_index": 0, "element_token": "\(snapshot):2",
+                 "parent_index": 0,
+                 "element_token": buttonToken ?? "\(snapshot):2",
                  "enabled": true],
             ],
         ]
     }
 
     private static func scriptNotesWorld(_ transport: FakeCuaTransport) {
+        transport.freshWindowSnapshots = true
         transport.responses["list_apps"] = ["apps": [
             ["name": "Notes", "bundle_id": "com.apple.Notes",
              "pid": 500, "running": true],
@@ -4302,6 +4383,228 @@ extension Selftest {
              "bounds": ["width": 800.0, "height": 600.0], "title": "My Note"],
         ]]
         transport.responses["get_window_state"] = noteWindowState()
+    }
+
+    private static func testSnapshotLineage() {
+        let system = FakeActionHost()
+        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let transport = FakeCuaTransport()
+        scriptNotesWorld(transport)
+        transport.freshWindowSnapshots = false
+        transport.responses["click"] = ["effect": "confirmed"]
+        transport.responses["type_text"] = ["effect": "confirmed"]
+        transport.responses["press_key"] = ["effect": "confirmed"]
+        let host = makeRoutedHost(system: system, transport: transport)
+        host.beginActionInputSession()
+        _ = host.openApp(named: "Notes")
+        expect(host.frontmostApp()?.name == "Notes",
+               "the lineage fixture reaches routed readiness on s1")
+
+        transport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000002", elementsComplete: false)
+        guard let cached = host.uiSnapshot() else {
+            expect(false, "the lineage fixture observes fresh s2")
+            return
+        }
+        transport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000001", elementsComplete: false)
+        expect(host.uiSnapshot() == nil,
+               "an observation replay permanently poisons routed evidence")
+
+        transport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000003", elementsComplete: false)
+        let readsBeforePoisonedChecks = transport.callCount("get_window_state")
+        let clicksBeforePoisonedChecks = transport.callCount("click")
+        let keysBeforePoisonedChecks = transport.callCount("press_key")
+        let typesBeforePoisonedChecks = transport.callCount("type_text")
+        expect(host.frontmostApp() == nil,
+               "poisoned lineage cannot report routed readiness")
+        expect(host.frontmostWindowTitle() == nil,
+               "poisoned lineage cannot report the routed window")
+        expect(host.focusedElementLabel() == nil
+               && host.focusedElementRole() == nil,
+               "poisoned lineage cannot report a routed element")
+        expect(host.visibleNames().isEmpty && host.uiSnapshot() == nil
+               && !host.hasFocusedTextTarget,
+               "poisoned lineage cannot expose later routed evidence")
+        expect(!host.typeText("blocked", expecting: "com.apple.notes")
+               && !host.pasteText("blocked", expecting: "com.apple.notes")
+               && !host.pressKey(name: "tab", mods: [], keyCode: 48,
+                                 flags: [], expecting: "com.apple.notes")
+               && !host.pressElement(label: "Open Sidebar",
+                                     expecting: "com.apple.notes")
+               && !host.pressElement(
+                    index: 2, snapshotID: cached.id, label: "Open Sidebar",
+                    role: "AXButton", expecting: "com.apple.notes"),
+               "poisoned lineage blocks every routed input path")
+        expect(transport.callCount("get_window_state")
+                   == readsBeforePoisonedChecks
+               && transport.callCount("click") == clicksBeforePoisonedChecks
+               && transport.callCount("press_key") == keysBeforePoisonedChecks
+               && transport.callCount("type_text") == typesBeforePoisonedChecks,
+               "poisoned input and evidence never reach the driver")
+
+        host.beginActionInputSession()
+        _ = host.openApp(named: "Notes")
+        transport.responses["get_window_state"] = noteWindowState()
+        expect(host.frontmostApp()?.name == "Notes",
+               "a new action resets poisoned snapshot lineage")
+
+        transport.responses["get_window_state"] = noteWindowState()
+        expect(host.uiSnapshot() == nil,
+               "a replay after reset poisons the new routed session")
+        transport.responses["list_windows"] = ["windows": [
+            ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+             "bounds": ["width": 800.0, "height": 600.0],
+             "title": "My Note"],
+            ["pid": 501, "window_id": 10, "layer": 0, "z_index": 11,
+             "bounds": ["width": 800.0, "height": 600.0],
+             "title": "Slack"],
+        ]]
+        expect(host.openApp(named: "Slack") == "Slack",
+               "an explicit retarget resets poisoned lineage")
+        transport.responses["get_window_state"] = noteWindowState()
+        expect(host.frontmostApp()?.name == "Slack",
+               "retargeted readiness may reuse an old snapshot ID")
+
+        let overflowTransport = FakeCuaTransport()
+        scriptNotesWorld(overflowTransport)
+        overflowTransport.freshWindowSnapshots = false
+        overflowTransport.responses["press_key"] = ["effect": "confirmed"]
+        let overflowHost = makeRoutedHost(
+            system: system, transport: overflowTransport)
+        overflowHost.beginActionInputSession()
+        _ = overflowHost.openApp(named: "Notes")
+        expect(overflowHost.frontmostApp()?.name == "Notes",
+               "the overflow fixture consumes its first snapshot ID")
+        for sequence in 2...512 {
+            overflowTransport.responses["get_window_state"] = noteWindowState(
+                snapshot: String(format: "s%08d", sequence),
+                elementsComplete: false)
+            expect(overflowHost.uiSnapshot() != nil,
+                   "the first 512 unique snapshot IDs remain bounded and valid")
+        }
+        overflowTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000513", elementsComplete: false)
+        expect(overflowHost.uiSnapshot() == nil,
+               "the 513th unique snapshot ID poisons routed lineage")
+        let readsBeforeOverflowRetry = overflowTransport.callCount(
+            "get_window_state")
+        overflowTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000514", elementsComplete: false)
+        expect(overflowHost.frontmostApp() == nil
+               && overflowHost.uiSnapshot() == nil
+               && !overflowHost.pressKey(
+                    name: "tab", mods: [], keyCode: 48, flags: [],
+                    expecting: "com.apple.notes"),
+               "lineage exhaustion blocks later readiness and input")
+        expect(overflowTransport.callCount("get_window_state")
+                   == readsBeforeOverflowRetry
+               && overflowTransport.callCount("press_key") == 0,
+               "an exhausted session never asks the driver for more evidence")
+
+        let sameIDTransport = FakeCuaTransport()
+        scriptNotesWorld(sameIDTransport)
+        sameIDTransport.freshWindowSnapshots = false
+        sameIDTransport.responses["click"] = ["effect": "confirmed"]
+        let sameIDHost = makeRoutedHost(
+            system: system, transport: sameIDTransport)
+        sameIDHost.beginActionInputSession()
+        _ = sameIDHost.openApp(named: "Notes")
+        _ = sameIDHost.frontmostApp()
+        sameIDTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000002", elementsComplete: false)
+        guard let sameIDSnapshot = sameIDHost.uiSnapshot() else {
+            expect(false, "the same-ID fixture observes s2")
+            return
+        }
+        sameIDTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000002", elementsComplete: false)
+        expect(!sameIDHost.pressElement(
+            index: 2, snapshotID: sameIDSnapshot.id, label: "Open Sidebar",
+            role: "AXButton", expecting: "com.apple.notes"),
+               "the cached snapshot ID cannot be replayed for execution")
+        expect(sameIDTransport.callCount("click") == 0,
+               "same-ID execution replay never reaches click")
+
+        let missingTransport = FakeCuaTransport()
+        scriptNotesWorld(missingTransport)
+        missingTransport.freshWindowSnapshots = false
+        let missingHost = makeRoutedHost(
+            system: system, transport: missingTransport)
+        missingHost.beginActionInputSession()
+        _ = missingHost.openApp(named: "Notes")
+        _ = missingHost.frontmostApp()
+        var missingID = noteWindowState(
+            snapshot: "s00000002", elementsComplete: false)
+        missingID.removeValue(forKey: "snapshot_id")
+        missingTransport.responses["get_window_state"] = missingID
+        expect(missingHost.uiSnapshot() == nil,
+               "exact evidence without a snapshot ID poisons lineage")
+        let missingReads = missingTransport.callCount("get_window_state")
+        missingTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000003", elementsComplete: false)
+        expect(missingHost.uiSnapshot() == nil
+               && missingTransport.callCount("get_window_state") == missingReads,
+               "a later ID cannot recover missing exact evidence")
+
+        let oversizedTransport = FakeCuaTransport()
+        scriptNotesWorld(oversizedTransport)
+        oversizedTransport.freshWindowSnapshots = false
+        let oversizedHost = makeRoutedHost(
+            system: system, transport: oversizedTransport)
+        oversizedHost.beginActionInputSession()
+        _ = oversizedHost.openApp(named: "Notes")
+        _ = oversizedHost.frontmostApp()
+        oversizedTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: String(repeating: "x", count: 129),
+            elementsComplete: false)
+        expect(oversizedHost.uiSnapshot() == nil,
+               "an oversized snapshot ID poisons bounded lineage")
+        let oversizedReads = oversizedTransport.callCount("get_window_state")
+        oversizedTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000002", elementsComplete: false)
+        expect(oversizedHost.uiSnapshot() == nil
+               && oversizedTransport.callCount("get_window_state")
+                   == oversizedReads,
+               "an oversized ID permanently blocks later evidence")
+
+        let missingReadyTransport = FakeCuaTransport()
+        scriptNotesWorld(missingReadyTransport)
+        missingReadyTransport.freshWindowSnapshots = false
+        missingReadyTransport.responses["click"] = ["effect": "confirmed"]
+        missingReadyTransport.responses["type_text"] = ["effect": "confirmed"]
+        missingReadyTransport.responses["press_key"] = ["effect": "confirmed"]
+        var missingReadyID = noteWindowState()
+        missingReadyID.removeValue(forKey: "snapshot_id")
+        missingReadyTransport.responses["get_window_state"] = missingReadyID
+        let missingReadyHost = makeRoutedHost(
+            system: system, transport: missingReadyTransport)
+        missingReadyHost.beginActionInputSession()
+        _ = missingReadyHost.openApp(named: "Notes")
+        expect(missingReadyHost.frontmostApp() == nil,
+               "readiness without a snapshot ID poisons the routed session")
+        let missingReadyReads = missingReadyTransport.callCount(
+            "get_window_state")
+        missingReadyTransport.responses["get_window_state"] = noteWindowState(
+            snapshot: "s00000001", elementsComplete: false)
+        expect(missingReadyHost.frontmostApp() == nil
+               && missingReadyHost.uiSnapshot() == nil,
+               "missing readiness lineage blocks every later routed read")
+        expect(!missingReadyHost.pressKey(
+            name: "tab", mods: [], keyCode: 48, flags: [],
+            expecting: "com.apple.notes")
+               && !missingReadyHost.typeText(
+                    "blocked", expecting: "com.apple.notes")
+               && !missingReadyHost.pressElement(
+                    label: "Open Sidebar", expecting: "com.apple.notes"),
+               "missing readiness lineage blocks every routed input")
+        expect(missingReadyTransport.callCount("get_window_state")
+                   == missingReadyReads
+               && missingReadyTransport.callCount("click") == 0
+               && missingReadyTransport.callCount("type_text") == 0
+               && missingReadyTransport.callCount("press_key") == 0,
+               "missing readiness lineage never reaches the driver again")
     }
 
     private static func testBackgroundRoutingHost() {
@@ -4370,6 +4673,179 @@ extension Selftest {
             expect(!host.pressKey(name: "return", mods: [], keyCode: 36,
                                   flags: [], expecting: "com.apple.notes"),
                    "a click clears stale background draft authority")
+        }
+
+        // A routed Cua tree is partial evidence, but it still carries an exact
+        // current capability. Execution re-reads the same pinned window and
+        // uses the fresh token instead of a fuzzy label search.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["get_window_state"] = noteWindowState(
+                elementsComplete: false, buttonToken: "cached-opaque-token")
+            transport.responses["click"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "a routed target exposes structured Cua evidence")
+                return
+            }
+            expect(!snapshot.complete && snapshot.bundleID == "com.apple.notes",
+                   "Cua evidence never claims an exhaustive whole-window tree")
+            let button = snapshot.elements.first { $0.index == 2 }
+            expect(button?.actions == [ActionUICapability.cuaClick],
+                   "Cua exposes its exact driver click without inventing AXPress")
+
+            transport.freshWindowSnapshots = false
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000002", elementsComplete: false,
+                buttonToken: "fresh-opaque-token")
+            expect(host.pressElement(
+                index: 2, snapshotID: snapshot.id, label: "Open Sidebar",
+                role: "AXButton", expecting: "com.apple.notes"),
+                   "a current partial capability is re-read and pressed")
+            let click = transport.calls.last { $0.tool == "click" }
+            expect((click?.arguments["element_token"] as? String)
+                   == "fresh-opaque-token",
+                   "execution treats the fresh snapshot token as opaque")
+            expect((click?.arguments["pid"] as? Int) == 500
+                   && (click?.arguments["window_id"] as? Int) == 9
+                   && (click?.arguments["element_index"] as? Int) == 2
+                   && (click?.arguments["snapshot_id"] as? String) == "s00000002",
+                   "the driver receives every agreeing stale-token guard")
+            expect(!host.pressElement(
+                index: 2, snapshotID: snapshot.id, label: "Open Sidebar",
+                role: "AXButton", expecting: "com.apple.notes"),
+                   "the consumed snapshot cannot authorize another press")
+
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000003", elementsComplete: false)
+            guard let changedSnapshot = host.uiSnapshot() else {
+                expect(false, "a second exact snapshot is available")
+                return
+            }
+            var changed = noteWindowState(
+                snapshot: "s00000004", elementsComplete: false)
+            var changedElements = changed["elements"] as? [[String: Any]] ?? []
+            changedElements[2]["label"] = "Different Control"
+            changed["elements"] = changedElements
+            transport.responses["get_window_state"] = changed
+            let clicksBeforeChange = transport.callCount("click")
+            expect(!host.pressElement(
+                index: 2, snapshotID: changedSnapshot.id,
+                label: "Open Sidebar", role: "AXButton",
+                expecting: "com.apple.notes"),
+                   "a capability whose fresh authored label changed is refused")
+            expect(transport.callCount("click") == clicksBeforeChange,
+                   "fresh identity mismatch never reaches click")
+
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000005", elementsComplete: false)
+            guard let staleTokenSnapshot = host.uiSnapshot() else {
+                expect(false, "a snapshot is available for token lineage")
+                return
+            }
+            var staleToken = noteWindowState(
+                snapshot: "s00000006", elementsComplete: false)
+            var staleTokenElements = staleToken["elements"] as? [[String: Any]] ?? []
+            staleTokenElements[2]["element_token"] = "s00000005:2"
+            staleToken["elements"] = staleTokenElements
+            transport.responses["get_window_state"] = staleToken
+            let clicksBeforeStaleToken = transport.callCount("click")
+            transport.responses["click"] = ["effect": "refused"]
+            expect(!host.pressElement(
+                index: 2, snapshotID: staleTokenSnapshot.id,
+                label: "Open Sidebar", role: "AXButton",
+                expecting: "com.apple.notes"),
+                   "a token from an older snapshot cannot authorize a press")
+            expect(transport.callCount("click") == clicksBeforeStaleToken + 1,
+                   "opaque token freshness is decided by the driver")
+            let staleClick = transport.calls.last { $0.tool == "click" }
+            expect((staleClick?.arguments["snapshot_id"] as? String)
+                   == "s00000006"
+                   && (staleClick?.arguments["element_token"] as? String)
+                   == "s00000005:2",
+                   "the driver receives the fresh snapshot and opaque token together")
+            transport.responses["click"] = ["effect": "confirmed"]
+
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000007", elementsComplete: false)
+            guard let verifySnapshot = host.uiSnapshot() else {
+                expect(false, "an exact snapshot is available for verification")
+                return
+            }
+            transport.queued["get_window_state"] = (8...12).map {
+                noteWindowState(
+                    snapshot: String(format: "s%08d", $0),
+                    elementsComplete: false)
+            }
+            let routedGoal = ActionPlan(
+                goal: "open the Notes sidebar", sends: false,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .verifyGoal(
+                        snapshotID: verifySnapshot.id, index: 2,
+                        role: "AXButton", label: "Open Sidebar",
+                        target: "Open Sidebar"),
+                ], unsupported: nil)
+            if case .failed(_, _, let recoverable) = ActionExecutor(host: host)
+                .run(routedGoal).outcome {
+                expect(recoverable,
+                       "routed partial Cua cannot satisfy runtime goal proof")
+            } else {
+                expect(false,
+                       "routed partial Cua must never complete verifyGoal")
+            }
+            transport.queued["get_window_state"] = []
+
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000013", elementsComplete: false)
+            guard let noOpSnapshot = host.uiSnapshot() else {
+                expect(false, "a snapshot is available for no-op refusal")
+                return
+            }
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000014", elementsComplete: false)
+            transport.responses["click"] = ["effect": "suspected_noop"]
+            expect(!host.pressElement(
+                index: 2, snapshotID: noOpSnapshot.id,
+                label: "Open Sidebar", role: "AXButton",
+                expecting: "com.apple.notes"),
+                   "a driver-reported no-op is refused")
+        }
+
+        // Freshness is action-wide, not just relative to the cached snapshot:
+        // replaying s1 after a later s2 read must still fail.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.freshWindowSnapshots = false
+            transport.responses["click"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000002", elementsComplete: false)
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the alternating-replay fixture has a snapshot")
+                return
+            }
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000001", elementsComplete: false)
+            let before = transport.callCount("click")
+            expect(!host.pressElement(
+                index: 2, snapshotID: snapshot.id, label: "Open Sidebar",
+                role: "AXButton", expecting: "com.apple.notes"),
+                   "s1 to s2 to s1 replay cannot authorize a press")
+            expect(transport.callCount("click") == before,
+                   "action-wide snapshot replay never reaches click")
         }
 
         // Committing keys are refused outright when the action never typed.

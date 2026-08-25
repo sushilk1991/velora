@@ -116,9 +116,11 @@ final class ActionLoopRunner {
         var context = context
         context.uiSnapshot = host.uiSnapshot()
         var carried = ActionPlan.BatchState()
+        carried.spokenCommand = transcript
         carried.requireUITargetVerification = true
         carried.structuredUIAvailable = context.uiSnapshot != nil
         carried.structuredUIComplete = context.uiSnapshot?.complete == true
+        carried.structuredUISnapshot = context.uiSnapshot
         carried.appNames.formUnion(context.runningApps)
         if !context.frontmostApp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             carried.appNames.insert(context.frontmostApp)
@@ -435,10 +437,12 @@ final class ActionLoopRunner {
         if let snapshot = host.uiSnapshot() {
             state.structuredUIAvailable = true
             state.structuredUIComplete = snapshot.complete
+            state.structuredUISnapshot = snapshot
             observation["ui_snapshot"] = snapshot.payload
         } else {
             state.structuredUIAvailable = false
             state.structuredUIComplete = false
+            state.structuredUISnapshot = nil
         }
         if let failedStep {
             observation["failed_step"] = failedStep

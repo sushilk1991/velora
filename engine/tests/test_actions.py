@@ -1064,6 +1064,66 @@ async def test_incomplete_ui_skips_target_verifier_and_inline_repair(engine):
     assert len(eng.cleanup.calls) == 1
 
 
+async def test_partial_ui_reviewer_can_approve_exact_navigation(engine):
+    partial = _structured_ui(active="Shivangi Gupta")
+    partial["complete"] = False
+    controller = turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+         "role": "AXButton", "label": "Shivangi Gupta"},
+    ], goal="open Shivangi Gupta on WhatsApp", sends=False)
+    eng, sock = engine
+    eng.cleanup = FakePlanner(controller, '{"safe":true}')
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="open Shivangi Gupta on WhatsApp",
+        context={"frontmost_app": "WhatsApp",
+                 "frontmost_bundle": "net.whatsapp.WhatsApp",
+                 "running_apps": ["WhatsApp"],
+                 "ui_snapshot": partial},
+    )
+
+    event = await client.recv_event("action_turn")
+
+    assert event["steps"][-1]["do"] == "press_ui"
+    assert len(eng.cleanup.calls) == 2
+
+
+async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(engine):
+    partial = _structured_ui(active="Shivangi Gupta")
+    partial["complete"] = False
+    controller = turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+         "role": "AXButton", "label": "Shivangi Gupta"},
+    ], goal="open Shivangi Gupta on WhatsApp", sends=False)
+    refusal = json.dumps({
+        "safe": False,
+        "reason": "the cited active header opens details, not the chat",
+    })
+    eng, sock = engine
+    eng.cleanup = FakePlanner(controller, refusal, controller, refusal)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="open Shivangi Gupta on WhatsApp",
+        context={"frontmost_app": "WhatsApp",
+                 "frontmost_bundle": "net.whatsapp.WhatsApp",
+                 "running_apps": ["WhatsApp"],
+                 "ui_snapshot": partial},
+    )
+
+    event = await client.recv_event("action_failed")
+
+    assert event["code"] == "plan_invalid"
+    assert "UI action reviewer refused" in event["error"]
+    assert "opens details" in event["error"]
+    assert len(eng.cleanup.calls) == 4
+
+
 async def test_ui_action_reviewer_replaces_active_header_press_with_proof(engine):
     eng, sock = engine
     first = turn(
@@ -2683,6 +2743,81 @@ def test_structured_ui_is_bounded_and_rendered_as_data():
     assert context.ui_snapshot["id"] == "snap-1"
 
 
+def test_structured_ui_preserves_partial_capability_identity():
+    raw = _structured_ui()
+    raw["source"] = "cua"
+    raw["window_id"] = 91
+    raw["elements"][2]["actions"] = ["CuaClick", "AXPress"]
+    raw["elements"][2]["enabled"] = False
+    raw["elements"][2]["in_web_content"] = True
+
+    snapshot = actions.normalize_ui_snapshot(raw)
+
+    assert snapshot["source"] == "cua"
+    assert snapshot["window_id"] == 91
+    assert snapshot["elements"][2]["actions"] == ["CuaClick"]
+    assert snapshot["elements"][2]["enabled"] is False
+    assert snapshot["elements"][2]["in_web_content"] is True
+    snapshot["complete"] = False
+    prompt = actions.build_ui_action_review_prompt(snapshot)
+    assert "goal_met" not in prompt
+    assert "missing peers or controls prove nothing" in prompt
+    assert "enabled=false" in prompt and "web_content=true" in prompt
+
+
+def test_cua_click_is_accepted_only_from_an_exact_cua_snapshot():
+    raw = _structured_ui(active="Shivangi Gupta")
+    raw.update({"source": "cua", "window_id": 91, "complete": False})
+    next(item for item in raw["elements"] if item["index"] == 28)[
+        "actions"] = ["CuaClick"]
+    context = actions.ActionContext.from_dict({"ui_snapshot": raw})
+
+    accepted = actions.ActionSession(
+        "open Shivangi Gupta on WhatsApp", context).accept_reply(turn([
+            {"do": "wait_frontmost", "app": "WhatsApp"},
+            {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+             "role": "AXButton", "label": "Shivangi Gupta"},
+        ], goal="open Shivangi Gupta", sends=False))
+
+    assert accepted["steps"][-1]["do"] == "press_ui"
+
+    native = _structured_ui(active="Shivangi Gupta")
+    native.update({"window_id": 91, "complete": False})
+    next(item for item in native["elements"] if item["index"] == 28)[
+        "actions"] = ["CuaClick"]
+    context = actions.ActionContext.from_dict({"ui_snapshot": native})
+    with pytest.raises(actions.PlanError, match="does not expose AXPress"):
+        actions.ActionSession(
+            "open Shivangi Gupta on WhatsApp", context).accept_reply(turn([
+                {"do": "wait_frontmost", "app": "WhatsApp"},
+                {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+                 "role": "AXButton", "label": "Shivangi Gupta"},
+            ], goal="open Shivangi Gupta", sends=False))
+
+
+def test_cua_source_cannot_claim_complete_or_authorize_completion():
+    raw = _structured_ui(active="Shivangi Gupta")
+    raw.update({"source": "cua", "window_id": 91, "complete": True})
+
+    snapshot = actions.normalize_ui_snapshot(raw)
+
+    assert snapshot["complete"] is False
+    verdict = json.dumps({
+        "safe": False, "goal_met": True, "target": "Shivangi Gupta",
+        "evidence": {"index": 28, "role": "AXButton",
+                     "label": "Shivangi Gupta"},
+    })
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        actions.parse_ui_action_review(
+            verdict, snapshot, "open Shivangi Gupta on WhatsApp")
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        actions.parse_goal_verdict(json.dumps({
+            "safe": True, "target": "Shivangi Gupta",
+            "evidence": {"index": 28, "role": "AXButton",
+                         "label": "Shivangi Gupta"},
+        }), snapshot, "open Shivangi Gupta on WhatsApp")
+
+
 def test_model_projection_omits_inert_leaves_but_preserves_their_ancestors():
     raw = _structured_ui()
     raw["elements"].extend([
@@ -2784,7 +2919,7 @@ def test_exact_editable_axpress_is_reviewed_as_a_focus_step():
     assert "own turn" in actions.PLANNER_RULES.lower()
 
 
-def test_incomplete_snapshot_cannot_authorize_an_indexed_press():
+def test_partial_snapshot_can_authorize_command_mentioned_focus():
     raw = _structured_send_ui("Hemesh Singh", focused=False)
     raw["complete"] = False
     context = actions.ActionContext.from_dict({"ui_snapshot": raw})
@@ -2796,8 +2931,8 @@ def test_incomplete_snapshot_cannot_authorize_an_indexed_press():
     ], goal="focus Hemesh composer", sends=False))
 
     assert actions.turn_requires_ui_action_review(parsed, session)
-    with pytest.raises(actions.PlanError, match="incomplete"):
-        session.accept_reply(json.dumps(parsed))
+    accepted = session.accept_reply(json.dumps(parsed))
+    assert accepted["steps"][-1]["do"] == "press_ui"
 
 
 def test_indexed_focus_requires_a_fresh_observation_before_more_steps():
@@ -2959,6 +3094,52 @@ def test_only_exact_navigation_only_collection_press_skips_ui_review():
         {"do": "pause", "ms": 200},
     ], sends=False))
     assert ordinary.direct_goal_check_pending is False
+
+
+def test_partial_ui_allows_only_command_mentioned_exact_capability():
+    raw = _structured_ui(active="Someone Else")
+    raw["complete"] = False
+    context = actions.ActionContext.from_dict({"ui_snapshot": raw})
+    session = actions.ActionSession(
+        "open the Shivangi Gupta chat on WhatsApp", context)
+    proposed = json.dumps({
+        "goal": "open the Shivangi Gupta chat on WhatsApp", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "WhatsApp"},
+            {"do": "press_ui", "snapshot": "snap-1", "index": 14,
+             "role": "AXButton", "label": "Shivangi Gupta"},
+        ],
+    })
+
+    accepted = session.accept_reply(proposed)
+
+    assert accepted["steps"][-1]["do"] == "press_ui"
+    unrelated = actions.ActionSession("open Priya on WhatsApp", context)
+    with pytest.raises(actions.PlanError, match="spoken command"):
+        unrelated.accept_reply(proposed)
+    disabled_raw = _structured_ui(active="Someone Else")
+    disabled_raw["complete"] = False
+    disabled_raw["elements"][2]["enabled"] = False
+    disabled = actions.ActionSession(
+        "open the Shivangi Gupta chat on WhatsApp",
+        actions.ActionContext.from_dict({"ui_snapshot": disabled_raw}))
+    with pytest.raises(actions.PlanError, match="disabled"):
+        disabled.accept_reply(proposed)
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        actions.parse_ui_action_review(json.dumps({
+            "safe": False, "goal_met": True, "target": "Shivangi Gupta",
+            "evidence": {"index": 28, "role": "AXButton",
+                         "label": "Shivangi Gupta"},
+        }), context.ui_snapshot, session.transcript)
+    session.turns_used = 1
+    assert actions.turn_requires_goal_verifier(
+        {"steps": [], "done": True}, session)
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        actions.parse_goal_verdict(json.dumps({
+            "safe": True, "target": "Shivangi Gupta",
+            "evidence": {"index": 28, "role": "AXButton",
+                         "label": "Shivangi Gupta"},
+        }), context.ui_snapshot, session.transcript)
 
 
 def test_legacy_label_press_is_refused_when_structured_ui_exists():

@@ -26,9 +26,8 @@ enum ActionStep: Equatable {
     /// Legacy fallback when the app cannot expose a structured snapshot.
     /// The host requires an authored label and a real AXPress capability.
     case pressElement(label: String)
-    /// Exact AXFocus or AXPress capability selected from a structured UI
-    /// snapshot. Generic across apps; runtime refuses stale or incomplete
-    /// snapshot/app/label/role identity.
+    /// Exact native AX or Cua driver capability selected from a structured UI
+    /// snapshot. Runtime refuses stale snapshot/app/window/label/role identity.
     case pressUI(snapshotID: String, index: Int, role: String, label: String)
 
     /// Steps that put characters or keystrokes into another app.
@@ -98,6 +97,8 @@ enum ActionPlanError: Error, Equatable {
     case weakPressLabel(String)
     case structuredUIRequired(step: Int)
     case incompleteStructuredUI(step: Int)
+    case partialUIUnmentioned(step: Int)
+    case invalidStructuredUICapability(step: Int)
     case pressRequiresFreshObservation(step: Int)
     case committingPressLabel(String)
     case sendInDraft(step: Int)
@@ -139,6 +140,10 @@ enum ActionPlanError: Error, Equatable {
             return "step \(step) discarded the structured UI; use an exact press_ui index or report done"
         case .incompleteStructuredUI(let step):
             return "step \(step) cannot act on an incomplete structured UI snapshot"
+        case .partialUIUnmentioned(let step):
+            return "step \(step) cites a partial UI label absent from the command"
+        case .invalidStructuredUICapability(let step):
+            return "step \(step) does not cite an exact current UI capability"
         case .pressRequiresFreshObservation(let step):
             return "step \(step) presses UI; observe the fresh screen before any later step"
         case .committingPressLabel(let label):
@@ -361,9 +366,17 @@ extension ActionPlan {
         /// this is true they are refused so a planner cannot discard the
         /// hierarchy after choosing the wrong indexed element.
         var structuredUIAvailable = false
-        /// A partial tree can be shown to the model as context, but it cannot
-        /// mint an executable indexed capability.
+        /// Whole-tree completeness remains necessary for absence, uniqueness,
+        /// and completion. A partial tree carries only exact affirmative
+        /// capabilities.
         var structuredUIComplete = false
+        /// The immutable spoken command. Sharing one non-generic mentioned term
+        /// is only a lexical bound; the independent reviewer proves semantics.
+        var spokenCommand = ""
+        /// The exact current structured evidence. The engine and app both
+        /// validate the selected source-specific capability; runtime still
+        /// owns native AX references and Cua token lineage.
+        var structuredUISnapshot: ActionUISnapshot?
     }
 
     /// All tokens found in allowed-source strings (lowercased alphanumeric
@@ -379,6 +392,63 @@ extension ActionPlan {
             }
         }
         return pool
+    }
+
+    private static let commandMentionWords: Set<String> = [
+        "app", "chat", "click", "composer", "conversation", "find", "focus",
+        "message", "messages", "navigate", "open", "press", "search", "show",
+        "the", "to", "with",
+    ]
+
+    private static func commandMentionsUILabel(
+        _ label: String, command: String
+    ) -> Bool {
+        let labelWords = Set(AppMatcher.words(label))
+        let commandWords = Set(AppMatcher.words(command))
+        return !labelWords.intersection(commandWords).filter {
+            $0.count >= Limits.minVerifyTermCharacters
+                && !commandMentionWords.contains($0)
+        }.isEmpty
+    }
+
+    private static func validatePressUI(
+        snapshotID: String, index: Int, role: String, label: String,
+        state: BatchState, step: Int
+    ) throws {
+        guard let snapshot = state.structuredUISnapshot else {
+            if state.structuredUIAvailable {
+                throw ActionPlanError.invalidStructuredUICapability(step: step)
+            }
+            return
+        }
+        guard snapshot.id == snapshotID,
+              let element = snapshot.elements.first(where: { $0.index == index }),
+              element.role == role,
+              AppMatcher.normalize(element.label ?? "")
+                == AppMatcher.normalize(label),
+              element.enabled else {
+            throw ActionPlanError.invalidStructuredUICapability(step: step)
+        }
+        if !snapshot.complete {
+            guard !snapshot.bundleID.isEmpty,
+                  !snapshot.windowTitle.isEmpty || snapshot.windowID != nil else {
+                throw ActionPlanError.invalidStructuredUICapability(step: step)
+            }
+        }
+        switch snapshot.source {
+        case .cua:
+            guard !snapshot.complete, snapshot.windowID != nil,
+                  element.actions.contains(ActionUICapability.cuaClick) else {
+                throw ActionPlanError.invalidStructuredUICapability(step: step)
+            }
+        case .native:
+            let capability = ScreenContext.isEditableActionRole(role)
+                ? ActionUICapability.axFocus : ActionUICapability.axPress
+            guard !element.actions.contains(ActionUICapability.cuaClick),
+                  element.actions.contains(capability) else {
+                throw ActionPlanError.invalidStructuredUICapability(step: step)
+            }
+        }
     }
 
     /// True when the label names a control that would commit something.
@@ -763,9 +833,6 @@ extension ActionPlan {
                 guard focusEstablished else {
                     throw ActionPlanError.inputBeforeFocus(step: index)
                 }
-                guard !state.structuredUIAvailable || state.structuredUIComplete else {
-                    throw ActionPlanError.incompleteStructuredUI(step: index)
-                }
                 guard index == rawSteps.count - 1 else {
                     throw ActionPlanError.pressRequiresFreshObservation(step: index)
                 }
@@ -785,6 +852,14 @@ extension ActionPlan {
                 guard !ActionPlan.pressLabelIsCommitting(label) else {
                     throw ActionPlanError.committingPressLabel(label)
                 }
+                if state.structuredUIAvailable, !state.structuredUIComplete,
+                   !ActionPlan.commandMentionsUILabel(
+                    label, command: state.spokenCommand) {
+                    throw ActionPlanError.partialUIUnmentioned(step: index)
+                }
+                try ActionPlan.validatePressUI(
+                    snapshotID: snapshotID, index: number.intValue,
+                    role: role, label: label, state: state, step: index)
                 steps.append(.pressUI(
                     snapshotID: snapshotID, index: number.intValue,
                     role: role, label: label))

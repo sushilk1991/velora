@@ -51,7 +51,28 @@ struct CuaElement: Equatable {
     let label: String?
     let value: String?
     let parentIndex: Int?
+    let depth: Int
+    let frame: CGRect?
     let enabled: Bool
+    let selected: Bool
+    let inWebContent: Bool
+
+    init(index: Int, token: String?, role: String, label: String?,
+         value: String?, parentIndex: Int?, depth: Int = 0,
+         frame: CGRect? = nil, enabled: Bool, selected: Bool = false,
+         inWebContent: Bool = false) {
+        self.index = index
+        self.token = token
+        self.role = role
+        self.label = label
+        self.value = value
+        self.parentIndex = parentIndex
+        self.depth = depth
+        self.frame = frame
+        self.enabled = enabled
+        self.selected = selected
+        self.inWebContent = inWebContent
+    }
 
     static let editableTextRoles: Set<String> = [
         "AXTextArea", "AXTextField", "AXComboBox", "AXSearchField",
@@ -66,6 +87,11 @@ struct CuaElement: Equatable {
     var authoredLabel: String? {
         guard let label, !label.isEmpty, label != value else { return nil }
         return label
+    }
+
+    var actionNames: [String] {
+        guard enabled, let token, !token.isEmpty else { return [] }
+        return [ActionUICapability.cuaClick]
     }
 }
 
@@ -100,25 +126,32 @@ struct CuaSnapshot: Equatable {
                 label: raw["label"] as? String,
                 value: raw["value"] as? String,
                 parentIndex: raw["parent_index"] as? Int,
-                enabled: (raw["enabled"] as? Bool) ?? true)
+                depth: raw["depth"] as? Int ?? 0,
+                frame: parseFrame(raw["frame"]),
+                enabled: (raw["enabled"] as? Bool) ?? false,
+                selected: (raw["selected"] as? Bool) ?? false,
+                inWebContent: (raw["in_web_content"] as? Bool) ?? false)
         }
-        // Completeness comes from the COUNTS, not from `elements_complete`:
-        // driver 0.21.0 reports that flag false even on a walk that plainly
-        // finished (verified live — 67 of 67 elements, flag false), so
-        // trusting it would refuse every background target. The flag is
-        // still honoured when it says true, in case a later driver fixes it.
-        //
-        // The comparison uses the elements actually PARSED, not a reported
-        // count: the driver has three different count fields, and the only
-        // number Velora can vouch for is how many nodes it holds.
-        let total = payload["total_element_count"] as? Int
-        let flagged = (payload["elements_complete"] as? Bool) ?? false
-        var complete = flagged
-        if let total, total > 0, elements.count >= total { complete = true }
+        let complete = (payload["elements_complete"] as? Bool) ?? false
         return CuaSnapshot(id: payload["snapshot_id"] as? String,
                            degraded: degraded,
                            complete: complete,
                            elements: elements)
+    }
+
+    private static func parseFrame(_ raw: Any?) -> CGRect? {
+        guard let frame = raw as? [String: Any],
+              let x = number(frame["x"]), let y = number(frame["y"]),
+              let width = number(frame["w"]),
+              let height = number(frame["h"]),
+              x.isFinite, y.isFinite, width.isFinite, height.isFinite
+        else { return nil }
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private static func number(_ raw: Any?) -> CGFloat? {
+        guard let value = raw as? NSNumber else { return nil }
+        return CGFloat(value.doubleValue)
     }
 
     var hasEditableTextElement: Bool { primaryTextElement != nil }
@@ -148,7 +181,8 @@ struct CuaSnapshot: Equatable {
         // writes without the DOM necessarily seeing them — the driver itself
         // refuses to trust readback there, and so does Velora: an element
         // under an AXWebArea is not a background-typeable target.
-        guard let chosen, !hasWebAreaAncestor(chosen) else { return nil }
+        guard let chosen, !chosen.inWebContent,
+              !hasWebAreaAncestor(chosen) else { return nil }
         return chosen
     }
 
@@ -268,6 +302,10 @@ enum CuaPressPick {
         "AXSearchField",
     ]
 
+    static func supportsPress(role: String) -> Bool {
+        !nonInteractiveRoles.contains(role)
+    }
+
     static func candidate(in elements: [CuaElement], label: String) -> CuaElement? {
         // Duplicate indices must refuse, not trap (review finding).
         let byIndex = Dictionary(elements.map { ($0.index, $0) },
@@ -281,7 +319,7 @@ enum CuaPressPick {
                 .compactMap { $0 }.joined(separator: " ")
             guard !ActionPlan.pressLabelIsCommitting(fullText) else { continue }
             if element.enabled, element.token != nil,
-               !nonInteractiveRoles.contains(element.role) { return element }
+               supportsPress(role: element.role) { return element }
             var ancestorIndex = element.parentIndex
             for _ in 0..<3 {
                 guard let index = ancestorIndex,
@@ -291,7 +329,7 @@ enum CuaPressPick {
                 if !ancestorText.isEmpty,
                    ActionPlan.pressLabelIsCommitting(ancestorText) { break }
                 if ancestor.enabled, ancestor.token != nil,
-                   !nonInteractiveRoles.contains(ancestor.role) { return ancestor }
+                   supportsPress(role: ancestor.role) { return ancestor }
                 ancestorIndex = ancestor.parentIndex
             }
         }
@@ -371,11 +409,13 @@ enum CuaDiagnostics {
 /// The driver only changes WHERE verified steps are delivered.
 final class BackgroundRoutingActionHost: ActionHost {
     /// Tree-only snapshots; screenshots are for humans and cost ~250 KB each.
-    /// The element cap matches the driver's own default walk bound — element
-    /// selection additionally requires `elements_complete`, so a window too
-    /// big to walk refuses rather than acts on a partial view.
+    /// The element cap matches the driver's own default walk bound. Routed
+    /// trees stay partial; an exact action is bound to one observed element
+    /// and a fresh driver reread instead of treating the cap as completeness.
     private static let snapshotElements = 2000
     private static let callTimeout: TimeInterval = 3.0
+    private static let maximumSnapshotIDs = 512
+    private static let maximumSnapshotIDBytes = 128
     /// How long `frontmostApp` polling lets a fresh window stay AX-unresolved
     /// before the one permitted materialization flash.
     private static let flashAfterSeconds: TimeInterval = 1.2
@@ -426,6 +466,28 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// background analog of the foreground draft: committing keys refuse
     /// without it, and it is dropped whenever the element or target changes.
     private var backgroundDraft = ""
+    private struct RoutedUISnapshot {
+        let observation: ActionUISnapshot
+        let driver: CuaSnapshot
+        let pid: Int
+        let windowID: Int
+        let bundleID: String
+    }
+    private var routedUISnapshot: RoutedUISnapshot?
+    private enum SnapshotIDResult {
+        case fresh
+        case replay
+        case exhausted
+    }
+    private enum SnapshotLineage {
+        case valid
+        case poisoned
+    }
+    /// Every nonempty driver snapshot ID read for this routed action. Each ID
+    /// may occur once; alternating replay is stale even when it differs from
+    /// the cached observation.
+    private var observedSnapshotIDs = Set<String>()
+    private var snapshotLineage = SnapshotLineage.valid
 
     init(system: ActionHost, transport: CuaTransport,
          backgroundEnabled: @escaping () -> Bool,
@@ -589,6 +651,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         // not). The materialization allowance travels with the target, but
         // the per-action ceiling still applies.
         pinnedElement = nil
+        routedUISnapshot = nil
+        resetSnapshotLineage()
         backgroundDraft = ""
         flashUsed = false
         return true
@@ -602,6 +666,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// each poll advances readiness one bounded step.
     func frontmostApp() -> (name: String, bundleID: String)? {
         guard routed else { return system.frontmostApp() }
+        guard snapshotLineage == .valid else { return nil }
         if targetReady, verifyTargetAlive() { return (targetName, targetBundleID) }
         guard advanceReadiness() else { return nil }
         return (targetName, targetBundleID)
@@ -619,6 +684,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func advanceReadiness() -> Bool {
+        guard snapshotLineage == .valid else { return false }
         if readinessStarted == nil { readinessStarted = now() }
         // Re-picking is allowed ONLY while the target has never been ready:
         // a cold-launched app's real document window can appear after the
@@ -648,7 +714,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func snapshotTarget(maxElements: Int) -> CuaSnapshot? {
-        guard let windowID = targetWindowID else { return nil }
+        guard snapshotLineage == .valid,
+              let windowID = targetWindowID else { return nil }
         let arguments: [String: Any] = [
             "include_screenshot": false,
             "pid": targetPID,
@@ -658,7 +725,43 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard case .success(let reply) = transport.call(
             "get_window_state", arguments: arguments, timeout: Self.callTimeout)
         else { return nil }
-        return CuaSnapshot.parse(reply)
+        let snapshot = CuaSnapshot.parse(reply)
+        guard let snapshotID = snapshot.id, !snapshotID.isEmpty else {
+            poisonSnapshotLineage()
+            return nil
+        }
+        switch recordSnapshotID(snapshotID) {
+        case .fresh:
+            return snapshot
+        case .replay, .exhausted:
+            poisonSnapshotLineage()
+            return nil
+        }
+    }
+
+    private func recordSnapshotID(_ id: String) -> SnapshotIDResult {
+        guard id.utf8.count <= Self.maximumSnapshotIDBytes else {
+            return .exhausted
+        }
+        if observedSnapshotIDs.contains(id) { return .replay }
+        guard observedSnapshotIDs.count < Self.maximumSnapshotIDs else {
+            return .exhausted
+        }
+        observedSnapshotIDs.insert(id)
+        return .fresh
+    }
+
+    private func poisonSnapshotLineage() {
+        snapshotLineage = .poisoned
+        targetReady = false
+        routedUISnapshot = nil
+        pinnedElement = nil
+        backgroundDraft = ""
+    }
+
+    private func resetSnapshotLineage() {
+        observedSnapshotIDs.removeAll(keepingCapacity: true)
+        snapshotLineage = .valid
     }
 
     /// An app that has never been activated since launch sits AX-unresolved:
@@ -700,7 +803,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// would let the check pass on stale evidence (review finding).
     func frontmostWindowTitle() -> String? {
         guard routed else { return system.frontmostWindowTitle() }
-        guard let windowID = targetWindowID,
+        guard snapshotLineage == .valid, let windowID = targetWindowID,
               case .success(let reply) = transport.call(
                 "list_windows", arguments: [:], timeout: Self.callTimeout),
               let windows = reply["windows"] as? [[String: Any]],
@@ -726,7 +829,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// `verify_context` (review finding).
     func focusedElementLabel() -> String? {
         guard routed else { return system.focusedElementLabel() }
-        guard targetReady, let element = freshPrimaryTextElement()?.element
+        guard snapshotLineage == .valid, targetReady,
+              let element = freshPrimaryTextElement()?.element
         else { return nil }
         let label = element.authoredLabel?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -739,7 +843,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func focusedElementRole() -> String? {
         guard routed else { return system.focusedElementRole() }
-        guard targetReady else { return nil }
+        guard snapshotLineage == .valid, targetReady else { return nil }
         return freshPrimaryTextElement()?.element.role
     }
 
@@ -750,7 +854,10 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func freshPrimaryTextElement()
         -> (snapshot: CuaSnapshot, element: CuaElement)? {
         guard let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
-              let element = snapshot.primaryTextElement else { return nil }
+              let element = snapshot.primaryTextElement else {
+            backgroundDraft = ""
+            return nil
+        }
         if let pinnedElement {
             guard pinnedElement.index == element.index,
                   pinnedElement.role == element.role else {
@@ -778,7 +885,8 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func visibleNames() -> [String] {
         guard routed else { return system.visibleNames() }
-        guard let snapshot = snapshotTarget(maxElements: Self.snapshotElements)
+        guard snapshotLineage == .valid,
+              let snapshot = snapshotTarget(maxElements: Self.snapshotElements)
         else { return [] }
         var names: [String] = []
         var seen = Set<String>()
@@ -796,10 +904,36 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func uiSnapshot() -> ActionUISnapshot? {
         // Foreground Action Mode uses the host's native AX capability map;
-        // Cua remains the adapter for a deliberately background-routed target.
-        // A routed snapshot is not exposed until Cua's structured record also
-        // carries actions and geometry through this adapter.
-        routed ? nil : system.uiSnapshot()
+        // a background target exposes Cua's exact structured capabilities but
+        // never promotes its actionable projection to a complete UI tree.
+        guard routed else { return system.uiSnapshot() }
+        guard snapshotLineage == .valid, targetReady,
+              let windowID = targetWindowID,
+              let driver = snapshotTarget(maxElements: Self.snapshotElements),
+              !driver.degraded, let snapshotID = driver.id,
+              !snapshotID.isEmpty else {
+            routedUISnapshot = nil
+            return nil
+        }
+        let elements = driver.elements.map { element in
+            ActionUIElement(
+                index: element.index, parentIndex: element.parentIndex,
+                depth: element.depth, role: element.role,
+                label: element.authoredLabel, frame: element.frame,
+                actions: element.actionNames,
+                enabled: element.enabled,
+                selected: element.selected, focused: false,
+                inWebContent: element.inWebContent)
+        }
+        let observation = ActionUISnapshot(
+            id: snapshotID, source: .cua,
+            appName: targetName, bundleID: targetBundleID,
+            windowTitle: frontmostWindowTitle() ?? "", windowID: windowID,
+            complete: false, elements: elements)
+        routedUISnapshot = RoutedUISnapshot(
+            observation: observation, driver: driver, pid: targetPID,
+            windowID: windowID, bundleID: targetBundleID)
+        return observation
     }
 
     func frontmostPageURL() -> String? {
@@ -830,6 +964,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         everReady = false
         readinessStarted = nil
         pinnedElement = nil
+        routedUISnapshot = nil
+        resetSnapshotLineage()
         backgroundDraft = ""
     }
 
@@ -837,7 +973,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard routed else {
             return system.pressElement(label: label, expecting: bundleID)
         }
-        guard expectedMatchesTarget(bundleID), targetReady,
+        guard snapshotLineage == .valid,
+              expectedMatchesTarget(bundleID), targetReady,
               let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
               !snapshot.degraded, snapshot.complete
         else { return false }
@@ -847,7 +984,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard case .success(let reply) = transport.call("click", arguments: [
             "pid": targetPID, "element_token": token,
         ], timeout: Self.callTimeout) else { return false }
-        guard !isRefused(reply) else { return false }
+        guard clickSucceeded(reply) else { return false }
         // A click can move focus or replace the editor. Content delivered to
         // the old field must never authorize a later committing key.
         backgroundDraft = ""
@@ -862,17 +999,72 @@ final class BackgroundRoutingActionHost: ActionHost {
                 index: index, snapshotID: snapshotID, label: label,
                 role: role, expecting: bundleID)
         }
-        // No foreground snapshot can authorize a background action.
-        return false
+        guard snapshotLineage == .valid,
+              let cached = routedUISnapshot,
+              cached.observation.id == snapshotID,
+              cached.pid == targetPID,
+              cached.windowID == targetWindowID,
+              cached.bundleID == targetBundleID,
+              expectedMatchesTarget(bundleID), targetReady,
+              let record = cached.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              record.role == role,
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(label),
+              !ActionPlan.pressLabelIsCommitting(label),
+              let prior = cached.driver.elements.first(where: {
+                  $0.index == index
+              }),
+              record.actions.contains(ActionUICapability.cuaClick),
+              prior.token?.isEmpty == false
+        else { return false }
+        guard let current = snapshotTarget(maxElements: Self.snapshotElements)
+        else { return false }
+        defer { routedUISnapshot = nil }
+        guard !current.degraded,
+              let currentID = current.id, !currentID.isEmpty,
+              let element = current.elements.first(where: { $0.index == index }),
+              let token = element.token, !token.isEmpty,
+              sameElementIdentity(
+                element, prior: prior, role: role, label: label)
+        else { return false }
+        guard case .success(let reply) = transport.call("click", arguments: [
+            "pid": targetPID, "window_id": cached.windowID,
+            "element_token": token, "element_index": index,
+            "snapshot_id": currentID,
+        ], timeout: Self.callTimeout), clickSucceeded(reply) else { return false }
+        backgroundDraft = ""
+        pinnedElement = nil
+        return true
     }
 
     func verifyElement(index: Int, snapshotID: String, label: String,
                        role: String, expecting bundleID: String?,
                        requiresFocus: Bool) -> Bool {
-        guard !routed else { return false }
+        guard !routed else {
+            routedUISnapshot = nil
+            return false
+        }
         return system.verifyElement(
             index: index, snapshotID: snapshotID, label: label,
             role: role, expecting: bundleID, requiresFocus: requiresFocus)
+    }
+
+    private func sameElementIdentity(
+        _ current: CuaElement, prior: CuaElement,
+        role: String, label: String
+    ) -> Bool {
+        current.index == prior.index
+            && current.role == role
+            && current.parentIndex == prior.parentIndex
+            && current.depth == prior.depth
+            && current.frame == prior.frame
+            && current.enabled == prior.enabled
+            && current.selected == prior.selected
+            && current.inWebContent == prior.inWebContent
+            && AppMatcher.normalize(current.authoredLabel ?? "")
+                == AppMatcher.normalize(label)
     }
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
@@ -887,7 +1079,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func deliverText(_ text: String, expecting bundleID: String?) -> Bool {
-        guard expectedMatchesTarget(bundleID), targetReady,
+        guard snapshotLineage == .valid,
+              expectedMatchesTarget(bundleID), targetReady,
               let windowID = targetWindowID else { return false }
         // Address the write to the target window's own text element. The
         // driver's default target — the PID's focused element — can live in
@@ -925,7 +1118,8 @@ final class BackgroundRoutingActionHost: ActionHost {
             return system.pressKey(name: name, mods: mods, keyCode: keyCode,
                                    flags: flags, expecting: bundleID)
         }
-        guard expectedMatchesTarget(bundleID), targetReady,
+        guard snapshotLineage == .valid,
+              expectedMatchesTarget(bundleID), targetReady,
               let windowID = targetWindowID,
               let driverKey = CuaKeyMap.driverKey(forPlanKey: name)
         else { return false }
@@ -958,12 +1152,13 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// routing excludes every app with send authority.
     var hasFocusedTextTarget: Bool {
         guard routed else { return system.hasFocusedTextTarget }
-        guard targetReady else { return false }
+        guard snapshotLineage == .valid, targetReady else { return false }
         return freshPrimaryTextElement() != nil
     }
 
     var canPostInput: Bool {
         guard routed else { return system.canPostInput }
+        guard snapshotLineage == .valid else { return false }
         // The driver's AX write path does not synthesize global events, so
         // the CGEvent preflight is not required — but a locked screen or
         // secure input still means "the machine is not ours to drive".
@@ -1016,5 +1211,12 @@ final class BackgroundRoutingActionHost: ActionHost {
         if (reply["status"] as? String) == "refused" { return true }
         if (reply["effect"] as? String) == "refused" { return true }
         return false
+    }
+
+    private func clickSucceeded(_ reply: [String: Any]) -> Bool {
+        guard !isRefused(reply), let effect = reply["effect"] as? String else {
+            return false
+        }
+        return effect == "confirmed" || effect == "unverifiable"
     }
 }

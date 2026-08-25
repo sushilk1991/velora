@@ -149,6 +149,7 @@ enum ScreenContext {
         kAXTextFieldRole as String,
         kAXTextAreaRole as String,
         kAXComboBoxRole as String,
+        "AXSearchField",
     ]
 
     static func isEditableActionRole(_ role: String) -> Bool {
@@ -268,6 +269,7 @@ enum ScreenContext {
         return ScreenActionUISnapshot(
             observation: observation,
             applicationElement: appElement,
+            focusedWindow: window,
             elementsByIndex: references)
     }
 
@@ -318,19 +320,40 @@ enum ScreenContext {
         index: Int,
         in snapshot: ScreenActionUISnapshot
     ) -> Bool {
-        guard snapshot.observation.complete,
+        guard focusedWindowIsCurrent(snapshot),
               let record = snapshot.observation.elements.first(where: {
             $0.index == index
         }),
               let element = snapshot.elementsByIndex[index],
               !ActionPlan.pressLabelIsCommitting(record.label ?? "")
         else { return false }
+        let role = axString(element, kAXRoleAttribute) ?? "AXUnknown"
+        guard role == record.role else { return false }
+        let authored = [
+            axString(element, kAXTitleAttribute),
+            axString(element, kAXDescriptionAttribute),
+            axString(element, kAXPlaceholderValueAttribute),
+        ].compactMap { $0 }
+        var rawActions = axActionNames(element)
+        if isEditableActionRole(role) {
+            var settable = DarwinBoolean(false)
+            if AXUIElementIsAttributeSettable(
+                element, kAXFocusedAttribute as CFString,
+                &settable) == .success, settable.boolValue {
+                rawActions.append("AXFocus")
+            }
+        }
+        let currentActions = modelActionNames(from: rawActions)
+        let currentLabel = actionUILabel(
+            role: role, authored: authored, actions: currentActions)
+        guard AppMatcher.normalize(currentLabel ?? "")
+                == AppMatcher.normalize(record.label ?? "") else { return false }
         guard isEditableActionRole(record.role) else {
-            return record.actions.contains(kAXPressAction as String)
+            return currentActions.contains(kAXPressAction as String)
                 && AXUIElementPerformAction(
                     element, kAXPressAction as CFString) == .success
         }
-        guard record.actions.contains("AXFocus") else { return false }
+        guard currentActions.contains("AXFocus") else { return false }
 
         // AXFocused is the generic Accessibility capability for that exact
         // editable element. Do not also AXPress it: combo boxes may interpret
@@ -357,6 +380,7 @@ enum ScreenContext {
         requiresFocus: Bool = false
     ) -> Bool {
         guard snapshot.observation.complete,
+              focusedWindowIsCurrent(snapshot),
               snapshot.observation.elements.contains(where: {
             $0.index == index
         }),
@@ -380,6 +404,16 @@ enum ScreenContext {
             actions: modelActionNames(from: axActionNames(element)))
         return AppMatcher.normalize(currentLabel ?? "")
             == AppMatcher.normalize(label)
+    }
+
+    private static func focusedWindowIsCurrent(
+        _ snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard let current = axElement(
+            snapshot.applicationElement, kAXFocusedWindowAttribute) else {
+            return false
+        }
+        return CFEqual(current, snapshot.focusedWindow)
     }
 
     /// Best-effort entities for the given app. Never throws; returns [] when
