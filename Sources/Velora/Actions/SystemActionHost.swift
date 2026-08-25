@@ -37,13 +37,27 @@ struct ActionTextTargetState {
 
     mutating func requireVerification() {
         verificationRequired = true
-        clearTarget()
     }
 
     mutating func pin(_ target: ScreenKeystrokeStreamTarget) {
         verificationRequired = true
         self.target = target
         draft = ""
+    }
+
+    mutating func repin(
+        _ candidate: ScreenKeystrokeStreamTarget,
+        owns: (String, ScreenKeystrokeStreamTarget) -> Bool
+    ) {
+        let prior = target
+        let priorDraft = draft
+        pin(candidate)
+        guard let prior, !priorDraft.isEmpty,
+              prior.bundleID == candidate.bundleID,
+              CFEqual(prior.element, candidate.element),
+              owns(priorDraft, prior) else { return }
+        target = prior
+        draft = priorDraft
     }
 
     mutating func captureGeneric(_ target: ScreenKeystrokeStreamTarget) {
@@ -410,18 +424,27 @@ final class SystemActionHost: ActionHost {
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               app.bundleIdentifier == snapshot.observation.bundleID,
               expectedBundle(bundleID, matches: snapshot.observation.bundleID)
-        else { return false }
+        else {
+            if purpose == .target { targetState.clearTarget() }
+            return false
+        }
         guard ScreenContext.verifyActionElement(
             index: index, label: label, role: role, target: target,
-            in: snapshot, purpose: purpose) else { return false }
+            in: snapshot, purpose: purpose) else {
+            if purpose == .target { targetState.clearTarget() }
+            return false
+        }
         guard purpose == .target else { return true }
         guard let pinned = Self.verifiedTextTarget(
             purpose: purpose, index: index, snapshot: snapshot,
             capture: { bundleID, element in
                 ScreenContext.keystrokeStreamTarget(
                     bundleID: bundleID, element: element)
-            }) else { return false }
-        targetState.pin(pinned)
+            }) else {
+            targetState.clearTarget()
+            return false
+        }
+        targetState.repin(pinned, owns: ScreenContext.keystrokeStreamOwnsDraft)
         return true
     }
 

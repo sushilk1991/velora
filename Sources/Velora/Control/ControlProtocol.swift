@@ -123,6 +123,7 @@ final class LocalControlRouter {
     private let accessEnabled: () -> Bool
     private let engineReady: () -> Bool
     private let typingWPM: () -> Int
+    private let restartBlockReason: () -> String?
     private let transcribeFile: AsyncCapability?
     private let listen: AsyncCapability?
     private let action: AsyncCapability?
@@ -133,6 +134,7 @@ final class LocalControlRouter {
         accessEnabled: @escaping () -> Bool,
         engineReady: @escaping () -> Bool,
         typingWPM: @escaping () -> Int,
+        restartBlockReason: @escaping () -> String? = { nil },
         transcribeFile: AsyncCapability? = nil,
         listen: AsyncCapability? = nil,
         action: AsyncCapability? = nil,
@@ -142,6 +144,7 @@ final class LocalControlRouter {
         self.accessEnabled = accessEnabled
         self.engineReady = engineReady
         self.typingWPM = typingWPM
+        self.restartBlockReason = restartBlockReason
         self.transcribeFile = transcribeFile
         self.listen = listen
         self.action = action
@@ -286,13 +289,19 @@ final class LocalControlRouter {
 
     private func status() -> [String: Any] {
         let enabled = accessEnabled()
-        return [
+        let blockReason = restartBlockReason()
+        var result: [String: Any] = [
             "app_running": true,
             "engine_ready": engineReady(),
             "access_enabled": enabled,
+            "safe_to_restart": blockReason == nil,
             "protocol_version": ControlRequest.version,
             "capabilities": enabled ? capabilities : [],
         ]
+        if let blockReason {
+            result["restart_block_reason"] = blockReason
+        }
+        return result
     }
 
     private var capabilities: [String] {

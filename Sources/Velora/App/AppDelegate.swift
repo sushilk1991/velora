@@ -380,6 +380,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             accessEnabled: { AppConfig.shared.localAgentAccess },
             engineReady: { [weak supervisor] in supervisor?.isReady ?? false },
             typingWPM: { AppConfig.shared.typingWPM },
+            restartBlockReason: { [weak self] in
+                self?.restartBlockReason() ?? "Velora is unavailable"
+            },
             transcribeFile: { [weak self] arguments, completion in
                 let requestID = UUID()
                 DispatchQueue.main.async {
@@ -597,12 +600,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         hotkeyMonitor.start()
 
         UpdateInstaller.shared.relaunchBlockReason = { [weak self] in
-            guard let self else { return nil }
-            return UpdateRelaunchSafety.blockReason(
-                dictationBusy: self.dictation.hasUserOperationInFlight,
-                fileTranscriptionBusy: self.transcriber.isTranscribing,
-                meetingCaptureBusy: self.meetingCoordinator.foregroundCaptureActive
-                    || self.meetingCoordinator.terminationWorkInFlight)
+            self?.restartBlockReason() ?? "Velora is unavailable"
         }
 
         UpdateChecker.shared.onUpdate = { [weak self] update, origin in
@@ -676,6 +674,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
     }
 
+    private func restartBlockReason() -> String? {
+        if !Thread.isMainThread {
+            return DispatchQueue.main.sync { restartBlockReason() }
+        }
+        return UpdateRelaunchSafety.blockReason(
+            dictationBusy: dictation.hasUserOperationInFlight,
+            fileTranscriptionBusy: transcriber.isTranscribing,
+            meetingCaptureBusy: meetingCoordinator.foregroundCaptureActive
+                || meetingCoordinator.terminationWorkInFlight)
+    }
+
     private func showMeetingFailureIfPossible() {
         guard let failure = meetingFailureHUDQueue.first,
               dictation != nil, meetingCoordinator != nil,
@@ -744,16 +753,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // process; windowWillClose is not guaranteed during terminate.
         settingsController?.flushPendingEdits()
         // Stop accepting new long-running work, then wait for meeting audio to
-        // finalize before allowing AppKit to tear down the engine and process.
+        // finalize and active dictation audio to seal before AppKit tears down
+        // the engine and process.
         controlServer?.stop()
-        dictation?.cancelForTermination()
         transcriber?.cancelForTermination()
-        guard let meetingCoordinator else {
-            DispatchQueue.main.async { self.replyTerminationOnce() }
-            return .terminateLater
+        let pending = DispatchGroup()
+        if let dictation {
+            pending.enter()
+            dictation.preserveForTermination { pending.leave() }
         }
-        meetingCoordinator.finishForTermination { [weak self] in
-            DispatchQueue.main.async { self?.replyTerminationOnce() }
+        if let meetingCoordinator {
+            pending.enter()
+            meetingCoordinator.finishForTermination { pending.leave() }
+        }
+        pending.notify(queue: .main) { [weak self] in
+            self?.replyTerminationOnce()
         }
         return .terminateLater
     }

@@ -112,6 +112,9 @@ enum Selftest {
         testStreak()
         testLongestStreak()
         testHistoryStoreMigration()
+        testInterruptedHistory()
+        testTerminationHistory()
+        testHistoryInsertAck()
         testHistoryEdit()
         testHistoryClearAll()
         testIntelligenceAggregates()
@@ -1952,6 +1955,8 @@ enum Selftest {
         expect(
             UserInputActivity.snapshot() == inputGeneration &+ 1,
             "real user input synchronously invalidates in-flight selection capture")
+        expect(!UserInputActivity.isQuiet(for: 60),
+               "recent physical input blocks an immediate foreground handoff")
         let generationAfterUserKey = UserInputActivity.snapshot()
         _ = monitor.handleKeyDown(
             keyCode: 0, flags: 0,
@@ -3768,6 +3773,77 @@ enum Selftest {
                "gaps everywhere → longest is 1")
     }
 
+    private static func testInterruptedHistory() {
+        withHistoryStore { store, _ in
+            let first = store.ensureInterrupted(
+                session: "recovered-session", audio: "recovered-session.flac",
+                durationMs: 12_500)
+            let duplicate = store.ensureInterrupted(
+                session: "recovered-session", audio: "recovered-session.flac",
+                durationMs: 12_500)
+            expect(first?.id != 0 && duplicate?.id == first?.id,
+                   "interrupted recovery creates one durable row per session")
+            let rows = store.recent(limit: 10).filter {
+                $0.sessionID == "recovered-session"
+            }
+            expect(rows.count == 1 && rows[0].final.isEmpty
+                   && rows[0].audioPath == "recovered-session.flac",
+                   "interrupted recovery stores audio without inventing transcript text")
+        }
+    }
+
+    private static func testTerminationHistory() {
+        withHistoryStore { store, _ in
+            let record = dictation(
+                daysAgo: 0, words: 3, session: "terminating-session")
+            expect(store.insertForTermination(record),
+                   "termination history persists before exit")
+            expect(store.insertForTermination(record),
+                   "termination history replay is idempotent")
+            let rows = store.recent(limit: 10).filter {
+                $0.sessionID == "terminating-session"
+            }
+            expect(rows.count == 1 && rows[0].final == record.final,
+                   "termination history creates one completed row per session")
+        }
+    }
+
+    private static func testHistoryInsertAck() {
+        withHistoryStore { store, _ in
+            let finished = DispatchSemaphore(value: 0)
+            var persisted = false
+            store.insert(dictation(
+                daysAgo: 0, words: 2, session: "acknowledged-session"
+            )) { success in
+                persisted = success
+                finished.signal()
+            }
+            expect(finished.wait(timeout: .now() + 2) == .success,
+                   "history insert reports bounded persistence completion")
+            expect(persisted && !store.hasPendingWrites,
+                   "history insert acknowledgement follows the durable write")
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-history-failure-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let blocker = directory.appendingPathComponent("not-a-directory")
+        FileManager.default.createFile(atPath: blocker.path, contents: Data())
+        let failed = HistoryStore(url: blocker.appendingPathComponent("history.sqlite3"))
+        let finished = DispatchSemaphore(value: 0)
+        var persisted = true
+        failed.insert(dictation(daysAgo: 0, words: 2)) { success in
+            persisted = success
+            finished.signal()
+        }
+        expect(finished.wait(timeout: .now() + 2) == .success && !persisted,
+               "history insert failure is reported to the recovery owner")
+        expect(!failed.hasPendingWrites,
+               "failed history insertion releases the restart-safety latch")
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     /// Manual transcript editing (History tab pencil → HistoryStore.updateFinal).
     private static func testHistoryEdit() {
         withHistoryStore { store, _ in
@@ -5519,6 +5595,23 @@ enum Selftest {
             expect(id == 42 && code == "invalid_file",
                    "history reprocess failures preserve row id and stable code")
         } else { expect(false, "expected reprocess failure event") }
+
+        let interrupted = EngineEvent.parse([
+            "event": "interrupted", "session": "session-1", "duration_s": 12.5,
+        ])
+        if case .interrupted(let session, let duration) = interrupted {
+            expect(session == "session-1" && duration == 12.5,
+                   "termination interruption acknowledgements preserve session identity")
+        } else { expect(false, "expected interrupted event") }
+
+        let recovered = EngineEvent.parse([
+            "event": "interrupted_dictation", "session": "session-1",
+            "audio": "session-1.flac", "duration_s": 12.5,
+        ])
+        if case .interruptedDictation(let session, let audio, let duration) = recovered {
+            expect(session == "session-1" && audio == "session-1.flac" && duration == 12.5,
+                   "recovery events remain separate from live final events")
+        } else { expect(false, "expected interrupted dictation event") }
     }
 
     private static func testMeetingCaptureReadiness() {
@@ -5729,6 +5822,19 @@ enum Selftest {
             expect(status.failure == nil
                    && (status.result?["access_enabled"] as? Bool) == false,
                    "status remains available while local agent access is off")
+            expect(status.result?["safe_to_restart"] as? Bool == true
+                   && status.result?["restart_block_reason"] == nil,
+                   "idle status explicitly permits a safe external restart")
+            let unsafeRouter = LocalControlRouter(
+                history: store, accessEnabled: { false },
+                engineReady: { true }, typingWPM: { 50 },
+                restartBlockReason: { "Waiting for active dictation" })
+            let unsafeStatus = unsafeRouter.handle(ControlRequest(
+                id: "unsafe", command: "status", arguments: [:]))
+            expect(unsafeStatus.result?["safe_to_restart"] as? Bool == false
+                   && unsafeStatus.result?["restart_block_reason"] as? String
+                        == "Waiting for active dictation",
+                   "busy status fails closed with the exact restart blocker")
             let denied = router.handle(ControlRequest(
                 id: "r", command: "recent", arguments: [:]))
             expect(denied.failure == .disabled,

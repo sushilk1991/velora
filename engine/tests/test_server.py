@@ -558,6 +558,195 @@ async def test_cancel_discards(engine):
     client.close()
 
 
+async def test_cancel_during_finalization_discards_audio(engine, monkeypatch):
+    eng, sock = engine
+    formatting_started = asyncio.Event()
+    release_formatting = asyncio.Event()
+
+    async def delayed_formatting(*_args, **_kwargs):
+        formatting_started.set()
+        await release_formatting.wait()
+        return "cancel me", "Default", 0, False, "test"
+
+    monkeypatch.setattr(eng, "_apply_formatting", delayed_formatting)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({
+            "cmd": "start", "session": "cancel-finalizing", "context": {},
+        })
+        await client.send_audio(AUDIO)
+        await client.send_json({"cmd": "stop", "session": "cancel-finalizing"})
+        await asyncio.wait_for(formatting_started.wait(), 2)
+
+        await client.send_json({"cmd": "cancel", "session": "cancel-finalizing"})
+        cancelled = await client.recv_event("cancelled", timeout=0.5)
+        assert cancelled["session"] == "cancel-finalizing"
+
+        release_formatting.set()
+        await client.send_json({"cmd": "ping"})
+        assert (await client.recv_event("pong"))["event"] == "pong"
+        assert not (eng.audio.active_dir / "cancel-finalizing.pcm16.part").exists()
+        assert not (eng.config.audio_dir / eng.audio.name_for("cancel-finalizing")).exists()
+    finally:
+        release_formatting.set()
+        client.close()
+
+
+async def test_final_audio_spool_waits_for_history_ack(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start", "session": "durable-final", "context": {},
+    })
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "durable-final"})
+    final = await client.recv_event("final")
+    assert final["session"] == "durable-final"
+
+    archive = eng._final_archives["durable-final"]
+    assert await asyncio.wait_for(archive, 2) is True
+    spool = eng.audio.active_dir / "durable-final.pcm16.part"
+    assert spool.is_file()
+
+    await client.send_json({"cmd": "ack_final", "session": "durable-final"})
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv_event("pong"))["event"] == "pong"
+    assert not spool.exists()
+    client.close()
+
+
+async def test_live_start_waits_for_automatic_recovery(engine, monkeypatch):
+    eng, sock = engine
+    recovery_started = threading.Event()
+    release_recovery = threading.Event()
+
+    def delayed_reprocess(*_args):
+        recovery_started.set()
+        assert release_recovery.wait(2)
+        return "recovered text"
+
+    monkeypatch.setattr(server_mod, "transcribe_clip", delayed_reprocess)
+    audio = eng.audio.save("automatic-recovery", AUDIO)
+    assert audio is not None
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({
+            "cmd": "reprocess", "audio": audio, "id": 41,
+            "recovery": True,
+        })
+        for _ in range(100):
+            if recovery_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert recovery_started.is_set()
+
+        await client.send_json({
+            "cmd": "start", "session": "live-after-recovery", "context": {},
+        })
+        await client.send_audio(AUDIO)
+        await client.send_json({"cmd": "stop", "session": "live-after-recovery"})
+        release_recovery.set()
+
+        recovered = await client.recv_event("reprocessed")
+        assert recovered["id"] == 41
+        final = await client.recv_event("final")
+        assert final["session"] == "live-after-recovery"
+        assert eng._reprocessing is False
+    finally:
+        release_recovery.set()
+        client.close()
+
+
+async def test_automatic_recoveries_run_serially(engine, monkeypatch):
+    eng, sock = engine
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def delayed_first(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            assert release_first.wait(2)
+        return f"recovered {calls}"
+
+    monkeypatch.setattr(server_mod, "transcribe_clip", delayed_first)
+    first_audio = eng.audio.save("recovery-one", AUDIO)
+    second_audio = eng.audio.save("recovery-two", AUDIO)
+    assert first_audio is not None and second_audio is not None
+    client = await connect(sock)
+    await client.recv_event("ready")
+    try:
+        await client.send_json({
+            "cmd": "reprocess", "audio": first_audio, "id": 51,
+            "recovery": True,
+        })
+        for _ in range(100):
+            if first_started.is_set():
+                break
+            await asyncio.sleep(0.01)
+        assert first_started.is_set()
+        await client.send_json({
+            "cmd": "reprocess", "audio": second_audio, "id": 52,
+            "recovery": True,
+        })
+        release_first.set()
+
+        recovered = {
+            (await client.recv_event("reprocessed"))["id"],
+            (await client.recv_event("reprocessed"))["id"],
+        }
+        assert recovered == {51, 52}
+        assert calls == 2
+    finally:
+        release_first.set()
+        client.close()
+
+
+async def test_cancel_after_final_before_history_ack_discards_audio(engine):
+    eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start", "session": "cancel-after-final", "context": {},
+    })
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "cancel-after-final"})
+    await client.recv_event("final")
+    assert await eng._final_archives["cancel-after-final"] is True
+
+    await client.send_json({"cmd": "cancel", "session": "cancel-after-final"})
+    cancelled = await client.recv_event("cancelled")
+    assert cancelled["session"] == "cancel-after-final"
+    assert not (eng.audio.active_dir / "cancel-after-final.pcm16.part").exists()
+    assert not (eng.config.audio_dir / eng.audio.name_for("cancel-after-final")).exists()
+    client.close()
+
+
+async def test_failed_final_archive_keeps_recovery_spool(engine, monkeypatch):
+    eng, sock = engine
+    monkeypatch.setattr(eng.audio, "recover_interrupted", lambda _sessions: [])
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "start", "session": "archive-failed", "context": {},
+    })
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "archive-failed"})
+    await client.recv_event("final")
+    assert await eng._final_archives["archive-failed"] is False
+
+    await client.send_json({"cmd": "ack_final", "session": "archive-failed"})
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv_event("pong"))["event"] == "pong"
+    assert (eng.audio.active_dir / "archive-failed.pcm16.part").is_file()
+    client.close()
+
+
 async def test_cancel_sends_confirmation_then_restarts_unhealthy_cleanup(engine):
     eng, sock = engine
 
@@ -949,6 +1138,10 @@ async def test_queue_overflow_aborts_session(engine, monkeypatch):
     assert evt["event"] == "error"
     assert "overflow" in evt["message"]
     assert evt["session"] == "s-of"
+    spool = eng.config.audio_dir / ".active" / "s-of.pcm16.part"
+    assert spool.is_file()
+    accepted_frames = 3 + 1 + 5 + 1  # queued + in-flight + allowed drops + aborting frame
+    assert spool.stat().st_size == AUDIO.size * 2 * accepted_frames
     release.set()
 
     # engine recovered: idle again and responsive

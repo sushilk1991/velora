@@ -1157,6 +1157,41 @@ async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(engin
     assert len(eng.cleanup.calls) == 4
 
 
+async def test_partial_ui_reviewer_cannot_claim_goal_met(engine):
+    partial = _structured_ui(active="Hemesh Singh")
+    partial["complete"] = False
+    controller = turn([
+        {"do": "wait_frontmost", "app": "Slack"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+         "role": "AXButton", "label": "Hemesh Singh"},
+    ], goal="open Hemesh Singh on Slack", sends=False)
+    invalid_completion = json.dumps({
+        "safe": False, "goal_met": True, "target": "Hemesh Singh",
+        "evidence": {"index": 28, "role": "AXButton",
+                     "label": "Hemesh Singh"},
+    })
+    eng, sock = engine
+    eng.cleanup = FakePlanner(
+        controller, invalid_completion, controller, invalid_completion)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="open Hemesh Singh on Slack",
+        context={"frontmost_app": "Slack",
+                 "frontmost_bundle": "com.tinyspeck.slackmacgap",
+                 "running_apps": ["Slack"],
+                 "ui_snapshot": partial},
+    )
+
+    event = await client.recv_event("action_failed")
+
+    assert event["code"] == "plan_invalid"
+    assert "partial UI cannot prove the goal is complete" in event["error"]
+    assert "structured UI is incomplete" not in event["error"]
+    assert len(eng.cleanup.calls) == 4
+
+
 async def test_ui_action_reviewer_replaces_active_header_press_with_proof(engine):
     eng, sock = engine
     first = turn(

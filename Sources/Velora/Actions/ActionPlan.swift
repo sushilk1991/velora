@@ -500,14 +500,25 @@ extension ActionPlan {
 
         switch purpose {
         case .target:
-            guard snapshot.source == .native,
-                  !snapshot.bundleID.isEmpty,
+            guard !snapshot.bundleID.isEmpty,
                   !snapshot.windowTitle.isEmpty || snapshot.windowID != nil,
-                  ScreenContext.isEditableActionRole(role), element.focused
+                  ScreenContext.isEditableActionRole(role)
             else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
-            if snapshot.complete,
+            switch snapshot.source {
+            case .native:
+                guard element.focused else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: step)
+                }
+            case .cua:
+                guard !snapshot.complete, snapshot.windowID != nil,
+                      element.actions.contains(ActionUICapability.cuaClick)
+                else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: step)
+                }
+            }
+            if snapshot.source == .native, snapshot.complete,
                !ActionUIEvidencePolicy.mayVerify(
-                index: index, in: snapshot.elements) {
+                    index: index, in: snapshot.elements) {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
         case .goal:

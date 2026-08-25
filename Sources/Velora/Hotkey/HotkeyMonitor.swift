@@ -37,6 +37,7 @@ protocol HotkeyMonitorDelegate: AnyObject {
 enum UserInputActivity {
     private static let lock = NSLock()
     private static var value: UInt64 = 0
+    private static var lastNanos: UInt64 = 0
 
     static func snapshot() -> UInt64 {
         lock.lock()
@@ -47,7 +48,18 @@ enum UserInputActivity {
     static func mark() {
         lock.lock()
         value &+= 1
+        lastNanos = DispatchTime.now().uptimeNanoseconds
         lock.unlock()
+    }
+
+    static func isQuiet(for seconds: TimeInterval) -> Bool {
+        guard seconds > 0 else { return true }
+        lock.lock()
+        let last = lastNanos
+        lock.unlock()
+        guard last > 0 else { return true }
+        let elapsed = Double(DispatchTime.now().uptimeNanoseconds &- last) / 1_000_000_000
+        return elapsed >= seconds
     }
 }
 
@@ -244,6 +256,7 @@ final class HotkeyMonitor {
             | (1 << CGEventType.leftMouseDown.rawValue)
             | (1 << CGEventType.rightMouseDown.rawValue)
             | (1 << CGEventType.otherMouseDown.rawValue)
+            | (1 << CGEventType.scrollWheel.rawValue)
 
         // C callback: cannot capture context; self travels via refcon.
         let callback: CGEventTapCallBack = { _, type, event, refcon in
@@ -331,7 +344,7 @@ final class HotkeyMonitor {
                 comboCanBeSuppressed: canSuppressComboEvents)
         case .keyUp:
             return handleKeyUp(keyCode: keyCode)
-        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
             if !isVeloraEvent {
                 UserInputActivity.mark()
                 emit { $0.nonHotkeyInput() }
@@ -347,7 +360,8 @@ final class HotkeyMonitor {
     private func startGlobalMonitor() {
         globalMonitor = NSEvent.addGlobalMonitorForEvents(
             matching: [.flagsChanged, .keyDown, .keyUp,
-                       .leftMouseDown, .rightMouseDown, .otherMouseDown]
+                       .leftMouseDown, .rightMouseDown, .otherMouseDown,
+                       .scrollWheel]
         ) { [weak self] event in
             guard let self else { return }
             let flags = Hotkey.cgFlags(from: event.modifierFlags)
@@ -360,7 +374,7 @@ final class HotkeyMonitor {
                     isRepeat: event.isARepeat, comboCanBeSuppressed: false)
             case .keyUp:
                 _ = self.handleKeyUp(keyCode: Int64(event.keyCode))
-            case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            case .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel:
                 UserInputActivity.mark()
                 self.emit { $0.nonHotkeyInput() }
             default:

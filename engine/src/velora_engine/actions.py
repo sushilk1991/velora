@@ -935,6 +935,12 @@ def parse_ui_action_review(
     if obj.get("safe") is True:
         return {"safe": True}
     if obj.get("goal_met") is True:
+        if not snapshot.get("complete"):
+            return {
+                "safe": False,
+                "goal_met": False,
+                "reason": "partial UI cannot prove the goal is complete",
+            }
         evidence = _exact_noncollection_ui_evidence(
             obj.get("evidence"), snapshot, prefix="UI action reviewer",
             bind_current=True)

@@ -40,6 +40,15 @@ enum EngineEvent {
         cleanupMs: Int?, cleanupWallMs: Int?, cleanupApplied: Bool,
         totalMs: Int?, audio: String?, autoStopped: Bool)
 
+    /// Graceful-termination acknowledgement after the engine sealed the
+    /// active spool. This never carries text and is never inserted.
+    case interrupted(session: String, durationS: Double)
+
+    /// A prior process ended mid-dictation. The archived audio is reprocessed
+    /// into History only; it never enters the live final/insertion path.
+    case interruptedDictation(session: String, audio: String, durationS: Double)
+    case interruptedAck(session: String)
+
     /// Result of a History `reprocess` command: a re-run of an archived clip
     /// through a (possibly different) STT model / mode. Routed to the History
     /// UI, not the live dictation flow.
@@ -152,6 +161,17 @@ enum EngineEvent {
                 totalMs: object["total_ms"] as? Int,
                 audio: object["audio"] as? String,
                 autoStopped: object["auto_stopped"] as? Bool ?? false)
+        case "interrupted":
+            return .interrupted(
+                session: object["session"] as? String ?? "",
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0)
+        case "interrupted_dictation":
+            return .interruptedDictation(
+                session: object["session"] as? String ?? "",
+                audio: object["audio"] as? String ?? "",
+                durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0)
+        case "interrupted_ack":
+            return .interruptedAck(session: object["session"] as? String ?? "")
         case "reprocessed":
             return .reprocessed(
                 id: (object["id"] as? Int).map(Int64.init),

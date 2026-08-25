@@ -282,6 +282,14 @@ final class DictationController: NSObject {
     /// A menubar "Reformat Last as…" round-trip in flight: the history row and
     /// the app to paste the re-formatted result back into.
     private var pendingReformat: (id: Int64, bundleID: String?)?
+    /// Audio-only crash recoveries being reprocessed into their durable
+    /// History rows. They never enter the live final or insertion path.
+    private var interruptedRows: [Int64: String] = [:]
+    private var terminationSession: String?
+    private var terminationCompletion: (() -> Void)?
+    private var terminationTimer: Timer?
+    private var stopEnqueuedSession: String?
+    private static let terminationSealTimeout: TimeInterval = 2
     /// Safe Voice Edit: the recording session whose transcript is an edit
     /// INSTRUCTION for `selection`, not text to paste.
     private var editSession: (
@@ -412,6 +420,7 @@ final class DictationController: NSObject {
     /// is already saved and they are safe to resume on a later edit.
     var hasUserOperationInFlight: Bool {
         phase != .idle
+            || history.hasPendingWrites
             || pendingReformat != nil
             || pendingEdit != nil
             || sublimeCaptureID != nil
@@ -729,30 +738,127 @@ final class DictationController: NSObject {
         }
     }
 
-    /// Completes every app-owned or broker-owned dictation before teardown.
-    /// Pending consent is completed immediately; dismissing its alert cannot
-    /// start capture because the approval state and lifecycle gate are cleared
-    /// first. Idempotent for applicationShouldTerminate/applicationWillTerminate.
-    func cancelForTermination() {
+    /// Drains the final microphone tail and asks the engine to seal its spool
+    /// before AppKit tears either process down. Recovery is History-only on the
+    /// next launch; this path never marks the session as an explicit cancel.
+    func preserveForTermination(completion: @escaping () -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
+        guard !terminating else {
+            completion()
+            return
+        }
         terminating = true
         clearSublimeCapture()
         cancelSublimeApply()
+        cancelStreamDraft()
         if let approval = externalApproval {
             externalApproval = nil
             approval.completion(.failure(.cancelled))
             VisibleAlert.dismiss(approval.alertToken)
         }
-        if phase != .idle {
-            cancel()
-        } else if let request = externalRequest {
+        if let request = externalRequest {
             externalRequest = nil
             request.completion(.failure(.cancelled))
         }
+        editSession?.selection.discardMutableIdentity()
+        editSession = nil
+
+        guard phase != .idle else {
+            mediaPlayback.restoreImmediatelyForTermination()
+            completion()
+            return
+        }
+        let terminatingSession = sessionID
+        beginTermination(session: terminatingSession, completion: completion)
+
+        // `.transcribing` begins before AudioCapture finishes flushing its
+        // tail. Arm the bounded wait only after that callback enqueues stop.
+        guard phase != .transcribing else {
+            mediaPlayback.restoreImmediatelyForTermination()
+            if stopEnqueuedSession == terminatingSession {
+                armTerminationTimer()
+            }
+            return
+        }
+
+        let interruptedSession = terminatingSession
+        capture.stop { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, self.terminationSession == interruptedSession else { return }
+                self.mediaPlayback.restoreImmediatelyForTermination()
+                self.supervisor.send([
+                    "cmd": "interrupt", "session": interruptedSession,
+                ])
+                self.armTerminationTimer()
+            }
+        }
+    }
+
+    private func beginTermination(
+        session: String, completion: @escaping () -> Void
+    ) {
+        terminationSession = session
+        terminationCompletion = completion
+    }
+
+    private func armTerminationTimer() {
+        guard terminationSession != nil, terminationTimer == nil else { return }
+        terminationTimer = Timer.scheduledTimer(
+            withTimeInterval: Self.terminationSealTimeout, repeats: false
+        ) { [weak self] _ in
+            NSLog("Velora: termination persistence timed out")
+            self?.finishTermination()
+        }
+    }
+
+    /// Idempotent fallback for applicationWillTerminate. Once preservation
+    /// started, a later lifecycle callback must not turn it into deletion.
+    func cancelForTermination() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard !terminating else {
+            mediaPlayback.restoreImmediatelyForTermination()
+            return
+        }
+        preserveForTermination {}
+    }
+
+    private func finishTermination() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        terminationTimer?.invalidate()
+        terminationTimer = nil
+        terminationSession = nil
+        let completion = terminationCompletion
+        terminationCompletion = nil
         mediaPlayback.restoreImmediatelyForTermination()
+        completion?()
     }
 
     // MARK: - Reformat last (menubar quick-override, off the hot path)
+
+    private func recoverInterrupted(
+        session: String, audio: String, durationS: Double
+    ) {
+        guard !session.isEmpty, !audio.isEmpty, durationS.isFinite,
+              AppConfig.archivedAudioURL(name: audio) != nil,
+              let record = history.ensureInterrupted(
+                session: session, audio: audio,
+                durationMs: max(0, Int(durationS * 1_000)))
+        else {
+            NSLog("Velora: rejected interrupted dictation session=%@ audio=%@", session, audio)
+            return
+        }
+        if !record.final.isEmpty {
+            supervisor.send(["cmd": "ack_interrupted", "session": session])
+            return
+        }
+        guard interruptedRows[record.id] == nil else { return }
+        interruptedRows[record.id] = session
+        supervisor.send([
+            "cmd": "reprocess", "audio": audio, "id": record.id,
+            "recovery": true,
+        ])
+        NSLog("Velora: recovering interrupted dictation session=%@", session)
+    }
 
     /// Built-in modes offered in the "Reformat Last as…" menu.
     static let reformatModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
@@ -1493,6 +1599,7 @@ final class DictationController: NSObject {
         mediaPlayback.pauseForDictation()
 
         sessionID = UUID().uuidString
+        stopEnqueuedSession = nil
         rawTranscript = nil
         sttMs = nil
         recordingStart = nil
@@ -1656,7 +1763,11 @@ final class DictationController: NSObject {
                   self.cancelledSessionID != stoppedSession else { return }
             NSLog("Velora: engine stop session=%@", stoppedSession)
             self.supervisor.send(stopCmd)
+            self.stopEnqueuedSession = stoppedSession
             self.armTranscribeTimeout()
+            if self.terminationSession == stoppedSession {
+                self.armTerminationTimer()
+            }
         }
     }
 
@@ -1839,6 +1950,7 @@ final class DictationController: NSObject {
             autoStopLimitSeconds = limitS > 0
                 ? limitS
                 : config.portableEngineSettings.maximumRecordingSeconds
+            stopEnqueuedSession = session
             if isRecording {
                 sounds.play(.stop)
                 stopCaptureAndRestoreMedia()
@@ -1863,6 +1975,29 @@ final class DictationController: NSObject {
             else {
                 NSLog("Velora: ignoring final for session=%@ (current=%@ cancelled=%@ consumed=%@)",
                       session, sessionID, cancelledSessionID ?? "none", consumedSessionID ?? "none")
+                return
+            }
+            let effectiveRaw = raw.isEmpty ? (rawTranscript ?? text) : raw
+            if terminating {
+                // The bounded quit timer may already have released AppKit.
+                // Never turn its late final into a paste; the unacknowledged
+                // engine spool is the recovery source on the next launch.
+                guard session == terminationSession else { return }
+                consumedSessionID = session
+                transcribeTimer?.invalidate()
+                transcribeTimer = nil
+                let persisted = history.insertForTermination(makeHistoryRecord(
+                    text: text, raw: effectiveRaw, context: sessionContext,
+                    mode: mode, cleanupMs: cleanupMs,
+                    cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: totalMs, audio: audio))
+                if !persisted {
+                    NSLog("Velora: termination history insert failed session=%@", session)
+                    return
+                }
+                ackFinalAudio(audio, session: session)
+                finishTermination()
                 return
             }
             // Grace-bounded auto-insertion: a much later result must not land
@@ -1894,7 +2029,6 @@ final class DictationController: NSObject {
             }
             // Safe Voice Edit: this session's transcript is an INSTRUCTION for
             // the captured selection, never text to paste.
-            let effectiveRaw = raw.isEmpty ? (rawTranscript ?? text) : raw
             if StreamTypingFinalPolicy.shouldDeferFinal(
                 session: session,
                 cancellationSession: streamCancellation?.session
@@ -1912,6 +2046,7 @@ final class DictationController: NSObject {
                 let instruction = (raw.isEmpty ? text : raw)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 sendEditCommand(edit: edit, instruction: instruction)
+                ackFinalAudio(audio, session: session)
                 return
             }
             if let stream = streamSession, stream.session == session {
@@ -1938,6 +2073,25 @@ final class DictationController: NSObject {
             let id, _, let raw, let text, let mode, _,
             let sttMs, let cleanupMs, let cleanupApplied, let cleanupWallMs
         ):
+            if let id, let session = interruptedRows[id] {
+                guard history.updateAfterReprocess(
+                    id: id, raw: raw, final: text, mode: mode,
+                    sttMs: sttMs, cleanupMs: cleanupMs,
+                    cleanupApplied: cleanupApplied, cleanupWallMs: cleanupWallMs
+                ) else {
+                    interruptedRows.removeValue(forKey: id)
+                    showNotice(
+                        symbol: "waveform.badge.exclamationmark",
+                        message: "Recovered audio saved — transcription needs retry")
+                    break
+                }
+                interruptedRows.removeValue(forKey: id)
+                supervisor.send(["cmd": "ack_interrupted", "session": session])
+                showNotice(
+                    symbol: "waveform.badge.checkmark",
+                    message: "Recovered interrupted dictation")
+                break
+            }
             // Only the menubar "Reformat Last as…" path is handled here; the
             // History tab consumes its own reprocess replies via notification.
             if let id, pendingReformat?.id == id {
@@ -1948,9 +2102,25 @@ final class DictationController: NSObject {
             }
 
         case .reprocessFailed(let id, let error, _):
+            if let id, interruptedRows.removeValue(forKey: id) != nil {
+                showNotice(
+                    symbol: "waveform.badge.exclamationmark",
+                    message: "Recovered audio saved — transcription needs retry")
+                break
+            }
             guard let id, pendingReformat?.id == id else { break }
             pendingReformat = nil
             showError("Reformat failed: \(error)")
+
+        case .interrupted(let session, _):
+            guard session == terminationSession else { break }
+            finishTermination()
+
+        case .interruptedDictation(let session, let audio, let durationS):
+            recoverInterrupted(session: session, audio: audio, durationS: durationS)
+
+        case .interruptedAck:
+            break
 
         case .edited(let id, let text, let applied, let ms, let reason):
             guard let pending = pendingEdit, pending.id == id else { break }
@@ -2088,6 +2258,7 @@ final class DictationController: NSObject {
                 showNotice(
                     symbol: "exclamationmark.arrow.triangle.2.circlepath",
                     message: "Finished late — action not run")
+                ackFinalAudio(audio, session: session)
                 return
             }
             if audio != nil {
@@ -2118,6 +2289,7 @@ final class DictationController: NSObject {
                     symbol: "exclamationmark.arrow.triangle.2.circlepath",
                     message: "Finished late — command not run")
             }
+            ackFinalAudio(audio, session: sessionID)
             return
         }
 
@@ -2311,6 +2483,7 @@ final class DictationController: NSObject {
                       session == self.sessionID,
                       session != self.cancelledSessionID
                 else { return }
+                self.ackFinalAudio(audio, session: session)
                 guard StreamTypingFinalPolicy.commandMayExecute(after: result) else {
                     self.phase = .idle
                     self.showNotice(
@@ -2426,23 +2599,46 @@ final class DictationController: NSObject {
         cleanupMs: Int?, cleanupApplied: Bool?, cleanupWallMs: Int?,
         finalizationMs: Int?, audio: String?
     ) {
-        let durationMs = recordingDurationMs ?? elapsedRecordingMs
-        history.insert(
-            DictationRecord(
-                timestamp: Date(),
-                bundleID: context?.bundleID,
-                appName: context?.appName,
-                raw: raw,
-                final: text,
-                mode: mode,
-                durationMs: durationMs,
-                cleanupMs: cleanupMs,
-                cleanupWallMs: cleanupWallMs,
-                finalizationMs: finalizationMs,
-                audioPath: audio,
-                sessionID: sessionID.isEmpty ? nil : sessionID,
-                sttMs: sttMs,
-                cleanupApplied: cleanupApplied))
+        let record = makeHistoryRecord(
+            text: text, raw: raw, context: context, mode: mode,
+            cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
+            cleanupWallMs: cleanupWallMs, finalizationMs: finalizationMs,
+            audio: audio)
+        history.insert(record) { [weak self] persisted in
+            guard persisted else {
+                NSLog("Velora: retaining recovery audio after History insert failure")
+                return
+            }
+            guard let session = record.sessionID else { return }
+            self?.ackFinalAudio(audio, session: session)
+        }
+    }
+
+    private func ackFinalAudio(_ audio: String?, session: String) {
+        guard audio != nil else { return }
+        supervisor.send(["cmd": "ack_final", "session": session])
+    }
+
+    private func makeHistoryRecord(
+        text: String, raw: String, context: AppContext?, mode: String?,
+        cleanupMs: Int?, cleanupApplied: Bool?, cleanupWallMs: Int?,
+        finalizationMs: Int?, audio: String?
+    ) -> DictationRecord {
+        DictationRecord(
+            timestamp: Date(),
+            bundleID: context?.bundleID,
+            appName: context?.appName,
+            raw: raw,
+            final: text,
+            mode: mode,
+            durationMs: recordingDurationMs ?? elapsedRecordingMs,
+            cleanupMs: cleanupMs,
+            cleanupWallMs: cleanupWallMs,
+            finalizationMs: finalizationMs,
+            audioPath: audio,
+            sessionID: sessionID.isEmpty ? nil : sessionID,
+            sttMs: sttMs,
+            cleanupApplied: cleanupApplied)
     }
 
     private var elapsedRecordingMs: Int {

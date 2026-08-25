@@ -1230,6 +1230,16 @@ extension Selftest {
         if let pinned { targetState.pin(pinned) }
         expect(targetState.target.map { CFEqual($0.element, focusedRef) } == true,
                "fresh exact verification installs its retained target")
+        targetState.updateDraft("hello")
+        targetState.requireVerification()
+        expect(targetState.draft == "hello"
+               && targetState.target.map { CFEqual($0.element, focusedRef) } == true,
+               "reverification keeps an owned draft until the result is known")
+        if let pinned {
+            targetState.repin(pinned, owns: { _, _ in true })
+        }
+        expect(targetState.draft == "hello",
+               "exact successful reverification retains the proven draft")
         targetState.clearTarget()
         let switchedTarget = ScreenKeystrokeStreamTarget(
             bundleID: "com.tinyspeck.slackmacgap", element: otherRef,
@@ -5076,9 +5086,9 @@ extension Selftest {
                "a native app that is not frontmost routes to the background")
         expect(!route("com.apple.notes", enabled: false),
                "the setting turns routing off")
-        expect(!route("com.example.FutureMessenger", target: "Future Messenger",
-                      contentMayCommit: true),
-               "every sending action keeps the foreground evidence chain")
+        expect(route("com.example.FutureMessenger", target: "Future Messenger",
+                     contentMayCommit: true),
+               "a sending action defers foreground until interaction")
         expect(route("com.tinyspeck.slackmacgap", target: "Slack"),
                "a non-sending draft does not need an app-specific route rule")
         expect(!route("com.google.chrome"),
@@ -5113,6 +5123,7 @@ extension Selftest {
         enabled: Bool = true, healthy: Bool = true,
         starter: FakeDaemonStarter? = nil,
         endDaemon: @escaping () -> Void = {},
+        interactionIsQuiet: (() -> Bool)? = { true },
         localApps: [String: String] = ["Notes": "com.apple.Notes",
                                        "Slack": "com.tinyspeck.slackmacgap"]
     ) -> BackgroundRoutingActionHost {
@@ -5129,6 +5140,7 @@ extension Selftest {
                 return healthy
             }, endDaemon: endDaemon,
             bundleForPID: { fakeBundleID($0, transport: transport) },
+            interactionIsQuiet: interactionIsQuiet,
             localResolve: { name in
                 guard let index = AppMatcher.bestMatch(
                     for: name, in: Array(localApps.keys)) else { return nil }
@@ -5550,15 +5562,14 @@ extension Selftest {
             expect(host.openApp(named: "Notes") == "Notes"
                    && host.frontmostApp()?.name == "Notes",
                    "hidden launch materializes a running app's missing window")
-            expect(system.frontmost?.bundleID == "com.mitchellh.ghostty",
-                   "window materialization preserves the user's foreground app")
+            expect(system.frontmost?.bundleID == "com.mitchellh.ghostty"
+                   && system.sleepCalls.isEmpty,
+                   "Cua owns hidden launch without a Velora focus-poll loop")
         }
 
-        // Electron can activate several seconds after launch_app already
-        // claimed suppression. The launch path must keep guarding the prior
-        // exact window through that late activation window.
+        // A driver that admits failed suppression is not a background route.
+        // Refuse it without adding another foreground manipulation.
         do {
-            let expectedSettleMs = 8_000
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
             system.foregroundWindowValue = ActionWindowIdentity(
@@ -5590,23 +5601,18 @@ extension Selftest {
                     system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
                 }
             }
-            system.onSleep = { _ in
-                guard system.sleepCalls.count == 10 else { return }
-                system.frontmost = ("Notes", "com.apple.notes")
-            }
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
-            expect(host.openApp(named: "Notes") == "Notes",
-                   "failed suppression and late activation both recover")
-            expect(system.sleepCalls.reduce(0, +) == expectedSettleMs
-                   && transport.callCount("bring_to_front") == 2
-                   && system.frontmost?.bundleID == "com.mitchellh.ghostty",
-                   "hidden launch guards the exact prior window for eight seconds")
+            expect(host.openApp(named: "Notes") == nil,
+                   "failed Cua suppression refuses the background route")
+            expect(system.sleepCalls.isEmpty
+                   && transport.callCount("bring_to_front") == 0
+                   && system.frontmost?.bundleID == "com.apple.notes",
+                   "failed suppression adds no Velora focus manipulation")
         }
 
-        // A user may switch apps while the exceptional launch guard is
-        // running. Protect the newly chosen app from a later Electron
-        // activation even when it has no ordinary WindowServer window.
+        // If focus changed to another app while Cua launched, that app belongs
+        // to the user. Failed suppression must not restore over it.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -5616,41 +5622,33 @@ extension Selftest {
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": []]
-            transport.responses["bring_to_front"] = processPresentationReply(800)
+            transport.responses["launch_app"] = [
+                "pid": 500, "bundle_id": "com.apple.Notes",
+                "name": "Notes", "windows": [],
+                "launch_state": [
+                    "requested": true, "process_running": true,
+                    "window_ready": false,
+                ],
+                "self_activation_suppressed": false,
+            ]
             transport.onCall = { tool in
                 if tool == "launch_app" {
+                    system.frontmost = ("Finder", "com.apple.finder")
+                    system.foregroundWindowValue = nil
                     transport.responses["list_windows"] = ["windows": [[
                         "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
                         "bounds": ["width": 800.0, "height": 600.0],
                         "title": "My Note",
                     ]]]
                 }
-                if tool == "bring_to_front" {
-                    system.frontmost = ("Finder", "com.apple.finder")
-                }
-            }
-            system.onSleep = { _ in
-                if system.sleepCalls.count == 5 {
-                    system.frontmost = ("Finder", "com.apple.finder")
-                    system.foregroundWindowValue = nil
-                    var apps = transport.responses["list_apps"]?["apps"]
-                        as? [[String: Any]] ?? []
-                    apps.append([
-                        "name": "Finder", "bundle_id": "com.apple.finder",
-                        "pid": 800, "running": true, "active": true,
-                    ])
-                    transport.responses["list_apps"] = ["apps": apps]
-                }
-                if system.sleepCalls.count == 10 {
-                    system.frontmost = ("Notes", "com.apple.notes")
-                }
             }
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
-            expect(host.openApp(named: "Notes") == "Notes"
+            expect(host.openApp(named: "Notes") == nil
                    && system.frontmost?.bundleID == "com.apple.finder"
-                   && transport.callCount("bring_to_front") == 1,
-                   "late activation restores the app the user switched to")
+                   && transport.callCount("bring_to_front") == 0
+                   && system.sleepCalls.isEmpty,
+                   "failed launch never restores over the app the user chose")
         }
 
         // Search and navigation stay off-screen. Only the engine-attested
@@ -5661,7 +5659,10 @@ extension Selftest {
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
-            let host = makeRoutedHost(system: system, transport: transport)
+            var interactionIsQuiet = false
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                interactionIsQuiet: { interactionIsQuiet })
             host.beginActionInputSession()
             _ = host.openApp(named: "Notes")
             _ = host.frontmostApp()
@@ -5685,6 +5686,12 @@ extension Selftest {
             ])
             transport.responses["list_apps"] = ["apps": apps]
             transport.responses["bring_to_front"] = presentationReply(500, windowID)
+            expect(!host.presentUI(
+                snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                windowID: windowID)
+                && transport.callCount("bring_to_front") == 0,
+                   "active user input defers final draft presentation")
+            interactionIsQuiet = true
             expect(host.presentUI(
                 snapshotID: snapshot.id, bundleID: snapshot.bundleID,
                 windowID: windowID),
@@ -5728,10 +5735,8 @@ extension Selftest {
                 windowID: windowID),
                    "a failed handoff restores a prior app without a window")
             let handoffs = transport.calls.filter { $0.tool == "bring_to_front" }
-            expect(handoffs.count == 2
-                   && handoffs[1].arguments["pid"] as? Int == 700
-                   && handoffs[1].arguments["window_id"] == nil,
-                   "app-only restoration is PID-bound and independently verified")
+            expect(handoffs.count == 1,
+                   "a failed handoff does not disturb the prior app still in front")
         }
 
         let mandatory: [(String, String, Any)] = [
@@ -5800,11 +5805,9 @@ extension Selftest {
             let handoffs = transport.calls.filter {
                 $0.tool == "bring_to_front"
             }
-            expect(handoffs.count == 2
-                   && handoffs[1].arguments["pid"] as? Int == 700
-                   && handoffs[1].arguments["window_id"] as? Int == 70
+            expect(handoffs.count == 1
                    && transport.callCount("type_text") == 0,
-                   "every malformed success restores the exact prior window")
+                   "malformed success leaves the prior foreground window alone")
         }
 
         let derivedFrontmost: [(String, Any, Any, Bool)] = [
@@ -5848,9 +5851,9 @@ extension Selftest {
             let handoffs = transport.calls.filter {
                 $0.tool == "bring_to_front"
             }
-            expect(handoffs.count == (expected ? 1 : 2)
+            expect(handoffs.count == 1
                    && transport.callCount("type_text") == 0,
-                   "frontmost derivation preserves handoff/restoration shape")
+                   "frontmost derivation never restores over unchanged focus")
         }
 
         for mismatched in [false, true] {
@@ -5891,11 +5894,9 @@ extension Selftest {
                     ? "a mismatched target presentation is refused"
                     : "a partial target presentation is refused")
             let handoffs = transport.calls.filter { $0.tool == "bring_to_front" }
-            expect(handoffs.count == 2
-                   && handoffs[0].arguments["pid"] as? Int == 500
-                   && handoffs[1].arguments["pid"] as? Int == 700
-                   && handoffs[1].arguments["window_id"] as? Int == 70,
-                   "failed presentation restores the exact prior pid and window")
+            expect(handoffs.count == 1
+                   && handoffs[0].arguments["pid"] as? Int == 500,
+                   "failed presentation leaves an unchanged prior window alone")
             expect(transport.callCount("type_text") == 0,
                    "failed presentation types nothing")
             expect(!host.isDrivingInBackground,
@@ -6161,14 +6162,12 @@ extension Selftest {
                    "later degradation also leaves foreground ownership alone")
         }
 
-        // Cua refuses every background route for a window on another macOS
-        // Space. Do not enter a readiness loop that can never resolve: use
-        // the foreground host once and release the per-action daemon.
+        // An off-Space target is still an exact read-only target. Keep it
+        // routed until interaction, even if the user changes foreground apps
+        // while the Cua window probe is in flight.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            system.appsByName["Notes"] = ("Notes impostor", "com.example.notes")
-            system.appsByPID[500] = ("Notes", "com.apple.Notes", 9)
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": [
@@ -6178,22 +6177,112 @@ extension Selftest {
                  "bounds": ["width": 800.0, "height": 600.0],
                  "title": "My Note", "on_current_space": false],
             ]]
+            transport.responses["get_window_state"] = [
+                "degraded": true, "elements": [],
+            ]
+            transport.onCall = { tool in
+                if tool == "list_windows" {
+                    system.frontmost = ("Finder", "com.apple.finder")
+                }
+                if tool == "bring_to_front" {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                    system.foregroundWindowValue = ActionWindowIdentity(
+                        name: "Notes", bundleID: "com.apple.notes",
+                        pid: 500, windowID: 9)
+                }
+            }
             var daemonStops = 0
             let host = makeRoutedHost(
                 system: system, transport: transport,
                 endDaemon: { daemonStops += 1 })
             host.beginActionInputSession()
             expect(host.openApp(named: "Notes") == "Notes",
-                   "an off-Space target falls back to foreground execution")
-            expect(!host.isDrivingInBackground
-                   && system.frontmost?.bundleID == "com.apple.Notes",
-                   "off-Space fallback does not claim background readiness")
-            expect(daemonStops == 1,
-                   "off-Space fallback releases its private Cua child")
+                   "an off-Space target remains available after a user focus change")
+            expect(host.isDrivingInBackground
+                   && host.frontmostApp()?.name == "Notes"
+                   && system.frontmost?.bundleID == "com.apple.finder",
+                   "off-Space observation never takes foreground ownership")
+            expect(daemonStops == 0,
+                   "the private child remains available until interaction")
             expect(transport.callCount("bring_to_front") == 0,
-                   "off-Space fallback delegates after Cua teardown")
-            expect(system.log == ["openExact(500)"],
-                   "off-Space fallback preserves resolved PID and bundle")
+                   "off-Space planning never calls bring_to_front")
+            expect(system.log.isEmpty,
+                   "off-Space planning never delegates to the foreground host")
+
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Finder", bundleID: "com.apple.finder",
+                pid: 800, windowID: 80)
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            let firstInteraction = ActionExecutor(host: host).run(ActionPlan(
+                goal: "dismiss the note", sends: false,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .key(name: "escape", mods: [], repeatCount: 1),
+                ], unsupported: nil))
+            expect(firstInteraction.outcome == .completed,
+                   "off-Space mutation follows the exact handoff immediately")
+            expect(transport.callCount("bring_to_front") == 1
+                   && transport.callCount("press_key") == 0
+                   && system.keys.count == 1,
+                   "off-Space handoff uses native input without planner delay")
+            expect(daemonStops == 1,
+                   "off-Space handoff releases its private Cua child")
+        }
+
+        // Cua can keep some AppKit windows actionable across Spaces when the
+        // exact window still has a fresh AX tree. Let the driver prove that
+        // capability instead of forcing a foreground transition from Space
+        // membership alone.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["list_windows"] = ["windows": [
+                ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+                 "bounds": ["width": 800.0, "height": 600.0],
+                 "title": "My Note", "on_current_space": false],
+            ]]
+            transport.responses["press_key"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            expect(host.openApp(named: "Notes") == "Notes"
+                   && host.frontmostApp()?.name == "Notes",
+                   "an off-Space exact AX tree remains background-actionable")
+            let result = ActionExecutor(host: host).run(ActionPlan(
+                goal: "dismiss the note", sends: false,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .key(name: "escape", mods: [], repeatCount: 1),
+                ], unsupported: nil))
+            expect(result.outcome == .completed
+                   && transport.callCount("press_key") == 1,
+                   "Cua owns the supported off-Space background route")
+            expect(transport.callCount("bring_to_front") == 0
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "an actionable off-Space tree never steals foreground")
+        }
+
+        // Space membership is private, nullable metadata. An exact document
+        // window with a usable Cua AX tree must not die before the driver gets
+        // to make the background-delivery decision.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["list_windows"] = ["windows": [
+                ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+                 "bounds": ["width": 800.0, "height": 600.0],
+                 "title": "My Note"],
+            ]]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            expect(host.openApp(named: "Notes") == "Notes"
+                   && host.frontmostApp()?.name == "Notes",
+                   "null Space metadata defers to the exact Cua AX result")
+            expect(host.isDrivingInBackground && system.log.isEmpty,
+                   "null Space metadata never causes speculative activation")
         }
 
         // A target whose window stops resolving reads as lost, not as fine —
@@ -6345,10 +6434,12 @@ extension Selftest {
             let expectedFrontmost = failure == "launch_focus_changed"
                 ? "com.apple.finder" : "com.mitchellh.ghostty"
             let opened = host.openApp(named: "Notes")
-            expect(opened == nil
+            let expectedOpened = failure == "launch_focus_changed"
+                ? "Notes" : nil
+            expect(opened == expectedOpened
                    && system.frontmost?.bundleID == expectedFrontmost
                    && !system.log.contains("openApp(Notes)"),
-                   "eligible background \(failure) failure never activates foreground")
+                   "eligible background \(failure) preserves foreground ownership")
         }
         do {
             let system = FakeActionHost()
@@ -6368,17 +6459,209 @@ extension Selftest {
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            system.appsByName["Notes"] = ("Notes", "com.apple.notes")
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             let starter = FakeDaemonStarter()
+            var interactionIsQuiet = false
             let host = makeRoutedHost(
-                system: system, transport: transport, starter: starter)
+                system: system, transport: transport, starter: starter,
+                interactionIsQuiet: { interactionIsQuiet })
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            expect(host.openApp(named: "Notes") == "Notes"
+                   && host.frontmostApp()?.name == "Notes",
+                   "a sending action resolves and observes the exact Cua target")
+            expect(system.log.isEmpty && starter.starts == 1
+                   && transport.callCount("bring_to_front") == 0,
+                   "sending open_app stays background and defers presentation")
+
+            let userBusy = ActionExecutor(host: host).run(ActionPlan(
+                goal: "write a note", sends: true,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .typeText("hello"),
+                ], unsupported: nil))
+            if case .failed(_, _, let recoverable) = userBusy.outcome {
+                expect(recoverable,
+                       "active user input defers the foreground handoff")
+            } else {
+                expect(false, "active user input must not foreground the target")
+            }
+            expect(transport.callCount("bring_to_front") == 0
+                   && host.isDrivingInBackground,
+                   "a deferred handoff leaves foreground ownership untouched")
+
+            interactionIsQuiet = true
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 9)
+            }
+            let firstInteraction = ActionExecutor(host: host).run(ActionPlan(
+                goal: "write a note", sends: true,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .typeText("hello"),
+                ], unsupported: nil))
+            expect(firstInteraction.outcome == .completed,
+                   "the exact handoff completes the authorized mutation immediately")
+            expect(transport.callCount("bring_to_front") == 1
+                   && transport.callCount("type_text") == 0
+                   && system.typed == ["hello"],
+                   "the handoff uses native input without planner focus dwell")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 9)
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
             host.prepareForActionPlan(sends: true)
             _ = host.openApp(named: "Notes")
-            expect(system.log.contains("openApp(Notes)") && starter.starts == 0,
-                   "every sending action stays foreground without starting Cua")
+            _ = host.frontmostApp()
+            expect(host.prepareInteraction() == .ready,
+                   "the exact target window reaches native handoff")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Notes", bundleID: "com.apple.notes",
+                pid: 500, windowID: 99)
+            expect(host.frontmostApp() == nil,
+                   "another window in the same process does not retain handoff")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            var handoffCalls = 0
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                handoffCalls += 1
+                guard handoffCalls == 1 else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 99)
+                UserInputActivity.mark()
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            expect(host.prepareInteraction() == .deferred
+                   && handoffCalls == 1
+                   && system.foregroundWindowValue?.windowID == 99,
+                   "user-selected target window is never restored away")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var quiet = false
+            system.onSleep = { _ in
+                if system.sleepCalls.count == 3 { quiet = true }
+            }
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 9)
+            }
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                interactionIsQuiet: { quiet })
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            let result = ActionExecutor(host: host).run(ActionPlan(
+                goal: "write a note", sends: true,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .typeText("hello"),
+                ], unsupported: nil))
+            expect(result.outcome == .completed
+                   && system.sleepCalls.count == 3,
+                   "handoff waits locally for quiet instead of replanning")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var cuaState = noteWindowState()
+            var cuaElements = cuaState["elements"] as? [[String: Any]] ?? []
+            cuaElements[1]["label"] = "Message Hemesh"
+            cuaState["elements"] = cuaElements
+            transport.responses["get_window_state"] = cuaState
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 9)
+            }
+            system.verifiableUIIndices = [1]
+            system.uiSnapshotValue = ActionUISnapshot(
+                id: "native-after-handoff", source: .native,
+                appName: "Notes", bundleID: "com.apple.notes",
+                windowTitle: "My Note", windowID: 9, complete: false,
+                elements: [ActionUIElement(
+                    index: 1, parentIndex: 0, depth: 1,
+                    role: "AXTextArea", label: "Message Hemesh",
+                    frame: nil, actions: ["AXFocus"], enabled: true,
+                    selected: false, focused: true, inWebContent: false)])
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "sending verification has routed UI evidence")
+                return
+            }
+            var state = ActionPlan.BatchState()
+            state.requireUITargetVerification = true
+            state.structuredUIAvailable = true
+            state.structuredUIComplete = false
+            state.structuredUISnapshot = snapshot
+            state.spokenCommand = "send hello to Hemesh"
+            guard let plan = decodeBatch("""
+            {"sends":true,"goal":"message Hemesh","steps":[
+              {"do":"wait_frontmost","app":"Notes"},
+              {"do":"verify_ui","snapshot":"\(snapshot.id)","index":1,
+               "role":"AXTextArea","label":"Message Hemesh",
+               "target":"Hemesh","attestation":"engine"},
+              {"do":"type_text","text":"hello"}]}
+            """, state: &state) else {
+                expect(false, "the real Cua sending batch decodes")
+                return
+            }
+            let result = ActionExecutor(host: host).run(plan)
+            expect(result.outcome == .completed
+                   && transport.callCount("bring_to_front") == 1
+                   && system.typed == ["hello"],
+                   "real sending verification hands off and types in one batch")
         }
         do {
             let system = FakeActionHost()
@@ -6468,12 +6751,13 @@ extension Selftest {
             host.beginActionInputSession()
             host.prepareForActionPlan(sends: true)
             _ = host.openApp(named: "Slack")
-            expect(starter.starts == 0,
-                   "a sending action never starts the driver daemon")
+            expect(starter.starts == 1
+                   && !system.log.contains("openApp(Slack)"),
+                   "a sending action resolves through the private driver")
             host.beginActionInputSession()
             _ = host.openApp(named: "Notes")
-            expect(starter.starts == 1,
-                   "an action that does route starts it exactly once")
+            expect(starter.starts == 2,
+                   "each routed action starts its private driver once")
         }
 
         // The next action starts unrouted even after a routed one.

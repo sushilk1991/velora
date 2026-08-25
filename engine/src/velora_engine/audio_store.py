@@ -19,7 +19,10 @@ import re
 import time
 import uuid
 import wave
+from collections.abc import Collection
+from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 import numpy as np
 
@@ -31,6 +34,38 @@ SAMPLE_RATE = 16_000
 # client-supplied session string) plus the extension. Anything with a path
 # separator or "." traversal is rejected before it touches the filesystem.
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(flac|wav)$")
+_ACTIVE_NAME_RE = re.compile(r"^([A-Za-z0-9_-]+)\.pcm16\.part$")
+
+
+@dataclass(frozen=True)
+class InterruptedAudio:
+    session: str
+    audio: str
+    duration_s: float
+
+
+class ActiveAudioSpool:
+    """Append-only, crash-readable PCM16 for one live dictation."""
+
+    def __init__(self, path: Path, handle: BinaryIO) -> None:
+        self.path = path
+        self._handle = handle
+
+    def append(self, pcm: np.ndarray) -> bool:
+        if self._handle.closed:
+            return False
+        try:
+            samples = np.asarray(pcm, dtype=np.float32)
+            samples = np.clip(np.nan_to_num(samples), -1.0, 1.0)
+            payload = (samples * 32767.0).astype("<i2").tobytes()
+            return self._handle.write(payload) == len(payload)
+        except OSError:
+            log.exception("failed to append active audio spool %s", self.path.name)
+            return False
+
+    def close(self) -> None:
+        with contextlib.suppress(OSError):
+            self._handle.close()
 
 
 def _soundfile():
@@ -56,6 +91,113 @@ class AudioStore:
         except OSError:  # pragma: no cover — best effort
             pass
 
+    @property
+    def active_dir(self) -> Path:
+        return self.dir / ".active"
+
+    @staticmethod
+    def _stem(session_id: str) -> str:
+        return re.sub(r"[^A-Za-z0-9_-]", "-", session_id) or "clip"
+
+    def _active_path(self, session_id: str) -> Path:
+        return self.active_dir / f"{self._stem(session_id)}.pcm16.part"
+
+    def begin_active(self, session_id: str) -> ActiveAudioSpool | None:
+        """Create one owner-only spool without replacing prior crash evidence."""
+        self._ensure_dir()
+        self.active_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(self.active_dir, 0o700)
+        path = self._active_path(session_id)
+        descriptor: int | None = None
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_APPEND
+            descriptor = os.open(path, flags, 0o600)
+            handle = os.fdopen(descriptor, "wb", buffering=0)
+            descriptor = None
+            return ActiveAudioSpool(path, handle)
+        except OSError:
+            log.exception("failed to create active audio spool %s", path.name)
+            return None
+        finally:
+            if descriptor is not None:
+                with contextlib.suppress(OSError):
+                    os.close(descriptor)
+
+    def pending_interrupted(self) -> tuple[str, ...]:
+        """Snapshot safe stale-session names before a new live session starts."""
+        try:
+            paths = sorted(self.active_dir.glob("*.pcm16.part"))
+        except OSError:
+            return ()
+        sessions: list[str] = []
+        for path in paths:
+            match = _ACTIVE_NAME_RE.match(path.name)
+            if match is not None and not path.is_symlink():
+                sessions.append(match.group(1))
+        return tuple(sessions)
+
+    def recover_interrupted(
+        self, sessions: Collection[str] | None = None,
+    ) -> list[InterruptedAudio]:
+        """Archive readable stale spools but retain them until the app acks."""
+        wanted = set(sessions) if sessions is not None else set(self.pending_interrupted())
+        recovered: list[InterruptedAudio] = []
+        for session in sorted(wanted):
+            path = self._active_path(session)
+            match = _ACTIVE_NAME_RE.match(path.name)
+            if match is None or path.is_symlink():
+                continue
+            try:
+                byte_count = path.stat().st_size
+                if byte_count == 0:
+                    self._unlink(path)
+                    continue
+                pcm16 = np.fromfile(path, dtype="<i2", count=byte_count // 2)
+            except OSError:
+                continue
+            if pcm16.size == 0:
+                continue
+            session = match.group(1)
+            audio = self.name_for(session)
+            archived = self.path_for(audio)
+            if archived is None or not archived.is_file():
+                pcm = (pcm16.astype(np.float32) / 32768.0).astype(np.float32)
+                audio = self.save(session, pcm) or ""
+            if not audio:
+                continue
+            recovered.append(InterruptedAudio(
+                session=session,
+                audio=audio,
+                duration_s=float(pcm16.size) / SAMPLE_RATE,
+            ))
+        return recovered
+
+    def finalize_active(self, spool: ActiveAudioSpool) -> str | None:
+        """Atomically archive a normal stop, then remove its active spool."""
+        spool.close()
+        try:
+            pcm16 = np.fromfile(spool.path, dtype="<i2")
+        except OSError:
+            return None
+        if pcm16.size == 0:
+            self._unlink(spool.path)
+            return None
+        pcm = (pcm16.astype(np.float32) / 32768.0).astype(np.float32)
+        saved = self.save(spool.path.name.removesuffix(".pcm16.part"), pcm)
+        if saved:
+            self._unlink(spool.path)
+        return saved
+
+    def ack_interrupted(self, session_id: str) -> bool:
+        """Remove only the acknowledged session's retained crash spool."""
+        return self._unlink(self._active_path(session_id))
+
+    def discard_active(self, spool: ActiveAudioSpool) -> bool:
+        """Close and delete audio after an explicit user cancellation."""
+        spool.close()
+        return self._unlink(spool.path)
+
     def path_for(self, name: str) -> Path | None:
         """Resolve a clip basename to a path, rejecting traversal/odd names."""
         if not name or not _SAFE_NAME_RE.match(name):
@@ -67,8 +209,7 @@ class AudioStore:
     def name_for(self, session_id: str) -> str:
         """The clip basename `save` will produce for this session — lets the
         caller report the name without waiting for the disk write."""
-        stem = re.sub(r"[^A-Za-z0-9_-]", "-", session_id) or "clip"
-        return f"{stem}.{self.ext}"
+        return f"{self._stem(session_id)}.{self.ext}"
 
     def save(self, session_id: str, pcm: np.ndarray) -> str | None:
         """Persist one session's PCM (float32, 16kHz mono). Returns the clip

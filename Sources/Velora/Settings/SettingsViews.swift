@@ -516,7 +516,7 @@ struct DictationSettingsView: View {
                 Toggle(isOn: $model.saveAudio) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Keep audio recordings")
-                        Text("Replay or re-transcribe past dictations from History. Recordings stay on this Mac and are deleted after \(Int(model.audioRetentionDays / 30)) months.")
+                        Text("Replay or re-transcribe past dictations, and recover one interrupted by a crash or restart. Recordings stay on this Mac and are deleted after \(Int(model.audioRetentionDays / 30)) months.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }

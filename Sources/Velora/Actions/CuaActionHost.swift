@@ -9,21 +9,17 @@ enum BackgroundActionGate {
     /// the target must be a DIFFERENT app from the one the user is in, and it
     /// must be one whose background semantics we trust.
     ///
-    /// Content-committing actions are deliberately excluded: their authority
-    /// is built on the foreground evidence chain (exact focused AX identity)
-    /// that a background window cannot provide yet. Browsers are
+    /// Content-committing actions may resolve and observe here, but their first
+    /// interaction is deferred to an exact foreground handoff. Browsers remain
     /// excluded because web content does not honor AX value writes reliably
-    /// (the driver itself reports them "unverifiable"). Both fall back to the
-    /// classic foreground path — worse for the user's flow, but with every
-    /// proven guarantee intact.
+    /// (the driver itself reports them "unverifiable").
     static func shouldRoute(enabled: Bool,
-                            contentMayCommit: Bool,
+                            contentMayCommit _: Bool,
                             targetName: String,
                             targetBundleID: String,
                             frontmostName: String?,
                             frontmostBundleID: String?) -> Bool {
         guard enabled else { return false }
-        if contentMayCommit { return false }
         if ActionRuntimePolicy.isBrowserBundle(targetBundleID) { return false }
         // Fail closed: if what the user is using cannot be read, nothing may
         // be driven "in the background" of it (review finding — a transient
@@ -398,12 +394,13 @@ enum CuaDiagnostics {
 /// classic foreground host when it is not.
 ///
 /// The routing decision is made once per action, at `openApp`: a target that
-/// is a different native app, the plan cannot deliver content, the feature is
-/// enabled, and the daemon is healthy is driven through an existing window.
-/// A windowless target is launched under a bounded focus guard. Explicit
-/// foreground cases—current app, sending, browsers, or a disabled setting—
-/// delegate to `SystemActionHost`. Driver failures fail closed so they never
-/// turn an eligible background action into activation.
+/// is a different native app, the feature is enabled, and the daemon is
+/// healthy is resolved through an existing window.
+/// A windowless target uses Cua's background launch only when the driver proves
+/// activation stayed suppressed. Explicit Foreground cases—current app,
+/// browsers, or a disabled setting—delegate to `SystemActionHost`. Sending
+/// targets stay routed for observation and defer their foreground transition
+/// until interaction. Driver failures fail closed.
 ///
 /// Validation is unchanged on purpose: the same `ActionPlan` decode, the same
 /// `ActionRuntimePolicy`, the same executor invariants run against this host.
@@ -417,13 +414,14 @@ final class BackgroundRoutingActionHost: ActionHost {
     private static let callTimeout: TimeInterval = 3.0
     private static let maximumSnapshotIDs = 512
     private static let maximumSnapshotIDBytes = 128
-    private static let launchSettleMs = 8_000
-    private static let launchPollMs = 100
     private static let presentationTool = "bring_to_front"
     private static let presentationCode =
         "bring_to_front_exact_window_verified"
     private static let processPresentationCode =
         "bring_to_front_process_verified"
+    private static let handoffQuietSeconds: TimeInterval = 0.5
+    private static let handoffWaitMs = 5_000
+    private static let handoffPollMs = 50
     private let system: ActionHost
     private let transport: CuaTransport
     private let backgroundEnabled: () -> Bool
@@ -431,6 +429,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let ensureDaemon: (CuaTransport) -> Bool
     private let endDaemon: () -> Void
     private let bundleForPID: (Int) -> String?
+    private let interactionIsQuiet: () -> Bool
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
     /// means "can't tell from here" — the driver decides.
@@ -443,10 +442,17 @@ final class BackgroundRoutingActionHost: ActionHost {
     private var targetName = ""
     private var targetBundleID = ""
     private var targetReady = false
+    /// This route may be observed in place, but its first mutation must cross
+    /// the exact-window foreground boundary and continue through native AX.
+    private var foregroundAtInteraction = false
+    /// Space membership alone is not a refusal. If Cua cannot resolve this
+    /// exact off-Space AX tree, defer it to the foreground boundary instead.
+    private var handoffIfDegraded = false
     private struct ForegroundTarget {
         let name: String
         let bundleID: String
         let pid: Int
+        let windowID: Int?
     }
     private var foregroundTarget: ForegroundTarget?
     /// True once readiness has succeeded at least once this action.
@@ -495,6 +501,7 @@ final class BackgroundRoutingActionHost: ActionHost {
          bundleForPID: @escaping (Int) -> String? = { pid in
             NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
          },
+         interactionIsQuiet: (() -> Bool)? = nil,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
             = BackgroundRoutingActionHost.resolveRunningApp) {
         self.system = system
@@ -503,6 +510,9 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.ensureDaemon = ensureDaemon
         self.endDaemon = endDaemon
         self.bundleForPID = bundleForPID
+        self.interactionIsQuiet = interactionIsQuiet ?? {
+            UserInputActivity.isQuiet(for: Self.handoffQuietSeconds)
+        }
         self.localResolve = localResolve
     }
 
@@ -538,7 +548,78 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func prepareForActionPlan(sends: Bool) {
         contentMayCommit = sends
-        if sends && routed { unroute() }
+        if sends && routed { foregroundAtInteraction = true }
+    }
+
+    func prepareInteraction() -> ActionInteractionState {
+        guard routed, foregroundAtInteraction else { return .ready }
+        guard snapshotLineage == .valid, targetReady,
+              resolveDeferredWindow(), let windowID = targetWindowID
+        else { return .refused }
+
+        guard waitForQuiet() else { return .deferred }
+        let inputGeneration = UserInputActivity.snapshot()
+        guard interactionIsQuiet(),
+              inputGeneration == UserInputActivity.snapshot()
+        else { return .deferred }
+        if exactTargetIsForeground(windowID: windowID) {
+            finishHandoff(windowID: windowID)
+            return .ready
+        }
+
+        guard let front = system.frontmostApp(),
+              let prior = captureFocus(front) else { return .refused }
+        let result = transport.call(Self.presentationTool, arguments: [
+            "pid": targetPID, "window_id": windowID,
+        ], timeout: Self.callTimeout)
+        guard inputGeneration == UserInputActivity.snapshot() else {
+            _ = restoreHandoffFocus(
+                prior, pid: targetPID, windowID: windowID,
+                bundleID: targetBundleID)
+            return .deferred
+        }
+        guard case .success(let reply) = result,
+              presentationMatches(reply, pid: targetPID, windowID: windowID)
+        else {
+            _ = restoreHandoffFocus(
+                prior, pid: targetPID, windowID: windowID,
+                bundleID: targetBundleID)
+            unroute()
+            endDaemon()
+            return .refused
+        }
+
+        finishHandoff(windowID: windowID)
+        return .ready
+    }
+
+    private func waitForQuiet() -> Bool {
+        let deadline = system.now()
+            + Double(Self.handoffWaitMs) / 1_000
+        while !interactionIsQuiet(), system.now() < deadline {
+            system.sleep(ms: Self.handoffPollMs)
+        }
+        return interactionIsQuiet()
+    }
+
+    private func exactTargetIsForeground(windowID: Int) -> Bool {
+        guard let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame,
+              let window = system.foregroundWindow(),
+              window.pid == targetPID, window.windowID == windowID,
+              window.bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame,
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame else { return false }
+        return true
+    }
+
+    private func finishHandoff(windowID: Int) {
+        let target = ForegroundTarget(
+            name: targetName, bundleID: targetBundleID, pid: targetPID,
+            windowID: windowID)
+        unroute()
+        foregroundTarget = target
+        endDaemon()
     }
 
     // MARK: - Routing decision
@@ -547,6 +628,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard !routed else { return openTargetApp(named: name) }
         if let target = foregroundTarget,
            AppMatcher.bestMatch(for: name, in: [target.name]) == 0 {
+            if exactForegroundApp() != nil { return target.name }
             return openForeground(target)
         }
         foregroundTarget = nil
@@ -556,15 +638,12 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard backgroundEnabled() else {
             return system.openApp(named: name)
         }
-        guard !contentMayCommit else {
-            return system.openApp(named: name)
-        }
         let frontmost = system.frontmostApp()
         // Pre-gate with Velora's OWN app knowledge before touching the
         // driver. Starting the daemon is itself a cost — it is a same-user
         // automation surface with its own telemetry — so an action that was
-        // never going to route (the app the user is in, a sending action, or
-        // a browser) must not bring one up (review finding). The driver's
+        // never going to route (the app the user is in or a browser) must not
+        // bring one up (review finding). The driver's
         // answer is still authoritative below; this only avoids the spawn.
         if let local = localResolve(name),
            !BackgroundActionGate.shouldRoute(
@@ -648,7 +727,8 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private func openForeground(_ resolved: ResolvedApp) -> String? {
         let target = ForegroundTarget(
-            name: resolved.name, bundleID: resolved.bundleID, pid: resolved.pid)
+            name: resolved.name, bundleID: resolved.bundleID, pid: resolved.pid,
+            windowID: nil)
         return openForeground(target)
     }
 
@@ -657,13 +737,22 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard let opened = system.openApp(
             named: target.name, bundleID: target.bundleID, pid: target.pid)
         else { return nil }
-        foregroundTarget = target
+        let window = system.foregroundWindow()
+        let windowID: Int? = window.flatMap {
+            guard $0.pid == target.pid,
+                  $0.bundleID.caseInsensitiveCompare(target.bundleID)
+                    == .orderedSame else { return nil }
+            return $0.windowID
+        }
+        foregroundTarget = ForegroundTarget(
+            name: target.name, bundleID: target.bundleID, pid: target.pid,
+            windowID: windowID)
         return opened
     }
 
     private enum WindowProbe {
         case found(pid: Int, windowID: Int)
-        case offSpace
+        case offSpace(pid: Int, windowID: Int)
         case missing
         case invalid
     }
@@ -677,13 +766,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     private enum FocusTarget {
         case app(bundleID: String, pid: Int)
         case window(ActionWindowIdentity)
-
-        var bundleID: String {
-            switch self {
-            case .app(let bundleID, _): return bundleID
-            case .window(let window): return window.bundleID
-            }
-        }
     }
 
     private func resolveApp(named name: String) -> ResolvedApp? {
@@ -709,17 +791,19 @@ final class BackgroundRoutingActionHost: ActionHost {
 
         switch existingWindow(resolved) {
         case .found(let pid, let windowID):
-            guard let frontAfter = system.frontmostApp(),
-                  frontAfter.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
-                    == .orderedSame else { return .failed }
-            beginRoute(resolved, pid: pid, windowID: windowID)
+            beginRoute(
+                resolved, pid: pid, windowID: windowID,
+                foregroundAtInteraction: contentMayCommit,
+                handoffIfDegraded: false)
             return .routed
-        case .offSpace:
-            // Cua refuses every exact background-input route across macOS
-            // Spaces. Foreground once instead of polling an impossible target.
-            return .foreground
+        case .offSpace(let pid, let windowID):
+            beginRoute(
+                resolved, pid: pid, windowID: windowID,
+                foregroundAtInteraction: contentMayCommit,
+                handoffIfDegraded: true)
+            return .routed
         case .missing:
-            return launchTarget(resolved, frontBefore: frontBefore)
+            return launchTarget(resolved)
                 ? .routed : .failed
         case .invalid:
             return .failed
@@ -738,13 +822,9 @@ final class BackgroundRoutingActionHost: ActionHost {
         else { return .invalid }
         guard windows.allSatisfy({ validWindow($0, pid: resolved.pid) })
         else { return .invalid }
-        // WindowServer chrome strips can omit Space membership. Ignore those,
-        // but fail closed when an actual document-sized candidate omits it.
         let unknown = windows.filter {
             exactFlag($0["on_current_space"]) == nil
         }
-        guard CuaWindowPick.choose(unknown, pid: resolved.pid) == nil
-        else { return .invalid }
         let known = windows.filter {
             exactFlag($0["on_current_space"]) != nil
         }
@@ -754,9 +834,13 @@ final class BackgroundRoutingActionHost: ActionHost {
         if let window = CuaWindowPick.choose(current, pid: resolved.pid) {
             return .found(pid: resolved.pid, windowID: window.id)
         }
-        guard CuaWindowPick.choose(known, pid: resolved.pid) != nil
-        else { return .missing }
-        return .offSpace
+        if let window = CuaWindowPick.choose(known, pid: resolved.pid) {
+            return .offSpace(pid: resolved.pid, windowID: window.id)
+        }
+        if let window = CuaWindowPick.choose(unknown, pid: resolved.pid) {
+            return .offSpace(pid: resolved.pid, windowID: window.id)
+        }
+        return .missing
     }
 
     private func validWindow(_ raw: [String: Any], pid: Int) -> Bool {
@@ -770,26 +854,18 @@ final class BackgroundRoutingActionHost: ActionHost {
         return true
     }
 
-    private func launchTarget(
-        _ resolved: ResolvedApp,
-        frontBefore: (name: String, bundleID: String)
-    ) -> Bool {
-        // launch_app can report suppression before Electron's delayed
-        // activation. Capture an independently owned restoration target and
-        // keep guarding it through the driver's late-activation interval.
-        guard let prior = captureFocus(frontBefore) else { return false }
+    private func launchTarget(_ resolved: ResolvedApp) -> Bool {
+        // Cua owns background launch. Velora accepts only the driver's exact
+        // suppression attestation plus a read-only foreground check; it never
+        // tries to repair focus with another activation.
         let launchResult = transport.call(
             "launch_app", arguments: ["bundle_id": resolved.bundleID],
             timeout: 10)
-        guard case .success(let launched) = launchResult else {
-            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
-            return false
-        }
-        let focusSuppressed = exactFlag(launched["self_activation_suppressed"])
-        guard focusSuppressed != nil else {
-            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
-            return false
-        }
+        guard case .success(let launched) = launchResult,
+              exactFlag(launched["self_activation_suppressed"]) == true,
+              let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(resolved.bundleID)
+                != .orderedSame else { return false }
         guard let pid = exactInt(launched["pid"]), pid > 0,
               !resolved.running || pid == resolved.pid,
               let launchedBundleID = launched["bundle_id"] as? String,
@@ -800,49 +876,11 @@ final class BackgroundRoutingActionHost: ActionHost {
               exactFlag(launchState["process_running"]) == true,
               let liveBundleID = bundleForPID(pid),
               liveBundleID.caseInsensitiveCompare(resolved.bundleID)
-                == .orderedSame else {
-            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
-            return false
-        }
-        if focusSuppressed == false,
-           !restoreLaunchFocus(prior, targetBundleID: resolved.bundleID) {
-            return false
-        }
-        guard settleLaunchFocus(prior, targetBundleID: resolved.bundleID) else {
-            _ = restoreLaunchFocus(prior, targetBundleID: resolved.bundleID)
-            return false
-        }
-
-        beginRoute(resolved, pid: pid, windowID: nil)
-        return true
-    }
-
-    private func settleLaunchFocus(
-        _ prior: FocusTarget, targetBundleID: String
-    ) -> Bool {
-        var protected = prior
-        let pollCount = Self.launchSettleMs / Self.launchPollMs
-        for _ in 0..<pollCount {
-            system.sleep(ms: Self.launchPollMs)
-            guard let front = system.frontmostApp() else {
-                guard restoreFocus(protected) else { return false }
-                continue
-            }
-            if front.bundleID.caseInsensitiveCompare(targetBundleID)
-                == .orderedSame {
-                guard restoreFocus(protected) else { return false }
-                continue
-            }
-            if front.bundleID.caseInsensitiveCompare(protected.bundleID)
-                == .orderedSame {
-                if let current = captureWindow(front) {
-                    protected = current
-                }
-                continue
-            }
-            guard let current = captureFocus(front) else { return false }
-            protected = current
-        }
+                == .orderedSame else { return false }
+        beginRoute(
+            resolved, pid: pid, windowID: nil,
+            foregroundAtInteraction: contentMayCommit,
+            handoffIfDegraded: false)
         return true
     }
 
@@ -878,7 +916,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func beginRoute(
-        _ resolved: ResolvedApp, pid: Int, windowID: Int?
+        _ resolved: ResolvedApp, pid: Int, windowID: Int?,
+        foregroundAtInteraction: Bool, handoffIfDegraded: Bool
     ) {
         routed = true
         targetPID = pid
@@ -886,6 +925,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetBundleID = resolved.bundleID.lowercased()
         targetWindowID = windowID
         targetReady = false
+        self.foregroundAtInteraction = foregroundAtInteraction
+        self.handoffIfDegraded = handoffIfDegraded
         everReady = false
         // A new target is a new window, a new element, and a new draft:
         // text delivered to the previous app must never authorize a commit
@@ -898,43 +939,77 @@ final class BackgroundRoutingActionHost: ActionHost {
         backgroundDraft = ""
     }
 
-    private func restoreLaunchFocus(
-        _ prior: FocusTarget, targetBundleID: String
+    private func restoreHandoffFocus(
+        _ prior: FocusTarget, pid: Int, windowID: Int, bundleID: String
     ) -> Bool {
-        guard let front = system.frontmostApp() else {
-            return restoreFocus(prior)
-        }
-        if front.bundleID.caseInsensitiveCompare(prior.bundleID) == .orderedSame {
-            return true
-        }
-        guard front.bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame
+        guard let front = system.frontmostApp(),
+              let window = system.foregroundWindow()
+        else { return true }
+        guard front.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame,
+              window.pid == pid, window.windowID == windowID,
+              window.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame
         else { return true }
         return restoreFocus(prior)
     }
 
     // MARK: - Target readiness (drives the executor's wait_frontmost poll)
 
-    /// In routed mode the "frontmost app" IS the background target — but only
-    /// once its window exists and its AX surface resolves. Until then this
-    /// returns nil, which keeps the executor's `wait_frontmost` polling, and
-    /// each poll advances readiness one bounded step.
+    /// In routed mode the "frontmost app" IS the background target. A route
+    /// that will hand off before interaction needs only an independently
+    /// verified exact window; a background-input route also needs AX.
     func frontmostApp() -> (name: String, bundleID: String)? {
         guard routed else { return exactForegroundApp() }
         guard snapshotLineage == .valid else { return nil }
+        if foregroundAtInteraction {
+            guard resolveDeferredWindow() else {
+                targetReady = false
+                return nil
+            }
+            targetReady = true
+            everReady = true
+            return (targetName, targetBundleID)
+        }
         if targetReady, verifyTargetAlive() { return (targetName, targetBundleID) }
         guard advanceReadiness() else { return nil }
         return (targetName, targetBundleID)
+    }
+
+    /// Re-reads WindowServer through Cua without activating the app. Space
+    /// membership is nullable private metadata; exact PID/window identity is
+    /// the handoff boundary.
+    private func resolveDeferredWindow() -> Bool {
+        guard foregroundAtInteraction,
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              case .success(let reply) = transport.call(
+                "list_windows", arguments: ["pid": targetPID],
+                timeout: Self.callTimeout),
+              let windows = reply["windows"] as? [[String: Any]],
+              windows.allSatisfy({ validWindow($0, pid: targetPID) })
+        else { return false }
+
+        if let windowID = targetWindowID {
+            let exact = windows.filter { exactInt($0["window_id"]) == windowID }
+            return exact.count == 1
+                && CuaWindowPick.choose(exact, pid: targetPID)?.id == windowID
+        }
+        guard let window = CuaWindowPick.choose(windows, pid: targetPID) else {
+            return false
+        }
+        targetWindowID = window.id
+        return true
     }
 
     private func exactForegroundApp() -> (name: String, bundleID: String)? {
         guard let target = foregroundTarget else {
             return system.frontmostApp()
         }
-        guard let front = system.frontmostApp(),
+        guard let targetWindowID = target.windowID,
+              let front = system.frontmostApp(),
               front.bundleID.caseInsensitiveCompare(target.bundleID)
                 == .orderedSame,
               let window = system.foregroundWindow(),
-              window.pid == target.pid,
+              window.pid == target.pid, window.windowID == targetWindowID,
               window.bundleID.caseInsensitiveCompare(target.bundleID)
                 == .orderedSame,
               bundleForPID(target.pid)?.caseInsensitiveCompare(target.bundleID)
@@ -966,7 +1041,11 @@ final class BackgroundRoutingActionHost: ActionHost {
             targetWindowID = window.id
         }
         guard let snapshot = snapshotTarget(maxElements: 10) else { return false }
-        if snapshot.degraded { return false }
+        if snapshot.degraded {
+            guard handoffIfDegraded else { return false }
+            foregroundAtInteraction = true
+            guard resolveDeferredWindow() else { return false }
+        }
         targetReady = true
         everReady = true
         return true
@@ -1200,6 +1279,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetName = ""
         targetBundleID = ""
         targetReady = false
+        foregroundAtInteraction = false
+        handoffIfDegraded = false
         everReady = false
         pinnedElement = nil
         routedUISnapshot = nil
@@ -1281,12 +1362,60 @@ final class BackgroundRoutingActionHost: ActionHost {
                        role: String, target: String,
                        expecting bundleID: String?,
                        purpose: ActionVerificationPurpose) -> Bool {
-        guard !routed else {
+        guard routed else {
+            return system.verifyElement(
+                index: index, snapshotID: snapshotID, label: label,
+                role: role, target: target, expecting: bundleID,
+                purpose: purpose)
+        }
+        return verifyRoutedTarget(
+            index: index, snapshotID: snapshotID, label: label,
+            role: role, target: target, expecting: bundleID,
+            purpose: purpose)
+    }
+
+    private func verifyRoutedTarget(
+        index: Int, snapshotID: String, label: String, role: String,
+        target: String, expecting bundleID: String?,
+        purpose: ActionVerificationPurpose
+    ) -> Bool {
+        guard purpose == .target, snapshotLineage == .valid,
+              expectedMatchesTarget(bundleID), targetReady,
+              let cached = routedUISnapshot,
+              cached.observation.id == snapshotID,
+              cached.pid == targetPID, cached.windowID == targetWindowID,
+              cached.bundleID == targetBundleID,
+              let prior = cached.driver.elements.first(where: {
+                  $0.index == index
+              }),
+              prior.role == role,
+              AppMatcher.normalize(prior.authoredLabel ?? "")
+                == AppMatcher.normalize(label),
+              ScreenContext.isEditableActionRole(role),
+              AppMatcher.bestMatch(for: target, in: [label]) != nil,
+              let current = snapshotTarget(maxElements: Self.snapshotElements),
+              !current.degraded,
+              let element = current.elements.first(where: { $0.index == index }),
+              sameElementIdentity(
+                element, prior: prior, role: role, label: label)
+        else {
             routedUISnapshot = nil
             return false
         }
+        routedUISnapshot = nil
+        guard prepareInteraction() == .ready,
+              let native = system.uiSnapshot(), native.source == .native,
+              native.bundleID.caseInsensitiveCompare(cached.bundleID)
+                == .orderedSame,
+              native.windowID == cached.windowID else { return false }
+        let matches = native.elements.filter {
+            $0.role == role
+                && AppMatcher.normalize($0.label ?? "")
+                    == AppMatcher.normalize(label)
+        }
+        guard matches.count == 1, let match = matches.first else { return false }
         return system.verifyElement(
-            index: index, snapshotID: snapshotID, label: label,
+            index: match.index, snapshotID: native.id, label: label,
             role: role, target: target, expecting: bundleID,
             purpose: purpose)
     }
@@ -1296,7 +1425,10 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+        let inputGeneration = UserInputActivity.snapshot()
         guard routed, snapshotLineage == .valid, targetReady,
+              interactionIsQuiet(),
+              inputGeneration == UserInputActivity.snapshot(),
               let cached = routedUISnapshot,
               cached.observation.source == .cua,
               cached.observation.id == snapshotID,
@@ -1313,10 +1445,18 @@ final class BackgroundRoutingActionHost: ActionHost {
         let result = transport.call(Self.presentationTool, arguments: [
             "pid": targetPID, "window_id": windowID,
         ], timeout: Self.callTimeout)
+        guard inputGeneration == UserInputActivity.snapshot() else {
+            _ = restoreHandoffFocus(
+                prior, pid: targetPID, windowID: windowID,
+                bundleID: targetBundleID)
+            return false
+        }
         guard case .success(let reply) = result,
               presentationMatches(reply, pid: targetPID, windowID: windowID)
         else {
-            _ = restoreFocus(prior)
+            _ = restoreHandoffFocus(
+                prior, pid: targetPID, windowID: windowID,
+                bundleID: targetBundleID)
             unroute()
             return false
         }
@@ -1544,8 +1684,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard routed else { return system.canPostInput }
         guard snapshotLineage == .valid else { return false }
         // The driver's AX write path does not synthesize global events, so
-        // the CGEvent preflight is not required — but a locked screen or
-        // secure input still means "the machine is not ours to drive".
+        // the CGEvent preflight is not required. A committing route leaves
+        // Cua before mutation; locked screens and secure input still refuse.
         return Permissions.accessibilityGranted
             && !SecureInput.isActive
             && !system.screenIsLocked

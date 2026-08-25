@@ -35,6 +35,39 @@ def test_audio_store_roundtrip(tmp_path):
     assert float(np.sqrt(np.mean((back - pcm) ** 2))) < 1e-3  # 16-bit quantization only
 
 
+def test_interrupted_spool_recovers_until_acknowledged(tmp_path):
+    store = AudioStore(tmp_path / "audio")
+    pcm = np.array([-0.5, -0.25, 0.0, 0.25, 0.5], dtype=np.float32)
+
+    spool = store.begin_active("session-123")
+    assert spool is not None
+    assert spool.append(pcm)
+    spool.close()
+
+    recovered = store.recover_interrupted()
+
+    assert len(recovered) == 1
+    assert recovered[0].session == "session-123"
+    assert recovered[0].duration_s == pytest.approx(5 / 16_000)
+    assert (store.dir.stat().st_mode & 0o777) == 0o700
+    assert (spool.path.stat().st_mode & 0o777) == 0o600
+    restored = store.load(recovered[0].audio)
+    assert np.allclose(restored, pcm, atol=1e-3)
+
+    store.ack_interrupted("session-123")
+    assert not spool.path.exists()
+
+
+def test_empty_interrupted_spool_is_discarded(tmp_path):
+    store = AudioStore(tmp_path / "audio")
+    spool = store.begin_active("empty-session")
+    assert spool is not None
+    spool.close()
+
+    assert store.recover_interrupted() == []
+    assert not spool.path.exists()
+
+
 def test_audio_store_rejects_traversal(tmp_path):
     store = AudioStore(tmp_path / "audio")
     assert store.path_for("../secret.flac") is None
@@ -79,6 +112,25 @@ def test_audio_store_write_failure_does_not_break_dictation(tmp_path):
     assert store.save("session", np.ones(10, dtype=np.float32)) is None
     assert not (audio_dir / "session.flac").exists()
     assert list(audio_dir.glob(".*.tmp")) == []
+
+
+def test_archive_failure_preserves_active_spool(tmp_path):
+    class BrokenSoundFile:
+        @staticmethod
+        def write(path, *_args, **_kwargs):
+            Path(path).write_bytes(b"partial")
+            raise OSError("disk unavailable")
+
+    store = AudioStore(tmp_path / "audio")
+    store._sf = BrokenSoundFile()
+    store.ext = "flac"
+    spool = store.begin_active("write-failure")
+    assert spool is not None
+    assert spool.append(AUDIO)
+
+    assert store.finalize_active(spool) is None
+    assert spool.path.is_file()
+    assert spool.path.stat().st_size == AUDIO.size * 2
 
 
 def test_audio_store_prune_missing_directory_is_noop(tmp_path):
@@ -177,6 +229,110 @@ async def test_final_includes_saved_audio(engine):
     client.close()
 
 
+async def test_normal_stop_removes_spool_after_history_ack(engine):
+    _eng, sock, config = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "normal-stop", "context": {}})
+    await client.send_audio(AUDIO)
+    spool = config.audio_dir / ".active" / "normal-stop.pcm16.part"
+    for _ in range(100):
+        if spool.exists() and spool.stat().st_size == AUDIO.size * 2:
+            break
+        await asyncio.sleep(0.01)
+    assert spool.exists()
+
+    await client.send_json({"cmd": "stop", "session": "normal-stop"})
+    final = await client.recv_event("final")
+    await _wait_for_clip(config.audio_dir / final["audio"])
+    assert spool.exists()
+
+    await client.send_json({"cmd": "ack_final", "session": "normal-stop"})
+    await client.send_json({"cmd": "ping"})
+    assert (await client.recv_event("pong"))["event"] == "pong"
+    for _ in range(100):
+        if not spool.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert not spool.exists()
+    client.close()
+
+
+async def test_disconnect_emits_recoverable_audio_until_ack(engine):
+    eng, sock, config = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "lost-client", "context": {}})
+    await client.send_audio(AUDIO)
+    client.close()
+    for _ in range(100):
+        if eng.session is None and eng.writer is None:
+            break
+        await asyncio.sleep(0.01)
+    assert eng.session is None
+
+    replacement = await connect(sock)
+    await replacement.recv_event("ready")
+    recovered = await replacement.recv_event("interrupted_dictation")
+
+    assert recovered["session"] == "lost-client"
+    assert recovered["duration_s"] == pytest.approx(0.1)
+    assert "text" not in recovered
+    assert "raw" not in recovered
+    assert (config.audio_dir / recovered["audio"]).is_file()
+    spool = config.audio_dir / ".active" / "lost-client.pcm16.part"
+    assert spool.is_file()
+
+    await replacement.send_json({"cmd": "ack_interrupted", "session": "lost-client"})
+    ack = await replacement.recv_event("interrupted_ack")
+    assert ack == {"event": "interrupted_ack", "session": "lost-client"}
+    assert not spool.exists()
+    replacement.close()
+
+
+async def test_interrupt_preserves_spool_and_acknowledges(engine):
+    eng, sock, config = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "graceful-quit", "context": {}})
+    await client.send_audio(AUDIO)
+
+    await client.send_json({"cmd": "ack_interrupted", "session": "graceful-quit"})
+    error = await client.recv_event("error")
+    assert error["message"] == "ack_interrupted: session is not recoverable"
+
+    await client.send_json({"cmd": "interrupt", "session": "graceful-quit"})
+    interrupted = await client.recv_event("interrupted")
+
+    assert interrupted == {
+        "event": "interrupted",
+        "session": "graceful-quit",
+        "duration_s": pytest.approx(0.1),
+    }
+    assert eng.session is None
+    spool = config.audio_dir / ".active" / "graceful-quit.pcm16.part"
+    assert spool.is_file()
+    assert spool.stat().st_size == AUDIO.size * 2
+    client.close()
+
+
+async def test_explicit_cancel_deletes_active_spool(engine):
+    eng, sock, config = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({"cmd": "start", "session": "cancelled", "context": {}})
+    await client.send_audio(AUDIO)
+
+    await client.send_json({"cmd": "cancel", "session": "cancelled"})
+    await client.recv_event("cancelled")
+
+    assert eng.session is None
+    spool = config.audio_dir / ".active" / "cancelled.pcm16.part"
+    assert not spool.exists()
+    assert "cancelled" not in eng.audio.pending_interrupted()
+    client.close()
+
+
 async def test_reprocess_roundtrip(engine):
     eng, sock, config = engine
     client = await connect(sock)
@@ -226,4 +382,5 @@ async def test_save_audio_disabled(engine):
     await client.recv_event("ready")
     final = await _dictate(client, "s3")
     assert "audio" not in final
+    assert not (config.audio_dir / ".active" / "s3.pcm16.part").exists()
     client.close()

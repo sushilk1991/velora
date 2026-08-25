@@ -273,7 +273,11 @@ enum VeloraCLI {
             let app = (result["app_running"] as? Bool) == true ? "running" : "unavailable"
             let engine = (result["engine_ready"] as? Bool) == true ? "ready" : "starting"
             let access = (result["access_enabled"] as? Bool) == true ? "enabled" : "disabled"
-            return "Velora app: \(app)\nSpeech engine: \(engine)\nLocal agent access: \(access)"
+            let restart = (result["safe_to_restart"] as? Bool) == true
+                ? "yes"
+                : "no — \(result["restart_block_reason"] as? String ?? "busy")"
+            return "Velora app: \(app)\nSpeech engine: \(engine)"
+                + "\nLocal agent access: \(access)\nSafe to restart: \(restart)"
         }
         if command == "recent" || command == "search" {
             guard let records = result["records"] as? [[String: Any]], !records.isEmpty else {

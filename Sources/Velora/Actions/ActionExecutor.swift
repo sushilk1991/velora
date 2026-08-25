@@ -23,6 +23,12 @@ enum ActionVerificationPurpose: Equatable {
     case goal
 }
 
+enum ActionInteractionState: Equatable {
+    case ready
+    case deferred
+    case refused
+}
+
 struct ActionWindowIdentity: Equatable {
     let name: String
     let bundleID: String
@@ -40,8 +46,11 @@ protocol ActionHost: AnyObject {
     /// Drops every retained input capability and any owned automation child.
     func endActionInputSession()
     /// Tells a routing host whether this immutable action may commit content.
-    /// Sending actions stay foreground regardless of app identity.
     func prepareForActionPlan(sends: Bool)
+    /// Gives a routed host one boundary immediately before a UI mutation. A
+    /// deferred target may be presented here immediately before the native
+    /// mutation, after exact identity and user-idle checks.
+    func prepareInteraction() -> ActionInteractionState
     /// Launch or switch to an app; returns the name it actually resolved to.
     func openApp(named name: String) -> String?
     /// Switch to the already-resolved running app without fuzzy re-resolution.
@@ -130,6 +139,7 @@ extension ActionHost {
     var isDrivingInBackground: Bool { false }
     func endActionInputSession() {}
     func prepareForActionPlan(sends: Bool) {}
+    func prepareInteraction() -> ActionInteractionState { .ready }
     func openApp(named name: String, bundleID: String, pid: Int) -> String? {
         nil
     }
@@ -317,6 +327,22 @@ final class ActionExecutor {
                 note("blocked: input not permitted")
                 return failed(index, "keyboard input is not permitted right now",
                               recoverable: false)
+            }
+            if Self.mutatesUI(step) {
+                switch host.prepareInteraction() {
+                case .ready:
+                    break
+                case .deferred:
+                    note("interaction boundary: user is active")
+                    return failed(
+                        index, "waiting for a quiet foreground handoff",
+                        recoverable: true)
+                case .refused:
+                    note("interaction boundary: exact handoff refused")
+                    return failed(
+                        index, "the target window could not be presented safely",
+                        recoverable: false)
+                }
             }
 
             switch step {
@@ -592,7 +618,7 @@ final class ActionExecutor {
                     note("present_ui: exact handoff refused")
                     return failed(
                         index, "the target window could not be presented safely",
-                        recoverable: false)
+                        recoverable: true)
                 }
                 expectedAppName = nil
                 expectedBundleID = nil
@@ -722,6 +748,15 @@ final class ActionExecutor {
         case .pause: return "Waiting for screen"
         case .pressElement(let label): return "Opening \(label)"
         case .pressUI(_, _, _, let label): return "Opening \(label)"
+        }
+    }
+
+    private static func mutatesUI(_ step: ActionStep) -> Bool {
+        switch step {
+        case .typeText, .searchText, .pasteText, .key:
+            return true
+        default:
+            return false
         }
     }
 

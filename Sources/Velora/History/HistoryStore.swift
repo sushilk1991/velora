@@ -50,6 +50,12 @@ final class HistoryStore {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "com.velora.history")
     private let removeArchivedClip: (String) -> Void
+    private let pendingLock = NSLock()
+    private var pendingWrites = 0
+
+    var hasPendingWrites: Bool {
+        pendingLock.withLock { pendingWrites > 0 }
+    }
 
     /// SQLITE_TRANSIENT: make sqlite copy bound strings immediately.
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -149,63 +155,145 @@ final class HistoryStore {
 
     // MARK: - Writes
 
-    /// Persists a completed dictation. Fire-and-forget (background queue).
-    func insert(_ record: DictationRecord) {
-        queue.async { [self] in
-            guard db != nil else { return }
+    /// Creates the audio-only placeholder for one interrupted session, or
+    /// returns its existing row after a replay. The serial queue makes the
+    /// select/insert/select sequence idempotent within the app process.
+    func ensureInterrupted(
+        session: String, audio: String, durationMs: Int
+    ) -> DictationRecord? {
+        guard !session.isEmpty, !audio.isEmpty else { return nil }
+        return queue.sync { [self] in
+            guard db != nil else { return nil }
+
+            func existing() -> DictationRecord? {
+                let sql = """
+                    SELECT \(Self.selectColumns) FROM dictations
+                    WHERE session_id = ? ORDER BY id ASC LIMIT 1;
+                    """
+                var stmt: OpaquePointer?
+                guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                    return nil
+                }
+                defer { sqlite3_finalize(stmt) }
+                bindText(stmt, 1, session)
+                return decodeRows(stmt).first
+            }
+
+            if let record = existing() { return record }
             let sql = """
                 INSERT INTO dictations
-                    (ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms,
-                     audio_path, session_id, stt_ms, cleanup_applied, finalization_ms,
-                     cleanup_wall_ms)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                    (ts, app_name, raw, final, duration_ms, audio_path, session_id)
+                VALUES (?, ?, '', '', ?, ?, ?);
                 """
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                NSLog("Velora: history insert prepare failed: %@", lastError)
-                return
+                return nil
             }
-            defer { sqlite3_finalize(stmt) }
-
-            sqlite3_bind_double(stmt, 1, record.timestamp.timeIntervalSince1970)
-            bindText(stmt, 2, record.bundleID)
-            bindText(stmt, 3, record.appName)
-            bindText(stmt, 4, record.raw)
-            bindText(stmt, 5, record.final)
-            bindText(stmt, 6, record.mode)
-            sqlite3_bind_int64(stmt, 7, Int64(record.durationMs))
-            if let cleanupMs = record.cleanupMs {
-                sqlite3_bind_int64(stmt, 8, Int64(cleanupMs))
-            } else {
-                sqlite3_bind_null(stmt, 8)
+            sqlite3_bind_double(stmt, 1, Date().timeIntervalSince1970)
+            bindText(stmt, 2, "Recovered dictation")
+            sqlite3_bind_int64(stmt, 3, Int64(max(0, durationMs)))
+            bindText(stmt, 4, audio)
+            bindText(stmt, 5, session)
+            let inserted = sqlite3_step(stmt) == SQLITE_DONE
+            sqlite3_finalize(stmt)
+            guard inserted else {
+                NSLog("Velora: interrupted history insert failed: %@", lastError)
+                return nil
             }
-            bindText(stmt, 9, record.audioPath)
-            bindText(stmt, 10, record.sessionID)
-            if let sttMs = record.sttMs {
-                sqlite3_bind_int64(stmt, 11, Int64(sttMs))
-            } else {
-                sqlite3_bind_null(stmt, 11)
-            }
-            if let applied = record.cleanupApplied {
-                sqlite3_bind_int(stmt, 12, applied ? 1 : 0)
-            } else {
-                sqlite3_bind_null(stmt, 12)
-            }
-            if let finalizationMs = record.finalizationMs {
-                sqlite3_bind_int64(stmt, 13, Int64(finalizationMs))
-            } else {
-                sqlite3_bind_null(stmt, 13)
-            }
-            if let cleanupWallMs = record.cleanupWallMs {
-                sqlite3_bind_int64(stmt, 14, Int64(cleanupWallMs))
-            } else {
-                sqlite3_bind_null(stmt, 14)
-            }
-
-            if sqlite3_step(stmt) != SQLITE_DONE {
-                NSLog("Velora: history insert failed: %@", lastError)
-            }
+            return existing()
         }
+    }
+
+    /// Persists a completed dictation off the main thread. The optional result
+    /// lets the engine retain recovery audio until the row is durable.
+    func insert(
+        _ record: DictationRecord, completion: ((Bool) -> Void)? = nil
+    ) {
+        pendingLock.withLock { pendingWrites += 1 }
+        queue.async { [self] in
+            let persisted = insertRecord(record)
+            pendingLock.withLock { pendingWrites -= 1 }
+            completion?(persisted)
+        }
+    }
+
+    /// Graceful termination cannot leave the final event queued behind process
+    /// exit. Session identity makes a repeated lifecycle callback harmless.
+    func insertForTermination(_ record: DictationRecord) -> Bool {
+        queue.sync { [self] in
+            if let session = record.sessionID, hasSession(session) { return true }
+            return insertRecord(record)
+        }
+    }
+
+    private func hasSession(_ session: String) -> Bool {
+        guard db != nil, !session.isEmpty else { return false }
+        let sql = "SELECT 1 FROM dictations WHERE session_id = ? LIMIT 1;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, session)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func insertRecord(_ record: DictationRecord) -> Bool {
+        guard db != nil else { return false }
+        let sql = """
+            INSERT INTO dictations
+                (ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms,
+                 audio_path, session_id, stt_ms, cleanup_applied, finalization_ms,
+                 cleanup_wall_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            NSLog("Velora: history insert prepare failed: %@", lastError)
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        sqlite3_bind_double(stmt, 1, record.timestamp.timeIntervalSince1970)
+        bindText(stmt, 2, record.bundleID)
+        bindText(stmt, 3, record.appName)
+        bindText(stmt, 4, record.raw)
+        bindText(stmt, 5, record.final)
+        bindText(stmt, 6, record.mode)
+        sqlite3_bind_int64(stmt, 7, Int64(record.durationMs))
+        if let cleanupMs = record.cleanupMs {
+            sqlite3_bind_int64(stmt, 8, Int64(cleanupMs))
+        } else {
+            sqlite3_bind_null(stmt, 8)
+        }
+        bindText(stmt, 9, record.audioPath)
+        bindText(stmt, 10, record.sessionID)
+        if let sttMs = record.sttMs {
+            sqlite3_bind_int64(stmt, 11, Int64(sttMs))
+        } else {
+            sqlite3_bind_null(stmt, 11)
+        }
+        if let applied = record.cleanupApplied {
+            sqlite3_bind_int(stmt, 12, applied ? 1 : 0)
+        } else {
+            sqlite3_bind_null(stmt, 12)
+        }
+        if let finalizationMs = record.finalizationMs {
+            sqlite3_bind_int64(stmt, 13, Int64(finalizationMs))
+        } else {
+            sqlite3_bind_null(stmt, 13)
+        }
+        if let cleanupWallMs = record.cleanupWallMs {
+            sqlite3_bind_int64(stmt, 14, Int64(cleanupWallMs))
+        } else {
+            sqlite3_bind_null(stmt, 14)
+        }
+
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            NSLog("Velora: history insert failed: %@", lastError)
+            return false
+        }
+        return true
     }
 
     /// Records what the edit-learning loop observed for a session's row.
@@ -234,12 +322,13 @@ final class HistoryStore {
 
     /// Rewrites a row after a `reprocess` produced a better transcript. Runs
     /// synchronously so the caller can refresh the list right after.
+    @discardableResult
     func updateAfterReprocess(
         id: Int64, raw: String, final: String, mode: String?,
         sttMs: Int, cleanupMs: Int, cleanupApplied: Bool, cleanupWallMs: Int?
-    ) {
+    ) -> Bool {
         queue.sync { [self] in
-            guard db != nil else { return }
+            guard db != nil else { return false }
             // A reprocess replaces the measured output, so its latency and
             // cleanup fields replace the old run too. Any prior edit-quality
             // verdict described the old text and must not survive the rewrite.
@@ -251,7 +340,9 @@ final class HistoryStore {
                 WHERE id = ?;
                 """
             var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                return false
+            }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, raw)
             bindText(stmt, 2, final)
@@ -267,7 +358,9 @@ final class HistoryStore {
             sqlite3_bind_int64(stmt, 8, id)
             if sqlite3_step(stmt) != SQLITE_DONE {
                 NSLog("Velora: history update failed: %@", lastError)
+                return false
             }
+            return sqlite3_changes(db) == 1
         }
     }
 
