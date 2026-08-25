@@ -350,6 +350,34 @@ def test_action_prefix_is_session_scoped_and_cleanup_prefix_survives(monkeypatch
         engine.close()
 
 
+def test_unrelated_prefix_cannot_evict_the_smaller_warm_base():
+    engine = RecordingCleanup()
+    engine._warm("stable dictation instructions")
+    base_tokens = list(engine._prepared_tokens)
+    base_snapshot = engine._prepared_cache
+    try:
+        unrelated = engine._prompt_tokens(
+            "independent verifier with a much longer changing UI tree", "a")
+        engine._install_prepared_prefix(
+            unrelated,
+            [FakeCache([list(unrelated)], "verifier")],
+        )
+
+        assert engine._prepared_tokens == unrelated
+        assert engine._fallback_prepared_tokens == base_tokens
+        assert engine._fallback_prepared_cache is base_snapshot
+
+        even_larger = unrelated + list(range(100))
+        engine._install_prepared_prefix(
+            even_larger,
+            [FakeCache([list(even_larger)], "larger")],
+        )
+        assert engine._fallback_prepared_tokens == base_tokens
+        assert engine._fallback_prepared_cache is base_snapshot
+    finally:
+        engine.close()
+
+
 def test_failed_runtime_prefix_extension_restores_clean_static_snapshot(
     monkeypatch,
 ):
@@ -465,6 +493,7 @@ def test_soft_deadline_starts_after_first_output_token(monkeypatch):
         assert result.text == "fixed"
         assert result.reason is None
         assert result.ttft_ms >= 20
+        assert result.input_tokens == len(engine._prompt_tokens("system", "raw"))
     finally:
         engine.close()
 
@@ -510,6 +539,30 @@ def test_cooperative_cancel_is_not_reported_as_quality_timeout(monkeypatch):
         )
         assert result.applied is False
         assert result.reason == "cancelled"
+    finally:
+        engine.close()
+
+
+def test_input_token_ceiling_refuses_before_mlx_prefill(monkeypatch):
+    engine = RecordingCleanup()
+
+    def should_not_generate(*_args, **_kwargs):
+        raise AssertionError("oversize prompt must be rejected before MLX generation")
+        yield
+
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", should_not_generate)
+    try:
+        result = engine._run(
+            "large screen", "controller rules", timeout_ms=100,
+            check_ratio=False, max_input_tokens=8,
+        )
+
+        assert result.applied is False
+        assert result.reason == "context_limit"
+        assert result.input_tokens > 8
+        assert engine.cache_creations == 0
     finally:
         engine.close()
 

@@ -9,20 +9,21 @@ enum BackgroundActionGate {
     /// the target must be a DIFFERENT app from the one the user is in, and it
     /// must be one whose background semantics we trust.
     ///
-    /// Communication apps are deliberately excluded: their send authority is
-    /// built on the foreground evidence chain (focused-field labels, selection
-    /// readbacks) that a background window cannot provide yet. Browsers are
+    /// Content-committing actions are deliberately excluded: their authority
+    /// is built on the foreground evidence chain (exact focused AX identity)
+    /// that a background window cannot provide yet. Browsers are
     /// excluded because web content does not honor AX value writes reliably
     /// (the driver itself reports them "unverifiable"). Both fall back to the
     /// classic foreground path — worse for the user's flow, but with every
     /// proven guarantee intact.
     static func shouldRoute(enabled: Bool,
+                            contentMayCommit: Bool,
                             targetName: String,
                             targetBundleID: String,
                             frontmostName: String?,
                             frontmostBundleID: String?) -> Bool {
         guard enabled else { return false }
-        if ActionRuntimePolicy.isCommunicationBundle(targetBundleID) { return false }
+        if contentMayCommit { return false }
         if ActionRuntimePolicy.isBrowserBundle(targetBundleID) { return false }
         // Fail closed: if what the user is using cannot be read, nothing may
         // be driven "in the background" of it (review finding — a transient
@@ -253,12 +254,21 @@ enum CuaWindowPick {
 
 /// Press-candidate selection over a snapshot, mirroring
 /// `ScreenContext.pressElement`: whole-word label match, the committing-verb
-/// denylist judged on the element's full text, allowed roles only, and an
+/// denylist judged on the element's full text, and an
 /// ancestor walk for the Electron/table pattern where the text lives on a
-/// child of the pressable row.
+/// child of the enabled control. This is the legacy fallback; structured
+/// snapshots use exact indices instead.
 enum CuaPressPick {
-    static func candidate(in elements: [CuaElement], label: String,
-                          roles: Set<String>) -> CuaElement? {
+    /// Cua 0.21 snapshots do not carry AX action names. Refuse structural and
+    /// editable roles here and let the driver prove whether the remaining
+    /// exact token is clickable. This is one driver contract, not an app map.
+    private static let nonInteractiveRoles: Set<String> = [
+        "AXApplication", "AXWindow", "AXGroup", "AXScrollArea", "AXWebArea",
+        "AXStaticText", "AXTextArea", "AXTextField", "AXComboBox",
+        "AXSearchField",
+    ]
+
+    static func candidate(in elements: [CuaElement], label: String) -> CuaElement? {
         // Duplicate indices must refuse, not trap (review finding).
         let byIndex = Dictionary(elements.map { ($0.index, $0) },
                                  uniquingKeysWith: { first, _ in first })
@@ -270,7 +280,8 @@ enum CuaPressPick {
             let fullText = [element.label, element.value]
                 .compactMap { $0 }.joined(separator: " ")
             guard !ActionPlan.pressLabelIsCommitting(fullText) else { continue }
-            if roles.contains(element.role) { return element }
+            if element.enabled, element.token != nil,
+               !nonInteractiveRoles.contains(element.role) { return element }
             var ancestorIndex = element.parentIndex
             for _ in 0..<3 {
                 guard let index = ancestorIndex,
@@ -279,7 +290,8 @@ enum CuaPressPick {
                     .compactMap { $0 }.joined(separator: " ")
                 if !ancestorText.isEmpty,
                    ActionPlan.pressLabelIsCommitting(ancestorText) { break }
-                if roles.contains(ancestor.role) { return ancestor }
+                if ancestor.enabled, ancestor.token != nil,
+                   !nonInteractiveRoles.contains(ancestor.role) { return ancestor }
                 ancestorIndex = ancestor.parentIndex
             }
         }
@@ -348,12 +360,11 @@ enum CuaDiagnostics {
 /// classic foreground host when it is not.
 ///
 /// The routing decision is made once per action, at `openApp`: a target that
-/// is a different, native, non-communication app — with the feature enabled
-/// and a healthy daemon — is launched WITHOUT activation and driven in the
-/// background; the user's cursor, focus, and typing are never touched.
-/// Everything else (acting on the current app, communication apps, browsers,
-/// driver missing or sick) falls through to the wrapped `SystemActionHost`
-/// unchanged.
+/// is a different native app, the plan cannot deliver content, the feature is
+/// enabled, and the daemon is healthy is launched WITHOUT activation and
+/// driven in the background; the user's cursor, focus, and typing are never
+/// touched. Everything else (acting on the current app, sending, browsers, or
+/// a missing/sick driver) falls through to `SystemActionHost` unchanged.
 ///
 /// Validation is unchanged on purpose: the same `ActionPlan` decode, the same
 /// `ActionRuntimePolicy`, the same executor invariants run against this host.
@@ -387,6 +398,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     // Routed-target state, reset every action.
     private var routed = false
+    private var contentMayCommit = false
     private var targetPID: Int = 0
     private var targetWindowID: Int?
     private var targetName = ""
@@ -453,9 +465,15 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func beginActionInputSession() {
         unroute()
+        contentMayCommit = false
         flashUsed = false
         flashCount = 0
         system.beginActionInputSession()
+    }
+
+    func prepareForActionPlan(sends: Bool) {
+        contentMayCommit = sends
+        if sends && routed { unroute() }
     }
 
     // MARK: - Routing decision
@@ -472,12 +490,13 @@ final class BackgroundRoutingActionHost: ActionHost {
         // Pre-gate with Velora's OWN app knowledge before touching the
         // driver. Starting the daemon is itself a cost — it is a same-user
         // automation surface with its own telemetry — so an action that was
-        // never going to route (the app the user is in, a chat app, a
-        // browser) must not bring one up (review finding). The driver's
+        // never going to route (the app the user is in, a sending action, or
+        // a browser) must not bring one up (review finding). The driver's
         // answer is still authoritative below; this only avoids the spawn.
         if let local = localResolve(name),
            !BackgroundActionGate.shouldRoute(
-            enabled: true, targetName: local.name,
+            enabled: true, contentMayCommit: contentMayCommit,
+            targetName: local.name,
             targetBundleID: local.bundleID,
             frontmostName: frontmost?.name,
             frontmostBundleID: frontmost?.bundleID) {
@@ -490,7 +509,7 @@ final class BackgroundRoutingActionHost: ActionHost {
             return system.openApp(named: name)
         }
         guard BackgroundActionGate.shouldRoute(
-            enabled: true,
+            enabled: true, contentMayCommit: contentMayCommit,
             targetName: resolved.name,
             targetBundleID: resolved.bundleID,
             frontmostName: frontmost?.name,
@@ -508,12 +527,13 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// still accepts becomes the new background target; anything else ends
     /// background mode and runs classically for the rest of the action —
     /// refusing outright would fail plans that legitimately move on to a
-    /// browser or a chat app (review finding).
+    /// browser or a foreground-only target (review finding).
     private func openTargetApp(named name: String) -> String? {
         let frontmost = system.frontmostApp()
         if let resolved = resolveApp(named: name),
            BackgroundActionGate.shouldRoute(
-            enabled: true, targetName: resolved.name,
+            enabled: true, contentMayCommit: contentMayCommit,
+            targetName: resolved.name,
             targetBundleID: resolved.bundleID,
             frontmostName: frontmost?.name,
             frontmostBundleID: frontmost?.bundleID),
@@ -774,6 +794,14 @@ final class BackgroundRoutingActionHost: ActionHost {
         return names
     }
 
+    func uiSnapshot() -> ActionUISnapshot? {
+        // Foreground Action Mode uses the host's native AX capability map;
+        // Cua remains the adapter for a deliberately background-routed target.
+        // A routed snapshot is not exposed until Cua's structured record also
+        // carries actions and geometry through this adapter.
+        routed ? nil : system.uiSnapshot()
+    }
+
     func frontmostPageURL() -> String? {
         routed ? nil : system.frontmostPageURL()
     }
@@ -809,22 +837,42 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard routed else {
             return system.pressElement(label: label, expecting: bundleID)
         }
-        // Same authority table as the foreground path. Background routing
-        // excludes communication apps and browsers, and `pressRoles` grants
-        // press only to those — so today this refuses everything, and it
-        // starts working the moment policy grants a background-safe role set.
-        guard let roles = ActionRuntimePolicy.pressRoles(forBundleID: targetBundleID),
-              expectedMatchesTarget(bundleID), targetReady,
+        guard expectedMatchesTarget(bundleID), targetReady,
               let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
               !snapshot.degraded, snapshot.complete
         else { return false }
         guard let element = CuaPressPick.candidate(
-            in: snapshot.elements, label: label, roles: roles),
+            in: snapshot.elements, label: label),
               let token = element.token else { return false }
         guard case .success(let reply) = transport.call("click", arguments: [
             "pid": targetPID, "element_token": token,
         ], timeout: Self.callTimeout) else { return false }
-        return !isRefused(reply)
+        guard !isRefused(reply) else { return false }
+        // A click can move focus or replace the editor. Content delivered to
+        // the old field must never authorize a later committing key.
+        backgroundDraft = ""
+        pinnedElement = nil
+        return true
+    }
+
+    func pressElement(index: Int, snapshotID: String, label: String,
+                      role: String, expecting bundleID: String?) -> Bool {
+        guard routed else {
+            return system.pressElement(
+                index: index, snapshotID: snapshotID, label: label,
+                role: role, expecting: bundleID)
+        }
+        // No foreground snapshot can authorize a background action.
+        return false
+    }
+
+    func verifyElement(index: Int, snapshotID: String, label: String,
+                       role: String, expecting bundleID: String?,
+                       requiresFocus: Bool) -> Bool {
+        guard !routed else { return false }
+        return system.verifyElement(
+            index: index, snapshotID: snapshotID, label: label,
+            role: role, expecting: bundleID, requiresFocus: requiresFocus)
     }
 
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
@@ -881,8 +929,8 @@ final class BackgroundRoutingActionHost: ActionHost {
               let windowID = targetWindowID,
               let driverKey = CuaKeyMap.driverKey(forPlanKey: name)
         else { return false }
-        // Defense in depth behind the executor's communication-bundle gate:
-        // a key that commits text may only be pressed when THIS action
+        // Defense in depth behind the executor's target-attestation gate: a
+        // key that commits text may only be pressed when THIS action
         // delivered the pending text, exactly as the foreground host
         // requires (review finding — `backgroundDraft` existed but nothing
         // read it).

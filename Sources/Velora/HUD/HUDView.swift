@@ -65,8 +65,12 @@ struct HUDView: View {
             return (CGSize(width: HUDGeometry.meetingWidth, height: HUDGeometry.height), true)
         case .inserted:
             return (CGSize(width: HUDGeometry.insertedDiameter, height: HUDGeometry.height), true)
-        case .error, .meetingFailure:
-            return (CGSize(width: HUDGeometry.errorWidth, height: HUDGeometry.height), true)
+        case .error(let message), .meetingFailure(_, let message):
+            return (
+                CGSize(
+                    width: HUDGeometry.errorWidth(for: message),
+                    height: HUDGeometry.height),
+                true)
         case .learned(let wrong, let right):
             var value = HUDGeometry.contentInsetH * 2 + 14 + 12 + VeloraSpacing.s * 4
             value += HUDGeometry.textWidth(wrong, font: HUDGeometry.bodyFont)
@@ -545,6 +549,10 @@ struct HUDView: View {
         return nil
     }
 
+    private var errorCapsuleWidth: CGFloat {
+        HUDGeometry.errorWidth(for: errorMessage)
+    }
+
     private var errorContent: some View {
         HStack(spacing: VeloraSpacing.s) {
             Image(systemName: "exclamationmark.triangle.fill")
@@ -573,7 +581,7 @@ struct HUDView: View {
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
-        .frame(width: HUDGeometry.errorWidth)
+        .frame(width: errorCapsuleWidth)
     }
 
     // MARK: - Learned correction
@@ -679,6 +687,8 @@ struct HUDView: View {
             return "Finish notes or keep recording"
         case .meetingFailure:
             return "Open the saved transcript or retry meeting processing"
+        case .notice(_, let message) where message.contains("Esc to stop"):
+            return "Press Escape to cancel the running action"
         default:
             return isStandby ? "Click to start dictation" : "Click to stop dictation"
         }
@@ -693,6 +703,8 @@ struct HUDView: View {
         case .meetingEnd(let title):
             return "Meeting ended, \(title)"
         case .meetingFailure(_, let message):
+            return message
+        case .notice(_, let message):
             return message
         default:
             return "Velora dictation"
@@ -863,7 +875,7 @@ struct HUDView: View {
 
         case .error, .meetingFailure:
             if old.isHidden {
-                resetInstant(width: HUDGeometry.errorWidth, height: HUDGeometry.height)
+                resetInstant(width: errorCapsuleWidth, height: HUDGeometry.height)
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                     opacity = 1
                     scale = 1
@@ -871,7 +883,7 @@ struct HUDView: View {
                 }
             } else {
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                    width = HUDGeometry.errorWidth
+                    width = errorCapsuleWidth
                     height = HUDGeometry.height
                     showCheck = false
                 }

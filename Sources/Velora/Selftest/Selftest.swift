@@ -5560,7 +5560,7 @@ enum Selftest {
         expect(
             state.usesNativeMouseControls
                 && HUDView.capsuleMetrics(for: state, context: nil).size.width
-                    == HUDGeometry.errorWidth,
+                    == HUDGeometry.errorWidth(for: "Meeting notes timed out"),
             "meeting failure HUD owns Open and Retry without starting dictation")
         var failures = MeetingFailureHUDQueue()
         failures.retain(meetingID: "first", message: "First failed")
@@ -6081,6 +6081,31 @@ enum Selftest {
     }
 
     private static func testScreenContextSites() {
+        expect(ScreenContext.actionUILabel(
+            role: kAXStaticTextRole as String,
+            authored: ["Shivangi Gupta"], actions: []) == "Shivangi Gupta",
+               "short passive AX names remain available to the action model")
+        expect(ScreenContext.actionUILabel(
+            role: kAXStaticTextRole as String,
+            authored: [String(repeating: "private message body ", count: 12)],
+            actions: []) == nil,
+               "long passive AX prose is omitted from the interaction tree")
+        expect(ScreenContext.actionUILabel(
+            role: kAXButtonRole as String,
+            authored: [String(repeating: "label ", count: 50)],
+            actions: [kAXPressAction as String])?.count == 180,
+               "interactive AX labels remain available within the hard cap")
+        expect(ScreenContext.actionTreeDepthBudget >= 30,
+               "generic Action AX capture reaches deep Electron composers")
+        expect(ScreenContext.modelActionNames(
+            from: [kAXShowMenuAction as String,
+                   "AXScrollToVisible",
+                   "AXFocus",
+                   kAXPressAction as String]) == ["AXFocus", kAXPressAction as String],
+               "only executable focus/press capabilities reach the action model")
+        expect(ScreenContext.isEditableActionRole(kAXTextAreaRole as String),
+               "a text area is a generic focus target")
+
         // URL-host detection: exact host, subdomain, www strip, unknown.
         expect(ScreenContext.siteSlug(forHost: "mail.google.com") == "gmail",
                "gmail host detected")
@@ -6193,17 +6218,8 @@ enum Selftest {
                                at: t0, maxAge: 3) == nil,
                "an unknown browser has no entry")
 
-        // Browser press policy: links join rows/cells in browsers only;
-        // send authority (communication bundles) is untouched.
-        expect(ActionRuntimePolicy.pressRoles(forBundleID: "com.google.Chrome")?
-                .contains("AXLink") == true, "browser press allows links")
-        expect(ActionRuntimePolicy.pressRoles(forBundleID: "com.tinyspeck.slackmacgap")
-               == ScreenContext.actionNavigationRoles,
-               "communication press stays rows/cells")
-        expect(ActionRuntimePolicy.pressRoles(forBundleID: "com.apple.TextEdit") == nil,
-               "other apps cannot press at all")
-        expect(!ActionRuntimePolicy.isCommunicationBundle("com.google.Chrome"),
-               "browsers gain no send authority")
+        // Browser identity remains only for page URL extraction/routing, not
+        // as an allow-list for which apps may receive verified text.
         for bundleID in ["com.apple.Safari", "org.mozilla.firefox", "app.zen-browser.zen"] {
             expect(ActionRuntimePolicy.isBrowserBundle(bundleID),
                    "\(bundleID) recognized as a browser")
@@ -6396,8 +6412,12 @@ enum Selftest {
             HUDPanel.panelSize.height >= HUDGeometry.height + 40,
             "HUD host leaves vertical room for motion and shadow")
         expect(
-            HUDPanel.panelSize.width >= HUDGeometry.errorWidth + 40,
+            HUDPanel.panelSize.width >= HUDGeometry.maxListeningWidth + 40,
             "HUD host leaves horizontal room for the error action")
+        expect(
+            HUDGeometry.errorWidth(for: "The selected conversation changed")
+                > HUDGeometry.errorWidth,
+            "a concrete Action failure grows instead of truncating beside Retry Action")
         expect(
             HUDPanel.panelSize.width >= HUDGeometry.meetingPromptWidth + 40,
             "HUD host leaves shadow room around the meeting prompt")

@@ -2,6 +2,31 @@ import AppKit
 import ApplicationServices
 import Foundation
 
+enum ActionProgress: Equatable {
+    case readingScreen
+    case planning(turn: Int)
+    case verifyingTarget
+    case executing(step: Int, total: Int, description: String)
+    case retrying(String)
+
+    var hudMessage: String {
+        switch self {
+        case .readingScreen:
+            return "Reading screen · Esc to stop"
+        case .planning(let turn):
+            return "Planning" + (turn > 1 ? " turn \(turn)" : "")
+                + " · Esc to stop"
+        case .verifyingTarget:
+            return "Confirming recipient · Esc to stop"
+        case .executing(let step, let total, let description):
+            let short = String(description.prefix(42))
+            return "\(step)/\(total) \(short) · Esc to stop"
+        case .retrying:
+            return "Screen changed; trying a new path · Esc to stop"
+        }
+    }
+}
+
 /// What the planner is told about the machine. Gathered entirely from APIs that
 /// need no permission beyond the Accessibility grant Velora already holds —
 /// running apps and the frontmost app are free, window titles come from AX.
@@ -19,9 +44,10 @@ struct ActionContextSnapshot {
     /// need it: the window title alone cannot tell Gmail's inbox from its
     /// compose view.
     var pageURL: String = ""
+    var uiSnapshot: ActionUISnapshot?
 
     var payload: [String: Any] {
-        [
+        var out: [String: Any] = [
             "frontmost_app": frontmostApp,
             "frontmost_bundle": frontmostBundle,
             "frontmost_window": frontmostWindow,
@@ -30,6 +56,8 @@ struct ActionContextSnapshot {
             "screen_names": screenNames,
             "page_url": pageURL,
         ]
+        if let uiSnapshot { out["ui_snapshot"] = uiSnapshot.payload }
+        return out
     }
 
     /// Snapshot of the machine as the command was spoken. `frontmost` is passed
@@ -140,13 +168,20 @@ extension ActionPlan {
                 // Every term must appear; a preview that said "or" would
                 // understate the check a reader is inspecting.
                 return "verify screen shows \(terms.joined(separator: " and "))"
+            case .verifyUI(_, let index, let role, let label, let target):
+                return "verify [\(index)] \(role) \"\(label)\" proves \(target)"
+            case .verifyGoal(_, let index, let role, let label, let target):
+                return "verify goal [\(index)] \(role) \"\(label)\" proves \(target)"
             case .typeText(let text): return "type \"\(text)\""
+            case .searchText(let text): return "search for \"\(text)\""
             case .pasteText(let text): return "paste \"\(text)\""
             case .key(let name, let mods, let count):
                 let chord = (mods + [name]).joined(separator: "+")
                 return count > 1 ? "press \(chord) x\(count)" : "press \(chord)"
             case .pause(let ms): return "pause \(ms)ms"
             case .pressElement(let label): return "press \"\(label)\" on screen"
+            case .pressUI(_, let index, let role, let label):
+                return "press [\(index)] \(role) \"\(label)\" on screen"
             }
         }
     }
@@ -160,12 +195,11 @@ extension ActionPlan {
 /// Lives for exactly one action: send a command, wait for that action's turn
 /// event, hand it back as a value.
 final class EngineTurnPlanner: ActionTurnPlanner {
-    /// The engine's worst case per ask is 35 s (cold first attempt) + 20 s
-    /// (repair); this backstop sits above that so it only ever fires for a
-    /// reply that will truly never arrive (engine crash, restart
-    /// mid-request). Without it the loop's thread would wait forever and
-    /// every later action would be refused as "already running".
-    static let turnTimeout: TimeInterval = 65
+    /// One turn may chain controller, UI reviewer, completion/target verifier,
+    /// and one repair. The previous 65 s backstop predated those calls and
+    /// cancelled a healthy engine mid-review, producing "session already
+    /// finished". The action's 180 s wall remains the outer bound.
+    static let turnTimeout: TimeInterval = 150
 
     let id = UUID().uuidString
     private let client: EngineClient
@@ -217,6 +251,15 @@ final class EngineTurnPlanner: ActionTurnPlanner {
     }
 
     private func send(_ json: [String: Any]) {
+        // AX is an IPC boundary. One app returning NaN/∞ geometry must not
+        // make JSONSerialization silently drop the whole observation and
+        // leave the caller waiting for a request the engine never received.
+        guard JSONSerialization.isValidJSONObject(json) else {
+            deliver(.failure(
+                reason: "the screen observation could not be encoded",
+                code: "invalid_observation"))
+            return
+        }
         DispatchQueue.main.async { [client] in
             client.send(json: json)
         }
@@ -307,6 +350,7 @@ final class ActionCoordinator {
         context: ActionContextSnapshot,
         execute: Bool = true,
         allowSend: Bool = true,
+        progress: ((ActionProgress) -> Void)? = nil,
         completion: @escaping (ActionResult) -> Void
     ) {
         guard !isRunning else {
@@ -314,8 +358,13 @@ final class ActionCoordinator {
             return
         }
         let planner = EngineTurnPlanner(client: client)
-        let runner = ActionLoopRunner(host: host, planner: planner,
-                                      execute: execute, allowSend: allowSend)
+        let report: (ActionProgress) -> Void = { value in
+            guard let progress else { return }
+            DispatchQueue.main.async { progress(value) }
+        }
+        let runner = ActionLoopRunner(
+            host: host, planner: planner, execute: execute,
+            allowSend: allowSend, progress: report)
         self.planner = planner
         self.runner = runner
         self.completion = completion

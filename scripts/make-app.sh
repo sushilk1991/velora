@@ -11,9 +11,9 @@
 #   to ~/Library/Application Support/Velora/engine and bootstraps the venv
 #   there with the bundled uv — the .app works on machines with nothing but
 #   the .app (models still download from Hugging Face on first run).
-# - VeloraEngineDir (this checkout's engine dir) is still baked into the
-#   bundle Info.plist as a dev fallback; the bundled engine takes precedence
-#   (set VELORA_ENGINE_DIR to override everything at runtime).
+# - Development bundles may carry VeloraEngineDir as a checkout fallback.
+#   Distribution bundles never expose a builder-local path and use only their
+#   bundled engine (or an explicit VELORA_ENGINE_DIR runtime override).
 # - UI sounds (start/stop/error.caf) generated if missing and copied in
 # - Development builds require a stable signing identity so TCC grants survive
 #   rebuilds. make-dmg.sh sets
@@ -123,11 +123,13 @@ cp Resources/SublimeText/VeloraVoiceEdit.py \
   Resources/SublimeText/.python-version \
   "$APP/Contents/Resources/SublimeText/"
 
-# Bake the absolute engine directory into the bundle as a dev fallback
-# (the bundled Resources/engine copy below takes precedence at runtime).
+# Bake the absolute engine directory only into local development bundles. A
+# public artifact must not disclose or depend on the builder's checkout path.
 ENGINE_DIR="$(pwd)/engine"
 /usr/libexec/PlistBuddy -c "Delete :VeloraEngineDir" "$APP/Contents/Info.plist" 2>/dev/null || true
-/usr/libexec/PlistBuddy -c "Add :VeloraEngineDir string $ENGINE_DIR" "$APP/Contents/Info.plist"
+if [[ "${VELORA_DISTRIBUTION:-0}" != "1" ]]; then
+  /usr/libexec/PlistBuddy -c "Add :VeloraEngineDir string $ENGINE_DIR" "$APP/Contents/Info.plist"
+fi
 
 # Version keys, from the VERSION source of truth (make-dmg.sh names the image
 # after CFBundleShortVersionString). The bundle plist was just copied from

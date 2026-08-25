@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import ctypes
 import json
 import logging
 import os
@@ -63,6 +64,44 @@ from .vocab_miner import VocabMiner
 T = TypeVar("T")
 
 log = logging.getLogger("velora.server")
+
+
+class _ActionModelUnavailable(Exception):
+    """A chained Action model call failed before returning a verdict."""
+
+
+class _ActionContextTooLarge(Exception):
+    """The bounded screen still exceeds Action Mode's local prefill ceiling."""
+
+
+def _memory_pressure_level() -> int:
+    """Return Darwin's current memory-pressure flag, or normal/unknown as 0.
+
+    The kernel uses the dispatch memory-pressure flag values: normal=1,
+    warning=2, critical=4. Failure is intentionally fail-open for latency: a
+    missing signal keeps the warm model rather than unloading on a guess.
+    """
+    if sys.platform != "darwin":
+        return 0
+    try:
+        value = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        libc = ctypes.CDLL(None, use_errno=True)
+        sysctlbyname = libc.sysctlbyname
+        sysctlbyname.argtypes = [
+            ctypes.c_char_p, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        ]
+        sysctlbyname.restype = ctypes.c_int
+        if sysctlbyname(
+            b"kern.memorystatus_vm_pressure_level",
+            ctypes.byref(value), ctypes.byref(size), None, 0,
+        ) != 0:
+            return 0
+        return int(value.value)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0
+
 
 CLEANUP_RESTART_EXIT_CODE = os.EX_TEMPFAIL
 CLEANUP_RESTART_GRACE_S = 0.1
@@ -122,6 +161,16 @@ MEETING_NOTES_REDUCE_MAX_TOKENS = 512
 # few seconds before Qwen is usable. Wait only for an existing, healthy worker;
 # an absent or unhealthy model still fails honestly instead of hanging.
 MEETING_NOTES_MODEL_READY_WAIT_S = 15.0
+
+# CleanupProcess replaces a wedged model child asynchronously. Action Mode is
+# already inside a 150-second app-side turn backstop, so wait for that bounded
+# replacement once instead of burning repair/rejection budgets against the
+# brief `loaded = false` interval. The observed replacement takes ~6 seconds.
+ACTION_MODEL_RECOVERY_WAIT_S = 12.0
+# Avoid unload/reload churn when the user chains actions. Under pressure the
+# weight-owning writing-model child is reaped only after the whole engine has
+# remained idle for this grace period.
+ACTION_HIBERNATE_IDLE_S = 8.0
 
 # Seam context for per-segment cleanup: the tail of the previous cleaned chunk
 # rides along in the system prompt so seams punctuate/capitalize correctly.
@@ -327,6 +376,10 @@ class Engine:
         # Dropping the id at failure time made the matching release unable to
         # clear this session's planner KV prefix.
         self._action_terminal = False
+        # Post-action KV release and pressure hibernation run outside the
+        # command dispatcher. A new foreground job cancels this task so stale
+        # action_end traffic cannot reap the model underneath new work.
+        self._action_cleanup_task: asyncio.Task[None] | None = None
         # Meeting notes share the cleanup model but are chunked and
         # cooperatively preempted whenever live dictation starts.
         self._meeting_notes_running = False
@@ -800,6 +853,10 @@ class Engine:
                 self._miner_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._miner_task
+            if self._action_cleanup_task is not None:
+                self._action_cleanup_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._action_cleanup_task
             self._server.close()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._server.wait_closed()
@@ -1029,7 +1086,7 @@ class Engine:
                 if (isinstance(requested, str) and requested
                         and requested == self._action_id
                         and self._drop_action_session(requested)):
-                    await self._release_action_memory()
+                    self._schedule_action_cleanup()
             elif cmd == "action_cancel":
                 requested = msg.get("id")
                 matches = (
@@ -1041,7 +1098,7 @@ class Engine:
                     if self._planning:
                         self._action_cancel.set()
                     if self._drop_action_session(requested):
-                        await self._release_action_memory()
+                        self._schedule_action_cleanup()
             elif cmd == "meeting_notes":
                 await self._cmd_meeting_notes(msg)
             elif cmd == "meeting_notes_cancel":
@@ -1060,6 +1117,7 @@ class Engine:
     # ---------------- session state machine ----------------
 
     async def _cmd_start(self, msg: dict[str, Any]) -> None:
+        self._cancel_action_cleanup()
         # Explicit-mode file cleanup uses the same writing model as foreground
         # dictation. Stop it between tokens and retry the exact chunk later.
         self._transcribe_preempt.set()
@@ -1977,7 +2035,9 @@ class Engine:
         )
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
-        if gate.use_llm and self.cleanup is not None and self.cleanup.loaded:
+        cleanup_ready = (
+            await self._ensure_cleanup_loaded() if gate.use_llm else False)
+        if gate.use_llm and self.cleanup is not None and cleanup_ready:
             prefix_candidates = formatting.build_prefill_prompt_candidates(
                 self.config,
                 bundle_id=bundle_id,
@@ -2326,9 +2386,6 @@ class Engine:
         if len(instruction) > editing.MAX_INSTRUCTION_CHARS:
             await fail("edit: instruction too long", "too_large")
             return
-        if self.cleanup is None:
-            await fail("edit: writing model unavailable", "cleanup_unavailable")
-            return
         # Idle vocab mining shares the single-thread cleanup executor and can
         # hold it for seconds. Without preempting it (as _cmd_start does), an
         # edit queues behind a mining step, blows its own from-submission
@@ -2337,12 +2394,26 @@ class Engine:
         if self._miner_task is not None:
             self._miner_task.cancel()
         self._mine_cancel.set()
+        self._cancel_action_cleanup()
         self._editing = True
         self._edit_cancel.clear()
         asyncio.create_task(self._run_edit_text(dict(msg), text, instruction))
 
     async def _run_edit_text(self, msg: dict[str, Any], text: str, instruction: str) -> None:
         try:
+            # A pressure-hibernated model may take seconds to restore. Keep
+            # that wait in this worker task so ping/edit_cancel stay live on
+            # the socket dispatcher, and make the load itself cancellable.
+            if self.cleanup is None or not await self._ensure_cleanup_loaded(
+                    self._edit_cancel):
+                code = "cancelled" if self._edit_cancel.is_set() else "cleanup_unavailable"
+                error = ("edit: cancelled" if code == "cancelled"
+                         else "edit: writing model unavailable")
+                await self._send({
+                    "event": "edit_failed", "id": msg.get("id"),
+                    "code": code, "error": error,
+                })
+                return
             t0 = time.perf_counter()
             # A dedicated budget scaled to selection size — the default
             # adaptive timeout tops out at 6 s (tuned for dictation cleanup),
@@ -2424,6 +2495,86 @@ class Engine:
         except Exception:  # noqa: BLE001 — hygiene must never fail a task
             log.debug("action memory release failed", exc_info=True)
 
+    def _cancel_action_cleanup(self) -> None:
+        task = self._action_cleanup_task
+        self._action_cleanup_task = None
+        if (task is not None and task is not asyncio.current_task()
+                and not task.done()):
+            task.cancel()
+
+    def _cleanup_model_is_idle(self) -> bool:
+        return not (
+            self.shutdown.is_set()
+            or self.session is not None
+            or self._starting
+            or self._finalizing
+            or self._reprocessing
+            or self._transcribing
+            or self._meeting_notes_running
+            or self._editing
+            or self._planning
+            or self._action_session is not None
+        )
+
+    def _schedule_action_cleanup(self) -> None:
+        """Release Action KV now, then hibernate only after verified idle.
+
+        The task is deliberately detached from command dispatch. Both worker
+        methods are best-effort, and every new foreground cleanup-model user
+        cancels the task before starting.
+        """
+        self._cancel_action_cleanup()
+
+        async def clean_when_idle() -> None:
+            try:
+                await self._release_action_memory()
+                await asyncio.sleep(ACTION_HIBERNATE_IDLE_S)
+                if self._cleanup_model_is_idle():
+                    await self._hibernate_cleanup_if_pressured()
+            except asyncio.CancelledError:
+                raise
+            finally:
+                if self._action_cleanup_task is asyncio.current_task():
+                    self._action_cleanup_task = None
+
+        self._action_cleanup_task = asyncio.create_task(clean_when_idle())
+
+    async def _ensure_cleanup_loaded(
+        self,
+        cancel_event: threading.Event | None = None,
+    ) -> bool:
+        self._cancel_action_cleanup()
+        cleanup = self.cleanup
+        if cleanup is None:
+            return False
+        if getattr(cleanup, "loaded", True):
+            return True
+        ensure = getattr(cleanup, "ensure_loaded", None)
+        if not callable(ensure):
+            return False
+        try:
+            return bool(await ensure(cancel_event=cancel_event))
+        except Exception:  # noqa: BLE001 — callers retain their normal fallback
+            log.exception("writing model failed to leave hibernation")
+            return False
+
+    async def _hibernate_cleanup_if_pressured(self) -> None:
+        cleanup = self.cleanup
+        hibernate = getattr(cleanup, "hibernate", None)
+        if not callable(hibernate):
+            return
+        pressure = await asyncio.to_thread(_memory_pressure_level)
+        if pressure < 2:
+            return
+        try:
+            if await hibernate():
+                log.info(
+                    "writing model hibernated after action memory_pressure=%d",
+                    pressure,
+                )
+        except Exception:  # noqa: BLE001 — memory hygiene cannot fail the action
+            log.debug("writing model hibernation skipped", exc_info=True)
+
     async def _action_busy_reason(self) -> tuple[str, str] | None:
         if self.session is not None or self._starting or self._finalizing:
             return ("action: busy (dictation in progress)", "busy")
@@ -2433,6 +2584,29 @@ class Engine:
         if self.cleanup is None:
             return ("action: writing model unavailable", "cleanup_unavailable")
         return None
+
+    async def _wait_for_action_model_recovery(self) -> bool:
+        """Wait once for CleanupProcess's bounded child replacement.
+
+        Model infrastructure failure is not a bad action plan. Keeping this
+        wait inside the current planning turn prevents the app from issuing a
+        burst of fresh observations that exhausts the session's rejection cap
+        while the same worker is still warming.
+        """
+        deadline = (
+            asyncio.get_running_loop().time() + ACTION_MODEL_RECOVERY_WAIT_S)
+        while not self._action_cancel.is_set() and not self.shutdown.is_set():
+            cleanup = self.cleanup
+            if cleanup is None:
+                return False
+            if getattr(cleanup, "loaded", True):
+                return True
+            if getattr(cleanup, "unhealthy", False):
+                return False
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.05)
+        return False
 
     async def _cmd_action_start(self, msg: dict[str, Any]) -> None:
         """Action Mode, turn 1: open an observe→decide→act session.
@@ -2462,6 +2636,7 @@ class Engine:
         if busy is not None:
             await fail(*busy)
             return
+        self._cancel_action_cleanup()
         # A new action unconditionally replaces any live session: the only way
         # a session is still here is that the app abandoned it (crash, kill
         # mid-loop), and wedging Action Mode until an engine restart would be
@@ -2472,7 +2647,8 @@ class Engine:
             await self._release_action_memory()
         context = actions.ActionContext.from_dict(msg.get("context"))
         context.transcript = transcript
-        session = actions.ActionSession(transcript, context)
+        session = actions.ActionSession(
+            transcript, context, require_target_verifier=True)
         self._action_session = session
         self._action_id = msg.get("id")
         self._action_terminal = False
@@ -2509,6 +2685,7 @@ class Engine:
             await fail(f"action: ran out of turns (max {actions.MAX_TURNS})",
                        "turn_limit")
             return
+        self._cancel_action_cleanup()
         observation = msg.get("observation")
         if not isinstance(observation, dict):
             await fail("action: missing 'observation'", "invalid_arguments")
@@ -2530,6 +2707,7 @@ class Engine:
         """One model call → one validated turn. Shared by start and observe;
         `message` is the user-role text (command or observation)."""
         planning_released = False
+        recovery_wait_attempted = False
 
         async def send_after_planning(payload: dict[str, Any]) -> None:
             """Publish only after a next turn is allowed through the busy gate.
@@ -2543,11 +2721,122 @@ class Engine:
             planning_released = True
             await self._send(payload)
 
+        async def wait_for_model_recovery_once() -> bool:
+            nonlocal recovery_wait_attempted
+            if recovery_wait_attempted:
+                return False
+            recovery_wait_attempted = True
+            return await self._wait_for_action_model_recovery()
+
         try:
             t0 = time.perf_counter()
             turn: dict[str, Any] | None = None
             last_error = ""
-            for attempt in range(2):
+            model_unavailable_error = ""
+            had_plan_error = False
+            # Deliberate pressure hibernation is restored inside this task, not
+            # in the socket-command dispatcher. Model loading takes seconds;
+            # ping/cancel/status frames must remain responsive throughout.
+            if getattr(self.cleanup, "hibernated", False):
+                loaded = await self._ensure_cleanup_loaded(self._action_cancel)
+                if self._action_cancel.is_set():
+                    self._drop_action_session(msg.get("id"))
+                    self._schedule_action_cleanup()
+                    await send_after_planning({
+                        "event": "action_failed", "id": msg.get("id"),
+                        "code": "cancelled", "error": "action: cancelled",
+                    })
+                    return
+                if not loaded:
+                    self._mark_action_terminal(msg.get("id"))
+                    await send_after_planning({
+                        "event": "action_failed", "id": msg.get("id"),
+                        "code": "planner_unavailable",
+                        "error": "the local action model could not leave hibernation",
+                    })
+                    return
+            if self._action_cancel.is_set():
+                self._drop_action_session(msg.get("id"))
+                self._schedule_action_cleanup()
+                await send_after_planning({
+                    "event": "action_failed", "id": msg.get("id"),
+                    "code": "cancelled", "error": "action: cancelled",
+                })
+                return
+            # An accepted exact press on a repeated collection member is
+            # already proven navigation by deterministic capability checks.
+            # On its fresh post-click observation, ask the independent
+            # completion model directly whether unique active content proves
+            # the spoken goal. A refusal or malformed verdict is only an
+            # optimization miss: fall back to the normal controller below.
+            direct_goal_check = session.direct_goal_check_pending
+            session.direct_goal_check_pending = False
+            if (direct_goal_check
+                    and session.current_ui_snapshot.get("complete")):
+                verifier_prompt = actions.build_goal_verifier_prompt(
+                    session.current_ui_snapshot)
+                verifier_message = actions.goal_verifier_message(
+                    session.transcript, session.goal)
+                completion = await self.cleanup.cleanup(
+                    verifier_message, verifier_prompt,
+                    timeout_ms=actions.VERIFIER_TIMEOUT_MS,
+                    check_ratio=False,
+                    cancel_event=self._action_cancel,
+                    max_tokens=180,
+                    # This tree changes after every UI action, so retaining its
+                    # verifier prefix only pins a large stale KV snapshot and
+                    # evicts the ordinary dictation prefix. Generate it once
+                    # and let the working cache die with the call.
+                    cache_scope=None,
+                    max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+                )
+                if completion.reason == "context_limit":
+                    raise _ActionContextTooLarge(
+                        "screen context needs "
+                        f"{completion.input_tokens} tokens; the safe local limit is "
+                        f"{actions.ACTION_MAX_INPUT_TOKENS}")
+                if self._action_cancel.is_set():
+                    self._drop_action_session(msg.get("id"))
+                    self._schedule_action_cleanup()
+                    await send_after_planning({
+                        "event": "action_failed", "id": msg.get("id"),
+                        "code": "cancelled", "error": "action: cancelled",
+                    })
+                    return
+                if completion.applied:
+                    try:
+                        goal_verdict = actions.parse_goal_verdict(
+                            completion.text, session.current_ui_snapshot,
+                            session.transcript)
+                        if goal_verdict.get("safe") is True:
+                            token = uuid.uuid4().hex
+                            session.state.allowed_ui_attestation = token
+                            parsed = actions.attach_verified_goal(
+                                {"done": True}, goal_verdict,
+                                session.current_ui_snapshot, token,
+                                sends=bool(session.sends))
+                            turn = session.accept_reply(json.dumps(
+                                parsed, ensure_ascii=False,
+                                separators=(",", ":")))
+                        else:
+                            log.info(
+                                "direct action completion check fell back: %s",
+                                goal_verdict.get("reason")
+                                or "current UI did not prove completion")
+                    except actions.PlanError as exc:
+                        session.state.allowed_ui_attestation = None
+                        log.info(
+                            "direct action completion check fell back: %s", exc)
+                else:
+                    log.info(
+                        "direct action completion check unavailable; "
+                        "falling back to controller: %s",
+                        completion.reason or "no output")
+                    await wait_for_model_recovery_once()
+
+            controller_attempts = range(2) if turn is None else range(0)
+            for attempt in controller_attempts:
+                authoritative_ui_refusal = False
                 # The repair carries the actual rejection: "not valid JSON"
                 # teaches nothing when the JSON was fine and a rule was broken.
                 prompt = (session.system_prompt() if attempt == 0
@@ -2571,42 +2860,253 @@ class Engine:
                     # tokens of prefill (~1.5s per turn on a 4B).
                     prefix_candidates=[(prompt, "a"), (prompt, "b")],
                     cache_scope="action",
+                    max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
                 )
                 if self._action_cancel.is_set():
                     self._drop_action_session(msg.get("id"))
                     # action_cancel/action_end may have arrived while the
                     # cleanup process lock was held. It is free after the await
                     # above, so this is the authoritative retry.
-                    await self._release_action_memory()
+                    self._schedule_action_cleanup()
                     await send_after_planning({
                         "event": "action_failed", "id": msg.get("id"),
                         "code": "cancelled", "error": "action: cancelled",
                     })
                     return
                 if not result.applied:
+                    if result.reason == "context_limit":
+                        raise _ActionContextTooLarge(
+                            "screen context needs "
+                            f"{result.input_tokens} tokens; the safe local limit is "
+                            f"{actions.ACTION_MAX_INPUT_TOKENS}")
                     last_error = f"model unavailable ({result.reason or 'no output'})"
+                    model_unavailable_error = last_error
+                    if attempt == 0:
+                        await wait_for_model_recovery_once()
                     continue
                 try:
-                    turn = session.accept_reply(result.text)
+                    reply_text = result.text
+                    parsed = actions.parse_turn(reply_text)
+                    review_refusal_reason = ""
+                    if actions.turn_requires_ui_action_review(parsed, session):
+                        if not session.current_ui_snapshot.get("complete"):
+                            authoritative_ui_refusal = True
+                            raise actions.PlanError(
+                                "UI action reviewer: structured UI is incomplete")
+                        review_prompt = actions.build_ui_action_review_prompt(
+                            session.current_ui_snapshot)
+                        review_message = actions.ui_action_review_message(
+                            session.transcript,
+                            str(parsed.get("goal") or session.goal),
+                            parsed.get("steps") or [])
+                        review_result = await self.cleanup.cleanup(
+                            review_message, review_prompt,
+                            timeout_ms=actions.VERIFIER_TIMEOUT_MS,
+                            check_ratio=False,
+                            cancel_event=self._action_cancel,
+                            max_tokens=180,
+                            cache_scope=None,
+                            max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+                        )
+                        if self._action_cancel.is_set():
+                            self._drop_action_session(msg.get("id"))
+                            self._schedule_action_cleanup()
+                            await send_after_planning({
+                                "event": "action_failed", "id": msg.get("id"),
+                                "code": "cancelled", "error": "action: cancelled",
+                            })
+                            return
+                        if not review_result.applied:
+                            if review_result.reason == "context_limit":
+                                raise _ActionContextTooLarge(
+                                    "screen context needs "
+                                    f"{review_result.input_tokens} tokens; "
+                                    "the safe local limit is "
+                                    f"{actions.ACTION_MAX_INPUT_TOKENS}")
+                            raise _ActionModelUnavailable(
+                                "UI action reviewer unavailable ("
+                                + str(review_result.reason or "no output") + ")")
+                        review = actions.parse_ui_action_review(
+                            review_result.text, session.current_ui_snapshot,
+                            session.transcript)
+                        if review.get("goal_met") is True:
+                            declared_sends = session.sends
+                            if declared_sends is None:
+                                declared_sends = parsed.get("sends")
+                            token = uuid.uuid4().hex
+                            session.state.allowed_ui_attestation = token
+                            parsed = actions.attach_verified_goal(
+                                parsed, review, session.current_ui_snapshot, token,
+                                sends=bool(declared_sends))
+                            reply_text = json.dumps(
+                                parsed, ensure_ascii=False, separators=(",", ":"))
+                        elif review.get("safe") is not True:
+                            declared_sends = session.sends
+                            if declared_sends is None:
+                                declared_sends = parsed.get("sends")
+                            reason = str(review.get("reason") or
+                                         "the selected control is not navigation")
+                            if declared_sends is False and session.turns_used > 0:
+                                # Do not execute the refused press. Give the
+                                # independent completion verifier the current
+                                # tree; it can replace the press only with
+                                # exact, runtime-rechecked proof that the
+                                # command is already complete.
+                                review_refusal_reason = reason
+                                parsed = {"done": True}
+                                reply_text = '{"done":true}'
+                            else:
+                                raise actions.PlanError(
+                                    "UI action reviewer refused: " + reason)
+                    if (review_refusal_reason
+                            or actions.turn_requires_goal_verifier(parsed, session)):
+                        if not session.current_ui_snapshot.get("complete"):
+                            authoritative_ui_refusal = True
+                            raise actions.PlanError(
+                                "goal verifier: structured UI is incomplete")
+                        verifier_prompt = actions.build_goal_verifier_prompt(
+                            session.current_ui_snapshot)
+                        verifier_message = actions.goal_verifier_message(
+                            session.transcript,
+                            str(parsed.get("goal") or session.goal))
+                        completion = await self.cleanup.cleanup(
+                            verifier_message, verifier_prompt,
+                            timeout_ms=actions.VERIFIER_TIMEOUT_MS,
+                            check_ratio=False,
+                            cancel_event=self._action_cancel,
+                            max_tokens=180,
+                            cache_scope=None,
+                            max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+                        )
+                        if self._action_cancel.is_set():
+                            self._drop_action_session(msg.get("id"))
+                            self._schedule_action_cleanup()
+                            await send_after_planning({
+                                "event": "action_failed", "id": msg.get("id"),
+                                "code": "cancelled", "error": "action: cancelled",
+                            })
+                            return
+                        if not completion.applied:
+                            if completion.reason == "context_limit":
+                                raise _ActionContextTooLarge(
+                                    "screen context needs "
+                                    f"{completion.input_tokens} tokens; "
+                                    "the safe local limit is "
+                                    f"{actions.ACTION_MAX_INPUT_TOKENS}")
+                            raise _ActionModelUnavailable(
+                                "goal verifier unavailable ("
+                                + str(completion.reason or "no output") + ")")
+                        goal_verdict = actions.parse_goal_verdict(
+                            completion.text, session.current_ui_snapshot,
+                            session.transcript)
+                        if goal_verdict.get("safe") is True:
+                            declared_sends = session.sends
+                            if declared_sends is None:
+                                declared_sends = parsed.get("sends")
+                            token = uuid.uuid4().hex
+                            session.state.allowed_ui_attestation = token
+                            parsed = actions.attach_verified_goal(
+                                parsed, goal_verdict,
+                                session.current_ui_snapshot, token,
+                                sends=bool(declared_sends))
+                            reply_text = json.dumps(
+                                parsed, ensure_ascii=False, separators=(",", ":"))
+                        elif review_refusal_reason:
+                            raise actions.PlanError(
+                                "UI action reviewer refused: "
+                                + review_refusal_reason)
+                    if actions.turn_requires_target_verifier(parsed, session):
+                        if not session.current_ui_snapshot.get("complete"):
+                            authoritative_ui_refusal = True
+                            raise actions.PlanError(
+                                "target verifier: structured UI is incomplete")
+                        verifier_prompt = actions.build_target_verifier_prompt(
+                            session.current_ui_snapshot)
+                        verifier_message = actions.target_verifier_message(
+                            session.transcript,
+                            str(parsed.get("goal") or session.goal),
+                            parsed.get("steps") or [])
+                        verdict = await self.cleanup.cleanup(
+                            verifier_message, verifier_prompt,
+                            timeout_ms=actions.VERIFIER_TIMEOUT_MS,
+                            check_ratio=False,
+                            cancel_event=self._action_cancel,
+                            max_tokens=180,
+                            cache_scope=None,
+                            max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+                        )
+                        if self._action_cancel.is_set():
+                            self._drop_action_session(msg.get("id"))
+                            self._schedule_action_cleanup()
+                            await send_after_planning({
+                                "event": "action_failed", "id": msg.get("id"),
+                                "code": "cancelled", "error": "action: cancelled",
+                            })
+                            return
+                        if not verdict.applied:
+                            if verdict.reason == "context_limit":
+                                raise _ActionContextTooLarge(
+                                    "screen context needs "
+                                    f"{verdict.input_tokens} tokens; "
+                                    "the safe local limit is "
+                                    f"{actions.ACTION_MAX_INPUT_TOKENS}")
+                            raise _ActionModelUnavailable(
+                                "target verifier unavailable ("
+                                + str(verdict.reason or "no output") + ")")
+                        evidence = actions.parse_target_verdict(
+                            verdict.text, session.current_ui_snapshot,
+                            session.transcript)
+                        token = uuid.uuid4().hex
+                        session.state.allowed_ui_attestation = token
+                        parsed = actions.attach_target_attestation(
+                            parsed, evidence, token)
+                        reply_text = json.dumps(
+                            parsed, ensure_ascii=False, separators=(",", ":"))
+                    turn = session.accept_reply(reply_text)
                     break
-                except actions.PlanError as exc:
+                except _ActionModelUnavailable as exc:
+                    session.state.allowed_ui_attestation = None
                     last_error = str(exc)
+                    model_unavailable_error = last_error
+                    if attempt == 0:
+                        await wait_for_model_recovery_once()
+                except actions.PlanError as exc:
+                    session.state.allowed_ui_attestation = None
+                    had_plan_error = True
+                    last_error = str(exc)
+                    repeats = session.note_rejected_reply(result.text)
+                    if repeats >= 2:
+                        last_error = (
+                            f"{exc}; model repeated an unchanged rejected plan; "
+                            "inspect the fresh UI and choose a different action")
                     # The reply excerpt is the difference between diagnosing a
                     # systematic model spelling and guessing at it. Local log,
                     # same sensitivity as the goal lines already logged.
                     log.warning("action turn attempt %d rejected: %s — reply: %s",
                                 attempt + 1, exc,
                                 " ".join(result.text.split())[:220])
+                    if authoritative_ui_refusal or repeats >= 2:
+                        break
 
             ms = int((time.perf_counter() - t0) * 1000)
             if turn is None:
+                if model_unavailable_error and not had_plan_error:
+                    self._mark_action_terminal(msg.get("id"))
+                    await send_after_planning({
+                        "event": "action_failed", "id": msg.get("id"),
+                        "code": "planner_unavailable",
+                        "error": "the local action model did not recover: "
+                                 + model_unavailable_error,
+                        "ms": ms,
+                    })
+                    return
                 # The session survives a rejected turn: no turn was consumed
                 # (accept_reply raises before counting), and the app may ask
                 # again with a fresh observation — which beats the inline
                 # repair when the model is stuck on a shape. Bounded by its
                 # own cap so a stuck model cannot be asked forever.
                 session.rejections += 1
-                if session.rejections >= 4:
+                if session.rejections >= 2:
                     self._mark_action_terminal(msg.get("id"))
                 await send_after_planning({
                     "event": "action_failed", "id": msg.get("id"),
@@ -2634,6 +3134,14 @@ class Engine:
                      session.turns_used, len(turn["steps"]), session.sends,
                      turn["done"], ms)
             await send_after_planning(evt)
+        except _ActionContextTooLarge as exc:
+            self._mark_action_terminal(msg.get("id"))
+            self._schedule_action_cleanup()
+            if not planning_released:
+                await send_after_planning({
+                    "event": "action_failed", "id": msg.get("id"),
+                    "code": "context_limit", "error": str(exc),
+                })
         except Exception as exc:  # noqa: BLE001 — the app is waiting on an answer
             log.exception("action turn failed")
             self._mark_action_terminal(msg.get("id"))
@@ -3343,6 +3851,8 @@ class Engine:
                 cleanup = self.cleanup or self._cleanup_loading
                 if cleanup is None:
                     return None, "the local notes model is unavailable", False
+                if cleanup is self.cleanup:
+                    await self._ensure_cleanup_loaded()
                 while not cleanup.loaded:
                     if (
                         self._meeting_notes_cancel

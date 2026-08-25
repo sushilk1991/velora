@@ -9,19 +9,32 @@ enum ActionStep: Equatable {
     case openURL(URL)
     case waitFrontmost(app: String, timeoutMs: Int)
     case verifyContext(anyOf: [String])
+    case verifyUI(snapshotID: String, index: Int, role: String,
+                  label: String, target: String)
+    /// Independent semantic completion proof, re-checked against the exact
+    /// current AX element at execution time. Distinct from recipient proof:
+    /// confirming where text would go does not prove the user's whole task.
+    case verifyGoal(snapshotID: String, index: Int, role: String,
+                    label: String, target: String)
     case typeText(String)
+    /// Navigation/query text, never message/document content and never
+    /// eligible for Return/Enter commit authority.
+    case searchText(String)
     case pasteText(String)
     case key(name: String, mods: [String], repeatCount: Int)
     case pause(ms: Int)
-    /// Press the on-screen navigation element whose visible label matches — a
-    /// row/cell in a search list or a link in results. Runtime role checks
-    /// reject buttons and other controls even when their labels appear safe.
+    /// Legacy fallback when the app cannot expose a structured snapshot.
+    /// The host requires an authored label and a real AXPress capability.
     case pressElement(label: String)
+    /// Exact AXFocus or AXPress capability selected from a structured UI
+    /// snapshot. Generic across apps; runtime refuses stale or incomplete
+    /// snapshot/app/label/role identity.
+    case pressUI(snapshotID: String, index: Int, role: String, label: String)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
         switch self {
-        case .typeText, .pasteText, .key: return true
+        case .typeText, .searchText, .pasteText, .key: return true
         default: return false
         }
     }
@@ -29,7 +42,7 @@ enum ActionStep: Equatable {
     /// Steps that establish which window the following input lands in.
     var isFocusCheckpoint: Bool {
         switch self {
-        case .waitFrontmost, .verifyContext: return true
+        case .waitFrontmost, .verifyContext, .verifyUI, .verifyGoal: return true
         default: return false
         }
     }
@@ -48,6 +61,19 @@ struct ActionPlan: Equatable {
     let steps: [ActionStep]
     /// Set when the planner declined; there is nothing to execute.
     let unsupported: String?
+    /// The real Action loop enables this when the engine/app protocol carries
+    /// independent structured target evidence. Standalone fixtures and legacy
+    /// dry plans keep their historical semantics.
+    let requiresUITargetVerification: Bool
+
+    init(goal: String, sends: Bool, steps: [ActionStep], unsupported: String?,
+         requiresUITargetVerification: Bool = false) {
+        self.goal = goal
+        self.sends = sends
+        self.steps = steps
+        self.unsupported = unsupported
+        self.requiresUITargetVerification = requiresUITargetVerification
+    }
 
     var isExecutable: Bool { unsupported == nil && !steps.isEmpty }
 }
@@ -68,12 +94,15 @@ enum ActionPlanError: Error, Equatable {
     case inputBeforeFocus(step: Int)
     case weakVerifyTerm(String)
     case unverifiedSend(step: Int)
+    case contentBeforeTargetVerification(step: Int)
     case weakPressLabel(String)
+    case structuredUIRequired(step: Int)
+    case incompleteStructuredUI(step: Int)
+    case pressRequiresFreshObservation(step: Int)
     case committingPressLabel(String)
     case sendInDraft(step: Int)
     case committingKeyRepeats(step: Int)
     case unsafeKeyChord(String)
-    case commitOutsideCommunicationApp(step: Int, app: String)
     case destructiveKey(String)
     case commitWithoutPendingText(step: Int, key: String)
     case bareSpace
@@ -102,8 +131,16 @@ enum ActionPlanError: Error, Equatable {
             return "'\(term)' doesn't identify anything specific enough to check"
         case .unverifiedSend(let step):
             return "step \(step) would send text the plan never confirmed a target for"
+        case .contentBeforeTargetVerification(let step):
+            return "step \(step) would type message content before the target verifier confirmed the active recipient"
         case .weakPressLabel(let label):
             return "'\(label)' is too short to identify one control to press"
+        case .structuredUIRequired(let step):
+            return "step \(step) discarded the structured UI; use an exact press_ui index or report done"
+        case .incompleteStructuredUI(let step):
+            return "step \(step) cannot act on an incomplete structured UI snapshot"
+        case .pressRequiresFreshObservation(let step):
+            return "step \(step) presses UI; observe the fresh screen before any later step"
         case .committingPressLabel(let label):
             return "'\(label)' names a committing control — pressing is for navigation only"
         case .sendInDraft(let step):
@@ -112,8 +149,6 @@ enum ActionPlanError: Error, Equatable {
             return "step \(step) repeats a committing key"
         case .unsafeKeyChord(let chord):
             return "modified chord '\(chord)' is not an allowed Action Mode capability"
-        case .commitOutsideCommunicationApp(let step, let app):
-            return "step \(step) would commit pending text in \(app), not a communication app"
         case .destructiveKey(let key):
             return "destructive key '\(key)' is not an Action Mode capability"
         case .commitWithoutPendingText(let step, let key):
@@ -170,6 +205,9 @@ extension ActionPlan {
         /// press_element label bounds, mirrored from the engine.
         static let minPressLabelCharacters = 3
         static let maxPressLabelCharacters = 80
+        /// Exact structured labels are already bounded at the AX projection.
+        /// Do not apply the shorter fuzzy-search bound to their identity.
+        static let maxStructuredUILabelCharacters = 180
         /// Words that mark a control as committing or destructive — a press
         /// may navigate, never commit. Checked word-by-word AND against each
         /// adjacent pair joined ("Log Out" → "logout"), so "Ascending" never
@@ -256,14 +294,6 @@ extension ActionPlan {
             "shift+up", "shift+down", "shift+left", "shift+right",
             "shift+home", "shift+end", "shift+page_up", "shift+page_down",
         ]
-        /// Return/Enter with pending text is executable authority in a shell,
-        /// browser, or editor. Restrict it to these explicit native messaging
-        /// targets. This marker is mirrored by the engine test.
-        // communication_apps_normalized: discord mail messages messenger microsoftteams signal slack teams telegram whatsapp
-        static let communicationAppsNormalized: Set<String> = [
-            "discord", "mail", "messages", "messenger", "microsoftteams",
-            "signal", "slack", "teams", "telegram", "whatsapp",
-        ]
         /// Everything after a URL's first `?` or `#` is payload, not address.
         /// Bounds open_url as an outbound channel without trying to judge
         /// which query strings are screen-derived. Defense in depth, NOT a
@@ -322,6 +352,18 @@ extension ActionPlan {
         /// fence). Nil disables the fence; the loop runner seeds it from the
         /// transcript, screen names, and page URL, and grows it each turn.
         var urlTokenPool: Set<String>?
+        /// Enabled by the real Action loop. Standalone decoder fixtures can
+        /// exercise syntax/state rules without manufacturing an engine-only
+        /// verifier attestation.
+        var requireUITargetVerification = false
+        /// Whether the current observation exposed exact indexed AX
+        /// capabilities. Label rescans are a degraded fallback only; when
+        /// this is true they are refused so a planner cannot discard the
+        /// hierarchy after choosing the wrong indexed element.
+        var structuredUIAvailable = false
+        /// A partial tree can be shown to the model as context, but it cannot
+        /// mint an executable indexed capability.
+        var structuredUIComplete = false
     }
 
     /// All tokens found in allowed-source strings (lowercased alphanumeric
@@ -400,6 +442,7 @@ extension ActionPlan {
         var pendingText = state.pendingText
         /// Drafts refuse committing keys once text is pending, outright.
         let isDraft = (plan["sends"] as? Bool) == false
+        var uiTargetVerified = false
 
         for (index, raw) in rawSteps.enumerated() {
             guard let step = raw as? [String: Any],
@@ -426,6 +469,7 @@ extension ActionPlan {
                 // and pending text is unverified again, because its check
                 // described a screen this step just left.
                 focusEstablished = false
+                uiTargetVerified = false
                 if pendingText { unverifiedText = true }
 
             case "open_url":
@@ -482,6 +526,7 @@ extension ActionPlan {
                 steps.append(.openURL(url))
                 // The URL handler is unknown until the runtime observation.
                 currentApp = ""
+                uiTargetVerified = false
                 if pendingText { unverifiedText = true }
 
             case "wait_frontmost":
@@ -492,6 +537,7 @@ extension ActionPlan {
                 currentApp = app
                 steps.append(.waitFrontmost(app: app, timeoutMs: timeout))
                 focusEstablished = true
+                uiTargetVerified = false
 
             case "verify_context":
                 let raw = step["expect"] ?? step["any_of"]
@@ -527,7 +573,34 @@ extension ActionPlan {
                 focusEstablished = true
                 unverifiedText = false
 
-            case "type_text", "paste_text":
+            case "verify_ui":
+                let snapshotID = String(try string("snapshot").prefix(80))
+                guard let number = step["index"] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      !CFNumberIsFloatType(number), number.intValue >= 0 else {
+                    throw ActionPlanError.missingField(step: index, field: "index")
+                }
+                let role = String(try string("role").prefix(40))
+                let label = String(ActionPlan.sanitize(try string("label")).prefix(180))
+                let target = String(ActionPlan.sanitize(try string("target")).prefix(80))
+                guard AppMatcher.normalize(target).count
+                        >= Limits.minVerifyTermCharacters else {
+                    throw ActionPlanError.weakVerifyTerm(target)
+                }
+                if step["purpose"] as? String == "goal" {
+                    steps.append(.verifyGoal(
+                        snapshotID: snapshotID, index: number.intValue,
+                        role: role, label: label, target: target))
+                } else {
+                    steps.append(.verifyUI(
+                        snapshotID: snapshotID, index: number.intValue,
+                        role: role, label: label, target: target))
+                }
+                focusEstablished = true
+                uiTargetVerified = true
+                unverifiedText = false
+
+            case "type_text", "paste_text", "search_text":
                 guard focusEstablished else {
                     throw ActionPlanError.inputBeforeFocus(step: index)
                 }
@@ -548,9 +621,18 @@ extension ActionPlan {
                 guard totalText <= Limits.maxTotalTextChars else {
                     throw ActionPlanError.textTooLong(totalText)
                 }
-                steps.append(verb == "type_text" ? .typeText(cleaned) : .pasteText(cleaned))
-                unverifiedText = true
-                pendingText = true
+                if verb == "search_text" {
+                    steps.append(.searchText(cleaned))
+                } else {
+                    if state.requireUITargetVerification,
+                       !isDraft, !uiTargetVerified {
+                        throw ActionPlanError.contentBeforeTargetVerification(step: index)
+                    }
+                    steps.append(verb == "type_text"
+                        ? .typeText(cleaned) : .pasteText(cleaned))
+                    unverifiedText = true
+                    pendingText = true
+                }
 
             case "key":
                 guard focusEstablished else {
@@ -609,17 +691,10 @@ extension ActionPlan {
                         // press_element, never a Return that might deliver.
                         throw ActionPlanError.sendInDraft(step: index)
                     }
-                    let communicationNames = Array(
-                        Limits.communicationAppsNormalized)
-                    let matchesCommunicationApp = AppMatcher.bestMatch(
-                        for: currentApp, in: communicationNames) != nil
-                        || communicationNames.contains { name in
-                            AppMatcher.bestMatch(for: name, in: [currentApp]) != nil
-                        }
-                    if pendingText, !isDraft, !matchesCommunicationApp {
-                        throw ActionPlanError.commitOutsideCommunicationApp(
-                            step: index,
-                            app: currentApp.isEmpty ? "unknown app" : currentApp)
+                    if state.requireUITargetVerification,
+                       !isDraft, !uiTargetVerified {
+                        throw ActionPlanError.contentBeforeTargetVerification(
+                            step: index)
                     }
                     if unverifiedText {
                         // The failure this prevents: a swallowed ⌘K meant the
@@ -644,6 +719,9 @@ extension ActionPlan {
                     // no longer describes where a committing key would land.
                     unverifiedText = true
                 }
+                if !committing, (!mods.isEmpty || Limits.focusMovingKeys.contains(name)) {
+                    uiTargetVerified = false
+                }
 
             case "pause":
                 let ms = step["ms"] as? Int ?? 300
@@ -660,6 +738,9 @@ extension ActionPlan {
                 guard focusEstablished else {
                     throw ActionPlanError.inputBeforeFocus(step: index)
                 }
+                guard !state.structuredUIAvailable else {
+                    throw ActionPlanError.structuredUIRequired(step: index)
+                }
                 let label = String(ActionPlan.sanitize(try string("label"))
                     .prefix(Limits.maxPressLabelCharacters))
                 guard AppMatcher.normalize(label).count
@@ -675,6 +756,40 @@ extension ActionPlan {
                 // pending text is unverified again, because its check
                 // described a screen the press just replaced.
                 focusEstablished = false
+                uiTargetVerified = false
+                if pendingText { unverifiedText = true }
+
+            case "press_ui":
+                guard focusEstablished else {
+                    throw ActionPlanError.inputBeforeFocus(step: index)
+                }
+                guard !state.structuredUIAvailable || state.structuredUIComplete else {
+                    throw ActionPlanError.incompleteStructuredUI(step: index)
+                }
+                guard index == rawSteps.count - 1 else {
+                    throw ActionPlanError.pressRequiresFreshObservation(step: index)
+                }
+                let snapshotID = String(try string("snapshot").prefix(80))
+                guard let number = step["index"] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      !CFNumberIsFloatType(number), number.intValue >= 0 else {
+                    throw ActionPlanError.missingField(step: index, field: "index")
+                }
+                let role = String(try string("role").prefix(40))
+                let label = String(ActionPlan.sanitize(try string("label"))
+                    .prefix(Limits.maxStructuredUILabelCharacters))
+                guard AppMatcher.normalize(label).count
+                        >= Limits.minPressLabelCharacters else {
+                    throw ActionPlanError.weakPressLabel(label)
+                }
+                guard !ActionPlan.pressLabelIsCommitting(label) else {
+                    throw ActionPlanError.committingPressLabel(label)
+                }
+                steps.append(.pressUI(
+                    snapshotID: snapshotID, index: number.intValue,
+                    role: role, label: label))
+                focusEstablished = false
+                uiTargetVerified = false
                 if pendingText { unverifiedText = true }
 
             default:
@@ -693,7 +808,9 @@ extension ActionPlan {
         return ActionPlan(goal: goal ?? "",
                           sends: plan["sends"] as? Bool ?? true,
                           steps: steps,
-                          unsupported: nil)
+                          unsupported: nil,
+                          requiresUITargetVerification:
+                              state.requireUITargetVerification)
     }
 
     /// The carried state as it stands after only the first `executedCount`
@@ -713,11 +830,14 @@ extension ActionPlan {
         next.stepsUsed = seed.stepsUsed + plan.steps.count
         for step in plan.steps.prefix(max(0, executedCount)) {
             switch step {
-            case .typeText(let text), .pasteText(let text):
+            case .typeText(let text), .pasteText(let text), .searchText(let text):
                 next.totalText += text.count
+                if case .searchText = step {
+                    break
+                }
                 next.unverifiedText = true
                 next.pendingText = true
-            case .verifyContext:
+            case .verifyContext, .verifyUI, .verifyGoal:
                 next.unverifiedText = false
             case .key(let name, let mods, _):
                 // The committing and focus-moving branches must mirror
@@ -752,7 +872,7 @@ extension ActionPlan {
             case .openURL:
                 next.currentApp = ""
                 if next.pendingText { next.unverifiedText = true }
-            case .pressElement:
+            case .pressElement, .pressUI:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.

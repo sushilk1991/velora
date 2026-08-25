@@ -14,13 +14,18 @@ final class FakeActionHost: ActionHost {
     var selectionLabel: String?
     var focusedRole: String?
     var visibleNamesValue: [String] = []
+    var uiSnapshotValue: ActionUISnapshot?
+    var pressableUIIndices: Set<Int> = []
+    var verifiableUIIndices: Set<Int> = []
     /// Labels that `pressElement` can find on the fake screen.
     var pressableLabels: Set<String> = []
-    var pressableRoles: [String: String] = [:]
     var canPostInput = true
     var screenIsLocked = false
     /// Whether anything on screen can receive typed characters.
     var hasTextTarget = true
+    /// Optional Electron-style AX lag: the editable target becomes visible
+    /// only after this many executor settle sleeps.
+    var textTargetAfterSleepCalls: Int?
     /// Deterministic AX fixtures for Action Mode's exact editable-target gate.
     /// Production obtains these from ScreenContext; the fake keeps executor
     /// regressions headless.
@@ -48,6 +53,8 @@ final class FakeActionHost: ActionHost {
     private(set) var keysByName: [(name: String, mods: [String])] = []
     private(set) var openedURLs: [URL] = []
     private(set) var pressedLabels: [String] = []
+    private(set) var pressedUIIndices: [Int] = []
+    private(set) var sleepCalls: [Int] = []
     private var frontmostReads = 0
     private var clock: TimeInterval = 0
     private var actionDraft = ""
@@ -91,6 +98,7 @@ final class FakeActionHost: ActionHost {
     func focusedSelectionLabel() -> String? { selectionLabel }
     func focusedElementRole() -> String? { focusedRole }
     func visibleNames() -> [String] { visibleNamesValue }
+    func uiSnapshot() -> ActionUISnapshot? { uiSnapshotValue }
     /// Mirrors the production foreground host: these come off the window in
     /// front of the user. A test can flip it to model a background host.
     var screenNamesAreUserVisible = true
@@ -145,13 +153,7 @@ final class FakeActionHost: ActionHost {
 
     func pressElement(label: String, expecting bundleID: String?) -> Bool {
         log.append("press(\(label))")
-        // Delegate the app/role policy to production — a fake that hard-codes
-        // its own copy certifies stale semantics (review finding, 2026-08-21).
-        guard let roles = ActionRuntimePolicy.pressRoles(forBundleID: frontmost?.bundleID)
-        else { return false }
         guard pressableLabels.contains(label) else { return false }
-        let role = pressableRoles[label] ?? (kAXRowRole as String)
-        guard roles.contains(role) else { return false }
         pressedLabels.append(label)
         actionDraft = ""
         ownsDraft = true
@@ -159,7 +161,58 @@ final class FakeActionHost: ActionHost {
         return true
     }
 
-    func sleep(ms: Int) { clock += Double(ms) / 1000 }
+    func pressElement(index: Int, snapshotID: String, label: String,
+                      role: String, expecting bundleID: String?) -> Bool {
+        log.append("pressUI(\(index),\(label))")
+        guard pressableUIIndices.contains(index),
+              let snapshot = uiSnapshotValue,
+              snapshot.id == snapshotID,
+              snapshot.complete,
+              expectingBundle(expecting: bundleID, equals: snapshot.bundleID),
+              let element = snapshot.elements.first(where: { $0.index == index }),
+              element.role == role, element.label == label,
+              (ScreenContext.isEditableActionRole(role)
+                ? element.actions.contains("AXFocus")
+                : element.actions.contains(kAXPressAction as String)),
+              !ActionPlan.pressLabelIsCommitting(label)
+        else { return false }
+        pressedUIIndices.append(index)
+        uiSnapshotValue = nil
+        actionDraft = ""
+        ownsDraft = true
+        return true
+    }
+
+    func verifyElement(index: Int, snapshotID: String, label: String,
+                       role: String, expecting bundleID: String?,
+                       requiresFocus: Bool) -> Bool {
+        guard verifiableUIIndices.contains(index),
+              let snapshot = uiSnapshotValue,
+              snapshot.id == snapshotID,
+              snapshot.complete,
+              expectingBundle(expecting: bundleID, equals: snapshot.bundleID),
+              let element = snapshot.elements.first(where: { $0.index == index }),
+              ActionUIEvidencePolicy.mayVerify(
+                index: index, in: snapshot.elements)
+        else { return false }
+        return element.role == role && element.label == label
+            && (!requiresFocus
+                || (ScreenContext.isEditableActionRole(role) && element.focused))
+    }
+
+    private func expectingBundle(expecting: String?, equals actual: String) -> Bool {
+        guard let expecting, !expecting.isEmpty else { return true }
+        return expecting == actual
+    }
+
+    func sleep(ms: Int) {
+        sleepCalls.append(ms)
+        clock += Double(ms) / 1000
+        if let target = textTargetAfterSleepCalls,
+           sleepCalls.count >= target {
+            hasTextTarget = true
+        }
+    }
     func now() -> TimeInterval { clock }
 }
 
@@ -211,6 +264,7 @@ final class FakeAgentActionCore: AgentActionCoordinating {
         context: ActionContextSnapshot,
         execute: Bool,
         allowSend: Bool,
+        progress: ((ActionProgress) -> Void)?,
         completion: @escaping (ActionResult) -> Void
     ) {
         performCount += 1
@@ -260,6 +314,7 @@ extension Selftest {
         testActionExecutorSafetyRails()
         testWaitFrontmostBringsTheAppForward()
         testActionExecutorPressElement()
+        testStructuredUIContract()
         testActionLoopRecovery()
         testActionLoopSafetyRails()
         testActionCompletionEvidence()
@@ -872,28 +927,6 @@ extension Selftest {
         """) == .unverifiedSend(step: 2),
         "pasted clipboard contents cannot be committed unverified")
 
-        expect(decodePlanError("""
-        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Terminal"},
-          {"do":"type_text","text":"rm -rf important-project"},
-          {"do":"verify_context","expect":["sushil"]},
-          {"do":"key","key":"return"}]}
-        """) == .commitOutsideCommunicationApp(step: 3, app: "Terminal"),
-        "pending text cannot execute in Terminal under the sends flag")
-        expect(decodePlan("""
-        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack"},
-          {"do":"type_text","text":"hello"},
-          {"do":"verify_context","expect":["Himesh"]},
-          {"do":"key","key":"return"}]}
-        """) != nil,
-        "verified communication text remains committable in Slack")
-        expect(decodePlan("""
-        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Slack Beta"},
-          {"do":"type_text","text":"hello"},
-          {"do":"verify_context","expect":["Himesh"]},
-          {"do":"key","key":"return"}]}
-        """) != nil,
-        "a branded Slack display name reaches the runtime bundle gate")
-
         for (key, mods) in [
             ("return", ""), ("enter", ""),
             ("return", "\"cmd\""), ("enter", "\"cmd\""),
@@ -973,7 +1006,6 @@ extension Selftest {
         let host = FakeActionHost()
         host.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
         host.pressableLabels = ["Shivangi Singh"]
-        host.pressableRoles["Shivangi Singh"] = "AXRow"
         guard let plan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
           {"do":"press_element","label":"Shivangi Singh"}]}
@@ -985,9 +1017,7 @@ extension Selftest {
         expect(result.outcome == .completed, "a findable label is pressed")
         expect(host.pressedLabels == ["Shivangi Singh"], "the press reaches the host")
 
-        // "Save Changes" moved to the decode-time denylist with the web-commit
-        // verbs (2026-08-21); these labels still decode and must be stopped by
-        // the runtime ROLE gate instead.
+        // Committing/destructive labels are stopped before execution.
         expect(decodePlanError("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
           {"do":"press_element","label":"Save Changes"}]}
@@ -997,28 +1027,25 @@ extension Selftest {
             let button = FakeActionHost()
             button.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
             button.pressableLabels = [label]
-            button.pressableRoles[label] = "AXButton"
             guard let buttonPlan = decodePlan("""
             {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
               {"do":"press_element","label":"\(label)"}]}
             """) else {
-                expect(false, "the structurally unsafe \(label) fixture decodes")
+                expect(false, "the generic \(label) fixture decodes")
                 continue
             }
             let buttonResult = ActionExecutor(host: button).run(buttonPlan)
-            expect(!buttonResult.outcome.isSuccess,
-                   "an AXButton labelled \(label) is refused at runtime")
-            expect(button.pressedLabels.isEmpty,
-                   "the runtime role gate does not press \(label)")
+            expect(buttonResult.outcome.isSuccess,
+                   "a safe AXPress control labelled \(label) is accepted generically")
+            expect(button.pressedLabels == [label],
+                   "the generic accessibility action reaches \(label)")
         }
 
-        // Browsers press links and rows since 2026-08-21 — the web's
-        // navigation primitives. Buttons stay refused everywhere, and apps
-        // that are neither browsers nor communication targets press nothing.
+        // The same Accessibility action contract applies across applications;
+        // there is no browser/messenger role table.
         let link = FakeActionHost()
         link.frontmost = ("Safari", "com.apple.Safari")
         link.pressableLabels = ["Continue"]
-        link.pressableRoles["Continue"] = "AXLink"
         if let linkPlan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Safari"},
           {"do":"press_element","label":"Continue"}]}
@@ -1032,14 +1059,13 @@ extension Selftest {
         let browserButton = FakeActionHost()
         browserButton.frontmost = ("Safari", "com.apple.Safari")
         browserButton.pressableLabels = ["Continue"]
-        browserButton.pressableRoles["Continue"] = "AXButton"
         if let browserButtonPlan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Safari"},
           {"do":"press_element","label":"Continue"}]}
         """) {
             let result = ActionExecutor(host: browserButton).run(browserButtonPlan)
-            expect(!result.outcome.isSuccess && browserButton.pressedLabels.isEmpty,
-                   "a web button is still refused in a browser — links and rows only")
+            expect(result.outcome.isSuccess && browserButton.pressedLabels == ["Continue"],
+                   "a browser button uses the same AXPress path")
         } else {
             expect(false, "the browser button fixture decodes")
         }
@@ -1047,7 +1073,6 @@ extension Selftest {
         let browserRow = FakeActionHost()
         browserRow.frontmost = ("Safari", "com.apple.Safari")
         browserRow.pressableLabels = ["Article"]
-        browserRow.pressableRoles["Article"] = "AXRow"
         if let browserRowPlan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Safari"},
           {"do":"press_element","label":"Article"}]}
@@ -1061,14 +1086,13 @@ extension Selftest {
         let editorLink = FakeActionHost()
         editorLink.frontmost = ("TextEdit", "com.apple.TextEdit")
         editorLink.pressableLabels = ["Continue"]
-        editorLink.pressableRoles["Continue"] = "AXLink"
         if let editorLinkPlan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"TextEdit"},
           {"do":"press_element","label":"Continue"}]}
         """) {
             let result = ActionExecutor(host: editorLink).run(editorLinkPlan)
-            expect(!result.outcome.isSuccess && editorLink.pressedLabels.isEmpty,
-                   "outside browsers and communication apps nothing is pressable")
+            expect(result.outcome.isSuccess && editorLink.pressedLabels == ["Continue"],
+                   "a native app uses the same labelled AXPress fallback")
         } else {
             expect(false, "the editor link fixture decodes")
         }
@@ -1076,15 +1100,14 @@ extension Selftest {
         let cell = FakeActionHost()
         cell.frontmost = ("Mail", "com.apple.mail")
         cell.pressableLabels = ["Himesh Singh"]
-        cell.pressableRoles["Himesh Singh"] = "AXCell"
         if let cellPlan = decodePlan("""
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Mail"},
           {"do":"press_element","label":"Himesh Singh"}]}
         """) {
             expect(ActionExecutor(host: cell).run(cellPlan).outcome == .completed,
-                   "a native communication-app AXCell remains navigable")
+                   "a native messenger AXCell remains navigable")
         } else {
-            expect(false, "the communication cell fixture decodes")
+            expect(false, "the messenger cell fixture decodes")
         }
 
         // The label isn't on screen → recoverable: the model should look again
@@ -1097,6 +1120,197 @@ extension Selftest {
         } else {
             expect(false, "an unfindable label must fail the step")
         }
+    }
+
+    private static func testStructuredUIContract() {
+        let snapshot = ActionUISnapshot(
+            id: "snapshot-1", appName: "WhatsApp",
+            bundleID: "net.whatsapp.WhatsApp", windowTitle: "WhatsApp",
+            complete: true,
+            elements: [
+                ActionUIElement(
+                    index: 14, parentIndex: 3, depth: 4, role: "AXButton",
+                    label: "Shivangi Gupta", frame: CGRect(x: 10, y: 30,
+                                                            width: 180, height: 44),
+                    actions: [kAXPressAction as String]),
+                ActionUIElement(
+                    index: 28, parentIndex: 26, depth: 5, role: "AXButton",
+                    label: "Shivangi Gupta", frame: CGRect(x: 300, y: 10,
+                                                            width: 180, height: 44),
+                    actions: [kAXPressAction as String], selected: true),
+                ActionUIElement(
+                    index: 30, parentIndex: 26, depth: 5, role: "AXTextArea",
+                    label: "Message to Shivangi Gupta",
+                    frame: CGRect(x: 320, y: 620, width: 500, height: 50),
+                    actions: ["AXFocus"], focused: true),
+            ])
+        expect(snapshot.elements[1].payload["selected"] as? Bool == true,
+               "structured UI exposes generic selected-state evidence")
+
+        let nonFinite = ActionUIElement(
+            index: 99, parentIndex: nil, depth: 0, role: "AXGroup",
+            label: "Unbounded", frame: CGRect(
+                x: CGFloat.infinity, y: 1, width: 2, height: 3), actions: [])
+        expect(nonFinite.payload["frame"] == nil,
+               "non-finite AX geometry is omitted at the JSON boundary")
+        expect(JSONSerialization.isValidJSONObject(nonFinite.payload),
+               "a structured element payload always remains valid JSON")
+
+        let invalidPlanner = EngineTurnPlanner(client: EngineClient())
+        let invalidTurn = invalidPlanner.observe([
+            "ui_snapshot": ["bad_geometry": Double.nan],
+        ])
+        if case .failure(let reason, let code) = invalidTurn {
+            expect(code == "invalid_observation"
+                    && reason.contains("could not be encoded"),
+                   "an invalid observation fails immediately instead of timing out")
+        } else {
+            expect(false, "an invalid observation cannot reach the engine")
+        }
+
+        let pressHost = FakeActionHost()
+        pressHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        pressHost.uiSnapshotValue = snapshot
+        pressHost.pressableUIIndices = [14]
+        guard let pressPlan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_ui","snapshot":"snapshot-1","index":14,
+           "role":"AXButton","label":"Shivangi Gupta"}]}
+        """) else {
+            expect(false, "the indexed UI fixture decodes")
+            return
+        }
+        expect(ActionExecutor(host: pressHost).run(pressPlan).outcome == .completed,
+               "an exact AXButton index from the current snapshot is pressed")
+        expect(pressHost.pressedUIIndices == [14],
+               "the executor uses the model-selected index, not a label rescan")
+        expect(pressHost.sleepCalls == [ActionExecutor.indexedPressSettleMs],
+               "an indexed press settles before the next AX observation")
+
+        let longLabel = "Priya Sharma Q3 planning notes for slide four and "
+            + "tomorrow morning follow up discussion details"
+        expect(longLabel.count > 80,
+               "the long structured-label fixture crosses the fuzzy-search bound")
+        let longSnapshot = ActionUISnapshot(
+            id: "long-snapshot", appName: snapshot.appName,
+            bundleID: snapshot.bundleID, windowTitle: snapshot.windowTitle,
+            complete: true,
+            elements: [
+                ActionUIElement(
+                    index: 41, parentIndex: 3, depth: 4, role: "AXButton",
+                    label: longLabel,
+                    frame: CGRect(x: 10, y: 80, width: 400, height: 44),
+                    actions: [kAXPressAction as String]),
+            ])
+        let longHost = FakeActionHost()
+        longHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        longHost.uiSnapshotValue = longSnapshot
+        longHost.pressableUIIndices = [41]
+        guard let longPressPlan = decodePlan("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_ui","snapshot":"long-snapshot","index":41,
+           "role":"AXButton","label":"\(longLabel)"}]}
+        """) else {
+            expect(false, "the long indexed-label fixture decodes")
+            return
+        }
+        expect(ActionExecutor(host: longHost).run(longPressPlan).outcome == .completed,
+               "an indexed press preserves its full 180-character identity")
+
+        let staleHost = FakeActionHost()
+        staleHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        staleHost.uiSnapshotValue = ActionUISnapshot(
+            id: "new-snapshot", appName: snapshot.appName,
+            bundleID: snapshot.bundleID, windowTitle: snapshot.windowTitle,
+            complete: true, elements: snapshot.elements)
+        staleHost.pressableUIIndices = [14]
+        if case .failed(_, _, let recoverable) = ActionExecutor(host: staleHost)
+            .run(pressPlan).outcome {
+            expect(recoverable, "a stale model-selected index requests a fresh turn")
+        } else {
+            expect(false, "a stale structured snapshot is never executed")
+        }
+        expect(staleHost.pressedUIIndices.isEmpty,
+               "a stale snapshot cannot fall back to fuzzy label matching")
+
+        var unverifiedState = ActionPlan.BatchState()
+        unverifiedState.requireUITargetVerification = true
+        expect(decodeBatchError("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"type_text","text":"hi"}]}
+        """, state: &unverifiedState) == .contentBeforeTargetVerification(step: 1),
+               "message content is rejected before independent UI evidence")
+
+        var unknownAppState = ActionPlan.BatchState()
+        unknownAppState.requireUITargetVerification = true
+        expect(decodeBatchError("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"Future Messenger"},
+          {"do":"type_text","text":"hi"}]}
+        """, state: &unknownAppState) == .contentBeforeTargetVerification(step: 1),
+               "new apps cannot receive message content before UI evidence")
+
+        var structuredState = ActionPlan.BatchState()
+        structuredState.structuredUIAvailable = true
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_element","label":"Shivangi Gupta"}]}
+        """, state: &structuredState) == .structuredUIRequired(step: 1),
+               "structured UI cannot degrade back to a fuzzy label rescan")
+
+        var incompleteState = ActionPlan.BatchState()
+        incompleteState.structuredUIAvailable = true
+        incompleteState.structuredUIComplete = false
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_ui","snapshot":"snapshot-1","index":14,
+           "role":"AXButton","label":"Shivangi Gupta"}]}
+        """, state: &incompleteState) == .incompleteStructuredUI(step: 1),
+               "an incomplete structured tree cannot mint an indexed action")
+
+        var chainedPressState = ActionPlan.BatchState()
+        chainedPressState.structuredUIAvailable = true
+        chainedPressState.structuredUIComplete = true
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"press_ui","snapshot":"snapshot-1","index":14,
+           "role":"AXButton","label":"Shivangi Gupta"},
+          {"do":"wait_frontmost","app":"WhatsApp"}]}
+        """, state: &chainedPressState) == .pressRequiresFreshObservation(step: 1),
+               "an indexed press must end its turn so the next step sees a fresh tree")
+
+        var verifiedState = ActionPlan.BatchState()
+        verifiedState.requireUITargetVerification = true
+        guard let sendPlan = decodeBatch("""
+        {"sends":true,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"verify_ui","snapshot":"snapshot-1","index":30,
+           "role":"AXTextArea","label":"Message to Shivangi Gupta","target":"Shivangi Gupta"},
+          {"do":"type_text","text":"hi"},
+          {"do":"verify_ui","snapshot":"snapshot-1","index":30,
+           "role":"AXTextArea","label":"Message to Shivangi Gupta","target":"Shivangi Gupta"},
+          {"do":"key","key":"return"}]}
+        """, state: &verifiedState) else {
+            expect(false, "the independently-attested send fixture decodes")
+            return
+        }
+        let sendHost = FakeActionHost()
+        sendHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        sendHost.uiSnapshotValue = snapshot
+        sendHost.verifiableUIIndices = [30]
+        let sendResult = ActionExecutor(host: sendHost).run(sendPlan)
+        expect(sendResult.outcome == .completed,
+               "recipient evidence is checked before content and again before send")
+        expect(sendResult.evidence.contains(.uiTargetVerified(target: "Shivangi Gupta"))
+               && !sendResult.evidence.contains(.goalVerified(target: "Shivangi Gupta")),
+               "recipient evidence cannot masquerade as whole-goal completion")
+        expect(sendHost.typed == ["hi"] && sendHost.keysByName.map(\.name) == ["return"],
+               "only the attested recipient path may type and commit content")
+
+        let changedHost = FakeActionHost()
+        changedHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        changedHost.uiSnapshotValue = snapshot
+        let changedResult = ActionExecutor(host: changedHost).run(sendPlan)
+        expect(!changedResult.outcome.isSuccess && changedHost.typed.isEmpty,
+               "a target that changed after model verification is refused before typing")
     }
 
     // MARK: - The loop: observe → decide → act
@@ -1174,6 +1388,31 @@ extension Selftest {
         expect(first["page_url"] as? String == "https://web.whatsapp.com/",
                "the observation carries the frontmost page URL")
         expect(planner.ended, "the session is closed when the loop finishes")
+
+        let stuckHost = FakeActionHost()
+        stuckHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        let repeated = jsonSteps("""
+        [{"do":"wait_frontmost","app":"WhatsApp"},
+         {"do":"press_element","label":"Missing Person"}]
+        """)
+        let stuckPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open Missing Person",
+                  steps: repeated, done: false),
+            .turn(sends: false, goal: "", steps: repeated, done: false),
+            .turn(sends: false, goal: "", steps: repeated, done: false),
+        ])
+        let stuckResult = ActionLoopRunner(
+            host: stuckHost, planner: stuckPlanner,
+            execute: true, allowSend: false).run(
+                transcript: "open Missing Person", context: loopContext())
+        if case .failed(let reason, _) = stuckResult {
+            expect(reason.contains("repeated the same failed action"),
+                   "the loop stops an unchanged failed choice after two attempts")
+        } else {
+            expect(false, "a repeated failed plan cannot consume every turn")
+        }
+        expect(stuckPlanner.observations.count == 1,
+               "the third identical runtime attempt is never requested")
     }
 
     private static func testActionLoopSafetyRails() {
@@ -1424,6 +1663,30 @@ extension Selftest {
             expect(false, "a recovered typed action remains explicitly unverified")
         }
 
+        let boundedRejectionHost = FakeActionHost()
+        let boundedRejectionPlanner = FakeTurnPlanner(turns: [
+            .failure(reason: "structured UI is incomplete", code: "plan_invalid"),
+            .failure(reason: "structured UI is incomplete", code: "plan_invalid"),
+            .turn(sends: false, goal: "must not run", steps: jsonSteps("""
+            [{"do":"open_app","app":"Slack"}]
+            """), done: true),
+        ])
+        let boundedRejectionRunner = ActionLoopRunner(
+            host: boundedRejectionHost, planner: boundedRejectionPlanner,
+            execute: true, allowSend: false)
+        if case .failed(let reason, _) = boundedRejectionRunner.run(
+            transcript: "t", context: loopContext()
+        ) {
+            expect(reason.contains("structured UI is incomplete"),
+                   "the second structural refusal reaches the user")
+            expect(boundedRejectionPlanner.observations.count == 1,
+                   "plan_invalid receives only one fresh-screen retry")
+            expect(boundedRejectionPlanner.startCount == 1,
+                   "the unreachable third controller turn never runs")
+        } else {
+            expect(false, "two consecutive plan rejections end the action")
+        }
+
         // 7. done together with final steps stops without another ask, but
         //    typed text remains unverified until exact readback exists.
         let finishHost = FakeActionHost()
@@ -1593,6 +1856,103 @@ extension Selftest {
             expect(false, "verify-only done must fail as no effective action")
         }
 
+        let goalSnapshot = ActionUISnapshot(
+            id: "goal-snapshot", appName: "WhatsApp",
+            bundleID: "net.whatsapp.WhatsApp", windowTitle: "WhatsApp",
+            complete: true,
+            elements: [ActionUIElement(
+                index: 28, parentIndex: 26, depth: 5, role: "AXButton",
+                label: "Shivangi Gupta",
+                frame: CGRect(x: 300, y: 10, width: 180, height: 44),
+                actions: [kAXPressAction as String], selected: true)])
+        let goalHost = FakeActionHost()
+        goalHost.appsByName["WhatsApp"] =
+            ("WhatsApp", "net.whatsapp.WhatsApp")
+        goalHost.uiSnapshotValue = goalSnapshot
+        goalHost.verifiableUIIndices = [28]
+        let goalPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open WhatsApp", steps: jsonSteps("""
+            [{"do":"open_app","app":"WhatsApp"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"WhatsApp"},
+             {"do":"verify_ui","snapshot":"goal-snapshot","index":28,
+              "role":"AXButton","label":"Shivangi Gupta",
+              "target":"Shivangi Gupta","purpose":"goal"}]
+            """), done: true),
+        ])
+        let goalResult = ActionLoopRunner(
+            host: goalHost, planner: goalPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open the Shivangi Gupta chat on WhatsApp",
+              context: loopContext())
+        if case .completed(let goal, let trace) = goalResult {
+            expect(goal == "open the Shivangi Gupta chat on WhatsApp",
+                   "runtime goal proof completes the immutable spoken goal")
+            expect(trace.contains { $0.contains("verify_goal ok") },
+                   "completion trace records the exact rechecked UI evidence")
+        } else {
+            expect(false, "independent exact goal evidence completes navigation")
+        }
+
+        let repeatedRows = (14...19).map { index in
+            ActionUIElement(
+                index: index, parentIndex: 10, depth: 2, role: "AXButton",
+                label: index == 14 ? "Shivangi Gupta" : "Chat \(index)",
+                frame: CGRect(x: 10, y: 100 + ((index - 14) * 60),
+                              width: 300, height: 60),
+                actions: [kAXPressAction as String],
+                selected: index == 14, focused: index == 14)
+        }
+        let inactiveGoalSnapshot = ActionUISnapshot(
+            id: "inactive-goal-snapshot", appName: "WhatsApp",
+            bundleID: "net.whatsapp.WhatsApp", windowTitle: "WhatsApp",
+            complete: true,
+            elements: [ActionUIElement(
+                index: 10, parentIndex: nil, depth: 1, role: "AXGroup",
+                label: "List of chats",
+                frame: CGRect(x: 0, y: 50, width: 320, height: 650),
+                actions: [])] + repeatedRows)
+        expect(ActionUIEvidencePolicy.isRepeatedCollectionMember(
+            index: 14, in: inactiveGoalSnapshot.elements),
+            "a selected/focused sidebar row remains collection-only evidence")
+        expect(!ActionUIEvidencePolicy.isRepeatedCollectionMember(
+            index: 28, in: goalSnapshot.elements),
+            "a unique active-content header remains completion evidence")
+        expect(!ActionUIEvidencePolicy.isRepeatedCollectionMember(
+            index: 14,
+            in: Array(inactiveGoalSnapshot.elements.prefix(4))),
+            "three repeated peers do not cross the collection threshold")
+        let framelessRows = (30...33).map { index in
+            ActionUIElement(
+                index: index, parentIndex: 29, depth: 2, role: "AXRow",
+                label: "Result \(index)", frame: nil,
+                actions: [kAXPressAction as String])
+        }
+        expect(ActionUIEvidencePolicy.isRepeatedCollectionMember(
+            index: 30, in: framelessRows),
+            "four frame-less same-role results fail closed as a collection")
+        let inactiveGoalHost = FakeActionHost()
+        inactiveGoalHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        inactiveGoalHost.uiSnapshotValue = inactiveGoalSnapshot
+        inactiveGoalHost.verifiableUIIndices = [14]
+        let inactiveGoalPlan = ActionPlan(
+            goal: "open the Shivangi Gupta chat on WhatsApp", sends: false,
+            steps: [
+                .waitFrontmost(app: "WhatsApp", timeoutMs: 1_000),
+                .verifyGoal(
+                    snapshotID: "inactive-goal-snapshot", index: 14,
+                    role: "AXButton", label: "Shivangi Gupta",
+                    target: "Shivangi Gupta"),
+            ], unsupported: nil)
+        if case .failed(_, _, let recoverable) = ActionExecutor(
+            host: inactiveGoalHost).run(inactiveGoalPlan).outcome {
+            expect(recoverable,
+                   "an inactive sidebar match cannot pass runtime goal proof")
+        } else {
+            expect(false, "inactive sidebar identity must not complete navigation")
+        }
+
         let unverified = ActionResult.performedUnverified(
             goal: "open example", trace: ["open_url https://example.com"])
         let payload = unverified.controlSuccessPayload(execute: true)
@@ -1613,7 +1973,7 @@ extension Selftest {
         let boundedResult = ActionLoopRunner(
             host: FakeActionHost(), planner: boundedPlanner,
             execute: true, allowSend: false
-        ).run(transcript: "open example", context: loopContext())
+        ).run(transcript: unsafeGoal, context: loopContext())
         if case .performedUnverified(let goal, _) = boundedResult {
             expect(goal.count == 200 && !goal.contains("\u{202E}"),
                    "unverified goal text is sanitized and bounded locally")
@@ -2935,18 +3295,17 @@ extension Selftest {
         expect(wrongChat.typed == ["Himesh"],
                "only the switcher query was typed — the message never reached the wrong person")
 
-        // 2b. The model-requested display name is not runtime authority. A
-        // fuzzy match can bring a Slack-named wrapper forward, but only the
-        // known Slack bundle may receive a committing Return.
+        // 2b. Bundle identity pins one resolved app for the duration of the
+        // plan; it is not an app allowlist. Recipient authority comes from the
+        // exact target attestation tested above, so a previously unseen client
+        // is not rejected merely because its bundle id is unfamiliar.
         let slackShell = FakeActionHost()
         slackShell.appsByName["Slack"] = ("SlackShell", "com.example.slackshell")
         slackShell.windowTitle = "Himesh Singh (DM) - SlackShell"
         slackShell.elementLabel = "Message Himesh Singh"
         let slackShellResult = ActionExecutor(host: slackShell).run(plan)
-        expect(!slackShellResult.outcome.isSuccess,
-               "a fuzzy SlackShell display-name match cannot authorize Return")
-        expect(slackShell.keys.count == 1,
-               "SlackShell may receive the search shortcut but no committing Return")
+        expect(slackShellResult.outcome == .completed && slackShell.keys.count == 3,
+               "an unfamiliar but consistently pinned client is not app-gated")
 
         let realSlack = FakeActionHost()
         realSlack.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
@@ -3013,6 +3372,23 @@ extension Selftest {
                "typing with nothing focused fails instead of reporting success")
         expect(noTarget.typed.isEmpty,
                "no characters are sent when there is nowhere for them to land")
+
+        let delayedTarget = FakeActionHost()
+        delayedTarget.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
+        delayedTarget.hasTextTarget = false
+        delayedTarget.textTargetAfterSleepCalls = 2
+        if let delayedPlan = decodePlan("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hi"}]}
+        """) {
+            let delayedResult = ActionExecutor(host: delayedTarget).run(delayedPlan)
+            expect(delayedResult.outcome == .completed
+                   && delayedTarget.typed == ["hi"],
+                   "Electron AX focus may settle briefly before typing")
+        } else {
+            expect(false, "the delayed focus fixture decodes")
+        }
 
         func runTextTargetFixture(_ configure: (FakeActionHost) -> Void) -> FakeActionHost {
             let fixture = FakeActionHost()
@@ -3619,7 +3995,7 @@ extension Selftest {
             "snapshot_id": "s00000004",
             "degraded": false,
             "elements_complete": false,
-            "element_count": 3, "total_element_count": 3,
+            "element_count": 2, "total_element_count": 2,
             "elements": [
                 ["element_index": 0, "role": "AXWindow", "label": "bgtype.txt",
                  "element_token": "s00000004:0"],
@@ -3698,8 +4074,7 @@ extension Selftest {
         expect(duplicated.elements.count == 3,
                "duplicate element indices parse without trapping")
         _ = duplicated.primaryTextElement
-        _ = CuaPressPick.candidate(in: duplicated.elements, label: "anything",
-                                   roles: ["AXRow"])
+        _ = CuaPressPick.candidate(in: duplicated.elements, label: "anything")
         expect(true, "selection over a duplicated tree completes safely")
         let flagOnly = CuaSnapshot.parse([
             "elements_complete": true,
@@ -3761,57 +4136,53 @@ extension Selftest {
                        label: label, value: nil, parentIndex: parent,
                        enabled: true)
         }
-        let roles: Set<String> = ["AXRow", "AXCell"]
         let rowWithChildText = [
             element(0, "AXWindow", label: nil),
             element(1, "AXRow", label: nil, parent: 0),
             element(2, "AXStaticText", label: "Priya Sharma", parent: 1),
         ]
         expect(CuaPressPick.candidate(in: rowWithChildText,
-                                      label: "Priya Sharma",
-                                      roles: roles)?.index == 1,
+                                      label: "Priya Sharma")?.index == 1,
                "the pressable ancestor row is chosen when text lives on a child")
-        expect(CuaPressPick.candidate(in: rowWithChildText, label: "Priya",
-                                      roles: roles)?.index == 1,
+        expect(CuaPressPick.candidate(in: rowWithChildText, label: "Priya")?.index == 1,
                "matching follows AppMatcher whole-word rules")
         let priyanka = [element(0, "AXRow", label: "Priyanka Verma")]
-        expect(CuaPressPick.candidate(in: priyanka, label: "Priya",
-                                      roles: roles) == nil,
+        expect(CuaPressPick.candidate(in: priyanka, label: "Priya") == nil,
                "Priya cannot press Priyanka — same rule as the foreground path")
         let committing = [element(0, "AXRow", label: "Delete chat with Priya")]
-        expect(CuaPressPick.candidate(in: committing, label: "Priya",
-                                      roles: roles) == nil,
+        expect(CuaPressPick.candidate(in: committing, label: "Priya") == nil,
                "the committing-verb denylist is judged in the background too")
         let committingAncestor = [
             element(0, "AXRow", label: "Unsubscribe from Priya"),
             element(1, "AXStaticText", label: "Priya", parent: 0),
         ]
-        expect(CuaPressPick.candidate(in: committingAncestor, label: "Priya",
-                                      roles: roles) == nil,
+        expect(CuaPressPick.candidate(in: committingAncestor, label: "Priya") == nil,
                "a committing ancestor stops the walk instead of being pressed")
         let button = [element(0, "AXButton", label: "Priya")]
-        expect(CuaPressPick.candidate(in: button, label: "Priya",
-                                      roles: roles) == nil,
-               "roles outside the allowed set are refused")
+        expect(CuaPressPick.candidate(in: button, label: "Priya")?.index == 0,
+               "a safe enabled AXButton is generically selectable")
     }
 
     private static func testBackgroundActionGate() {
         func route(_ bundleID: String, target: String = "Notes",
                    front: String? = "Ghostty",
                    frontBundle: String? = "com.mitchellh.ghostty",
+                   contentMayCommit: Bool = false,
                    enabled: Bool = true) -> Bool {
             BackgroundActionGate.shouldRoute(
-                enabled: enabled, targetName: target, targetBundleID: bundleID,
+                enabled: enabled, contentMayCommit: contentMayCommit,
+                targetName: target, targetBundleID: bundleID,
                 frontmostName: front, frontmostBundleID: frontBundle)
         }
         expect(route("com.apple.notes"),
                "a native app that is not frontmost routes to the background")
         expect(!route("com.apple.notes", enabled: false),
                "the setting turns routing off")
-        // Production tables, not copies: a bundle added to the communication
-        // or browser sets must change this behavior automatically.
-        expect(!route("com.tinyspeck.slackmacgap"),
-               "communication apps keep the foreground evidence chain")
+        expect(!route("com.example.FutureMessenger", target: "Future Messenger",
+                      contentMayCommit: true),
+               "every sending action keeps the foreground evidence chain")
+        expect(route("com.tinyspeck.slackmacgap", target: "Slack"),
+               "a non-sending draft does not need an app-specific route rule")
         expect(!route("com.google.chrome"),
                "browsers keep the foreground path (web AX is unverifiable)")
         expect(!route("com.apple.notes", target: "Notes", front: "Notes",
@@ -3905,12 +4276,15 @@ extension Selftest {
         [
             "snapshot_id": snapshot, "degraded": false,
             "elements_complete": false,
-            "element_count": 2, "total_element_count": 2,
+            "element_count": 3, "total_element_count": 3,
             "elements": [
                 ["element_index": 0, "role": "AXWindow", "label": "My Note",
                  "element_token": "\(snapshot):0"],
                 ["element_index": 1, "role": "AXTextArea", "value": value,
                  "parent_index": 0, "element_token": "\(snapshot):1",
+                 "enabled": true],
+                ["element_index": 2, "role": "AXButton", "label": "Open Sidebar",
+                 "parent_index": 0, "element_token": "\(snapshot):2",
                  "enabled": true],
             ],
         ]
@@ -3971,13 +4345,14 @@ extension Selftest {
             expect(!host.typeText("hello", expecting: "com.other.app"),
                    "typing for a different expected bundle is refused")
 
-            // Press stays policy-gated: Notes grants no press roles, so the
-            // driver must never even be asked.
-            let clicksBefore = transport.callCount("click")
-            expect(!host.pressElement(label: "My Note", expecting: "com.apple.notes"),
-                   "press_element obeys ActionRuntimePolicy in the background")
-            expect(transport.callCount("click") == clicksBefore,
-                   "a policy-refused press sends nothing to the driver")
+            transport.responses["click"] = ["effect": "confirmed"]
+            expect(host.pressElement(label: "Open Sidebar",
+                                     expecting: "com.apple.notes"),
+                   "a background AX control uses the generic driver click path")
+            let clickCall = transport.calls.last { $0.tool == "click" }
+            expect((clickCall?.arguments["element_token"] as? String)
+                   == "s00000001:2",
+                   "the background click addresses the exact tree token")
 
             transport.responses["press_key"] = ["effect": "unverifiable",
                                                 "delivery": ["mode": "background"]]
@@ -3990,15 +4365,11 @@ extension Selftest {
             expect(!host.pressKey(name: "comma", mods: [], keyCode: 43,
                                   flags: [], expecting: "com.apple.notes"),
                    "an untranslatable key refuses instead of guessing")
-            // A committing key needs THIS action's own pending text — the
-            // background analog of the foreground draft gate. "hello" landed
-            // above, so Return is allowed exactly once.
-            expect(host.pressKey(name: "return", mods: [], keyCode: 36,
-                                 flags: [], expecting: "com.apple.notes"),
-                   "Return commits the text this action delivered")
+            // The intervening click invalidated the field that owned "hello";
+            // its old draft can no longer authorize a committing key.
             expect(!host.pressKey(name: "return", mods: [], keyCode: 36,
                                   flags: [], expecting: "com.apple.notes"),
-                   "a second Return has no draft of its own to commit")
+                   "a click clears stale background draft authority")
         }
 
         // Committing keys are refused outright when the action never typed.
@@ -4200,8 +4571,21 @@ extension Selftest {
                              configure: { _, transport in
                                  transport.failing.insert("list_apps")
                              })
-        expectSystemFallback("communication targets fall back to the foreground",
-                             appName: "Slack")
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByName["Notes"] = ("Notes", "com.apple.notes")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let starter = FakeDaemonStarter()
+            let host = makeRoutedHost(
+                system: system, transport: transport, starter: starter)
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            _ = host.openApp(named: "Notes")
+            expect(system.log.contains("openApp(Notes)") && starter.starts == 0,
+                   "every sending action stays foreground without starting Cua")
+        }
         do {
             let system = FakeActionHost()
             system.frontmost = ("Notes", "com.apple.notes")
@@ -4288,9 +4672,10 @@ extension Selftest {
             let host = makeRoutedHost(system: system, transport: transport,
                                       starter: starter)
             host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
             _ = host.openApp(named: "Slack")
             expect(starter.starts == 0,
-                   "a chat-app action never starts the driver daemon")
+                   "a sending action never starts the driver daemon")
             host.beginActionInputSession()
             _ = host.openApp(named: "Notes")
             expect(starter.starts == 1,

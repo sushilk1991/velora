@@ -2,6 +2,7 @@
 
 # ruff: noqa: F811
 
+import asyncio
 from types import SimpleNamespace
 
 from test_server import connect, engine  # noqa: F401 — fixture reuse
@@ -106,6 +107,20 @@ class FakeCleanup:
         return self._result
 
 
+class HibernatedEditCleanup(FakeCleanup):
+    def __init__(self) -> None:
+        super().__init__("unused")
+        self.loaded = False
+        self.hibernated = True
+        self.load_started = asyncio.Event()
+
+    async def ensure_loaded(self, cancel_event=None):
+        self.load_started.set()
+        while cancel_event is None or not cancel_event.is_set():
+            await asyncio.sleep(0.005)
+        return False
+
+
 async def test_edit_text_round_trip(engine):
     eng, sock = engine
     eng.cleanup = FakeCleanup("The launch is delayed until Friday.")
@@ -122,6 +137,29 @@ async def test_edit_text_round_trip(engine):
     raw, prompt = eng.cleanup.calls[0]
     assert raw == "launch delayed friday"
     assert "fix the grammar" in prompt
+
+
+async def test_hibernated_edit_load_keeps_ping_and_cancel_responsive(engine):
+    eng, sock = engine
+    eng.cleanup = HibernatedEditCleanup()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "edit_text", "id": "cold-edit",
+        "text": "launch delayed friday", "instruction": "fix the grammar",
+    })
+    await asyncio.wait_for(eng.cleanup.load_started.wait(), timeout=0.2)
+
+    await client.send_json({"cmd": "ping"})
+    assert (await asyncio.wait_for(
+        client.recv_event("pong"), timeout=0.2))["event"] == "pong"
+    await client.send_json({"cmd": "edit_cancel"})
+    failed = await asyncio.wait_for(
+        client.recv_event("edit_failed"), timeout=0.5)
+
+    assert failed["id"] == "cold-edit"
+    assert failed["code"] == "cancelled"
+    assert eng._editing is False
 
 
 async def test_edit_text_preserves_selection_boundary_whitespace(engine):

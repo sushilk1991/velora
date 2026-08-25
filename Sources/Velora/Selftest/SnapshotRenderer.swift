@@ -53,11 +53,32 @@ enum SnapshotRenderer {
             ("hud-inserted", .inserted),
             ("hud-learned", .learned(wrong: "valora", right: "Velora")),
             ("hud-error", .error("Microphone disconnected")),
+            ("hud-action-reading", .notice(
+                symbol: "wand.and.stars",
+                message: ActionProgress.readingScreen.hudMessage)),
+            ("hud-action-planning", .notice(
+                symbol: "wand.and.stars",
+                message: ActionProgress.planning(turn: 2).hudMessage)),
+            ("hud-action-verifying", .notice(
+                symbol: "wand.and.stars",
+                message: ActionProgress.verifyingTarget.hudMessage)),
+            ("hud-action-executing", .notice(
+                symbol: "wand.and.stars",
+                message: ActionProgress.executing(
+                    step: 2, total: 4, description: "Opening Shivangi Gupta").hudMessage)),
+            ("hud-action-retrying", .notice(
+                symbol: "wand.and.stars",
+                message: ActionProgress.retrying("stale screen").hudMessage)),
+            ("hud-action-failed", .error("The selected conversation changed")),
         ]
         for (name, state) in cases {
             let model = HUDModel()
             model.state = state
             model.edge = .trailing
+            if name == "hud-action-failed" {
+                model.retryTitle = "Retry Action"
+                model.onRetry = {}
+            }
             if state == .listening {
                 let elapsed: TimeInterval
                 switch name {

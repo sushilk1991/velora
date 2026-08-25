@@ -41,6 +41,7 @@ final class SystemActionHost: ActionHost {
     /// field survives planner turns, but is reset before the next user action.
     private var actionTextTarget: ScreenKeystrokeStreamTarget?
     private var actionDraft = ""
+    private var actionUISnapshot: ScreenActionUISnapshot?
 
     init(inserter: TextInserter) {
         self.inserter = inserter
@@ -48,6 +49,7 @@ final class SystemActionHost: ActionHost {
 
     func beginActionInputSession() {
         clearActionTextState()
+        actionUISnapshot = nil
     }
 
     private func clearActionTextState() {
@@ -180,9 +182,8 @@ final class SystemActionHost: ActionHost {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    /// What the focused field says about itself. In a chat app this is where
-    /// the recipient's name lives ("Message Himesh"), which is exactly what a
-    /// `verify_context` step needs to confirm before typing.
+    /// What the focused field says about itself. A target-bound composer may
+    /// expose the recipient in an authored label such as "Message Himesh".
     func focusedElementLabel() -> String? {
         guard Permissions.accessibilityGranted,
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
@@ -259,27 +260,73 @@ final class SystemActionHost: ActionHost {
         return ScreenContext.visibleNames(of: app)
     }
 
+    func uiSnapshot() -> ActionUISnapshot? {
+        guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
+        else {
+            actionUISnapshot = nil
+            return nil
+        }
+        let snapshot = ScreenContext.actionUISnapshot(of: app)
+        actionUISnapshot = snapshot
+        return snapshot?.observation
+    }
+
     /// These come off the frontmost window, which is by definition what the
     /// user is looking at.
     var screenNamesAreUserVisible: Bool { true }
 
-    /// Press the navigation element whose visible label matches. The
-    /// frontmost app must still be the one the plan verified; ScreenContext
-    /// also refuses every non-navigation AX role before AXPress. Communication
-    /// apps expose rows/cells; browsers additionally expose links (a search
-    /// result) — every other app refuses the verb outright.
+    /// Legacy label-addressed fallback. The frontmost app must still be the
+    /// one the plan verified; the structured indexed path is preferred.
     func pressElement(label: String, expecting bundleID: String?) -> Bool {
         guard Permissions.accessibilityGranted else { return false }
         guard let app = onMain({ NSWorkspace.shared.frontmostApplication })
         else { return false }
-        guard let roles = ActionRuntimePolicy.pressRoles(forBundleID: app.bundleIdentifier)
-        else { return false }
         if let bundleID, !bundleID.isEmpty, app.bundleIdentifier != bundleID {
             return false
         }
-        let pressed = ScreenContext.pressElement(labelled: label, in: app, roles: roles)
+        let pressed = ScreenContext.pressElement(labelled: label, in: app)
         if pressed { clearActionTextState() }
         return pressed
+    }
+
+    func pressElement(index: Int, snapshotID: String, label: String,
+                      role: String, expecting bundleID: String?) -> Bool {
+        guard Permissions.accessibilityGranted,
+              let snapshot = actionUISnapshot,
+              snapshot.observation.id == snapshotID,
+              snapshot.observation.complete,
+              let record = snapshot.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              record.role == role,
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(label),
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.bundleIdentifier == snapshot.observation.bundleID,
+              expectedBundle(bundleID, matches: snapshot.observation.bundleID)
+        else { return false }
+        let pressed = ScreenContext.pressActionElement(
+            index: index, in: snapshot)
+        // Any press can replace the tree or move focus. Never let a later
+        // indexed step reuse capabilities from the old surface.
+        actionUISnapshot = nil
+        if pressed { clearActionTextState() }
+        return pressed
+    }
+
+    func verifyElement(index: Int, snapshotID: String, label: String,
+                       role: String, expecting bundleID: String?,
+                       requiresFocus: Bool) -> Bool {
+        guard Permissions.accessibilityGranted,
+              let snapshot = actionUISnapshot,
+              snapshot.observation.id == snapshotID,
+              let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+              app.bundleIdentifier == snapshot.observation.bundleID,
+              expectedBundle(bundleID, matches: snapshot.observation.bundleID)
+        else { return false }
+        return ScreenContext.verifyActionElement(
+            index: index, label: label, role: role, in: snapshot,
+            requiresFocus: requiresFocus)
     }
 
     /// URL of the frontmost page when a browser is frontmost, else nil. Read

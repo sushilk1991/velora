@@ -107,37 +107,150 @@ behaviour differed from a hardcoded recipe.
 app → engine  {"cmd":"action_start","id":"uuid","transcript":"message Priya on Slack that I'm late",
                "context":{"frontmost_app":"Sublime Text","frontmost_bundle":"com.sublimetext.4",
                           "frontmost_window":"notes.md","running_apps":["Slack","Google Chrome"],
-                          "selection":"","screen_names":["Priya Menon","#standup"]}}
+                          "selection":"","screen_names":["Priya Menon","#standup"],
+                          "ui_snapshot":{"id":"…","complete":true,"elements":[…]}}}
 engine → app  {"event":"action_turn","id":"uuid","turn":1,"sends":true,"goal":"…",
                "steps":[…],"done":false,"ms":1580}
 app → engine  {"cmd":"action_observe","id":"uuid",
                "observation":{"frontmost_app":"Slack","window_title":"…",
                               "focused_label":"Query","focused_role":"AXTextField",
                               "selection":"…","screen_names":[…],
+                              "ui_snapshot":{"id":"…","complete":true,"elements":[…]},
                               "executed":["open_app Slack","key cmd+k"],
                               "failed_step":"verify_context [Priya]: no match in '…'"}}
 engine → app  {"event":"action_turn","id":"uuid","turn":2,"steps":[…],"done":false}
 …
 app → engine  {"cmd":"action_end","id":"uuid"}       # loop finished either way
-engine → app  {"event":"action_failed","id":"uuid","code":"plan_invalid|unsupported|turn_limit|…"}
+engine → app  {"event":"action_failed","id":"uuid","code":"plan_invalid|planner_unavailable|unsupported|turn_limit|…"}
 ```
 
-The model is the same on-device Qwen that cleans dictation, prompted for JSON
-(`actions.py`), with one repair retry per turn. It shares the model with
-dictation under the same preemption contract as Safe Voice Edit. The loop is
-bounded: 8 turns, one session at a time, and the engine's `ActionSession` owns
-the budgets so no turn can reset them. Everything in an observation is read off
-the user's screen, so every string is defanged (chat-template control markers
-neutralized, line structure collapsed) before it reaches the prompt.
+The controller is the same on-device Qwen that cleans dictation, prompted for
+JSON (`actions.py`), with one repair retry for an ordinary malformed proposal.
+An authoritative refusal caused by a missing/incomplete UI tree skips both the
+impossible verifier call and the same-snapshot repair. The app permits only one
+fresh-screen retry for `plan_invalid`, so a static inaccessible surface cannot
+turn into a sustained inference loop. It shares the model with
+dictation under the same preemption contract as Safe Voice Edit. A proposed UI
+press is checked by a separate narrow model call against the same fresh tree,
+except for one policy-complete navigation shape: a non-send turn may press one
+exact repeated-collection member whose AXPress action is present, whose label
+is non-committing, and whose label is named by the spoken command. That bounded
+row press needs no second model to rediscover that a sidebar/list/search result
+is navigation; unique controls, mixed/content-changing turns, and ambiguous
+labels still go through the reviewer. After that exact collection press, the
+fresh screen goes directly to the completion verifier. If unique active content
+does not yet prove the spoken goal, control falls back to the normal controller;
+the optimization cannot declare failure or success by itself. The reviewer approves navigation,
+rejects the selected control, or proves the requested screen is already active
+and replaces the press with an exact read-only verification. A
+controller-authored bare `done`, or a reviewer that rejects a redundant header
+press in prose, goes to one independent completion verifier. It may mark only
+the entire non-send command complete and must cite an exact active element that
+the app re-reads; it grants no action capability. Verifier evidence is bound by
+the server to the immutable tree supplied for that specific call, so the model
+cites only index, role, and label instead of echoing a random snapshot UUID.
+When a turn would deliver text to another person,
+another narrow model call sees the current structured UI and proposed action
+shape (not the message body). It must cite the exact focused editable whose own
+app-authored label names the recipient; a header or selected row is not enough.
+The app re-reads that same AX object before typing and again before Return. The
+pipeline is explicit and framework-neutral:
+controller → optional UI-action reviewer → completion verifier (for `done`) or
+target verifier (for delivery) → validator → executor → fresh observation. The
+spoken command remains the immutable task identity throughout; a controller
+summary cannot replace it.
+
+The controller and UI-action reviewer receive the complete **semantic** tree
+because repeated rows and results are valid navigation controls. The immutable
+snapshot still retains every bounded AX node and frame for collection
+classification, indexed execution, and runtime rechecks; the model projection
+omits coordinates and unlabeled inert leaves while preserving useful nodes and
+their ancestor chains. Completion and target verifiers receive a narrower
+projection that also omits structurally repeated destinations: they are
+categorically inadmissible evidence and otherwise compete with the unique active
+header or content container the verifier must cite. The parser independently
+rejects any repeated-collection citation, so projection is a model focus and
+latency optimization rather than the safety boundary.
+
+An accepted indexed AXPress also gets a 250 ms executor-level settle before
+the next observation. AX reports that the action was accepted before many apps
+publish the replacement hierarchy; without this capability-level settle, the
+agent can receive the old tree and spend another model turn repeating the same
+navigation. An exact editable AXTextField/AXTextArea/AXComboBox is also a generic
+focus capability: the app sets AXFocused, verifies that exact object owns focus,
+and observes again before any text. This contains no app, layout, or coordinate
+rule. A final 750 ms bounded focus poll covers asynchronous Electron AX updates
+without weakening the editable-target requirement.
+
+Every executing action drives the same persistent HUD progress capsule whether
+it starts from the voice hotkey or the local CLI/agent bridge. Reading,
+planning, verification, execution, and recovery remain visible until a final
+success, cancellation, approval request, or concrete failure replaces them;
+dry-run planning stays silent. This keeps an external agent from controlling
+apps behind an idle collapsed pill.
+
+The loop is bounded: 8 accepted turns, one fresh retry after a rejected plan,
+one session at a time, and the engine's
+`ActionSession` owns the budgets so no turn can reset them. The Accessibility
+observation is a bounded projection of the focused window's tree: hierarchy,
+roles, authored labels, geometry, supported actions, generic selected/focused
+state, and stable per-snapshot indices. Editable values are excluded so text
+the action just typed cannot confirm its own target. Every string is defanged
+(chat-template control markers neutralized, line structure collapsed) before
+it reaches the prompt. Capture walks at most 30 levels, 500 nodes, 60 children
+per node, and 1.2 seconds; the deeper level bound reaches nested Electron
+composers while the other independent ceilings remain fail-closed. Only
+executable AXFocus and AXPress capabilities enter the model projection;
+ubiquitous passive AXShowMenu/AXScrollToVisible advertisements do not inflate
+it. Non-finite AX
+geometry is omitted at capture and payload
+projection; an invalid control frame that survives those guards fails locally
+instead of silently turning into a planner timeout.
+
+The full chat-template input for every Action model call is capped at 16,384
+tokens before MLX prefill begins. Normal 500-node trees become much smaller after
+semantic projection; a pathological screen that still exceeds the cap fails
+closed without allocating a huge Metal working set. The Action controller alone
+retains its small stable rules prefix in a session-scoped cache. Reviewer and
+verifier trees change after each UI action, so those calls are one-shot and
+retain no stale KV snapshot. `action_end` drops the controller snapshot and
+clears unused MLX buffers. When Darwin reports warning or critical memory
+pressure it also reaps the weight-owning cleanup sidecar after an eight-second
+idle grace; a new action or dictation cancels that pending reap. The next
+dictation, edit, meeting-note, or Action request lazily reloads the same pinned
+model and warm dictation prefix. Loading is bounded, retryable, cancellable, and
+runs outside the control-frame dispatcher, so ping and cancellation remain
+responsive. Under normal pressure the ordinary dictation prefix stays resident
+for latency.
+
+The private model-worker transport uses a guarded 4 MiB ceiling in both
+directions. Python's 64 KiB default cannot carry the worst-case bounded AX
+prompt (or a fallback response that echoes it). A common system prompt used by
+reusable prefix-cache candidates is transmitted once and reconstructed in the
+child rather than duplicated on the wire; changing reviewer/verifier trees are
+not prefix candidates. The upstream 500-node AX snapshot remains the actual
+data bound. Either side rejects an over-limit message before socket I/O, and a
+malformed response retires the child on a bounded wall.
+
+A controller, reviewer, or verifier timeout is infrastructure failure, not a
+rejected plan. If the isolated cleanup child is replacing itself, the current
+turn waits up to 12 seconds for the new child and retries once. If it still
+cannot answer, the engine returns `planner_unavailable` without spending the
+session's plan-rejection budget; it never spins fresh observations against a
+model that is still warming.
 
 **Step vocabulary** (closed by design — no shell, no scripts, no raw
 coordinates): `open_app`, `open_url`, `wait_frontmost`, `verify_context`,
-`press_element`, `type_text`, `key`, `pause`. `press_element` activates the
-control whose visible label matches (AXPress, label-addressed, whole-word) —
-and refuses labels naming committing controls (send/delete/pay/confirm/…), so
-pressing can navigate but never deliver. At runtime it is role- and
-app-scoped: AX rows/cells in communication bundles, rows/cells/links in
-browsers, nothing anywhere else.
+`press_ui`, `search_text`, `type_text`, `key`, `pause`; `verify_ui` is inserted
+only from reviewer evidence. `press_ui` names an exact element from the current,
+complete snapshot and is refused if the snapshot, app, role, label, or required
+capability changed: editable roles require AXFocus; other roles require AXPress.
+It also refuses labels naming committing controls (send/delete/pay/confirm/…),
+so navigation or editable focus cannot deliver. Every indexed action ends its
+batch and requires a fresh observation before continuing.
+`press_element` is a
+label-addressed legacy fallback only when no structured snapshot exists. There
+is no app-to-role navigation table.
 
 **The safety gate is implemented twice**, in `velora_engine/actions.py` and again
 in `Sources/Velora/Actions/ActionPlan.swift`. That is deliberate: the engine
@@ -153,10 +266,16 @@ only the app holds the Accessibility grant. Its rules:
   to be in front.
 - `type_text` may not contain a newline — in a chat composer a bare Return is a
   send, and the app owns that decision through an explicit `key` step.
-- An unmodified Return that would commit typed text must be preceded by a
-  `verify_context` since that text was typed. Verifying afterwards is too late:
-  if the quick switcher never opened, the recipient's name went into the
-  conversation already on screen and that Return sends it to the wrong person.
+- For every delivery action, message content itself is refused until the
+  separate target-verifier call cites an exact active-recipient element. This
+  applies even to an app Velora has never seen. A matching label is identity
+  only: repeated peer collections—sidebars, search results, switchers, grids,
+  and tab strips—remain pressable navigation but can never prove the active
+  target, even when selected or focused. The verifier must instead cite unique
+  target-bound content outside that collection, and the app re-reads its exact
+  identity before typing. An unmodified Return that would commit the typed text
+  requires the same check again after typing and before Return. Navigation
+  completion uses the same invariant.
 - `verify_context` requires ALL its terms, matched whole-word, each at least
   three characters and never the target app's own name — "Slack" appears in
   every Slack window title and would prove nothing.
@@ -168,6 +287,8 @@ only the app holds the Accessibility grant. Its rules:
 - `sends` marks an action that delivers something to another person. It is
   declared on the first turn and locked — a later turn can never upgrade a
   draft into a send. A first turn that omits the field is treated as sending.
+- A model that repeats the same rejected plan or the same recoverable runtime
+  failure is stopped instead of consuming the remaining turn budget.
 
 At execution time (`ActionExecutor`) each step re-checks reality: the frontmost
 app must still be the one focus was established on, secure input must be absent,
@@ -179,23 +300,21 @@ never a field's value, which would just be the plan's own typed text confirming
 itself. Any failure stops the plan where it stands rather
 than continuing blind.
 
-App knowledge lives in the prompt as **hints, not scripts** ("Slack's ⌘K field
-labels itself Query"; "WhatsApp's Return does not open a chat — press the
-person's row"). The loop's observations are the ground truth; when a hint and
-the screen disagree, the screen wins, and an app nobody wrote a hint for is
-still navigable by looking. Web searches resolve to a single `open_url`, which
-is faster and far more reliable than walking a UI.
+The structured tree is the navigation source of truth. The controller reasons
+from the same hierarchy/action contract in WhatsApp, a browser, or an app it has
+never seen; no per-app layout recipe participates. Web searches still resolve
+to a single `open_url`, which is faster and more reliable than walking a UI.
 
 **Background execution (optional).** When the user has the open-source
 [Cua Driver](https://cua.ai/cua-driver) installed,
 `BackgroundRoutingActionHost` can deliver an action to a background window —
 the user keeps cursor, focus, and keyboard while the action runs "over
-there". Routing is decided once per action at `open_app` and only when the target is
-a *different* app than the one the user is in (by bundle id, failing closed
-when the frontmost app cannot be read), is neither a communication app nor a
-browser, and the driver daemon is healthy — its socket answers and it holds a
-usable Accessibility grant, which a daemon spawned by Velora inherits from
-Velora. Everything else falls back to the classic foreground host, as does
+there". Routing is decided once per action at `open_app` and only when the target
+is a *different* app than the one the user is in (by bundle id, failing closed
+when the frontmost app cannot be read), the plan cannot deliver content, the
+target is not a browser, and the driver daemon is healthy — its socket answers
+and it holds a usable Accessibility grant, which a daemon spawned by Velora
+inherits from Velora. Everything else falls back to the classic foreground host, as does
 the rest of an action after an `open_url` or a switch to a non-routable app.
 
 Web content is refused at the element level rather than by app category: any

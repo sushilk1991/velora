@@ -140,26 +140,246 @@ enum StreamPreviewTargetPolicy {
 enum ScreenContext {
     /// Max entities returned; keeps the prompt/vocabulary bounded.
     private static let maxEntities = 4
+    /// Electron applications commonly nest the useful editable surface under
+    /// several layers of web containers. Slack's visible composer is depth 23;
+    /// this remains bounded by the independent node and wall-clock ceilings.
+    static let actionTreeDepthBudget = 30
 
-    /// AXPress is a generic control action. Action Mode exposes it only for
-    /// roles whose semantics are navigation, never mutation or submission.
-    /// Groups are intentionally excluded: an unlabeled group can wrap a row,
-    /// but it can just as easily wrap a destructive button cluster.
-    static let actionNavigationRoles: Set<String> = [
-        "AXRow", "AXCell",
+    private static let editableActionRoles: Set<String> = [
+        kAXTextFieldRole as String,
+        kAXTextAreaRole as String,
+        kAXComboBoxRole as String,
     ]
 
-    /// Browser variant: links are the web's navigation primitive (a search
-    /// result, an article), so AXLink joins rows/cells there. Web buttons,
-    /// checkboxes, and menu items stay refused — a link whose label names a
-    /// committing verb is still rejected by the press denylist.
-    static let browserNavigationRoles: Set<String> = [
-        "AXRow", "AXCell", "AXLink",
-    ]
+    static func isEditableActionRole(_ role: String) -> Bool {
+        editableActionRoles.contains(role)
+    }
 
-    static func isActionNavigationRole(_ role: String?) -> Bool {
-        guard let role else { return false }
-        return actionNavigationRoles.contains(role)
+    /// The model may invoke only capabilities the executor implements. Many
+    /// Electron nodes advertise AXShowMenu/AXScrollToVisible even when they are
+    /// passive prose; forwarding them bloats the semantic tree and invents no
+    /// usable action.
+    static func modelActionNames(from actions: [String]) -> [String] {
+        let available = Set(actions)
+        return ["AXFocus", kAXPressAction as String].filter {
+            available.contains($0)
+        }
+    }
+
+    /// One generic, bounded projection of the focused window's AX tree for
+    /// Action Mode. It deliberately preserves hierarchy, geometry, roles and
+    /// supported actions instead of flattening the screen into a bag of names.
+    /// Values are excluded: editable values may contain text the action just
+    /// typed, and feeding them back would let the model self-confirm a target.
+    static func actionUISnapshot(
+        of app: NSRunningApplication?,
+        nodeBudget: Int = 500,
+        depthBudget: Int = actionTreeDepthBudget,
+        deadline: TimeInterval = 1.2
+    ) -> ScreenActionUISnapshot? {
+        guard let app, app.processIdentifier > 0,
+              Permissions.accessibilityGranted else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        guard let window = focusedOrFirstWindow(
+            appElement, pid: app.processIdentifier) else { return nil }
+        // One identity read is enough to annotate the whole tree. Reading
+        // AXFocused separately on every node would add avoidable IPC latency.
+        let focusedElement = axElement(appElement, kAXFocusedUIElementAttribute)
+
+        let stopAt = Date().addingTimeInterval(deadline)
+        var queue: [(element: AXUIElement, parent: Int?, depth: Int)] = [
+            (window, nil, 0),
+        ]
+        var records: [ActionUIElement] = []
+        var references: [Int: AXUIElement] = [:]
+        var nextIndex = 0
+        var truncated = false
+
+        while !queue.isEmpty {
+            guard records.count < nodeBudget, Date() < stopAt else {
+                truncated = true
+                break
+            }
+            let item = queue.removeFirst()
+            let index = nextIndex
+            nextIndex += 1
+            AXUIElementSetMessagingTimeout(item.element, 0.2)
+
+            let role = axString(item.element, kAXRoleAttribute) ?? "AXUnknown"
+            let authored = [
+                axString(item.element, kAXTitleAttribute),
+                axString(item.element, kAXDescriptionAttribute),
+                axString(item.element, kAXPlaceholderValueAttribute),
+            ]
+                .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            var rawActions = axActionNames(item.element)
+            if isEditableActionRole(role) {
+                var settable = DarwinBoolean(false)
+                if AXUIElementIsAttributeSettable(
+                    item.element, kAXFocusedAttribute as CFString,
+                    &settable) == .success, settable.boolValue {
+                    rawActions.append("AXFocus")
+                }
+            }
+            let actions = modelActionNames(from: rawActions)
+            let label = actionUILabel(
+                role: role, authored: authored, actions: actions)
+            // AXSelected is useful only on labelled destinations. Limiting
+            // this extra read keeps the generic tree within the same latency
+            // budget even in large Electron windows.
+            let selected = label != nil
+                && axBool(item.element, kAXSelectedAttribute) == true
+            let focused = focusedElement.map {
+                CFEqual($0, item.element)
+            } ?? false
+            records.append(ActionUIElement(
+                index: index,
+                parentIndex: item.parent,
+                depth: item.depth,
+                role: role,
+                label: label,
+                frame: axFrame(item.element),
+                actions: actions,
+                selected: selected,
+                focused: focused))
+            references[index] = item.element
+
+            let children = axChildren(item.element) ?? []
+            if item.depth >= depthBudget {
+                if !children.isEmpty { truncated = true }
+                continue
+            }
+            for child in children.prefix(60) {
+                queue.append((child, index, item.depth + 1))
+            }
+            if children.count > 60 { truncated = true }
+        }
+
+        let title = axString(window, kAXTitleAttribute) ?? ""
+        let observation = ActionUISnapshot(
+            id: UUID().uuidString,
+            appName: app.localizedName ?? "",
+            bundleID: app.bundleIdentifier ?? "",
+            windowTitle: String(title.prefix(180)),
+            complete: !truncated && queue.isEmpty,
+            elements: records)
+        return ScreenActionUISnapshot(
+            observation: observation,
+            applicationElement: appElement,
+            elementsByIndex: references)
+    }
+
+    /// Project authored AX labels into the model-facing interaction tree.
+    /// Capabilities and editable/structural controls retain their labels;
+    /// passive prose is kept only when it is short enough to plausibly be a
+    /// name, tab, or status. This is app-agnostic and prevents long document or
+    /// message bodies from dominating every planning turn. AXValue remains
+    /// excluded entirely so an action cannot verify text it just typed.
+    static func actionUILabel(
+        role: String,
+        authored: [String],
+        actions: [String]
+    ) -> String? {
+        var seen = Set<String>()
+        let label = authored
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter {
+                seen.insert($0.folding(
+                    options: [.caseInsensitive, .diacriticInsensitive],
+                    locale: .current)).inserted
+            }
+            .joined(separator: " ")
+        guard !label.isEmpty else { return nil }
+
+        let labelledControlRoles: Set<String> = [
+            kAXWindowRole as String,
+            kAXSheetRole as String,
+            kAXTextFieldRole as String,
+            kAXTextAreaRole as String,
+            kAXComboBoxRole as String,
+        ]
+        let interactive = !actions.isEmpty || labelledControlRoles.contains(role)
+        let wordCount = label.split(whereSeparator: \.isWhitespace).count
+        guard interactive || (label.count <= 80 && wordCount <= 8) else {
+            return nil
+        }
+        return String(label.prefix(180))
+    }
+
+    /// Perform the exact AX action selected from `actionUISnapshot`. The
+    /// caller owns freshness and app/window identity; this method proves the
+    /// referenced object still exposes AXPress and refuses committing labels.
+    /// Editable controls are focused by exact AX identity; they are never sent
+    /// coordinates and the caller must observe again before typing.
+    static func pressActionElement(
+        index: Int,
+        in snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard snapshot.observation.complete,
+              let record = snapshot.observation.elements.first(where: {
+            $0.index == index
+        }),
+              let element = snapshot.elementsByIndex[index],
+              !ActionPlan.pressLabelIsCommitting(record.label ?? "")
+        else { return false }
+        guard isEditableActionRole(record.role) else {
+            return record.actions.contains(kAXPressAction as String)
+                && AXUIElementPerformAction(
+                    element, kAXPressAction as CFString) == .success
+        }
+        guard record.actions.contains("AXFocus") else { return false }
+
+        // AXFocused is the generic Accessibility capability for that exact
+        // editable element. Do not also AXPress it: combo boxes may interpret
+        // AXPress as expansion rather than focus.
+        let focused = AXUIElementSetAttributeValue(
+            element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+        guard focused else { return false }
+        for attempt in 0..<5 {
+            if let current = axElement(
+                snapshot.applicationElement, kAXFocusedUIElementAttribute),
+               CFEqual(current, element) {
+                return true
+            }
+            if attempt < 4 { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        return false
+    }
+
+    static func verifyActionElement(
+        index: Int,
+        label: String,
+        role: String,
+        in snapshot: ScreenActionUISnapshot,
+        requiresFocus: Bool = false
+    ) -> Bool {
+        guard snapshot.observation.complete,
+              snapshot.observation.elements.contains(where: {
+            $0.index == index
+        }),
+              ActionUIEvidencePolicy.mayVerify(
+                index: index, in: snapshot.observation.elements),
+              let element = snapshot.elementsByIndex[index],
+              axString(element, kAXRoleAttribute) == role else { return false }
+        if requiresFocus {
+            guard isEditableActionRole(role),
+                  let focused = axElement(
+                    snapshot.applicationElement, kAXFocusedUIElementAttribute),
+                  CFEqual(focused, element) else { return false }
+        }
+        let authored = [
+            axString(element, kAXTitleAttribute),
+            axString(element, kAXDescriptionAttribute),
+            axString(element, kAXPlaceholderValueAttribute),
+        ].compactMap { $0 }
+        let currentLabel = actionUILabel(
+            role: role, authored: authored,
+            actions: modelActionNames(from: axActionNames(element)))
+        return AppMatcher.normalize(currentLabel ?? "")
+            == AppMatcher.normalize(label)
     }
 
     /// Best-effort entities for the given app. Never throws; returns [] when
@@ -286,10 +506,9 @@ enum ScreenContext {
         return names
     }
 
-    /// Finds and presses the navigation row/cell whose visible label
-    /// matches `label`. Label-addressed only; there is deliberately no
-    /// press-by-coordinate anywhere in Action Mode, and non-navigation roles
-    /// are refused even when their labels pass planning validation.
+    /// Legacy fallback for an app that cannot produce a structured snapshot.
+    /// Finds the labelled control and performs only an AXPress action. New
+    /// plans address an exact index from `actionUISnapshot` instead.
     ///
     /// Matching is `AppMatcher.contextMatches` (whole-word, ALL terms), the
     /// same rule `verify_context` lives by, so "Priya" cannot press
@@ -301,7 +520,6 @@ enum ScreenContext {
     static func pressElement(
         labelled label: String,
         in app: NSRunningApplication?,
-        roles: Set<String> = actionNavigationRoles,
         nodeBudget: Int = 900,
         deadline: TimeInterval = 1.5
     ) -> Bool {
@@ -334,7 +552,7 @@ enum ScreenContext {
                     axString(element, kAXDescriptionAttribute),
                 ].compactMap { $0 }.joined(separator: " ")
                 guard !ActionPlan.pressLabelIsCommitting(fullText) else { continue }
-                if press(element, roles: roles) { return true }
+                if press(element) { return true }
                 // The text lives on a child; the pressable thing is the row.
                 // An ancestor that carries its OWN label gets the same
                 // judgment — an unlabeled container (the typical Electron
@@ -348,7 +566,7 @@ enum ScreenContext {
                     ].compactMap { $0 }.joined(separator: " ")
                     if !ancestorText.isEmpty,
                        ActionPlan.pressLabelIsCommitting(ancestorText) { break }
-                    if press(candidate, roles: roles) { return true }
+                    if press(candidate) { return true }
                     ancestor = axElement(candidate, kAXParentAttribute)
                 }
             }
@@ -360,13 +578,9 @@ enum ScreenContext {
         return false
     }
 
-    /// Performs AXPress only when both role and action prove this is an
-    /// explicit navigation target. Buttons and generic containers are skipped.
-    private static func press(_ element: AXUIElement, roles: Set<String>) -> Bool {
-        guard let role = axString(element, kAXRoleAttribute),
-              roles.contains(role) else {
-            return false
-        }
+    /// Accessibility itself is the capability boundary: the target must
+    /// expose AXPress. App names and app-specific role tables are irrelevant.
+    private static func press(_ element: AXUIElement) -> Bool {
         var actionsRef: CFArray?
         guard AXUIElementCopyActionNames(element, &actionsRef) == .success,
               let actions = actionsRef as? [String],
@@ -1090,6 +1304,39 @@ enum ScreenContext {
         return t.isEmpty ? nil : t
     }
 
+    private static func axActionNames(_ element: AXUIElement) -> [String] {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFArray?
+        guard AXUIElementCopyActionNames(element, &ref) == .success,
+              let actions = ref as? [String] else { return [] }
+        return actions.sorted()
+    }
+
+    private static func axFrame(_ element: AXUIElement) -> CGRect? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var positionRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, kAXPositionAttribute as CFString, &positionRef) == .success,
+              AXUIElementCopyAttributeValue(
+                element, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let positionRef, let sizeRef,
+              CFGetTypeID(positionRef) == AXValueGetTypeID(),
+              CFGetTypeID(sizeRef) == AXValueGetTypeID()
+        else { return nil }
+        let positionValue = positionRef as! AXValue
+        let sizeValue = sizeRef as! AXValue
+        guard AXValueGetType(positionValue) == .cgPoint,
+              AXValueGetType(sizeValue) == .cgSize else { return nil }
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue, .cgPoint, &point),
+              AXValueGetValue(sizeValue, .cgSize, &size),
+              point.x.isFinite, point.y.isFinite,
+              size.width.isFinite, size.height.isFinite else { return nil }
+        return CGRect(origin: point, size: size)
+    }
+
     /// URL-valued attributes arrive as CFURL (`AXURL`) or as String
     /// (`AXDocument`, app-dependent); accept both.
     private static func axURLString(_ element: AXUIElement, _ attr: String) -> String? {
@@ -1415,6 +1662,15 @@ extension ScreenContext {
             "app": app.localizedName ?? "?",
             "bundle": app.bundleIdentifier ?? "?",
         ]
+        let uiStarted = ProcessInfo.processInfo.systemUptime
+        if let snapshot = actionUISnapshot(of: app) {
+            out["action_ui_snapshot"] = [
+                "id": snapshot.observation.id,
+                "complete": snapshot.observation.complete,
+                "elements": snapshot.observation.elements.count,
+                "ms": Int((ProcessInfo.processInfo.systemUptime - uiStarted) * 1_000),
+            ]
+        }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 1.0)
         out["pid"] = Int(app.processIdentifier)

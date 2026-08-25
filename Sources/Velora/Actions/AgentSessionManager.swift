@@ -13,6 +13,7 @@ protocol AgentActionCoordinating: AnyObject {
         context: ActionContextSnapshot,
         execute: Bool,
         allowSend: Bool,
+        progress: ((ActionProgress) -> Void)?,
         completion: @escaping (ActionResult) -> Void
     )
     func cancel()
@@ -56,6 +57,7 @@ final class AgentSessionManager {
         context: ActionContextSnapshot,
         execute: Bool = true,
         allowSend: Bool = true,
+        progress: ((ActionProgress) -> Void)? = nil,
         completion: @escaping (ActionResult) -> Void
     ) {
         guard !core.isRunning, activeTaskID == nil else {
@@ -81,7 +83,8 @@ final class AgentSessionManager {
             transcript: transcript,
             context: context,
             execute: execute,
-            allowSend: allowSend
+            allowSend: allowSend,
+            progress: progress
         ) { [weak self] result in
             guard let self else {
                 completion(result)

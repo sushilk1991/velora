@@ -8,6 +8,13 @@ from pathlib import Path
 
 import pytest
 import velora_engine.cleanup_process as cleanup_process_mod
+from velora_engine import actions
+from velora_engine.cleanup_ipc import (
+    CLEANUP_IPC_STREAM_LIMIT_BYTES,
+    encode_cleanup_ipc_message,
+    pack_prefix_candidates,
+    unpack_prefix_candidates,
+)
 from velora_engine.cleanup_process import CleanupProcess
 
 
@@ -45,6 +52,10 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         assert 0 <= result.wall_ms < 1_000
         assert result.cache_hit is True
 
+        limited = await cleanup.cleanup(
+            "__limits__", "system", max_input_tokens=16_384)
+        assert limited.text == "16384"
+
         prefix = await cleanup.prepare_prefix([("system", "alpha"), ("system", "zulu")])
         assert prefix.applied is True
         assert prefix.tokens == 12
@@ -55,6 +66,215 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         await cleanup.release_action_memory()
     finally:
         await cleanup.aclose()
+
+
+async def test_hibernated_cleanup_worker_reloads_lazily_on_next_request() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        original_pid = cleanup.pid
+
+        assert await cleanup.hibernate() is True
+        assert cleanup.loaded is False
+        assert cleanup.pid is None
+
+        result = await cleanup.cleanup("hello again", "system")
+
+        assert result.text == "HELLO AGAIN"
+        assert result.applied is True
+        assert cleanup.loaded is True
+        assert cleanup.pid is not None and cleanup.pid != original_pid
+    finally:
+        await cleanup.aclose()
+
+
+async def test_hibernated_reload_retries_one_transient_load_failure(tmp_path) -> None:
+    marker = tmp_path / "fail-next-hibernated-load"
+    command = fixture_command() + ["--fail-next-replacement", str(marker)]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        await cleanup.load_async("warm prompt")
+        assert await cleanup.hibernate() is True
+
+        assert await cleanup.ensure_loaded() is True
+
+        assert marker.read_text() == "failed"
+        assert cleanup.loaded is True
+        assert cleanup.unhealthy is False
+    finally:
+        await cleanup.aclose()
+
+
+async def test_inflight_hibernated_reload_honors_threading_cancel() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        assert await cleanup.hibernate() is True
+        entered = asyncio.Event()
+        blocked = asyncio.Event()
+        original_request = cleanup._request
+
+        async def gated_request(operation: str, **payload):
+            if operation == "load":
+                entered.set()
+                await blocked.wait()
+            return await original_request(operation, **payload)
+
+        cleanup._request = gated_request  # type: ignore[method-assign]
+        cancelled = threading.Event()
+        reload_task = asyncio.create_task(
+            cleanup.ensure_loaded(cancel_event=cancelled))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+
+        cancelled.set()
+
+        assert await asyncio.wait_for(reload_task, timeout=0.5) is False
+        assert cleanup.loaded is False
+        assert cleanup.hibernated is True
+        assert cleanup.pid is None
+    finally:
+        blocked.set()
+        await cleanup.aclose()
+
+
+async def test_precancelled_cleanup_does_not_reload_a_hibernated_worker() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        assert await cleanup.hibernate() is True
+        cancelled = threading.Event()
+        cancelled.set()
+
+        result = await cleanup.cleanup(
+            "do not reload", "system", cancel_event=cancelled)
+
+        assert result.applied is False
+        assert result.reason == "cancelled"
+        assert cleanup.hibernated is True
+        assert cleanup.loaded is False
+        assert cleanup.pid is None
+    finally:
+        await cleanup.aclose()
+
+
+async def test_aclose_cannot_race_a_hibernated_reload() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    await cleanup.load_async("warm prompt")
+    assert await cleanup.hibernate() is True
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_spawn = cleanup._spawn
+
+    async def gated_spawn() -> None:
+        entered.set()
+        await release.wait()
+        await original_spawn()
+
+    cleanup._spawn = gated_spawn  # type: ignore[method-assign]
+    reload_task = asyncio.create_task(cleanup.ensure_loaded())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    close_task = asyncio.create_task(cleanup.aclose())
+    await asyncio.sleep(0)
+    release.set()
+
+    assert await reload_task is False
+    await close_task
+    assert cleanup.loaded is False
+    assert cleanup.pid is None
+
+
+async def test_cancelled_hibernate_finishes_reap_before_reload() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    release = asyncio.Event()
+    try:
+        await cleanup.load_async("warm prompt")
+        entered = asyncio.Event()
+        original_stop = cleanup._stop_worker
+        first = True
+
+        async def gated_stop() -> None:
+            nonlocal first
+            if first:
+                first = False
+                entered.set()
+                await release.wait()
+            await original_stop()
+
+        cleanup._stop_worker = gated_stop  # type: ignore[method-assign]
+        hibernate_task = asyncio.create_task(cleanup.hibernate())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        hibernate_task.cancel()
+        reload_task = asyncio.create_task(cleanup.ensure_loaded())
+        await asyncio.sleep(0.02)
+
+        assert reload_task.done() is False
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await hibernate_task
+        assert await asyncio.wait_for(reload_task, timeout=1) is True
+        assert cleanup.loaded is True
+    finally:
+        release.set()
+        await cleanup.aclose()
+
+
+async def test_cleanup_ipc_accepts_ax_sized_lines_over_asyncio_default() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        original_pid = cleanup.pid
+        raw = "screen evidence " + ("x" * 80_000)
+
+        result = await cleanup.cleanup(raw, "controller rules")
+
+        assert result.text == raw.upper()
+        assert result.applied is True
+        assert cleanup.loaded is True
+        assert cleanup.pid == original_pid
+        assert (await cleanup.cleanup("still connected", "system")).text == (
+            "STILL CONNECTED"
+        )
+    finally:
+        await cleanup.aclose()
+
+
+def test_cleanup_ipc_worst_case_ax_prompt_is_bounded_without_prefix_duplication() -> None:
+    snapshot = actions.normalize_ui_snapshot({
+        "id": "worst-case",
+        "complete": True,
+        "elements": [
+            {
+                "index": index,
+                "role": "😀" * 40,
+                "label": "😀" * 180,
+                "actions": ["😀" * 40] * 12,
+            }
+            for index in range(500)
+        ],
+    })
+    prompt = actions.build_ui_action_review_prompt(snapshot)
+    candidates = [(prompt, "a"), (prompt, "b")]
+    wire_candidates, shared_prefixes = pack_prefix_candidates(prompt, candidates)
+    encoded = encode_cleanup_ipc_message({
+        "id": "probe",
+        "op": "cleanup",
+        "raw": "review one proposed UI press",
+        "system_prompt": prompt,
+        "prefix_candidates": wire_candidates,
+        "shared_prompt_prefixes": shared_prefixes,
+    })
+
+    assert wire_candidates is None
+    assert unpack_prefix_candidates(
+        prompt, wire_candidates, shared_prefixes) == candidates
+    assert len(encoded) < CLEANUP_IPC_STREAM_LIMIT_BYTES
+
+
+def test_cleanup_ipc_refuses_oversize_message_before_socket_write() -> None:
+    with pytest.raises(ValueError, match="exceeds"):
+        encode_cleanup_ipc_message({
+            "raw": "x" * CLEANUP_IPC_STREAM_LIMIT_BYTES,
+        })
 
 
 async def test_production_worker_model_free_probe() -> None:
@@ -104,6 +324,29 @@ async def test_spontaneous_worker_exit_recovers() -> None:
         await wait_until_loaded(cleanup)
         assert cleanup.pid != original_pid
         assert (await cleanup.cleanup("after crash", "system")).text == "AFTER CRASH"
+    finally:
+        await cleanup.aclose()
+
+
+async def test_malformed_worker_response_fails_fast_and_recovers() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        original_pid = cleanup.pid
+        started = asyncio.get_running_loop().time()
+
+        result = await cleanup.cleanup(
+            "__malformed__", "system", timeout_ms=5_000)
+
+        elapsed = asyncio.get_running_loop().time() - started
+        assert result.applied is False
+        assert "invalid cleanup worker response" in str(result.reason)
+        assert elapsed < 1.5
+        await wait_until_loaded(cleanup)
+        assert cleanup.pid != original_pid
+        assert (await cleanup.cleanup("after malformed", "system")).text == (
+            "AFTER MALFORMED"
+        )
     finally:
         await cleanup.aclose()
 

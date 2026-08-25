@@ -69,8 +69,28 @@ enum HUDGeometry {
     static let maxListeningWidth: CGFloat = 420
     static let insertedDiameter: CGFloat = height
 
-    /// Error pill width (icon + one-line message + action button).
+    /// Minimum error pill width. Longer concrete reasons grow up to the same
+    /// proven capsule ceiling as Action progress instead of truncating beside
+    /// Retry Action.
     static let errorWidth: CGFloat = 320
+
+    static func errorWidth(for message: String) -> CGFloat {
+        let messageWidth = textWidth(
+            message, font: .systemFont(ofSize: 12, weight: .medium))
+        let actionFont = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        let actionWidth = max(
+            textWidth("Retry Action", font: actionFont),
+            textWidth("Open Settings", font: actionFont),
+            textWidth("Open", font: actionFont)
+                + elementGap
+                + textWidth("Retry", font: actionFont))
+        let desired = contentInsetH * 2
+            + 14
+            + elementGap * 3
+            + messageWidth
+            + actionWidth
+        return min(max(desired, errorWidth), maxListeningWidth)
+    }
 
     /// Capsule content insets and gaps.
     static let contentInsetH: CGFloat = VeloraSpacing.l

@@ -26,6 +26,7 @@ enum PlannedTurn {
 private struct ActionCompletionEvidence {
     private(set) var events: [ActionEvidenceEvent] = []
     private(set) var hadEffect = false
+    private(set) var hadGoalVerification = false
 
     mutating func record(_ result: ActionRunResult) {
         for event in result.evidence {
@@ -33,6 +34,11 @@ private struct ActionCompletionEvidence {
             switch event {
             case .appOpenRequested, .unverifiedEffect:
                 hadEffect = true
+            case .goalVerified:
+                hadEffect = true
+                hadGoalVerification = true
+            case .uiTargetVerified:
+                break
             case .frontmostConfirmed:
                 break
             }
@@ -70,17 +76,20 @@ final class ActionLoopRunner {
     private let planner: ActionTurnPlanner
     private let execute: Bool
     private let allowSend: Bool
+    private let progress: (ActionProgress) -> Void
 
     private let lock = NSLock()
     private var cancelledStorage = false
     private var currentExecutor: ActionExecutor?
 
     init(host: ActionHost, planner: ActionTurnPlanner,
-         execute: Bool, allowSend: Bool) {
+         execute: Bool, allowSend: Bool,
+         progress: @escaping (ActionProgress) -> Void = { _ in }) {
         self.host = host
         self.planner = planner
         self.execute = execute
         self.allowSend = allowSend
+        self.progress = progress
     }
 
     private var isCancelled: Bool {
@@ -103,7 +112,13 @@ final class ActionLoopRunner {
         // Draft ownership must cross turns in this run, but never leak into
         // the next action invocation.
         host.beginActionInputSession()
+        progress(.readingScreen)
+        var context = context
+        context.uiSnapshot = host.uiSnapshot()
         var carried = ActionPlan.BatchState()
+        carried.requireUITargetVerification = true
+        carried.structuredUIAvailable = context.uiSnapshot != nil
+        carried.structuredUIComplete = context.uiSnapshot?.complete == true
         carried.appNames.formUnion(context.runningApps)
         if !context.frontmostApp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             carried.appNames.insert(context.frontmostApp)
@@ -123,13 +138,17 @@ final class ActionLoopRunner {
         var lockedGoal = ""
         /// The last runtime failure a step actually hit, in the user's terms.
         var lastStepFailure: String?
+        var lastRecoverablePlan: String?
+        var repeatedRecoverablePlans = 0
         var turnsUsed = 0
+        var planInvalidRetries = 0
         // Every planner call, accepted or rejected. Rejected turns consume no
         // engine turn, so this is the bound that stops a model stuck on an
         // invalid shape from being asked forever.
         var asks = 1
         let deadline = host.now() + Self.wallClockSeconds
 
+        progress(.planning(turn: 1))
         var reply = planner.start(transcript: transcript, context: context)
 
         while true {
@@ -145,13 +164,19 @@ final class ActionLoopRunner {
                 // live: the inline repair repeated the rejected shape, while
                 // a fresh observation broke the fixation.
                 if code == "plan_invalid", execute,
+                   planInvalidRetries < 1,
                    asks < Self.maxTurns + 2, host.now() < deadline, !isCancelled {
+                    planInvalidRetries += 1
                     asks += 1
-                    reply = planner.observe(gatherObservation(
+                    progress(.retrying(reason))
+                    progress(.readingScreen)
+                    let observation = gatherObservation(
                         executed: observationTrace,
                         failedStep: "steps rejected before running: \(reason) "
                             + "— propose different steps",
-                        state: &carried))
+                        state: &carried)
+                    progress(.planning(turn: turnsUsed + 1))
+                    reply = planner.observe(observation)
                     continue
                 }
                 planner.end()
@@ -168,14 +193,17 @@ final class ActionLoopRunner {
                 }
                 return .failed(reason: reason, trace: fullTrace)
 
-            case .turn(let sends, let goal, let stepsJSON, let done):
+            case .turn(let sends, _, let stepsJSON, let done):
                 turnsUsed += 1
                 if lockedSends == nil {
                     // Decided here, never again: a later turn upgrading a
                     // draft into a send would sidestep the consent the caller
                     // actually gave.
                     lockedSends = sends
-                    lockedGoal = String(ActionPlan.sanitize(goal).prefix(200))
+                    // The model may summarize the task but cannot redefine
+                    // what the user asked. Mirror the engine's immutable
+                    // spoken-command goal at the app boundary.
+                    lockedGoal = String(ActionPlan.sanitize(transcript).prefix(200))
                 }
 
                 if stepsJSON.isEmpty {
@@ -228,10 +256,14 @@ final class ActionLoopRunner {
                                        trace: fullTrace)
                     }
                     asks += 1
-                    reply = planner.observe(gatherObservation(
+                    progress(.retrying(message))
+                    progress(.readingScreen)
+                    let observation = gatherObservation(
                         executed: observationTrace,
                         failedStep: "steps rejected before running: \(message)",
-                        state: &carried))
+                        state: &carried)
+                    progress(.planning(turn: turnsUsed + 1))
+                    reply = planner.observe(observation)
                     continue
                 }
 
@@ -240,7 +272,7 @@ final class ActionLoopRunner {
                     return .planned(plan)
                 }
 
-                let executor = ActionExecutor(host: host)
+                let executor = ActionExecutor(host: host, progress: progress)
                 lock.lock()
                 currentExecutor = executor
                 let alreadyCancelled = cancelledStorage
@@ -265,6 +297,8 @@ final class ActionLoopRunner {
 
                 switch result.outcome {
                 case .completed:
+                    lastRecoverablePlan = nil
+                    repeatedRecoverablePlans = 0
                     // A batch that ran clean supersedes whatever went wrong
                     // before it; keeping the old reason would report a solved
                     // problem as the cause of a later one.
@@ -282,9 +316,12 @@ final class ActionLoopRunner {
                             trace: fullTrace)
                     }
                     asks += 1
-                    reply = planner.observe(gatherObservation(
+                    progress(.readingScreen)
+                    let observation = gatherObservation(
                         executed: observationTrace, failedStep: nil,
-                        state: &carried))
+                        state: &carried)
+                    progress(.planning(turn: turnsUsed + 1))
+                    reply = planner.observe(observation)
 
                 case .cancelled:
                     planner.end()
@@ -297,17 +334,52 @@ final class ActionLoopRunner {
                         planner.end()
                         return .failed(reason: reason, trace: fullTrace)
                     }
+                    let fingerprint = Self.planFingerprint(stepsJSON)
+                    if fingerprint == lastRecoverablePlan {
+                        repeatedRecoverablePlans += 1
+                    } else {
+                        lastRecoverablePlan = fingerprint
+                        repeatedRecoverablePlans = 1
+                    }
+                    if repeatedRecoverablePlans >= 2 {
+                        planner.end()
+                        return .failed(
+                            reason: "the agent repeated the same failed action; "
+                                + "the screen did not provide enough evidence to continue",
+                            trace: fullTrace)
+                    }
                     // The trace's last line says what the screen actually
                     // showed — that detail is what makes the next turn
                     // smarter than a retry.
                     asks += 1
-                    reply = planner.observe(gatherObservation(
+                    progress(.retrying(reason))
+                    progress(.readingScreen)
+                    let observation = gatherObservation(
                         executed: observationTrace,
                         failedStep: result.observationTrace.last ?? reason,
-                        state: &carried))
+                        state: &carried)
+                    progress(.planning(turn: turnsUsed + 1))
+                    reply = planner.observe(observation)
                 }
             }
         }
+    }
+
+    /// Semantic fingerprint for loop detection. Snapshot IDs and verifier
+    /// attestations are capabilities refreshed on every observation; ignoring
+    /// them lets us recognize the same failed choice against a fresh tree.
+    private static func planFingerprint(_ rawSteps: [Any]) -> String {
+        let normalized: [[String: Any]] = rawSteps.compactMap { raw in
+            guard var step = raw as? [String: Any] else { return nil }
+            step.removeValue(forKey: "snapshot")
+            step.removeValue(forKey: "attestation")
+            return step
+        }
+        guard JSONSerialization.isValidJSONObject(normalized),
+              let data = try? JSONSerialization.data(
+                withJSONObject: normalized, options: [.sortedKeys])
+        else { return String(describing: rawSteps) }
+        return String(decoding: data, as: UTF8.self)
     }
 
     private func completionResult(
@@ -319,6 +391,9 @@ final class ActionLoopRunner {
             return .failed(
                 reason: "the planner returned nothing effective to do",
                 trace: trace)
+        }
+        if evidence.hadGoalVerification {
+            return .completed(goal: goal, trace: trace)
         }
         return .performedUnverified(goal: goal, trace: trace)
     }
@@ -357,6 +432,14 @@ final class ActionLoopRunner {
             "page_url": pageURL,
             "executed": executed,
         ]
+        if let snapshot = host.uiSnapshot() {
+            state.structuredUIAvailable = true
+            state.structuredUIComplete = snapshot.complete
+            observation["ui_snapshot"] = snapshot.payload
+        } else {
+            state.structuredUIAvailable = false
+            state.structuredUIComplete = false
+        }
         if let failedStep {
             observation["failed_step"] = failedStep
         }

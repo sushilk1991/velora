@@ -46,6 +46,11 @@ if [[ ! -d "$APP" ]]; then
   echo "Velora.app is missing from $DMG" >&2
   exit 1
 fi
+if /usr/libexec/PlistBuddy -c 'Print :VeloraEngineDir' \
+    "$APP/Contents/Info.plist" >/dev/null 2>&1; then
+  echo "Velora.app exposes a builder-local VeloraEngineDir" >&2
+  exit 1
+fi
 
 echo "Verifying bundled app signature and hardened runtime..."
 codesign --verify --deep --strict --verbose=2 "$APP"
@@ -86,6 +91,7 @@ test -f "$ENGINE/pyproject.toml"
 test -f "$ENGINE/uv.lock"
 test -s "$ENGINE/.velora-build"
 test -f "$ENGINE/src/velora_engine/server.py"
+test -f "$ENGINE/src/velora_engine/cleanup_ipc.py"
 test -f "$ENGINE/src/velora_engine/cleanup_process.py"
 test -f "$ENGINE/src/velora_engine/cleanup_worker.py"
 codesign --verify --strict --verbose=2 "$UV"

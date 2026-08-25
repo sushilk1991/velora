@@ -2,32 +2,10 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-/// Runtime-only identities for actions that can navigate or commit content in
-/// communication apps. Display names are deliberately absent: only the actual
-/// frontmost bundle can satisfy this policy.
+/// Runtime-only identities needed for capability-level policy.
 enum ActionRuntimePolicy {
-    static let communicationBundleIDs: Set<String> = [
-        "com.apple.mail",
-        "com.apple.mobilesms",
-        "com.facebook.archon",
-        "com.hnc.discord",
-        "com.microsoft.teams",
-        "com.microsoft.teams2",
-        "com.slack.slack",
-        "com.tinyspeck.slackmacgap",
-        "net.whatsapp.whatsapp",
-        "org.telegram.desktop",
-        "org.whispersystems.signal-desktop",
-        "ru.keepcoder.telegram",
-    ]
-
-    static func isCommunicationBundle(_ bundleID: String?) -> Bool {
-        guard let bundleID else { return false }
-        return communicationBundleIDs.contains(bundleID.lowercased())
-    }
-
-    /// Browser identities, derived from the category table so a browser added
-    /// there is automatically press- and URL-capable here.
+    /// Browser identities are used for page-URL observations only. They do
+    /// not grant a separate set of controls that Action Mode may press.
     static let browserBundleIDs: Set<String> = Set(
         ModeCategory.byBundleID
             .filter { $0.value == .browser }
@@ -38,14 +16,6 @@ enum ActionRuntimePolicy {
         return browserBundleIDs.contains(bundleID.lowercased())
     }
 
-    /// AX roles press_element may press in this app, or nil when the app
-    /// supports no pressing at all. Send authority is NOT this list —
-    /// Return/Enter stays gated on `isCommunicationBundle` alone.
-    static func pressRoles(forBundleID bundleID: String?) -> Set<String>? {
-        if isCommunicationBundle(bundleID) { return ScreenContext.actionNavigationRoles }
-        if isBrowserBundle(bundleID) { return ScreenContext.browserNavigationRoles }
-        return nil
-    }
 }
 
 /// Everything the executor needs from the machine. Split out from the executor
@@ -55,6 +25,9 @@ protocol ActionHost: AnyObject {
     /// Clears exact text-target/draft ownership at the boundary between user
     /// actions. The host itself survives across planner turns within one run.
     func beginActionInputSession()
+    /// Tells a routing host whether this immutable action may commit content.
+    /// Sending actions stay foreground regardless of app identity.
+    func prepareForActionPlan(sends: Bool)
     /// Launch or switch to an app; returns the name it actually resolved to.
     func openApp(named name: String) -> String?
     func openURL(_ url: URL) -> Bool
@@ -73,6 +46,10 @@ protocol ActionHost: AnyObject {
     /// Name-like labels visible in the frontmost window — what the model gets
     /// to look at between turns.
     func visibleNames() -> [String]
+    /// Structured, hierarchy-preserving view of the current target window.
+    /// The model receives the serializable observation; the host retains the
+    /// local AX capabilities that make its element indices meaningful.
+    func uiSnapshot() -> ActionUISnapshot?
     /// True when `visibleNames()` really is what the USER can see. The
     /// open_url data fence admits screen names as "the spelling on screen",
     /// which only holds for a window in front of the user; labels read out
@@ -94,6 +71,14 @@ protocol ActionHost: AnyObject {
     /// Press the on-screen control whose label matches. Label-addressed AX
     /// action — never a coordinate, never a synthesized click.
     func pressElement(label: String, expecting bundleID: String?) -> Bool
+    /// Press an exact element selected from `uiSnapshot`. Implementations
+    /// must refuse a stale snapshot or changed app/label/role.
+    func pressElement(index: Int, snapshotID: String, label: String,
+                      role: String, expecting bundleID: String?) -> Bool
+    /// Re-read exact model-selected evidence without performing an action.
+    func verifyElement(index: Int, snapshotID: String, label: String,
+                       role: String, expecting bundleID: String?,
+                       requiresFocus: Bool) -> Bool
     func typeText(_ text: String, expecting bundleID: String?) -> Bool
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
@@ -122,6 +107,17 @@ protocol ActionHost: AnyObject {
 extension ActionHost {
     /// Foreground hosts drive the window the user is looking at.
     var isDrivingInBackground: Bool { false }
+    func prepareForActionPlan(sends: Bool) {}
+    func uiSnapshot() -> ActionUISnapshot? { nil }
+    func pressElement(index: Int, snapshotID: String, label: String,
+                      role: String, expecting bundleID: String?) -> Bool {
+        pressElement(label: label, expecting: bundleID)
+    }
+    func verifyElement(index: Int, snapshotID: String, label: String,
+                       role: String, expecting bundleID: String?,
+                       requiresFocus: Bool) -> Bool {
+        false
+    }
 }
 
 enum ActionOutcome: Equatable {
@@ -142,6 +138,8 @@ enum ActionOutcome: Equatable {
 enum ActionEvidenceEvent: Equatable {
     case appOpenRequested(requested: String, resolved: String)
     case frontmostConfirmed(requested: String, actual: String, bundleID: String)
+    case uiTargetVerified(target: String)
+    case goalVerified(target: String)
     case unverifiedEffect(ActionEffectKind)
 }
 
@@ -191,8 +189,18 @@ final class ActionExecutor {
     /// asks it to, and how long it then gets to arrive.
     static let focusRecoveryAfterMs = 700
     static let focusRecoveryTimeoutMs = 3000
+    /// AXPress returns when the action is accepted, not when an asynchronous
+    /// app has published the resulting hierarchy. Without this small generic
+    /// settle, the next observation can re-read the pre-press tree and spend
+    /// a multi-second model turn repeating the same navigation control.
+    static let indexedPressSettleMs = 250
+    /// Electron exposes focus asynchronously after an exact AX focus action.
+    /// A short bounded poll distinguishes "not yet" from "not focused" without
+    /// weakening the editable-target requirement.
+    static let textFocusSettleSeconds: TimeInterval = 0.75
 
     private let host: ActionHost
+    private let progress: (ActionProgress) -> Void
     /// Written on the main queue by `cancel()`, read on the executor's
     /// background queue. Locked rather than left to arm64's incidental
     /// coherence, matching `UserInputActivity` in HotkeyMonitor.
@@ -210,9 +218,12 @@ final class ActionExecutor {
     /// is not going to come forward a third time, and each attempt costs the
     /// user real seconds.
     private var triedFocusRecovery = false
+    private var verifiedUITarget = false
 
-    init(host: ActionHost) {
+    init(host: ActionHost,
+         progress: @escaping (ActionProgress) -> Void = { _ in }) {
         self.host = host
+        self.progress = progress
     }
 
     func cancel() {
@@ -246,6 +257,7 @@ final class ActionExecutor {
         guard plan.isExecutable else {
             return failed(0, "nothing to do", recoverable: false)
         }
+        host.prepareForActionPlan(sends: plan.sends)
         // Checked up front rather than per step: on a locked Mac every plan
         // fails, and it should say why instead of blaming the target app.
         guard !host.screenIsLocked else {
@@ -254,6 +266,15 @@ final class ActionExecutor {
         }
 
         for (index, step) in plan.steps.enumerated() {
+            if case .verifyUI = step {
+                progress(.verifyingTarget)
+            } else if case .verifyGoal = step {
+                progress(.verifyingTarget)
+            } else {
+                progress(.executing(
+                    step: index + 1, total: plan.steps.count,
+                    description: Self.progressDescription(step)))
+            }
             if cancelled {
                 return ActionRunResult(outcome: .cancelled(step: index), trace: trace,
                                        observationTrace: observationTrace,
@@ -281,6 +302,7 @@ final class ActionExecutor {
                 // off the per-chunk target check inside TextInserter.
                 expectedAppName = nil
                 expectedBundleID = nil
+                verifiedUITarget = false
                 evidence.append(.appOpenRequested(
                     requested: Self.evidenceText(name, limit: 120),
                     resolved: Self.evidenceText(resolved, limit: 120)))
@@ -295,6 +317,7 @@ final class ActionExecutor {
                 // must re-establish focus before it may type.
                 expectedAppName = nil
                 expectedBundleID = nil
+                verifiedUITarget = false
                 evidence.append(.unverifiedEffect(.openURL))
                 note("open_url \(url.scheme ?? "?")")
 
@@ -344,6 +367,7 @@ final class ActionExecutor {
                 }
                 expectedAppName = front.name
                 expectedBundleID = front.bundleID
+                verifiedUITarget = false
                 evidence.append(.frontmostConfirmed(
                     requested: Self.evidenceText(app, limit: 120),
                     actual: Self.evidenceText(front.name, limit: 120),
@@ -412,12 +436,76 @@ final class ActionExecutor {
                              + "title='\(title ?? "")' label='\(label ?? "")' "
                              + "selection='\(selection ?? "")'")
 
-            case .typeText(let text), .pasteText(let text):
+            case .verifyUI(let snapshotID, let elementIndex, let role,
+                           let label, let target):
+                guard let before = host.frontmostApp(), focusStillHeld() else {
+                    note("verify_ui [\(elementIndex)] \(target): focus lost")
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
+                }
+                guard host.verifyElement(
+                    index: elementIndex, snapshotID: snapshotID,
+                    label: label, role: role, expecting: expectedBundleID,
+                    requiresFocus: true),
+                      let after = host.frontmostApp(),
+                      after.bundleID == before.bundleID, after.name == before.name
+                else {
+                    note("verify_ui [\(elementIndex)] \(target): stale or no match")
+                    return failed(
+                        index, "the active target changed before typing",
+                        recoverable: true)
+                }
+                expectedAppName = after.name
+                expectedBundleID = after.bundleID
+                verifiedUITarget = true
+                evidence.append(.uiTargetVerified(target: target))
+                note("verify_ui ok [\(elementIndex)] \(role) '\(label)' target='\(target)'")
+
+            case .verifyGoal(let snapshotID, let elementIndex, let role,
+                             let label, let target):
+                guard let before = host.frontmostApp(), focusStillHeld() else {
+                    note("verify_goal [\(elementIndex)] \(target): focus lost")
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
+                }
+                guard host.verifyElement(
+                    index: elementIndex, snapshotID: snapshotID,
+                    label: label, role: role, expecting: expectedBundleID,
+                    requiresFocus: false),
+                      let after = host.frontmostApp(),
+                      after.bundleID == before.bundleID, after.name == before.name
+                else {
+                    note("verify_goal [\(elementIndex)] \(target): stale or no match")
+                    return failed(
+                        index, "the visible completion evidence changed",
+                        recoverable: true)
+                }
+                expectedAppName = after.name
+                expectedBundleID = after.bundleID
+                evidence.append(.goalVerified(target: target))
+                note("verify_goal ok [\(elementIndex)] \(role) '\(label)' target='\(target)'")
+
+            case .typeText(let text), .pasteText(let text), .searchText(let text):
+                let isSearch: Bool
+                if case .searchText = step { isSearch = true } else { isSearch = false }
+                if !isSearch, plan.sends, plan.requiresUITargetVerification,
+                   !verifiedUITarget {
+                    note("type_text: target verifier has not confirmed the recipient")
+                    return failed(
+                        index,
+                        "the active recipient was not confirmed before typing",
+                        recoverable: true)
+                }
                 // Synthesized characters go to whatever holds focus; with
                 // nothing focused they are simply dropped. Observed in the
                 // field: "open TextEdit and type hello" reported success while
                 // TextEdit had no document, so the text went nowhere and the
                 // run still claimed it had typed 17 characters.
+                let focusDeadline = host.now() + Self.textFocusSettleSeconds
+                while !host.hasFocusedTextTarget,
+                      host.now() < focusDeadline, !cancelled {
+                    host.sleep(ms: 100)
+                }
                 guard host.hasFocusedTextTarget else {
                     // Name the remedy, not just the symptom. "nothing focused"
                     // sent the planner hunting for a menu item called "New
@@ -461,8 +549,9 @@ final class ActionExecutor {
                 // observation adds no untrusted content. Bounded in UNICODE
                 // SCALARS so the engine's 140-code-point clip of an executed
                 // line cannot cut it mid-quote.
-                note("type_text \(text.count) chars",
-                     observed: "type_text \(text.count) chars: "
+                let verb = isSearch ? "search_text" : "type_text"
+                note("\(verb) \(text.count) chars",
+                     observed: "\(verb) \(text.count) chars: "
                          + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
 
             case .key(let name, let mods, let repeatCount):
@@ -470,16 +559,6 @@ final class ActionExecutor {
                     note("key \(name): focus lost")
                     return failed(index, "\(expectedAppName ?? "the app") lost focus",
                                   recoverable: false)
-                }
-                if ActionPlan.Limits.committingKeys.contains(name) {
-                    guard let bundleID = expectedBundleID,
-                          ActionRuntimePolicy.isCommunicationBundle(bundleID) else {
-                        note("key \(name): untrusted communication bundle")
-                        return failed(
-                            index,
-                            "the active app is not an approved communication app",
-                            recoverable: false)
-                    }
                 }
                 guard let code = ActionKey.keyCode(for: name) else {
                     note("key \(name): unmappable")
@@ -505,6 +584,9 @@ final class ActionExecutor {
                 evidence.append(.unverifiedEffect(.key))
                 note("key \(mods.joined(separator: "+"))\(mods.isEmpty ? "" : "+")\(name)"
                              + (repeatCount > 1 ? " x\(repeatCount)" : ""))
+                if !mods.isEmpty || ActionPlan.Limits.focusMovingKeys.contains(name) {
+                    verifiedUITarget = false
+                }
 
             case .pressElement(let label):
                 // The host exposes AXPress only for structurally safe
@@ -540,6 +622,32 @@ final class ActionExecutor {
                 }
                 evidence.append(.unverifiedEffect(.pressElement))
                 note("press_element \(label)")
+                verifiedUITarget = false
+
+            case .pressUI(let snapshotID, let elementIndex, let role, let label):
+                guard !host.screenIsLocked else {
+                    note("press_ui [\(elementIndex)] \(label): screen locked")
+                    return failed(index, "the screen is locked", recoverable: false)
+                }
+                guard focusStillHeld() else {
+                    note("press_ui [\(elementIndex)] \(label): focus lost")
+                    return failed(index, "\(expectedAppName ?? "the app") lost focus",
+                                  recoverable: false)
+                }
+                guard host.pressElement(
+                    index: elementIndex, snapshotID: snapshotID,
+                    label: label, role: role, expecting: expectedBundleID)
+                else {
+                    note("press_ui [\(elementIndex)] \(label): stale or refused")
+                    return failed(
+                        index,
+                        "the selected UI element changed; inspect the fresh screen",
+                        recoverable: true)
+                }
+                evidence.append(.unverifiedEffect(.pressElement))
+                note("press_ui [\(elementIndex)] \(role) \(label)")
+                verifiedUITarget = false
+                host.sleep(ms: Self.indexedPressSettleMs)
 
             case .pause(let ms):
                 host.sleep(ms: ms)
@@ -549,6 +657,25 @@ final class ActionExecutor {
         return ActionRunResult(outcome: .completed, trace: trace,
                                observationTrace: observationTrace,
                                executedSteps: plan.steps.count, evidence: evidence)
+    }
+
+    private static func progressDescription(_ step: ActionStep) -> String {
+        switch step {
+        case .openApp(let app): return "Opening \(app)"
+        case .openURL: return "Opening link"
+        case .waitFrontmost(let app, _): return "Waiting for \(app)"
+        case .verifyContext: return "Checking screen"
+        case .verifyUI: return "Confirming recipient"
+        case .verifyGoal: return "Confirming completion"
+        case .typeText, .pasteText: return "Typing message"
+        case .searchText: return "Searching"
+        case .key(let name, _, _):
+            return ActionPlan.Limits.committingKeys.contains(name)
+                ? "Sending" : "Pressing \(name)"
+        case .pause: return "Waiting for screen"
+        case .pressElement(let label): return "Opening \(label)"
+        case .pressUI(_, _, _, let label): return "Opening \(label)"
+        }
     }
 
     /// True when the app the plan focused is still frontmost. When focus was

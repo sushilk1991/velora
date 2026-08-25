@@ -19,6 +19,11 @@ from dataclasses import asdict
 from typing import Any
 
 from .cleanup import CleanupEngine
+from .cleanup_ipc import (
+    CLEANUP_IPC_STREAM_LIMIT_BYTES,
+    encode_cleanup_ipc_message,
+    unpack_prefix_candidates,
+)
 
 log = logging.getLogger("velora.cleanup_worker")
 
@@ -95,12 +100,11 @@ class Worker:
             if operation == "cleanup":
                 raw = str(message.get("raw") or "")
                 prompt = str(message.get("system_prompt") or "")
-                raw_candidates = message.get("prefix_candidates")
-                prefix_candidates = [
-                    (str(item[0]), str(item[1]))
-                    for item in (raw_candidates or [])
-                    if isinstance(item, (list, tuple)) and len(item) == 2
-                ]
+                prefix_candidates = unpack_prefix_candidates(
+                    prompt,
+                    message.get("prefix_candidates"),
+                    message.get("shared_prompt_prefixes"),
+                )
                 result = await self.engine.cleanup(
                     raw,
                     prompt,
@@ -111,6 +115,7 @@ class Worker:
                     prefix_candidates=prefix_candidates,
                     max_tokens=message.get("max_tokens"),
                     cache_scope=message.get("cache_scope"),
+                    max_input_tokens=message.get("max_input_tokens"),
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return
@@ -135,16 +140,26 @@ class Worker:
 
     async def _respond(self, request_id: str, **payload: Any) -> None:
         async with self._write_lock:
-            self.writer.write(
-                (json.dumps({"id": request_id, **payload}, ensure_ascii=False) + "\n").encode()
-            )
+            message = {"id": request_id, **payload}
+            try:
+                encoded = encode_cleanup_ipc_message(message)
+            except ValueError:
+                encoded = encode_cleanup_ipc_message({
+                    "id": request_id,
+                    "ok": False,
+                    "error": "cleanup IPC response exceeds byte limit",
+                })
+            self.writer.write(encoded)
             await self.writer.drain()
 
 
 async def _amain(args: argparse.Namespace) -> None:
     sock = socket.socket(fileno=args.fd)
     sock.setblocking(False)
-    reader, writer = await asyncio.open_connection(sock=sock)
+    reader, writer = await asyncio.open_connection(
+        sock=sock,
+        limit=CLEANUP_IPC_STREAM_LIMIT_BYTES,
+    )
     worker = Worker(args.model, reader, writer)
     try:
         await worker.serve()

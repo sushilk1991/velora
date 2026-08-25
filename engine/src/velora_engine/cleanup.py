@@ -337,8 +337,12 @@ class CleanupResult:
     ttft_ms: int = 0
     decode_ms: int = 0
     prefix_tokens: int = 0
+    input_tokens: int = 0
     output_tokens: int = 0
     cache_hit: bool = False
+    mlx_active_bytes: int = 0
+    mlx_peak_bytes: int = 0
+    mlx_cache_bytes: int = 0
     # Parent-observed submission-to-result wall time. The process proxy
     # overwrites this without changing the established `ms` inference metric.
     wall_ms: int = 0
@@ -351,8 +355,12 @@ class _GenerationResult:
     ttft_ms: int
     decode_ms: int
     prefix_tokens: int
+    input_tokens: int
     output_tokens: int
     cache_hit: bool
+    mlx_active_bytes: int
+    mlx_peak_bytes: int
+    mlx_cache_bytes: int
 
 
 @dataclass(frozen=True)
@@ -620,14 +628,20 @@ class CleanupEngine:
             self._action_prepared_tokens = list(tokens)
             self._action_prepared_cache = snapshot
             return
-        if (
-            self._prepared_cache is not None
-            and self._prepared_tokens
-            and len(tokens) > len(self._prepared_tokens)
-            and tokens[: len(self._prepared_tokens)] == self._prepared_tokens
-        ):
-            self._fallback_prepared_tokens = self._prepared_tokens
-            self._fallback_prepared_cache = self._prepared_cache
+        if (self._prepared_cache is not None and self._prepared_tokens
+                and tokens != self._prepared_tokens):
+            # A mode-specific prefix usually extends the warm dictation base;
+            # an unrelated transformation/verifier does not. Preserve the old
+            # snapshot in both cases, but never replace a smaller fallback with
+            # a larger unrelated cache. This keeps a compact warm base alive
+            # instead of letting the last optional call evict it.
+            if (
+                self._fallback_prepared_cache is None
+                or not self._fallback_prepared_tokens
+                or len(self._prepared_tokens) < len(self._fallback_prepared_tokens)
+            ):
+                self._fallback_prepared_tokens = self._prepared_tokens
+                self._fallback_prepared_cache = self._prepared_cache
         self._prepared_tokens = list(tokens)
         self._prepared_cache = snapshot
 
@@ -651,8 +665,6 @@ class CleanupEngine:
                 sequences = [self._prompt_tokens(system, user) for system, user in candidates]
                 prefix = _longest_common_tokens(sequences)
                 if not prefix:
-                    self._prepared_tokens = []
-                    self._prepared_cache = None
                     return PrefixPreparation(False, 0, int((time.perf_counter() - t0) * 1000), "no_prefix")
                 cache = self._prefill_tokens_locked(prefix, cancel_event)
                 self._install_prepared_prefix(prefix, cache)
@@ -668,8 +680,6 @@ class CleanupEngine:
             log.info("cleanup prefix preparation cancelled after %dms", ms)
             return PrefixPreparation(False, 0, ms, "cancelled")
         except Exception as exc:  # noqa: BLE001 — preparation is an optimization
-            self._prepared_tokens = []
-            self._prepared_cache = None
             ms = int((time.perf_counter() - t0) * 1000)
             log.exception("cleanup prefix preparation failed")
             return PrefixPreparation(False, 0, ms, f"error:{exc}")
@@ -735,9 +745,18 @@ class CleanupEngine:
         import mlx.core as mx
 
         with self._lock:
+            active_before = int(mx.get_active_memory())
             self._action_prepared_tokens = []
             self._action_prepared_cache = None
             mx.clear_cache()
+            log.info(
+                "cleanup action memory released active_before_bytes=%d "
+                "active_after_bytes=%d peak_bytes=%d cache_bytes=%d",
+                active_before,
+                int(mx.get_active_memory()),
+                int(mx.get_peak_memory()),
+                int(mx.get_cache_memory()),
+            )
 
     async def release_action_memory(self) -> None:
         await asyncio.get_running_loop().run_in_executor(
@@ -835,15 +854,44 @@ class CleanupEngine:
         cancel_event: threading.Event | None = None,
         prefix_candidates: list[tuple[str, str]] | None = None,
         cache_scope: str | None = None,
+        max_input_tokens: int | None = None,
     ) -> _GenerationResult:
         """Generate with a quality budget that begins at first output token."""
+        import mlx.core as mx
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
 
+        def result(
+            *,
+            text: str = "",
+            status: str,
+            ttft_ms: int = 0,
+            decode_ms: int = 0,
+            prefix_tokens: int = 0,
+            input_tokens: int = 0,
+            output_tokens: int = 0,
+            cache_hit: bool = False,
+        ) -> _GenerationResult:
+            return _GenerationResult(
+                text=text,
+                status=status,
+                ttft_ms=ttft_ms,
+                decode_ms=decode_ms,
+                prefix_tokens=prefix_tokens,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_hit=cache_hit,
+                mlx_active_bytes=int(mx.get_active_memory()),
+                mlx_peak_bytes=int(mx.get_peak_memory()),
+                mlx_cache_bytes=int(mx.get_cache_memory()),
+            )
+
         started = time.perf_counter()
         if cancel_event is not None and cancel_event.is_set():
-            return _GenerationResult("", "cancelled", 0, 0, 0, 0, False)
+            return result(status="cancelled")
         tokens = self._prompt_tokens(system_prompt, user_text)
+        if max_input_tokens is not None and len(tokens) > max_input_tokens:
+            return result(status="context_limit", input_tokens=len(tokens))
         cache, common, cache_hit = self._cache_for_tokens(
             tokens, cache_scope=cache_scope
         )
@@ -859,14 +907,12 @@ class CleanupEngine:
                 )
                 cache_hit = cache_hit or extended
             except _PrefixCancelled:
-                return _GenerationResult(
-                    "",
-                    "cancelled",
-                    int((time.perf_counter() - started) * 1000),
-                    0,
-                    common,
-                    0,
-                    cache_hit,
+                return result(
+                    status="cancelled",
+                    ttft_ms=int((time.perf_counter() - started) * 1000),
+                    prefix_tokens=common,
+                    input_tokens=len(tokens),
+                    cache_hit=cache_hit,
                 )
 
         suffix = tokens[common:]
@@ -921,14 +967,15 @@ class CleanupEngine:
         finished = time.perf_counter()
         ttft_ms = int(((first_token_at or finished) - started) * 1000)
         decode_ms = int((finished - first_token_at) * 1000) if first_token_at else 0
-        return _GenerationResult(
-            "".join(out_text),
-            status,
-            ttft_ms,
-            decode_ms,
-            common,
-            len(gen_tokens),
-            cache_hit,
+        return result(
+            text="".join(out_text),
+            status=status,
+            ttft_ms=ttft_ms,
+            decode_ms=decode_ms,
+            prefix_tokens=common,
+            input_tokens=len(tokens),
+            output_tokens=len(gen_tokens),
+            cache_hit=cache_hit,
         )
 
     def _run(
@@ -942,6 +989,7 @@ class CleanupEngine:
         prefix_candidates: list[tuple[str, str]] | None = None,
         max_tokens_override: int | None = None,
         cache_scope: str | None = None,
+        max_input_tokens: int | None = None,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
@@ -962,25 +1010,35 @@ class CleanupEngine:
                 cancel_event,
                 prefix_candidates,
                 cache_scope,
+                max_input_tokens,
             )
         ms = int((time.perf_counter() - t0) * 1000)
         log.info(
             "cleanup inference total_ms=%d ttft_ms=%d decode_ms=%d prefix_tokens=%d "
-            "output_tokens=%d prepared_hit=%s status=%s",
+            "input_tokens=%d output_tokens=%d prepared_hit=%s status=%s "
+            "mlx_active_bytes=%d mlx_peak_bytes=%d mlx_cache_bytes=%d",
             ms,
             generated.ttft_ms,
             generated.decode_ms,
             generated.prefix_tokens,
+            generated.input_tokens,
             generated.output_tokens,
             generated.cache_hit,
             generated.status,
+            generated.mlx_active_bytes,
+            generated.mlx_peak_bytes,
+            generated.mlx_cache_bytes,
         )
         metrics = {
             "ttft_ms": generated.ttft_ms,
             "decode_ms": generated.decode_ms,
             "prefix_tokens": generated.prefix_tokens,
+            "input_tokens": generated.input_tokens,
             "output_tokens": generated.output_tokens,
             "cache_hit": generated.cache_hit,
+            "mlx_active_bytes": generated.mlx_active_bytes,
+            "mlx_peak_bytes": generated.mlx_peak_bytes,
+            "mlx_cache_bytes": generated.mlx_cache_bytes,
         }
         if generated.status == "cancelled":
             log.info("cleanup cooperatively cancelled after %dms", ms)
@@ -994,6 +1052,13 @@ class CleanupEngine:
             # trustworthy — return raw so nothing partial is delivered.
             log.warning("cleanup hit token ceiling after %dms — returning raw", ms)
             return CleanupResult(raw, False, ms, "length", **metrics)
+        if generated.status == "context_limit":
+            log.warning(
+                "cleanup input exceeded token ceiling input_tokens=%d max_input_tokens=%d",
+                generated.input_tokens,
+                max_input_tokens,
+            )
+            return CleanupResult(raw, False, ms, "context_limit", **metrics)
         # Undo the control-token neutralization applied to the prompt so a
         # preserved marker round-trips cleanly (before the guard compares).
         text = restore_control_tokens(generated.text)
@@ -1019,6 +1084,7 @@ class CleanupEngine:
         prefix_candidates: list[tuple[str, str]] | None = None,
         max_tokens: int | None = None,
         cache_scope: str | None = None,
+        max_input_tokens: int | None = None,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
@@ -1045,7 +1111,7 @@ class CleanupEngine:
             return self._run(
                 raw, system_prompt, timeout_ms, check_ratio,
                 worker_cancel, allowed_terms, prefix_candidates, max_tokens,
-                cache_scope,
+                cache_scope, max_input_tokens,
             )
 
         worker = loop.run_in_executor(self._executor, run_started)

@@ -10,6 +10,11 @@ import signal
 import socket
 from pathlib import Path
 
+from velora_engine.cleanup_ipc import (
+    CLEANUP_IPC_STREAM_LIMIT_BYTES,
+    encode_cleanup_ipc_message,
+)
+
 
 async def main(
     fd: int,
@@ -18,12 +23,15 @@ async def main(
 ) -> None:
     sock = socket.socket(fileno=fd)
     sock.setblocking(False)
-    reader, writer = await asyncio.open_connection(sock=sock)
+    reader, writer = await asyncio.open_connection(
+        sock=sock,
+        limit=CLEANUP_IPC_STREAM_LIMIT_BYTES,
+    )
     cancelled: set[str] = set()
     tasks: set[asyncio.Task[None]] = set()
 
     async def respond(request_id: str, **payload) -> None:
-        writer.write((json.dumps({"id": request_id, **payload}) + "\n").encode())
+        writer.write(encode_cleanup_ipc_message({"id": request_id, **payload}))
         await writer.drain()
 
     async def handle(message: dict) -> None:
@@ -84,6 +92,10 @@ async def main(
             await respond(request_id, ok=True)
             return
         raw = message["raw"]
+        if raw == "__malformed__":
+            writer.write(b"not json\n")
+            await writer.drain()
+            return
         if raw == "__crash__":
             os._exit(17)
         if "__hang__" in raw:
@@ -126,7 +138,8 @@ async def main(
             }
         else:
             result = {
-                "text": raw.upper(),
+                "text": (str(message.get("max_input_tokens"))
+                         if raw == "__limits__" else raw.upper()),
                 "applied": True,
                 "ms": 7,
                 "reason": None,

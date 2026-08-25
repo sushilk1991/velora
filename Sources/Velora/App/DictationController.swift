@@ -492,10 +492,16 @@ final class DictationController: NSObject {
             pageURL: actionPageURL(of: frontmost))
 
         actionRequestID = requestID
+        let progressHandler: ((ActionProgress) -> Void)? = execute
+            ? { [weak self] progress in self?.showActionProgress(progress) }
+            : nil
+        if execute { showActionProgress(.readingScreen) }
         actions.perform(
-            transcript: command, context: context, execute: execute, allowSend: allowSend
+            transcript: command, context: context, execute: execute,
+            allowSend: allowSend, progress: progressHandler
         ) { [weak self] result in
             self?.actionRequestID = nil
+            if execute { self?.showControlActionResult(result) }
             switch result {
             case .planned(let plan):
                 // The harvested names are reported so a wrong-name plan can be
@@ -536,6 +542,34 @@ final class DictationController: NSObject {
         return ScreenContext.pageURL(of: app, deep: true)?.absoluteString ?? ""
     }
 
+    /// Every executing Action surface—including local CLI/agent requests—uses
+    /// the same persistent progress capsule. External actions should be at
+    /// least as visible and cancellable as a command spoken through the
+    /// Action hotkey; dry-run planning remains silent.
+    private func showActionProgress(_ progress: ActionProgress) {
+        hud.transition(to: .notice(
+            symbol: "wand.and.stars", message: progress.hudMessage))
+    }
+
+    private func showControlActionResult(_ result: ActionResult) {
+        if let notice = result.voiceCompletionNotice {
+            showNotice(symbol: notice.symbol, message: notice.message)
+            return
+        }
+        switch result {
+        case .planned:
+            showNotice(symbol: "checkmark.circle", message: "Planned")
+        case .needsSendApproval:
+            showNotice(symbol: "hand.raised", message: "Send approval needed")
+        case .cancelled:
+            showNotice(symbol: "xmark.circle", message: "Action cancelled")
+        case .failed(let reason, _):
+            showError(String(reason.prefix(80)))
+        case .completed, .performedUnverified:
+            break
+        }
+    }
+
     /// Cancels the running action. With a `requestID`, only the action that
     /// request started — a client that was refused as busy must not be able to
     /// cancel the plan it lost the race to.
@@ -567,12 +601,17 @@ final class DictationController: NSObject {
             selection: ScreenContext.selectedText(of: origin)?.text ?? "",
             screenNames: names,
             pageURL: actionPageURL(of: origin))
-        showNotice(symbol: "wand.and.stars", message: "Working on it…")
+        showActionProgress(.readingScreen)
         NSLog("Velora: voice action — %@", command)
         // allowSend: holding the Action hotkey and speaking the command is the
         // consent. Esc aborts while it runs.
-        actions.perform(transcript: command, context: context,
-                        execute: true, allowSend: true) { [weak self] result in
+        actions.perform(
+            transcript: command, context: context,
+            execute: true, allowSend: true,
+            progress: { [weak self] progress in
+                self?.showActionProgress(progress)
+            }
+        ) { [weak self] result in
             guard let self else { return }
             if let notice = result.voiceCompletionNotice {
                 self.showNotice(symbol: notice.symbol, message: notice.message)
@@ -585,6 +624,14 @@ final class DictationController: NSObject {
                 self.showNotice(symbol: "xmark.circle", message: "Action cancelled")
             case .failed(let reason, _):
                 self.showError(String(reason.prefix(80)))
+                self.hud.model.retryTitle = "Retry Action"
+                self.errorRetryAction = { [weak self] in
+                    guard let self else { return }
+                    let app = NSWorkspace.shared.frontmostApplication
+                    self.actionOriginApp = app
+                    self.actionScreenNames = ScreenContext.visibleNames(of: app)
+                    self.runVoiceAction(command)
+                }
             case .completed, .performedUnverified:
                 break
             }
