@@ -1246,11 +1246,16 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private func verifyTargetAlive() -> Bool {
         // A vanished target window must read as lost focus, never as "still
-        // fine": the executor aborts instead of typing into nothing.
-        guard let snapshot = snapshotTarget(maxElements: 1),
-              !snapshot.degraded else {
+        // fine": the executor aborts instead of typing into nothing. A live
+        // exact window without AX remains sufficient only for an app-ready
+        // result; every mutation method independently requires its UI proof.
+        guard let snapshot = snapshotTarget(maxElements: 1) else {
             targetReady = false
             return false
+        }
+        if snapshot.degraded {
+            targetReady = resolveDeferredWindow()
+            return targetReady
         }
         return true
     }
@@ -1268,7 +1273,7 @@ final class BackgroundRoutingActionHost: ActionHost {
             targetWindowID = window.id
         }
         guard let snapshot = snapshotTarget(maxElements: 10) else { return false }
-        guard !snapshot.degraded else { return false }
+        if snapshot.degraded, !resolveDeferredWindow() { return false }
         targetReady = true
         everReady = true
         return true
@@ -1297,10 +1302,10 @@ final class BackgroundRoutingActionHost: ActionHost {
             "get_window_state", arguments: arguments, timeout: Self.callTimeout)
         else { return nil }
         let snapshot = CuaSnapshot.parse(reply)
-        // An unresolved Cua observation is non-actionable and carries no
-        // lineage while Electron enables AX. Retry that exact shape; degraded
-        // replies that do carry IDs still participate in replay detection.
-        if snapshot.degraded, snapshot.id?.isEmpty != false { return snapshot }
+        // A degraded observation grants no element capability. Its optional
+        // snapshot ID therefore carries no action lineage; exact app/window
+        // readiness comes independently from the fresh WindowServer list.
+        if snapshot.degraded { return snapshot }
         guard let snapshotID = snapshot.id, !snapshotID.isEmpty else {
             poisonSnapshotLineage()
             return nil

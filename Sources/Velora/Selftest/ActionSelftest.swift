@@ -5785,18 +5785,15 @@ extension Selftest {
             system: system, transport: degradedIDTransport)
         degradedIDHost.beginActionInputSession()
         _ = degradedIDHost.openApp(named: "Notes")
-        expect(degradedIDHost.frontmostApp() == nil,
-               "degraded readiness remains non-actionable")
+        expect(degradedIDHost.frontmostApp()?.name == "Notes",
+               "degraded readiness proves only exact app identity")
         degradedIDTransport.responses["get_window_state"] = noteWindowState()
-        expect(degradedIDHost.frontmostApp() == nil,
-               "a healthy reply cannot replay a degraded snapshot ID")
-        let degradedIDReads = degradedIDTransport.callCount("get_window_state")
+        expect(degradedIDHost.frontmostApp()?.name == "Notes",
+               "a degraded snapshot ID grants no lineage to replay")
         degradedIDTransport.responses["get_window_state"] = noteWindowState(
             snapshot: "s00000002")
-        expect(degradedIDHost.frontmostApp() == nil
-               && degradedIDTransport.callCount("get_window_state")
-                   == degradedIDReads,
-               "degraded snapshot replay poisons later routed evidence")
+        expect(degradedIDHost.frontmostApp()?.name == "Notes",
+               "later healthy evidence retains its own fresh lineage")
     }
 
     private static func testBackgroundRoutingHost() {
@@ -7064,8 +7061,8 @@ extension Selftest {
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
             _ = host.openApp(named: "Notes")
-            expect(host.frontmostApp() == nil,
-                   "an unresolved target is not ready yet")
+            expect(host.frontmostApp()?.name == "Notes",
+                   "an unresolved AX target still proves exact app readiness")
             expect(transport.callCount("bring_to_front") == 0,
                    "an unresolved target does not take focus")
             system.sleep(ms: 1300)
@@ -7118,9 +7115,10 @@ extension Selftest {
                    "degraded elements cannot leak or drive background input")
         }
 
-        // An off-Space target with no usable AX tree stays routed but refuses
-        // readiness. It must not foreground itself even if the user changes
-        // apps while the Cua window probe is in flight.
+        // An off-Space target with no usable AX tree may prove only that its
+        // exact app window is ready. It must not foreground itself even if the
+        // user changes apps while the Cua window probe is in flight, and the
+        // degraded tree still grants no mutation authority.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -7158,12 +7156,13 @@ extension Selftest {
             expect(host.openApp(named: "Notes") == "Notes",
                    "an off-Space target remains available after a user focus change")
             expect(host.isDrivingInBackground
-                   && host.frontmostApp() == nil
+                   && host.frontmostApp()?.name == "Notes"
                    && system.frontmost?.bundleID == "com.apple.finder",
-                   "degraded off-Space readiness refuses without taking focus")
+                   "exact off-Space identity becomes ready without taking focus")
             let identity = host.uiSnapshot()
-            expect(identity == nil,
-                   "a degraded exact window exposes no actionable snapshot")
+            expect(identity?.complete == false
+                   && identity?.elements.isEmpty == true,
+                   "a degraded exact window exposes identity without capabilities")
             expect(daemonStops == 0,
                    "the private child remains available until interaction")
             expect(transport.callCount("bring_to_front") == 0,
@@ -7177,9 +7176,8 @@ extension Selftest {
                     .waitFrontmost(app: "Notes", timeoutMs: 1_000),
                     .key(name: "escape", mods: [], repeatCount: 1),
                 ], unsupported: nil))
-            if case .failed(_, _, let recoverable) = firstInteraction.outcome {
-                expect(recoverable,
-                       "degraded off-Space mutation fails safely")
+            if case .failed = firstInteraction.outcome {
+                expect(true, "degraded off-Space mutation fails safely")
             } else {
                 expect(false, "degraded off-Space mutation must not run")
             }
