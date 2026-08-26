@@ -468,11 +468,12 @@ final class ActionLoopRunner {
                 bundleID: snapshot.bundleID,
                 candidates: state.appNames)
         else { return nil }
-        guard let fresh = host.uiSnapshot(),
+        guard let live = host.frontmostApp(),
+              live.bundleID.caseInsensitiveCompare(snapshot.bundleID)
+                == .orderedSame,
+              let fresh = host.uiSnapshot(),
               fresh.source == .cua,
-              fresh.complete,
               !fresh.id.isEmpty,
-              fresh.id != snapshot.id,
               fresh.windowID == windowID,
               fresh.bundleID.caseInsensitiveCompare(snapshot.bundleID)
                 == .orderedSame,
@@ -480,6 +481,18 @@ final class ActionLoopRunner {
               let target = host.actionWindow(),
               target.pid > 0, target.windowID == windowID,
               target.bundleID.caseInsensitiveCompare(fresh.bundleID)
+                == .orderedSame
+        else { return nil }
+        let identityID = "cua-window-\(target.pid)-\(windowID)"
+        let freshEvidence = fresh.complete
+            ? fresh.id != snapshot.id
+            : (fresh.elements.isEmpty
+               && snapshot.elements.isEmpty
+               && fresh.id == identityID
+               && snapshot.id == identityID)
+        guard freshEvidence,
+              let confirmed = host.frontmostApp(),
+              confirmed.bundleID.caseInsensitiveCompare(fresh.bundleID)
                 == .orderedSame
         else { return nil }
         return ActionCompletionTarget(

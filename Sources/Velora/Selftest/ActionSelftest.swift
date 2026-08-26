@@ -71,6 +71,7 @@ final class FakeActionHost: ActionHost {
     private(set) var elementLabelReads = 0
     private(set) var focusedRoleReads = 0
     private(set) var visibleNamesReads = 0
+    private var uiSnapshotReads = 0
     private var frontmostReads = 0
     private var clock: TimeInterval = 0
     private var actionDraft = ""
@@ -129,6 +130,7 @@ final class FakeActionHost: ActionHost {
         return frontmost
     }
     var foregroundWindowValue: ActionWindowIdentity?
+    var onUISnapshotRead: ((Int) -> Void)?
     func foregroundWindow() -> ActionWindowIdentity? {
         onForegroundWindowRead?()
         return foregroundWindowValue
@@ -165,6 +167,8 @@ final class FakeActionHost: ActionHost {
         return visibleNamesValue
     }
     func uiSnapshot() -> ActionUISnapshot? {
+        uiSnapshotReads += 1
+        onUISnapshotRead?(uiSnapshotReads)
         guard !uiSnapshotValues.isEmpty else { return uiSnapshotValue }
         return uiSnapshotValues.removeFirst()
     }
@@ -2427,11 +2431,11 @@ extension Selftest {
         terminalHost.foregroundWindowValue = ActionWindowIdentity(
             name: "Slack", bundleID: "com.tinyspeck.slackmacgap",
             pid: 500, windowID: 46)
-        terminalHost.uiSnapshotValues = ["initial", "observed", "fresh"].map { id in
+        terminalHost.uiSnapshotValues = (0..<3).map { _ in
             ActionUISnapshot(
-                id: id, source: .cua, appName: "Slack",
+                id: "cua-window-500-46", source: .cua, appName: "Slack",
                 bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Slack",
-                windowID: 46, complete: true, elements: [])
+                windowID: 46, complete: false, elements: [])
         }
         let terminalPlanner = FakeTurnPlanner(turns: [
             .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
@@ -2457,7 +2461,41 @@ extension Selftest {
                 pid: 500, windowID: 46),
                 "the result keeps the exact app for a user-clicked handoff")
         } else {
-            expect(false, "a fresh exact background route reports ready")
+            expect(false, "an exact identity-only background route reports ready")
+        }
+
+        let staleHost = FakeActionHost()
+        staleHost.appsByName["Slack"] = (
+            "Slack", "com.tinyspeck.slackmacgap")
+        staleHost.frontmost = (
+            "Slack", "com.tinyspeck.slackmacgap")
+        staleHost.isDrivingInBackground = true
+        staleHost.foregroundWindowValue = ActionWindowIdentity(
+            name: "Slack", bundleID: "com.tinyspeck.slackmacgap",
+            pid: 500, windowID: 46)
+        staleHost.uiSnapshotValues = (0..<3).map { _ in
+            ActionUISnapshot(
+                id: "cua-window-500-46", source: .cua, appName: "Slack",
+                bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Slack",
+                windowID: 46, complete: false, elements: [])
+        }
+        staleHost.onUISnapshotRead = { [weak staleHost] read in
+            if read == 3 { staleHost?.frontmost = nil }
+        }
+        let stalePlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Slack"}]
+            """), done: true),
+            .turn(sends: false, goal: "", steps: [], done: true),
+        ])
+        let staleResult = ActionLoopRunner(
+            host: staleHost, planner: stalePlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "Open Slack", context: loopContext())
+        if case .ready = staleResult {
+            expect(false, "a stale identity-only route cannot report ready")
+        } else {
+            expect(true, "a window lost after the final read is not ready")
         }
 
         let ambiguousHost = FakeActionHost()
