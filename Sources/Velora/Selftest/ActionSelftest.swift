@@ -6384,7 +6384,10 @@ extension Selftest {
                  "title": "My Note", "on_current_space": false],
             ]]
             transport.responses["get_window_state"] = [
-                "degraded": true, "elements": [],
+                "degraded": true, "elements": [
+                    ["element_index": 7, "role": "AXButton",
+                     "label": "Send", "element_token": "untrusted:7"],
+                ],
             ]
             transport.onCall = { tool in
                 if tool == "list_windows" {
@@ -6408,6 +6411,13 @@ extension Selftest {
                    && host.frontmostApp()?.name == "Notes"
                    && system.frontmost?.bundleID == "com.apple.finder",
                    "off-Space observation never takes foreground ownership")
+            let identity = host.uiSnapshot()
+            expect(identity?.id == "cua-window-500-9"
+                   && identity?.source == .cua
+                   && identity?.bundleID == "com.apple.notes"
+                   && identity?.windowID == 9
+                   && identity?.elements.isEmpty == true,
+                   "a degraded exact window still exposes presentation identity")
             expect(daemonStops == 0,
                    "the private child remains available until interaction")
             expect(transport.callCount("bring_to_front") == 0,

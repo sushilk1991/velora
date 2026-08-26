@@ -919,6 +919,50 @@ async def test_cua_draft_presents_once(engine):
     assert len(eng.cleanup.calls) == 1
 
 
+async def test_app_only_cua_window_presents_without_second_model_turn(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(turn([
+        {"do": "open_app", "app": "Slack"},
+    ], goal="open Slack", sends=False))
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="Open Slack",
+        context={
+            "frontmost_app": "Orca",
+            "frontmost_bundle": "com.stablyai.orca",
+            "running_apps": ["Slack", "Orca"],
+        },
+    )
+    await client.recv_event("action_turn")
+    await send_observe(client, observation=observation(
+        frontmost_app="Slack",
+        frontmost_bundle="com.tinyspeck.slackmacgap",
+        ui_snapshot={
+            "id": "cua-window-46820-1316",
+            "source": "cua",
+            "app_name": "Slack",
+            "bundle_id": "com.tinyspeck.slackmacgap",
+            "window_id": 1316,
+            "complete": False,
+            "elements": [],
+        },
+        executed=["open_app Slack"],
+    ))
+
+    event = await client.recv_event("action_turn")
+
+    assert event["done"] is False
+    assert event["steps"] == [{
+        "do": "present_ui",
+        "snapshot": "cua-window-46820-1316",
+        "bundle_id": "com.tinyspeck.slackmacgap",
+        "window_id": 1316,
+    }]
+    assert len(eng.cleanup.calls) == 1
+
+
 async def test_action_controller_waits_for_replacement_without_rejection(engine):
     eng, sock = engine
     eng.cleanup = RecoveringPlanner(

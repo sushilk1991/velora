@@ -2940,10 +2940,19 @@ class Engine:
             last_error = ""
             model_unavailable_error = ""
             had_plan_error = False
+            if (not self._action_cancel.is_set()
+                    and actions.needs_app_presentation(session)):
+                token = uuid.uuid4().hex
+                session.state.allowed_ui_attestation = token
+                session.state.allow_ui_presentation = True
+                parsed = actions.attach_ui_presentation(
+                    {"done": True}, session.current_ui_snapshot, token)
+                turn = session.accept_reply(json.dumps(
+                    parsed, ensure_ascii=False, separators=(",", ":")))
             # Deliberate pressure hibernation is restored inside this task, not
             # in the socket-command dispatcher. Model loading takes seconds;
             # ping/cancel/status frames must remain responsive throughout.
-            if getattr(self.cleanup, "hibernated", False):
+            if turn is None and getattr(self.cleanup, "hibernated", False):
                 loaded = await self._ensure_cleanup_loaded(self._action_cancel)
                 if self._action_cancel.is_set():
                     self._drop_action_session(msg.get("id"))
@@ -2977,7 +2986,7 @@ class Engine:
             # optimization miss: fall back to the normal controller below.
             direct_goal_check = session.direct_goal_check_pending
             session.direct_goal_check_pending = False
-            if (direct_goal_check
+            if (turn is None and direct_goal_check
                     and session.current_ui_snapshot.get("complete")):
                 verifier_prompt = actions.build_goal_verifier_prompt(
                     session.current_ui_snapshot)

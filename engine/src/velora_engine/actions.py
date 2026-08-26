@@ -1275,6 +1275,27 @@ def turn_requires_terminal_presentation(
     )
 
 
+def needs_app_presentation(session: "ActionSession") -> bool:
+    """Whether exact presentation itself now completes the command."""
+    snapshot = session.current_ui_snapshot
+    window_id = snapshot.get("window_id")
+    return (
+        session.turns_used > 0
+        and session.sends is False
+        and session.state.require_ui_target_verification
+        and snapshot.get("source") == _UI_SOURCE_CUA
+        and bool(snapshot.get("id"))
+        and bool(snapshot.get("bundle_id"))
+        and isinstance(window_id, int)
+        and not isinstance(window_id, bool)
+        and window_id > 0
+        and is_app_only_presentation(
+            session.transcript, str(snapshot.get("app_name") or ""),
+            candidate_apps=session.state.app_names,
+            bundle_id=str(snapshot.get("bundle_id") or ""))
+    )
+
+
 def attach_ui_presentation(parsed: dict, snapshot: dict, token: str) -> dict:
     """Replace deferred content with one engine-minted foreground handoff."""
     snapshot_id = str(snapshot.get("id") or "")

@@ -1268,13 +1268,27 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard routed else { return system.uiSnapshot() }
         guard snapshotLineage == .valid, targetReady,
               let windowID = targetWindowID,
-              let driver = snapshotTarget(maxElements: Self.snapshotElements),
-              !driver.degraded, let snapshotID = driver.id,
-              !snapshotID.isEmpty else {
+              let driver = snapshotTarget(maxElements: Self.snapshotElements)
+        else {
             routedUISnapshot = nil
             return nil
         }
-        let elements = driver.elements.map { element in
+        let snapshotID: String
+        if driver.degraded {
+            // Cua still proves exact PID/window ownership when Electron cannot
+            // expose this hidden window's AX tree. This identity has no
+            // elements and therefore authorizes only the separately attested
+            // final presentation; every content action remains impossible.
+            snapshotID = "cua-window-\(targetPID)-\(windowID)"
+        } else {
+            guard let driverID = driver.id, !driverID.isEmpty else {
+                routedUISnapshot = nil
+                return nil
+            }
+            snapshotID = driverID
+        }
+        let visibleElements: [CuaElement] = driver.degraded ? [] : driver.elements
+        let elements = visibleElements.map { element in
             ActionUIElement(
                 index: element.index, parentIndex: element.parentIndex,
                 depth: element.depth, role: element.role,
