@@ -401,9 +401,10 @@ extension ActionPlan {
     }
 
     private static let commandMentionWords: Set<String> = [
-        "app", "chat", "click", "composer", "conversation", "find", "focus",
-        "message", "messages", "navigate", "open", "press", "search", "show",
-        "the", "to", "with",
+        "app", "bring", "chat", "click", "composer", "conversation",
+        "display", "find", "focus", "go", "launch", "me", "message",
+        "messages", "navigate", "open", "please", "press", "search", "show",
+        "switch", "take", "the", "to", "up", "with",
     ]
 
     // recipient_intent: comment dm email mail message post reply text | draft prepare write + chat channel comment conversation discord dm email gmail imessage mail messenger post recipient reply signal slack teams telegram thread whatsapp
@@ -417,6 +418,19 @@ extension ActionPlan {
         "thread", "whatsapp",
     ]
     private static let composeWords: Set<String> = ["draft", "prepare", "write"]
+    private static let presentationIntentPrefixes: [[String]] = [
+        ["open"], ["show"], ["display"], ["launch"],
+        ["navigate", "to"], ["go", "to"], ["switch", "to"],
+        ["switch", "me", "to"], ["take", "me", "to"], ["bring", "up"],
+    ]
+    private static let appOnlyIgnoredWords: Set<String> = [
+        "app", "application", "please", "the",
+    ]
+    private static let browserModalityWords: Set<String> = [
+        "browser", "online", "tab", "url", "web", "webpage", "website",
+    ]
+    private static let browserAddressPattern =
+        #"(?:https?://|www\.|\b[a-z0-9-]+\.[a-z]{2,24}(?:\b|[/#?])|\bdot\s+[a-z]{2,24}\b)"#
 
     static func isRecipientContent(
         _ command: String, bundleID: String?
@@ -429,6 +443,129 @@ extension ActionPlan {
             || !words.intersection(composeWords).isEmpty
         return hasIntent
             && !words.intersection(contextWords).isEmpty
+    }
+
+    static func isExplicitUIPresentation(
+        _ command: String, appName: String,
+        bundleID: String? = nil,
+        candidates: Set<String> = []
+    ) -> Bool {
+        guard commandNamesOnlyApp(
+            command, appName: appName, candidates: candidates
+        ) else {
+            return false
+        }
+        var words = AppMatcher.words(command)
+        if !commandAllowsBundleModality(command, bundleID: bundleID) {
+            return false
+        }
+        if words.first == "please" { words.removeFirst() }
+        return presentationIntentPrefixes.contains { prefix in
+            words.starts(with: prefix)
+        }
+    }
+
+    static func isAppOnlyPresentation(
+        _ command: String, appName: String,
+        bundleID: String? = nil,
+        candidates: Set<String> = []
+    ) -> Bool {
+        guard isExplicitUIPresentation(
+            command, appName: appName, bundleID: bundleID,
+            candidates: candidates
+        ) else { return false }
+        var words = AppMatcher.words(command)
+        if words.first == "please" { words.removeFirst() }
+        guard let prefix = presentationIntentPrefixes.first(where: {
+            words.starts(with: $0)
+        }) else { return false }
+        let remainder = words.dropFirst(prefix.count).filter {
+            !appOnlyIgnoredWords.contains($0)
+        }
+        let phrase = remainder.joined(separator: " ")
+        if AppMatcher.normalize(phrase) == AppMatcher.normalize(appName) {
+            return true
+        }
+        return remainder.count == 1
+            && AppMatcher.bestMatch(for: remainder[0], in: [appName]) != nil
+    }
+
+    private static func commandAllowsBundleModality(
+        _ command: String, bundleID: String?
+    ) -> Bool {
+        let hasAddress = command.range(
+            of: browserAddressPattern,
+            options: [.regularExpression, .caseInsensitive]) != nil
+        return (browserModalityWords.isDisjoint(with: AppMatcher.words(command))
+            && !hasAddress)
+            || ModeCategory.category(forBundleID: bundleID) == .browser
+    }
+
+    private static func commandNamesApp(
+        _ command: String, appName: String
+    ) -> Bool {
+        if AppMatcher.bestMatch(for: appName, in: [command]) != nil {
+            return true
+        }
+        return AppMatcher.words(command).contains { word in
+            word.count >= Limits.minVerifyTermCharacters
+                && !commandMentionWords.contains(word)
+                && AppMatcher.bestMatch(for: word, in: [appName]) != nil
+        }
+    }
+
+    private static func commandNamesOnlyApp(
+        _ command: String, appName: String, candidates: Set<String>
+    ) -> Bool {
+        guard commandNamesApp(command, appName: appName) else { return false }
+        let knownApps = candidates.union([appName])
+        let exact: [(name: String, range: Range<Int>)] = knownApps.flatMap { name in
+            commandAppSpans(command, appName: name).map { (name, $0) }
+        }
+        if !exact.isEmpty {
+            let maximal = exact.filter { item in
+                !exact.contains { other in
+                    other.range.lowerBound <= item.range.lowerBound
+                        && other.range.upperBound >= item.range.upperBound
+                        && other.range.count > item.range.count
+                }
+            }
+            let targetIdentity = AppMatcher.normalize(appName)
+            let winners = Set(maximal.map { AppMatcher.normalize($0.name) })
+            guard winners == [targetIdentity] else { return false }
+            let consumed = Set(maximal.flatMap { item -> [Int] in
+                guard AppMatcher.normalize(item.name) == targetIdentity else {
+                    return []
+                }
+                return Array(item.range)
+            })
+            let remainder = AppMatcher.words(command).enumerated().compactMap {
+                consumed.contains($0.offset) ? nil : $0.element
+            }.joined(separator: " ")
+            return !knownApps.contains {
+                AppMatcher.normalize($0) != targetIdentity
+                    && commandNamesApp(remainder, appName: $0)
+            }
+        }
+        let mentioned = knownApps.filter {
+            commandNamesApp(command, appName: $0)
+        }
+        let identities = Set(mentioned.map(AppMatcher.normalize))
+        return identities == [AppMatcher.normalize(appName)]
+    }
+
+    private static func commandAppSpans(
+        _ command: String, appName: String
+    ) -> [Range<Int>] {
+        let commandWords = AppMatcher.words(command)
+        let targetWords = AppMatcher.words(appName)
+        guard !targetWords.isEmpty,
+              targetWords.count <= commandWords.count else { return [] }
+        let lastStart = commandWords.count - targetWords.count
+        return (0...lastStart).compactMap { index in
+            Array(commandWords[index..<(index + targetWords.count)])
+                == targetWords ? index..<(index + targetWords.count) : nil
+        }
     }
 
     private static func commandMentionsUILabel(
@@ -954,12 +1091,29 @@ extension ActionPlan {
                 if pendingText { unverifiedText = true }
 
             case "present_ui":
+                let recipientPresentation = state.requireUITargetVerification
+                    && isDraft
+                    && state.structuredUISnapshot.map {
+                        ActionPlan.isRecipientContent(
+                            state.spokenCommand, bundleID: $0.bundleID)
+                            && ActionPlan.commandAllowsBundleModality(
+                                state.spokenCommand, bundleID: $0.bundleID)
+                            && ActionPlan.commandNamesOnlyApp(
+                                state.spokenCommand, appName: $0.appName,
+                                candidates: state.appNames)
+                    } == true
+                let explicitPresentation = isDraft
+                    && state.structuredUISnapshot.map {
+                        ActionPlan.isExplicitUIPresentation(
+                            state.spokenCommand, appName: $0.appName,
+                            bundleID: $0.bundleID,
+                            candidates: state.appNames)
+                    } == true
                 guard rawSteps.count == 1, index == 0,
                       state.requireUITargetVerification,
                       isDraft,
                       let snapshot = state.structuredUISnapshot,
-                      ActionPlan.isRecipientContent(
-                        state.spokenCommand, bundleID: snapshot.bundleID),
+                      recipientPresentation || explicitPresentation,
                       snapshot.source == .cua,
                       let windowNumber = step["window_id"] as? NSNumber,
                       CFGetTypeID(windowNumber) != CFBooleanGetTypeID(),

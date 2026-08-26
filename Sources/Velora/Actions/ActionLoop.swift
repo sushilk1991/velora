@@ -27,13 +27,19 @@ private struct ActionCompletionEvidence {
     private(set) var events: [ActionEvidenceEvent] = []
     private(set) var hadEffect = false
     private(set) var hadGoalVerification = false
+    private(set) var hadPresentation = false
+
+    var provesGoal: Bool { hadGoalVerification }
 
     mutating func record(_ result: ActionRunResult) {
         for event in result.evidence {
             events.append(event)
             switch event {
-            case .appOpenRequested, .unverifiedEffect:
+            case .appOpenRequested:
                 hadEffect = true
+            case .unverifiedEffect(let kind):
+                hadEffect = true
+                if kind == .presentUI { hadPresentation = true }
             case .goalVerified:
                 hadEffect = true
                 hadGoalVerification = true
@@ -123,6 +129,7 @@ final class ActionLoopRunner {
         carried.structuredUIComplete = context.uiSnapshot?.complete == true
         carried.structuredUISnapshot = context.uiSnapshot
         carried.appNames.formUnion(context.runningApps)
+        carried.appNames.formUnion(context.knownApps)
         if !context.frontmostApp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             carried.appNames.insert(context.frontmostApp)
         }
@@ -306,7 +313,26 @@ final class ActionLoopRunner {
                     // before it; keeping the old reason would report a solved
                     // problem as the cause of a later one.
                     lastStepFailure = nil
-                    if done {
+                    // A routed target is still hidden behind the user's work.
+                    // Give the engine one fresh exact Cua observation so it
+                    // can mint the final presentation; a model-authored done
+                    // never owns foreground authority.
+                    let appGoalPresented = completionEvidence.hadPresentation
+                        && ActionPlan.isAppOnlyPresentation(
+                            transcript, appName: carried.currentApp,
+                            bundleID: carried.structuredUISnapshot?.bundleID,
+                            candidates: carried.appNames)
+                    if appGoalPresented {
+                        planner.end()
+                        return .completed(goal: lockedGoal, trace: fullTrace)
+                    }
+                    let needsPresentation = host.isDrivingInBackground
+                        && ActionPlan.isExplicitUIPresentation(
+                            transcript, appName: carried.currentApp,
+                            bundleID: carried.structuredUISnapshot?.bundleID,
+                            candidates: carried.appNames)
+                    if done, completionEvidence.provesGoal
+                        || !needsPresentation {
                         planner.end()
                         return completionResult(
                             goal: lockedGoal, trace: fullTrace,

@@ -113,6 +113,7 @@ final class FakeActionHost: ActionHost {
 
     func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
         presentUICalls += 1
+        if presentUISucceeds { isDrivingInBackground = false }
         return presentUISucceeds
     }
 
@@ -1498,6 +1499,121 @@ extension Selftest {
             snapshotID: "slack-cua",
             bundleID: "com.tinyspeck.slackmacgap", windowID: 44)],
                "an exact engine-normalized Slack recipient draft may present")
+        var webDraftPresentation = slackPresentation
+        webDraftPresentation.spokenCommand =
+            "Draft a message for Hemesh on Slack on the web"
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[{"do":"present_ui",
+          "snapshot":"slack-cua","bundle_id":"com.tinyspeck.slackmacgap",
+          "window_id":44}]}
+        """, state: &webDraftPresentation) == .invalidUIPresentation(step: 0),
+               "web draft intent cannot present native Slack")
+        var wrongMessenger = slackPresentation
+        wrongMessenger.structuredUISnapshot = ActionUISnapshot(
+            id: "wrong-messenger", source: .cua, appName: "WhatsApp",
+            bundleID: "net.whatsapp.WhatsApp", windowTitle: "Hemesh",
+            windowID: 47, complete: false, elements: [])
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[{"do":"present_ui",
+          "snapshot":"wrong-messenger","bundle_id":"net.whatsapp.WhatsApp",
+          "window_id":47}]}
+        """, state: &wrongMessenger) == .invalidUIPresentation(step: 0),
+               "a Slack command cannot present a routed WhatsApp window")
+        let navigationCua = ActionUISnapshot(
+            id: "navigation-cua", source: .cua, appName: "WhatsApp",
+            bundleID: "net.whatsapp.WhatsApp", windowTitle: "Shivangi Gupta",
+            windowID: 45, complete: false, elements: snapshot.elements)
+        var navigationPresentation = ActionPlan.BatchState()
+        navigationPresentation.requireUITargetVerification = true
+        navigationPresentation.structuredUIAvailable = true
+        navigationPresentation.structuredUIComplete = false
+        navigationPresentation.structuredUISnapshot = navigationCua
+        navigationPresentation.spokenCommand =
+            "open the Shivangi Gupta chat on WhatsApp"
+        expect(ActionPlan.isExplicitUIPresentation(
+                "Open Chrome", appName: "Google Chrome")
+               && !ActionPlan.isExplicitUIPresentation(
+                "Open Chrome", appName: "OpenAI"),
+               "presentation intent binds spoken aliases without generic words")
+        expect(ActionPlan.isAppOnlyPresentation(
+                "Open Chrome", appName: "Google Chrome")
+               && !ActionPlan.isAppOnlyPresentation(
+                "Open the Shivangi Gupta chat on WhatsApp",
+                appName: "WhatsApp"),
+               "app-only presentation excludes in-app navigation")
+        let ambiguousApps: Set<String> = ["WhatsApp", "Slack"]
+        expect(!ActionPlan.isExplicitUIPresentation(
+                "Open WhatsApp and then show Slack", appName: "WhatsApp",
+                candidates: ambiguousApps)
+               && !ActionPlan.isExplicitUIPresentation(
+                "Open WhatsApp and then show Slack", appName: "Slack",
+                candidates: ambiguousApps),
+               "presentation intent refuses commands naming multiple apps")
+        let mailApps: Set<String> = ["Mail", "Gmail", "Orca"]
+        expect(ActionPlan.isAppOnlyPresentation(
+                "Open Mail", appName: "Mail", candidates: mailApps)
+               && !ActionPlan.isExplicitUIPresentation(
+                "Open Mail", appName: "Gmail", candidates: mailApps)
+               && !ActionPlan.isAppOnlyPresentation(
+                "Open Mail", appName: "Gmail", candidates: mailApps),
+               "fuzzy Mail matching cannot authorize Gmail foreground")
+        let slackApps: Set<String> = [
+            "Slack", "Safari", "Google Chrome", "Orca",
+        ]
+        let webCommands = [
+            "Open Slack in browser", "Open Slack on the web",
+            "Open the Slack website", "Open https://slack.com",
+            "Open slack.com", "Open the Slack webpage", "Open Slack online",
+            "Open Slack dot com", "Open Slack URL", "Open Slack in a tab",
+        ]
+        expect(webCommands.allSatisfy {
+            !ActionPlan.isExplicitUIPresentation(
+                $0, appName: "Slack",
+                bundleID: "com.tinyspeck.slackmacgap",
+                candidates: slackApps)
+        }, "web modality cannot authorize a native Slack presentation")
+        let calendarApps: Set<String> = ["Calendar", "Google Calendar", "Orca"]
+        expect(ActionPlan.isAppOnlyPresentation(
+                "Open Google Calendar", appName: "Google Calendar",
+                candidates: calendarApps),
+               "the longest exact installed app name owns foreground authority")
+        let browserApps: Set<String> = ["Apple Music", "Safari", "Orca"]
+        let browserCommand = "Open the Apple Music website in Safari"
+        expect(!ActionPlan.isExplicitUIPresentation(
+                browserCommand, appName: "Apple Music",
+                candidates: browserApps)
+               && !ActionPlan.isExplicitUIPresentation(
+                browserCommand, appName: "Safari", candidates: browserApps),
+               "separate exact app mentions get no foreground authority")
+        let calendarBrowserApps: Set<String> = [
+            "Calendar", "Google Calendar", "Google Chrome",
+        ]
+        let calendarCommand = "Open Google Calendar in Chrome"
+        expect(!ActionPlan.isExplicitUIPresentation(
+                calendarCommand, appName: "Google Calendar",
+                candidates: calendarBrowserApps)
+               && !ActionPlan.isExplicitUIPresentation(
+                calendarCommand, appName: "Google Chrome",
+                candidates: calendarBrowserApps),
+               "a separate installed alias keeps multi-app intent ambiguous")
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"present_ui","snapshot":"navigation-cua",
+           "bundle_id":"net.whatsapp.WhatsApp","window_id":45}]}
+        """, state: &navigationPresentation)?.steps == [
+            .presentUI(
+                snapshotID: "navigation-cua",
+                bundleID: "net.whatsapp.WhatsApp", windowID: 45),
+        ], "an explicit navigation command may present its exact window last")
+        navigationPresentation.spokenCommand =
+            "check the Shivangi Gupta chat on WhatsApp"
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[
+          {"do":"present_ui","snapshot":"navigation-cua",
+           "bundle_id":"net.whatsapp.WhatsApp","window_id":45}]}
+        """, state: &navigationPresentation)
+               == .invalidUIPresentation(step: 0),
+               "a non-presentation command cannot mint a focus handoff")
         var forgedPresentation = presentationState
         expect(decodeBatchError("""
         {"sends":false,"steps":[{"do":"present_ui",
@@ -1610,6 +1726,7 @@ extension Selftest {
         var snapshot = ActionContextSnapshot()
         snapshot.frontmostApp = "Sublime Text"
         snapshot.runningApps = ["WhatsApp", "Slack", "Sublime Text"]
+        snapshot.knownApps = ["WhatsApp", "Slack", "Notes", "Sublime Text"]
         return snapshot
     }
 
@@ -2224,6 +2341,61 @@ extension Selftest {
                    "completion trace records the exact rechecked UI evidence")
         } else {
             expect(false, "independent exact goal evidence completes navigation")
+        }
+
+        let terminalHost = FakeActionHost()
+        terminalHost.appsByName["Slack"] = (
+            "Slack", "com.tinyspeck.slackmacgap")
+        terminalHost.isDrivingInBackground = true
+        terminalHost.presentUISucceeds = true
+        terminalHost.uiSnapshotValue = ActionUISnapshot(
+            id: "terminal-cua", source: .cua, appName: "Slack",
+            bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Slack",
+            windowID: 46, complete: false, elements: [])
+        let terminalPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
+            [{"do":"open_app","app":"Slack"}]
+            """), done: true),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"present_ui","snapshot":"terminal-cua",
+              "bundle_id":"com.tinyspeck.slackmacgap","window_id":46}]
+            """), done: false),
+        ])
+        let terminalResult = ActionLoopRunner(
+            host: terminalHost, planner: terminalPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "Open Slack", context: loopContext())
+        expect(terminalHost.presentUICalls == 1
+               && terminalPlanner.observations.count == 1,
+               "an exact app-only presentation completes without full AX")
+        if case .completed = terminalResult {
+            expect(true, "exact app-only presentation proves the open goal")
+        } else {
+            expect(false, "an exact app-only presentation completes")
+        }
+
+        let ambiguousHost = FakeActionHost()
+        ambiguousHost.appsByName["Slack"] = (
+            "Slack", "com.tinyspeck.slackmacgap")
+        ambiguousHost.isDrivingInBackground = true
+        let ambiguousPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
+            [{"do":"open_app","app":"Slack"}]
+            """), done: true),
+        ])
+        let ambiguousResult = ActionLoopRunner(
+            host: ambiguousHost, planner: ambiguousPlanner,
+            execute: true, allowSend: false
+        ).run(
+            transcript: "Open Slack integration settings in Notes",
+            context: loopContext())
+        expect(ambiguousHost.presentUICalls == 0
+               && ambiguousPlanner.observations.isEmpty,
+               "a command naming another installed app gets no focus authority")
+        if case .performedUnverified = ambiguousResult {
+            expect(true, "ambiguous navigation stays performed but unverified")
+        } else {
+            expect(false, "ambiguous navigation cannot claim completion")
         }
 
         let repeatedRows = (14...19).map { index in
@@ -5124,6 +5296,7 @@ extension Selftest {
         starter: FakeDaemonStarter? = nil,
         endDaemon: @escaping () -> Void = {},
         interactionIsQuiet: (() -> Bool)? = { true },
+        userFocusForWindow: @escaping (Int) -> ActionWindowIdentity? = { _ in nil },
         localApps: [String: String] = ["Notes": "com.apple.Notes",
                                        "Slack": "com.tinyspeck.slackmacgap"]
     ) -> BackgroundRoutingActionHost {
@@ -5141,6 +5314,7 @@ extension Selftest {
             }, endDaemon: endDaemon,
             bundleForPID: { fakeBundleID($0, transport: transport) },
             interactionIsQuiet: interactionIsQuiet,
+            userFocusForWindow: userFocusForWindow,
             localResolve: { name in
                 guard let index = AppMatcher.bestMatch(
                     for: name, in: Array(localApps.keys)) else { return nil }
@@ -5702,6 +5876,38 @@ extension Selftest {
                    "successful presentation switches the next turn to native AX")
             expect(transport.callCount("type_text") == 0,
                    "the presentation turn contains no deferred content")
+        }
+
+        // Ownership can change during the bounded user-quiet wait. The final
+        // reveal must re-read the exact PID/window after that wait.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var quiet = false
+            system.onSleep = { _ in
+                quiet = true
+                transport.responses["list_windows"] = ["windows": []]
+            }
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                interactionIsQuiet: { quiet })
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot(),
+                  let windowID = snapshot.windowID else {
+                expect(false, "the quiet-wait race has routed evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                windowID: windowID)
+                && transport.callCount("bring_to_front") == 0,
+                   "presentation revalidates a target changed during quiet wait")
         }
 
         do {
@@ -6572,6 +6778,51 @@ extension Selftest {
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var handoffCalls = 0
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                handoffCalls += 1
+                if handoffCalls == 1 {
+                    UserInputActivity.pointerPressed(button: 0, windowID: 80)
+                    UserInputActivity.pointerReleased(0)
+                    system.frontmost = ("Notes", "com.apple.notes")
+                    system.foregroundWindowValue = ActionWindowIdentity(
+                        name: "Notes", bundleID: "com.apple.notes",
+                        pid: 500, windowID: 9)
+                    transport.queued[tool] = [presentationReply(500, 9)]
+                    return
+                }
+                system.frontmost = ("Telegram", "org.telegram.desktop")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Telegram", bundleID: "org.telegram.desktop",
+                    pid: 800, windowID: 80)
+                transport.queued[tool] = [presentationReply(800, 80)]
+            }
+            let userWindow = ActionWindowIdentity(
+                name: "Telegram", bundleID: "org.telegram.desktop",
+                pid: 800, windowID: 80)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                userFocusForWindow: { $0 == 80 ? userWindow : nil })
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+
+            expect(host.prepareInteraction() == .deferred
+                   && handoffCalls == 2
+                   && system.frontmost?.bundleID == "org.telegram.desktop"
+                   && system.foregroundWindowValue?.windowID == 80,
+                   "a mid-handoff click restores the window the user selected")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             var quiet = false
@@ -6602,6 +6853,29 @@ extension Selftest {
             expect(result.outcome == .completed
                    && system.sleepCalls.count == 3,
                    "handoff waits locally for quiet instead of replanning")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var quiet = false
+            system.onSleep = { _ in
+                quiet = true
+                transport.responses["list_windows"] = ["windows": []]
+            }
+            transport.responses["bring_to_front"] = presentationReply(500, 9)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                interactionIsQuiet: { quiet })
+            host.beginActionInputSession()
+            host.prepareForActionPlan(sends: true)
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+
+            expect(host.prepareInteraction() == .refused
+                   && transport.callCount("bring_to_front") == 0,
+                   "sending handoff revalidates a target changed during quiet wait")
         }
         do {
             let system = FakeActionHost()

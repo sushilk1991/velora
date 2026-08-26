@@ -36,6 +36,9 @@ struct ActionContextSnapshot {
     var frontmostBundle: String = ""
     var frontmostWindow: String = ""
     var runningApps: [String] = []
+    /// Installed names used only by the local focus-authority validator.
+    /// They are sent to the engine but never included in the model prompt.
+    var knownApps: [String] = []
     var selection: String = ""
     /// Name-like labels visible in the front window — the correct spellings of
     /// the people and channels the user is about to name out loud.
@@ -52,6 +55,7 @@ struct ActionContextSnapshot {
             "frontmost_bundle": frontmostBundle,
             "frontmost_window": frontmostWindow,
             "running_apps": runningApps,
+            "known_apps": knownApps,
             "selection": selection,
             "screen_names": screenNames,
             "page_url": pageURL,
@@ -75,6 +79,7 @@ struct ActionContextSnapshot {
             .filter { $0.activationPolicy == .regular && $0.processIdentifier != ownPID }
             .compactMap { $0.localizedName }
             .filter { !$0.isEmpty }
+        snapshot.knownApps = InstalledApps.shared.entries().map(\.name)
         if let frontmost {
             snapshot.frontmostApp = frontmost.localizedName ?? ""
             snapshot.frontmostBundle = frontmost.bundleIdentifier ?? ""

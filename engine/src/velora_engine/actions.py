@@ -354,6 +354,9 @@ class ActionContext:
     frontmost_bundle: str = ""
     frontmost_window: str = ""
     running_apps: list[str] = field(default_factory=list)
+    # Installed names are validator-only authority candidates. They stay out
+    # of the model prompt so a large catalog cannot dilute the command.
+    known_apps: list[str] = field(default_factory=list)
     selection: str = ""
     # Name-like labels read off the front window: the correct spellings of the
     # people and channels the user just said out loud.
@@ -370,12 +373,17 @@ class ActionContext:
     def from_dict(cls, data: dict | None) -> "ActionContext":
         data = data or {}
         apps = data.get("running_apps") or []
+        known_apps = data.get("known_apps") or []
         return cls(
             transcript=str(data.get("transcript") or ""),
             frontmost_app=str(data.get("frontmost_app") or ""),
             frontmost_bundle=str(data.get("frontmost_bundle") or ""),
             frontmost_window=str(data.get("frontmost_window") or ""),
             running_apps=[str(a) for a in apps if isinstance(a, (str, int))],
+            known_apps=[
+                str(a) for a in known_apps[:_MAX_KNOWN_APPS]
+                if isinstance(a, (str, int))
+            ],
             selection=str(data.get("selection") or ""),
             screen_names=[
                 str(n) for n in (data.get("screen_names") or [])
@@ -389,6 +397,7 @@ class ActionContext:
 # ---------------------------------------------------------------- prompt
 
 _MAX_APPS = 40
+_MAX_KNOWN_APPS = 500
 _MAX_TITLE_CHARS = 160
 _MAX_SELECTION_CHARS = 400
 _MAX_SCREEN_NAMES = 40
@@ -1068,8 +1077,202 @@ def turn_requires_target_verifier(parsed: dict, session: "ActionSession") -> boo
 
 def turn_requires_ui_presentation(
         parsed: dict, session: "ActionSession") -> bool:
-    return (session.current_ui_snapshot.get("source") == _UI_SOURCE_CUA
+    snapshot = session.current_ui_snapshot
+    return (snapshot.get("source") == _UI_SOURCE_CUA
+            and command_allows_bundle_modality(
+                session.transcript, str(snapshot.get("bundle_id") or ""))
+            and command_names_only_app(
+                session.transcript, str(snapshot.get("app_name") or ""),
+                session.state.app_names)
             and turn_requires_target_verifier(parsed, session))
+
+
+_PRESENTATION_INTENT_PREFIXES = (
+    ("open",), ("show",), ("display",), ("launch",),
+    ("navigate", "to"), ("go", "to"), ("switch", "to"),
+    ("switch", "me", "to"), ("take", "me", "to"), ("bring", "up"),
+)
+_APP_ONLY_IGNORED_WORDS = {"app", "application", "please", "the"}
+_BROWSER_MODALITY_WORDS = {
+    "browser", "online", "tab", "url", "web", "webpage", "website",
+}
+_BROWSER_ADDRESS_RE = re.compile(
+    r"(?:https?://|www\.|\b[a-z0-9-]+\.[a-z]{2,24}(?:\b|[/#?])"
+    r"|\bdot\s+[a-z]{2,24}\b)",
+    re.IGNORECASE)
+_TERMINAL_PRESENTATION_VERBS = {
+    "open_app", "wait_frontmost", "verify_context", "pause",
+}
+
+
+def command_allows_bundle_modality(command: str, bundle_id: str) -> bool:
+    """Prevent explicit web intent from authorizing a native app window."""
+    words = re.findall(r"[^\W_]+", command.casefold())
+    has_browser_modality = (
+        bool(_BROWSER_MODALITY_WORDS.intersection(words))
+        or _BROWSER_ADDRESS_RE.search(command) is not None
+    )
+    return (not has_browser_modality
+            or category_for_bundle(bundle_id) == "browser")
+
+
+def is_explicit_ui_presentation(
+        command: str, app_name: str,
+        *, candidate_apps: set[str] | None = None,
+        bundle_id: str | None = None) -> bool:
+    """Whether the immutable command expressly asks to show this app."""
+    if not command_names_only_app(command, app_name, candidate_apps or set()):
+        return False
+    words = re.findall(r"[^\W_]+", command.casefold())
+    if not command_allows_bundle_modality(command, bundle_id or ""):
+        return False
+    if words[:1] == ["please"]:
+        words = words[1:]
+    return any(tuple(words[:len(prefix)]) == prefix
+               for prefix in _PRESENTATION_INTENT_PREFIXES)
+
+
+def is_app_only_presentation(
+        command: str, app_name: str,
+        *, candidate_apps: set[str] | None = None,
+        bundle_id: str | None = None) -> bool:
+    """Whether exact presentation itself proves the whole spoken goal."""
+    if not is_explicit_ui_presentation(
+            command, app_name, candidate_apps=candidate_apps,
+            bundle_id=bundle_id):
+        return False
+    words = re.findall(r"[^\W_]+", command.casefold())
+    if words[:1] == ["please"]:
+        words = words[1:]
+    prefix = next((item for item in _PRESENTATION_INTENT_PREFIXES
+                   if tuple(words[:len(item)]) == item), None)
+    if prefix is None:
+        return False
+    remainder = [
+        word for word in words[len(prefix):]
+        if word not in _APP_ONLY_IGNORED_WORDS
+    ]
+    phrase = " ".join(remainder)
+    if normalized_term(phrase) == normalized_term(app_name):
+        return True
+    return len(remainder) == 1 and app_name_matches(remainder[0], app_name)
+
+
+def command_names_app(command: str, app_name: str) -> bool:
+    """Bind a full app name or a non-generic spoken alias to the command."""
+    if app_name_matches(app_name, command):
+        return True
+    words = re.findall(r"[^\W_]+", command.casefold())
+    return any(
+        len(normalized_term(word)) >= MIN_VERIFY_TERM_CHARS
+        and word not in _COMMAND_MENTION_WORDS
+        and app_name_matches(word, app_name)
+        for word in words
+    )
+
+
+def command_names_only_app(
+        command: str, app_name: str, candidate_apps: set[str]) -> bool:
+    """Bind foreground authority to one uniquely named app identity."""
+    if not command_names_app(command, app_name):
+        return False
+    candidates = set(candidate_apps)
+    candidates.add(app_name)
+    exact = [
+        (candidate, start, end)
+        for candidate in candidates
+        for start, end in command_app_spans(command, candidate)
+    ]
+    if exact:
+        maximal = [
+            item for item in exact
+            if not any(
+                other[1] <= item[1] and other[2] >= item[2]
+                and other[2] - other[1] > item[2] - item[1]
+                for other in exact
+            )
+        ]
+        target_identity = normalized_term(app_name)
+        winners = {normalized_term(item[0]) for item in maximal}
+        if winners != {target_identity}:
+            return False
+        consumed = {
+            index for candidate, start, end in maximal
+            if normalized_term(candidate) == target_identity
+            for index in range(start, end)
+        }
+        command_words = app_name_words(command)
+        remainder = " ".join(
+            word for index, word in enumerate(command_words)
+            if index not in consumed
+        )
+        return not any(
+            normalized_term(candidate) != target_identity
+            and command_names_app(remainder, candidate)
+            for candidate in candidates
+        )
+    mentioned = {
+        candidate for candidate in candidates
+        if command_names_app(command, candidate)
+    }
+    identities = {normalized_term(candidate) for candidate in mentioned}
+    return identities == {normalized_term(app_name)}
+
+
+def app_name_words(value: str) -> list[str]:
+    """Normalized words used for exact installed-app phrase binding."""
+    return [
+        normalized_term(word)
+        for word in re.findall(r"[^\W_]+", value.casefold())
+        if normalized_term(word)
+    ]
+
+
+def command_app_spans(command: str, app_name: str) -> list[tuple[int, int]]:
+    """Word spans where the command contains this full installed app name."""
+    command_words = app_name_words(command)
+    target_words = app_name_words(app_name)
+    if not target_words or len(target_words) > len(command_words):
+        return []
+    width = len(target_words)
+    return [
+        (index, index + width)
+        for index in range(len(command_words) - width + 1)
+        if command_words[index:index + width] == target_words
+    ]
+
+
+def turn_requires_terminal_presentation(
+        parsed: dict, session: "ActionSession") -> bool:
+    """Mint the final foreground handoff only for an explicit UI request."""
+    snapshot = session.current_ui_snapshot
+    sends = session.sends
+    if sends is None:
+        raw = parsed.get("sends")
+        sends = raw if isinstance(raw, bool) else True
+    steps = parsed.get("steps") or []
+    verbs = [
+        str(step.get("do") or "").strip().lower()
+        if isinstance(step, dict) else ""
+        for step in steps
+    ]
+    window_id = snapshot.get("window_id")
+    return (
+        parsed.get("done") is True
+        and session.turns_used > 0
+        and sends is False
+        and session.state.require_ui_target_verification
+        and all(verb in _TERMINAL_PRESENTATION_VERBS for verb in verbs)
+        and snapshot.get("source") == _UI_SOURCE_CUA
+        and bool(snapshot.get("id"))
+        and bool(snapshot.get("bundle_id"))
+        and isinstance(window_id, int)
+        and not isinstance(window_id, bool)
+        and is_explicit_ui_presentation(
+            session.transcript, str(snapshot.get("app_name") or ""),
+            candidate_apps=session.state.app_names,
+            bundle_id=str(snapshot.get("bundle_id") or ""))
+    )
 
 
 def attach_ui_presentation(parsed: dict, snapshot: dict, token: str) -> dict:
@@ -1159,22 +1362,29 @@ def turn_requires_ui_action_review(parsed: dict, session: "ActionSession") -> bo
             and not turn_is_self_evident_collection_navigation(parsed, session))
 
 
+_GOAL_REPLACEABLE_NAVIGATION_VERBS = {
+    "open_app", "wait_frontmost", "verify_context",
+    "press_ui", "press_element", "pause",
+}
+
+
 def turn_requires_goal_verifier(parsed: dict, session: "ActionSession") -> bool:
-    """A controller-authored bare done is a hypothesis, not completion proof."""
+    """A controller-authored navigation done is a hypothesis, not proof."""
     snapshot = session.current_ui_snapshot
     sends = session.sends
     if sends is None:
         raw = parsed.get("sends")
         sends = raw if isinstance(raw, bool) else True
-    return (parsed.get("done") is True and not parsed.get("steps")
+    steps = parsed.get("steps") or []
+    navigation_only = all(
+        isinstance(step, dict)
+        and str(step.get("do") or "").strip().lower()
+        in _GOAL_REPLACEABLE_NAVIGATION_VERBS
+        for step in steps
+    )
+    return (parsed.get("done") is True and navigation_only
             and session.turns_used > 0 and sends is False
             and bool(snapshot))
-
-
-_GOAL_REPLACEABLE_NAVIGATION_VERBS = {
-    "open_app", "wait_frontmost", "verify_context",
-    "press_ui", "press_element", "pause",
-}
 
 
 def attach_verified_goal(parsed: dict, verdict: dict,
@@ -1500,9 +1710,10 @@ def app_name_matches(query: str, candidate: str) -> bool:
 
 
 _COMMAND_MENTION_WORDS = {
-    "app", "chat", "click", "composer", "conversation", "find", "focus",
-    "message", "messages", "navigate", "open", "press", "search", "show",
-    "the", "to", "with",
+    "app", "bring", "chat", "click", "composer", "conversation",
+    "display", "find", "focus", "go", "launch", "me", "message",
+    "messages", "navigate", "open", "please", "press", "search", "show",
+    "switch", "take", "the", "to", "up", "with",
 }
 
 
@@ -1702,10 +1913,22 @@ def _validate_verified_ui(step: dict, state: "SessionState | None") -> dict:
 def _validate_present_ui(step: dict, state: "SessionState | None",
                          declared_sends: object) -> dict:
     if (state is None or declared_sends is not False
-            or not state.require_ui_target_verification
-            or not is_recipient_content(
-                state.spoken_command, state.ui_snapshot_bundle_id)):
+            or not state.require_ui_target_verification):
         raise PlanError("present_ui: requires an attested recipient draft")
+    recipient_draft = (
+        state.require_ui_target_verification
+        and is_recipient_content(
+            state.spoken_command, state.ui_snapshot_bundle_id)
+        and command_allows_bundle_modality(
+            state.spoken_command, state.ui_snapshot_bundle_id)
+        and command_names_only_app(
+            state.spoken_command, state.ui_snapshot_app_name,
+            state.app_names)
+    )
+    if not recipient_draft and not state.allow_ui_presentation:
+        raise PlanError(
+            "present_ui: requires an attested recipient draft or explicit "
+            "presentation command")
     if not state.allowed_ui_attestation:
         raise PlanError("present_ui: no engine attestation")
     token = _require_str(step, "attestation", "present_ui", 100)
@@ -1797,11 +2020,13 @@ class SessionState:
     ui_elements: dict[int, dict] = field(default_factory=dict)
     ui_snapshot_complete: bool = False
     ui_snapshot_source: str = _UI_SOURCE_NATIVE
+    ui_snapshot_app_name: str = ""
     ui_snapshot_bundle_id: str = ""
     ui_snapshot_window_title: str = ""
     ui_snapshot_window_id: int | None = None
     spoken_command: str = ""
     allowed_ui_attestation: str | None = None
+    allow_ui_presentation: bool = False
     require_ui_target_verification: bool = False
 
 
@@ -2040,6 +2265,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
         state.current_app = current_app
         if used_ui_attestation:
             state.allowed_ui_attestation = None
+            state.allow_ui_presentation = False
 
     goal = plan.get("goal")
     sends = plan.get("sends")
@@ -2125,7 +2351,10 @@ class ActionSession:
         self.transcript = transcript
         self.context = context
         initial_apps = {
-            name.strip() for name in [context.frontmost_app, *context.running_apps]
+            name.strip() for name in [
+                context.frontmost_app, *context.running_apps,
+                *context.known_apps,
+            ]
             if name.strip()
         }
         self.state = SessionState(
@@ -2143,6 +2372,8 @@ class ActionSession:
             ui_snapshot_complete=bool(context.ui_snapshot.get("complete")),
             ui_snapshot_source=str(
                 context.ui_snapshot.get("source") or _UI_SOURCE_NATIVE),
+            ui_snapshot_app_name=str(
+                context.ui_snapshot.get("app_name") or ""),
             ui_snapshot_bundle_id=str(
                 context.ui_snapshot.get("bundle_id") or ""),
             ui_snapshot_window_title=str(
@@ -2215,6 +2446,8 @@ class ActionSession:
             self.current_ui_snapshot.get("complete"))
         self.state.ui_snapshot_source = str(
             self.current_ui_snapshot.get("source") or _UI_SOURCE_NATIVE)
+        self.state.ui_snapshot_app_name = str(
+            self.current_ui_snapshot.get("app_name") or "")
         self.state.ui_snapshot_bundle_id = str(
             self.current_ui_snapshot.get("bundle_id") or "")
         self.state.ui_snapshot_window_title = str(
@@ -2224,6 +2457,7 @@ class ActionSession:
             window_id if isinstance(window_id, int)
             and not isinstance(window_id, bool) else None)
         self.state.allowed_ui_attestation = None
+        self.state.allow_ui_presentation = False
         if observed_app:
             # The server calls this before asking for the next reply, so this
             # is the boundary where runtime-observed identity enters the

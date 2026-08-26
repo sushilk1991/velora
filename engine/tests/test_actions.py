@@ -1450,6 +1450,71 @@ async def test_bare_done_is_independently_verified_and_keeps_spoken_goal(engine)
     assert evt["steps"][1]["purpose"] == "goal"
 
 
+async def test_goal_refusal_repairs_instead_of_returning_empty_turn(engine):
+    eng, sock = engine
+    first = turn(
+        [{"do": "open_app", "app": "WhatsApp"}],
+        goal="open WhatsApp app", sends=False)
+    refused = json.dumps({
+        "safe": False,
+        "reason": "the current window does not prove the requested chat",
+    })
+    repair = turn([{"do": "pause", "ms": 250}])
+    eng.cleanup = FakePlanner(first, turn(done=True), refused, repair)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client, transcript="open the Shivangi Gupta chat on WhatsApp",
+        context={"frontmost_app": "Sublime Text",
+                 "frontmost_bundle": "com.sublimetext.4",
+                 "running_apps": ["WhatsApp", "Sublime Text"]},
+    )
+    await client.recv_event("action_turn")
+    await send_observe(client, observation=observation(
+        frontmost_app="WhatsApp",
+        frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=_structured_ui(),
+        executed=["open_app WhatsApp"],
+    ))
+
+    event = await client.recv_event("action_turn")
+
+    assert event["done"] is False
+    assert event["steps"] == [{"do": "pause", "ms": 250}]
+    assert "goal verifier refused" in eng.cleanup.calls[3][1]
+
+
+async def test_incomplete_goal_snapshot_repairs_with_another_turn(engine):
+    eng, sock = engine
+    first = turn(
+        [{"do": "open_app", "app": "WhatsApp"}],
+        goal="open WhatsApp app", sends=False)
+    repair = turn([{"do": "pause", "ms": 250}])
+    eng.cleanup = FakePlanner(first, turn(done=True), repair)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client, transcript="open the Shivangi Gupta chat on WhatsApp",
+        context={"frontmost_app": "Sublime Text",
+                 "frontmost_bundle": "com.sublimetext.4",
+                 "running_apps": ["WhatsApp", "Sublime Text"]},
+    )
+    await client.recv_event("action_turn")
+    partial = _structured_ui()
+    partial["complete"] = False
+    await send_observe(client, observation=observation(
+        frontmost_app="WhatsApp",
+        frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=partial,
+        executed=["open_app WhatsApp"],
+    ))
+
+    event = await client.recv_event("action_turn")
+
+    assert event["steps"] == [{"do": "pause", "ms": 250}]
+    assert "structured UI is incomplete" in eng.cleanup.calls[2][1]
+
+
 async def test_action_observe_continues_the_session(engine):
     eng, sock = engine
     eng.cleanup = FakePlanner(
@@ -2876,9 +2941,12 @@ def test_cua_source_cannot_claim_complete_or_authorize_completion():
         "evidence": {"index": 28, "role": "AXButton",
                      "label": "Shivangi Gupta"},
     })
-    with pytest.raises(actions.PlanError, match="incomplete"):
-        actions.parse_ui_action_review(
-            verdict, snapshot, "open Shivangi Gupta on WhatsApp")
+    review = actions.parse_ui_action_review(
+        verdict, snapshot, "open Shivangi Gupta on WhatsApp")
+    assert review == {
+        "safe": False, "goal_met": False,
+        "reason": "partial UI cannot prove the goal is complete",
+    }
     with pytest.raises(actions.PlanError, match="incomplete"):
         actions.parse_goal_verdict(json.dumps({
             "safe": True, "target": "Shivangi Gupta",
@@ -3170,7 +3238,8 @@ def test_partial_ui_allows_only_command_mentioned_exact_capability():
     raw["complete"] = False
     context = actions.ActionContext.from_dict({"ui_snapshot": raw})
     session = actions.ActionSession(
-        "open the Shivangi Gupta chat on WhatsApp", context)
+        "open the Shivangi Gupta chat on WhatsApp", context,
+        require_target_verifier=True)
     proposed = json.dumps({
         "goal": "open the Shivangi Gupta chat on WhatsApp", "sends": False,
         "steps": [
@@ -3194,12 +3263,12 @@ def test_partial_ui_allows_only_command_mentioned_exact_capability():
         actions.ActionContext.from_dict({"ui_snapshot": disabled_raw}))
     with pytest.raises(actions.PlanError, match="disabled"):
         disabled.accept_reply(proposed)
-    with pytest.raises(actions.PlanError, match="incomplete"):
-        actions.parse_ui_action_review(json.dumps({
-            "safe": False, "goal_met": True, "target": "Shivangi Gupta",
-            "evidence": {"index": 28, "role": "AXButton",
-                         "label": "Shivangi Gupta"},
-        }), context.ui_snapshot, session.transcript)
+    review = actions.parse_ui_action_review(json.dumps({
+        "safe": False, "goal_met": True, "target": "Shivangi Gupta",
+        "evidence": {"index": 28, "role": "AXButton",
+                     "label": "Shivangi Gupta"},
+    }), context.ui_snapshot, session.transcript)
+    assert review["safe"] is False and review["goal_met"] is False
     session.turns_used = 1
     assert actions.turn_requires_goal_verifier(
         {"steps": [], "done": True}, session)
@@ -3365,6 +3434,120 @@ def test_verified_goal_replacement_is_navigation_only():
             verdict, snapshot, "token", sends=False)
 
 
+def test_explicit_cua_navigation_presents_exact_window():
+    assert actions.is_explicit_ui_presentation("Open Chrome", "Google Chrome")
+    assert not actions.is_explicit_ui_presentation("Open Chrome", "OpenAI")
+    assert actions.is_app_only_presentation("Open Chrome", "Google Chrome")
+    assert not actions.is_app_only_presentation(
+        "Open the Shivangi Gupta chat on WhatsApp", "WhatsApp")
+    candidates = {"WhatsApp", "Slack"}
+    command = "Open WhatsApp and then show Slack"
+    assert not actions.is_explicit_ui_presentation(
+        command, "WhatsApp", candidate_apps=candidates)
+    assert not actions.is_explicit_ui_presentation(
+        command, "Slack", candidate_apps=candidates)
+    mail_apps = {"Mail", "Gmail", "Orca"}
+    assert actions.is_app_only_presentation(
+        "Open Mail", "Mail", candidate_apps=mail_apps)
+    assert not actions.is_explicit_ui_presentation(
+        "Open Mail", "Gmail", candidate_apps=mail_apps)
+    assert not actions.is_app_only_presentation(
+        "Open Mail", "Gmail", candidate_apps=mail_apps)
+    slack_apps = {"Slack", "Safari", "Google Chrome", "Orca"}
+    for web_command in (
+            "Open Slack in browser", "Open Slack on the web",
+            "Open the Slack website", "Open https://slack.com",
+            "Open slack.com", "Open the Slack webpage", "Open Slack online",
+            "Open Slack dot com", "Open Slack URL", "Open Slack in a tab"):
+        assert not actions.is_explicit_ui_presentation(
+            web_command, "Slack", candidate_apps=slack_apps,
+            bundle_id="com.tinyspeck.slackmacgap")
+    calendar_apps = {"Calendar", "Google Calendar", "Orca"}
+    assert actions.is_app_only_presentation(
+        "Open Google Calendar", "Google Calendar",
+        candidate_apps=calendar_apps)
+    browser_apps = {"Apple Music", "Safari", "Orca"}
+    browser_command = "Open the Apple Music website in Safari"
+    assert not actions.is_explicit_ui_presentation(
+        browser_command, "Apple Music", candidate_apps=browser_apps)
+    assert not actions.is_explicit_ui_presentation(
+        browser_command, "Safari", candidate_apps=browser_apps)
+    calendar_browser_apps = {"Calendar", "Google Calendar", "Google Chrome"}
+    calendar_command = "Open Google Calendar in Chrome"
+    assert not actions.is_explicit_ui_presentation(
+        calendar_command, "Google Calendar",
+        candidate_apps=calendar_browser_apps)
+    assert not actions.is_explicit_ui_presentation(
+        calendar_command, "Google Chrome",
+        candidate_apps=calendar_browser_apps)
+    raw = _structured_ui()
+    raw.update({
+        "complete": False, "source": "cua", "window_id": 44,
+        "app_name": "WhatsApp", "bundle_id": "net.whatsapp.WhatsApp",
+    })
+    context = actions.ActionContext.from_dict({"ui_snapshot": raw})
+    session = actions.ActionSession(
+        "open the Shivangi Gupta chat on WhatsApp", context,
+        require_target_verifier=True)
+    session.turns_used = 1
+    parsed = actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+    ], sends=False, done=True))
+
+    assert actions.turn_requires_terminal_presentation(parsed, session)
+
+    session.state.allowed_ui_attestation = "token-1"
+    session.state.allow_ui_presentation = True
+    attached = actions.attach_ui_presentation(
+        parsed, session.current_ui_snapshot, "token-1")
+    accepted = session.accept_reply(json.dumps(attached))
+    assert attached["done"] is False
+    assert [step["do"] for step in accepted["steps"]] == ["present_ui"]
+
+    wrong_intent = actions.ActionSession(
+        "check the Shivangi Gupta chat on WhatsApp", context,
+        require_target_verifier=True)
+    wrong_intent.turns_used = 1
+    assert not actions.turn_requires_terminal_presentation(parsed, wrong_intent)
+
+    ambiguous = actions.ActionSession(
+        "Open Slack integration settings in Notes",
+        actions.ActionContext.from_dict({
+            "running_apps": ["Slack", "Orca"],
+            "known_apps": ["Slack", "Notes", "Orca"],
+            "ui_snapshot": dict(
+                raw, app_name="Slack",
+                bundle_id="com.tinyspeck.slackmacgap"),
+        }),
+        require_target_verifier=True)
+    ambiguous.turns_used = 1
+    assert not actions.turn_requires_terminal_presentation(parsed, ambiguous)
+
+    web_target = actions.ActionSession(
+        "Open Slack on the web",
+        actions.ActionContext.from_dict({
+            "running_apps": ["Slack", "Orca"],
+            "known_apps": ["Slack", "Safari", "Google Chrome", "Orca"],
+            "ui_snapshot": dict(
+                raw, app_name="Slack",
+                bundle_id="com.tinyspeck.slackmacgap"),
+        }),
+        require_target_verifier=True)
+    web_target.turns_used = 1
+    assert not actions.turn_requires_terminal_presentation(parsed, web_target)
+    url_target = actions.ActionSession(
+        "Open https://slack.com",
+        web_target.context, require_target_verifier=True)
+    url_target.turns_used = 1
+    assert not actions.turn_requires_terminal_presentation(parsed, url_target)
+    spoken_url_target = actions.ActionSession(
+        "Open Slack dot com",
+        web_target.context, require_target_verifier=True)
+    spoken_url_target.turns_used = 1
+    assert not actions.turn_requires_terminal_presentation(
+        parsed, spoken_url_target)
+
+
 def test_production_session_refuses_message_content_before_target_attestation():
     context = actions.ActionContext.from_dict({
         "frontmost_app": "WhatsApp", "ui_snapshot": _structured_ui(),
@@ -3500,6 +3683,13 @@ def test_present_ui_attestation():
 
     assert actions.turn_requires_ui_presentation(parsed, session)
 
+    for web_command in (
+            "Draft a message for Hemesh on Slack on the web",
+            "Draft a Slack message for Hemesh in browser"):
+        web_session = actions.ActionSession(
+            web_command, context, require_target_verifier=True)
+        assert not actions.turn_requires_ui_presentation(parsed, web_session)
+
     for bundle_id in ("com.apple.Notes", "com.example.unknown"):
         local_raw = dict(raw, bundle_id=bundle_id)
         local_session = actions.ActionSession(
@@ -3507,6 +3697,14 @@ def test_present_ui_attestation():
             actions.ActionContext.from_dict({"ui_snapshot": local_raw}),
             require_target_verifier=True)
         assert not actions.turn_requires_ui_presentation(parsed, local_session)
+
+    wrong_app_raw = dict(
+        raw, app_name="WhatsApp", bundle_id="net.whatsapp.WhatsApp")
+    wrong_app = actions.ActionSession(
+        "Draft a message for Hemesh on Slack",
+        actions.ActionContext.from_dict({"ui_snapshot": wrong_app_raw}),
+        require_target_verifier=True)
+    assert not actions.turn_requires_ui_presentation(parsed, wrong_app)
 
     attached = actions.attach_ui_presentation(parsed, snapshot, "token-1")
     assert attached["done"] is False
@@ -3518,6 +3716,13 @@ def test_present_ui_attestation():
         "do": "present_ui", "snapshot": "snap-1",
         "bundle_id": "com.tinyspeck.slackmacgap", "window_id": 44,
     }]
+
+    web_state = actions.ActionSession(
+        "Draft a message for Hemesh on Slack on the web", context,
+        require_target_verifier=True)
+    web_state.state.allowed_ui_attestation = "token-1"
+    with pytest.raises(actions.PlanError, match="recipient draft"):
+        web_state.accept_reply(json.dumps(attached))
 
     forged = actions.ActionSession(
         "Draft a message for Hemesh on Slack", context,
@@ -3532,6 +3737,7 @@ def test_present_ui_draft_gate():
     def state(bundle_id, *, requires_proof=True):
         return actions.SessionState(
             ui_snapshot_id="snap-1", ui_snapshot_source="cua",
+            ui_snapshot_app_name="Slack",
             ui_snapshot_bundle_id=bundle_id, ui_snapshot_window_id=44,
             spoken_command=command, allowed_ui_attestation="token-1",
             require_ui_target_verification=requires_proof)

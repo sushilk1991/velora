@@ -430,6 +430,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let endDaemon: () -> Void
     private let bundleForPID: (Int) -> String?
     private let interactionIsQuiet: () -> Bool
+    private let userFocusForWindow: (Int) -> ActionWindowIdentity?
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
     /// means "can't tell from here" — the driver decides.
@@ -502,6 +503,8 @@ final class BackgroundRoutingActionHost: ActionHost {
             NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
          },
          interactionIsQuiet: (() -> Bool)? = nil,
+         userFocusForWindow: @escaping (Int) -> ActionWindowIdentity?
+            = BackgroundRoutingActionHost.resolveUserWindow,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
             = BackgroundRoutingActionHost.resolveRunningApp) {
         self.system = system
@@ -513,7 +516,29 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.interactionIsQuiet = interactionIsQuiet ?? {
             UserInputActivity.isQuiet(for: Self.handoffQuietSeconds)
         }
+        self.userFocusForWindow = userFocusForWindow
         self.localResolve = localResolve
+    }
+
+    private static func resolveUserWindow(
+        _ windowID: Int
+    ) -> ActionWindowIdentity? {
+        guard windowID > 0,
+              let rows = CGWindowListCopyWindowInfo(
+                [.optionIncludingWindow], CGWindowID(windowID))
+                as? [[String: Any]],
+              let row = rows.first(where: {
+                  ($0[kCGWindowNumber as String] as? Int) == windowID
+                      && ($0[kCGWindowLayer as String] as? Int) == 0
+              }),
+              let pid = row[kCGWindowOwnerPID as String] as? Int, pid > 0,
+              let app = NSRunningApplication(processIdentifier: pid_t(pid)),
+              app.activationPolicy == .regular,
+              let bundleID = app.bundleIdentifier
+        else { return nil }
+        return ActionWindowIdentity(
+            name: app.localizedName ?? "", bundleID: bundleID,
+            pid: pid, windowID: windowID)
     }
 
     /// Best-effort local identity for a spoken app name: the running apps
@@ -562,6 +587,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard interactionIsQuiet(),
               inputGeneration == UserInputActivity.snapshot()
         else { return .deferred }
+        guard presentationTargetIsLive(windowID: windowID) else { return .refused }
         if exactTargetIsForeground(windowID: windowID) {
             finishHandoff(windowID: windowID)
             return .ready
@@ -569,13 +595,17 @@ final class BackgroundRoutingActionHost: ActionHost {
 
         guard let front = system.frontmostApp(),
               let prior = captureFocus(front) else { return .refused }
+        guard interactionIsQuiet(),
+              inputGeneration == UserInputActivity.snapshot()
+        else { return .deferred }
+        guard presentationTargetIsLive(windowID: windowID) else { return .refused }
         let result = transport.call(Self.presentationTool, arguments: [
             "pid": targetPID, "window_id": windowID,
         ], timeout: Self.callTimeout)
         guard inputGeneration == UserInputActivity.snapshot() else {
-            _ = restoreHandoffFocus(
-                prior, pid: targetPID, windowID: windowID,
-                bundleID: targetBundleID)
+            _ = restoreAfterUserInput(
+                prior, generation: inputGeneration, pid: targetPID,
+                windowID: windowID, bundleID: targetBundleID)
             return .deferred
         }
         guard case .success(let reply) = result,
@@ -952,6 +982,18 @@ final class BackgroundRoutingActionHost: ActionHost {
         return restoreFocus(prior)
     }
 
+    private func restoreAfterUserInput(
+        _ prior: FocusTarget, generation: UInt64,
+        pid: Int, windowID: Int, bundleID: String
+    ) -> Bool {
+        if let selectedWindow = UserInputActivity.selectedWindow(after: generation),
+           let selected = userFocusForWindow(selectedWindow) {
+            return restoreWindow(selected)
+        }
+        return restoreHandoffFocus(
+            prior, pid: pid, windowID: windowID, bundleID: bundleID)
+    }
+
     // MARK: - Target readiness (drives the executor's wait_frontmost poll)
 
     /// In routed mode the "frontmost app" IS the background target. A route
@@ -978,7 +1020,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// membership is nullable private metadata; exact PID/window identity is
     /// the handoff boundary.
     private func resolveDeferredWindow() -> Bool {
-        guard foregroundAtInteraction,
+        guard routed,
               bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame,
               case .success(let reply) = transport.call(
@@ -1424,11 +1466,17 @@ final class BackgroundRoutingActionHost: ActionHost {
         routed ? nil : system.foregroundWindow()
     }
 
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
-        let inputGeneration = UserInputActivity.snapshot()
+    private func presentationTargetIsLive(windowID: Int) -> Bool {
         guard routed, snapshotLineage == .valid, targetReady,
-              interactionIsQuiet(),
-              inputGeneration == UserInputActivity.snapshot(),
+              resolveDeferredWindow(), targetWindowID == windowID,
+              let liveBundleID = bundleForPID(targetPID),
+              liveBundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame
+        else { return false }
+        return true
+    }
+
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+        guard routed, snapshotLineage == .valid, targetReady,
               let cached = routedUISnapshot,
               cached.observation.source == .cua,
               cached.observation.id == snapshotID,
@@ -1436,19 +1484,35 @@ final class BackgroundRoutingActionHost: ActionHost {
               cached.observation.windowID == windowID,
               cached.pid == targetPID, cached.windowID == windowID,
               cached.bundleID == targetBundleID,
-              let front = system.frontmostApp(),
-              front.bundleID.caseInsensitiveCompare(targetBundleID)
-                != .orderedSame,
+              waitForQuiet()
+        else { return false }
+
+        let inputGeneration = UserInputActivity.snapshot()
+        guard interactionIsQuiet(),
+              inputGeneration == UserInputActivity.snapshot(),
+              presentationTargetIsLive(windowID: windowID)
+        else { return false }
+        if exactTargetIsForeground(windowID: windowID) {
+            unroute()
+            return true
+        }
+        guard let front = system.frontmostApp(),
               let prior = captureFocus(front)
         else { return false }
+        guard interactionIsQuiet(),
+              inputGeneration == UserInputActivity.snapshot(),
+              presentationTargetIsLive(windowID: windowID)
+        else {
+            return false
+        }
 
         let result = transport.call(Self.presentationTool, arguments: [
             "pid": targetPID, "window_id": windowID,
         ], timeout: Self.callTimeout)
         guard inputGeneration == UserInputActivity.snapshot() else {
-            _ = restoreHandoffFocus(
-                prior, pid: targetPID, windowID: windowID,
-                bundleID: targetBundleID)
+            _ = restoreAfterUserInput(
+                prior, generation: inputGeneration, pid: targetPID,
+                windowID: windowID, bundleID: targetBundleID)
             return false
         }
         guard case .success(let reply) = result,

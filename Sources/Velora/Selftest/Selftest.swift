@@ -1962,8 +1962,20 @@ enum Selftest {
             keyCode: 0, flags: 0,
             isRepeat: true, invalidateContinuation: true)
         expect(
-            UserInputActivity.snapshot() == generationAfterUserKey,
-            "key autorepeat does not create redundant input generations")
+            UserInputActivity.snapshot() == generationAfterUserKey &+ 1,
+            "key autorepeat keeps a foreground handoff deferred")
+        UserInputActivity.keyPressed(0)
+        expect(!UserInputActivity.isQuiet(for: 0),
+               "a held user key is never classified as quiet")
+        UserInputActivity.keyReleased(0)
+        let clickGeneration = UserInputActivity.snapshot()
+        UserInputActivity.pointerPressed(button: 0, windowID: 80)
+        expect(!UserInputActivity.isQuiet(for: 0)
+               && UserInputActivity.selectedWindow(after: clickGeneration) == 80,
+               "a held pointer records the window the user selected")
+        UserInputActivity.pointerReleased(0)
+        expect(!HotkeyMonitor.modifierKeyIsDown(56, keyState: { $0 == 60 }),
+               "one held Shift does not keep its released sibling active")
         expect(
             DictationController.delayedEditCaptureRelease(heldFor: 0.1)
                 == .lockRecording,

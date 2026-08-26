@@ -3093,9 +3093,14 @@ class Engine:
                 try:
                     reply_text = result.text
                     parsed = actions.parse_turn(reply_text)
-                    if actions.turn_requires_ui_presentation(parsed, session):
+                    terminal_presentation = (
+                        actions.turn_requires_terminal_presentation(
+                            parsed, session))
+                    if (actions.turn_requires_ui_presentation(parsed, session)
+                            or terminal_presentation):
                         token = uuid.uuid4().hex
                         session.state.allowed_ui_attestation = token
+                        session.state.allow_ui_presentation = terminal_presentation
                         parsed = actions.attach_ui_presentation(
                             parsed, session.current_ui_snapshot, token)
                         reply_text = json.dumps(
@@ -3172,7 +3177,8 @@ class Engine:
                     if (review_refusal_reason
                             or actions.turn_requires_goal_verifier(parsed, session)):
                         if not session.current_ui_snapshot.get("complete"):
-                            authoritative_ui_refusal = True
+                            authoritative_ui_refusal = bool(
+                                review_refusal_reason)
                             raise actions.PlanError(
                                 "goal verifier: structured UI is incomplete")
                         verifier_prompt = actions.build_goal_verifier_prompt(
@@ -3226,6 +3232,12 @@ class Engine:
                             raise actions.PlanError(
                                 "UI action reviewer refused: "
                                 + review_refusal_reason)
+                        else:
+                            reason = str(
+                                goal_verdict.get("reason")
+                                or "current UI did not prove completion")
+                            raise actions.PlanError(
+                                "goal verifier refused: " + reason)
                     if actions.turn_requires_target_verifier(parsed, session):
                         authoritative_ui_refusal = True
                         verifier_prompt = actions.build_target_verifier_prompt(
@@ -3274,12 +3286,14 @@ class Engine:
                     break
                 except _ActionModelUnavailable as exc:
                     session.state.allowed_ui_attestation = None
+                    session.state.allow_ui_presentation = False
                     last_error = str(exc)
                     model_unavailable_error = last_error
                     if attempt == 0:
                         await wait_for_model_recovery_once()
                 except actions.PlanError as exc:
                     session.state.allowed_ui_attestation = None
+                    session.state.allow_ui_presentation = False
                     had_plan_error = True
                     last_error = str(exc)
                     repeats = session.note_rejected_reply(result.text)
