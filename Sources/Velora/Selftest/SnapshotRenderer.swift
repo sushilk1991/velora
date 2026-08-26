@@ -69,6 +69,24 @@ enum SnapshotRenderer {
             ("hud-action-retrying", .notice(
                 symbol: "wand.and.stars",
                 message: ActionProgress.retrying("stale screen").hudMessage)),
+            ("hud-action-result-verified", .actionResult(
+                id: "action-verified",
+                status: .verified,
+                symbol: "paperplane.fill",
+                message: "Sent Hi to Gaurav Singh Bissain",
+                appName: "Slack")),
+            ("hud-action-result-ready", .actionResult(
+                id: "action-ready",
+                status: .ready,
+                symbol: "arrow.up.forward.app.fill",
+                message: "Slack is ready",
+                appName: "Slack")),
+            ("hud-action-result-unverified", .actionResult(
+                id: "action-unverified",
+                status: .unverified,
+                symbol: "paperplane.fill",
+                message: "Could not verify the recipient",
+                appName: "Slack")),
             ("hud-action-failed", .error("The selected conversation changed")),
         ]
         for (name, state) in cases {

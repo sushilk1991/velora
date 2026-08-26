@@ -16,6 +16,7 @@ final class FakeActionHost: ActionHost {
     var focusedRole: String?
     var visibleNamesValue: [String] = []
     var uiSnapshotValue: ActionUISnapshot?
+    var uiSnapshotValues: [ActionUISnapshot] = []
     var uiWindowStillCurrent = true
     var pressableUIIndices: Set<Int> = []
     var verifiableUIIndices: Set<Int> = []
@@ -43,6 +44,7 @@ final class FakeActionHost: ActionHost {
     var keyPressSucceeds = true
     var openURLSucceeds = true
     var presentUISucceeds = false
+    var interactionState = ActionInteractionState.ready
     var exactOpenDefers = false
     var exactOpenRequiresInactive = false
     /// Set to make `frontmostApp()` change after N reads (focus stolen).
@@ -64,6 +66,11 @@ final class FakeActionHost: ActionHost {
     private(set) var sleepCalls: [Int] = []
     private(set) var endInputCount = 0
     private(set) var presentUICalls = 0
+    private(set) var interactionCalls = 0
+    private(set) var windowTitleReads = 0
+    private(set) var elementLabelReads = 0
+    private(set) var focusedRoleReads = 0
+    private(set) var visibleNamesReads = 0
     private var frontmostReads = 0
     private var clock: TimeInterval = 0
     private var actionDraft = ""
@@ -71,6 +78,11 @@ final class FakeActionHost: ActionHost {
     func beginActionInputSession() {
         actionDraft = ""
         ownsDraft = true
+    }
+
+    func prepareInteraction() -> ActionInteractionState {
+        interactionCalls += 1
+        return interactionState
     }
 
     func endActionInputSession() {
@@ -130,6 +142,7 @@ final class FakeActionHost: ActionHost {
     }
 
     func frontmostWindowTitle() -> String? {
+        windowTitleReads += 1
         defer {
             if loseDraftOwnershipAfterContextRead {
                 loseDraftOwnershipAfterContextRead = false
@@ -138,11 +151,23 @@ final class FakeActionHost: ActionHost {
         }
         return windowTitle
     }
-    func focusedElementLabel() -> String? { elementLabel }
+    func focusedElementLabel() -> String? {
+        elementLabelReads += 1
+        return elementLabel
+    }
     func focusedSelectionLabel() -> String? { selectionLabel }
-    func focusedElementRole() -> String? { focusedRole }
-    func visibleNames() -> [String] { visibleNamesValue }
-    func uiSnapshot() -> ActionUISnapshot? { uiSnapshotValue }
+    func focusedElementRole() -> String? {
+        focusedRoleReads += 1
+        return focusedRole
+    }
+    func visibleNames() -> [String] {
+        visibleNamesReads += 1
+        return visibleNamesValue
+    }
+    func uiSnapshot() -> ActionUISnapshot? {
+        guard !uiSnapshotValues.isEmpty else { return uiSnapshotValue }
+        return uiSnapshotValues.removeFirst()
+    }
     /// Mirrors the production foreground host: these come off the window in
     /// front of the user. A test can flip it to model a background host.
     var screenNamesAreUserVisible = true
@@ -1334,6 +1359,19 @@ extension Selftest {
         expect(pressHost.sleepCalls == [ActionExecutor.indexedPressSettleMs],
                "an indexed press settles before the next AX observation")
 
+        let busyPressHost = FakeActionHost()
+        busyPressHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        busyPressHost.uiSnapshotValue = snapshot
+        busyPressHost.pressableUIIndices = [14]
+        busyPressHost.interactionState = .deferred
+        if case .failed = ActionExecutor(host: busyPressHost).run(pressPlan).outcome {
+            expect(busyPressHost.interactionCalls == 1
+                   && busyPressHost.pressedUIIndices.isEmpty,
+                   "an indexed press respects the interaction boundary")
+        } else {
+            expect(false, "an indexed press cannot bypass a busy target")
+        }
+
         let longLabel = "Priya Sharma Q3 planning notes for slide four and "
             + "tomorrow morning follow up discussion details"
         expect(longLabel.count > 80,
@@ -1819,7 +1857,7 @@ extension Selftest {
                                       execute: true, allowSend: false)
         let result = runner.run(transcript: "message Shivangi about traffic",
                                 context: loopContext())
-        guard case .performedUnverified(_, let trace) = result else {
+        guard case .performedUnverified(_, let trace, _) = result else {
             expect(false, "the loop recovers and reports its typed draft as unverified, "
                    + "got \(result)")
             return
@@ -2230,7 +2268,7 @@ extension Selftest {
         let openResult = ActionLoopRunner(host: openHost, planner: openPlanner,
                                           execute: true, allowSend: false)
             .run(transcript: "send the email", context: loopContext())
-        if case .performedUnverified(let goal, _) = openResult {
+        if case .performedUnverified(let goal, _, _) = openResult {
             expect(goal == "send the email",
                    "an under-planned request remains explicitly unverified")
         } else {
@@ -2251,7 +2289,7 @@ extension Selftest {
             host: crossTurnHost, planner: crossTurnPlanner,
             execute: true, allowSend: false
         ).run(transcript: "open Mail", context: loopContext())
-        if case .performedUnverified(let goal, _) = crossTurnResult {
+        if case .performedUnverified(let goal, _, _) = crossTurnResult {
             expect(goal == "open Mail",
                    "cross-turn evidence is retained without claiming goal completion")
         } else {
@@ -2371,7 +2409,7 @@ extension Selftest {
             execute: true, allowSend: false
         ).run(transcript: "open the Shivangi Gupta chat on WhatsApp",
               context: loopContext())
-        if case .completed(let goal, let trace) = goalResult {
+        if case .completed(let goal, let trace, _) = goalResult {
             expect(goal == "open the Shivangi Gupta chat on WhatsApp",
                    "runtime goal proof completes the immutable spoken goal")
             expect(trace.contains { $0.contains("verify_goal ok") },
@@ -2383,32 +2421,43 @@ extension Selftest {
         let terminalHost = FakeActionHost()
         terminalHost.appsByName["Slack"] = (
             "Slack", "com.tinyspeck.slackmacgap")
+        terminalHost.frontmost = (
+            "Slack", "com.tinyspeck.slackmacgap")
         terminalHost.isDrivingInBackground = true
-        terminalHost.presentUISucceeds = true
-        terminalHost.uiSnapshotValue = ActionUISnapshot(
-            id: "terminal-cua", source: .cua, appName: "Slack",
-            bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Slack",
-            windowID: 46, complete: false, elements: [])
+        terminalHost.foregroundWindowValue = ActionWindowIdentity(
+            name: "Slack", bundleID: "com.tinyspeck.slackmacgap",
+            pid: 500, windowID: 46)
+        terminalHost.uiSnapshotValues = ["initial", "observed", "fresh"].map { id in
+            ActionUISnapshot(
+                id: id, source: .cua, appName: "Slack",
+                bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Slack",
+                windowID: 46, complete: true, elements: [])
+        }
         let terminalPlanner = FakeTurnPlanner(turns: [
             .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
-            [{"do":"open_app","app":"Slack"}]
+            [{"do":"wait_frontmost","app":"Slack"}]
             """), done: true),
-            .turn(sends: false, goal: "", steps: jsonSteps("""
-            [{"do":"present_ui","snapshot":"terminal-cua",
-              "bundle_id":"com.tinyspeck.slackmacgap","window_id":46}]
-            """), done: false),
+            .turn(sends: false, goal: "", steps: [], done: true),
         ])
         let terminalResult = ActionLoopRunner(
             host: terminalHost, planner: terminalPlanner,
             execute: true, allowSend: false
         ).run(transcript: "Open Slack", context: loopContext())
-        expect(terminalHost.presentUICalls == 1
+        expect(terminalHost.presentUICalls == 0
                && terminalPlanner.observations.count == 1,
-               "an exact app-only presentation completes without full AX")
-        if case .completed = terminalResult {
-            expect(true, "exact app-only presentation proves the open goal")
+               "an exact background route completes without stealing focus")
+        expect(terminalHost.windowTitleReads == 0
+               && terminalHost.elementLabelReads == 0
+               && terminalHost.focusedRoleReads == 0
+               && terminalHost.visibleNamesReads == 0,
+               "one structured background snapshot supplies one observation")
+        if case .ready(_, _, let target) = terminalResult {
+            expect(target == ActionCompletionTarget(
+                appName: "Slack", bundleID: "com.tinyspeck.slackmacgap",
+                pid: 500, windowID: 46),
+                "the result keeps the exact app for a user-clicked handoff")
         } else {
-            expect(false, "an exact app-only presentation completes")
+            expect(false, "a fresh exact background route reports ready")
         }
 
         let ambiguousHost = FakeActionHost()
@@ -2494,15 +2543,31 @@ extension Selftest {
         }
 
         let unverified = ActionResult.performedUnverified(
-            goal: "open example", trace: ["open_url https://example.com"])
+            goal: "open example", trace: ["open_url https://example.com"],
+            target: ActionCompletionTarget(
+                appName: "Browser", bundleID: "com.example.browser"))
         let payload = unverified.controlSuccessPayload(execute: true)
         expect(payload?["executed"] as? Bool == true
                && payload?["completed"] as? Bool == false
                && payload?["verified"] as? Bool == false,
                "CLI truthfully separates execution from verified completion")
         let notice = unverified.voiceCompletionNotice
-        expect(notice?.symbol != "checkmark.circle",
-               "voice execution without evidence never receives a success checkmark")
+        expect(notice?.verified == false
+               && notice?.target?.bundleID == "com.example.browser",
+               "unverified work is inspectable without looking successful")
+
+        let ready = ActionResult.ready(
+            goal: "Open Slack", trace: ["wait_frontmost Slack"],
+            target: ActionCompletionTarget(
+                appName: "Slack",
+                bundleID: "com.tinyspeck.slackmacgap"))
+        let readyPayload = ready.controlSuccessPayload(execute: true)
+        let readyNotice = ready.voiceCompletionNotice
+        expect(readyPayload?["ready"] as? Bool == true
+               && readyPayload?["completed"] as? Bool == false
+               && readyNotice?.ready == true
+               && readyNotice?.message == "Slack is ready",
+               "a hidden app is ready for a click, never falsely completed")
 
         let unsafeGoal = "\u{202E}" + String(repeating: "x", count: 300)
         let boundedPlanner = FakeTurnPlanner(turns: [
@@ -2514,7 +2579,7 @@ extension Selftest {
             host: FakeActionHost(), planner: boundedPlanner,
             execute: true, allowSend: false
         ).run(transcript: unsafeGoal, context: loopContext())
-        if case .performedUnverified(let goal, _) = boundedResult {
+        if case .performedUnverified(let goal, _, _) = boundedResult {
             expect(goal.count == 200 && !goal.contains("\u{202E}"),
                    "unverified goal text is sanitized and bounded locally")
         } else {
@@ -4167,6 +4232,9 @@ final class FakeCuaTransport: CuaTransport {
     /// Most host tests model a healthy driver, which mints every snapshot ID
     /// once. Replay tests disable this and supply exact IDs themselves.
     var freshWindowSnapshots = false
+    /// A confirmed native type has already observed the field change. Mirror
+    /// that driver contract unless a refusal test deliberately disables it.
+    var appliesConfirmedText = true
     private var snapshotSequence = 0
 
     func call(_ tool: String, arguments: [String: Any],
@@ -4177,9 +4245,11 @@ final class FakeCuaTransport: CuaTransport {
         if var queue = queued[tool], !queue.isEmpty {
             let response = queue.removeFirst()
             queued[tool] = queue
+            applyText(response, tool: tool, arguments: arguments)
             return .success(freshened(response, for: tool))
         }
         if let response = responses[tool] {
+            applyText(response, tool: tool, arguments: arguments)
             return .success(freshened(response, for: tool))
         }
         if tool == "launch_app", let response = launchReply(arguments) {
@@ -4189,6 +4259,26 @@ final class FakeCuaTransport: CuaTransport {
     }
 
     func callCount(_ tool: String) -> Int { calls.filter { $0.tool == tool }.count }
+
+    private func applyText(
+        _ response: [String: Any], tool: String,
+        arguments: [String: Any]
+    ) {
+        guard appliesConfirmedText, tool == "type_text",
+              response["effect"] as? String == "confirmed",
+              let text = arguments["text"] as? String,
+              var state = responses["get_window_state"],
+              var elements = state["elements"] as? [[String: Any]],
+              let index = elements.firstIndex(where: {
+                  CuaElement.editableTextRoles.contains(
+                    ($0["role"] as? String) ?? "")
+              })
+        else { return }
+        elements[index]["value"] = ((elements[index]["value"] as? String) ?? "")
+            + text
+        state["elements"] = elements
+        responses["get_window_state"] = state
+    }
 
     private func launchReply(_ arguments: [String: Any]) -> [String: Any]? {
         guard let bundleID = arguments["bundle_id"] as? String,
@@ -4852,7 +4942,7 @@ extension Selftest {
                                 context: context)
 
         switch result {
-        case .performedUnverified(_, let trace):
+        case .performedUnverified(_, let trace, _):
             expect(trace.contains { $0.hasPrefix("type_text") },
                    "a routed action runs end to end and types")
             expect(trace.contains { $0.hasPrefix("verify_context ok") },
@@ -5047,6 +5137,35 @@ extension Selftest {
     }
 
     private static func testCuaKeyMap() {
+        let activation: [String: Any] = [
+            "status": "activated",
+            "code": "bring_to_front_exact_window_verified",
+            "activated": true,
+            "request_accepted": true,
+            "process_activated": true,
+            "pid": 500,
+            "window_id": 9,
+            "exact_window_effect": [
+                "verified": true,
+                "focused": true,
+                "frontmost_ordinary": true,
+                "target_visible_ordinary": true,
+            ],
+            "observed": [
+                "frontmost_pid": 500,
+                "workspace_frontmost_pid": 500,
+                "front_process_matches_target": true,
+                "focused_window_id": 9,
+                "frontmost_ordinary_window_id": 9,
+            ],
+        ]
+        expect(CuaWindowActivation.matches(
+            activation, pid: 500, windowID: 9),
+            "an exact Cua activation proves the requested PID and window")
+        expect(!CuaWindowActivation.matches(
+            activation, pid: 500, windowID: 10),
+            "an activation for another window cannot open an Action target")
+
         expect(CuaKeyMap.driverKey(forPlanKey: "enter") == "return",
                "enter translates to the driver's return")
         expect(CuaKeyMap.driverKey(forPlanKey: "page_up") == "pageup"
@@ -5168,19 +5287,20 @@ extension Selftest {
         ])
         expect(!truncated.complete && truncated.primaryTextElement == nil,
                "a truncated tree can manufacture uniqueness — refuse it")
-        // Counts describe only the actionable projection and cannot prove the
-        // driver's whole AX walk was exhaustive.
+        // Matching counts do not prove that the driver walked the whole AX
+        // tree. Only its explicit completeness flag can grant that authority.
         let wholeTree = CuaSnapshot.parse([
             "elements_complete": false,
             "element_count": 2, "total_element_count": 2,
             "elements": [
                 ["element_index": 0, "role": "AXWindow", "element_token": "s:0"],
                 ["element_index": 1, "role": "AXTextArea", "value": "",
-                 "parent_index": 0, "element_token": "s:1"],
+                 "parent_index": 0, "element_token": "s:1",
+                 "enabled": true],
             ],
         ])
         expect(!wholeTree.complete && wholeTree.primaryTextElement == nil,
-               "matching Cua counts never manufacture whole-tree completeness")
+               "matching Cua counts do not prove a complete projection")
         // The driver reports several different count fields; only the nodes
         // actually parsed can be vouched for. A reply that CLAIMS a full
         // count but ships fewer elements is truncated.
@@ -5216,6 +5336,18 @@ extension Selftest {
         ])
         expect(flagOnly.complete,
                "a driver that does set the flag is still believed")
+        let malformedFlag = CuaSnapshot.parse([
+            "elements_complete": true,
+            "elements": [
+                ["element_index": 0, "role": "AXWindow",
+                 "element_token": "s:0"],
+                ["element_index": 1, "element_token": "s:1"],
+            ],
+        ])
+        expect(!malformedFlag.complete,
+               "a complete flag cannot hide a malformed tree element")
+        expect(!duplicated.complete,
+               "duplicate indices make the entire Cua tree incomplete")
 
         func text(_ index: Int, _ role: String, value: String? = nil,
                   parent: Int? = nil) -> CuaElement {
@@ -5313,11 +5445,11 @@ extension Selftest {
                "the setting turns routing off")
         expect(route("com.example.FutureMessenger", target: "Future Messenger",
                      contentMayCommit: true),
-               "a sending action defers foreground until interaction")
+               "a sending action remains eligible for exact background delivery")
         expect(route("com.tinyspeck.slackmacgap", target: "Slack"),
                "a non-sending draft does not need an app-specific route rule")
         expect(!route("com.google.chrome"),
-               "browsers keep the foreground path (web AX is unverifiable)")
+               "browsers refuse this native background path")
         expect(!route("com.apple.notes", target: "Notes", front: "Notes",
                       frontBundle: "com.apple.notes"),
                "acting on the app the user is in stays foreground")
@@ -5346,6 +5478,7 @@ extension Selftest {
     private static func makeRoutedHost(
         system: FakeActionHost, transport: FakeCuaTransport,
         enabled: Bool = true, healthy: Bool = true,
+        accessibilityGranted: Bool = true,
         starter: FakeDaemonStarter? = nil,
         endDaemon: @escaping () -> Void = {},
         interactionIsQuiet: (() -> Bool)? = { true },
@@ -5361,6 +5494,7 @@ extension Selftest {
         return BackgroundRoutingActionHost(
             system: system, transport: transport,
             backgroundEnabled: { enabled },
+            accessibilityGranted: { accessibilityGranted },
             ensureDaemon: { _ in
                 if let starter { return starter.ensure() }
                 return healthy
@@ -5388,9 +5522,7 @@ extension Selftest {
         snapshot: String = "s00000001", value: String = "",
         elementsComplete: Bool = true, buttonToken: String? = nil
     ) -> [String: Any] {
-        // An explicitly exhaustive native-window fixture. Production Cua
-        // 0.21 currently leaves this flag false; matching counts must not
-        // manufacture it.
+        // An explicitly exhaustive native-window fixture.
         [
             "snapshot_id": snapshot, "degraded": false,
             "elements_complete": elementsComplete,
@@ -5725,6 +5857,56 @@ extension Selftest {
             ]
         }
 
+        // Background mode is a no-focus contract. A target that cannot be
+        // driven invisibly must refuse instead of falling through to AppKit.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByName["Safari"] = ("Safari", "com.apple.Safari")
+            let transport = FakeCuaTransport()
+            let starter = FakeDaemonStarter()
+            let host = makeRoutedHost(
+                system: system,
+                transport: transport,
+                starter: starter,
+                localApps: ["Safari": "com.apple.Safari"])
+            host.beginActionInputSession()
+
+            expect(host.openApp(named: "Safari") == nil
+                   && system.log.isEmpty && starter.starts == 0,
+                   "a foreground-only target refuses without stealing focus")
+            expect(!host.openURL(URL(string: "https://example.com")!)
+                   && system.log.isEmpty,
+                   "open_url refuses rather than switching the default app")
+        }
+
+        // A display name is not an app identity. Duplicate candidates must
+        // refuse before either bundle receives an invisible action.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            transport.responses["list_apps"] = ["apps": [
+                ["name": "Slack", "bundle_id": "com.real.slack",
+                 "pid": 500, "running": true],
+                ["name": "Slack", "bundle_id": "com.other.slack",
+                 "pid": 600, "running": true],
+            ]]
+            let host = makeRoutedHost(
+                system: system,
+                transport: transport,
+                localApps: [:])
+            host.beginActionInputSession()
+
+            expect(host.openApp(named: "Slack") == nil
+                   && transport.callCount("list_windows") == 0
+                   && !host.isDrivingInBackground && system.log.isEmpty,
+                   "duplicate app names refuse instead of picking a bundle")
+        }
+
         // The happy path: another app, native, daemon healthy — the action
         // routes to the background and the system host never activates
         // anything.
@@ -5743,7 +5925,7 @@ extension Selftest {
                    "the system host never activates a background target")
             let front = host.frontmostApp()
             expect(front?.name == "Notes"
-                   && front?.bundleID == "com.apple.notes",
+                   && front?.bundleID == "com.apple.Notes",
                    "once the window resolves, the target IS the frontmost")
             expect(host.frontmostWindowTitle() == "My Note",
                    "observations read the target window, not the user's")
@@ -5752,6 +5934,13 @@ extension Selftest {
             expect(host.focusedElementRole() == "AXTextArea",
                    "the observation reports the element typing will address — "
                        + "without it the planner waits for focus forever")
+
+            system.frontmost = ("Notes", "com.apple.Notes")
+            expect(host.prepareInteraction() == .deferred,
+                   "background work pauses while the user is in its target app")
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            expect(host.prepareInteraction() == .ready,
+                   "activity in another app does not block background work")
 
             transport.responses["type_text"] = ["effect": "confirmed",
                                                 "delivery": ["mode": "background"]]
@@ -5794,11 +5983,31 @@ extension Selftest {
                    "a click clears stale background draft authority")
         }
 
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            let host = makeRoutedHost(
+                system: system,
+                transport: transport,
+                accessibilityGranted: false)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+
+            expect(!host.canPostInput,
+                   "background input refuses without Accessibility permission")
+        }
+
         // A running Electron process can own zero windows after its last
         // window closes. launch_app must materialize one without activating it.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": []]
@@ -5859,9 +6068,9 @@ extension Selftest {
             expect(host.openApp(named: "Notes") == nil,
                    "failed Cua suppression refuses the background route")
             expect(system.sleepCalls.isEmpty
-                   && transport.callCount("bring_to_front") == 0
-                   && system.frontmost?.bundleID == "com.apple.notes",
-                   "failed suppression adds no Velora focus manipulation")
+                   && transport.callCount("bring_to_front") == 1
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "failed suppression restores the exact untouched window")
         }
 
         // If focus changed to another app while Cua launched, that app belongs
@@ -5886,6 +6095,7 @@ extension Selftest {
             ]
             transport.onCall = { tool in
                 if tool == "launch_app" {
+                    UserInputActivity.mark()
                     system.frontmost = ("Finder", "com.apple.finder")
                     system.foregroundWindowValue = nil
                     transport.responses["list_windows"] = ["windows": [[
@@ -6636,8 +6846,8 @@ extension Selftest {
                 expect(false, "a routed target exposes structured Cua evidence")
                 return
             }
-            expect(!snapshot.complete && snapshot.bundleID == "com.apple.notes",
-                   "Cua evidence never claims an exhaustive whole-window tree")
+            expect(!snapshot.complete && snapshot.bundleID == "com.apple.Notes",
+                   "Cua evidence keeps a partial projection partial")
             let button = snapshot.elements.first { $0.index == 2 }
             expect(button?.actions == [ActionUICapability.cuaClick],
                    "Cua exposes its exact driver click without inventing AXPress")
@@ -6830,14 +7040,13 @@ extension Selftest {
                 noteWindowState(snapshot: "s00000002", value: "landed already")
             expect(!host.typeText("landed", expecting: nil),
                    "pre-existing text is not proof of delivery")
-            // Now the element's value genuinely grows.
+            // Now the empty field becomes exactly the text Velora delivered.
             transport.queued["get_window_state"] = [
-                noteWindowState(snapshot: "s00000003", value: "landed already"),
-                noteWindowState(snapshot: "s00000004",
-                                value: "landed already landed"),
+                noteWindowState(snapshot: "s00000003", value: ""),
+                noteWindowState(snapshot: "s00000004", value: "landed"),
             ]
             expect(host.typeText("landed", expecting: nil),
-                   "a changed value carrying the insertion IS proof")
+                   "the exact changed field value proves delivery")
         }
 
         // An unresolved background AX surface must stay background. Earlier
@@ -6909,9 +7118,9 @@ extension Selftest {
                    "degraded elements cannot leak or drive background input")
         }
 
-        // An off-Space target is still an exact read-only target. Keep it
-        // routed until interaction, even if the user changes foreground apps
-        // while the Cua window probe is in flight.
+        // An off-Space target with no usable AX tree stays routed but refuses
+        // readiness. It must not foreground itself even if the user changes
+        // apps while the Cua window probe is in flight.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -6949,16 +7158,12 @@ extension Selftest {
             expect(host.openApp(named: "Notes") == "Notes",
                    "an off-Space target remains available after a user focus change")
             expect(host.isDrivingInBackground
-                   && host.frontmostApp()?.name == "Notes"
+                   && host.frontmostApp() == nil
                    && system.frontmost?.bundleID == "com.apple.finder",
-                   "off-Space observation never takes foreground ownership")
+                   "degraded off-Space readiness refuses without taking focus")
             let identity = host.uiSnapshot()
-            expect(identity?.id == "cua-window-500-9"
-                   && identity?.source == .cua
-                   && identity?.bundleID == "com.apple.notes"
-                   && identity?.windowID == 9
-                   && identity?.elements.isEmpty == true,
-                   "a degraded exact window still exposes presentation identity")
+            expect(identity == nil,
+                   "a degraded exact window exposes no actionable snapshot")
             expect(daemonStops == 0,
                    "the private child remains available until interaction")
             expect(transport.callCount("bring_to_front") == 0,
@@ -6966,24 +7171,25 @@ extension Selftest {
             expect(system.log.isEmpty,
                    "off-Space planning never delegates to the foreground host")
 
-            system.foregroundWindowValue = ActionWindowIdentity(
-                name: "Finder", bundleID: "com.apple.finder",
-                pid: 800, windowID: 80)
-            transport.responses["bring_to_front"] = presentationReply(500, 9)
             let firstInteraction = ActionExecutor(host: host).run(ActionPlan(
                 goal: "dismiss the note", sends: false,
                 steps: [
                     .waitFrontmost(app: "Notes", timeoutMs: 1_000),
                     .key(name: "escape", mods: [], repeatCount: 1),
                 ], unsupported: nil))
-            expect(firstInteraction.outcome == .completed,
-                   "off-Space mutation follows the exact handoff immediately")
-            expect(transport.callCount("bring_to_front") == 1
+            if case .failed(_, _, let recoverable) = firstInteraction.outcome {
+                expect(recoverable,
+                       "degraded off-Space mutation fails safely")
+            } else {
+                expect(false, "degraded off-Space mutation must not run")
+            }
+            expect(transport.callCount("bring_to_front") == 0
                    && transport.callCount("press_key") == 0
-                   && system.keys.count == 1,
-                   "off-Space handoff uses native input without planner delay")
+                   && system.keys.isEmpty,
+                   "degraded off-Space input never reaches either host")
+            host.endActionInputSession()
             expect(daemonStops == 1,
-                   "off-Space handoff releases its private Cua child")
+                   "ending the refused action releases its private Cua child")
         }
 
         // Cua can keep some AppKit windows actionable across Spaces when the
@@ -7181,19 +7387,20 @@ extension Selftest {
             }
             if failure == "launch_focus_changed" {
                 transport.onCall = { tool in
-                    guard tool == "launch_app" else { return }
-                    system.frontmost = ("Finder", "com.apple.finder")
+                    if tool == "launch_app" {
+                        system.frontmost = ("Finder", "com.apple.finder")
+                    }
+                    if tool == "bring_to_front" {
+                        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+                    }
                 }
             }
             let host = makeRoutedHost(
                 system: system, transport: transport, healthy: healthy)
             host.beginActionInputSession()
-            let expectedFrontmost = failure == "launch_focus_changed"
-                ? "com.apple.finder" : "com.mitchellh.ghostty"
+            let expectedFrontmost = "com.mitchellh.ghostty"
             let opened = host.openApp(named: "Notes")
-            let expectedOpened = failure == "launch_focus_changed"
-                ? "Notes" : nil
-            expect(opened == expectedOpened
+            expect(opened == nil
                    && system.frontmost?.bundleID == expectedFrontmost
                    && !system.log.contains("openApp(Notes)"),
                    "eligible background \(failure) preserves foreground ownership")
@@ -7212,6 +7419,47 @@ extension Selftest {
             expect(host.openApp(named: "Slack") == nil
                    && !system.log.contains("openApp(Slack)"),
                    "a routed retarget resolution failure does not activate Slack")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var targetState = noteWindowState()
+            var elements = targetState["elements"] as? [[String: Any]] ?? []
+            elements[1]["label"] = "My Note"
+            targetState["elements"] = elements
+            transport.responses["get_window_state"] = targetState
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot(),
+                  let target = snapshot.elements.first(where: { $0.index == 1 })
+            else {
+                expect(false, "complete Cua target evidence is available")
+                return
+            }
+            let result = ActionExecutor(host: host).run(ActionPlan(
+                goal: "write hello in My Note", sends: false,
+                steps: [
+                    .waitFrontmost(app: "Notes", timeoutMs: 1_000),
+                    .verifyUI(
+                        snapshotID: snapshot.id,
+                        index: target.index,
+                        role: target.role,
+                        label: target.label ?? "",
+                        target: "My Note"),
+                    .typeText("hello"),
+                ], unsupported: nil,
+                requiresUITargetVerification: true))
+            expect(result.outcome == .completed
+                   && transport.callCount("type_text") == 1,
+                   "a complete exact Cua target accepts background text")
+            expect(transport.callCount("bring_to_front") == 0
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "automatic background text never steals foreground")
         }
         do {
             let system = FakeActionHost()
@@ -7433,32 +7681,70 @@ extension Selftest {
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
+            transport.responses["get_window_state"] = noteWindowState(
+                value: "someone else's draft")
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+
+            expect(!host.typeText("hello", expecting: "com.apple.notes")
+                   && transport.callCount("type_text") == 0,
+                   "background typing never overwrites a pre-existing draft")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.appliesConfirmedText = false
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            transport.responses["press_key"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+
+            expect(!host.typeText("hello", expecting: "com.apple.notes"),
+                   "a driver claim without exact field readback owns no draft")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            transport.responses["press_key"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+
+            expect(host.typeText("hello", expecting: "com.apple.notes"),
+                   "exact field readback owns the delivered background draft")
+            transport.responses["get_window_state"] = noteWindowState(
+                value: "replaced")
+            expect(!host.pressKey(
+                name: "return", mods: [], keyCode: 36, flags: [],
+                expecting: "com.apple.notes")
+                && transport.callCount("press_key") == 0,
+                "Return refuses after another writer replaces the draft")
+        }
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
             var cuaState = noteWindowState()
             var cuaElements = cuaState["elements"] as? [[String: Any]] ?? []
             cuaElements[1]["label"] = "Message Hemesh"
             cuaState["elements"] = cuaElements
             transport.responses["get_window_state"] = cuaState
-            transport.responses["bring_to_front"] = presentationReply(500, 9)
-            transport.onCall = { tool in
-                guard tool == "bring_to_front" else { return }
-                system.frontmost = ("Notes", "com.apple.notes")
-                system.foregroundWindowValue = ActionWindowIdentity(
-                    name: "Notes", bundleID: "com.apple.notes",
-                    pid: 500, windowID: 9)
-            }
-            system.verifiableUIIndices = [1]
-            system.uiSnapshotValue = ActionUISnapshot(
-                id: "native-after-handoff", source: .native,
-                appName: "Notes", bundleID: "com.apple.notes",
-                windowTitle: "My Note", windowID: 9, complete: false,
-                elements: [ActionUIElement(
-                    index: 1, parentIndex: 0, depth: 1,
-                    role: "AXTextArea", label: "Message Hemesh",
-                    frame: nil, actions: ["AXFocus"], enabled: true,
-                    selected: false, focused: true, inWebContent: false)])
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            transport.responses["press_key"] = ["effect": "confirmed"]
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
-            host.prepareForActionPlan(sends: true)
             _ = host.openApp(named: "Notes")
             _ = host.frontmostApp()
             guard let snapshot = host.uiSnapshot() else {
@@ -7468,25 +7754,35 @@ extension Selftest {
             var state = ActionPlan.BatchState()
             state.requireUITargetVerification = true
             state.structuredUIAvailable = true
-            state.structuredUIComplete = false
+            state.structuredUIComplete = true
             state.structuredUISnapshot = snapshot
             state.spokenCommand = "send hello to Hemesh"
             guard let plan = decodeBatch("""
             {"sends":true,"goal":"message Hemesh","steps":[
               {"do":"wait_frontmost","app":"Notes"},
+              {"do":"verify_context","expect":["Hemesh"]},
               {"do":"verify_ui","snapshot":"\(snapshot.id)","index":1,
                "role":"AXTextArea","label":"Message Hemesh",
                "target":"Hemesh","attestation":"engine"},
-              {"do":"type_text","text":"hello"}]}
+              {"do":"type_text","text":"hello"},
+              {"do":"verify_context","expect":["Hemesh"]},
+              {"do":"verify_ui","snapshot":"\(snapshot.id)","index":1,
+               "role":"AXTextArea","label":"Message Hemesh",
+               "target":"Hemesh","attestation":"engine"},
+              {"do":"key","key":"return"}]}
             """, state: &state) else {
                 expect(false, "the real Cua sending batch decodes")
                 return
             }
             let result = ActionExecutor(host: host).run(plan)
+            let commit = transport.calls.last { $0.tool == "press_key" }
             expect(result.outcome == .completed
-                   && transport.callCount("bring_to_front") == 1
-                   && system.typed == ["hello"],
-                   "real sending verification hands off and types in one batch")
+                   && transport.callCount("type_text") == 1
+                   && transport.callCount("press_key") == 1
+                   && (commit?.arguments["element_token"] as? String) != nil
+                   && transport.callCount("bring_to_front") == 0
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty",
+                   "the engine-shaped Cua send commits without foregrounding")
         }
         do {
             let system = FakeActionHost()
@@ -7496,14 +7792,62 @@ extension Selftest {
             scriptNotesWorld(transport)
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
-            _ = host.openApp(named: "Notes")
-            expect(system.log.contains("openApp(Notes)"),
-                   "acting on the app the user is in stays foreground")
+            let opened = host.openApp(named: "Notes")
+            expect(opened == "Notes" && system.log.isEmpty
+                   && system.frontmost?.bundleID == "com.apple.notes",
+                   "the current target needs no activation to stay foreground")
         }
 
         // The element is PINNED, not re-derived: a window whose editable
         // surfaces change under the action must refuse, or a plan can verify
         // against a search field and then type into a document body.
+        let identityChanges: [(String, (inout [String: Any]) -> Void)] = [
+            ("label", { $0["label"] = "Message Someone Else" }),
+            ("parent", { $0.removeValue(forKey: "parent_index") }),
+            ("depth", { $0["depth"] = 1 }),
+            ("frame", { $0["frame"] = [
+                "x": 1.0, "y": 2.0, "w": 300.0, "h": 40.0,
+            ] }),
+            ("enabled", { $0["enabled"] = false }),
+            ("web content", { $0["in_web_content"] = true }),
+        ]
+        for (field, change) in identityChanges {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var original = noteWindowState()
+            var originalElements = original["elements"] as? [[String: Any]] ?? []
+            originalElements[1]["label"] = "Message Hemesh"
+            original["elements"] = originalElements
+            transport.responses["get_window_state"] = original
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "\(field) identity fixture has routed evidence")
+                continue
+            }
+            expect(host.verifyElement(
+                index: 1, snapshotID: snapshot.id,
+                label: "Message Hemesh", role: "AXTextArea",
+                target: "Hemesh", expecting: "com.apple.notes",
+                purpose: .target),
+                   "\(field) identity fixture pins the original field")
+
+            var changed = original
+            var changedElements = changed["elements"] as? [[String: Any]] ?? []
+            change(&changedElements[1])
+            changed["elements"] = changedElements
+            transport.responses["get_window_state"] = changed
+            let callsBefore = transport.callCount("type_text")
+            expect(!host.typeText("secret", expecting: "com.apple.notes")
+                   && transport.callCount("type_text") == callsBefore,
+                   "a changed \(field) refuses before background typing")
+        }
+
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")

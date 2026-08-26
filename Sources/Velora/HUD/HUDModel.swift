@@ -13,6 +13,12 @@ enum HUDState: Equatable {
         case cancel
     }
 
+    enum ActionResultStatus: Equatable {
+        case verified
+        case ready
+        case unverified
+    }
+
     case hidden(ExitStyle)
     /// Persistent idle pill: a small always-on-screen capsule shown between
     /// sessions when "keep HUD on screen" is enabled. Click starts dictation;
@@ -41,6 +47,14 @@ enum HUDState: Equatable {
     /// General transient toast: an SF Symbol + one line of text (file
     /// transcription done, etc.). Auto-hidden by whoever shows it.
     case notice(symbol: String, message: String)
+    /// Action completion stays in the non-activating HUD. Opening the target
+    /// is a separate, explicit user click; unverified work never looks done.
+    case actionResult(
+        id: String,
+        status: ActionResultStatus,
+        symbol: String,
+        message: String,
+        appName: String?)
 
     var isHidden: Bool {
         if case .hidden = self { return true }
@@ -65,7 +79,8 @@ enum HUDState: Equatable {
     /// intercept their clicks as whole-HUD dictation taps.
     var usesNativeMouseControls: Bool {
         switch self {
-        case .error, .meetingSuggestion, .meeting, .meetingEnd, .meetingFailure:
+        case .error, .meetingSuggestion, .meeting, .meetingEnd, .meetingFailure,
+             .actionResult:
             return true
         default: return false
         }
@@ -153,6 +168,8 @@ final class HUDModel: ObservableObject {
     var onMeetingEndDiscard: (() -> Void)?
     var onMeetingFailureOpen: ((String) -> Void)?
     var onMeetingFailureRetry: ((String) -> Void)?
+    /// Invoked only when the user clicks an Action result with a target app.
+    var onActionTargetOpen: ((String) -> Void)?
     /// Title of the error-state action button ("Retry" normally; "Open
     /// Settings" when the fix is granting a permission).
     @Published var retryTitle = "Retry"

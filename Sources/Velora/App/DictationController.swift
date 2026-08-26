@@ -133,6 +133,7 @@ final class DictationController: NSObject {
     /// preserving the transcript.
     private static let minimumTranscribeTimeout: TimeInterval = 20
     private static let maximumTranscribeTimeout: TimeInterval = 600
+    private static let actionResultTimeout: TimeInterval = 6
     static func transcribeTimeout(recordingDurationMs: Int?) -> TimeInterval {
         let recordingSeconds = Double(max(0, recordingDurationMs ?? 0)) / 1_000
         return min(
@@ -226,6 +227,12 @@ final class DictationController: NSObject {
     /// session start because Velora's own HUD may take focus afterwards, and
     /// "this window" in a command means the user's window, not ours.
     private var actionOriginApp: NSRunningApplication?
+    /// A completion card can activate only the exact bundle captured from
+    /// executor evidence, and only after the user clicks that card.
+    private var actionResultTarget: (
+        id: String,
+        target: ActionCompletionTarget
+    )?
 
     private(set) var phase: Phase = .idle {
         didSet {
@@ -290,6 +297,15 @@ final class DictationController: NSObject {
     private var terminationTimer: Timer?
     private var stopEnqueuedSession: String?
     private static let terminationSealTimeout: TimeInterval = 2
+
+    var terminationWatchdogDelay: TimeInterval {
+        guard phase == .idle else { return 0 }
+        let pendingWrites = history.pendingWriteCount
+        guard pendingWrites > 0 else { return 0 }
+        return HistoryDurabilityPolicy.quitWatchdogTimeout(
+            pendingWrites: pendingWrites)
+    }
+
     /// Safe Voice Edit: the recording session whose transcript is an edit
     /// INSTRUCTION for `selection`, not text to paste.
     private var editSession: (
@@ -387,6 +403,9 @@ final class DictationController: NSObject {
             self?.inserter.resetContinuationContext()
         }
         hud.model.onRetry = { [weak self] in self?.retryFromError() }
+        hud.model.onActionTargetOpen = { [weak self] id in
+            self?.openActionTarget(id: id)
+        }
         // The direct device adapter reports runtime interruption or removal;
         // a failed microphone cannot leave a silent "recording" HUD alive.
         capture.onDeviceLost = { [weak self] _ in
@@ -525,7 +544,7 @@ final class DictationController: NSObject {
                     code: "send_not_allowed",
                     message: "This plan sends a message. Re-run with --allow-send if "
                         + "that is what you want: " + plan.describedSteps.joined(separator: " → "))))
-            case .completed, .performedUnverified:
+            case .completed, .ready, .performedUnverified:
                 guard let payload = result.controlSuccessPayload(execute: execute) else {
                     completion(.failure(ControlFailure(
                         code: "action_failed", message: "Action result was unavailable")))
@@ -562,7 +581,7 @@ final class DictationController: NSObject {
 
     private func showControlActionResult(_ result: ActionResult) {
         if let notice = result.voiceCompletionNotice {
-            showNotice(symbol: notice.symbol, message: notice.message)
+            showActionResult(notice)
             return
         }
         switch result {
@@ -574,7 +593,7 @@ final class DictationController: NSObject {
             showNotice(symbol: "xmark.circle", message: "Action cancelled")
         case .failed(let reason, _):
             showError(String(reason.prefix(80)))
-        case .completed, .performedUnverified:
+        case .completed, .ready, .performedUnverified:
             break
         }
     }
@@ -623,7 +642,7 @@ final class DictationController: NSObject {
         ) { [weak self] result in
             guard let self else { return }
             if let notice = result.voiceCompletionNotice {
-                self.showNotice(symbol: notice.symbol, message: notice.message)
+                self.showActionResult(notice)
                 return
             }
             switch result {
@@ -641,7 +660,7 @@ final class DictationController: NSObject {
                     self.actionScreenNames = ScreenContext.visibleNames(of: app)
                     self.runVoiceAction(command)
                 }
-            case .completed, .performedUnverified:
+            case .completed, .ready, .performedUnverified:
                 break
             }
         }
@@ -765,7 +784,25 @@ final class DictationController: NSObject {
 
         guard phase != .idle else {
             mediaPlayback.restoreImmediatelyForTermination()
-            completion()
+            guard history.hasPendingWrites else {
+                completion()
+                return
+            }
+
+            let drainingSession = sessionID
+            beginTermination(session: drainingSession, completion: completion)
+            armTerminationTimer(
+                after: HistoryDurabilityPolicy.quitDrainTimeout(
+                    pendingWrites: history.pendingWriteCount))
+            history.drain { [weak self] in
+                DispatchQueue.main.async {
+                    guard let self,
+                          self.terminationSession == drainingSession else {
+                        return
+                    }
+                    self.finishTermination()
+                }
+            }
             return
         }
         let terminatingSession = sessionID
@@ -801,10 +838,12 @@ final class DictationController: NSObject {
         terminationCompletion = completion
     }
 
-    private func armTerminationTimer() {
+    private func armTerminationTimer(
+        after timeout: TimeInterval = DictationController.terminationSealTimeout
+    ) {
         guard terminationSession != nil, terminationTimer == nil else { return }
         terminationTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.terminationSealTimeout, repeats: false
+            withTimeInterval: timeout, repeats: false
         ) { [weak self] _ in
             NSLog("Velora: termination persistence timed out")
             self?.finishTermination()
@@ -2714,6 +2753,7 @@ final class DictationController: NSObject {
 
     /// Transient toast in the dictation flow (replaces whatever the HUD shows).
     private func showNotice(symbol: String, message: String) {
+        actionResultTarget = nil
         hud.transition(to: .notice(symbol: symbol, message: message))
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) { [weak self] in
             // Only hide OUR toast — a different notice shown meanwhile keeps
@@ -2725,6 +2765,133 @@ final class DictationController: NSObject {
             self.hud.transition(to: .hidden(.success))
             self.flushDeferredLearnedToastIfPossible()
         }
+    }
+
+    private func showActionResult(_ notice: ActionVoiceCompletionNotice) {
+        let id = UUID().uuidString
+        actionResultTarget = notice.target.map { (id: id, target: $0) }
+        hud.transition(to: .actionResult(
+            id: id,
+            status: notice.ready
+                ? .ready
+                : (notice.verified ? .verified : .unverified),
+            symbol: notice.symbol,
+            message: notice.message,
+            appName: notice.target?.appName))
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.actionResultTimeout
+        ) { [weak self] in
+            guard let self,
+                  case .actionResult(let currentID, _, _, _, _) = self.hud.model.state,
+                  currentID == id
+            else { return }
+            self.actionResultTarget = nil
+            self.hud.transition(to: .hidden(.success))
+            self.flushDeferredLearnedToastIfPossible()
+        }
+    }
+
+    private func openActionTarget(id: String) {
+        guard case .actionResult(let currentID, _, _, _, _) = hud.model.state,
+              currentID == id,
+              let stored = actionResultTarget,
+              stored.id == id
+        else { return }
+        actionResultTarget = nil
+        hud.transition(to: .hidden(.success))
+
+        if stored.target.pid != nil || stored.target.windowID != nil {
+            guard stored.target.pid != nil, stored.target.windowID != nil else {
+                showError("The exact action window is no longer available")
+                return
+            }
+            let target = stored.target
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let opened = Self.openActionWindow(target)
+                guard !opened else { return }
+                DispatchQueue.main.async {
+                    self?.showError("Couldn't open the exact \(target.appName) window")
+                }
+            }
+            return
+        }
+
+        let bundleID = stored.target.bundleID
+        let running = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleIdentifier?.caseInsensitiveCompare(bundleID) == .orderedSame
+        }
+        guard running.count <= 1 else {
+            showError("Multiple copies of \(stored.target.appName) are running")
+            return
+        }
+        if let app = running.first {
+            NSApp.yieldActivation(to: app)
+            guard app.activate(options: []) else {
+                showError("Couldn't open \(stored.target.appName)")
+                return
+            }
+            return
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: bundleID
+        ) else {
+            showError("Couldn't open \(stored.target.appName)")
+            return
+        }
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        NSWorkspace.shared.openApplication(
+            at: url,
+            configuration: configuration
+        ) { [weak self] _, error in
+            guard error != nil else { return }
+            DispatchQueue.main.async {
+                self?.showError("Couldn't open \(stored.target.appName)")
+            }
+        }
+    }
+
+    private static func openActionWindow(
+        _ target: ActionCompletionTarget
+    ) -> Bool {
+        guard let pid = target.pid, let windowID = target.windowID,
+              pid > 0, windowID > 0,
+              let app = NSRunningApplication(
+                processIdentifier: pid_t(pid)),
+              app.bundleIdentifier?.caseInsensitiveCompare(target.bundleID)
+                == .orderedSame,
+              CuaDriver.isInstalled else { return false }
+        let transport = CuaSocketTransport()
+        guard CuaDriverDaemon.ensureRunning(transport: transport) else {
+            return false
+        }
+        defer { CuaDriverDaemon.stopIfVeloraStarted() }
+        guard case .success(let reply) = transport.call(
+            CuaWindowActivation.tool,
+            arguments: ["pid": pid, "window_id": windowID],
+            timeout: 3),
+              CuaWindowActivation.matches(
+                reply, pid: pid, windowID: windowID)
+        else { return false }
+
+        let verify = {
+            guard let front = NSWorkspace.shared.frontmostApplication,
+                  Int(front.processIdentifier) == pid,
+                  front.bundleIdentifier?.caseInsensitiveCompare(target.bundleID)
+                    == .orderedSame,
+                  let rows = CGWindowListCopyWindowInfo(
+                    [.optionOnScreenOnly, .excludeDesktopElements],
+                    CGWindowID(kCGNullWindowID)) as? [[String: Any]],
+                  let first = rows.first(where: {
+                      ($0[kCGWindowOwnerPID as String] as? Int) == pid
+                          && ($0[kCGWindowLayer as String] as? Int) == 0
+                  })
+            else { return false }
+            return (first[kCGWindowNumber as String] as? Int) == windowID
+        }
+        return Thread.isMainThread
+            ? verify()
+            : DispatchQueue.main.sync(execute: verify)
     }
 
     private func schedulePendingRecordingLimitNotice(attempt: Int = 0) {

@@ -95,25 +95,60 @@ struct ActionContextSnapshot {
 }
 
 /// Outcome of one spoken command, for the HUD and the log.
+struct ActionCompletionTarget: Equatable {
+    let appName: String
+    let bundleID: String
+    let pid: Int?
+    let windowID: Int?
+
+    init(
+        appName: String, bundleID: String,
+        pid: Int? = nil, windowID: Int? = nil
+    ) {
+        self.appName = appName
+        self.bundleID = bundleID
+        self.pid = pid
+        self.windowID = windowID
+    }
+}
+
 enum ActionResult {
     /// Planned only — nothing was executed (a dry run).
     case planned(ActionPlan)
     /// The plan would deliver something to another person and the caller had
     /// not agreed to that. Nothing ran.
     case needsSendApproval(ActionPlan)
-    /// Reserved for a caller-supplied, goal-bound postcondition. The current
-    /// Action loop has no such contract and never constructs this case.
-    case completed(goal: String, trace: [String])
+    /// The requested postcondition was proven, or an app-only request reached
+    /// a fresh exact background route.
+    case completed(
+        goal: String,
+        trace: [String],
+        target: ActionCompletionTarget? = nil
+    )
+    /// A background app-only request reached a fresh exact route. The app is
+    /// ready, but opening it remains an explicit user click.
+    case ready(
+        goal: String,
+        trace: [String],
+        target: ActionCompletionTarget
+    )
     /// Steps ran, but the executor did not observe enough structured evidence
     /// to prove the requested postcondition.
-    case performedUnverified(goal: String, trace: [String])
+    case performedUnverified(
+        goal: String,
+        trace: [String],
+        target: ActionCompletionTarget? = nil
+    )
     case failed(reason: String, trace: [String])
     case cancelled
 }
 
 struct ActionVoiceCompletionNotice: Equatable {
+    let verified: Bool
+    let ready: Bool
     let symbol: String
     let message: String
+    let target: ActionCompletionTarget?
 }
 
 extension ActionResult {
@@ -121,7 +156,7 @@ extension ActionResult {
     /// completion are independent facts and stay independent on the wire.
     func controlSuccessPayload(execute: Bool) -> [String: Any]? {
         switch self {
-        case .completed(let goal, let trace):
+        case .completed(let goal, let trace, _):
             return [
                 "ok": true,
                 "executed": execute,
@@ -130,7 +165,17 @@ extension ActionResult {
                 "goal": goal,
                 "trace": trace,
             ]
-        case .performedUnverified(let goal, let trace):
+        case .ready(let goal, let trace, _):
+            return [
+                "ok": true,
+                "executed": execute,
+                "completed": false,
+                "verified": true,
+                "ready": true,
+                "goal": goal,
+                "trace": trace,
+            ]
+        case .performedUnverified(let goal, let trace, _):
             return [
                 "ok": true,
                 "executed": true,
@@ -146,14 +191,29 @@ extension ActionResult {
 
     var voiceCompletionNotice: ActionVoiceCompletionNotice? {
         switch self {
-        case .completed(let goal, _):
+        case .completed(let goal, _, let target):
             return ActionVoiceCompletionNotice(
-                symbol: "checkmark.circle",
-                message: goal.isEmpty ? "Done" : String(goal.prefix(60)))
-        case .performedUnverified:
+                verified: true,
+                ready: false,
+                symbol: "checkmark.circle.fill",
+                message: goal.isEmpty
+                    ? "Task completed"
+                    : "Done · \(String(goal.prefix(80)))",
+                target: target)
+        case .ready(_, _, let target):
             return ActionVoiceCompletionNotice(
+                verified: true,
+                ready: true,
+                symbol: "arrow.up.forward.app.fill",
+                message: "\(target.appName) is ready",
+                target: target)
+        case .performedUnverified(_, _, let target):
+            return ActionVoiceCompletionNotice(
+                verified: false,
+                ready: false,
                 symbol: "circle.dashed",
-                message: "Action ran; completion wasn't verified")
+                message: "Action ran; completion wasn't verified",
+                target: target)
         default:
             return nil
         }
@@ -412,10 +472,13 @@ final class ActionCoordinator {
 
     private func finish(_ result: ActionResult) {
         switch result {
-        case .completed(let goal, let trace):
+        case .completed(let goal, let trace, _):
             for line in trace { veloraLog("Velora: action · \(line)") }
             veloraLog("Velora: action completed — \(goal)")
-        case .performedUnverified(let goal, let trace):
+        case .ready(let goal, let trace, _):
+            for line in trace { veloraLog("Velora: action · \(line)") }
+            veloraLog("Velora: action target ready — \(goal)")
+        case .performedUnverified(let goal, let trace, _):
             for line in trace { veloraLog("Velora: action · \(line)") }
             veloraLog("Velora: action ran without completion evidence — \(goal)")
         case .failed(let reason, let trace):

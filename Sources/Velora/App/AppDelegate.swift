@@ -100,6 +100,9 @@ final class LocalAgentAccessRevocationObserver {
 /// Composition root: builds every module, wires delegates, and owns app
 /// lifecycle (engine supervision, onboarding on first launch, teardown).
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+    private static let terminationWatchdogBase: TimeInterval = 8
+    private static let meetingWatchdogExtension: TimeInterval = 52
+
     private let config = AppConfig.shared
     private let supervisor = EngineSupervisor()
     private let contextTracker = AppContextTracker()
@@ -746,10 +749,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         // the pending reply would leave the app unquittable forever — and the
         // `terminationPending` latch makes every LATER quit a silent no-op
         // (field report: menubar Quit dead + update stuck on "Installing…").
-        // A genuinely-finalizing meeting gets ONE extension to 60s (cutting a
-        // mid-flight .m4a finalize loses the system track — review catch);
-        // anything else wedged is forced at 8s.
-        scheduleTerminationWatchdog(after: 8, allowMeetingExtension: true)
+        // A finalizing meeting gets one extension. The base is eight seconds;
+        // queued History writes scale it by SQLite's bounded busy wait so the
+        // watchdog cannot outrun the drain it protects.
+        let watchdogDelay = max(
+            Self.terminationWatchdogBase,
+            dictation?.terminationWatchdogDelay ?? 0)
+        scheduleTerminationWatchdog(
+            after: watchdogDelay, allowMeetingExtension: true)
         // A debounced Settings edit (notes prompt) must not die with the
         // process; windowWillClose is not guaranteed during terminate.
         settingsController?.flushPendingEdits()
@@ -781,7 +788,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if allowMeetingExtension,
                self.meetingCoordinator?.terminationWorkInFlight == true {
                 veloraLog("Velora: termination waiting on a meeting finalize — extending watchdog to 60s")
-                self.scheduleTerminationWatchdog(after: 52, allowMeetingExtension: false)
+                self.scheduleTerminationWatchdog(
+                    after: Self.meetingWatchdogExtension,
+                    allowMeetingExtension: false)
                 return
             }
             veloraLog("Velora: termination watchdog fired — forcing quit")

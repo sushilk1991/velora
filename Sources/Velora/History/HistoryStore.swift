@@ -1,6 +1,22 @@
 import Foundation
 import SQLite3
 
+enum HistoryDurabilityPolicy {
+    static let sqliteBusyTimeoutMs: Int32 = 2_000
+    private static let drainMargin: TimeInterval = 2
+    private static let watchdogMargin: TimeInterval = 2
+
+    static func quitDrainTimeout(pendingWrites: Int) -> TimeInterval {
+        let writes = max(1, pendingWrites)
+        let busySeconds = TimeInterval(sqliteBusyTimeoutMs) / 1_000
+        return busySeconds * TimeInterval(writes) + drainMargin
+    }
+
+    static func quitWatchdogTimeout(pendingWrites: Int) -> TimeInterval {
+        quitDrainTimeout(pendingWrites: pendingWrites) + watchdogMargin
+    }
+}
+
 /// One completed dictation.
 struct DictationRecord {
     var id: Int64 = 0
@@ -57,6 +73,18 @@ final class HistoryStore {
         pendingLock.withLock { pendingWrites > 0 }
     }
 
+    var pendingWriteCount: Int {
+        pendingLock.withLock { pendingWrites }
+    }
+
+    private func beginWrite() {
+        pendingLock.withLock { pendingWrites += 1 }
+    }
+
+    private func endWrite() {
+        pendingLock.withLock { pendingWrites -= 1 }
+    }
+
     /// SQLITE_TRANSIENT: make sqlite copy bound strings immediately.
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -73,7 +101,8 @@ final class HistoryStore {
             // a busy timeout an INSERT that collides with its SELECT fails
             // SQLITE_BUSY instantly and the dictation silently vanishes from
             // history (review finding).
-            sqlite3_busy_timeout(handle, 2000)
+            sqlite3_busy_timeout(
+                handle, HistoryDurabilityPolicy.sqliteBusyTimeoutMs)
             createTableIfNeeded()
             // Transcript store is owner-only (default umask would be 0644).
             try? FileManager.default.setAttributes(
@@ -209,12 +238,18 @@ final class HistoryStore {
     func insert(
         _ record: DictationRecord, completion: ((Bool) -> Void)? = nil
     ) {
-        pendingLock.withLock { pendingWrites += 1 }
+        beginWrite()
         queue.async { [self] in
             let persisted = insertRecord(record)
-            pendingLock.withLock { pendingWrites -= 1 }
+            endWrite()
             completion?(persisted)
         }
+    }
+
+    /// Calls back only after every write already queued for History is durable.
+    /// App termination uses this barrier when dictation has returned to idle.
+    func drain(_ completion: @escaping () -> Void) {
+        queue.async(execute: completion)
     }
 
     /// Graceful termination cannot leave the final event queued behind process
@@ -303,7 +338,9 @@ final class HistoryStore {
     /// First observation wins; later triggers for the same session are no-ops.
     func markQualityObservation(session: String, state: QualityObservation) {
         guard !session.isEmpty else { return }
+        beginWrite()
         queue.async { [self] in
+            defer { endWrite() }
             guard db != nil else { return }
             let sql = """
                 UPDATE dictations SET quality_state = ?
@@ -442,7 +479,9 @@ final class HistoryStore {
     /// the transcript store and the clips age out together). Called once at
     /// startup; fire-and-forget.
     func pruneOlderThan(days: Double) {
+        beginWrite()
         queue.async { [self] in
+            defer { endWrite() }
             guard db != nil, days > 0 else { return }
             let cutoff = Date().timeIntervalSince1970 - days * 86_400
             var stmt: OpaquePointer?

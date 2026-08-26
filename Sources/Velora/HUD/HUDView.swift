@@ -5,6 +5,14 @@ import SwiftUI
 /// waveform-only; opaque Stream targets use the capsule for a non-mutating
 /// live preview before one authoritative final insertion.
 struct HUDView: View {
+    private typealias ActionResultValue = (
+        id: String,
+        status: HUDState.ActionResultStatus,
+        symbol: String,
+        message: String,
+        appName: String?
+    )
+
     @ObservedObject var model: HUDModel
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
@@ -85,7 +93,22 @@ struct HUDView: View {
                     width: min(max(value, 160), HUDGeometry.maxListeningWidth),
                     height: HUDGeometry.height),
                 true)
+        case .actionResult(_, _, _, let message, let appName):
+            return (
+                CGSize(
+                    width: Self.actionResultWidth(message: message, appName: appName),
+                    height: HUDGeometry.height),
+                true)
         }
+    }
+
+    private static func actionResultWidth(message: String, appName: String?) -> CGFloat {
+        var value = HUDGeometry.contentInsetH * 2 + 14 + VeloraSpacing.s
+        value += HUDGeometry.textWidth(message, font: HUDGeometry.bodyFont)
+        if let appName, !appName.isEmpty {
+            return HUDGeometry.maxListeningWidth
+        }
+        return min(max(value, 240), HUDGeometry.maxListeningWidth)
     }
 
     private static func chipWidth(for context: HUDSessionContext?) -> CGFloat {
@@ -138,7 +161,7 @@ struct HUDView: View {
         .opacity(opacity)
         .onHover { hovering = $0 }
         .animation(.easeOut(duration: 0.15), value: hovering)
-        .accessibilityElement(children: isMeetingSurface ? .contain : .ignore)
+        .accessibilityElement(children: usesContainedAccessibility ? .contain : .ignore)
         .accessibilityLabel(meetingAccessibilityLabel)
         .accessibilityHint(meetingAccessibilityHint)
     }
@@ -202,6 +225,8 @@ struct HUDView: View {
                 .opacity(isLearned ? 1 : 0)
             noticeContent
                 .opacity(isNotice ? 1 : 0)
+            actionResultContent
+                .opacity(isActionResult ? 1 : 0)
         }
     }
 
@@ -651,6 +676,97 @@ struct HUDView: View {
         Self.capsuleMetrics(for: model.state, context: nil).size.width
     }
 
+    // MARK: - Action result
+
+    private var actionResultValue: ActionResultValue? {
+        if case .actionResult(let id, let status, let symbol, let message, let appName) =
+            model.state {
+            return (id, status, symbol, message, appName)
+        }
+        return nil
+    }
+
+    @ViewBuilder private var actionResultContent: some View {
+        if let value = actionResultValue {
+            let appName = value.appName ?? ""
+            ZStack(alignment: .trailing) {
+                HStack(spacing: VeloraSpacing.s) {
+                    Image(systemName: actionResultSymbol(for: value))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(actionResultColor(for: value.status))
+                    Text(value.message)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(hudPrimaryText)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.trailing, actionResultButtonWidth(appName: value.appName))
+                HStack(spacing: VeloraSpacing.xs) {
+                    Text("Open \(appName)")
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.accentColor)
+                .fixedSize(horizontal: true, vertical: false)
+                .opacity(appName.isEmpty ? 0 : 1)
+            }
+            .frame(width: actionResultWidth - HUDGeometry.contentInsetH * 2)
+            .padding(.horizontal, HUDGeometry.contentInsetH)
+            .padding(.vertical, HUDGeometry.contentInsetV)
+            .frame(width: actionResultWidth, height: HUDGeometry.height)
+            .contentShape(Capsule())
+            .onTapGesture { openActionResult(value) }
+            .accessibilityAddTraits(appName.isEmpty ? [] : .isButton)
+            .accessibilityAction(named: Text(actionResultOpenLabel(value))) {
+                openActionResult(value)
+            }
+        }
+    }
+
+    private func actionResultButtonWidth(appName: String?) -> CGFloat {
+        guard let appName, !appName.isEmpty else { return 0 }
+        let font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        return HUDGeometry.textWidth("Open \(appName)", font: font)
+            + 12
+            + VeloraSpacing.s
+            + VeloraSpacing.xs
+    }
+
+    private func actionResultOpenLabel(_ value: ActionResultValue) -> String {
+        guard let appName = value.appName, !appName.isEmpty else {
+            return "Action result"
+        }
+        return "Open \(appName)"
+    }
+
+    private func openActionResult(_ value: ActionResultValue) {
+        guard value.appName?.isEmpty == false else { return }
+        model.onActionTargetOpen?(value.id)
+    }
+
+    private func actionResultSymbol(for value: ActionResultValue) -> String {
+        if value.status == .unverified {
+            return "exclamationmark.triangle.fill"
+        }
+        return value.symbol.isEmpty ? "checkmark.circle.fill" : value.symbol
+    }
+
+    private func actionResultColor(for status: HUDState.ActionResultStatus) -> Color {
+        switch status {
+        case .verified:
+            return Color(nsColor: .systemGreen)
+        case .ready:
+            return Color(nsColor: .systemBlue)
+        case .unverified:
+            return Color(nsColor: .systemOrange)
+        }
+    }
+
+    private var actionResultWidth: CGFloat {
+        Self.capsuleMetrics(for: model.state, context: nil).size.width
+    }
+
     // MARK: - State
 
     private var isListening: Bool { model.state == .listening }
@@ -677,6 +793,10 @@ struct HUDView: View {
             || meetingFailureID != nil
     }
 
+    private var usesContainedAccessibility: Bool {
+        isMeetingSurface || isActionResult
+    }
+
     private var meetingAccessibilityHint: String {
         switch model.state {
         case .meetingSuggestion:
@@ -687,6 +807,11 @@ struct HUDView: View {
             return "Finish notes or keep recording"
         case .meetingFailure:
             return "Open the saved transcript or retry meeting processing"
+        case .actionResult(_, _, _, _, let appName):
+            if let appName, !appName.isEmpty {
+                return "Click the result to open \(appName)"
+            }
+            return "Action result"
         case .notice(_, let message) where message.contains("Esc to stop"):
             return "Press Escape to cancel the running action"
         default:
@@ -704,6 +829,20 @@ struct HUDView: View {
             return "Meeting ended, \(title)"
         case .meetingFailure(_, let message):
             return message
+        case .actionResult(_, let status, _, let message, let appName):
+            let verification: String
+            switch status {
+            case .verified:
+                verification = "Verified"
+            case .ready:
+                verification = "Ready"
+            case .unverified:
+                verification = "Not verified"
+            }
+            if let appName, !appName.isEmpty {
+                return "\(verification), \(message), in \(appName)"
+            }
+            return "\(verification), \(message)"
         case .notice(_, let message):
             return message
         default:
@@ -736,6 +875,11 @@ struct HUDView: View {
 
     private var isNotice: Bool {
         if case .notice = model.state { return true }
+        return false
+    }
+
+    private var isActionResult: Bool {
+        if case .actionResult = model.state { return true }
         return false
     }
 
@@ -919,6 +1063,25 @@ struct HUDView: View {
                 }
             } else {
                 resetInstant(width: noticeWidth, height: HUDGeometry.height)
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                    opacity = 1
+                    scale = 1
+                    yOffset = 0
+                }
+            }
+
+        case .actionResult:
+            if case .actionResult = old {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = actionResultWidth
+                }
+            } else if old == .standby {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                    width = actionResultWidth
+                    height = HUDGeometry.height
+                }
+            } else {
+                resetInstant(width: actionResultWidth, height: HUDGeometry.height)
                 withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
                     opacity = 1
                     scale = 1

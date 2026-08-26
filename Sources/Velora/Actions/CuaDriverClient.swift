@@ -244,6 +244,78 @@ enum CuaDriverError: Error, Equatable {
     case daemonError(String)
 }
 
+enum CuaWindowActivation {
+    static let tool = "bring_to_front"
+    private static let verifiedCode =
+        "bring_to_front_exact_window_verified"
+
+    static func matches(_ reply: [String: Any], pid: Int, windowID: Int) -> Bool {
+        guard reply["status"] as? String == "activated",
+              reply["code"] as? String == verifiedCode,
+              exactFlag(reply["activated"]) == true,
+              exactFlag(reply["request_accepted"]) == true,
+              exactFlag(reply["process_activated"]) == true,
+              exactInt(reply["pid"]) == pid,
+              exactInt(reply["window_id"]) == windowID,
+              let effect = reply["exact_window_effect"] as? [String: Any],
+              exactFlag(effect["verified"]) == true,
+              exactFlag(effect["focused"]) == true,
+              exactFlag(effect["frontmost_ordinary"]) == true,
+              exactFlag(effect["target_visible_ordinary"]) == true,
+              let observed = reply["observed"] as? [String: Any],
+              exactInt(observed["frontmost_pid"]) == pid,
+              exactInt(observed["focused_window_id"]) == windowID,
+              exactInt(observed["frontmost_ordinary_window_id"]) == windowID,
+              derivedPID(observed, targetPID: pid) == pid
+        else { return false }
+        return true
+    }
+
+    private static func derivedPID(
+        _ observed: [String: Any], targetPID: Int
+    ) -> Int? {
+        guard let workspaceRaw = observed["workspace_frontmost_pid"],
+              let privateRaw = observed["front_process_matches_target"]
+        else { return nil }
+        let workspace = nullablePID(workspaceRaw)
+        let privateMatch = nullableFlag(privateRaw)
+        guard workspace.valid, privateMatch.valid else { return nil }
+        if let matches = privateMatch.value {
+            return matches ? targetPID : nil
+        }
+        return workspace.value
+    }
+
+    private static func nullablePID(
+        _ raw: Any
+    ) -> (valid: Bool, value: Int?) {
+        if raw is NSNull { return (true, nil) }
+        guard let value = exactInt(raw) else { return (false, nil) }
+        return (true, value)
+    }
+
+    private static func nullableFlag(
+        _ raw: Any
+    ) -> (valid: Bool, value: Bool?) {
+        if raw is NSNull { return (true, nil) }
+        guard let value = exactFlag(raw) else { return (false, nil) }
+        return (true, value)
+    }
+
+    private static func exactInt(_ raw: Any?) -> Int? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number) else { return nil }
+        return number.intValue
+    }
+
+    private static func exactFlag(_ raw: Any?) -> Bool? {
+        guard let number = raw as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+}
+
 /// The seam the selftests script: the host's decisions (what to press, when
 /// to refuse, how to verify typing) run against a scripted transport with no
 /// daemon anywhere near the test.

@@ -6,6 +6,7 @@ enum AgentTaskStatus: String, Equatable {
     case planned
     case needsApproval = "needs_approval"
     case completed
+    case ready
     case unverified
     case failed
     case cancelled
@@ -224,9 +225,11 @@ final class AgentTaskStore {
             outcome = (.planned, plan.goal, "", plan.describedSteps)
         case .needsSendApproval(let plan):
             outcome = (.needsApproval, plan.goal, "", plan.describedSteps)
-        case .completed(let goal, let trace):
+        case .completed(let goal, let trace, _):
             outcome = (.completed, goal, "", trace)
-        case .performedUnverified(let goal, let trace):
+        case .ready(let goal, let trace, _):
+            outcome = (.ready, goal, "", trace)
+        case .performedUnverified(let goal, let trace, _):
             outcome = (.unverified, goal, "", trace)
         case .failed(let reason, let trace):
             outcome = (.failed, "", reason, trace)

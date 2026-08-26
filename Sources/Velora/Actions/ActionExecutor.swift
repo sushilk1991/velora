@@ -45,7 +45,8 @@ protocol ActionHost: AnyObject {
     func beginActionInputSession()
     /// Drops every retained input capability and any owned automation child.
     func endActionInputSession()
-    /// Tells a routing host whether this immutable action may commit content.
+    /// Arms an explicit caller-owned foreground handoff. The automatic
+    /// executor never requests one.
     func prepareForActionPlan(sends: Bool)
     /// Gives a routed host one boundary immediately before a UI mutation. A
     /// deferred target may be presented here immediately before the native
@@ -107,6 +108,9 @@ protocol ActionHost: AnyObject {
                        purpose: ActionVerificationPurpose) -> Bool
     /// Exact ordinary window currently in front, including WindowServer id.
     func foregroundWindow() -> ActionWindowIdentity?
+    /// Exact window owned by this action. A background host returns its routed
+    /// target; a foreground host returns the user's current window.
+    func actionWindow() -> ActionWindowIdentity?
     /// Present the engine-attested routed app or window and leave it in front.
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope) -> Bool
@@ -156,6 +160,7 @@ extension ActionHost {
         false
     }
     func foregroundWindow() -> ActionWindowIdentity? { nil }
+    func actionWindow() -> ActionWindowIdentity? { foregroundWindow() }
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope) -> Bool {
         false
@@ -300,7 +305,6 @@ final class ActionExecutor {
         guard plan.isExecutable else {
             return failed(0, "nothing to do", recoverable: false)
         }
-        host.prepareForActionPlan(sends: plan.sends)
         // Checked up front rather than per step: on a locked Mac every plan
         // fails, and it should say why instead of blaming the target app.
         guard !host.screenIsLocked else {
@@ -335,9 +339,9 @@ final class ActionExecutor {
                 case .ready:
                     break
                 case .deferred:
-                    note("interaction boundary: user is active")
+                    note("interaction boundary: target app is in use")
                     return failed(
-                        index, "waiting for a quiet foreground handoff",
+                        index, "waiting for the target app to be free",
                         recoverable: true)
                 case .refused:
                     note("interaction boundary: exact handoff refused")
@@ -756,7 +760,8 @@ final class ActionExecutor {
 
     private static func mutatesUI(_ step: ActionStep) -> Bool {
         switch step {
-        case .typeText, .searchText, .pasteText, .key:
+        case .typeText, .searchText, .pasteText, .key,
+             .pressElement, .pressUI, .presentUI:
             return true
         default:
             return false
@@ -770,7 +775,8 @@ final class ActionExecutor {
         guard expectedAppName != nil || expectedBundleID != nil else { return false }
         guard let front = host.frontmostApp() else { return false }
         if let expectedBundleID, !expectedBundleID.isEmpty {
-            return front.bundleID == expectedBundleID
+            return front.bundleID.caseInsensitiveCompare(expectedBundleID)
+                == .orderedSame
         }
         if let expectedAppName {
             return AppMatcher.normalize(front.name) == AppMatcher.normalize(expectedAppName)

@@ -611,7 +611,7 @@ extension ActionPlan {
         }
         switch snapshot.source {
         case .cua:
-            guard !snapshot.complete, snapshot.windowID != nil,
+            guard !snapshot.bundleID.isEmpty, snapshot.windowID != nil,
                   element.actions.contains(ActionUICapability.cuaClick) else {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
@@ -653,13 +653,14 @@ extension ActionPlan {
                     throw ActionPlanError.invalidStructuredUICapability(step: step)
                 }
             case .cua:
-                guard !snapshot.complete, snapshot.windowID != nil,
+                guard snapshot.complete, snapshot.windowID != nil,
+                      element.focused, !element.inWebContent,
                       element.actions.contains(ActionUICapability.cuaClick)
                 else {
                     throw ActionPlanError.invalidStructuredUICapability(step: step)
                 }
             }
-            if snapshot.source == .native, snapshot.complete,
+            if snapshot.complete,
                !ActionUIEvidencePolicy.mayVerify(
                     index: index, in: snapshot.elements) {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)

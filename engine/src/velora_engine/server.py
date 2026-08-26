@@ -2942,11 +2942,7 @@ class Engine:
             had_plan_error = False
             if (not self._action_cancel.is_set()
                     and actions.needs_app_presentation(session)):
-                token = uuid.uuid4().hex
-                session.state.allowed_ui_attestation = token
-                session.state.allow_ui_presentation = True
-                parsed = actions.attach_ui_presentation(
-                    {"done": True}, session.current_ui_snapshot, token)
+                parsed = {"sends": False, "steps": [], "done": True}
                 turn = session.accept_reply(json.dumps(
                     parsed, ensure_ascii=False, separators=(",", ":")))
             # Deliberate pressure hibernation is restored inside this task, not
@@ -2987,7 +2983,8 @@ class Engine:
             direct_goal_check = session.direct_goal_check_pending
             session.direct_goal_check_pending = False
             if (turn is None and direct_goal_check
-                    and session.current_ui_snapshot.get("complete")):
+                    and actions.goal_snapshot_is_native(
+                        session.current_ui_snapshot)):
                 verifier_prompt = actions.build_goal_verifier_prompt(
                     session.current_ui_snapshot)
                 verifier_message = actions.goal_verifier_message(
@@ -3102,20 +3099,6 @@ class Engine:
                 try:
                     reply_text = result.text
                     parsed = actions.parse_turn(reply_text)
-                    terminal_presentation = (
-                        actions.turn_requires_terminal_presentation(
-                            parsed, session))
-                    if (actions.turn_requires_ui_presentation(parsed, session)
-                            or terminal_presentation):
-                        token = uuid.uuid4().hex
-                        session.state.allowed_ui_attestation = token
-                        session.state.allow_ui_presentation = terminal_presentation
-                        parsed = actions.attach_ui_presentation(
-                            parsed, session.current_ui_snapshot, token)
-                        reply_text = json.dumps(
-                            parsed, ensure_ascii=False, separators=(",", ":"))
-                        turn = session.accept_reply(reply_text)
-                        break
                     review_refusal_reason = ""
                     if actions.turn_requires_ui_action_review(parsed, session):
                         review_prompt = actions.build_ui_action_review_prompt(
@@ -3190,6 +3173,12 @@ class Engine:
                                 review_refusal_reason)
                             raise actions.PlanError(
                                 "goal verifier: structured UI is incomplete")
+                        if not actions.goal_snapshot_is_native(
+                                session.current_ui_snapshot):
+                            authoritative_ui_refusal = bool(
+                                review_refusal_reason)
+                            raise actions.PlanError(
+                                "goal verifier: native UI is required")
                         verifier_prompt = actions.build_goal_verifier_prompt(
                             session.current_ui_snapshot)
                         verifier_message = actions.goal_verifier_message(

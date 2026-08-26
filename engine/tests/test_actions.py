@@ -887,12 +887,15 @@ async def test_action_start_returns_the_first_turn(engine):
     assert "open_app" in prompt
 
 
-async def test_cua_draft_presents_once(engine):
+async def test_partial_cua_draft_never_presents(engine):
     eng, sock = engine
-    eng.cleanup = FakePlanner(turn([
-        {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "type_text", "text": "Sunny is available"},
-    ], goal="draft for Hemesh", sends=False, done=True))
+    eng.cleanup = FakePlanner(
+        turn([
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "type_text", "text": "Sunny is available"},
+        ], goal="draft for Hemesh", sends=False, done=True),
+        json.dumps({"safe": False, "reason": "background UI is incomplete"}),
+    )
     raw = _structured_send_ui("Hemesh")
     raw.update({
         "complete": False, "source": "cua", "window_id": 44,
@@ -910,16 +913,72 @@ async def test_cua_draft_presents_once(engine):
         },
     )
 
-    evt = await client.recv_event("action_turn")
-    assert evt["done"] is False
-    assert evt["steps"] == [{
-        "do": "present_ui", "snapshot": "snap-1",
-        "bundle_id": "com.tinyspeck.slackmacgap", "window_id": 44,
-    }]
-    assert len(eng.cleanup.calls) == 1
+    evt = await client.recv_event("action_failed")
+    assert "present_ui" not in evt["error"]
+    assert "background UI is incomplete" in evt["error"]
+    assert len(eng.cleanup.calls) == 2
 
 
-async def test_app_only_cua_window_presents_without_second_model_turn(engine):
+async def test_complete_cua_send_stays_background(engine):
+    eng, sock = engine
+    eng.cleanup = FakePlanner(
+        turn([
+            {"do": "wait_frontmost", "app": "Slack"},
+        ], goal="Say hi to Gaurav Singh Bissain on Slack", sends=True),
+        turn([
+            {"do": "wait_frontmost", "app": "Slack"},
+            {"do": "verify_context", "expect": ["Gaurav Singh Bissain"]},
+            {"do": "type_text", "text": "Hi"},
+            {"do": "verify_context", "expect": ["Gaurav Singh Bissain"]},
+            {"do": "key", "key": "return"},
+        ], done=True, goal="Say hi to Gaurav Singh Bissain on Slack",
+             sends=True),
+        json.dumps({
+            "safe": True,
+            "target": "Gaurav Singh Bissain",
+            "evidence": {
+                "snapshot": "snap-1", "index": 30,
+                "role": "AXTextArea",
+                "label": "Message to Gaurav Singh Bissain",
+            },
+        }),
+    )
+    raw = _structured_send_ui("Gaurav Singh Bissain")
+    raw.update({
+        "complete": True, "source": "cua", "window_id": 1316,
+        "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
+    })
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="Say hi to Gaurav Singh Bissain on Slack",
+        context={
+            "frontmost_app": "Orca",
+            "frontmost_bundle": "com.stablyai.orca",
+            "running_apps": ["Slack", "Orca"],
+        },
+    )
+    await client.recv_event("action_turn")
+    await send_observe(client, observation=observation(
+        ui_snapshot=raw,
+        executed=["wait_frontmost Slack"],
+    ))
+
+    event = await client.recv()
+
+    assert event["event"] == "action_turn"
+    assert event["sends"] is True
+    assert event["done"] is True
+    assert [step["do"] for step in event["steps"]] == [
+        "wait_frontmost", "verify_context", "verify_ui", "type_text",
+        "verify_context", "verify_ui", "key",
+    ]
+    assert all(step["do"] != "present_ui" for step in event["steps"])
+    assert len(eng.cleanup.calls) == 3
+
+
+async def test_app_only_cua_window_stays_background(engine):
     eng, sock = engine
     eng.cleanup = FakePlanner(turn([
         {"do": "open_app", "app": "Slack"},
@@ -953,13 +1012,9 @@ async def test_app_only_cua_window_presents_without_second_model_turn(engine):
 
     event = await client.recv_event("action_turn")
 
-    assert event["done"] is False
-    assert event["steps"] == [{
-        "do": "present_ui",
-        "snapshot": "cua-window-46820-1316",
-        "bundle_id": "com.tinyspeck.slackmacgap",
-        "window_id": 1316,
-    }]
+    assert event["done"] is True
+    assert event["sends"] is False
+    assert event["steps"] == []
     assert len(eng.cleanup.calls) == 1
 
 
@@ -2973,13 +3028,16 @@ def test_cua_click_is_accepted_only_from_an_exact_cua_snapshot():
             ], goal="open Shivangi Gupta", sends=False))
 
 
-def test_cua_source_cannot_claim_complete_or_authorize_completion():
+def test_complete_cua_authorizes_target_but_not_completion():
     raw = _structured_ui(active="Shivangi Gupta")
     raw.update({"source": "cua", "window_id": 91, "complete": True})
 
     snapshot = actions.normalize_ui_snapshot(raw)
 
-    assert snapshot["complete"] is False
+    assert snapshot["complete"] is True
+    prompt = actions.build_ui_action_review_prompt(snapshot)
+    assert "goal_met" not in prompt
+    assert "source=cua" in prompt
     verdict = json.dumps({
         "safe": False, "goal_met": True, "target": "Shivangi Gupta",
         "evidence": {"index": 28, "role": "AXButton",
@@ -2989,9 +3047,9 @@ def test_cua_source_cannot_claim_complete_or_authorize_completion():
         verdict, snapshot, "open Shivangi Gupta on WhatsApp")
     assert review == {
         "safe": False, "goal_met": False,
-        "reason": "partial UI cannot prove the goal is complete",
+        "reason": "native complete UI is required to prove the goal",
     }
-    with pytest.raises(actions.PlanError, match="incomplete"):
+    with pytest.raises(actions.PlanError, match="native complete UI"):
         actions.parse_goal_verdict(json.dumps({
             "safe": True, "target": "Shivangi Gupta",
             "evidence": {"index": 28, "role": "AXButton",
@@ -3544,9 +3602,9 @@ def test_explicit_cua_navigation_presents_exact_window():
     session.state.allow_ui_presentation = True
     attached = actions.attach_ui_presentation(
         parsed, session.current_ui_snapshot, "token-1")
-    accepted = session.accept_reply(json.dumps(attached))
     assert attached["done"] is False
-    assert [step["do"] for step in accepted["steps"]] == ["present_ui"]
+    with pytest.raises(actions.PlanError, match="result-card click"):
+        session.accept_reply(json.dumps(attached))
 
     wrong_intent = actions.ActionSession(
         "check the Shivangi Gupta chat on WhatsApp", context,
@@ -3754,24 +3812,20 @@ def test_present_ui_attestation():
     assert attached["done"] is False
     assert [step["do"] for step in attached["steps"]] == ["present_ui"]
     session.state.allowed_ui_attestation = "token-1"
-    accepted = session.accept_reply(json.dumps(attached))
-    assert session.sends is False
-    assert accepted["steps"] == [{
-        "do": "present_ui", "snapshot": "snap-1",
-        "bundle_id": "com.tinyspeck.slackmacgap", "window_id": 44,
-    }]
+    with pytest.raises(actions.PlanError, match="result-card click"):
+        session.accept_reply(json.dumps(attached))
 
     web_state = actions.ActionSession(
         "Draft a message for Hemesh on Slack on the web", context,
         require_target_verifier=True)
     web_state.state.allowed_ui_attestation = "token-1"
-    with pytest.raises(actions.PlanError, match="recipient draft"):
+    with pytest.raises(actions.PlanError, match="result-card click"):
         web_state.accept_reply(json.dumps(attached))
 
     forged = actions.ActionSession(
         "Draft a message for Hemesh on Slack", context,
         require_target_verifier=True)
-    with pytest.raises(actions.PlanError, match="attestation"):
+    with pytest.raises(actions.PlanError, match="result-card click"):
         forged.accept_reply(json.dumps(attached))
 
 
@@ -3797,22 +3851,43 @@ def test_present_ui_draft_gate():
         }
 
     slack = "com.tinyspeck.slackmacgap"
-    accepted = actions.validate_plan(plan(slack), state=state(slack))
-    assert accepted["sends"] is False
-    assert accepted["steps"][0]["do"] == "present_ui"
+    with pytest.raises(actions.PlanError, match="result-card click"):
+        actions.validate_plan(plan(slack), state=state(slack))
 
     for bundle_id in ("com.apple.Notes", "com.example.unknown"):
-        with pytest.raises(actions.PlanError, match="recipient draft"):
+        with pytest.raises(actions.PlanError, match="result-card click"):
             actions.validate_plan(plan(bundle_id), state=state(bundle_id))
 
-    with pytest.raises(actions.PlanError, match="recipient draft"):
+    with pytest.raises(actions.PlanError, match="result-card click"):
         actions.validate_plan(plan(slack), state=state(slack, requires_proof=False))
-    with pytest.raises(actions.PlanError, match="recipient draft"):
+    with pytest.raises(actions.PlanError, match="result-card click"):
         actions.validate_plan(plan(slack, sends=True), state=state(slack))
     missing_sends = plan(slack)
     missing_sends.pop("sends")
-    with pytest.raises(actions.PlanError, match="recipient draft"):
+    with pytest.raises(actions.PlanError, match="result-card click"):
         actions.validate_plan(missing_sends, state=state(slack))
+
+
+def test_complete_cua_target_verdict_stays_background():
+    raw = _structured_send_ui("Hemesh")
+    raw.update({
+        "complete": True, "source": "cua", "window_id": 44,
+        "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
+    })
+    snapshot = actions.normalize_ui_snapshot(raw)
+    verdict = json.dumps({
+        "safe": True,
+        "target": "Hemesh",
+        "evidence": {
+            "snapshot": "snap-1", "index": 30,
+            "role": "AXTextArea", "label": "Message to Hemesh",
+        },
+    })
+
+    accepted = actions.parse_target_verdict(
+        verdict, snapshot, "Send hello to Hemesh on Slack")
+
+    assert accepted["target"] == "Hemesh"
 
 
 def test_unknown_app_also_refuses_content_before_target_attestation():

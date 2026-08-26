@@ -27,7 +27,7 @@ private struct ActionCompletionEvidence {
     private(set) var events: [ActionEvidenceEvent] = []
     private(set) var hadEffect = false
     private(set) var hadGoalVerification = false
-    private(set) var hadPresentation = false
+    private(set) var target: ActionCompletionTarget?
 
     var provesGoal: Bool { hadGoalVerification }
 
@@ -37,16 +37,18 @@ private struct ActionCompletionEvidence {
             switch event {
             case .appOpenRequested:
                 hadEffect = true
-            case .unverifiedEffect(let kind):
+            case .unverifiedEffect:
                 hadEffect = true
-                if kind == .presentUI { hadPresentation = true }
             case .goalVerified:
                 hadEffect = true
                 hadGoalVerification = true
             case .uiTargetVerified:
                 break
-            case .frontmostConfirmed:
-                break
+            case .frontmostConfirmed(_, let actual, let bundleID):
+                guard !actual.isEmpty, !bundleID.isEmpty else { continue }
+                target = ActionCompletionTarget(
+                    appName: actual,
+                    bundleID: bundleID)
             }
         }
     }
@@ -226,6 +228,16 @@ final class ActionLoopRunner {
                         return .failed(reason: "the planner returned nothing to do",
                                        trace: fullTrace)
                     }
+                    if let target = routedTarget(
+                        transcript: transcript,
+                        state: carried,
+                        sends: lockedSends
+                    ) {
+                        return .ready(
+                            goal: lockedGoal,
+                            trace: fullTrace,
+                            target: target)
+                    }
                     return completionResult(
                         goal: lockedGoal, trace: fullTrace,
                         evidence: completionEvidence)
@@ -313,26 +325,16 @@ final class ActionLoopRunner {
                     // before it; keeping the old reason would report a solved
                     // problem as the cause of a later one.
                     lastStepFailure = nil
-                    // A routed target is still hidden behind the user's work.
-                    // Give the engine one fresh exact Cua observation so it
-                    // can mint the final presentation; a model-authored done
-                    // never owns foreground authority.
-                    let appGoalPresented = completionEvidence.hadPresentation
+                    // Background app-only requests get one fresh routed
+                    // observation. The app comes forward only if the user
+                    // later clicks the completion card.
+                    let needsBackgroundProof = host.isDrivingInBackground
                         && ActionPlan.isAppOnlyPresentation(
                             transcript, appName: carried.currentApp,
                             bundleID: carried.structuredUISnapshot?.bundleID,
                             candidates: carried.appNames)
-                    if appGoalPresented {
-                        planner.end()
-                        return .completed(goal: lockedGoal, trace: fullTrace)
-                    }
-                    let needsPresentation = host.isDrivingInBackground
-                        && ActionPlan.isExplicitUIPresentation(
-                            transcript, appName: carried.currentApp,
-                            bundleID: carried.structuredUISnapshot?.bundleID,
-                            candidates: carried.appNames)
                     if done, completionEvidence.provesGoal
-                        || !needsPresentation {
+                        || !needsBackgroundProof {
                         planner.end()
                         return completionResult(
                             goal: lockedGoal, trace: fullTrace,
@@ -422,9 +424,67 @@ final class ActionLoopRunner {
                 trace: trace)
         }
         if evidence.hadGoalVerification {
-            return .completed(goal: goal, trace: trace)
+            return .completed(
+                goal: goal,
+                trace: trace,
+                target: exactTarget(evidence.target))
         }
-        return .performedUnverified(goal: goal, trace: trace)
+        return .performedUnverified(
+            goal: goal,
+            trace: trace,
+            target: exactTarget(evidence.target))
+    }
+
+    private func exactTarget(
+        _ target: ActionCompletionTarget?
+    ) -> ActionCompletionTarget? {
+        guard let target, let window = host.actionWindow(),
+              window.bundleID.caseInsensitiveCompare(target.bundleID)
+                == .orderedSame
+        else { return target }
+        return ActionCompletionTarget(
+            appName: window.name, bundleID: window.bundleID,
+            pid: window.pid, windowID: window.windowID)
+    }
+
+    private func routedTarget(
+        transcript: String,
+        state: ActionPlan.BatchState,
+        sends: Bool?
+    ) -> ActionCompletionTarget? {
+        guard sends == false,
+              host.isDrivingInBackground,
+              state.requireUITargetVerification,
+              let snapshot = state.structuredUISnapshot,
+              snapshot.source == .cua,
+              !snapshot.id.isEmpty,
+              let windowID = snapshot.windowID,
+              windowID > 0,
+              !snapshot.appName.isEmpty,
+              !snapshot.bundleID.isEmpty,
+              ActionPlan.isAppOnlyPresentation(
+                transcript,
+                appName: snapshot.appName,
+                bundleID: snapshot.bundleID,
+                candidates: state.appNames)
+        else { return nil }
+        guard let fresh = host.uiSnapshot(),
+              fresh.source == .cua,
+              fresh.complete,
+              !fresh.id.isEmpty,
+              fresh.id != snapshot.id,
+              fresh.windowID == windowID,
+              fresh.bundleID.caseInsensitiveCompare(snapshot.bundleID)
+                == .orderedSame,
+              fresh.appName == snapshot.appName,
+              let target = host.actionWindow(),
+              target.pid > 0, target.windowID == windowID,
+              target.bundleID.caseInsensitiveCompare(fresh.bundleID)
+                == .orderedSame
+        else { return nil }
+        return ActionCompletionTarget(
+            appName: fresh.appName, bundleID: fresh.bundleID,
+            pid: target.pid, windowID: target.windowID)
     }
 
     /// What the model gets to look at between turns. Every string is read off
@@ -439,7 +499,30 @@ final class ActionLoopRunner {
             state.appNames.insert(name)
         }
         state.currentApp = front?.name ?? ""
-        let visibleNames = host.visibleNames()
+        let snapshot: ActionUISnapshot?
+        let visibleNames: [String]
+        let windowTitle: String
+        let focusedLabel: String
+        let focusedRole: String
+        let selection: String
+        if host.isDrivingInBackground, let routed = host.uiSnapshot() {
+            // One immutable Cua tree supplies a planner observation. Safety
+            // boundaries still take their own fresh snapshots before acting.
+            snapshot = routed
+            visibleNames = snapshotNames(routed)
+            windowTitle = routed.windowTitle
+            let focused = routed.elements.first(where: \.focused)
+            focusedLabel = focused?.label ?? ""
+            focusedRole = focused?.role ?? ""
+            selection = ""
+        } else {
+            visibleNames = host.visibleNames()
+            windowTitle = host.frontmostWindowTitle() ?? ""
+            focusedLabel = host.focusedElementLabel() ?? ""
+            focusedRole = host.focusedElementRole() ?? ""
+            selection = host.focusedSelectionLabel() ?? ""
+            snapshot = host.uiSnapshot()
+        }
         let pageURL = host.frontmostPageURL() ?? ""
         if state.urlTokenPool != nil {
             // Names the user can see may enter the next search URL (screen
@@ -453,15 +536,15 @@ final class ActionLoopRunner {
         var observation: [String: Any] = [
             "frontmost_app": front?.name ?? "",
             "frontmost_bundle": front?.bundleID ?? "",
-            "window_title": host.frontmostWindowTitle() ?? "",
-            "focused_label": host.focusedElementLabel() ?? "",
-            "focused_role": host.focusedElementRole() ?? "",
-            "selection": host.focusedSelectionLabel() ?? "",
+            "window_title": windowTitle,
+            "focused_label": focusedLabel,
+            "focused_role": focusedRole,
+            "selection": selection,
             "screen_names": visibleNames,
             "page_url": pageURL,
             "executed": executed,
         ]
-        if let snapshot = host.uiSnapshot() {
+        if let snapshot {
             state.structuredUIAvailable = true
             state.structuredUIComplete = snapshot.complete
             state.structuredUISnapshot = snapshot
@@ -475,5 +558,19 @@ final class ActionLoopRunner {
             observation["failed_step"] = failedStep
         }
         return observation
+    }
+
+    private func snapshotNames(_ snapshot: ActionUISnapshot) -> [String] {
+        var names: [String] = []
+        var seen = Set<String>()
+        for element in snapshot.elements {
+            guard let candidate = ScreenContext.nameCandidate(element.label ?? "")
+            else { continue }
+            if seen.insert(candidate.lowercased()).inserted {
+                names.append(candidate)
+            }
+            if names.count >= 40 { break }
+        }
+        return names
     }
 }

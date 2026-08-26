@@ -115,6 +115,7 @@ enum Selftest {
         testInterruptedHistory()
         testTerminationHistory()
         testHistoryInsertAck()
+        testHistoryDrain()
         testHistoryEdit()
         testHistoryClearAll()
         testIntelligenceAggregates()
@@ -3786,7 +3787,7 @@ enum Selftest {
     }
 
     private static func testInterruptedHistory() {
-        withHistoryStore { store, _ in
+        withHistoryStore { store, url in
             let first = store.ensureInterrupted(
                 session: "recovered-session", audio: "recovered-session.flac",
                 durationMs: 12_500)
@@ -3854,6 +3855,47 @@ enum Selftest {
         expect(!failed.hasPendingWrites,
                "failed history insertion releases the restart-safety latch")
         try? FileManager.default.removeItem(at: directory)
+    }
+
+    private static func testHistoryDrain() {
+        let busySeconds = TimeInterval(
+            HistoryDurabilityPolicy.sqliteBusyTimeoutMs) / 1_000
+        expect(HistoryDurabilityPolicy.quitDrainTimeout(
+            pendingWrites: 1) > busySeconds,
+               "quit drain outlives SQLite's full busy wait")
+        expect(HistoryDurabilityPolicy.quitDrainTimeout(
+            pendingWrites: 3) > busySeconds * 3,
+               "quit drain scales with every queued SQLite busy wait")
+        expect(HistoryDurabilityPolicy.quitWatchdogTimeout(
+            pendingWrites: 3) > HistoryDurabilityPolicy.quitDrainTimeout(
+                pendingWrites: 3),
+               "the app watchdog outlives the scaled History drain")
+
+        withHistoryStore { store, url in
+            let drained = DispatchSemaphore(value: 0)
+            store.insert(dictation(
+                daysAgo: 0, words: 2, session: "drained-session"))
+            store.drain { drained.signal() }
+
+            expect(drained.wait(timeout: .now() + 2) == .success,
+                   "history drain finishes after queued writes")
+            expect(store.recent(limit: 10).contains {
+                $0.sessionID == "drained-session"
+            }, "history drain makes the final queued write durable")
+
+            var lockDB: OpaquePointer?
+            expect(sqlite3_open(url.path, &lockDB) == SQLITE_OK,
+                   "history durability fixture opens a second connection")
+            sqlite3_exec(lockDB, "BEGIN IMMEDIATE;", nil, nil, nil)
+            store.markQualityObservation(
+                session: "drained-session", state: .unchanged)
+            store.insert(dictation(
+                daysAgo: 0, words: 2, session: "queued-after-quality"))
+            expect(store.pendingWriteCount == 2,
+                   "quit accounting includes every queued History mutation")
+            sqlite3_exec(lockDB, "COMMIT;", nil, nil, nil)
+            sqlite3_close(lockDB)
+        }
     }
 
     /// Manual transcript editing (History tab pencil → HistoryStore.updateFinal).
@@ -6539,6 +6581,23 @@ enum Selftest {
         expect(
             HUDPanel.panelSize.width >= HUDGeometry.meetingPromptWidth + 40,
             "HUD host leaves shadow room around the meeting prompt")
+
+        let verifiedResult = HUDState.actionResult(
+            id: "action-verified", status: .verified,
+            symbol: "paperplane.fill", message: "Sent Hi to Gaurav", appName: "Slack")
+        let unverifiedResult = HUDState.actionResult(
+            id: "action-unverified", status: .unverified,
+            symbol: "paperplane.fill", message: "Could not verify the recipient", appName: "Slack")
+        expect(
+            verifiedResult.usesNativeMouseControls
+                && unverifiedResult.usesNativeMouseControls,
+            "Action result card clicks cannot start dictation")
+        expect(
+            HUDView.capsuleMetrics(for: verifiedResult, context: nil).size.width
+                == HUDGeometry.maxListeningWidth
+                && HUDView.capsuleMetrics(for: unverifiedResult, context: nil).size.width
+                    == HUDGeometry.maxListeningWidth,
+            "clickable Action results use the proven 420-point HUD footprint")
 
         // Persistent standby pill (2026-07 HUD round).
         expect(!HUDState.standby.isHidden, "the standby pill is a visible state")
