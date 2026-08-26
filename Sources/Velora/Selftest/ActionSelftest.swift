@@ -4444,6 +4444,8 @@ extension Selftest {
         testCuaProtocolFraming()
         testCuaKeyMap()
         testCuaWindowPick()
+        testActionResultHandoff()
+        testActionReopenGate()
         testCuaSnapshotParsing()
         testCuaPressPick()
         testBackgroundActionGate()
@@ -5225,11 +5227,12 @@ extension Selftest {
     }
 
     private static func testCuaWindowPick() {
-        func window(_ pid: Int, _ id: Int, layer: Int = 0, z: Int,
+        func window(_ pid: Int, _ id: Int, layer: Int = 0, z: Int?,
                     width: Double, height: Double,
                     title: String? = nil) -> [String: Any] {
             var raw: [String: Any] = [
-                "pid": pid, "window_id": id, "layer": layer, "z_index": z,
+                "pid": pid, "window_id": id, "layer": layer,
+                "z_index": z ?? NSNull(),
                 "bounds": ["width": width, "height": height],
             ]
             if let title { raw["title"] = title }
@@ -5271,6 +5274,197 @@ extension Selftest {
              window(9, 2, z: 800, width: 900, height: 700)], pid: 9)
         expect(overlay?.id == 1,
                "a titled document outranks an untitled overlay above it")
+        let uniqueUnknown = CuaWindowPick.choose(
+            [window(9, 7, z: nil, width: 900, height: 700, title: "Only")],
+            pid: 9)
+        expect(uniqueUnknown?.id == 7,
+               "one semantic candidate does not need a reported z-order")
+        let ambiguousUnknown = CuaWindowPick.choose(
+            [window(9, 7, z: nil, width: 900, height: 700, title: "First"),
+             window(9, 8, z: 8, width: 900, height: 700, title: "Second")],
+            pid: 9)
+        expect(ambiguousUnknown == nil,
+               "multiple semantic candidates refuse when any z-order is null")
+        let tied = CuaWindowPick.choose(
+            [window(9, 7, z: 8, width: 900, height: 700, title: "First"),
+             window(9, 8, z: 8, width: 900, height: 700, title: "Second")],
+            pid: 9)
+        expect(tied == nil,
+               "multiple candidates tied at the maximum z-order refuse")
+    }
+
+    private static func testActionResultHandoff() {
+        let exact = ActionResultHandoff.Observation(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9)
+        let sibling = ActionResultHandoff.Observation(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 10)
+
+        var reopenCount = 0
+        var observationCount = 0
+        var sleepCount = 0
+        let reopened = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: {
+                reopenCount += 1
+                return true
+            },
+            observe: {
+                observationCount += 1
+                return observationCount < 3 ? nil : exact
+            },
+            inputGeneration: { 1 },
+            sleep: { _ in sleepCount += 1 })
+        expect(reopened && reopenCount == 1 && sleepCount == 1,
+               "a strict miss reopens and polls for the original window")
+
+        let refusedSibling = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: { true },
+            observe: { sibling },
+            inputGeneration: { 1 },
+            sleep: { _ in })
+        expect(!refusedSibling,
+               "a reopen that exposes a sibling window refuses")
+
+        var generation: UInt64 = 1
+        var inputAbortReads = 0
+        let interrupted = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: {
+                generation &+= 1
+                return true
+            },
+            observe: {
+                inputAbortReads += 1
+                return nil
+            },
+            inputGeneration: { generation },
+            sleep: { _ in })
+        expect(!interrupted && inputAbortReads == 1,
+               "new user input aborts before a post-reopen focus read")
+
+        var strictCalls = 0
+        var exactReopens = 0
+        let localExact = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: {
+                strictCalls += 1
+                return false
+            },
+            reopen: {
+                exactReopens += 1
+                return true
+            },
+            observe: { exact },
+            inputGeneration: { 1 },
+            sleep: { _ in })
+        expect(localExact && strictCalls == 1 && exactReopens == 0,
+               "local exact visibility succeeds after a partial Cua reply")
+
+        var staleStrictCalls = 0
+        let preDispatch = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: {
+                staleStrictCalls += 1
+                return false
+            },
+            reopen: { true },
+            observe: { exact },
+            inputGeneration: { 2 },
+            sleep: { _ in })
+        expect(!preDispatch && staleStrictCalls == 0,
+               "input after the card click aborts before queued activation")
+
+        var postReopenReads = 0
+        let reopenRefused = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: { false },
+            observe: {
+                postReopenReads += 1
+                return nil
+            },
+            inputGeneration: { 1 },
+            sleep: { _ in })
+        expect(!reopenRefused && postReopenReads == 1,
+               "an unvalidated reopen is never treated as accepted")
+
+        var timeoutReads = 0
+        var timeoutSleeps = 0
+        let timedOut = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: { true },
+            observe: {
+                timeoutReads += 1
+                return nil
+            },
+            inputGeneration: { 1 },
+            sleep: { _ in timeoutSleeps += 1 })
+        expect(!timedOut
+               && timeoutReads == ActionResultHandoff.maximumPolls + 1
+               && timeoutSleeps == ActionResultHandoff.maximumPolls - 1,
+               "the exact-window poll stops at its fixed bound")
+
+        var pollGeneration: UInt64 = 1
+        let changedDuringPoll = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: { true },
+            observe: { nil },
+            inputGeneration: { pollGeneration },
+            sleep: { _ in pollGeneration &+= 1 })
+        expect(!changedDuringPoll,
+               "input during exact-window polling aborts the handoff")
+
+        var finalGeneration: UInt64 = 1
+        let changedAtExact = ActionResultHandoff.open(
+            pid: 500, bundleID: "com.apple.Notes", windowID: 9,
+            generation: 1,
+            activateStrict: { false },
+            reopen: { true },
+            observe: {
+                finalGeneration &+= 1
+                return exact
+            },
+            inputGeneration: { finalGeneration },
+            sleep: { _ in })
+        expect(!changedAtExact,
+               "input during the final exact read prevents success")
+    }
+
+    private static func testActionReopenGate() {
+        expect(ActionReopenGate.hasUniquePID([500], expected: 500),
+               "one exact running instance may be reopened")
+        expect(!ActionReopenGate.hasUniquePID([500, 501], expected: 500),
+               "multiple same-bundle instances refuse before reopen")
+
+        var validated = false
+        let completed = ActionReopenGate.awaitResult { finish in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.01) {
+                validated = true
+                finish(true)
+            }
+        }
+        expect(completed && validated,
+               "reopen acceptance waits for the validated async completion")
+
+        let rejected = ActionReopenGate.awaitResult { finish in
+            finish(false)
+        }
+        expect(!rejected,
+               "an explicit reopen rejection fails synchronously")
     }
 
     private static func testCuaSnapshotParsing() {

@@ -291,7 +291,8 @@ enum CuaWindowPick {
     static let minimumHeight: Double = 120
 
     static func choose(_ windows: [[String: Any]], pid: Int) -> (id: Int, title: String?)? {
-        let candidates = windows.compactMap { raw -> (id: Int, title: String?, z: Int)? in
+        let candidates = windows.compactMap {
+            raw -> (id: Int, title: String?, z: Int?)? in
             guard (raw["pid"] as? Int) == pid,
                   (raw["layer"] as? Int) == 0,
                   let id = raw["window_id"] as? Int else { return nil }
@@ -302,14 +303,120 @@ enum CuaWindowPick {
             let title = (raw["title"] as? String).flatMap {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
             }
-            return (id, title, (raw["z_index"] as? Int) ?? 0)
+            return (id, title, raw["z_index"] as? Int)
         }
         // A titled window is a document; untitled ones are panels and
-        // overlays. Within each class the topmost wins — z-order is what the
-        // app itself would bring forward, which is what "the window" means.
+        // overlays. A lone semantic candidate needs no z-order. Multiple
+        // candidates need complete, uniquely maximal ordering; null or a tie
+        // would turn missing driver evidence into a guess.
         let titled = candidates.filter { $0.title != nil }
         let pool = titled.isEmpty ? candidates : titled
-        return pool.max { $0.z < $1.z }.map { ($0.id, $0.title) }
+        guard let first = pool.first else { return nil }
+        if pool.count == 1 { return (first.id, first.title) }
+        guard !pool.contains(where: { $0.z == nil }),
+              let maximumZ = pool.compactMap(\.z).max()
+        else { return nil }
+        let top = pool.filter { $0.z == maximumZ }
+        guard top.count == 1, let chosen = top.first else { return nil }
+        return (chosen.id, chosen.title)
+    }
+}
+
+/// Exact, click-only handoff for an Action completion card. The UI supplies
+/// the user's authority by calling this only from the card tap; background
+/// execution never enters this path.
+enum ActionResultHandoff {
+    static let pollDelayMs = 50
+    static let maximumPolls = 60
+
+    struct Observation: Equatable {
+        let pid: Int
+        let bundleID: String
+        let windowID: Int
+    }
+
+    static func open(
+        pid: Int,
+        bundleID: String,
+        windowID: Int,
+        generation: UInt64,
+        activateStrict: () -> Bool,
+        reopen: () -> Bool,
+        observe: () -> Observation?,
+        inputGeneration: () -> UInt64,
+        sleep: (Int) -> Void
+    ) -> Bool {
+        guard pid > 0, windowID > 0, !bundleID.isEmpty else { return false }
+        guard generation == inputGeneration() else { return false }
+        _ = activateStrict()
+        guard generation == inputGeneration() else { return false }
+        if let current = observe(),
+           isExact(current, pid: pid, bundleID: bundleID, windowID: windowID) {
+            return generation == inputGeneration()
+        }
+
+        guard generation == inputGeneration(), reopen(),
+              generation == inputGeneration() else { return false }
+        for attempt in 0..<maximumPolls {
+            guard generation == inputGeneration() else { return false }
+            if let current = observe() {
+                guard current.pid != pid
+                        || current.bundleID.caseInsensitiveCompare(bundleID)
+                            != .orderedSame
+                        || current.windowID == windowID
+                else { return false }
+                if isExact(current, pid: pid, bundleID: bundleID,
+                           windowID: windowID) {
+                    return generation == inputGeneration()
+                }
+            }
+            if attempt + 1 < maximumPolls { sleep(pollDelayMs) }
+        }
+        return false
+    }
+
+    private static func isExact(
+        _ observed: Observation,
+        pid: Int,
+        bundleID: String,
+        windowID: Int
+    ) -> Bool {
+        observed.pid == pid
+            && observed.windowID == windowID
+            && observed.bundleID.caseInsensitiveCompare(bundleID)
+                == .orderedSame
+    }
+}
+
+/// Completion and process-identity gate for AppKit's asynchronous reopen.
+/// The caller runs off-main so AppKit can deliver its callback on main.
+enum ActionReopenGate {
+    static func hasUniquePID(_ pids: [Int], expected: Int) -> Bool {
+        pids.count == 1 && pids[0] == expected
+    }
+
+    static func awaitResult(
+        start: (@escaping (Bool) -> Void) -> Void
+    ) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var result: Bool?
+        var closed = false
+        start { accepted in
+            lock.lock()
+            guard !closed else {
+                lock.unlock()
+                return
+            }
+            result = accepted
+            closed = true
+            lock.unlock()
+            semaphore.signal()
+        }
+        semaphore.wait()
+        lock.lock()
+        defer { lock.unlock() }
+        return result == true
     }
 }
 

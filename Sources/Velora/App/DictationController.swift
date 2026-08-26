@@ -134,6 +134,7 @@ final class DictationController: NSObject {
     private static let minimumTranscribeTimeout: TimeInterval = 20
     private static let maximumTranscribeTimeout: TimeInterval = 600
     private static let actionResultTimeout: TimeInterval = 6
+    private static let actionOpenTimeout: TimeInterval = 3
     static func transcribeTimeout(recordingDurationMs: Int?) -> TimeInterval {
         let recordingSeconds = Double(max(0, recordingDurationMs ?? 0)) / 1_000
         return min(
@@ -2792,6 +2793,7 @@ final class DictationController: NSObject {
     }
 
     private func openActionTarget(id: String) {
+        let inputGeneration = UserInputActivity.snapshot()
         guard case .actionResult(let currentID, _, _, _, _) = hud.model.state,
               currentID == id,
               let stored = actionResultTarget,
@@ -2807,7 +2809,8 @@ final class DictationController: NSObject {
             }
             let target = stored.target
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                let opened = Self.openActionWindow(target)
+                let opened = Self.openActionWindow(
+                    target, generation: inputGeneration)
                 guard !opened else { return }
                 DispatchQueue.main.async {
                     self?.showError("Couldn't open the exact \(target.appName) window")
@@ -2852,46 +2855,124 @@ final class DictationController: NSObject {
     }
 
     private static func openActionWindow(
-        _ target: ActionCompletionTarget
+        _ target: ActionCompletionTarget,
+        generation: UInt64
     ) -> Bool {
         guard let pid = target.pid, let windowID = target.windowID,
               pid > 0, windowID > 0,
-              let app = NSRunningApplication(
-                processIdentifier: pid_t(pid)),
-              app.bundleIdentifier?.caseInsensitiveCompare(target.bundleID)
-                == .orderedSame,
-              CuaDriver.isInstalled else { return false }
-        let transport = CuaSocketTransport()
-        guard CuaDriverDaemon.ensureRunning(transport: transport) else {
-            return false
-        }
-        defer { CuaDriverDaemon.stopIfVeloraStarted() }
-        guard case .success(let reply) = transport.call(
-            CuaWindowActivation.tool,
-            arguments: ["pid": pid, "window_id": windowID],
-            timeout: 3),
-              CuaWindowActivation.matches(
-                reply, pid: pid, windowID: windowID)
+              uniqueActionApp(pid: pid, bundleID: target.bundleID) != nil
         else { return false }
+        let transport = CuaSocketTransport()
+        defer { CuaDriverDaemon.stopIfVeloraStarted() }
+        return ActionResultHandoff.open(
+            pid: pid, bundleID: target.bundleID, windowID: windowID,
+            generation: generation,
+            activateStrict: {
+                guard CuaDriver.isInstalled,
+                      CuaDriverDaemon.ensureRunning(transport: transport),
+                      case .success(let reply) = transport.call(
+                        CuaWindowActivation.tool,
+                        arguments: ["pid": pid, "window_id": windowID],
+                        timeout: Self.actionOpenTimeout)
+                else { return false }
+                return CuaWindowActivation.matches(
+                    reply, pid: pid, windowID: windowID)
+            },
+            reopen: {
+                reopenActionApp(
+                    pid: pid, bundleID: target.bundleID,
+                    generation: generation)
+            },
+            observe: { actionFront() },
+            inputGeneration: UserInputActivity.snapshot,
+            sleep: { milliseconds in
+                Thread.sleep(
+                    forTimeInterval: Double(milliseconds) / 1_000)
+            })
+    }
 
-        let verify = {
+    private static func reopenActionApp(
+        pid: Int,
+        bundleID: String,
+        generation: UInt64
+    ) -> Bool {
+        // Waiting on main would prevent the queued reopen from starting. The
+        // result-card caller uses a worker queue; a future main-thread caller
+        // fails closed instead of deadlocking.
+        guard !Thread.isMainThread else { return false }
+        return ActionReopenGate.awaitResult { finish in
+            DispatchQueue.main.async {
+                guard generation == UserInputActivity.snapshot(),
+                      let app = uniqueActionApp(
+                        pid: pid, bundleID: bundleID),
+                      let url = app.bundleURL else {
+                    finish(false)
+                    return
+                }
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                configuration.allowsRunningApplicationSubstitution = false
+                NSWorkspace.shared.openApplication(
+                    at: url, configuration: configuration
+                ) { opened, error in
+                    let exact = error == nil
+                        && Int(opened?.processIdentifier ?? 0) == pid
+                        && opened?.bundleIdentifier?.caseInsensitiveCompare(
+                            bundleID) == .orderedSame
+                        && uniqueActionApp(
+                            pid: pid, bundleID: bundleID) != nil
+                        && generation == UserInputActivity.snapshot()
+                    if !exact {
+                        NSLog("Velora: exact Action result reopen failed")
+                    }
+                    finish(exact)
+                }
+            }
+        }
+    }
+
+    private static func uniqueActionApp(
+        pid: Int,
+        bundleID: String
+    ) -> NSRunningApplication? {
+        let resolve: () -> NSRunningApplication? = {
+            let matches = NSWorkspace.shared.runningApplications.filter {
+                !$0.isTerminated
+                    && $0.bundleIdentifier?.caseInsensitiveCompare(bundleID)
+                        == .orderedSame
+            }
+            guard ActionReopenGate.hasUniquePID(
+                    matches.map { Int($0.processIdentifier) }, expected: pid)
+            else { return nil }
+            return matches[0]
+        }
+        return Thread.isMainThread
+            ? resolve()
+            : DispatchQueue.main.sync(execute: resolve)
+    }
+
+    private static func actionFront() -> ActionResultHandoff.Observation? {
+        let observe: () -> ActionResultHandoff.Observation? = {
             guard let front = NSWorkspace.shared.frontmostApplication,
-                  Int(front.processIdentifier) == pid,
-                  front.bundleIdentifier?.caseInsensitiveCompare(target.bundleID)
-                    == .orderedSame,
+                  let bundleID = front.bundleIdentifier,
                   let rows = CGWindowListCopyWindowInfo(
                     [.optionOnScreenOnly, .excludeDesktopElements],
                     CGWindowID(kCGNullWindowID)) as? [[String: Any]],
                   let first = rows.first(where: {
-                      ($0[kCGWindowOwnerPID as String] as? Int) == pid
+                      ($0[kCGWindowOwnerPID as String] as? Int)
+                          == Int(front.processIdentifier)
                           && ($0[kCGWindowLayer as String] as? Int) == 0
-                  })
-            else { return false }
-            return (first[kCGWindowNumber as String] as? Int) == windowID
+                  }),
+                  let windowID = first[kCGWindowNumber as String] as? Int
+            else { return nil }
+            return ActionResultHandoff.Observation(
+                pid: Int(front.processIdentifier),
+                bundleID: bundleID,
+                windowID: windowID)
         }
         return Thread.isMainThread
-            ? verify()
-            : DispatchQueue.main.sync(execute: verify)
+            ? observe()
+            : DispatchQueue.main.sync(execute: observe)
     }
 
     private func schedulePendingRecordingLimitNotice(attempt: Int = 0) {
