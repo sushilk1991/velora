@@ -177,7 +177,7 @@ extension ActionPlan {
                 return "verify [\(index)] \(role) \"\(label)\" proves \(target)"
             case .verifyGoal(_, let index, let role, let label, let target):
                 return "verify goal [\(index)] \(role) \"\(label)\" proves \(target)"
-            case .presentUI(_, let bundleID, let windowID):
+            case .presentUI(_, let bundleID, let windowID, _):
                 return "present \(bundleID) window \(windowID)"
             case .typeText(let text): return "type \"\(text)\""
             case .searchText(let text): return "search for \"\(text)\""

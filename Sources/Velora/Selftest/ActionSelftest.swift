@@ -43,12 +43,15 @@ final class FakeActionHost: ActionHost {
     var keyPressSucceeds = true
     var openURLSucceeds = true
     var presentUISucceeds = false
+    var exactOpenDefers = false
+    var exactOpenRequiresInactive = false
     /// Set to make `frontmostApp()` change after N reads (focus stolen).
     var frontmostAfterReads: (reads: Int, value: (name: String, bundleID: String)?)?
 
     /// Fires after each host call, so a test can change the world mid-plan.
     var onStep: ((String) -> Void)?
     var onSleep: ((Int) -> Void)?
+    var onForegroundWindowRead: (() -> Void)?
 
     private(set) var log: [String] = []
     private(set) var typed: [String] = []
@@ -88,6 +91,11 @@ final class FakeActionHost: ActionHost {
         guard let resolved = appsByPID[pid],
               resolved.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame
         else { return nil }
+        if exactOpenRequiresInactive,
+           frontmost?.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame {
+            return resolved.name
+        }
+        if exactOpenDefers { return resolved.name }
         frontmost = (resolved.name, resolved.bundleID)
         foregroundWindowValue = ActionWindowIdentity(
             name: resolved.name, bundleID: resolved.bundleID,
@@ -109,9 +117,13 @@ final class FakeActionHost: ActionHost {
         return frontmost
     }
     var foregroundWindowValue: ActionWindowIdentity?
-    func foregroundWindow() -> ActionWindowIdentity? { foregroundWindowValue }
+    func foregroundWindow() -> ActionWindowIdentity? {
+        onForegroundWindowRead?()
+        return foregroundWindowValue
+    }
 
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int,
+                   scope: ActionPresentationScope) -> Bool {
         presentUICalls += 1
         if presentUISucceeds { isDrivingInBackground = false }
         return presentUISucceeds
@@ -1497,8 +1509,21 @@ extension Selftest {
         """, state: &slackPresentation)
         expect(presentation?.steps == [.presentUI(
             snapshotID: "slack-cua",
-            bundleID: "com.tinyspeck.slackmacgap", windowID: 44)],
+            bundleID: "com.tinyspeck.slackmacgap", windowID: 44,
+            scope: .window)],
                "an exact engine-normalized Slack recipient draft may present")
+        var appPresentation = slackPresentation
+        appPresentation.spokenCommand = "Open Slack"
+        let appOnly = decodeBatch("""
+        {"sends":false,"steps":[{"do":"present_ui",
+          "snapshot":"slack-cua","bundle_id":"com.tinyspeck.slackmacgap",
+          "window_id":44}]}
+        """, state: &appPresentation)
+        expect(appOnly?.steps == [.presentUI(
+            snapshotID: "slack-cua",
+            bundleID: "com.tinyspeck.slackmacgap", windowID: 44,
+            scope: .app)],
+               "only an exact app-only command carries process presentation")
         var webDraftPresentation = slackPresentation
         webDraftPresentation.spokenCommand =
             "Draft a message for Hemesh on Slack on the web"
@@ -1603,8 +1628,20 @@ extension Selftest {
         """, state: &navigationPresentation)?.steps == [
             .presentUI(
                 snapshotID: "navigation-cua",
-                bundleID: "net.whatsapp.WhatsApp", windowID: 45),
+                bundleID: "net.whatsapp.WhatsApp", windowID: 45,
+                scope: .window),
         ], "an explicit navigation command may present its exact window last")
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"present_ui","snapshot":"navigation-cua",
+           "bundle_id":"net.whatsapp.WhatsApp","window_id":45,
+           "scope":"app"}]}
+        """, state: &navigationPresentation)?.steps == [
+            .presentUI(
+                snapshotID: "navigation-cua",
+                bundleID: "net.whatsapp.WhatsApp", windowID: 45,
+                scope: .window),
+        ], "a planner field cannot widen in-app presentation scope")
         navigationPresentation.spokenCommand =
             "check the Shivangi Gupta chat on WhatsApp"
         expect(decodeBatchError("""
@@ -4973,6 +5010,22 @@ extension Selftest {
         } else {
             expect(false, "a refusal is a failure")
         }
+        let exactPartial = """
+        {"ok":true,"result":{"isError":true,
+        "content":[{"type":"text","text":"exact window unverified"}],
+        "structuredContent":{
+          "status":"partial",
+          "code":"bring_to_front_exact_window_unverified",
+          "pid":500,"window_id":9,"activated":false,
+          "request_accepted":true,"process_activated":true}}}
+        """
+        if case .success(let payload) = CuaDriver.parseResponse(
+            Data(exactPartial.utf8)) {
+            expect(payload["_velora_tool_error"] as? Bool == true,
+                   "the exact presentation partial preserves structured proof")
+        } else {
+            expect(false, "the exact presentation partial remains inspectable")
+        }
 
         guard let request = CuaDriver.encodeRequest(
             tool: "click", arguments: ["pid": 7]) else {
@@ -5646,6 +5699,32 @@ extension Selftest {
             ]
         }
 
+        func appPresentationReply(
+            _ pid: Int, _ windowID: Int, _ siblingID: Int
+        ) -> [String: Any] {
+            [
+                "status": "partial",
+                "code": "bring_to_front_exact_window_unverified",
+                "_velora_tool_error": true,
+                "activated": false, "request_accepted": true,
+                "process_activated": true,
+                "pid": pid, "window_id": windowID,
+                "path": "skylight_process_exact",
+                "exact_window_effect": [
+                    "verified": false, "focused": true,
+                    "frontmost_ordinary": false,
+                    "target_visible_ordinary": false,
+                ],
+                "observed": [
+                    "frontmost_pid": pid,
+                    "workspace_frontmost_pid": pid,
+                    "front_process_matches_target": true,
+                    "focused_window_id": windowID,
+                    "frontmost_ordinary_window_id": siblingID,
+                ],
+            ]
+        }
+
         // The happy path: another app, native, daemon healthy — the action
         // routes to the background and the system host never activates
         // anything.
@@ -5908,6 +5987,435 @@ extension Selftest {
                 windowID: windowID)
                 && transport.callCount("bring_to_front") == 0,
                    "presentation revalidates a target changed during quiet wait")
+        }
+
+        // Electron can focus the requested document while placing a sibling
+        // ordinary window first. That is enough only for a strict app-only
+        // reveal; a window-specific reveal refuses and restores user focus.
+        for scope in [ActionPresentationScope.app, .window] {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 99),
+                presentationReply(700, 70),
+            ]
+            transport.onCall = { tool in
+                guard tool == "bring_to_front",
+                      let call = transport.calls.last,
+                      let pid = call.arguments["pid"] as? Int else { return }
+                if pid == 500 {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                    system.foregroundWindowValue = ActionWindowIdentity(
+                        name: "Notes", bundleID: "com.apple.notes",
+                        pid: 500, windowID: 99)
+                } else {
+                    system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+                    system.foregroundWindowValue = ActionWindowIdentity(
+                        name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                        pid: 700, windowID: 70)
+                }
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the sibling presentation fixture has evidence")
+                return
+            }
+
+            let presented = host.presentUI(
+                snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                windowID: 9, scope: scope)
+            let handoffs = transport.calls.filter {
+                $0.tool == "bring_to_front"
+            }
+            if scope == .app {
+                expect(presented && handoffs.count == 1
+                       && system.foregroundWindowValue?.windowID == 99,
+                       "app-only reveal accepts a verified target sibling")
+            } else {
+                expect(!presented && handoffs.count == 2
+                       && handoffs.last?.arguments["pid"] as? Int == 700
+                       && system.foregroundWindowValue?.windowID == 70,
+                       "window reveal restores focus after a target sibling")
+            }
+        }
+
+        // An off-Space app can become the front process while the user's
+        // prior window remains the first ordinary window. App-only reveal
+        // may use the exact live app identity to cross Spaces; window reveal
+        // may not.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            system.appsByPID[500] = (
+                name: "Notes", bundleID: "com.apple.notes", windowID: 9)
+            system.exactOpenRequiresInactive = true
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 70),
+                presentationReply(700, 70),
+            ]
+            transport.onCall = { tool in
+                guard tool == "bring_to_front",
+                      let pid = transport.calls.last?.arguments["pid"] as? Int
+                else { return }
+                if pid == 500 {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                } else {
+                    system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+                }
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the off-Space presentation fixture has evidence")
+                return
+            }
+
+            let presented = host.presentUI(
+                snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                windowID: 9, scope: .app)
+            expect(presented && system.log.contains("openExact(500)")
+                   && transport.callCount("bring_to_front") == 2
+                   && system.foregroundWindowValue?.windowID == 9,
+                   "app-only reveal crosses Spaces through the exact app")
+        }
+
+        // AppKit activation is advisory. Keep the input guard armed until an
+        // asynchronous Space switch publishes the exact target app/window.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            system.appsByPID[500] = (
+                name: "Notes", bundleID: "com.apple.notes", windowID: 9)
+            system.exactOpenDefers = true
+            system.onSleep = { _ in
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 9)
+            }
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 70),
+                presentationReply(700, 70),
+            ]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the delayed activation fixture has evidence")
+                return
+            }
+
+            expect(host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .app)
+                   && system.sleepCalls.contains(50)
+                   && system.foregroundWindowValue?.windowID == 9,
+                   "app-only reveal waits for advisory activation")
+        }
+
+        // A failed AppKit Space switch can still mark the target as the
+        // workspace front process while the prior ordinary window stays up.
+        // Reassert that exact prior window before reporting failure.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            system.appsByPID[500] = (
+                name: "Notes", bundleID: "com.apple.notes", windowID: 9)
+            system.exactOpenDefers = true
+            system.onSleep = { _ in
+                system.frontmost = ("Notes", "com.apple.notes")
+            }
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 70),
+                presentationReply(700, 70),
+                presentationReply(700, 70),
+            ]
+            transport.onCall = { tool in
+                guard tool == "bring_to_front",
+                      let pid = transport.calls.last?.arguments["pid"] as? Int,
+                      pid == 700 else { return }
+                system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the activation-timeout fixture has evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .app)
+                   && transport.callCount("bring_to_front") == 3
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty"
+                   && system.foregroundWindowValue?.windowID == 70,
+                   "failed app activation restores the exact prior window")
+        }
+
+        // A failed first normalization attempt must not bypass cleanup in the
+        // target-front/prior-window topology. Retry the exact prior window.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 70),
+                ["status": "error"],
+                presentationReply(700, 70),
+            ]
+            transport.onCall = { tool in
+                guard tool == "bring_to_front" else { return }
+                let count = transport.callCount("bring_to_front")
+                if count == 1 {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                } else if count == 3 {
+                    system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+                }
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the failed-normalization fixture has evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .app)
+                   && transport.callCount("bring_to_front") == 3
+                   && system.frontmost?.bundleID == "com.mitchellh.ghostty"
+                   && system.foregroundWindowValue?.windowID == 70,
+                   "failed normalization retries the exact prior window")
+        }
+
+        // The off-Space fallback needs an exact prior window. A process-only
+        // prior could select an arbitrary window and is not safe to normalize.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.appsByPID[500] = (
+                name: "Notes", bundleID: "com.apple.notes", windowID: 9)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            var apps = transport.responses["list_apps"]?["apps"]
+                as? [[String: Any]] ?? []
+            apps.append([
+                "name": "Ghostty", "bundle_id": "com.mitchellh.ghostty",
+                "pid": 700, "running": true, "active": true,
+            ])
+            transport.responses["list_apps"] = ["apps": apps]
+            let host = makeRoutedHost(system: system, transport: transport)
+            system.foregroundWindowValue = nil
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the process-only prior fixture has evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .app)
+                   && transport.callCount("bring_to_front") == 0
+                   && !system.log.contains("openExact(500)"),
+                   "app normalization refuses a process-only prior")
+        }
+
+        // Cua can prove target process activation while macOS momentarily has
+        // no ordinary foreground row. Window scope still restores prior focus.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 99),
+                presentationReply(700, 70),
+            ]
+            transport.onCall = { tool in
+                guard tool == "bring_to_front",
+                      let pid = transport.calls.last?.arguments["pid"] as? Int
+                else { return }
+                if pid == 500 {
+                    system.frontmost = ("Notes", "com.apple.notes")
+                    system.foregroundWindowValue = nil
+                } else {
+                    system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+                    system.foregroundWindowValue = ActionWindowIdentity(
+                        name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                        pid: 700, windowID: 70)
+                }
+            }
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the nil-window restore fixture has evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .window)
+                   && transport.callCount("bring_to_front") == 2
+                   && system.foregroundWindowValue?.windowID == 70,
+                   "driver-proven target focus restores without a local row")
+        }
+
+        // Input during local app attestation belongs to the user. Restore the
+        // clicked sibling, never the app that was front before the action.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 99),
+                presentationReply(500, 80),
+            ]
+            var attesting = false
+            var marked = false
+            transport.onCall = { tool in
+                guard tool == "bring_to_front",
+                      let windowID = transport.calls.last?
+                        .arguments["window_id"] as? Int else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: windowID == 9 ? 99 : 80)
+                attesting = windowID == 9
+            }
+            let quiet: () -> Bool = {
+                guard attesting, !marked else { return true }
+                marked = true
+                UserInputActivity.pointerPressed(button: 0, windowID: 80)
+                UserInputActivity.pointerReleased(0)
+                return false
+            }
+            let clicked = ActionWindowIdentity(
+                name: "Notes", bundleID: "com.apple.notes",
+                pid: 500, windowID: 80)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                interactionIsQuiet: quiet,
+                userFocusForWindow: { $0 == 80 ? clicked : nil })
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the mid-attestation input fixture has evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .app)
+                   && transport.callCount("bring_to_front") == 2
+                   && transport.calls.last?.arguments["pid"] as? Int == 500
+                   && transport.calls.last?.arguments["window_id"] as? Int == 80
+                   && system.foregroundWindowValue?.windowID == 80,
+                   "mid-attestation input preserves the clicked sibling")
+        }
+
+        // The user can click between the last caller-side generation check
+        // and broad failure restoration. The clicked window still wins.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.queued["bring_to_front"] = [
+                appPresentationReply(500, 9, 99),
+                presentationReply(500, 80),
+            ]
+            var targetFront = false
+            var marked = false
+            transport.onCall = { tool in
+                guard tool == "bring_to_front",
+                      let windowID = transport.calls.last?
+                        .arguments["window_id"] as? Int else { return }
+                system.frontmost = ("Notes", "com.apple.notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: windowID == 9 ? 99 : 80)
+                targetFront = windowID == 9
+            }
+            system.onForegroundWindowRead = {
+                guard targetFront, !marked else { return }
+                marked = true
+                UserInputActivity.pointerPressed(button: 0, windowID: 80)
+                UserInputActivity.pointerReleased(0)
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.notes",
+                    pid: 500, windowID: 80)
+            }
+            let clicked = ActionWindowIdentity(
+                name: "Notes", bundleID: "com.apple.notes",
+                pid: 500, windowID: 80)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                userFocusForWindow: { $0 == 80 ? clicked : nil })
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the restore-read race fixture has evidence")
+                return
+            }
+
+            expect(!host.presentUI(
+                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
+                    windowID: 9, scope: .window)
+                   && transport.callCount("bring_to_front") == 2
+                   && transport.calls.last?.arguments["pid"] as? Int == 500
+                   && transport.calls.last?.arguments["window_id"] as? Int == 80
+                   && system.foregroundWindowValue?.windowID == 80,
+                   "input during restoration preserves the clicked sibling")
         }
 
         do {
@@ -6368,6 +6876,39 @@ extension Selftest {
                    "later degradation also leaves foreground ownership alone")
         }
 
+        // A healthy background route can degrade later. Driver-supplied
+        // elements in that degraded reply are never readable or actionable.
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["type_text"] = ["effect": "confirmed"]
+            transport.responses["press_key"] = ["effect": "confirmed"]
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            expect(host.frontmostApp()?.name == "Notes",
+                   "the degradation fixture first proves a healthy route")
+            transport.responses["get_window_state"] = [
+                "degraded": true, "elements": [[
+                    "element_index": 7, "role": "AXTextArea",
+                    "label": "Secret draft", "value": "",
+                    "element_token": "untrusted:7",
+                ]],
+            ]
+
+            expect(host.visibleNames().isEmpty
+                   && !host.hasFocusedTextTarget
+                   && !host.typeText("unsafe", expecting: "com.apple.notes")
+                   && !host.pressKey(
+                        name: "escape", mods: [], keyCode: 53, flags: [],
+                        expecting: "com.apple.notes")
+                   && transport.callCount("type_text") == 0
+                   && transport.callCount("press_key") == 0,
+                   "degraded elements cannot leak or drive background input")
+        }
+
         // An off-Space target is still an exact read-only target. Keep it
         // routed until interaction, even if the user changes foreground apps
         // while the Cua window probe is in flight.
@@ -6783,7 +7324,7 @@ extension Selftest {
             expect(host.prepareInteraction() == .deferred
                    && handoffCalls == 1
                    && system.foregroundWindowValue?.windowID == 99,
-                   "user-selected target window is never restored away")
+                   "unattributed input preserves a same-app sibling")
         }
         do {
             let system = FakeActionHost()

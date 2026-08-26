@@ -1,5 +1,10 @@
 import Foundation
 
+enum ActionPresentationScope: Equatable {
+    case window
+    case app
+}
+
 /// One primitive the executor can perform. The vocabulary is closed by design:
 /// there is no shell step, no script step, and no raw-coordinate click, so the
 /// worst a bad plan can do is open the wrong app or type into a window the
@@ -17,8 +22,9 @@ enum ActionStep: Equatable {
     case verifyGoal(snapshotID: String, index: Int, role: String,
                     label: String, target: String)
     /// Engine-attested transition from exact routed-window evidence to the
-    /// same window in front. The controller vocabulary never includes it.
-    case presentUI(snapshotID: String, bundleID: String, windowID: Int)
+    /// requested app or window in front. The controller never authors it.
+    case presentUI(snapshotID: String, bundleID: String, windowID: Int,
+                   scope: ActionPresentationScope)
     case typeText(String)
     /// Navigation/query text, never message/document content and never
     /// eligible for Return/Enter commit authority.
@@ -1124,9 +1130,14 @@ extension ActionPlan {
                       snapshot.windowID == windowNumber.intValue,
                       snapshot.bundleID.lowercased() == bundleID.lowercased()
                 else { throw ActionPlanError.invalidUIPresentation(step: index) }
+                let scope: ActionPresentationScope =
+                    ActionPlan.isAppOnlyPresentation(
+                        state.spokenCommand, appName: snapshot.appName,
+                        bundleID: snapshot.bundleID,
+                        candidates: state.appNames) ? .app : .window
                 steps.append(.presentUI(
                     snapshotID: snapshot.id, bundleID: snapshot.bundleID,
-                    windowID: windowNumber.intValue))
+                    windowID: windowNumber.intValue, scope: scope))
                 focusEstablished = false
                 uiTargetVerified = false
 

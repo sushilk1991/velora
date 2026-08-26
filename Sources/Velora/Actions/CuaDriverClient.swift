@@ -51,6 +51,9 @@ struct CuaPeerTrustCache {
 /// that govern the foreground path — the driver is an actuator, never an
 /// authority.
 enum CuaDriver {
+    private static let exactPartialCode =
+        "bring_to_front_exact_window_unverified"
+    private static let toolErrorMarker = "_velora_tool_error"
     private static let safeEnvironmentNames: Set<String> = [
         "PATH", "HOME", "USER", "LOGNAME", "SHELL",
         "TMPDIR", "TMP", "TEMP", "LANG",
@@ -168,9 +171,8 @@ enum CuaDriver {
     /// Parses one response line. The daemon wraps MCP-shaped results:
     /// `{"ok":true,"result":{"content":…,"structuredContent":{…}}}` on
     /// success, `{"ok":false,"error":"…"}` on failure. Tool-level refusals
-    /// (`{"refusal":…,"status":"refused"}`) arrive INSIDE a successful
-    /// envelope and are surfaced as values, not errors — a refusal is an
-    /// answer the caller must judge, not a transport fault.
+    /// arrive inside a successful envelope with `isError:true`; they remain
+    /// failures even when they carry structured diagnostic fields.
     static func parseResponse(_ line: Data) -> Result<[String: Any], CuaDriverError> {
         guard let object = (try? JSONSerialization.jsonObject(with: line))
                 as? [String: Any] else {
@@ -196,6 +198,14 @@ enum CuaDriver {
                 ?? (structured?["reason"] as? String)
             let text = ((result["content"] as? [[String: Any]])?
                 .first?["text"] as? String)
+            // Cua deliberately marks a non-verified exact-window activation
+            // as a tool error while returning the independent observations.
+            // Preserve only that closed shape for the presentation policy;
+            // every other tool error remains a transport failure.
+            if code == exactPartialCode, var structured {
+                structured[toolErrorMarker] = true
+                return .success(structured)
+            }
             return .failure(.daemonError(code ?? text ?? "tool error"))
         }
         if let structured = result["structuredContent"] as? [String: Any] {

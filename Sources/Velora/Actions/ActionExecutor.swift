@@ -107,8 +107,9 @@ protocol ActionHost: AnyObject {
                        purpose: ActionVerificationPurpose) -> Bool
     /// Exact ordinary window currently in front, including WindowServer id.
     func foregroundWindow() -> ActionWindowIdentity?
-    /// Present an engine-attested routed window and leave it in front.
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool
+    /// Present the engine-attested routed app or window and leave it in front.
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int,
+                   scope: ActionPresentationScope) -> Bool
     func typeText(_ text: String, expecting bundleID: String?) -> Bool
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
@@ -155,7 +156,8 @@ extension ActionHost {
         false
     }
     func foregroundWindow() -> ActionWindowIdentity? { nil }
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int,
+                   scope: ActionPresentationScope) -> Bool {
         false
     }
 }
@@ -611,11 +613,12 @@ final class ActionExecutor {
                      observed: "\(verb) \(text.count) chars: "
                          + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
 
-            case .presentUI(let snapshotID, let bundleID, let windowID):
+            case .presentUI(
+                    let snapshotID, let bundleID, let windowID, let scope):
                 guard host.presentUI(
                     snapshotID: snapshotID, bundleID: bundleID,
-                    windowID: windowID) else {
-                    note("present_ui: exact handoff refused")
+                    windowID: windowID, scope: scope) else {
+                    note("present_ui: safe handoff refused")
                     return failed(
                         index, "the target window could not be presented safely",
                         recoverable: true)

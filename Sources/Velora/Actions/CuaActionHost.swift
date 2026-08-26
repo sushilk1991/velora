@@ -417,11 +417,16 @@ final class BackgroundRoutingActionHost: ActionHost {
     private static let presentationTool = "bring_to_front"
     private static let presentationCode =
         "bring_to_front_exact_window_verified"
+    private static let partialPresentationCode =
+        "bring_to_front_exact_window_unverified"
     private static let processPresentationCode =
         "bring_to_front_process_verified"
+    private static let toolErrorMarker = "_velora_tool_error"
     private static let handoffQuietSeconds: TimeInterval = 0.5
     private static let handoffWaitMs = 5_000
     private static let handoffPollMs = 50
+    private static let appActivationWaitMs = 3_000
+    private static let appActivationStableMs = 100
     private let system: ActionHost
     private let transport: CuaTransport
     private let backgroundEnabled: () -> Bool
@@ -608,12 +613,18 @@ final class BackgroundRoutingActionHost: ActionHost {
                 windowID: windowID, bundleID: targetBundleID)
             return .deferred
         }
-        guard case .success(let reply) = result,
+        let reply: [String: Any]?
+        if case .success(let value) = result {
+            reply = value
+        } else {
+            reply = nil
+        }
+        guard let reply,
               presentationMatches(reply, pid: targetPID, windowID: windowID)
         else {
-            _ = restoreHandoffFocus(
-                prior, pid: targetPID, windowID: windowID,
-                bundleID: targetBundleID)
+            _ = restoreTargetFocus(
+                prior, generation: inputGeneration, pid: targetPID,
+                windowID: windowID, bundleID: targetBundleID, reply: reply)
             unroute()
             endDaemon()
             return .refused
@@ -969,13 +980,45 @@ final class BackgroundRoutingActionHost: ActionHost {
         backgroundDraft = ""
     }
 
-    private func restoreHandoffFocus(
+    private func restoreTargetFocus(
+        _ prior: FocusTarget, generation: UInt64,
+        pid: Int, windowID: Int, bundleID: String,
+        reply: [String: Any]? = nil
+    ) -> Bool {
+        guard let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame
+        else { return true }
+        let targetOwnsFocus: Bool
+        if let window = system.foregroundWindow() {
+            targetOwnsFocus = window.pid == pid
+                && window.bundleID.caseInsensitiveCompare(bundleID)
+                    == .orderedSame
+        } else {
+            targetOwnsFocus = reply.map {
+                replyProvesTargetFront($0, pid: pid)
+            } == true
+        }
+        guard targetOwnsFocus else { return true }
+        guard generation == UserInputActivity.snapshot() else {
+            return restoreAfterUserInput(
+                prior, generation: generation, pid: pid,
+                windowID: windowID, bundleID: bundleID)
+        }
+        let restored = restoreFocus(prior)
+        guard generation == UserInputActivity.snapshot() else {
+            return restoreAfterUserInput(
+                prior, generation: generation, pid: pid,
+                windowID: windowID, bundleID: bundleID)
+        }
+        return restored
+    }
+
+    private func restoreExactFocus(
         _ prior: FocusTarget, pid: Int, windowID: Int, bundleID: String
     ) -> Bool {
         guard let front = system.frontmostApp(),
-              let window = system.foregroundWindow()
-        else { return true }
-        guard front.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame,
+              let window = system.foregroundWindow(),
+              front.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame,
               window.pid == pid, window.windowID == windowID,
               window.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame
         else { return true }
@@ -990,7 +1033,7 @@ final class BackgroundRoutingActionHost: ActionHost {
            let selected = userFocusForWindow(selectedWindow) {
             return restoreWindow(selected)
         }
-        return restoreHandoffFocus(
+        return restoreExactFocus(
             prior, pid: pid, windowID: windowID, bundleID: bundleID)
     }
 
@@ -1213,6 +1256,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func freshPrimaryTextElement()
         -> (snapshot: CuaSnapshot, element: CuaElement)? {
         guard let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
+              !snapshot.degraded,
               let element = snapshot.primaryTextElement else {
             backgroundDraft = ""
             return nil
@@ -1245,7 +1289,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     func visibleNames() -> [String] {
         guard routed else { return system.visibleNames() }
         guard snapshotLineage == .valid,
-              let snapshot = snapshotTarget(maxElements: Self.snapshotElements)
+              let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
+              !snapshot.degraded
         else { return [] }
         var names: [String] = []
         var seen = Set<String>()
@@ -1489,7 +1534,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         return true
     }
 
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int) -> Bool {
+    func presentUI(snapshotID: String, bundleID: String, windowID: Int,
+                   scope: ActionPresentationScope = .window) -> Bool {
         guard routed, snapshotLineage == .valid, targetReady,
               let cached = routedUISnapshot,
               cached.observation.source == .cua,
@@ -1513,6 +1559,13 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard let front = system.frontmostApp(),
               let prior = captureFocus(front)
         else { return false }
+        let priorWindow: ActionWindowIdentity?
+        if case .window(let window) = prior {
+            priorWindow = window
+        } else {
+            priorWindow = nil
+        }
+        guard scope != .app || priorWindow != nil else { return false }
         guard interactionIsQuiet(),
               inputGeneration == UserInputActivity.snapshot(),
               presentationTargetIsLive(windowID: windowID)
@@ -1529,17 +1582,81 @@ final class BackgroundRoutingActionHost: ActionHost {
                 windowID: windowID, bundleID: targetBundleID)
             return false
         }
-        guard case .success(let reply) = result,
-              presentationMatches(reply, pid: targetPID, windowID: windowID)
-        else {
-            _ = restoreHandoffFocus(
-                prior, pid: targetPID, windowID: windowID,
-                bundleID: targetBundleID)
-            unroute()
+        let reply: [String: Any]?
+        if case .success(let value) = result {
+            reply = value
+        } else {
+            reply = nil
+        }
+        if let reply {
+            if presentationMatches(
+                    reply, pid: targetPID, windowID: windowID) {
+                guard inputGeneration == UserInputActivity.snapshot() else {
+                    _ = restoreAfterUserInput(
+                        prior, generation: inputGeneration, pid: targetPID,
+                        windowID: windowID, bundleID: targetBundleID)
+                    return false
+                }
+                unroute()
+                return true
+            }
+            if scope == .app, let priorWindow, interactionIsQuiet() {
+                let matches = appPresentationMatches(
+                    reply, pid: targetPID, windowID: windowID)
+                let requestMatches = appRequestWindow(
+                    reply, pid: targetPID, windowID: windowID) != nil
+                guard inputGeneration == UserInputActivity.snapshot() else {
+                    _ = restoreAfterUserInput(
+                        prior, generation: inputGeneration, pid: targetPID,
+                        windowID: windowID, bundleID: targetBundleID)
+                    return false
+                }
+                if matches {
+                    unroute()
+                    return true
+                }
+                let priorRestored = requestMatches
+                    && restoreWindow(priorWindow)
+                guard inputGeneration == UserInputActivity.snapshot() else {
+                    _ = restoreAfterUserInput(
+                        prior, generation: inputGeneration, pid: targetPID,
+                        windowID: windowID, bundleID: targetBundleID)
+                    return false
+                }
+                if priorRestored
+                    && activateTargetApp(generation: inputGeneration) {
+                    guard inputGeneration == UserInputActivity.snapshot() else {
+                        _ = restoreAfterUserInput(
+                            prior, generation: inputGeneration,
+                            pid: targetPID, windowID: windowID,
+                            bundleID: targetBundleID)
+                        return false
+                    }
+                    unroute()
+                    return true
+                }
+                guard inputGeneration == UserInputActivity.snapshot() else {
+                    _ = restoreAfterUserInput(
+                        prior, generation: inputGeneration, pid: targetPID,
+                        windowID: windowID, bundleID: targetBundleID)
+                    return false
+                }
+                if requestMatches {
+                    _ = restoreWindow(priorWindow)
+                }
+            }
+        }
+        guard inputGeneration == UserInputActivity.snapshot() else {
+            _ = restoreAfterUserInput(
+                prior, generation: inputGeneration, pid: targetPID,
+                windowID: windowID, bundleID: targetBundleID)
             return false
         }
+        _ = restoreTargetFocus(
+            prior, generation: inputGeneration, pid: targetPID,
+            windowID: windowID, bundleID: targetBundleID, reply: reply)
         unroute()
-        return true
+        return false
     }
 
     private func restoreFocus(_ target: FocusTarget) -> Bool {
@@ -1575,6 +1692,100 @@ final class BackgroundRoutingActionHost: ActionHost {
               exactFlag(reply["process_activated"]) == true,
               exactInt(reply["pid"]) == pid,
               reply["window_id"] is NSNull
+        else { return false }
+        return true
+    }
+
+    private func appPresentationMatches(
+        _ reply: [String: Any], pid: Int, windowID: Int
+    ) -> Bool {
+        guard let siblingID = appRequestWindow(
+                reply, pid: pid, windowID: windowID),
+              siblingID != windowID,
+              let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              let window = system.foregroundWindow(),
+              window.pid == pid, window.windowID == siblingID,
+              window.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame
+        else { return false }
+        return true
+    }
+
+    private func appRequestWindow(
+        _ reply: [String: Any], pid: Int, windowID: Int
+    ) -> Int? {
+        guard reply["status"] as? String == "partial",
+              reply["code"] as? String == Self.partialPresentationCode,
+              exactFlag(reply[Self.toolErrorMarker]) == true,
+              exactFlag(reply["activated"]) == false,
+              exactFlag(reply["request_accepted"]) == true,
+              exactFlag(reply["process_activated"]) == true,
+              exactInt(reply["pid"]) == pid,
+              exactInt(reply["window_id"]) == windowID,
+              let effect = reply["exact_window_effect"] as? [String: Any],
+              exactFlag(effect["verified"]) == false,
+              exactFlag(effect["focused"]) == true,
+              exactFlag(effect["frontmost_ordinary"]) == false,
+              exactFlag(effect["target_visible_ordinary"]) != nil,
+              let observed = reply["observed"] as? [String: Any],
+              exactInt(observed["frontmost_pid"]) == pid,
+              exactInt(observed["focused_window_id"]) == windowID,
+              let frontWindowID = exactInt(
+                observed["frontmost_ordinary_window_id"]),
+              frontWindowID > 0,
+              derivedFrontmostPID(observed, targetPID: pid) == pid,
+              let liveBundleID = bundleForPID(pid),
+              liveBundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame
+        else { return nil }
+        return frontWindowID
+    }
+
+    private func activateTargetApp(generation: UInt64) -> Bool {
+        guard generation == UserInputActivity.snapshot(),
+              system.openApp(
+                named: targetName, bundleID: targetBundleID, pid: targetPID)
+                != nil else { return false }
+        let deadline = system.now()
+            + Double(Self.appActivationWaitMs) / 1_000
+        repeat {
+            if targetAppIsFront() {
+                guard generation == UserInputActivity.snapshot() else {
+                    return false
+                }
+                system.sleep(ms: Self.appActivationStableMs)
+                return generation == UserInputActivity.snapshot()
+                    && targetAppIsFront()
+            }
+            guard system.now() < deadline else { return false }
+            system.sleep(ms: Self.handoffPollMs)
+        } while true
+    }
+
+    private func targetAppIsFront() -> Bool {
+        guard let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              let window = system.foregroundWindow(),
+              window.pid == targetPID,
+              window.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame
+        else { return false }
+        return true
+    }
+
+    private func replyProvesTargetFront(
+        _ reply: [String: Any], pid: Int
+    ) -> Bool {
+        guard exactFlag(reply["process_activated"]) == true,
+              exactInt(reply["pid"]) == pid,
+              let observed = reply["observed"] as? [String: Any],
+              exactInt(observed["frontmost_pid"]) == pid,
+              derivedFrontmostPID(observed, targetPID: pid) == pid
         else { return false }
         return true
     }
@@ -1723,7 +1934,9 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard snapshotLineage == .valid,
               expectedMatchesTarget(bundleID), targetReady,
               let windowID = targetWindowID,
-              let driverKey = CuaKeyMap.driverKey(forPlanKey: name)
+              let driverKey = CuaKeyMap.driverKey(forPlanKey: name),
+              let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
+              !snapshot.degraded
         else { return false }
         // Defense in depth behind the executor's target-attestation gate: a
         // key that commits text may only be pressed when THIS action
