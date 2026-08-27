@@ -33,7 +33,7 @@ or updates change:
 | Microphone fails during a meeting | Recording stops visibly and already-captured audio remains recoverable |
 | Microphone, input-monitoring, or accessibility denied | The app gives the correct recovery action and does not claim to be listening or inserted |
 | Password/secure field | No text is inserted, and no action plan runs |
-| Voice action against a real app (`velora action "…" --execute`) | The named app comes forward and the plan runs; a plan that cannot confirm the target window stops without typing |
+| Voice action against a real app (`velora action "…" --execute`) | The current app stays in front while the plan runs against the exact background process and window; a plan that cannot confirm that target stops without typing |
 | Voice action with the screen locked | The plan fails with "the screen is locked" and opens nothing |
 | Voice action while the target conversation is wrong | Only the switcher query is typed; the message body is never sent |
 | Normal text field with a non-text clipboard item | Text lands once and the original clipboard is restored |

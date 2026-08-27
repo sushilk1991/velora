@@ -302,8 +302,9 @@ than continuing blind.
 
 The structured tree is the navigation source of truth. The controller reasons
 from the same hierarchy/action contract in WhatsApp, a browser, or an app it has
-never seen; no per-app layout recipe participates. Web searches still resolve
-to a single `open_url`, which is faster and more reliable than walking a UI.
+never seen; no per-app layout recipe participates. Action Mode refuses
+`open_url` because macOS cannot bind the handler activation to an exact
+background process and window.
 
 **Background execution (optional).** When the user has the open-source
 [Cua Driver](https://cua.ai/cua-driver) installed,
@@ -314,8 +315,10 @@ is a *different* app than the one the user is in (by bundle id, failing closed
 when the frontmost app cannot be read), the plan cannot deliver content, the
 target is not a browser, and the driver daemon is healthy — its socket answers
 and it holds a usable Accessibility grant, which a daemon spawned by Velora
-inherits from Velora. Everything else falls back to the classic foreground host, as does
-the rest of an action after an `open_url` or a switch to a non-routable app.
+inherits from Velora. A cross-app action refuses when that route is unavailable,
+unhealthy, or unsupported. The classic host remains available only when the
+requested target is already the user's current app; it never becomes a
+cross-app foreground fallback.
 
 Web content is refused at the element level rather than by app category: any
 text element under an `AXWebArea` is never a background target, because
