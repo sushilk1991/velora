@@ -1,10 +1,45 @@
 # Velora
 
-**Private voice typing for Mac.** Hold a key, speak, and release. Velora turns
-your speech into polished text in the app you are already using.
+<div align="center">
+
+**Private voice typing for Mac — free, open source, and fully on-device.**
+
+[![GitHub stars](https://img.shields.io/github/stars/sushilk1991/velora)](https://github.com/sushilk1991/velora/stargazers)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![macOS](https://img.shields.io/badge/macOS-14+-brightgreen)]()
+[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-only-lightgrey)]()
+[![Offline](https://img.shields.io/badge/100%25-offline-informational)]()
+[![Platform](https://img.shields.io/badge/Mac-app-brightgreen)]()
+
+</div>
+
+Hold a key, speak, and release. Velora turns your speech into polished text in
+the app you are already using — then can carry out spoken commands for you.
+
+**The pitch:** a **free, MIT, on-device** alternative to paid dictation tools
+like Superwhisper and Wispr Flow. No subscription, no account, no cloud. Your
+audio and transcripts never leave your Mac.
 
 Speech recognition and writing cleanup run on your Mac. Your audio,
 transcripts, and history are not sent to a transcription service.
+
+> ⭐ **Like Velora?** Star the repo — it tells me this matters and helps others
+> find a private, offline dictation option. Thanks!
+
+## Why Velora
+
+| | Velora | Superwhisper / Wispr Flow |
+|---|---|---|
+| **Price** | Free (MIT) | Paid subscription |
+| **On-device** | ✅ fully offline | Mostly cloud or hybrid |
+| **Agentic actions** | ✅ "message Priya on Slack I'm late" | ❌ dictation only |
+| **Account / telemetry** | None | Often required |
+| **Audio leaves Mac** | Never | Sometimes |
+
+Most dictation apps just type what you say. Velora can also **do things**: select
+text and describe a change, or hold ⌃⇧A and ask Velora to open an app and carry
+out a task. It works a few steps at a time, reads what's actually on screen, and
+adjusts — then stops rather than guess when the window it expects isn't there.
 
 ## What Velora does
 
