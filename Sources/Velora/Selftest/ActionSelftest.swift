@@ -318,6 +318,37 @@ final class FakeActionHost: ActionHost {
     func now() -> TimeInterval { clock }
 }
 
+final class FakeNativeMediaProvider: NativeMediaProvider {
+    let bundleID = "com.apple.Music"
+    private let pid: Int
+    private(set) var commands: [ActionMediaState] = []
+    private(set) var permissionPrompts: [Bool] = []
+    var permissionStatus: OSStatus = noErr
+
+    init(pid: Int = 900) {
+        self.pid = pid
+    }
+
+    func permission(
+        _ state: ActionMediaState,
+        target: ActionProcessIdentity,
+        askUserIfNeeded: Bool
+    ) -> OSStatus {
+        permissionPrompts.append(askUserIfNeeded)
+        return permissionStatus
+    }
+
+    func send(
+        _ state: ActionMediaState,
+        target: ActionProcessIdentity,
+        maySend: () -> Bool
+    ) -> Bool {
+        guard maySend() else { return false }
+        commands.append(state)
+        return target.bundleID == bundleID && target.pid == pid
+    }
+}
+
 /// Scripted stand-in for the engine's turn planner, so the loop driver can be
 /// exercised without a model or a socket.
 final class FakeTurnPlanner: ActionTurnPlanner {
@@ -416,6 +447,9 @@ extension Selftest {
         testActionExecutorSafetyRails()
         testWaitFrontmostBringsTheAppForward()
         testMediaActionControl()
+        testNativeMediaAutomation()
+        testActionBrowserConsentBoundary()
+        testActionFirstTurnConsent()
         testActionExecutorPressElement()
         testStructuredUIContract()
         testActionLoopRecovery()
@@ -3657,6 +3691,39 @@ extension Selftest {
            "index":3,"role":"AXButton","label":"Send"}]}
         """, state: &committingMedia) == nil,
                "media playback cannot bypass indexed control safety rules")
+
+        let nativeCapability = ActionNativeCapability(
+            id: "opaque-pause", verb: .mediaControl, state: .pause)
+        let nativeSnapshot = ActionUISnapshot(
+            id: "native-music", source: .appNative,
+            appName: "Music", bundleID: "com.apple.Music",
+            windowTitle: "", complete: false, elements: [],
+            capabilities: [nativeCapability])
+        var nativeState = ActionPlan.BatchState()
+        nativeState.structuredUIAvailable = true
+        nativeState.structuredUISnapshot = nativeSnapshot
+        let nativePlan = decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"media_control","state":"pause","snapshot":"native-music",
+           "capability":"opaque-pause"}]}
+        """, state: &nativeState)
+        expect(nativePlan?.steps.last == .mediaControl(ActionMediaControl(
+            state: .pause,
+            capability: .appNative(
+                snapshotID: "native-music", id: "opaque-pause"))),
+            "an app-native media step echoes one current opaque capability")
+
+        var forgedState = ActionPlan.BatchState()
+        forgedState.structuredUIAvailable = true
+        forgedState.structuredUISnapshot = nativeSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"media_control","state":"play","snapshot":"native-music",
+           "capability":"opaque-pause"}]}
+        """, state: &forgedState) == nil,
+               "an opaque capability cannot be forged for another media state")
     }
 
     /// The 2026-08-21 bakeoff produced a validator-ACCEPTED exfiltration: a
@@ -3991,6 +4058,184 @@ extension Selftest {
         expect(lockedResult.outcome != .completed
                && locked.mediaControlCalls.isEmpty,
                "media control rechecks a screen that locks mid-plan")
+    }
+
+    private static func testNativeMediaAutomation() {
+        let process = ActionProcessIdentity(
+            name: "Music", bundleID: "com.apple.Music", pid: 900)
+        let audioID = AudioObjectID(77)
+        func audio(_ playing: Bool) -> MediaPlaybackCoordinator.Snapshot {
+            MediaPlaybackCoordinator.Snapshot(
+                processes: [audioID], playing: [],
+                allPlaying: playing ? [audioID] : [],
+                bundleIDs: [audioID: process.bundleID],
+                pids: [audioID: process.pid])
+        }
+        let provider = FakeNativeMediaProvider()
+        var reads = 0
+        let automation = NativeMediaAutomation(
+            providers: [provider],
+            bundleForPID: { $0 == process.pid ? process.bundleID : nil },
+            read: {
+                defer { reads += 1 }
+                return audio(reads > 0)
+            }, sleep: { _ in })
+        let capabilities = automation.capabilities(for: process)
+        guard let play = capabilities.first(where: { $0.state == .play }) else {
+            expect(false, "Music exposes an opaque native play capability")
+            return
+        }
+        let control = ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "native-music", id: play.id))
+        expect(automation.perform(
+            control, target: process, maySend: { true }) == .verified
+            && provider.commands == [.play],
+            "one target-bound native command proves exact PID playback")
+
+        let rejected = NativeMediaAutomation(
+            providers: [FakeNativeMediaProvider()],
+            bundleForPID: { $0 == process.pid ? process.bundleID : nil },
+            read: { audio(false) }, sleep: { _ in })
+        guard let playBlocked = rejected.capabilities(for: process).first(where: {
+            $0.state == .play
+        }) else {
+            expect(false, "Music exposes an opaque native play capability")
+            return
+        }
+        let blocked = ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "native-music", id: playBlocked.id))
+        expect(rejected.perform(
+            blocked, target: process, maySend: { false }) == .unavailable,
+            "entering the background target cancels before native automation")
+
+        let consentRequired = FakeNativeMediaProvider()
+        consentRequired.permissionStatus = OSStatus(
+            errAEEventWouldRequireUserConsent)
+        let noninteractive = NativeMediaAutomation(
+            providers: [consentRequired],
+            bundleForPID: { $0 == process.pid ? process.bundleID : nil },
+            read: { audio(false) }, sleep: { _ in })
+        let hidden = noninteractive.capabilities(for: process)
+        let forged = ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "native-music", id: "not-minted"))
+        expect(hidden.isEmpty && !noninteractive.supports(process),
+               "consent-required native media exposes no capability or route")
+        expect(noninteractive.perform(
+            forged, target: process, maySend: { true }) == .unavailable
+            && consentRequired.commands.isEmpty
+            && !consentRequired.permissionPrompts.isEmpty
+            && consentRequired.permissionPrompts.allSatisfy { !$0 },
+            "Action media never asks for Automation consent or sends an event")
+
+        var setupPrompts: [Bool] = []
+        var statusWasOnMain = true
+        var requestWasOnMain = true
+        let setup = NativeMediaAutomation(
+            providers: [FakeNativeMediaProvider()],
+            bundleForPID: { $0 == process.pid ? process.bundleID : nil },
+            read: { audio(false) }, sleep: { _ in },
+            musicPermission: { ask in
+                setupPrompts.append(ask)
+                if ask { requestWasOnMain = Thread.isMainThread }
+                else { statusWasOnMain = Thread.isMainThread }
+                return ask
+                    ? [noErr, noErr]
+                    : [OSStatus(errAEEventWouldRequireUserConsent)]
+            })
+        var statusResult: NativeMediaPermission?
+        var statusCompletionOnMain = false
+        setup.readMusicPermission { result in
+            statusResult = result
+            statusCompletionOnMain = Thread.isMainThread
+        }
+        let statusDeadline = Date().addingTimeInterval(2)
+        while statusResult == nil && Date() < statusDeadline {
+            RunLoop.current.run(
+                mode: .default,
+                before: Date().addingTimeInterval(0.01))
+        }
+        expect(statusResult == .needsConsent
+               && setupPrompts == [false] && !statusWasOnMain
+               && statusCompletionOnMain,
+               "Music permission status probes off-main and returns on main")
+        var setupResult: NativeMediaPermission?
+        var completionWasOnMain = false
+        setup.requestMusicPermission { result in
+            setupResult = result
+            completionWasOnMain = Thread.isMainThread
+        }
+        let setupDeadline = Date().addingTimeInterval(2)
+        while setupResult == nil && Date() < setupDeadline {
+            RunLoop.current.run(
+                mode: .default,
+                before: Date().addingTimeInterval(0.01))
+        }
+        expect(setupResult == .allowed
+               && setupPrompts == [false, true]
+               && !requestWasOnMain && completionWasOnMain,
+               "explicit Music consent runs off-main and returns on main")
+    }
+
+    private static func testActionBrowserConsentBoundary() {
+        let pasteboard = NSPasteboard(
+            name: NSPasteboard.Name(
+                "com.velora.action-browser.\(UUID().uuidString)"))
+        var permissionPrompts: [Bool] = []
+        let host = SystemActionHost(
+            inserter: TextInserter(pasteboard: pasteboard),
+            browserPageOverride: { askUserIfNeeded in
+                permissionPrompts.append(askUserIfNeeded)
+                return BrowserPageCache.Entry(
+                    url: URL(string: "https://example.com/action"),
+                    title: "Action Browser", at: Date())
+            })
+        expect(host.frontmostWindowTitle() == "Action Browser"
+               && host.frontmostPageURL()
+                == "https://example.com/action",
+               "Action browser observation keeps available context")
+        expect(permissionPrompts == [false, false],
+               "Action browser observation never requests Automation consent")
+    }
+
+    private static func testActionFirstTurnConsent() {
+        var permissionPrompts: [Bool] = []
+        var axReads = 0
+        let url = DictationController.actionPageURL(
+            bundleID: "com.google.Chrome",
+            axURL: {
+                axReads += 1
+                return URL(string: "https://wrong.example")
+            },
+            chromiumURL: { askUserIfNeeded in
+                permissionPrompts.append(askUserIfNeeded)
+                return URL(string: "https://cached.example/action")
+            })
+        expect(url == "https://cached.example/action"
+               && axReads == 0 && permissionPrompts == [false],
+               "CLI and voice Action first-turn context is noninteractive")
+
+        var entityReads = 0
+        _ = DictationController.recordingEntities(policy: .action) {
+            entityReads += 1
+            return []
+        }
+        _ = DictationController.recordingEntities(policy: .ordinary) {
+            entityReads += 1
+            return []
+        }
+        expect(entityReads == 1,
+               "Action recording skips the ordinary browser entity refresh")
+        expect(!DictationController.gathersRichRecordingEntities(
+            policy: .action)
+            && DictationController.gathersRichRecordingEntities(
+                policy: .ordinary),
+               "Action recording skips the rich browser context refresh")
     }
 
     /// A checkpoint that only ever waits cannot rescue a plan whose app is
@@ -5887,6 +6132,7 @@ extension Selftest {
         mediaSnapshot: @escaping () -> MediaPlaybackCoordinator.Snapshot
             = MediaPlaybackSystem.snapshot,
         mediaSleep: @escaping (Int) -> Void = { _ in },
+        nativeMedia: NativeMediaAutomation = .shared,
         userFocusForWindow: @escaping (Int) -> ActionWindowIdentity? = { _ in nil },
         localApps: [String: String] = ["Notes": "com.apple.Notes",
                                        "Slack": "com.tinyspeck.slackmacgap"]
@@ -5907,6 +6153,7 @@ extension Selftest {
             bundleForPID: { fakeBundleID($0, transport: transport) },
             interactionIsQuiet: interactionIsQuiet,
             mediaSnapshot: mediaSnapshot, mediaSleep: mediaSleep,
+            nativeMedia: nativeMedia,
             userFocusForWindow: userFocusForWindow,
             localResolve: { name in
                 guard let index = AppMatcher.bestMatch(
@@ -6032,6 +6279,51 @@ extension Selftest {
         expect(system.frontmost?.name == "Ghostty"
                && result.evidence.contains(.goalVerified(target: "media play")),
                "the exact target PID postcondition proves media without focus theft")
+
+        let degradedSystem = FakeActionHost()
+        degradedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let degradedTransport = FakeCuaTransport()
+        world(degradedTransport)
+        degradedTransport.responses["get_window_state"] = [
+            "snapshot_id": "unresolved", "degraded": true,
+            "degraded_reason": "ax_window_unresolved",
+            "elements_complete": false, "element_count": 0,
+            "total_element_count": 0, "elements": [],
+        ]
+        let nativeProvider = FakeNativeMediaProvider(pid: 503)
+        var nativeReads = 0
+        let nativeAutomation = NativeMediaAutomation(
+            providers: [nativeProvider],
+            bundleForPID: { $0 == 503 ? "com.apple.Music" : nil },
+            read: {
+                defer { nativeReads += 1 }
+                return audio(nativeReads > 0)
+            }, sleep: { _ in })
+        let degradedHost = makeRoutedHost(
+            system: degradedSystem, transport: degradedTransport,
+            nativeMedia: nativeAutomation,
+            localApps: ["Music": "com.apple.Music"])
+        degradedHost.beginActionInputSession()
+        _ = degradedHost.openApp(named: "Music")
+        _ = degradedHost.frontmostApp()
+        let nativeCapabilities = degradedHost.mediaCapabilities()
+        guard let nativePlay = nativeCapabilities.first(where: {
+            $0.state == .play
+        }) else {
+            expect(false,
+                   "a degraded exact Music route exposes its native capability")
+            return
+        }
+        let nativeResult = degradedHost.mediaControl(ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "app-native", id: nativePlay.id)))
+        expect(nativeResult == .verified
+               && nativeProvider.commands == [.play]
+               && degradedTransport.callCount("click") == 0,
+               "degraded Cua falls back to one exact app-native command")
+        expect(degradedSystem.frontmost?.name == "Ghostty",
+               "native media fallback preserves the user's foreground app")
 
         let staleSystem = FakeActionHost()
         staleSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")

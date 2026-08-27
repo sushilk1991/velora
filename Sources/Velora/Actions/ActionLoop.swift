@@ -560,7 +560,10 @@ final class ActionLoopRunner {
         let focusedLabel: String
         let focusedRole: String
         let selection: String
-        if host.isDrivingInBackground, let routed = host.uiSnapshot() {
+        let capabilities = host.mediaCapabilities()
+        if host.isDrivingInBackground,
+           let routed = capabilitySnapshot(
+            host.uiSnapshot(), capabilities: capabilities, front: front) {
             // One immutable Cua tree supplies a planner observation. Safety
             // boundaries still take their own fresh snapshots before acting.
             snapshot = routed
@@ -576,7 +579,8 @@ final class ActionLoopRunner {
             focusedLabel = host.focusedElementLabel() ?? ""
             focusedRole = host.focusedElementRole() ?? ""
             selection = host.focusedSelectionLabel() ?? ""
-            snapshot = host.uiSnapshot()
+            snapshot = capabilitySnapshot(
+                host.uiSnapshot(), capabilities: capabilities, front: front)
         }
         let pageURL = host.frontmostPageURL() ?? ""
         if state.urlTokenPool != nil {
@@ -613,6 +617,30 @@ final class ActionLoopRunner {
             observation["failed_step"] = failedStep
         }
         return observation
+    }
+
+    private func capabilitySnapshot(
+        _ snapshot: ActionUISnapshot?,
+        capabilities: [ActionNativeCapability],
+        front: (name: String, bundleID: String)?
+    ) -> ActionUISnapshot? {
+        guard !capabilities.isEmpty else { return snapshot }
+        if let snapshot {
+            return snapshot.addingCapabilities(capabilities)
+        }
+        guard let target = host.actionProcess(), target.pid > 0 else {
+            return nil
+        }
+        if !host.isDrivingInBackground {
+            guard let front,
+                  front.bundleID.caseInsensitiveCompare(target.bundleID)
+                    == .orderedSame else { return nil }
+        }
+        return ActionUISnapshot(
+            id: "app-native-\(capabilities[0].id)", source: .appNative,
+            appName: target.name, bundleID: target.bundleID,
+            windowTitle: "", windowID: host.actionWindow()?.windowID,
+            complete: false, elements: [], capabilities: capabilities)
     }
 
     private func snapshotNames(_ snapshot: ActionUISnapshot) -> [String] {

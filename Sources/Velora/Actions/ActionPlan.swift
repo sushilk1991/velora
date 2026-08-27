@@ -10,12 +10,28 @@ enum ActionMediaState: String, Equatable {
     case pause
 }
 
+enum ActionMediaCapability: Equatable {
+    case cua(snapshotID: String, index: Int, role: String, label: String)
+    case appNative(snapshotID: String, id: String)
+}
+
 struct ActionMediaControl: Equatable {
     let state: ActionMediaState
-    let snapshotID: String
-    let index: Int
-    let role: String
-    let label: String
+    let capability: ActionMediaCapability
+
+    init(state: ActionMediaState, capability: ActionMediaCapability) {
+        self.state = state
+        self.capability = capability
+    }
+
+    init(state: ActionMediaState, snapshotID: String, index: Int,
+         role: String, label: String) {
+        self.init(
+            state: state,
+            capability: .cua(
+                snapshotID: snapshotID, index: index,
+                role: role, label: label))
+    }
 }
 
 /// One primitive the executor can perform. The vocabulary is closed by design:
@@ -645,6 +661,21 @@ extension ActionPlan {
                   element.actions.contains(capability) else {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
+        case .appNative:
+            throw ActionPlanError.invalidStructuredUICapability(step: step)
+        }
+    }
+
+    private static func hasCuaMediaControl(
+        _ state: ActionMediaState,
+        snapshot: ActionUISnapshot
+    ) -> Bool {
+        guard snapshot.source == .cua else { return false }
+        return snapshot.elements.contains { element in
+            element.enabled
+                && element.actions.contains(ActionUICapability.cuaClick)
+                && AppMatcher.words(element.label ?? "")
+                    .contains(state.rawValue)
         }
     }
 
@@ -682,6 +713,8 @@ extension ActionPlan {
                 else {
                     throw ActionPlanError.invalidStructuredUICapability(step: step)
                 }
+            case .appNative:
+                throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
             if snapshot.complete,
                !ActionUIEvidencePolicy.mayVerify(
@@ -1073,8 +1106,34 @@ extension ActionPlan {
                 guard index == rawSteps.count - 1 else {
                     throw ActionPlanError.pressRequiresFreshObservation(step: index)
                 }
+                guard let snapshot = state.structuredUISnapshot,
+                      AppMatcher.namesSameApp(currentApp, snapshot.appName) else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
                 let snapshotID = String(try string("snapshot").prefix(80))
-                guard let number = step["index"] as? NSNumber,
+                guard snapshot.id == snapshotID else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
+                if let rawCapability = step["capability"] as? String {
+                    let capabilityID = String(rawCapability.prefix(80))
+                    guard !capabilityID.isEmpty,
+                          !ActionPlan.hasCuaMediaControl(
+                            requested, snapshot: snapshot),
+                          snapshot.capabilities.contains(where: {
+                              $0.id == capabilityID
+                                  && $0.verb == .mediaControl
+                                  && $0.state == requested
+                          }) else {
+                        throw ActionPlanError.invalidStructuredUICapability(step: index)
+                    }
+                    steps.append(.mediaControl(ActionMediaControl(
+                        state: requested,
+                        capability: .appNative(
+                            snapshotID: snapshotID, id: capabilityID))))
+                    break
+                }
+                guard snapshot.source == .cua,
+                      let number = step["index"] as? NSNumber,
                       CFGetTypeID(number) != CFBooleanGetTypeID(),
                       !CFNumberIsFloatType(number), number.intValue >= 0 else {
                     throw ActionPlanError.missingField(step: index, field: "index")
@@ -1082,11 +1141,6 @@ extension ActionPlan {
                 let role = String(try string("role").prefix(40))
                 let label = String(ActionPlan.sanitize(try string("label"))
                     .prefix(Limits.maxStructuredUILabelCharacters))
-                guard let snapshot = state.structuredUISnapshot,
-                      snapshot.source == .cua,
-                      AppMatcher.namesSameApp(currentApp, snapshot.appName) else {
-                    throw ActionPlanError.invalidStructuredUICapability(step: index)
-                }
                 try ActionPlan.validatePressUI(
                     snapshotID: snapshotID, index: number.intValue,
                     role: role, label: label, state: state, step: index)

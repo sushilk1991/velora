@@ -126,6 +126,8 @@ protocol ActionHost: AnyObject {
     /// Exact process acquired by this action. Windowless regular apps retain
     /// process identity without gaining any UI capability.
     func actionProcess() -> ActionProcessIdentity?
+    /// Opaque app-native capabilities bound to the current exact process.
+    func mediaCapabilities() -> [ActionNativeCapability]
     /// Presses an exact Cua capability, then proves the acquired PID's state.
     func mediaControl(_ control: ActionMediaControl) -> ActionMediaControlResult
     /// Present the engine-attested routed app or window and leave it in front.
@@ -183,8 +185,14 @@ extension ActionHost {
         return ActionProcessIdentity(
             name: window.name, bundleID: window.bundleID, pid: window.pid)
     }
+    func mediaCapabilities() -> [ActionNativeCapability] {
+        guard let target = actionProcess() else { return [] }
+        return NativeMediaAutomation.shared.capabilities(for: target)
+    }
     func mediaControl(_ control: ActionMediaControl) -> ActionMediaControlResult {
-        .unavailable
+        guard let target = actionProcess() else { return .unavailable }
+        return NativeMediaAutomation.shared.perform(
+            control, target: target, maySend: { true })
     }
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope) -> Bool {

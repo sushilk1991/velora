@@ -48,7 +48,7 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Velora asks your browser for the current page address so dictation can pick the right writing style (email in Gmail, notes in Notion). Everything stays on this Mac.</string>
+	<string>Velora uses app automation only when you ask it to read browser context or control playback. Everything stays on this Mac.</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Velora captures computer audio only after you confirm a meeting recording, so it can create a local transcript and notes.</string>
 	<key>NSCalendarsFullAccessUsageDescription</key>

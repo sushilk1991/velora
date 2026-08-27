@@ -4474,3 +4474,75 @@ def test_media_control_keeps_runtime_goal_verification():
     assert actions.turn_requires_ui_action_review(parsed, sess)
     assert "media_control" in actions.PLANNER_RULES
     assert "media_control step" in actions.PLANNER_RULES
+
+
+def test_native_media_capability_is_opaque_and_current():
+    raw = {
+        "id": "native-music-1", "source": "app_native",
+        "app_name": "Music", "bundle_id": "com.apple.Music",
+        "window_title": "", "complete": False, "elements": [],
+        "capabilities": [{
+            "id": "opaque-pause", "source": "app_native",
+            "do": "media_control", "state": "pause",
+        }],
+    }
+    snapshot = actions.normalize_ui_snapshot(raw)
+    assert snapshot["capabilities"] == raw["capabilities"]
+    assert "opaque-pause" in "\n".join(actions.ui_snapshot_lines(snapshot))
+
+    context = actions.ActionContext.from_dict({"ui_snapshot": raw})
+    turn = actions.ActionSession(
+        "pause music in Music", context
+    ).accept_reply(json.dumps({
+        "goal": "pause music", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "Music"},
+            {"do": "media_control", "state": "pause",
+             "capability": "opaque-pause"},
+        ],
+    }))
+    assert turn["steps"][-1] == {
+        "do": "media_control", "state": "pause",
+        "snapshot": "native-music-1", "capability": "opaque-pause",
+    }
+    assert "opaque-pause" in actions.ui_action_review_message(
+        "pause music in Music", "pause music", turn["steps"])
+
+    with pytest.raises(actions.PlanError):
+        actions.ActionSession(
+            "pause music in Music", context
+        ).accept_reply(json.dumps({
+            "goal": "pause music", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Music"},
+                {"do": "media_control", "state": "play",
+                 "capability": "opaque-pause"},
+            ],
+        }))
+
+    with pytest.raises(actions.PlanError):
+        actions.ActionSession(
+            "pause music in Music", context
+        ).accept_reply(json.dumps({
+            "goal": "pause music", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Music"},
+                {"do": "media_control", "state": "pause",
+                 "capability": "invented"},
+            ],
+        }))
+
+    cua = _media_ui()
+    cua["capabilities"] = raw["capabilities"]
+    with pytest.raises(actions.PlanError, match="prefer the exact Cua"):
+        actions.ActionSession(
+            "pause music in Music",
+            actions.ActionContext.from_dict({"ui_snapshot": cua}),
+        ).accept_reply(json.dumps({
+            "goal": "pause music", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Music"},
+                {"do": "media_control", "state": "pause",
+                 "capability": "opaque-pause"},
+            ],
+        }))

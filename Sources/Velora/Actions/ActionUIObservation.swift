@@ -10,6 +10,28 @@ enum ActionUICapability {
 enum ActionUISnapshotSource: String {
     case native
     case cua
+    case appNative = "app_native"
+}
+
+enum ActionNativeCapabilityVerb: String {
+    case mediaControl = "media_control"
+}
+
+/// An opaque, single-use automation authority. The planner sees only what the
+/// capability does; provider identity and target binding remain in Swift.
+struct ActionNativeCapability: Equatable {
+    let id: String
+    let verb: ActionNativeCapabilityVerb
+    let state: ActionMediaState
+
+    var payload: [String: Any] {
+        [
+            "id": id,
+            "source": ActionUISnapshotSource.appNative.rawValue,
+            "do": verb.rawValue,
+            "state": state.rawValue,
+        ]
+    }
 }
 
 /// Framework-neutral UI evidence passed across the Swift/engine boundary.
@@ -161,11 +183,13 @@ struct ActionUISnapshot: Equatable {
     let windowID: Int?
     let complete: Bool
     let elements: [ActionUIElement]
+    let capabilities: [ActionNativeCapability]
 
     init(id: String, source: ActionUISnapshotSource = .native,
          appName: String, bundleID: String,
          windowTitle: String, windowID: Int? = nil, complete: Bool,
-         elements: [ActionUIElement]) {
+         elements: [ActionUIElement],
+         capabilities: [ActionNativeCapability] = []) {
         self.id = id
         self.source = source
         self.appName = appName
@@ -174,6 +198,7 @@ struct ActionUISnapshot: Equatable {
         self.windowID = windowID
         self.complete = complete
         self.elements = elements
+        self.capabilities = capabilities
     }
 
     var payload: [String: Any] {
@@ -186,8 +211,20 @@ struct ActionUISnapshot: Equatable {
             "complete": complete,
             "elements": elements.map(\.payload),
         ]
+        if !capabilities.isEmpty {
+            out["capabilities"] = capabilities.map(\.payload)
+        }
         if let windowID { out["window_id"] = windowID }
         return out
+    }
+
+    func addingCapabilities(
+        _ values: [ActionNativeCapability]
+    ) -> ActionUISnapshot {
+        ActionUISnapshot(
+            id: id, source: source, appName: appName, bundleID: bundleID,
+            windowTitle: windowTitle, windowID: windowID, complete: complete,
+            elements: elements, capabilities: values)
     }
 }
 

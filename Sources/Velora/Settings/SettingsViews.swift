@@ -730,6 +730,8 @@ struct ModelSettingsView: View {
 
 struct ShortcutsSettingsView: View {
     @ObservedObject var model: SettingsModel
+    @State private var musicPermission: NativeMediaPermission?
+    @State private var requestingMusicPermission = false
 
     var body: some View {
         Form {
@@ -822,6 +824,17 @@ struct ShortcutsSettingsView: View {
                     }
                     .disabled(!model.actionsEnabled)
                 }
+                LabeledContent {
+                    musicPermissionControl
+                } label: {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Music control")
+                        Text("Allow once to play or pause Music without bringing it forward.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .disabled(!model.actionsEnabled)
             } header: {
                 Text("Voice actions")
             } footer: {
@@ -841,6 +854,49 @@ struct ShortcutsSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear(perform: refreshMusicPermission)
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didBecomeActiveNotification
+        )) { _ in
+            refreshMusicPermission()
+        }
+    }
+
+    @ViewBuilder
+    private var musicPermissionControl: some View {
+        switch musicPermission {
+        case .allowed?:
+            Label("Allowed", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .needsConsent?:
+            Button(requestingMusicPermission ? "Waiting…" : "Allow…",
+                   action: requestMusicPermission)
+                .disabled(requestingMusicPermission)
+        case .denied?:
+            Button("Open Settings") {
+                Permissions.openAutomationSettings()
+            }
+        case .unavailable?:
+            Text("Open Music, then return here")
+                .foregroundStyle(.secondary)
+        case nil:
+            ProgressView()
+                .controlSize(.small)
+        }
+    }
+
+    private func refreshMusicPermission() {
+        NativeMediaAutomation.shared.readMusicPermission { permission in
+            musicPermission = permission
+        }
+    }
+
+    private func requestMusicPermission() {
+        requestingMusicPermission = true
+        NativeMediaAutomation.shared.requestMusicPermission { permission in
+            musicPermission = permission
+            requestingMusicPermission = false
+        }
     }
 }
 

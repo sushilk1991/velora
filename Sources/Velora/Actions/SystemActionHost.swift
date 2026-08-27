@@ -91,15 +91,22 @@ struct ActionTextTargetState {
 ///   (electron#37465), so the result is ignored and the tree is re-read to
 ///   check — never branch on its error code.
 final class SystemActionHost: ActionHost {
+    private static let mayAskForBrowserAutomation = false
+
     private let inserter: TextInserter
+    private let browserPageOverride: ((Bool) -> BrowserPageCache.Entry?)?
     private var accessibilityEnabledPIDs = Set<pid_t>()
     /// Exact AX field and exact text written by this Action invocation. The
     /// field survives planner turns, but is reset before the next user action.
     private var targetState = ActionTextTargetState()
     private var actionUISnapshot: ScreenActionUISnapshot?
 
-    init(inserter: TextInserter) {
+    init(
+        inserter: TextInserter,
+        browserPageOverride: ((Bool) -> BrowserPageCache.Entry?)? = nil
+    ) {
         self.inserter = inserter
+        self.browserPageOverride = browserPageOverride
     }
 
     func beginActionInputSession() {
@@ -253,13 +260,18 @@ final class SystemActionHost: ActionHost {
     }
 
     func frontmostWindowTitle() -> String? {
+        if let browserPageOverride {
+            return browserPageOverride(
+                Self.mayAskForBrowserAutomation)?.title
+        }
         guard Permissions.accessibilityGranted,
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               app.processIdentifier > 0 else { return nil }
         if BrowserPage.usesAppleScript(app.bundleIdentifier) {
-            // Chromium exposes no AX window; the tab title rides the same
-            // Apple Event as the page URL (executor queue — waiting is fine).
-            return BrowserPage.info(app)?.title
+            // Action observation must never open a new Automation permission
+            // surface. Ordinary dictation primes this cache separately.
+            return BrowserPage.cachedInfo(
+                bundleID: app.bundleIdentifier)?.title
         }
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.5)
@@ -461,13 +473,21 @@ final class SystemActionHost: ActionHost {
         return capture(snapshot.observation.bundleID, element)
     }
 
-    /// URL of the frontmost page when a browser is frontmost, else nil. Read
-    /// via AX only — no AppleScript, no new permission surface.
+    /// URL of the frontmost page without opening a permission surface. AX
+    /// browsers are read directly; Chromium uses context cached before Action.
     func frontmostPageURL() -> String? {
+        if let browserPageOverride {
+            return browserPageOverride(
+                Self.mayAskForBrowserAutomation)?.url?.absoluteString
+        }
         guard Permissions.accessibilityGranted,
               let app = onMain({ NSWorkspace.shared.frontmostApplication }),
               ActionRuntimePolicy.isBrowserBundle(app.bundleIdentifier)
         else { return nil }
+        if BrowserPage.usesAppleScript(app.bundleIdentifier) {
+            return BrowserPage.cachedInfo(
+                bundleID: app.bundleIdentifier)?.url?.absoluteString
+        }
         return ScreenContext.pageURL(of: app, deep: true)?.absoluteString
     }
 

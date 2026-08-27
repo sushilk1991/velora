@@ -97,6 +97,13 @@ enum ExternalDictationError: LocalizedError {
 ///   the next tap (or Esc) stops it and transcribes
 /// - Esc always cancels cleanly; nothing is inserted
 final class DictationController: NSObject {
+    enum RecordingContextPolicy {
+        case ordinary
+        case action
+    }
+
+    private static let actionMayAskForBrowserAutomation = false
+
     enum Phase: Equatable {
         case idle
         case starting(locked: Bool)
@@ -567,9 +574,43 @@ final class DictationController: NSObject {
 
     /// Page URL for the action planner's first-turn context — browsers only,
     /// same policy as the per-turn observation.
+    static func actionPageURL(
+        bundleID: String?,
+        axURL: () -> URL?,
+        chromiumURL: (_ askUserIfNeeded: Bool) -> URL?
+    ) -> String {
+        guard ActionRuntimePolicy.isBrowserBundle(bundleID) else { return "" }
+        if BrowserPage.usesAppleScript(bundleID) {
+            return chromiumURL(
+                actionMayAskForBrowserAutomation)?.absoluteString ?? ""
+        }
+        return axURL()?.absoluteString ?? ""
+    }
+
     private func actionPageURL(of app: NSRunningApplication?) -> String {
-        guard ActionRuntimePolicy.isBrowserBundle(app?.bundleIdentifier) else { return "" }
-        return ScreenContext.pageURL(of: app, deep: true)?.absoluteString ?? ""
+        Self.actionPageURL(
+            bundleID: app?.bundleIdentifier,
+            axURL: { ScreenContext.pageURL(of: app, deep: true) },
+            chromiumURL: { askUserIfNeeded in
+                guard !askUserIfNeeded else { return nil }
+                return BrowserPage.cachedInfo(
+                    bundleID: app?.bundleIdentifier)?.url
+            })
+    }
+
+    static func recordingEntities(
+        policy: RecordingContextPolicy,
+        read: () -> [ContextEntity]
+    ) -> [ContextEntity] {
+        if case .action = policy { return [] }
+        return read()
+    }
+
+    static func gathersRichRecordingEntities(
+        policy: RecordingContextPolicy
+    ) -> Bool {
+        if case .action = policy { return false }
+        return true
     }
 
     /// Every executing Action surface—including local CLI/agent requests—uses
@@ -1588,7 +1629,8 @@ final class DictationController: NSObject {
         locked: Bool, explicitMode: String? = nil, external: Bool = false,
         hudLabel: String? = nil, streamTyping: Bool = false,
         livePreview: Bool = false,
-        targetAppOverride: NSRunningApplication? = nil
+        targetAppOverride: NSRunningApplication? = nil,
+        contextPolicy: RecordingContextPolicy = .ordinary
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
         guard streamCancellation == nil else {
@@ -1675,8 +1717,12 @@ final class DictationController: NSObject {
                 bundleID: targetApp?.bundleIdentifier,
                 appName: targetApp?.localizedName)
         if !external {
-            enriched.entities = ScreenContext.entities(
-                for: targetApp, category: ModeCategory.category(forBundleID: enriched.bundleID))
+            enriched.entities = Self.recordingEntities(policy: contextPolicy) {
+                ScreenContext.entities(
+                    for: targetApp,
+                    category: ModeCategory.category(
+                        forBundleID: enriched.bundleID))
+            }
         }
         sessionContext = enriched
         if !enriched.entities.isEmpty {
@@ -1724,7 +1770,7 @@ final class DictationController: NSObject {
         // `stop` command — ready by the time the user finishes talking, adding
         // nothing to the release→insert latency.
         richEntities = []
-        if !external {
+        if !external, Self.gathersRichRecordingEntities(policy: contextPolicy) {
             contextGatherGeneration += 1
             let generation = contextGatherGeneration
             let gatherApp = targetApp
@@ -3442,7 +3488,10 @@ extension DictationController: HotkeyMonitorDelegate {
             return
         }
         let origin = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
-        guard startRecording(locked: locked, explicitMode: "Raw", hudLabel: "Action") else {
+        guard startRecording(
+            locked: locked, explicitMode: "Raw", hudLabel: "Action",
+            contextPolicy: .action
+        ) else {
             return
         }
         actionSession = sessionID

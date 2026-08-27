@@ -581,6 +581,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let interactionIsQuiet: () -> Bool
     private let mediaSnapshot: () -> MediaPlaybackCoordinator.Snapshot
     private let mediaSleep: (Int) -> Void
+    private let nativeMedia: NativeMediaAutomation
     private let userFocusForWindow: (Int) -> ActionWindowIdentity?
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
@@ -680,6 +681,7 @@ final class BackgroundRoutingActionHost: ActionHost {
          mediaSleep: @escaping (Int) -> Void = { milliseconds in
              Thread.sleep(forTimeInterval: Double(milliseconds) / 1_000)
          },
+         nativeMedia: NativeMediaAutomation = .shared,
          userFocusForWindow: @escaping (Int) -> ActionWindowIdentity?
             = BackgroundRoutingActionHost.resolveUserWindow,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
@@ -696,6 +698,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         }
         self.mediaSnapshot = mediaSnapshot
         self.mediaSleep = mediaSleep
+        self.nativeMedia = nativeMedia
         self.userFocusForWindow = userFocusForWindow
         self.localResolve = localResolve
     }
@@ -1377,8 +1380,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         // exact window without AX remains sufficient only for an app-ready
         // result; every mutation method independently requires its UI proof.
         guard let snapshot = snapshotTarget(maxElements: 1) else {
-            targetReady = false
-            return false
+            targetReady = nativeRouteReady()
+            return targetReady
         }
         if snapshot.degraded {
             targetReady = resolveDeferredWindow()
@@ -1402,11 +1405,23 @@ final class BackgroundRoutingActionHost: ActionHost {
                 return false
             }
         }
-        guard let snapshot = snapshotTarget(maxElements: 10) else { return false }
+        guard let snapshot = snapshotTarget(maxElements: 10) else {
+            guard nativeRouteReady() else { return false }
+            targetReady = true
+            everReady = true
+            return true
+        }
         if snapshot.degraded, !resolveDeferredWindow() { return false }
         targetReady = true
         everReady = true
         return true
+    }
+
+    private func nativeRouteReady() -> Bool {
+        guard resolveDeferredWindow(), let target = exactRoutedProcess() else {
+            return false
+        }
+        return nativeMedia.supports(target)
     }
 
     private func pickTargetWindow() -> (id: Int, title: String?)? {
@@ -1812,35 +1827,70 @@ final class BackgroundRoutingActionHost: ActionHost {
         } else {
             guard advanceReadiness() else { return nil }
         }
-        guard targetReady, everReady,
-              targetPID > 0, !targetName.isEmpty, !targetBundleID.isEmpty,
+        guard targetReady, everReady else { return nil }
+        return exactRoutedProcess()
+    }
+
+    private func exactRoutedProcess() -> ActionProcessIdentity? {
+        guard routed, targetPID > 0,
+              !targetName.isEmpty, !targetBundleID.isEmpty,
               bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame else { return nil }
         return ActionProcessIdentity(
             name: targetName, bundleID: targetBundleID, pid: targetPID)
     }
 
+    func mediaCapabilities() -> [ActionNativeCapability] {
+        guard routed else {
+            return system.mediaCapabilities()
+        }
+        guard targetReady, everReady,
+              let target = exactRoutedProcess() else { return [] }
+        return nativeMedia.capabilities(for: target)
+    }
+
     func mediaControl(
         _ control: ActionMediaControl
+    ) -> ActionMediaControlResult {
+        switch control.capability {
+        case .cua(let snapshotID, let index, let role, let label):
+            return clickMediaControl(
+                control, snapshotID: snapshotID, index: index,
+                role: role, label: label)
+        case .appNative:
+            guard routed, targetReady, let target = exactRoutedProcess(),
+                  !userIsInTarget() else { return .unavailable }
+            return nativeMedia.perform(
+                control, target: target,
+                maySend: { !self.userIsInTarget() })
+        }
+    }
+
+    private func clickMediaControl(
+        _ control: ActionMediaControl,
+        snapshotID: String,
+        index: Int,
+        role: String,
+        label: String
     ) -> ActionMediaControlResult {
         guard routed, snapshotLineage == .valid, targetReady,
               let windowID = targetWindowID,
               let target = actionProcess(),
               let cached = routedUISnapshot,
               cached.observation.source == .cua,
-              cached.observation.id == control.snapshotID,
+              cached.observation.id == snapshotID,
               cached.pid == target.pid, cached.windowID == windowID,
               cached.bundleID.caseInsensitiveCompare(target.bundleID)
                 == .orderedSame,
               let record = cached.observation.elements.first(where: {
-                  $0.index == control.index
+                  $0.index == index
               }),
-              record.enabled, record.role == control.role,
+              record.enabled, record.role == role,
               AppMatcher.normalize(record.label ?? "")
-                == AppMatcher.normalize(control.label),
+                == AppMatcher.normalize(label),
               record.actions.contains(ActionUICapability.cuaClick),
               let prior = cached.driver.elements.first(where: {
-                  $0.index == control.index
+                  $0.index == index
               }),
               prior.token?.isEmpty == false,
               let current = snapshotTarget(maxElements: Self.snapshotElements)
@@ -1849,13 +1899,13 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard !current.degraded,
               let currentID = current.id, !currentID.isEmpty,
               let element = current.elements.first(where: {
-                  $0.index == control.index
+                  $0.index == index
               }),
               element.actionNames.contains(ActionUICapability.cuaClick),
               let token = element.token, !token.isEmpty,
               sameElementIdentity(
-                element, prior: prior, role: control.role,
-                label: control.label)
+                element, prior: prior, role: role,
+                label: label)
         else { return .unavailable }
 
         let before = mediaSnapshot()
@@ -1867,7 +1917,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
         guard case .success(let reply) = transport.call("click", arguments: [
             "pid": target.pid, "window_id": windowID,
-            "element_token": token, "element_index": control.index,
+            "element_token": token, "element_index": index,
             "snapshot_id": currentID,
         ], timeout: Self.callTimeout), clickSucceeded(reply) else {
             return .unavailable
