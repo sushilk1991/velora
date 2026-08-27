@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreAudio
 import Foundation
 
 /// Pure decision logic for when an Action routes to the background driver.
@@ -567,6 +568,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     private static let handoffPollMs = 50
     private static let appActivationWaitMs = 3_000
     private static let appActivationStableMs = 100
+    private static let mediaPollMs = 200
+    private static let mediaPollAttempts = 15
     private let system: ActionHost
     private let transport: CuaTransport
     private let backgroundEnabled: () -> Bool
@@ -576,6 +579,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let endDaemon: () -> Void
     private let bundleForPID: (Int) -> String?
     private let interactionIsQuiet: () -> Bool
+    private let mediaSnapshot: () -> MediaPlaybackCoordinator.Snapshot
+    private let mediaSleep: (Int) -> Void
     private let userFocusForWindow: (Int) -> ActionWindowIdentity?
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
@@ -584,7 +589,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     // Routed-target state, reset every action.
     private var routed = false
     private var contentMayCommit = false
-    private var executionMode = ActionExecutionMode.interaction
     private var targetPID: Int = 0
     private var targetWindowID: Int?
     private var targetName = ""
@@ -671,6 +675,11 @@ final class BackgroundRoutingActionHost: ActionHost {
             NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
          },
          interactionIsQuiet: (() -> Bool)? = nil,
+         mediaSnapshot: @escaping () -> MediaPlaybackCoordinator.Snapshot
+            = MediaPlaybackSystem.snapshot,
+         mediaSleep: @escaping (Int) -> Void = { milliseconds in
+             Thread.sleep(forTimeInterval: Double(milliseconds) / 1_000)
+         },
          userFocusForWindow: @escaping (Int) -> ActionWindowIdentity?
             = BackgroundRoutingActionHost.resolveUserWindow,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
@@ -685,6 +694,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.interactionIsQuiet = interactionIsQuiet ?? {
             UserInputActivity.isQuiet(for: Self.handoffQuietSeconds)
         }
+        self.mediaSnapshot = mediaSnapshot
+        self.mediaSleep = mediaSleep
         self.userFocusForWindow = userFocusForWindow
         self.localResolve = localResolve
     }
@@ -741,14 +752,12 @@ final class BackgroundRoutingActionHost: ActionHost {
     func beginActionInputSession() {
         unroute()
         contentMayCommit = false
-        executionMode = .interaction
         system.beginActionInputSession()
     }
 
     func endActionInputSession() {
         unroute()
         contentMayCommit = false
-        executionMode = .interaction
         system.endActionInputSession()
         endDaemon()
     }
@@ -756,10 +765,6 @@ final class BackgroundRoutingActionHost: ActionHost {
     func prepareForActionPlan(sends: Bool) {
         contentMayCommit = sends
         if sends && routed { foregroundAtInteraction = true }
-    }
-
-    func prepareForExecutionMode(_ mode: ActionExecutionMode) {
-        executionMode = mode
     }
 
     func prepareInteraction() -> ActionInteractionState {
@@ -1077,12 +1082,6 @@ final class BackgroundRoutingActionHost: ActionHost {
                 foregroundAtInteraction: contentMayCommit)
             return .routed
         case .missing:
-            if resolved.running, executionMode == .processOnly {
-                beginRoute(
-                    resolved, pid: resolved.pid, windowID: nil,
-                    foregroundAtInteraction: contentMayCommit)
-                return .routed
-            }
             return launchTarget(resolved)
                 ? .routed : .failed
         case .invalid:
@@ -1377,10 +1376,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         // fine": the executor aborts instead of typing into nothing. A live
         // exact window without AX remains sufficient only for an app-ready
         // result; every mutation method independently requires its UI proof.
-        if executionMode == .processOnly {
-            targetReady = processOnlyReady()
-            return targetReady
-        }
         guard let snapshot = snapshotTarget(maxElements: 1) else {
             targetReady = false
             return false
@@ -1394,11 +1389,6 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private func advanceReadiness() -> Bool {
         guard snapshotLineage == .valid else { return false }
-        if executionMode == .processOnly {
-            targetReady = processOnlyReady()
-            everReady = targetReady
-            return targetReady
-        }
         // Re-picking is allowed ONLY while the target has never been ready:
         // a cold-launched app's real document window can appear after the
         // first look. Once ready, the window is pinned for the rest of the
@@ -1408,10 +1398,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         if targetWindowID == nil || !everReady {
             if let window = pickTargetWindow() {
                 targetWindowID = window.id
-            } else if processOnlyReady() {
-                targetReady = true
-                everReady = true
-                return true
             } else {
                 return false
             }
@@ -1428,24 +1414,6 @@ final class BackgroundRoutingActionHost: ActionHost {
             "list_windows", arguments: [:], timeout: Self.callTimeout),
               let windows = reply["windows"] as? [[String: Any]] else { return nil }
         return CuaWindowPick.choose(windows, pid: targetPID)
-    }
-
-    private func processOnlyReady() -> Bool {
-        guard routed, executionMode == .processOnly, targetPID > 0,
-              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
-                == .orderedSame,
-              case .success(let reply) = transport.call(
-                "list_apps", arguments: [:],
-                timeout: Self.callTimeout),
-              let apps = reply["apps"] as? [[String: Any]]
-        else { return false }
-        let exact = apps.filter {
-            exactInt($0["pid"]) == targetPID
-                && exactFlag($0["running"]) == true
-                && ($0["bundle_id"] as? String)?.caseInsensitiveCompare(
-                    targetBundleID) == .orderedSame
-        }
-        return exact.count == 1
     }
 
     private func snapshotTarget(maxElements: Int) -> CuaSnapshot? {
@@ -1852,11 +1820,88 @@ final class BackgroundRoutingActionHost: ActionHost {
             name: targetName, bundleID: targetBundleID, pid: targetPID)
     }
 
-    func mediaControl(_ state: ActionMediaState) -> ActionMediaControlResult {
-        guard routed else { return system.mediaControl(state) }
-        guard let target = actionProcess() else { return .unavailable }
-        return MediaPlaybackSystem.setPlayback(
-            state, bundleID: target.bundleID, pid: target.pid)
+    func mediaControl(
+        _ control: ActionMediaControl
+    ) -> ActionMediaControlResult {
+        guard routed, snapshotLineage == .valid, targetReady,
+              let windowID = targetWindowID,
+              let target = actionProcess(),
+              let cached = routedUISnapshot,
+              cached.observation.source == .cua,
+              cached.observation.id == control.snapshotID,
+              cached.pid == target.pid, cached.windowID == windowID,
+              cached.bundleID.caseInsensitiveCompare(target.bundleID)
+                == .orderedSame,
+              let record = cached.observation.elements.first(where: {
+                  $0.index == control.index
+              }),
+              record.enabled, record.role == control.role,
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(control.label),
+              record.actions.contains(ActionUICapability.cuaClick),
+              let prior = cached.driver.elements.first(where: {
+                  $0.index == control.index
+              }),
+              prior.token?.isEmpty == false,
+              let current = snapshotTarget(maxElements: Self.snapshotElements)
+        else { return .unavailable }
+        defer { routedUISnapshot = nil }
+        guard !current.degraded,
+              let currentID = current.id, !currentID.isEmpty,
+              let element = current.elements.first(where: {
+                  $0.index == control.index
+              }),
+              element.actionNames.contains(ActionUICapability.cuaClick),
+              let token = element.token, !token.isEmpty,
+              sameElementIdentity(
+                element, prior: prior, role: control.role,
+                label: control.label)
+        else { return .unavailable }
+
+        let before = mediaSnapshot()
+        let priorState = mediaMatches(
+            control.state, target: target, snapshot: before)
+        if priorState == true { return .verified }
+        if control.state == .pause, priorState == nil { return .unavailable }
+        guard !userIsInTarget() else { return .unavailable }
+
+        guard case .success(let reply) = transport.call("click", arguments: [
+            "pid": target.pid, "window_id": windowID,
+            "element_token": token, "element_index": control.index,
+            "snapshot_id": currentID,
+        ], timeout: Self.callTimeout), clickSucceeded(reply) else {
+            return .unavailable
+        }
+        backgroundDraft = ""
+        pinnedElement = nil
+
+        for _ in 0..<Self.mediaPollAttempts {
+            mediaSleep(Self.mediaPollMs)
+            let after = mediaSnapshot()
+            if mediaMatches(
+                control.state, target: target, snapshot: after) == true {
+                return .verified
+            }
+        }
+        return .misdirected
+    }
+
+    private func mediaMatches(
+        _ requested: ActionMediaState,
+        target: ActionProcessIdentity,
+        snapshot: MediaPlaybackCoordinator.Snapshot
+    ) -> Bool? {
+        guard snapshot.isComplete,
+              !ActionRuntimePolicy.isBrowserBundle(target.bundleID)
+        else { return nil }
+        let processes = snapshot.processes.filter {
+            snapshot.pids[$0] == target.pid
+                && snapshot.bundleIDs[$0]?.caseInsensitiveCompare(
+                    target.bundleID) == .orderedSame
+        }
+        guard !processes.isEmpty else { return nil }
+        let isPlaying = !processes.isDisjoint(with: snapshot.allPlaying)
+        return requested == .play ? isPlaying : !isPlaying
     }
 
     private func presentationTargetIsLive(windowID: Int) -> Bool {

@@ -511,6 +511,7 @@ final class DictationController: NSObject {
                     message: "A password field is active; keystrokes are blocked")))
                 return
             }
+            mediaPlayback.restoreBeforeAction()
         }
         let frontmost = contextTracker.frontmost ?? NSWorkspace.shared.frontmostApplication
         let context = ActionContextSnapshot.capture(
@@ -622,6 +623,7 @@ final class DictationController: NSObject {
             showError("A password field is active — actions are blocked")
             return
         }
+        mediaPlayback.restoreBeforeAction()
         let names = actionScreenNames
         actionScreenNames = []
         let context = ActionContextSnapshot.capture(

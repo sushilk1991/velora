@@ -69,7 +69,7 @@ final class FakeActionHost: ActionHost {
     private(set) var sleepCalls: [Int] = []
     private(set) var endInputCount = 0
     private(set) var presentUICalls = 0
-    private(set) var mediaControlCalls: [ActionMediaState] = []
+    private(set) var mediaControlCalls: [ActionMediaControl] = []
     private(set) var interactionCalls = 0
     private(set) var windowTitleReads = 0
     private(set) var elementLabelReads = 0
@@ -139,8 +139,8 @@ final class FakeActionHost: ActionHost {
             pid: match.key)
     }
 
-    func mediaControl(_ state: ActionMediaState) -> ActionMediaControlResult {
-        mediaControlCalls.append(state)
+    func mediaControl(_ control: ActionMediaControl) -> ActionMediaControlResult {
+        mediaControlCalls.append(control)
         return mediaControlResult
     }
 
@@ -3587,12 +3587,45 @@ extension Selftest {
                                                       timeoutMs: ActionPlan.Limits.maxWaitMs),
                "an absurd wait timeout is clamped, not honoured")
 
-        let media = decodePlan("""
+        let mediaSnapshot = ActionUISnapshot(
+            id: "music-snapshot", source: .cua,
+            appName: "Music", bundleID: "com.apple.Music",
+            windowTitle: "Music", windowID: 13, complete: true,
+            elements: [ActionUIElement(
+                index: 2, parentIndex: 0, depth: 1,
+                role: "AXButton", label: "Play", frame: nil,
+                actions: [ActionUICapability.cuaClick], enabled: true,
+                selected: false, focused: false, inWebContent: false)])
+        var mediaState = ActionPlan.BatchState()
+        mediaState.structuredUIAvailable = true
+        mediaState.structuredUIComplete = true
+        mediaState.structuredUISnapshot = mediaSnapshot
+        let media = decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"media_control","state":"play","snapshot":"music-snapshot",
+           "index":2,"role":"AXButton","label":"Play"}]}
+        """, state: &mediaState)
+        let mediaControl = ActionMediaControl(
+            state: .play, snapshotID: "music-snapshot", index: 2,
+            role: "AXButton", label: "Play")
+        expect(media?.steps.last == .mediaControl(mediaControl),
+               "media playback carries one exact Cua UI capability")
+        var unfocusedMedia = ActionPlan.BatchState()
+        unfocusedMedia.structuredUIAvailable = true
+        unfocusedMedia.structuredUIComplete = true
+        unfocusedMedia.structuredUISnapshot = mediaSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"media_control","state":"play","snapshot":"music-snapshot",
+           "index":2,"role":"AXButton","label":"Play"}]}
+        """, state: &unfocusedMedia) == nil,
+               "media playback requires the same fresh focus checkpoint as the engine")
+        expect(decodePlan("""
         {"sends":false,"steps":[{"do":"open_app","app":"Music"},
           {"do":"media_control","state":"play"}]}
-        """)
-        expect(media?.steps.last == .mediaControl(.play),
-               "media playback is one closed target-bound action")
+        """) == nil,
+               "name-only media playback has no machine capability")
         var inheritedMedia = ActionPlan.BatchState()
         inheritedMedia.currentApp = "Spotify"
         expect(decodeBatch("""
@@ -3604,6 +3637,26 @@ extension Selftest {
           {"do":"media_control","state":"next"}]}
         """) == nil,
                "media playback rejects states outside play and pause")
+
+        var committingMedia = ActionPlan.BatchState()
+        committingMedia.structuredUIAvailable = true
+        committingMedia.structuredUIComplete = true
+        committingMedia.structuredUISnapshot = ActionUISnapshot(
+            id: "music-send", source: .cua,
+            appName: "Music", bundleID: "com.apple.Music",
+            windowTitle: "Music", windowID: 13, complete: true,
+            elements: [ActionUIElement(
+                index: 3, parentIndex: 0, depth: 1,
+                role: "AXButton", label: "Send", frame: nil,
+                actions: [ActionUICapability.cuaClick], enabled: true,
+                selected: false, focused: false, inWebContent: false)])
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"media_control","state":"play","snapshot":"music-send",
+           "index":3,"role":"AXButton","label":"Send"}]}
+        """, state: &committingMedia) == nil,
+               "media playback cannot bypass indexed control safety rules")
     }
 
     /// The 2026-08-21 bakeoff produced a validator-ACCEPTED exfiltration: a
@@ -3909,120 +3962,35 @@ extension Selftest {
     }
 
     private static func testMediaActionControl() {
-        let targetID = AudioObjectID(41)
-        let otherID = AudioObjectID(42)
-        func mediaSnapshot(
-            playing: Set<AudioObjectID>,
-            otherBundle: String? = nil
-        ) -> MediaPlaybackCoordinator.Snapshot {
-            var processes: Set<AudioObjectID> = [targetID]
-            var bundles: [AudioObjectID: String] = [targetID: "com.apple.Music"]
-            var pids: [AudioObjectID: Int] = [targetID: 900]
-            if let otherBundle {
-                processes.insert(otherID)
-                bundles[otherID] = otherBundle
-                pids[otherID] = 901
-            }
-            return MediaPlaybackCoordinator.Snapshot(
-                processes: processes, playing: playing,
-                allPlaying: playing, bundleIDs: bundles, pids: pids)
-        }
-
-        var toggles = 0
-        let alreadyPlaying = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 900,
-            read: { mediaSnapshot(playing: [targetID]) },
-            post: { toggles += 1; return true }, sleep: { _ in })
-        expect(alreadyPlaying == .verified && toggles == 0,
-               "an already-satisfied media state sends no toggle")
-
-        let alreadyPlayingWithCompetitor = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 900,
-            read: {
-                mediaSnapshot(
-                    playing: [targetID], otherBundle: "com.spotify.client")
-            }, post: { toggles += 1; return true }, sleep: { _ in })
-        expect(alreadyPlayingWithCompetitor == .verified && toggles == 0,
-               "an achieved media state needs no global ownership guess")
-
-        var discoveryReads = 0
-        let discovered = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 900,
-            read: {
-                defer { discoveryReads += 1 }
-                if discoveryReads == 0 {
-                    return MediaPlaybackCoordinator.Snapshot(
-                        processes: [], playing: [])
-                }
-                return mediaSnapshot(
-                    playing: discoveryReads == 1 ? [] : [targetID])
-            }, post: { toggles += 1; return true }, sleep: { _ in })
-        expect(discovered == .verified && discoveryReads >= 3,
-               "a cold player gets a bounded capability-discovery window")
-
-        let beforeStartedToggles = toggles
-        var reads = 0
-        let started = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 900,
-            read: {
-                defer { reads += 1 }
-                return mediaSnapshot(playing: reads == 0 ? [] : [targetID])
-            }, post: { toggles += 1; return true }, sleep: { _ in })
-        expect(started == .verified && toggles == beforeStartedToggles + 1,
-               "media playback toggles at most once and verifies the exact PID")
-
-        let beforeAmbiguousToggles = toggles
-        let ambiguous = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 900,
-            read: {
-                mediaSnapshot(
-                    playing: [], otherBundle: "com.spotify.client")
-            }, post: { toggles += 1; return true }, sleep: { _ in })
-        expect(ambiguous == .ambiguous && toggles == beforeAmbiguousToggles,
-               "another media-key owner refuses before posting anything")
-
-        let wrongPID = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 901,
-            read: { mediaSnapshot(playing: []) },
-            post: { toggles += 1; return true }, sleep: { _ in })
-        expect(wrongPID == .unavailable && toggles == beforeAmbiguousToggles,
-               "media control refuses a different PID without posting")
-
-        var misdirectedReads = 0
-        let misdirected = MediaPlaybackSystem.setPlayback(
-            .play, bundleID: "com.apple.Music", pid: 900,
-            read: {
-                defer { misdirectedReads += 1 }
-                if misdirectedReads == 0 {
-                    return mediaSnapshot(playing: [])
-                }
-                if misdirectedReads == 1 {
-                    return mediaSnapshot(
-                        playing: [otherID], otherBundle: "com.spotify.client")
-                }
-                return mediaSnapshot(
-                    playing: [], otherBundle: "com.spotify.client")
-            }, post: { toggles += 1; return true }, sleep: { _ in })
-        expect(misdirected == .compensated
-               && toggles == beforeAmbiguousToggles + 2
-               && misdirectedReads >= 3,
-               "a misdirected global toggle proves its compensation")
-
         let host = FakeActionHost()
         host.appsByName["Music"] = ("Music", "com.apple.Music")
         host.actionProcessValue = ActionProcessIdentity(
             name: "Music", bundleID: "com.apple.Music", pid: 900)
         host.mediaControlResult = .verified
+        let control = ActionMediaControl(
+            state: .play, snapshotID: "music-snapshot", index: 2,
+            role: "AXButton", label: "Play")
         let plan = ActionPlan(
             goal: "play music", sends: false,
-            steps: [.openApp("Music"), .mediaControl(.play)],
+            steps: [.openApp("Music"), .mediaControl(control)],
             unsupported: nil)
         let result = ActionExecutor(host: host).run(plan)
         expect(result.outcome == .completed
-               && host.mediaControlCalls == [.play]
+               && host.mediaControlCalls == [control]
                && host.interactionCalls == 1
                && result.evidence.contains(.goalVerified(target: "media play")),
                "runtime media postcondition is gated typed goal evidence")
+
+        let locked = FakeActionHost()
+        locked.actionProcessValue = host.actionProcessValue
+        locked.mediaControlResult = .verified
+        locked.onSleep = { _ in locked.screenIsLocked = true }
+        let lockedResult = ActionExecutor(host: locked).run(ActionPlan(
+            goal: "play music", sends: false,
+            steps: [.pause(ms: 1), .mediaControl(control)], unsupported: nil))
+        expect(lockedResult.outcome != .completed
+               && locked.mediaControlCalls.isEmpty,
+               "media control rechecks a screen that locks mid-plan")
     }
 
     /// A checkpoint that only ever waits cannot rescue a plan whose app is
@@ -4649,7 +4617,8 @@ extension Selftest {
         testCuaSnapshotParsing()
         testCuaPressPick()
         testBackgroundActionGate()
-        testProcessOnlyRouting()
+        testWindowlessRouting()
+        testRoutedMediaControl()
         testSnapshotLineage()
         testBackgroundRoutingHost()
     }
@@ -5915,6 +5884,9 @@ extension Selftest {
         starter: FakeDaemonStarter? = nil,
         endDaemon: @escaping () -> Void = {},
         interactionIsQuiet: (() -> Bool)? = { true },
+        mediaSnapshot: @escaping () -> MediaPlaybackCoordinator.Snapshot
+            = MediaPlaybackSystem.snapshot,
+        mediaSleep: @escaping (Int) -> Void = { _ in },
         userFocusForWindow: @escaping (Int) -> ActionWindowIdentity? = { _ in nil },
         localApps: [String: String] = ["Notes": "com.apple.Notes",
                                        "Slack": "com.tinyspeck.slackmacgap"]
@@ -5934,6 +5906,7 @@ extension Selftest {
             }, endDaemon: endDaemon,
             bundleForPID: { fakeBundleID($0, transport: transport) },
             interactionIsQuiet: interactionIsQuiet,
+            mediaSnapshot: mediaSnapshot, mediaSleep: mediaSleep,
             userFocusForWindow: userFocusForWindow,
             localResolve: { name in
                 guard let index = AppMatcher.bestMatch(
@@ -5951,7 +5924,7 @@ extension Selftest {
         return apps.first { ($0["pid"] as? Int) == pid }?["bundle_id"] as? String
     }
 
-    private static func testProcessOnlyRouting() {
+    private static func testWindowlessRouting() {
         let system = FakeActionHost()
         system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         let transport = FakeCuaTransport()
@@ -5989,49 +5962,200 @@ extension Selftest {
         expect(system.frontmost?.name == "Ghostty"
                && !system.log.contains("openApp(Finder)"),
                "failed app presentation never brings the app forward")
+    }
 
-        host.beginActionInputSession()
-        host.prepareForExecutionMode(.processOnly)
-        _ = host.openApp(named: "Finder")
-        expect(host.frontmostApp()?.name == "Finder"
-               && host.actionProcess() == ActionProcessIdentity(
-                name: "Finder", bundleID: "com.apple.finder", pid: 502),
-               "semantic process actions acquire exact PID readiness")
-        let mutation = ActionPlan(
-            goal: "press something", sends: false,
-            steps: [
-                .waitFrontmost(app: "Finder", timeoutMs: 100),
-                .pressElement(label: "Documents"),
-            ], unsupported: nil)
-        if case .failed = ActionExecutor(host: host).run(mutation).outcome {
-            expect(transport.callCount("click") == 0,
-                   "PID-only identity grants no UI mutation capability")
-        } else {
-            expect(false, "PID-only mutation must fail closed")
+    private static func testRoutedMediaControl() {
+        let targetID = AudioObjectID(71)
+        func audio(_ playing: Bool) -> MediaPlaybackCoordinator.Snapshot {
+            MediaPlaybackCoordinator.Snapshot(
+                processes: [targetID], playing: playing ? [targetID] : [],
+                bundleIDs: [targetID: "com.apple.Music"],
+                pids: [targetID: 503])
+        }
+        func world(_ transport: FakeCuaTransport) {
+            transport.freshWindowSnapshots = true
+            transport.responses["list_apps"] = ["apps": [[
+                "name": "Music", "bundle_id": "com.apple.Music",
+                "pid": 503, "running": true,
+            ]]]
+            transport.responses["list_windows"] = ["windows": [[
+                "pid": 503, "window_id": 13, "layer": 0, "z_index": 1,
+                "bounds": ["width": 800.0, "height": 600.0],
+                "title": "Music", "on_current_space": true,
+            ]]]
+            transport.responses["get_window_state"] = [
+                "snapshot_id": "music", "degraded": false,
+                "elements_complete": true,
+                "element_count": 2, "total_element_count": 2,
+                "elements": [
+                    ["element_index": 0, "role": "AXWindow",
+                     "label": "Music", "element_token": "music:0"],
+                    ["element_index": 2, "role": "AXButton", "label": "Play",
+                     "parent_index": 0, "element_token": "music:2",
+                     "enabled": true],
+                ],
+            ]
+            transport.responses["click"] = ["effect": "confirmed"]
         }
 
-        let musicSystem = FakeActionHost()
-        musicSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let musicTransport = FakeCuaTransport()
-        musicTransport.responses["list_apps"] = ["apps": [
-            ["name": "Music", "bundle_id": "com.apple.Music",
-             "pid": 503, "running": true],
-        ]]
-        musicTransport.responses["list_windows"] = ["windows": [
-            ["pid": 503, "window_id": 13, "layer": 0, "z_index": 1,
-             "bounds": ["width": 800.0, "height": 600.0],
-             "title": "Music", "on_current_space": true],
-        ]]
-        let musicHost = makeRoutedHost(
-            system: musicSystem, transport: musicTransport,
+        let system = FakeActionHost()
+        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let transport = FakeCuaTransport()
+        world(transport)
+        var reads = 0
+        let host = makeRoutedHost(
+            system: system, transport: transport,
+            mediaSnapshot: {
+                defer { reads += 1 }
+                return audio(reads > 0)
+            }, localApps: ["Music": "com.apple.Music"])
+        host.beginActionInputSession()
+        _ = host.openApp(named: "Music")
+        _ = host.frontmostApp()
+        guard let snapshot = host.uiSnapshot() else {
+            expect(false, "the routed player exposes an exact UI capability")
+            return
+        }
+        let control = ActionMediaControl(
+            state: .play, snapshotID: snapshot.id, index: 2,
+            role: "AXButton", label: "Play")
+        let result = ActionExecutor(host: host).run(ActionPlan(
+            goal: "play music", sends: false,
+            steps: [.mediaControl(control)], unsupported: nil))
+        let click = transport.calls.last { $0.tool == "click" }
+        expect(result.outcome == .completed
+               && transport.callCount("click") == 1
+               && click?.arguments["pid"] as? Int == 503
+               && click?.arguments["window_id"] as? Int == 13
+               && click?.arguments["element_index"] as? Int == 2,
+               "media control clicks one exact background Cua capability")
+        expect(system.frontmost?.name == "Ghostty"
+               && result.evidence.contains(.goalVerified(target: "media play")),
+               "the exact target PID postcondition proves media without focus theft")
+
+        let staleSystem = FakeActionHost()
+        staleSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let staleTransport = FakeCuaTransport()
+        world(staleTransport)
+        let staleHost = makeRoutedHost(
+            system: staleSystem, transport: staleTransport,
+            mediaSnapshot: { audio(false) },
             localApps: ["Music": "com.apple.Music"])
-        musicHost.beginActionInputSession()
-        musicHost.prepareForExecutionMode(.processOnly)
-        _ = musicHost.openApp(named: "Music")
-        expect(musicHost.actionProcess() == ActionProcessIdentity(
-            name: "Music", bundleID: "com.apple.Music", pid: 503)
-            && musicTransport.callCount("get_window_state") == 0,
-            "semantic process readiness does not depend on a UI tree")
+        staleHost.beginActionInputSession()
+        _ = staleHost.openApp(named: "Music")
+        _ = staleHost.frontmostApp()
+        guard let staleSnapshot = staleHost.uiSnapshot() else {
+            expect(false, "the stale fixture first exposes its exact capability")
+            return
+        }
+        var changed = staleTransport.responses["get_window_state"] ?? [:]
+        var elements = changed["elements"] as? [[String: Any]] ?? []
+        elements[1]["label"] = "Shuffle"
+        changed["elements"] = elements
+        staleTransport.responses["get_window_state"] = changed
+        let staleControl = ActionMediaControl(
+            state: .play, snapshotID: staleSnapshot.id, index: 2,
+            role: "AXButton", label: "Play")
+        let staleResult = ActionExecutor(host: staleHost).run(ActionPlan(
+            goal: "play music", sends: false,
+            steps: [.mediaControl(staleControl)], unsupported: nil))
+        expect(staleResult.outcome != .completed
+               && staleTransport.callCount("click") == 0,
+               "a changed media capability fails closed before any click")
+
+        let outputSystem = FakeActionHost()
+        outputSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let outputTransport = FakeCuaTransport()
+        world(outputTransport)
+        var outputReads = 0
+        let outputHost = makeRoutedHost(
+            system: outputSystem, transport: outputTransport,
+            mediaSnapshot: {
+                defer { outputReads += 1 }
+                return MediaPlaybackCoordinator.Snapshot(
+                    processes: [targetID], playing: [],
+                    allPlaying: outputReads == 0 ? [targetID] : [],
+                    bundleIDs: [targetID: "com.apple.Music"],
+                    pids: [targetID: 503])
+            }, localApps: ["Music": "com.apple.Music"])
+        outputHost.beginActionInputSession()
+        _ = outputHost.openApp(named: "Music")
+        _ = outputHost.frontmostApp()
+        var pausedState = outputTransport.responses["get_window_state"] ?? [:]
+        var pausedElements = pausedState["elements"] as? [[String: Any]] ?? []
+        pausedElements[1]["label"] = "Pause"
+        pausedState["elements"] = pausedElements
+        outputTransport.responses["get_window_state"] = pausedState
+        guard let outputSnapshot = outputHost.uiSnapshot() else {
+            expect(false, "the generic output fixture exposes its exact capability")
+            return
+        }
+        let pause = ActionMediaControl(
+            state: .pause, snapshotID: outputSnapshot.id, index: 2,
+            role: "AXButton", label: "Pause")
+        let outputResult = ActionExecutor(host: outputHost).run(ActionPlan(
+            goal: "pause music", sends: false,
+            steps: [.mediaControl(pause)], unsupported: nil))
+        expect(outputResult.outcome == .completed
+               && outputTransport.callCount("click") == 1,
+               "exact media pause verifies generic target output rather than a player allowlist")
+
+        let unknownSystem = FakeActionHost()
+        unknownSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let unknownTransport = FakeCuaTransport()
+        world(unknownTransport)
+        let unknownHost = makeRoutedHost(
+            system: unknownSystem, transport: unknownTransport,
+            mediaSnapshot: {
+                MediaPlaybackCoordinator.Snapshot(
+                    processes: [targetID], playing: [], allPlaying: [],
+                    isComplete: false,
+                    bundleIDs: [targetID: "com.apple.Music"],
+                    pids: [targetID: 503])
+            }, localApps: ["Music": "com.apple.Music"])
+        unknownHost.beginActionInputSession()
+        _ = unknownHost.openApp(named: "Music")
+        _ = unknownHost.frontmostApp()
+        guard let unknownSnapshot = unknownHost.uiSnapshot() else {
+            expect(false, "the incomplete-output fixture exposes its exact capability")
+            return
+        }
+        let unknownControl = ActionMediaControl(
+            state: .pause, snapshotID: unknownSnapshot.id, index: 2,
+            role: "AXButton", label: "Play")
+        let unknownResult = ActionExecutor(host: unknownHost).run(ActionPlan(
+            goal: "pause music", sends: false,
+            steps: [.mediaControl(unknownControl)], unsupported: nil))
+        expect(unknownResult.outcome != .completed
+               && unknownTransport.callCount("click") == 0,
+               "incomplete Core Audio evidence cannot prove an absent output state")
+
+        let occupiedSystem = FakeActionHost()
+        occupiedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let occupiedTransport = FakeCuaTransport()
+        world(occupiedTransport)
+        let occupiedHost = makeRoutedHost(
+            system: occupiedSystem, transport: occupiedTransport,
+            mediaSnapshot: {
+                occupiedSystem.frontmost = ("Music", "com.apple.Music")
+                return audio(false)
+            }, localApps: ["Music": "com.apple.Music"])
+        occupiedHost.beginActionInputSession()
+        _ = occupiedHost.openApp(named: "Music")
+        _ = occupiedHost.frontmostApp()
+        guard let occupiedSnapshot = occupiedHost.uiSnapshot() else {
+            expect(false, "the target-occupancy fixture exposes its exact capability")
+            return
+        }
+        let occupiedControl = ActionMediaControl(
+            state: .play, snapshotID: occupiedSnapshot.id, index: 2,
+            role: "AXButton", label: "Play")
+        let occupiedResult = ActionExecutor(host: occupiedHost).run(ActionPlan(
+            goal: "play music", sends: false,
+            steps: [.mediaControl(occupiedControl)], unsupported: nil))
+        expect(occupiedResult.outcome != .completed
+               && occupiedTransport.callCount("click") == 0,
+               "a user entering the target before the click cancels background media control")
     }
 
     private static func noteWindowState(
@@ -6746,7 +6870,6 @@ extension Selftest {
             }
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
-            host.prepareForExecutionMode(.interaction)
             _ = host.openApp(named: "Notes")
             _ = host.frontmostApp()
             guard let snapshot = host.uiSnapshot() else {

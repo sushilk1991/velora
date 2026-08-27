@@ -29,12 +29,6 @@ enum ActionInteractionState: Equatable {
     case refused
 }
 
-enum ActionExecutionMode: Equatable {
-    case appOnly
-    case processOnly
-    case interaction
-}
-
 struct ActionWindowIdentity: Equatable {
     let name: String
     let bundleID: String
@@ -50,9 +44,7 @@ struct ActionProcessIdentity: Equatable {
 
 enum ActionMediaControlResult: Equatable {
     case verified
-    case compensated
     case unavailable
-    case ambiguous
     case misdirected
 }
 
@@ -68,9 +60,6 @@ protocol ActionHost: AnyObject {
     /// Arms an explicit caller-owned foreground handoff. The automatic
     /// executor never requests one.
     func prepareForActionPlan(sends: Bool)
-    /// Narrows the capability an automatic plan may acquire without changing
-    /// foreground ownership.
-    func prepareForExecutionMode(_ mode: ActionExecutionMode)
     /// Gives a routed host one boundary immediately before a UI mutation. A
     /// deferred target may be presented here immediately before the native
     /// mutation, after exact identity and user-idle checks.
@@ -137,8 +126,8 @@ protocol ActionHost: AnyObject {
     /// Exact process acquired by this action. Windowless regular apps retain
     /// process identity without gaining any UI capability.
     func actionProcess() -> ActionProcessIdentity?
-    /// Sets media playback only for the exact acquired process.
-    func mediaControl(_ state: ActionMediaState) -> ActionMediaControlResult
+    /// Presses an exact Cua capability, then proves the acquired PID's state.
+    func mediaControl(_ control: ActionMediaControl) -> ActionMediaControlResult
     /// Present the engine-attested routed app or window and leave it in front.
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope) -> Bool
@@ -172,7 +161,6 @@ extension ActionHost {
     var isDrivingInBackground: Bool { false }
     func endActionInputSession() {}
     func prepareForActionPlan(sends: Bool) {}
-    func prepareForExecutionMode(_ mode: ActionExecutionMode) {}
     func prepareInteraction() -> ActionInteractionState { .ready }
     func openApp(named name: String, bundleID: String, pid: Int) -> String? {
         nil
@@ -195,11 +183,8 @@ extension ActionHost {
         return ActionProcessIdentity(
             name: window.name, bundleID: window.bundleID, pid: window.pid)
     }
-    func mediaControl(_ state: ActionMediaState) -> ActionMediaControlResult {
-        guard let target = actionProcess() else { return .unavailable }
-
-        return MediaPlaybackSystem.setPlayback(
-            state, bundleID: target.bundleID, pid: target.pid)
+    func mediaControl(_ control: ActionMediaControl) -> ActionMediaControlResult {
+        .unavailable
     }
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope) -> Bool {
@@ -773,40 +758,33 @@ final class ActionExecutor {
                 host.sleep(ms: ms)
                 note("pause \(ms)ms")
 
-            case .mediaControl(let requested):
+            case .mediaControl(let control):
+                guard !host.screenIsLocked else {
+                    note("media_control \(control.state.rawValue): screen locked")
+                    return failed(index, "the screen is locked", recoverable: false)
+                }
                 guard let target = host.actionProcess(), target.pid > 0,
                       !target.name.isEmpty, !target.bundleID.isEmpty else {
-                    note("media_control \(requested.rawValue): no exact target")
+                    note("media_control \(control.state.rawValue): no exact target")
                     return failed(
                         index, "media playback has no exact app target",
                         recoverable: false)
                 }
-                switch host.mediaControl(requested) {
+                switch host.mediaControl(control) {
                 case .verified:
                     evidence.append(.targetResolved(ActionCompletionTarget(
                         appName: target.name, bundleID: target.bundleID,
                         pid: target.pid)))
                     evidence.append(.goalVerified(
-                        target: "media \(requested.rawValue)"))
-                    note("media_control \(requested.rawValue): verified")
-                case .compensated:
-                    note("media_control \(requested.rawValue): compensated")
-                    return failed(
-                        index,
-                        "the media command missed the target; other playback was restored",
-                        recoverable: false)
+                        target: "media \(control.state.rawValue)"))
+                    note("media_control \(control.state.rawValue): verified")
                 case .unavailable:
-                    note("media_control \(requested.rawValue): unavailable")
+                    note("media_control \(control.state.rawValue): unavailable")
                     return failed(
                         index, "the target app's media state is unavailable",
                         recoverable: false)
-                case .ambiguous:
-                    note("media_control \(requested.rawValue): ambiguous")
-                    return failed(
-                        index, "another app could receive the media command",
-                        recoverable: false)
                 case .misdirected:
-                    note("media_control \(requested.rawValue): misdirected")
+                    note("media_control \(control.state.rawValue): misdirected")
                     return failed(
                         index, "the media command did not reach the target app",
                         recoverable: false)
@@ -835,8 +813,8 @@ final class ActionExecutor {
         case .pause: return "Waiting for screen"
         case .pressElement(let label): return "Opening \(label)"
         case .pressUI(_, _, _, let label): return "Opening \(label)"
-        case .mediaControl(let state):
-            return state == .play ? "Starting playback" : "Pausing playback"
+        case .mediaControl(let control):
+            return control.state == .play ? "Starting playback" : "Pausing playback"
         }
     }
 

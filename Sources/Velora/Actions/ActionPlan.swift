@@ -10,6 +10,14 @@ enum ActionMediaState: String, Equatable {
     case pause
 }
 
+struct ActionMediaControl: Equatable {
+    let state: ActionMediaState
+    let snapshotID: String
+    let index: Int
+    let role: String
+    let label: String
+}
+
 /// One primitive the executor can perform. The vocabulary is closed by design:
 /// there is no shell step, no script step, and no raw-coordinate click, so the
 /// worst a bad plan can do is open the wrong app or type into a window the
@@ -43,9 +51,9 @@ enum ActionStep: Equatable {
     /// Exact native AX or Cua driver capability selected from a structured UI
     /// snapshot. Runtime refuses stale snapshot/app/window/label/role identity.
     case pressUI(snapshotID: String, index: Int, role: String, label: String)
-    /// Idempotent system media command bound at runtime to the exact acquired
-    /// app process. No scripts, app names, or raw media-key toggles enter plans.
-    case mediaControl(ActionMediaState)
+    /// Idempotent media command bound to one exact Cua click capability. The
+    /// runtime re-reads this element and proves the target PID's audio state.
+    case mediaControl(ActionMediaControl)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
@@ -611,9 +619,16 @@ extension ActionPlan {
               element.enabled else {
             throw ActionPlanError.invalidStructuredUICapability(step: step)
         }
+        guard AppMatcher.normalize(label).count
+                >= Limits.minPressLabelCharacters,
+              !pressLabelIsCommitting(label) else {
+            throw ActionPlanError.invalidStructuredUICapability(step: step)
+        }
         if !snapshot.complete {
             guard !snapshot.bundleID.isEmpty,
-                  !snapshot.windowTitle.isEmpty || snapshot.windowID != nil else {
+                  !snapshot.windowTitle.isEmpty || snapshot.windowID != nil,
+                  commandMentionsUILabel(
+                    label, command: state.spokenCommand) else {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
         }
@@ -1046,13 +1061,38 @@ extension ActionPlan {
                 steps.append(.pause(ms: ms))
 
             case "media_control":
+                guard focusEstablished else {
+                    throw ActionPlanError.inputBeforeFocus(step: index)
+                }
                 guard let rawState = step["state"] as? String,
                       let requested = ActionMediaState(rawValue: rawState),
                       acquiredApp, !currentApp.isEmpty else {
                     throw ActionPlanError.missingField(
                         step: index, field: "state or acquired app")
                 }
-                steps.append(.mediaControl(requested))
+                guard index == rawSteps.count - 1 else {
+                    throw ActionPlanError.pressRequiresFreshObservation(step: index)
+                }
+                let snapshotID = String(try string("snapshot").prefix(80))
+                guard let number = step["index"] as? NSNumber,
+                      CFGetTypeID(number) != CFBooleanGetTypeID(),
+                      !CFNumberIsFloatType(number), number.intValue >= 0 else {
+                    throw ActionPlanError.missingField(step: index, field: "index")
+                }
+                let role = String(try string("role").prefix(40))
+                let label = String(ActionPlan.sanitize(try string("label"))
+                    .prefix(Limits.maxStructuredUILabelCharacters))
+                guard let snapshot = state.structuredUISnapshot,
+                      snapshot.source == .cua,
+                      AppMatcher.namesSameApp(currentApp, snapshot.appName) else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
+                try ActionPlan.validatePressUI(
+                    snapshotID: snapshotID, index: number.intValue,
+                    role: role, label: label, state: state, step: index)
+                steps.append(.mediaControl(ActionMediaControl(
+                    state: requested, snapshotID: snapshotID,
+                    index: number.intValue, role: role, label: label)))
 
             case "press_element":
                 guard focusEstablished else {

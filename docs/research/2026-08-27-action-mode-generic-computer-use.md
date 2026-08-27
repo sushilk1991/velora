@@ -8,14 +8,14 @@ Mac app without taking the foreground. “Generic” has to mean a
 which semantic transports and verifiers are available for that target, choose
 one route, and refuse when no route can prove the requested postcondition.
 
-This is not a reason to add five app-name scripts. It is a reason to stop asking
-the planner to improvise around a transport failure. The planner should receive
+Do not add five app-name scripts or ask the planner to improvise around a
+transport failure. The planner should receive
 capabilities such as `media.play`, `ax.perform`, `ax.set_value`, `browser.dom`,
 and `window.pointer`, each coupled to a verifier. App-specific protocols remain
 behind those generic intent capabilities.
 
-The current failure pattern—launching Calendar or Mail twice, exhausting turns
-on Finder, and waiting after Music changed—fits a fundamental contract error:
+The current failure pattern, launching Calendar or Mail twice, exhausting turns
+on Finder, and waiting after Music changed, fits a contract error:
 **delivery or process launch is being treated as task completion without a
 target-owned postcondition.** More retries, UI-review turns, or planner prose
 cannot repair that.
@@ -41,7 +41,7 @@ route are therefore unsupported.
 
 ## Verified facts
 
-### OpenAI exposes a harness contract, not one universal actuator
+### OpenAI documents a harness contract
 
 OpenAI's API guide says a computer-use model can work with screenshots,
 model-returned UI actions, or a custom harness mixing visual and programmatic
@@ -94,10 +94,18 @@ it is not a controller for an arbitrary other media app. System media events go
 to the current or most recently active Now Playing application, which is not an
 exact Music target. [Apple remote-command center](https://developer.apple.com/documentation/mediaplayer/mpremotecommandcenter), [external player events](https://developer.apple.com/documentation/mediaplayer/handling-external-player-events-notifications)
 
-MusicKit explicitly distinguishes `ApplicationMusicPlayer`, whose state does
-not affect the Music app, from `SystemMusicPlayer`, which controls the Music
-app's playback state. Playback status is an observable enum including playing,
-paused, and stopped. [MusicPlayer](https://developer.apple.com/documentation/musickit/musicplayer), [playback status](https://developer.apple.com/documentation/musickit/musicplayer/playbackstatus)
+MusicKit's `ApplicationMusicPlayer` deliberately does not affect the Music
+app. Although Apple documents `SystemMusicPlayer` on other platforms, the
+current macOS 26.5 SDK marks it unavailable on macOS. MusicKit therefore cannot
+be Velora's controller for an existing Music.app session.
+[ApplicationMusicPlayer](https://developer.apple.com/documentation/musickit/applicationmusicplayer)
+
+A live read-only probe on this Mac found Music itself playing while macOS
+MediaRemote named a paused Chrome process as the current Now Playing owner.
+That falsifies the assumption that a global play/pause key targets the app the
+user named. When the requested player's current window exposes an exact
+Play/Pause capability, Cua's PID/window/element background action is the safer
+generic route; otherwise Velora must refuse rather than redirect the key.
 
 On this Mac, read-only `sdef` discovery showed that Music exports `play`,
 `pause`, `playpause`, `stop`, `current track`, and `player state`. Finder exports
@@ -253,8 +261,8 @@ element, and verifier state must be fresh.
 
 Map a small intent vocabulary onto the best current capability:
 
-1. dedicated OS/app semantics for the actual intent—MusicKit system playback,
-   an audited Apple Event, browser protocol, or another first-party framework;
+1. dedicated OS/app semantics for the actual intent when a public API controls
+   and verifies the exact requested session;
 2. exact AX action or value write on an element descended from the leased AX
    window;
 3. exact browser page/DOM target;
@@ -316,7 +324,7 @@ The conflict unit is the **target lease**, not the whole desktop:
   non-global;
 - if user activity or an AX notification changes the same leased target, discard
   the snapshot and re-observe or pause;
-- never restore the foreground app captured at action start—the user may have
+- never restore the foreground app captured at action start; the user may have
   moved on deliberately;
 - forbid global HID, cursor warp, and implicit clipboard paste in background
   mode;
@@ -350,9 +358,9 @@ The host returns the capabilities and exact refusal. A missing capability is not
    stops.
 2. Feed the planner a runtime capability report instead of expanding prompt
    heuristics or retries.
-3. Add one semantic media adapter behind `media.play/pause`—prefer MusicKit's
-   system player where it satisfies the exact request; otherwise use a narrowly
-   audited, consented Music Apple Event. Verify playback state.
+3. Bind `media.play/pause` to one exact current UI capability and verify the
+   acquired target PID's Core Audio output. A future public semantic adapter is
+   eligible only when it controls and verifies that same named target.
 4. Add generic SDEF discovery for diagnostics/capability registration, but map
    only an audited closed intent vocabulary. Do not let the planner emit raw
    AppleScript or arbitrary dictionary commands.
@@ -361,8 +369,8 @@ The host returns the capabilities and exact refusal. A missing capability is not
 6. Show a completion/failure HUD without activation. A user click may open the
    exact result app/window after lease revalidation.
 
-This is one necessary deterministic boundary—the capability/evidence contract—
-not an accumulating layer of app-specific deterministic behavior.
+The capability/evidence contract is the necessary deterministic boundary. It
+does not require an accumulating layer of app-specific behavior.
 
 ## Five-app acceptance gate
 
@@ -373,7 +381,7 @@ any physical-input generation changes.
 
 | App/intent | Pass condition | Expected route class |
 |---|---|---|
-| Music: play/resume, then pause | Structured player state reaches playing/paused; user's foreground and cursor never move. | MusicKit system player or audited Music Apple Event |
+| Music: play/resume, then pause | Exact target PID output reaches playing/paused; user's foreground and cursor never move. | Exact Cua UI capability plus target-owned Core Audio readback |
 | Calendar: open/show requested calendar | Exact Calendar window/context exists; process-only launch does not pass. | Apple Event or exact AX semantic route |
 | Mail: open inbox without sending | Exact Mail window/context exists; no draft/send mutation; no activation. | Apple Event or exact AX semantic route |
 | Finder: reveal a temporary non-sensitive test file | Exact revealed item/window state is observable; persistent Finder process does not pass. | Finder Apple Event, with AX observation where useful |

@@ -298,19 +298,6 @@ final class ActionLoopRunner {
                     return .planned(plan)
                 }
 
-                let executionMode: ActionExecutionMode
-                if Self.usesProcessOnly(plan) {
-                    executionMode = .processOnly
-                } else if ActionPlan.isAppOnlyPresentation(
-                    transcript, appName: probe.currentApp,
-                    bundleID: probe.structuredUISnapshot?.bundleID,
-                    candidates: probe.appNames) {
-                    executionMode = .appOnly
-                } else {
-                    executionMode = .interaction
-                }
-                host.prepareForExecutionMode(executionMode)
-
                 let executor = ActionExecutor(host: host, progress: progress)
                 lock.lock()
                 currentExecutor = executor
@@ -474,23 +461,6 @@ final class ActionLoopRunner {
                 withJSONObject: stable, options: [.sortedKeys])
         else { return String(describing: stable) }
         return String(decoding: data, as: UTF8.self)
-    }
-
-    /// Process identity is sufficient only when every effect is a typed
-    /// semantic postcondition. A PID alone never proves an app was presented.
-    private static func usesProcessOnly(_ plan: ActionPlan) -> Bool {
-        var hasMediaControl = false
-        for step in plan.steps {
-            switch step {
-            case .mediaControl:
-                hasMediaControl = true
-            case .openApp, .waitFrontmost, .pause:
-                continue
-            default:
-                return false
-            }
-        }
-        return hasMediaControl
     }
 
     private func completionResult(

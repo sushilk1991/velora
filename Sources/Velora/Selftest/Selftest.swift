@@ -164,6 +164,9 @@ enum Selftest {
         testMediaPlaybackUnrelatedSystemInput()
         testMediaPlaybackUnsupportedOutputOnRestore()
         testMediaPlaybackTerminationRestore()
+        testMediaPlaybackActionRestore()
+        testMediaPlaybackPendingActionRestore()
+        testMediaPlaybackPendingActionMisdirection()
         testMediaPlaybackTerminationDuringVerification()
         testMediaPlaybackRapidRestart()
         testMediaPlaybackMisdirectedRestoreRollsBack()
@@ -7858,6 +7861,97 @@ enum Selftest {
         expect(toggles == 2, "termination restores verified media without waiting on a timer")
         scheduled.removeFirst().1()
         expect(toggles == 2, "the stale delayed restore is inert after termination restoration")
+    }
+
+    private static func testMediaPlaybackActionRestore() {
+        let player = AudioObjectID(70)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) })
+
+        coordinator.pauseForDictation()
+        snapshot.playing = []
+        snapshot.allPlaying = []
+        scheduled.removeFirst().1()
+        coordinator.restoreAfterDictation()
+        coordinator.restoreBeforeAction()
+
+        expect(toggles == 2,
+               "Action execution settles dictation's verified media pause first")
+        scheduled.removeFirst().1()
+        expect(toggles == 2,
+               "the stale dictation restore cannot reverse a later media action")
+    }
+
+    private static func testMediaPlaybackPendingActionRestore() {
+        let player = AudioObjectID(71)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [player], playing: [player])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        var waits = 0
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: {
+                toggles += 1
+                if toggles == 2 {
+                    snapshot.playing = [player]
+                    snapshot.allPlaying = [player]
+                }
+                return true
+            },
+            schedule: { delay, work in scheduled.append((delay, work)) },
+            sleep: { _ in
+                waits += 1
+                snapshot.playing = []
+                snapshot.allPlaying = []
+            })
+
+        coordinator.pauseForDictation()
+        coordinator.restoreAfterDictation()
+        coordinator.restoreBeforeAction()
+
+        expect(waits == 1 && toggles == 2,
+               "Action waits for an in-flight dictation pause and restores it")
+        while !scheduled.isEmpty { scheduled.removeFirst().1() }
+        expect(toggles == 2,
+               "stale pause verification cannot change playback after Action starts")
+    }
+
+    private static func testMediaPlaybackPendingActionMisdirection() {
+        let intended = AudioObjectID(72)
+        let accidental = AudioObjectID(73)
+        var snapshot = MediaPlaybackCoordinator.Snapshot(
+            processes: [intended], playing: [intended],
+            bundleIDs: [intended: "com.spotify.client"])
+        var toggles = 0
+        var scheduled: [(TimeInterval, () -> Void)] = []
+        var waits = 0
+        let coordinator = MediaPlaybackCoordinator(
+            snapshot: { snapshot },
+            postToggle: { toggles += 1; return true },
+            schedule: { delay, work in scheduled.append((delay, work)) },
+            sleep: { _ in
+                waits += 1
+                snapshot.processes = [intended, accidental]
+                snapshot.allPlaying = [intended, accidental]
+                snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
+            })
+
+        coordinator.pauseForDictation()
+        coordinator.restoreAfterDictation()
+        coordinator.restoreBeforeAction()
+
+        expect(waits == 1 && toggles == 2,
+               "Action reverses an in-flight pause that starts another player")
+        while !scheduled.isEmpty { scheduled.removeFirst().1() }
+        expect(toggles == 2,
+               "stale pause verification cannot repeat misdirection compensation")
     }
 
     private static func testMediaPlaybackTerminationDuringVerification() {

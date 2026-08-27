@@ -87,6 +87,7 @@ final class MediaPlaybackCoordinator {
     private let snapshot: () -> Snapshot
     private let postToggle: () -> Bool
     private let schedule: Schedule
+    private let sleep: (TimeInterval) -> Void
     private var state: State = .idle
 
     convenience init() {
@@ -101,11 +102,13 @@ final class MediaPlaybackCoordinator {
     init(
         snapshot: @escaping () -> Snapshot,
         postToggle: @escaping () -> Bool,
-        schedule: @escaping Schedule
+        schedule: @escaping Schedule,
+        sleep: @escaping (TimeInterval) -> Void = Thread.sleep
     ) {
         self.snapshot = snapshot
         self.postToggle = postToggle
         self.schedule = schedule
+        self.sleep = sleep
     }
 
     /// Call after dictation's preflight gates pass, before opening the mic.
@@ -180,10 +183,51 @@ final class MediaPlaybackCoordinator {
         }
     }
 
+    /// Settle dictation's verified pause before Action Mode can deliberately
+    /// change playback. The old delayed restore becomes inert.
+    func restoreBeforeAction() {
+        if case .pausePending(let before, _) = state {
+            restorePendingPause(before)
+            return
+        }
+        restoreNow(context: "before action")
+    }
+
+    private func restorePendingPause(_ before: Set<AudioObjectID>) {
+        state = .pausePending(before: before, restoreRequested: true)
+        for attempt in 0...Self.pauseVerificationAttempts {
+            let current = snapshot()
+            guard current.isComplete else {
+                state = .idle
+                return
+            }
+            let paused = before
+                .subtracting(current.playing)
+                .intersection(current.processes)
+            if !paused.isEmpty {
+                state = .restorePending(paused)
+                restore(paused: paused)
+                return
+            }
+            if revertMisdirectedPause(before: before, after: current) {
+                return
+            }
+            guard attempt < Self.pauseVerificationAttempts else {
+                state = .idle
+                return
+            }
+            sleep(Self.pauseVerificationInterval)
+        }
+    }
+
     /// AppKit may terminate before delayed main-queue work executes. Once the
     /// microphone has been released, restore a verified pause synchronously so
     /// quitting Velora cannot strand the player's playback state.
     func restoreImmediatelyForTermination() {
+        restoreNow(context: "during termination")
+    }
+
+    private func restoreNow(context: String) {
         let paused: Set<AudioObjectID>
         switch state {
         case .pausePending(let before, _):
@@ -199,7 +243,7 @@ final class MediaPlaybackCoordinator {
                 in: current.allPlaying.subtracting(value))
             if current.isComplete, value.isDisjoint(with: current.playing),
                !unexpectedlyStarted.isEmpty, postToggle() {
-                NSLog("Velora: reverted a misdirected media resume during termination")
+                NSLog("Velora: reverted a misdirected media resume %@", context)
             }
             state = .idle
             return
@@ -230,21 +274,7 @@ final class MediaPlaybackCoordinator {
             .subtracting(after.playing)
             .intersection(after.processes)
         guard !pausedByVelora.isEmpty else {
-            // A global media key can occasionally target a previously paused
-            // application instead of the process Core Audio showed as active.
-            // If that mistake made a different eligible process start while
-            // the original kept playing, immediately send the matching toggle
-            // to put the accidental target back. Never claim a resume right.
-            let unexpectedlyStarted = after.mediaKeyTargets(
-                in: after.allPlaying.subtracting(before))
-            if !unexpectedlyStarted.isEmpty, !before.isDisjoint(with: after.playing) {
-                if postToggle() {
-                    NSLog("Velora: media pause targeted another player; reverted the toggle")
-                }
-                // The first command demonstrably targeted the wrong Now
-                // Playing owner. A retry would be another untargeted media
-                // command and could restart that player, so fail closed.
-                state = .idle
+            if revertMisdirectedPause(before: before, after: after) {
                 return
             }
             if attemptsRemaining > 0 {
@@ -262,6 +292,24 @@ final class MediaPlaybackCoordinator {
         NSLog("Velora: media pause confirmed")
         state = .paused(pausedByVelora)
         if restoreRequested { scheduleRestore(pausedByVelora) }
+    }
+
+    private func revertMisdirectedPause(
+        before: Set<AudioObjectID>,
+        after: Snapshot
+    ) -> Bool {
+        // A global media key can target a previously paused application. If a
+        // different eligible process starts while the intended one keeps
+        // playing, reverse the accidental toggle and retire the obligation.
+        let unexpectedlyStarted = after.mediaKeyTargets(
+            in: after.allPlaying.subtracting(before))
+        guard !unexpectedlyStarted.isEmpty,
+              !before.isDisjoint(with: after.playing) else { return false }
+        if postToggle() {
+            NSLog("Velora: media pause targeted another player; reverted the toggle")
+        }
+        state = .idle
+        return true
     }
 
     private func scheduleRestore(_ paused: Set<AudioObjectID>) {
@@ -321,8 +369,6 @@ final class MediaPlaybackCoordinator {
 }
 
 enum MediaPlaybackSystem {
-    private static let controlPollMs = 200
-    private static let controlAttempts = 15
     /// Dedicated communication clients are system audio, but not media. Direct
     /// dictation must not send them a play/pause command, and meeting capture
     /// never invokes this coordinator at all.
@@ -359,9 +405,7 @@ enum MediaPlaybackSystem {
         for process in processObjects() {
             let bundleID = stringProperty(process, kAudioProcessPropertyBundleID)
             guard let bundleID, bundleID != ownBundleID else { continue }
-            guard let rawPID = uint32Property(
-                      process, kAudioProcessPropertyPID), rawPID > 0,
-                  let isRunningOutput = uint32Property(
+            guard let isRunningOutput = uint32Property(
                       process, kAudioProcessPropertyIsRunningOutput),
                   let isRunningInput = uint32Property(
                       process, kAudioProcessPropertyIsRunningInput)
@@ -371,7 +415,10 @@ enum MediaPlaybackSystem {
             }
             processes.insert(process)
             bundleIDs[process] = bundleID
-            pids[process] = Int(rawPID)
+            if let rawPID = int32Property(
+                process, kAudioProcessPropertyPID), rawPID > 0 {
+                pids[process] = Int(rawPID)
+            }
             if isRunningInput != 0 { inputProcesses.insert(process) }
             guard isRunningOutput != 0 else { continue }
             allPlaying.insert(process)
@@ -383,104 +430,6 @@ enum MediaPlaybackSystem {
             processes: processes, playing: playing, allPlaying: allPlaying,
             inputProcesses: inputProcesses, isComplete: isComplete,
             bundleIDs: bundleIDs, pids: pids)
-    }
-
-    /// Sets the requested state through one hardware-faithful toggle, then
-    /// proves the exact bundle/PID reached that postcondition. Other possible
-    /// Now Playing owners make the command ambiguous before anything is sent.
-    static func setPlayback(
-        _ requested: ActionMediaState,
-        bundleID: String,
-        pid: Int,
-        read: () -> MediaPlaybackCoordinator.Snapshot = snapshot,
-        post: () -> Bool = postPlayPause,
-        sleep: (Int) -> Void = { milliseconds in
-            Thread.sleep(forTimeInterval: Double(milliseconds) / 1_000)
-        }
-    ) -> ActionMediaControlResult {
-        guard isAutomaticPlaybackCandidate(bundleID: bundleID) else {
-            return .unavailable
-        }
-        var before = read()
-        var target = targetProcesses(
-            in: before, bundleID: bundleID, pid: pid)
-        for attempt in 0..<controlAttempts where target.isEmpty {
-            guard before.isComplete, attempt + 1 < controlAttempts else {
-                return .unavailable
-            }
-            sleep(controlPollMs)
-            before = read()
-            target = targetProcesses(
-                in: before, bundleID: bundleID, pid: pid)
-        }
-        guard before.isComplete, !target.isEmpty else { return .unavailable }
-        if playbackMatches(requested, target: target, snapshot: before) {
-            return .verified
-        }
-        let competing = before.mediaKeyTargets(in: before.processes)
-            .subtracting(target)
-        guard competing.isEmpty else { return .ambiguous }
-        guard post() else { return .unavailable }
-
-        for _ in 0..<controlAttempts {
-            sleep(controlPollMs)
-            let after = read()
-            guard after.isComplete else { return .unavailable }
-            let liveTarget = targetProcesses(
-                in: after, bundleID: bundleID, pid: pid)
-            guard !liveTarget.isEmpty else { return .unavailable }
-            let unexpected = after.mediaKeyTargets(in: after.allPlaying)
-                .subtracting(liveTarget)
-            if !unexpected.isEmpty {
-                // A second toggle is the only generic compensation for a
-                // global media key that reached a different Now Playing app.
-                guard post() else { return .misdirected }
-                for _ in 0..<controlAttempts {
-                    sleep(controlPollMs)
-                    let restored = read()
-                    guard restored.isComplete else { return .misdirected }
-                    let restoredTarget = targetProcesses(
-                        in: restored, bundleID: bundleID, pid: pid)
-                    guard !restoredTarget.isEmpty else { return .misdirected }
-                    let remaining = restored.mediaKeyTargets(
-                        in: restored.allPlaying).subtracting(restoredTarget)
-                    guard remaining.isEmpty else { continue }
-                    if playbackMatches(
-                        requested, target: restoredTarget,
-                        snapshot: restored) {
-                        return .verified
-                    }
-                    return .compensated
-                }
-                return .misdirected
-            }
-            if playbackMatches(
-                requested, target: liveTarget, snapshot: after) {
-                return .verified
-            }
-        }
-        return .misdirected
-    }
-
-    private static func targetProcesses(
-        in snapshot: MediaPlaybackCoordinator.Snapshot,
-        bundleID: String,
-        pid: Int
-    ) -> Set<AudioObjectID> {
-        snapshot.processes.filter {
-            snapshot.pids[$0] == pid
-                && snapshot.bundleIDs[$0]?.caseInsensitiveCompare(bundleID)
-                    == .orderedSame
-        }
-    }
-
-    private static func playbackMatches(
-        _ requested: ActionMediaState,
-        target: Set<AudioObjectID>,
-        snapshot: MediaPlaybackCoordinator.Snapshot
-    ) -> Bool {
-        let isPlaying = !target.isDisjoint(with: snapshot.playing)
-        return requested == .play ? isPlaying : !isPlaying
     }
 
     private static func mediaFamily(_ bundleID: String) -> String? {
@@ -553,6 +502,21 @@ enum MediaPlaybackSystem {
             mElement: kAudioObjectPropertyElementMain)
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(
+                  object, &property, 0, nil, &size, &value) == noErr
+        else { return nil }
+        return value
+    }
+
+    private static func int32Property(
+        _ object: AudioObjectID, _ selector: AudioObjectPropertySelector
+    ) -> Int32? {
+        var property = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: Int32 = 0
+        var size = UInt32(MemoryLayout<Int32>.size)
         guard AudioObjectGetPropertyData(
                   object, &property, 0, nil, &size, &value) == noErr
         else { return nil }
