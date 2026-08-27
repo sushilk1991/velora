@@ -2099,7 +2099,23 @@ final class BackgroundRoutingActionHost: ActionHost {
         target: String, expecting bundleID: String?,
         purpose: ActionVerificationPurpose
     ) -> Bool {
-        guard purpose == .target, snapshotLineage == .valid,
+        switch purpose {
+        case .target:
+            return verifyRoutedTextTarget(
+                index: index, snapshotID: snapshotID, label: label,
+                role: role, target: target, expecting: bundleID)
+        case .goal:
+            return verifyRoutedGoal(
+                index: index, snapshotID: snapshotID, label: label,
+                role: role, target: target, expecting: bundleID)
+        }
+    }
+
+    private func verifyRoutedTextTarget(
+        index: Int, snapshotID: String, label: String, role: String,
+        target: String, expecting bundleID: String?
+    ) -> Bool {
+        guard snapshotLineage == .valid,
               expectedMatchesTarget(bundleID), targetReady,
               let cached = routedUISnapshot,
               cached.observation.complete, cached.driver.complete,
@@ -2133,6 +2149,87 @@ final class BackgroundRoutingActionHost: ActionHost {
         }
         pinnedElement = identity
         return true
+    }
+
+    private func verifyRoutedGoal(
+        index: Int, snapshotID: String, label: String, role: String,
+        target: String, expecting bundleID: String?
+    ) -> Bool {
+        guard snapshotLineage == .valid,
+              expectedMatchesTarget(bundleID), targetReady,
+              let windowID = targetWindowID,
+              let process = targetProcessIdentity,
+              process.pid == pid_t(targetPID),
+              let cached = routedUISnapshot,
+              cached.observation.source == .cua,
+              cached.observation.complete, cached.driver.complete,
+              cached.observation.id == snapshotID,
+              cached.observation.windowID == windowID,
+              cached.observation.bundleID.caseInsensitiveCompare(
+                targetBundleID) == .orderedSame,
+              cached.pid == targetPID, cached.windowID == windowID,
+              cached.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              let record = cached.observation.elements.first(where: {
+                  $0.index == index
+              }),
+              let prior = cached.driver.elements.first(where: {
+                  $0.index == index
+              }),
+              record.role == role, prior.role == role,
+              record.parentIndex == prior.parentIndex,
+              record.depth == prior.depth, record.frame == prior.frame,
+              record.enabled == prior.enabled,
+              record.selected == prior.selected,
+              record.inWebContent == prior.inWebContent,
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(label),
+              AppMatcher.normalize(prior.authoredLabel ?? "")
+                == AppMatcher.normalize(label),
+              AppMatcher.bestMatch(for: target, in: [label]) != nil,
+              ActionUIEvidencePolicy.mayVerifyGoal(
+                index: index, source: .cua,
+                in: cached.observation.elements)
+        else { return false }
+
+        // Goal proof is observation-only. Hold process, window, and user
+        // activity stable across the fresh exhaustive tree read.
+        let generation = UserInputActivity.snapshot()
+        guard processIdentity(targetPID) == process,
+              let window = exactTargetWindow(),
+              targetActivitySafe(generation, windowID: windowID),
+              let current = snapshotTarget(maxElements: Self.snapshotElements),
+              !current.degraded, current.complete,
+              let element = current.elements.first(where: {
+                  $0.index == index
+              }),
+              sameElementIdentity(
+                element, prior: prior, role: role, label: label),
+              !record.focused || current.primaryTextElement?.index == index,
+              ActionUIEvidencePolicy.mayVerifyGoal(
+                index: index, source: .cua,
+                in: goalElements(in: current)),
+              targetActivitySafe(generation, windowID: windowID),
+              processIdentity(targetPID) == process,
+              targetProcessIdentity == process,
+              exactTargetWindow() == window,
+              targetActivitySafe(generation, windowID: windowID)
+        else { return false }
+        return true
+    }
+
+    private func goalElements(in snapshot: CuaSnapshot) -> [ActionUIElement] {
+        let primary = snapshot.primaryTextElement
+        return snapshot.elements.map { element in
+            ActionUIElement(
+                index: element.index, parentIndex: element.parentIndex,
+                depth: element.depth, role: element.role,
+                label: element.authoredLabel, frame: element.frame,
+                actions: element.actionNames, enabled: element.enabled,
+                selected: element.selected,
+                focused: primary?.index == element.index,
+                inWebContent: element.inWebContent)
+        }
     }
 
     func foregroundWindow() -> ActionWindowIdentity? {

@@ -2974,19 +2974,21 @@ class Engine:
                     "code": "cancelled", "error": "action: cancelled",
                 })
                 return
-            # An accepted exact press on a repeated collection member is
-            # already proven navigation by deterministic capability checks.
-            # On its fresh post-click observation, ask the independent
+            # An accepted exact press is already bound to one observed target
+            # by capability checks. On its fresh post-click observation, ask the
             # completion model directly whether unique active content proves
             # the spoken goal. A refusal or malformed verdict is only an
             # optimization miss: fall back to the normal controller below.
             direct_goal_check = session.direct_goal_check_pending
             session.direct_goal_check_pending = False
             if (turn is None and direct_goal_check
-                    and actions.goal_snapshot_is_native(
-                        session.current_ui_snapshot)):
+                    and actions.goal_snapshot_can_verify(
+                        session.current_ui_snapshot)
+                    and actions.goal_snapshot_has_evidence(
+                        session.current_ui_snapshot,
+                        session.prior_ui_snapshot)):
                 verifier_prompt = actions.build_goal_verifier_prompt(
-                    session.current_ui_snapshot)
+                    session.current_ui_snapshot, session.prior_ui_snapshot)
                 verifier_message = actions.goal_verifier_message(
                     session.transcript, session.goal)
                 completion = await self.cleanup.cleanup(
@@ -3019,7 +3021,7 @@ class Engine:
                     try:
                         goal_verdict = actions.parse_goal_verdict(
                             completion.text, session.current_ui_snapshot,
-                            session.transcript)
+                            session.transcript, session.prior_ui_snapshot)
                         if goal_verdict.get("safe") is True:
                             token = uuid.uuid4().hex
                             session.state.allowed_ui_attestation = token
@@ -3099,6 +3101,11 @@ class Engine:
                 try:
                     reply_text = result.text
                     parsed = actions.parse_turn(reply_text)
+                    bounded = actions.bound_observation_turn(parsed)
+                    if bounded is not parsed:
+                        parsed = bounded
+                        reply_text = json.dumps(
+                            parsed, ensure_ascii=False, separators=(",", ":"))
                     review_refusal_reason = ""
                     if actions.turn_requires_ui_action_review(parsed, session):
                         review_prompt = actions.build_ui_action_review_prompt(
@@ -3136,7 +3143,7 @@ class Engine:
                                 + str(review_result.reason or "no output") + ")")
                         review = actions.parse_ui_action_review(
                             review_result.text, session.current_ui_snapshot,
-                            session.transcript)
+                            session.transcript, session.prior_ui_snapshot)
                         if review.get("goal_met") is True:
                             declared_sends = session.sends
                             if declared_sends is None:
@@ -3177,10 +3184,10 @@ class Engine:
                                  parsed, session)))
                     can_review_refusal = (
                         session.current_ui_snapshot.get("complete") is True
-                        and actions.goal_snapshot_is_native(
+                        and actions.goal_snapshot_can_verify(
                             session.current_ui_snapshot))
                     # A refused action is never executed. When its tree cannot
-                    # support native completion proof, return an evidence-free
+                    # support exact completion proof, return an evidence-free
                     # terminal turn; the Swift runtime then reports prior
                     # effects as unverified or refuses success when none ran.
                     if (needs_goal_review
@@ -3191,14 +3198,15 @@ class Engine:
                                 review_refusal_reason)
                             raise actions.PlanError(
                                 "goal verifier: structured UI is incomplete")
-                        if not actions.goal_snapshot_is_native(
+                        if not actions.goal_snapshot_can_verify(
                                 session.current_ui_snapshot):
                             authoritative_ui_refusal = bool(
                                 review_refusal_reason)
                             raise actions.PlanError(
-                                "goal verifier: native UI is required")
+                                "goal verifier: runtime-verifiable UI is required")
                         verifier_prompt = actions.build_goal_verifier_prompt(
-                            session.current_ui_snapshot)
+                            session.current_ui_snapshot,
+                            session.prior_ui_snapshot)
                         verifier_message = actions.goal_verifier_message(
                             session.transcript,
                             str(parsed.get("goal") or session.goal))
@@ -3231,7 +3239,7 @@ class Engine:
                                 + str(completion.reason or "no output") + ")")
                         goal_verdict = actions.parse_goal_verdict(
                             completion.text, session.current_ui_snapshot,
-                            session.transcript)
+                            session.transcript, session.prior_ui_snapshot)
                         if goal_verdict.get("safe") is True:
                             declared_sends = session.sends
                             if declared_sends is None:

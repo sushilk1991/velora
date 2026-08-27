@@ -120,10 +120,46 @@ enum ActionUIEvidencePolicy {
     static let minimumPeers = 4
     static let ancestorLevels = 4
     static let frameTolerance: CGFloat = 3
+    private static let editableRoles: Set<String> = [
+        "AXComboBox", "AXSearchField", "AXTextArea", "AXTextField",
+    ]
 
     static func mayVerify(index: Int, in elements: [ActionUIElement]) -> Bool {
         guard elements.contains(where: { $0.index == index }) else { return false }
         return !isRepeatedCollectionMember(index: index, in: elements)
+    }
+
+    /// Goal evidence must describe active state or inert content, never the
+    /// unchanged actuator that caused navigation or one of its child labels.
+    static func mayVerifyGoal(
+        index: Int, source: ActionUISnapshotSource,
+        in elements: [ActionUIElement]
+    ) -> Bool {
+        guard mayVerify(index: index, in: elements),
+              let element = elements.first(where: { $0.index == index })
+        else { return false }
+        guard source != .appNative else { return false }
+        if element.selected { return true }
+        if element.focused && editableRoles.contains(element.role) { return true }
+        return hasInertPath(index: index, in: elements)
+    }
+
+    private static func hasInertPath(
+        index: Int, in elements: [ActionUIElement]
+    ) -> Bool {
+        let byIndex = Dictionary(uniqueKeysWithValues: elements.map { ($0.index, $0) })
+        guard var element = byIndex[index] else { return false }
+        var visited: Set<Int> = []
+
+        while true {
+            guard !visited.contains(element.index), element.actions.isEmpty else {
+                return false
+            }
+            visited.insert(element.index)
+            guard let parent = element.parentIndex else { return true }
+            guard let ancestor = byIndex[parent] else { return false }
+            element = ancestor
+        }
     }
 
     static func isRepeatedCollectionMember(

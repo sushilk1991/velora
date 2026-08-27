@@ -1033,6 +1033,64 @@ async def test_action_controller_waits_for_replacement_without_rejection(engine)
     assert eng._action_session.rejections == 0
 
 
+async def test_action_controller_bounds_turn_at_first_observation_barrier(engine):
+    calculator_ui = {
+        "id": "calc-1", "app_name": "Calculator",
+        "bundle_id": "com.apple.calculator", "window_title": "Calculator",
+        "complete": True,
+        "elements": [{
+            "index": 8, "role": "AXButton", "label": "Add",
+            "actions": ["AXPress"],
+        }],
+    }
+    stale_batch = turn([
+        {"do": "wait_frontmost", "app": "Calculator"},
+        {"do": "type_text", "text": "17"},
+        {"do": "press_ui", "snapshot": "calc-1", "index": 8,
+         "role": "AXButton", "label": "Add"},
+        {"do": "type_text", "text": "25"},
+    ], goal="calculate 17 plus 25", sends=False, done=True)
+    continuation = turn([
+        {"do": "wait_frontmost", "app": "Calculator"},
+        {"do": "type_text", "text": "25"},
+    ])
+    eng, sock = engine
+    eng.cleanup = FakePlanner(stale_batch, '{"safe":true}', continuation)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="calculate 17 plus 25",
+        context={
+            "frontmost_app": "Calculator",
+            "frontmost_bundle": "com.apple.calculator",
+            "running_apps": ["Calculator"],
+            "ui_snapshot": calculator_ui,
+        },
+    )
+
+    event = await client.recv_event("action_turn")
+
+    assert [step["do"] for step in event["steps"]] == [
+        "wait_frontmost", "type_text", "press_ui",
+    ]
+    assert event["done"] is False
+    assert '"text":"25"' not in eng.cleanup.calls[1][0]
+
+    await send_observe(client, observation=observation(
+        frontmost_app="Calculator",
+        frontmost_bundle="com.apple.calculator",
+        ui_snapshot=calculator_ui,
+        executed=["type_text 17", "press_ui Add"],
+    ))
+    next_event = await client.recv_event("action_turn")
+
+    assert [step["do"] for step in next_event["steps"]] == [
+        "wait_frontmost", "type_text",
+    ]
+    assert next_event["steps"][-1]["text"] == "25"
+
+
 async def test_hibernated_action_model_load_does_not_block_control_frames(engine):
     eng, sock = engine
     eng.cleanup = HibernatedPlanner(
@@ -1622,6 +1680,70 @@ async def test_bare_done_is_independently_verified_and_keeps_spoken_goal(engine)
     assert evt["goal"] == command
     assert evt["done"] is True
     assert evt["steps"][1]["purpose"] == "goal"
+
+
+async def test_cua_goal_bridge(engine):
+    eng, sock = engine
+    first = turn(
+        [{"do": "open_app", "app": "WhatsApp"}],
+        goal="open WhatsApp app", sends=False)
+    proposed = turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 14,
+         "role": "AXButton", "label": "Shivangi Gupta"},
+    ], sends=False)
+    review = json.dumps({
+        "safe": True, "target": "Shivangi Gupta",
+        "evidence": {"snapshot": "snap-1", "index": 14,
+                     "role": "AXButton", "label": "Shivangi Gupta"},
+    })
+    completion = json.dumps({
+        "safe": True, "target": "Shivangi Gupta",
+        "evidence": {"snapshot": "snap-1", "index": 28,
+                     "role": "AXButton", "label": "Shivangi Gupta"},
+    })
+    eng.cleanup = FakePlanner(first, proposed, review, completion)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client, transcript="open the Shivangi Gupta chat on WhatsApp",
+        context={"frontmost_app": "Sublime Text",
+                 "frontmost_bundle": "com.sublimetext.4",
+                 "running_apps": ["WhatsApp", "Sublime Text"]},
+    )
+    await client.recv_event("action_turn")
+    cua_before = _structured_ui(active="Someone Else")
+    cua_before.update({"source": "cua", "window_id": 91})
+    for element in cua_before["elements"]:
+        if "AXPress" in element.get("actions", []):
+            element["actions"] = ["CuaClick"]
+    await send_observe(client, observation=observation(
+        frontmost_app="WhatsApp",
+        frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=cua_before,
+        executed=["open_app WhatsApp"],
+    ))
+    await client.recv_event("action_turn")
+    cua_after = _structured_ui(active="Shivangi Gupta")
+    cua_after.update({"source": "cua", "window_id": 91})
+    for element in cua_after["elements"]:
+        if "AXPress" in element.get("actions", []):
+            element["actions"] = ["CuaClick"]
+    await send_observe(client, observation=observation(
+        frontmost_app="WhatsApp",
+        frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=cua_after,
+        executed=["open_app WhatsApp", "press_ui Shivangi Gupta"],
+    ))
+
+    event = await client.recv_event("action_turn")
+
+    assert event["done"] is True
+    assert [step["do"] for step in event["steps"]] == [
+        "wait_frontmost", "verify_ui",
+    ]
+    assert event["steps"][1]["purpose"] == "goal"
+    assert len(eng.cleanup.calls) == 4
 
 
 async def test_cua_state_postcondition_bypasses_native_goal_reviewer(engine):
@@ -2467,6 +2589,71 @@ def test_parse_turn_rejects_prose_and_arrays():
         actions.parse_turn(json.dumps([{"do": "open_app", "app": "Slack"}]))
 
 
+def test_observation_barrier_keeps_missing_press_capability_rejected():
+    ui = _structured_ui()
+    next(item for item in ui["elements"] if item["index"] == 14)["actions"] = []
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "WhatsApp", "ui_snapshot": ui,
+    })
+    parsed = actions.bound_observation_turn(actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "stale", "index": 14,
+         "role": "AXButton", "label": "Shivangi Gupta"},
+        {"do": "pause", "ms": 200},
+    ], goal="open Shivangi Gupta", sends=False, done=True)))
+
+    assert parsed["done"] is False
+    assert [step["do"] for step in parsed["steps"]] == [
+        "wait_frontmost", "press_ui",
+    ]
+    with pytest.raises(actions.PlanError, match="does not expose AXPress"):
+        actions.ActionSession("open Shivangi Gupta", context).accept_reply(
+            json.dumps(parsed))
+
+
+def test_media_suffix_is_rejected():
+    media_ui = _media_ui()
+    media_ui.update({"source": "app_native", "elements": [], "capabilities": []})
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "Music", "ui_snapshot": media_ui,
+    })
+    parsed = actions.bound_observation_turn(actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "Music"},
+        {"do": "media_control", "state": "pause",
+         "capability": "invented"},
+        {"do": "pause", "ms": 200},
+    ], goal="pause Music", sends=False, done=True)))
+
+    assert parsed["done"] is True
+    assert parsed["steps"][-1]["do"] == "pause"
+    with pytest.raises(actions.PlanError, match="must end its turn"):
+        actions.ActionSession("pause Music", context).accept_reply(
+            json.dumps(parsed))
+
+
+def test_barrier_clears_done():
+    parsed = actions.bound_observation_turn(actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "Calculator"},
+        {"do": "press_ui", "snapshot": "calc-1", "index": 8,
+         "role": "AXButton", "label": "Add"},
+    ], goal="calculate 17 plus 25", sends=False, done=True)))
+
+    assert parsed["done"] is False
+    assert parsed["steps"][-1]["do"] == "press_ui"
+
+
+@pytest.mark.parametrize("invalid", [42, {}, {"do": "run_shell"}])
+def test_observation_barrier_does_not_launder_invalid_batch(invalid):
+    parsed = actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 14,
+         "role": "AXButton", "label": "Shivangi Gupta"},
+        invalid,
+    ], goal="open Shivangi Gupta", sends=False, done=True))
+
+    assert actions.bound_observation_turn(parsed) is parsed
+
+
 # ================= press_element =================
 
 def press_plan(label, prefix=None):
@@ -3142,9 +3329,12 @@ def test_cua_click_is_accepted_only_from_an_exact_cua_snapshot():
             ], goal="open Shivangi Gupta", sends=False))
 
 
-def test_complete_cua_authorizes_target_but_not_completion():
+def test_complete_cua_authorizes_exact_goal_review():
     raw = _structured_ui(active="Shivangi Gupta")
     raw.update({"source": "cua", "window_id": 91, "complete": True})
+    for element in raw["elements"]:
+        if "AXPress" in element.get("actions", []):
+            element["actions"] = ["CuaClick"]
 
     snapshot = actions.normalize_ui_snapshot(raw)
 
@@ -3163,12 +3353,142 @@ def test_complete_cua_authorizes_target_but_not_completion():
         "safe": False, "goal_met": False,
         "reason": "native complete UI is required to prove the goal",
     }
-    with pytest.raises(actions.PlanError, match="native complete UI"):
+    goal = actions.parse_goal_verdict(json.dumps({
+        "safe": True, "target": "Shivangi Gupta",
+        "evidence": {"index": 28, "role": "AXButton",
+                     "label": "Shivangi Gupta"},
+    }), snapshot, "open Shivangi Gupta on WhatsApp")
+    assert goal["safe"] is True
+    assert goal["evidence"] == {
+        "snapshot": "snap-1", "index": 28,
+        "role": "AXButton", "label": "Shivangi Gupta",
+    }
+    assert actions.goal_snapshot_can_verify(snapshot)
+
+    static_button = dict(snapshot)
+    static_button["elements"] = [dict(item) for item in snapshot["elements"]]
+    static_button["elements"][-1].pop("selected", None)
+    with pytest.raises(actions.PlanError, match="active target state"):
         actions.parse_goal_verdict(json.dumps({
             "safe": True, "target": "Shivangi Gupta",
             "evidence": {"index": 28, "role": "AXButton",
                          "label": "Shivangi Gupta"},
-        }), snapshot, "open Shivangi Gupta on WhatsApp")
+        }), static_button, "open Shivangi Gupta on WhatsApp")
+
+    focused_button = dict(static_button)
+    focused_button["elements"] = [
+        dict(item, focused=True) if item["index"] == 28 else item
+        for item in static_button["elements"]
+    ]
+    with pytest.raises(actions.PlanError, match="active target state"):
+        actions.parse_goal_verdict(json.dumps({
+            "safe": True, "target": "Shivangi Gupta",
+            "evidence": {"index": 28, "role": "AXButton",
+                         "label": "Shivangi Gupta"},
+        }), focused_button, "open Shivangi Gupta on WhatsApp")
+
+    actuator_child = dict(static_button)
+    actuator_child["elements"] = [
+        *static_button["elements"],
+        {"index": 29, "parent_index": 28, "depth": 3,
+         "role": "AXStaticText", "label": "Shivangi Gupta"},
+    ]
+    with pytest.raises(actions.PlanError, match="active target state"):
+        actions.parse_goal_verdict(json.dumps({
+            "safe": True, "target": "Shivangi Gupta",
+            "evidence": {"index": 29, "role": "AXStaticText",
+                         "label": "Shivangi Gupta"},
+        }), actuator_child, "open Shivangi Gupta on WhatsApp")
+
+    missing_window = dict(snapshot)
+    missing_window["window_id"] = None
+    assert not actions.goal_snapshot_can_verify(missing_window)
+    with pytest.raises(actions.PlanError, match="runtime-verifiable"):
+        actions.parse_goal_verdict(json.dumps({
+            "safe": True, "target": "Shivangi Gupta",
+            "evidence": {"index": 28, "role": "AXButton",
+                         "label": "Shivangi Gupta"},
+        }), missing_window, "open Shivangi Gupta on WhatsApp")
+
+
+def test_goal_evidence_requires_active_or_changed_state():
+    prior = actions.normalize_ui_snapshot({
+        "id": "before", "source": "native", "app_name": "Calendar",
+        "bundle_id": "com.apple.iCal", "window_title": "Calendar",
+        "complete": True,
+        "elements": [
+            {"index": 0, "role": "AXWindow", "label": "Calendar"},
+            {"index": 1, "parent_index": 0, "depth": 1,
+             "role": "AXButton", "label": "Today", "actions": ["AXPress"]},
+        ],
+    })
+    current = dict(prior)
+    current["id"] = "after"
+
+    for index, role, label in (
+        (0, "AXWindow", "Calendar"),
+        (1, "AXButton", "Today"),
+    ):
+        with pytest.raises(actions.PlanError, match="active target state"):
+            actions.parse_goal_verdict(json.dumps({
+                "safe": True, "target": label,
+                "evidence": {"index": index, "role": role, "label": label},
+            }), current, "In Calendar, show today", prior)
+    assert "evidence indices: none" in actions.build_goal_verifier_prompt(
+        current, prior)
+
+    result = actions.normalize_ui_snapshot({
+        "id": "result", "source": "native", "app_name": "Calculator",
+        "bundle_id": "com.apple.calculator", "window_title": "Calculator",
+        "complete": True,
+        "elements": [
+            {"index": 0, "role": "AXWindow", "label": "Calculator"},
+            {"index": 1, "parent_index": 0, "depth": 1,
+             "role": "AXStaticText", "label": "42"},
+        ],
+    })
+    before_result = dict(result)
+    before_result["id"] = "before-result"
+    before_result["elements"] = [
+        dict(item, label="0") if item["index"] == 1 else item
+        for item in result["elements"]
+    ]
+
+    verdict = actions.parse_goal_verdict(json.dumps({
+        "safe": True, "target": "42",
+        "evidence": {"index": 1, "role": "AXStaticText", "label": "42"},
+    }), result, "In Calculator, calculate 17 plus 25", before_result)
+
+    assert verdict["target"] == "42"
+    assert "evidence indices: 1" in actions.build_goal_verifier_prompt(
+        result, before_result)
+
+    partial = actions.normalize_ui_snapshot({
+        "id": "partial", "source": "cua", "app_name": "Calendar",
+        "bundle_id": "com.apple.iCal", "window_title": "Calendar",
+        "window_id": 91, "complete": False,
+        "elements": [
+            {"index": 0, "role": "AXWindow", "label": "Calendar"},
+            {"index": 1, "parent_index": 0, "depth": 1,
+             "role": "AXButton", "label": "Today", "actions": ["CuaClick"]},
+        ],
+    })
+    completed = dict(partial)
+    completed["id"] = "complete"
+    completed["complete"] = True
+    completed["elements"] = [
+        *partial["elements"],
+        {"index": 2, "parent_index": 0, "depth": 1,
+         "role": "AXStaticText", "label": "Today"},
+    ]
+
+    assert not actions.goal_snapshot_has_evidence(completed, partial)
+    with pytest.raises(actions.PlanError, match="active target state"):
+        actions.parse_goal_verdict(json.dumps({
+            "safe": True, "target": "Today",
+            "evidence": {"index": 2, "role": "AXStaticText",
+                         "label": "Today"},
+        }), completed, "In Calendar, show today", partial)
 
 
 def test_model_projection_omits_inert_leaves_but_preserves_their_ancestors():
@@ -3463,6 +3783,15 @@ def test_only_exact_navigation_only_collection_press_skips_ui_review():
     session.accept_reply(json.dumps(parsed))
     assert session.direct_goal_check_pending is True
 
+    unique = actions.ActionSession(
+        "open Someone Else on WhatsApp", context)
+    unique.accept_reply(turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+         "role": "AXButton", "label": "Someone Else"},
+    ], sends=False))
+    assert unique.direct_goal_check_pending is True
+
     ordinary = actions.ActionSession(
         "open the Shivangi Gupta chat on WhatsApp", context)
     ordinary.accept_reply(turn([
@@ -3470,6 +3799,18 @@ def test_only_exact_navigation_only_collection_press_skips_ui_review():
         {"do": "pause", "ms": 200},
     ], sends=False))
     assert ordinary.direct_goal_check_pending is False
+
+    calculator = actions.ActionSession(
+        "In Calculator, calculate 17 plus 25", context)
+    assert actions.turn_needs_goal_check({
+        "sends": False, "done": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "Calculator"},
+            {"do": "type_text", "text": "17+25"},
+            {"do": "press_ui", "index": 9, "role": "AXButton",
+             "label": "equals"},
+        ],
+    }, calculator)
 
 
 def test_partial_ui_allows_only_command_mentioned_exact_capability():
@@ -3562,7 +3903,7 @@ def test_ui_verifiers_bind_exact_evidence_to_their_current_call():
     refused = actions.parse_goal_verdict(
         '{"safe":false,"reason":"only the app is open"}', snapshot)
     assert refused == {"safe": False, "reason": "only the app is open"}
-    with pytest.raises(actions.PlanError, match="spoken command"):
+    with pytest.raises(actions.PlanError, match="active target state"):
         actions.parse_goal_verdict(json.dumps({
             "safe": True, "target": "Conversation",
             "evidence": {"snapshot": "snap-1", "index": 26,

@@ -438,8 +438,9 @@ enum ScreenContext {
                   CFEqual(focused, element) else { return false }
         case .goal:
             guard snapshot.observation.complete,
-                  ActionUIEvidencePolicy.mayVerify(
-                    index: index, in: snapshot.observation.elements)
+                  let currentElements = currentGoalElements(in: snapshot),
+                  ActionUIEvidencePolicy.mayVerifyGoal(
+                    index: index, source: .native, in: currentElements)
             else { return false }
         }
         let authored = [
@@ -456,6 +457,26 @@ enum ScreenContext {
             return AppMatcher.bestMatch(for: target, in: [label]) != nil
         }
         return true
+    }
+
+    private static func currentGoalElements(
+        in snapshot: ScreenActionUISnapshot
+    ) -> [ActionUIElement]? {
+        let focused = axElement(
+            snapshot.applicationElement, kAXFocusedUIElementAttribute)
+        var elements: [ActionUIElement] = []
+        elements.reserveCapacity(snapshot.observation.elements.count)
+
+        for record in snapshot.observation.elements {
+            guard let reference = snapshot.elementsByIndex[record.index] else {
+                return nil
+            }
+            elements.append(actionUIRecord(
+                reference, index: record.index,
+                parentIndex: record.parentIndex, depth: record.depth,
+                focused: focused.map { CFEqual($0, reference) } ?? false))
+        }
+        return elements
     }
 
     private static func focusedWindowIsCurrent(

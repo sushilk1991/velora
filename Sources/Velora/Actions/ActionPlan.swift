@@ -305,6 +305,9 @@ extension ActionPlan {
         static let defaultWaitMs = 8_000
         static let maxKeyRepeat = 12
         static let minVerifyTermCharacters = 3
+        // A changed exact result may be one character; the engine attests its
+        // complete before/after tree and the app rechecks the live label.
+        static let minChangedVerifyCharacters = 1
         /// Deliberately short: every scheme's worst case must be "a window
         /// opened". App deeplinks (`shortcuts://run-shortcut`, raycast,
         /// obsidian, things, vscode) are excluded because they reach scripting
@@ -770,13 +773,14 @@ extension ActionPlan {
               element.role == role,
               AppMatcher.normalize(element.label ?? "")
                 == AppMatcher.normalize(label),
-              AppMatcher.bestMatch(for: target, in: [label]) != nil,
-              AppMatcher.bestMatch(for: target, in: [state.spokenCommand]) != nil
+              AppMatcher.bestMatch(for: target, in: [label]) != nil
         else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
 
         switch purpose {
         case .target:
-            guard !snapshot.bundleID.isEmpty,
+            guard AppMatcher.bestMatch(
+                    for: target, in: [state.spokenCommand]) != nil,
+                  !snapshot.bundleID.isEmpty,
                   !snapshot.windowTitle.isEmpty || snapshot.windowID != nil,
                   ScreenContext.isEditableActionRole(role)
             else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
@@ -802,8 +806,9 @@ extension ActionPlan {
             }
         case .goal:
             guard snapshot.complete,
-                  ActionUIEvidencePolicy.mayVerify(
-                    index: index, in: snapshot.elements)
+                  ActionUIEvidencePolicy.mayVerifyGoal(
+                    index: index, source: snapshot.source,
+                    in: snapshot.elements)
             else { throw ActionPlanError.invalidStructuredUICapability(step: step) }
         }
     }
@@ -1102,12 +1107,15 @@ extension ActionPlan {
                 let role = String(try string("role").prefix(40))
                 let label = String(ActionPlan.sanitize(try string("label")).prefix(180))
                 let target = String(ActionPlan.sanitize(try string("target")).prefix(80))
-                guard AppMatcher.normalize(target).count
-                        >= Limits.minVerifyTermCharacters else {
-                    throw ActionPlanError.weakVerifyTerm(target)
-                }
                 let purpose: ActionVerificationPurpose =
                     step["purpose"] as? String == "goal" ? .goal : .target
+                let minimumCharacters = purpose == .goal
+                    ? Limits.minChangedVerifyCharacters
+                    : Limits.minVerifyTermCharacters
+                guard AppMatcher.normalize(target).count
+                        >= minimumCharacters else {
+                    throw ActionPlanError.weakVerifyTerm(target)
+                }
                 try ActionPlan.validateVerifyUI(
                     snapshotID: snapshotID, index: number.intValue,
                     role: role, label: label, target: target,

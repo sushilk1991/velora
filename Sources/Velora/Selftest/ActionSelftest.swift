@@ -1856,6 +1856,32 @@ extension Selftest {
         expect(!changedResult.outcome.isSuccess && changedHost.typed.isEmpty,
                "a target that changed after model verification is refused before typing")
 
+        var resultState = ActionPlan.BatchState()
+        resultState.requireUITargetVerification = true
+        resultState.structuredUIAvailable = true
+        resultState.structuredUIComplete = true
+        resultState.spokenCommand = "In Calculator, calculate 17 plus 25"
+        resultState.structuredUISnapshot = ActionUISnapshot(
+            id: "result", appName: "Calculator",
+            bundleID: "com.apple.calculator", windowTitle: "Calculator",
+            complete: true,
+            elements: [
+                ActionUIElement(
+                    index: 0, parentIndex: nil, depth: 0, role: "AXWindow",
+                    label: "Calculator", frame: nil, actions: []),
+                ActionUIElement(index: 1, parentIndex: 0, depth: 1,
+                                role: "AXStaticText", label: "42",
+                                frame: nil, actions: []),
+            ])
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Calculator"},
+          {"do":"verify_ui","snapshot":"result","index":1,
+           "role":"AXStaticText","label":"42","target":"42",
+           "purpose":"goal","attestation":"engine"}]}
+        """, state: &resultState) == nil,
+               "derived result evidence need not repeat the spoken wording")
+
         let partialHost = FakeActionHost()
         partialHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
         partialHost.uiSnapshotValue = ActionUISnapshot(
@@ -2682,6 +2708,18 @@ extension Selftest {
         expect(!ActionUIEvidencePolicy.isRepeatedCollectionMember(
             index: 28, in: goalSnapshot.elements),
             "a unique active-content header remains completion evidence")
+        let focusedActuator = [
+            ActionUIElement(
+                index: 0, parentIndex: nil, depth: 0, role: "AXWindow",
+                label: "Calendar", frame: nil, actions: []),
+            ActionUIElement(
+                index: 1, parentIndex: 0, depth: 1, role: "AXButton",
+                label: "Today", frame: nil,
+                actions: [kAXPressAction as String], focused: true),
+        ]
+        expect(!ActionUIEvidencePolicy.mayVerifyGoal(
+            index: 1, source: .native, in: focusedActuator),
+            "focus alone does not make a pressed actuator a postcondition")
         expect(!ActionUIEvidencePolicy.isRepeatedCollectionMember(
             index: 14,
             in: Array(inactiveGoalSnapshot.elements.prefix(4))),
@@ -5087,6 +5125,7 @@ extension Selftest {
         testBackgroundActionGate()
         testWindowlessRouting()
         testRoutedMediaControl()
+        testRoutedGoalVerification()
         testSnapshotLineage()
         testBackgroundRoutingHost()
     }
@@ -7581,10 +7620,225 @@ extension Selftest {
         ]]
         transport.responses["list_windows"] = ["windows": [
             ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-             "bounds": ["width": 800.0, "height": 600.0], "title": "My Note",
+             "bounds": ["x": 0.0, "y": 0.0,
+                        "width": 800.0, "height": 600.0], "title": "My Note",
              "on_current_space": true],
         ]]
         transport.responses["get_window_state"] = noteWindowState()
+    }
+
+    private static func testRoutedGoalVerification() {
+        func prepared(
+            state: [String: Any] = noteWindowState(),
+            processIdentity: @escaping (Int) -> CuaProcessIdentity? = {
+                CuaProcessIdentity(
+                    pid: pid_t($0), startSeconds: 1, startMicroseconds: 1)
+            }
+        ) -> (BackgroundRoutingActionHost, FakeCuaTransport, ActionUISnapshot) {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["get_window_state"] = state
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                processIdentity: processIdentity)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            guard let snapshot = host.uiSnapshot() else {
+                fatalError("routed goal fixture requires a Cua snapshot")
+            }
+            return (host, transport, snapshot)
+        }
+
+        func provesGoal(
+            _ host: BackgroundRoutingActionHost,
+            _ snapshot: ActionUISnapshot,
+            target: String = "Open Sidebar", index: Int = 2,
+            label: String = "Open Sidebar", role: String = "AXButton"
+        ) -> Bool {
+            host.verifyElement(
+                index: index, snapshotID: snapshot.id,
+                label: label, role: role,
+                target: target, expecting: "com.apple.notes",
+                purpose: .goal)
+        }
+
+        do {
+            let (host, _, snapshot) = prepared()
+            expect(provesGoal(
+                host, snapshot, target: "My Note", index: 0,
+                label: "My Note", role: "AXWindow"),
+                "complete active Cua content proves the routed goal")
+        }
+
+        do {
+            let (host, _, snapshot) = prepared()
+            expect(!provesGoal(host, snapshot),
+                   "a static Cua actuator cannot prove the routed goal")
+        }
+
+        do {
+            var state = noteWindowState()
+            state["element_count"] = 4
+            state["total_element_count"] = 4
+            var elements = state["elements"] as? [[String: Any]] ?? []
+            elements.append([
+                "element_index": 3, "role": "AXStaticText",
+                "label": "Open Sidebar", "parent_index": 2,
+                "element_token": "s00000001:3",
+            ])
+            state["elements"] = elements
+            let (host, _, snapshot) = prepared(state: state)
+            expect(!provesGoal(
+                host, snapshot, index: 3,
+                label: "Open Sidebar", role: "AXStaticText"),
+                "a static child of a Cua actuator cannot prove the goal")
+        }
+
+        do {
+            let (host, _, snapshot) = prepared()
+            expect(!provesGoal(host, snapshot, target: "Different Control"),
+                   "the routed goal target must match its authored label")
+        }
+
+        do {
+            var before = noteWindowState()
+            before["element_count"] = 3
+            before["total_element_count"] = 3
+            before["elements"] = [
+                ["element_index": 0, "role": "AXWindow", "label": "My Note",
+                 "element_token": "s00000001:0"],
+                ["element_index": 1, "role": "AXTextField", "label": "Query",
+                 "value": "", "parent_index": 0,
+                 "element_token": "s00000001:1", "enabled": true],
+                ["element_index": 2, "role": "AXButton",
+                 "label": "Open Sidebar", "parent_index": 0,
+                 "element_token": "s00000001:2", "enabled": true],
+            ]
+            let (host, transport, snapshot) = prepared(state: before)
+            var after = before
+            after["element_count"] = 4
+            after["total_element_count"] = 4
+            var elements = after["elements"] as? [[String: Any]] ?? []
+            elements.append([
+                "element_index": 3, "role": "AXTextArea", "label": "Body",
+                "value": "", "parent_index": 0,
+                "element_token": "s00000002:3", "enabled": true,
+            ])
+            after["elements"] = elements
+            transport.responses["get_window_state"] = after
+            let verified = host.verifyElement(
+                index: 1, snapshotID: snapshot.id,
+                label: "Query", role: "AXTextField", target: "Query",
+                expecting: "com.apple.notes", purpose: .goal)
+            expect(!verified,
+                   "a Cua goal refuses when its cited element loses focus")
+        }
+
+        do {
+            let partial = noteWindowState(elementsComplete: false)
+            let (host, _, snapshot) = prepared(state: partial)
+            expect(!provesGoal(host, snapshot),
+                   "partial Cua evidence cannot prove the routed goal")
+        }
+
+        do {
+            var collection = noteWindowState()
+            collection["element_count"] = 6
+            collection["total_element_count"] = 6
+            collection["elements"] = [
+                ["element_index": 0, "role": "AXWindow", "label": "My Note",
+                 "element_token": "s00000001:0"],
+                ["element_index": 1, "role": "AXGroup", "label": "Sidebar",
+                 "parent_index": 0, "element_token": "s00000001:1",
+                 "enabled": true],
+                ["element_index": 2, "role": "AXButton",
+                 "label": "Open Sidebar", "parent_index": 1,
+                 "element_token": "s00000001:2", "enabled": true],
+                ["element_index": 3, "role": "AXButton", "label": "One",
+                 "parent_index": 1, "element_token": "s00000001:3",
+                 "enabled": true],
+                ["element_index": 4, "role": "AXButton", "label": "Two",
+                 "parent_index": 1, "element_token": "s00000001:4",
+                 "enabled": true],
+                ["element_index": 5, "role": "AXButton", "label": "Three",
+                 "parent_index": 1, "element_token": "s00000001:5",
+                 "enabled": true],
+            ]
+            let (host, _, snapshot) = prepared(state: collection)
+            expect(!provesGoal(host, snapshot),
+                   "a repeated Cua collection member cannot prove the goal")
+        }
+
+        do {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.freshWindowSnapshots = false
+            let host = makeRoutedHost(system: system, transport: transport)
+            host.beginActionInputSession()
+            _ = host.openApp(named: "Notes")
+            _ = host.frontmostApp()
+            transport.responses["get_window_state"] = noteWindowState(
+                snapshot: "s00000002")
+            guard let snapshot = host.uiSnapshot() else {
+                expect(false, "the stale goal fixture caches Cua evidence")
+                return
+            }
+            expect(!provesGoal(host, snapshot),
+                   "a replayed Cua snapshot cannot prove the routed goal")
+        }
+
+        let changes: [(String, (inout [[String: Any]]) -> Void)] = [
+            ("index", { $0[2]["element_index"] = 7 }),
+            ("role", { $0[2]["role"] = "AXStaticText" }),
+            ("authored label", { $0[2]["label"] = "Close Sidebar" }),
+            ("structure", { $0[2]["depth"] = 2 }),
+        ]
+        for (field, change) in changes {
+            let (host, transport, snapshot) = prepared()
+            var current = noteWindowState()
+            var elements = current["elements"] as? [[String: Any]] ?? []
+            change(&elements)
+            current["elements"] = elements
+            transport.responses["get_window_state"] = current
+            expect(!provesGoal(host, snapshot),
+                   "changed Cua goal \(field) is refused")
+        }
+
+        do {
+            var identity = CuaProcessIdentity(
+                pid: 500, startSeconds: 1, startMicroseconds: 1)
+            let (host, _, snapshot) = prepared(processIdentity: { _ in identity })
+            identity = CuaProcessIdentity(
+                pid: 500, startSeconds: 2, startMicroseconds: 1)
+            expect(!provesGoal(host, snapshot),
+                   "a replaced routed process cannot prove the goal")
+        }
+
+        do {
+            let wrongPID: (Int) -> CuaProcessIdentity? = { _ in
+                CuaProcessIdentity(
+                    pid: 501, startSeconds: 1, startMicroseconds: 1)
+            }
+            let (host, _, snapshot) = prepared(processIdentity: wrongPID)
+            expect(!provesGoal(host, snapshot),
+                   "a process identity for another PID cannot prove the goal")
+        }
+
+        do {
+            let (host, transport, snapshot) = prepared()
+            transport.responses["list_windows"] = ["windows": [
+                ["pid": 500, "window_id": 10, "layer": 0, "z_index": 10,
+                 "bounds": ["width": 800.0, "height": 600.0],
+                 "title": "My Note", "on_current_space": true],
+            ]]
+            expect(!provesGoal(host, snapshot),
+                   "a replaced routed window cannot prove the goal")
+        }
     }
 
     private static func testSnapshotLineage() {

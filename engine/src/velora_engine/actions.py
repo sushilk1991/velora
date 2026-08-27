@@ -62,6 +62,9 @@ MAX_VERIFY_TERMS = 6
 # A one- or two-character term matches almost any window title, which would turn
 # the check that authorises a send into a formality.
 MIN_VERIFY_TERM_CHARS = 3
+# A changed exact result can legitimately be one character (for example, 7).
+# It remains bound to a complete comparable before/after tree and live label.
+MIN_CHANGED_VERIFY_TERM_CHARS = 1
 
 # Keys that commit whatever is currently typed — WITH OR WITHOUT modifiers.
 # ⌘Return is Send in Gmail, Slack (enter-newline mode), GitHub, and Linear;
@@ -877,8 +880,15 @@ def build_ui_action_review_prompt(snapshot: dict) -> str:
                       "Reply with the JSON object only."])
 
 
-def build_goal_verifier_prompt(snapshot: dict) -> str:
+def build_goal_verifier_prompt(
+        snapshot: dict, prior_snapshot: dict | None = None) -> str:
+    eligible = _goal_evidence_indices(snapshot, prior_snapshot)
+    eligible_line = (
+        "Eligible active or post-action evidence indices: "
+        + (", ".join(str(index) for index in eligible) if eligible else "none")
+    )
     return "\n".join([GOAL_VERIFIER_RULES, "", CONTEXT_FENCE_NOTE, "",
+                      eligible_line, "",
                       *ui_snapshot_lines(snapshot, evidence_only=True), "",
                       "Reply with the JSON object only."])
 
@@ -981,16 +991,14 @@ def _exact_noncollection_ui_evidence(
 
 def _require_verifier_target(
         obj: dict, snapshot: dict, evidence: dict, *, prefix: str,
-        transcript: str = "") -> str:
+        minimum_chars: int = MIN_VERIFY_TERM_CHARS) -> str:
     target = _require_str(obj, "target", prefix, 80)
-    if len(normalized_term(target)) < MIN_VERIFY_TERM_CHARS:
+    if len(normalized_term(target)) < minimum_chars:
         raise PlanError(f"{prefix}: target is not specific enough")
     element = next(item for item in snapshot["elements"]
                    if item["index"] == evidence["index"])
     if not app_name_matches(target, str(element.get("label") or "")):
         raise PlanError(f"{prefix}: evidence label does not name its target")
-    if transcript and not app_name_matches(target, transcript):
-        raise PlanError(f"{prefix}: target was not named by the spoken command")
     return target
 
 
@@ -1000,8 +1008,130 @@ def goal_snapshot_is_native(snapshot: dict) -> bool:
             and snapshot.get("complete") is True)
 
 
+def goal_snapshot_can_verify(snapshot: dict) -> bool:
+    """Whether Swift can re-check exact goal evidence on the live target."""
+    if (snapshot.get("complete") is not True
+            or not str(snapshot.get("id") or "")
+            or not str(snapshot.get("app_name") or "")
+            or not str(snapshot.get("bundle_id") or "")):
+        return False
+    if snapshot.get("source") == _UI_SOURCE_NATIVE:
+        return True
+    window_id = snapshot.get("window_id")
+    return (snapshot.get("source") == _UI_SOURCE_CUA
+            and isinstance(window_id, int) and not isinstance(window_id, bool)
+            and window_id > 0)
+
+
+class _GoalEvidenceState(Enum):
+    INVALID = "invalid"
+    ACTIVE = "active"
+    CHANGED = "changed"
+
+
+def _goal_path_signatures(snapshot: dict) -> dict[int, tuple]:
+    by_index = {
+        item["index"]: item for item in snapshot.get("elements", [])
+    }
+    identity = (
+        str(snapshot.get("bundle_id") or ""),
+        snapshot.get("window_id"),
+    )
+    signatures: dict[int, tuple] = {}
+    for index, root in by_index.items():
+        element = root
+        path: list[tuple[str, str]] = []
+        visited: set[int] = set()
+
+        while element is not None:
+            element_index = element["index"]
+            if element_index in visited or element.get("actions"):
+                break
+            visited.add(element_index)
+            path.append((
+                str(element.get("role") or ""),
+                normalized_term(str(element.get("label") or "")),
+            ))
+            parent = element.get("parent_index")
+            if parent is None:
+                signatures[index] = (*identity, tuple(reversed(path)))
+                break
+            element = by_index.get(parent)
+    return signatures
+
+
+def _classify_goal_evidence(
+        element: dict, signature: tuple | None,
+        prior_signatures: set[tuple] | None) -> _GoalEvidenceState:
+    if element.get("selected") is True:
+        return _GoalEvidenceState.ACTIVE
+    if (element.get("focused") is True
+            and element.get("role") in _EDITABLE_CUA_ROLES):
+        return _GoalEvidenceState.ACTIVE
+    if (signature is None or prior_signatures is None
+            or signature in prior_signatures):
+        return _GoalEvidenceState.INVALID
+    return _GoalEvidenceState.CHANGED
+
+
+def _goal_snapshots_comparable(current: dict, prior: dict) -> bool:
+    if (not goal_snapshot_can_verify(current)
+            or not goal_snapshot_can_verify(prior)
+            or current.get("source") != prior.get("source")
+            or str(current.get("bundle_id") or "").casefold()
+            != str(prior.get("bundle_id") or "").casefold()):
+        return False
+
+    current_window = current.get("window_id")
+    prior_window = prior.get("window_id")
+    if current.get("source") == _UI_SOURCE_CUA:
+        return current_window == prior_window
+    if current_window is None and prior_window is None:
+        return True
+    return current_window == prior_window
+
+
+def _goal_evidence_indices(
+        snapshot: dict, prior_snapshot: dict | None = None) -> list[int]:
+    signatures = _goal_path_signatures(snapshot)
+    prior_signatures = (
+        set(_goal_path_signatures(prior_snapshot).values())
+        if prior_snapshot
+        and _goal_snapshots_comparable(snapshot, prior_snapshot)
+        else None)
+    return [
+        item["index"] for item in snapshot.get("elements", [])
+        if _classify_goal_evidence(
+            item, signatures.get(item["index"]), prior_signatures)
+        is not _GoalEvidenceState.INVALID
+        and not _is_repeated_collection_member(snapshot, item["index"])
+    ]
+
+
+def goal_snapshot_has_evidence(
+        snapshot: dict, prior_snapshot: dict | None = None) -> bool:
+    """Whether this fresh tree contains exact postcondition evidence."""
+    return bool(_goal_evidence_indices(snapshot, prior_snapshot))
+
+
+def _goal_evidence_state(
+        snapshot: dict, index: int,
+        prior_snapshot: dict | None = None) -> _GoalEvidenceState:
+    element = next(
+        item for item in snapshot["elements"] if item["index"] == index)
+    signatures = _goal_path_signatures(snapshot)
+    prior_signatures = (
+        set(_goal_path_signatures(prior_snapshot).values())
+        if prior_snapshot
+        and _goal_snapshots_comparable(snapshot, prior_snapshot)
+        else None)
+    return _classify_goal_evidence(
+        element, signatures.get(index), prior_signatures)
+
+
 def parse_ui_action_review(
-        raw: str, snapshot: dict, transcript: str = "") -> dict:
+        raw: str, snapshot: dict, transcript: str = "",
+        prior_snapshot: dict | None = None) -> dict:
     obj = parse_plan(raw)
     if obj.get("safe") is True:
         return {"safe": True}
@@ -1021,9 +1151,17 @@ def parse_ui_action_review(
         evidence = _exact_noncollection_ui_evidence(
             obj.get("evidence"), snapshot, prefix="UI action reviewer",
             bind_current=True)
+        evidence_state = _goal_evidence_state(
+            snapshot, evidence["index"], prior_snapshot)
+        if evidence_state is _GoalEvidenceState.INVALID:
+            raise PlanError(
+                "UI action reviewer: evidence does not prove active target state")
         target = _require_verifier_target(
-            obj, snapshot, evidence, prefix="UI action reviewer",
-            transcript=transcript)
+            obj, snapshot, evidence, prefix="UI action reviewer")
+        if (transcript and evidence_state is _GoalEvidenceState.ACTIVE
+                and not app_name_matches(target, transcript)):
+            raise PlanError(
+                "UI action reviewer: target was not named by the spoken command")
         return {"safe": False, "goal_met": True,
                 "target": target, "evidence": evidence}
     reason = obj.get("reason")
@@ -1032,7 +1170,9 @@ def parse_ui_action_review(
                        else "the selected control is not proven navigation")}
 
 
-def parse_goal_verdict(raw: str, snapshot: dict, transcript: str = "") -> dict:
+def parse_goal_verdict(
+        raw: str, snapshot: dict, transcript: str = "",
+        prior_snapshot: dict | None = None) -> dict:
     obj = parse_plan(raw)
     if obj.get("safe") is not True:
         reason = obj.get("reason")
@@ -1041,15 +1181,26 @@ def parse_goal_verdict(raw: str, snapshot: dict, transcript: str = "") -> dict:
                            else "the current UI does not prove completion")}
     if snapshot.get("complete") is not True:
         raise PlanError("goal verifier: structured UI is incomplete")
-    if not goal_snapshot_is_native(snapshot):
+    if not goal_snapshot_can_verify(snapshot):
         raise PlanError(
-            "goal verifier: native complete UI is required for completion proof")
+            "goal verifier: runtime-verifiable complete UI is required")
     evidence = _exact_noncollection_ui_evidence(
         obj.get("evidence"), snapshot, prefix="goal verifier",
         bind_current=True)
+    evidence_state = _goal_evidence_state(
+        snapshot, evidence["index"], prior_snapshot)
+    if evidence_state is _GoalEvidenceState.INVALID:
+        raise PlanError(
+            "goal verifier: evidence does not prove active target state")
     target = _require_verifier_target(
         obj, snapshot, evidence, prefix="goal verifier",
-        transcript=transcript)
+        minimum_chars=(MIN_CHANGED_VERIFY_TERM_CHARS
+                       if evidence_state is _GoalEvidenceState.CHANGED
+                       else MIN_VERIFY_TERM_CHARS))
+    if (transcript and evidence_state is _GoalEvidenceState.ACTIVE
+            and not app_name_matches(target, transcript)):
+        raise PlanError(
+            "goal verifier: target was not named by the spoken command")
     return {"safe": True, "target": target, "evidence": evidence}
 
 
@@ -1085,8 +1236,10 @@ def parse_target_verdict(raw: str, snapshot: dict, transcript: str = "") -> dict
         raise PlanError(
             "target verifier: evidence is not the exact focused editable")
     target = _require_verifier_target(
-        obj, snapshot, evidence, prefix="target verifier",
-        transcript=transcript)
+        obj, snapshot, evidence, prefix="target verifier")
+    if transcript and not app_name_matches(target, transcript):
+        raise PlanError(
+            "target verifier: target was not named by the spoken command")
     return {
         **evidence, "target": _clip(target, 80),
     }
@@ -1466,6 +1619,23 @@ _GOAL_REPLACEABLE_NAVIGATION_VERBS = {
 }
 
 
+def turn_needs_goal_check(
+        parsed: dict, session: "ActionSession") -> bool:
+    """Run the independent verifier after an exact press and fresh tree."""
+    sends = session.sends
+    if sends is None:
+        raw = parsed.get("sends")
+        sends = raw if isinstance(raw, bool) else True
+    steps = parsed.get("steps") or []
+    verbs = [
+        str(step.get("do") or "").strip().lower()
+        for step in steps if isinstance(step, dict)
+    ]
+    return (sends is False and parsed.get("done") is not True
+            and len(verbs) == len(steps) and "press_ui" in verbs
+            and all(verb in VERBS for verb in verbs))
+
+
 def turn_requires_goal_verifier(parsed: dict, session: "ActionSession") -> bool:
     """A controller-authored navigation done is a hypothesis, not proof."""
     snapshot = session.current_ui_snapshot
@@ -1482,7 +1652,7 @@ def turn_requires_goal_verifier(parsed: dict, session: "ActionSession") -> bool:
     )
     return (parsed.get("done") is True and navigation_only
             and session.turns_used > 0 and sends is False
-            and snapshot.get("source") == _UI_SOURCE_NATIVE)
+            and snapshot.get("source") in (_UI_SOURCE_NATIVE, _UI_SOURCE_CUA))
 
 
 def attach_verified_goal(parsed: dict, verdict: dict,
@@ -2004,7 +2174,8 @@ def _validate_verified_ui(step: dict, state: "SessionState | None") -> dict:
         raise PlanError("verify_ui: target is not specific enough")
     if not app_name_matches(target, observed_label):
         raise PlanError("verify_ui: evidence label does not name the target")
-    if not app_name_matches(target, state.spoken_command):
+    if purpose == "target" and not app_name_matches(
+            target, state.spoken_command):
         raise PlanError("verify_ui: target was not named by the spoken command")
     if purpose == "target" and (
             role not in {"AXTextField", "AXTextArea", "AXComboBox"}
@@ -2553,6 +2724,49 @@ def parse_turn(raw: str) -> dict:
     return result
 
 
+_OBSERVATION_BARRIERS = frozenset(("press_ui",))
+
+
+def bound_observation_turn(parsed: dict) -> dict:
+    """End a well-shaped batch at its first observation barrier.
+
+    The model sometimes proposes steps based on the screen that existed before
+    a UI press. Execute only its authored prefix so the next turn can use a
+    fresh observation. Invalid step shapes remain untouched for the validator
+    to reject instead of laundering an arbitrary bad suffix.
+    """
+    steps = parsed.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return parsed
+
+    verbs: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            return parsed
+        verb = step.get("do")
+        if not isinstance(verb, str):
+            return parsed
+        normalized = verb.strip().lower()
+        if normalized not in VERBS:
+            return parsed
+        verbs.append(normalized)
+
+    barrier = next(
+        (index for index, verb in enumerate(verbs)
+         if verb in _OBSERVATION_BARRIERS),
+        None,
+    )
+    if barrier is None:
+        return parsed
+    if barrier == len(steps) - 1 and parsed.get("done") is not True:
+        return parsed
+
+    bounded = dict(parsed)
+    bounded["steps"] = steps[:barrier + 1]
+    bounded["done"] = False
+    return bounded
+
+
 _MAX_EXECUTED_LINES = 30
 _MAX_EXECUTED_CHARS = 140
 _MAX_FAILED_CHARS = 240
@@ -2643,6 +2857,7 @@ class ActionSession:
         self.goal = _clip(_sanitize_text(transcript), MAX_GOAL_CHARS)
         self.finished = False
         self.current_ui_snapshot = context.ui_snapshot
+        self.prior_ui_snapshot: dict = {}
         # Set only after accepting an exact repeated-collection navigation
         # press. The next fresh observation can then go straight to the
         # independent completion verifier instead of spending another
@@ -2680,6 +2895,7 @@ class ActionSession:
         anything) failed, and what the screen says right now. Everything in it
         is read off the user's screen, so everything is defanged."""
         observed_app = str(obs.get("frontmost_app") or "").strip()
+        self.prior_ui_snapshot = self.current_ui_snapshot
         self.current_ui_snapshot = normalize_ui_snapshot(obs.get("ui_snapshot"))
         self.state.ui_snapshot_id = str(self.current_ui_snapshot.get("id") or "")
         self.state.ui_elements = {
@@ -2798,7 +3014,8 @@ class ActionSession:
             sends = raw_sends if isinstance(raw_sends, bool) else True
 
         direct_goal_check_pending = (
-            turn_is_self_evident_collection_navigation(parsed, self))
+            turn_is_self_evident_collection_navigation(parsed, self)
+            or turn_needs_goal_check(parsed, self))
 
         # A first turn that claims the goal is already met without having
         # changed anything is the model shrugging, and the app reported it to
