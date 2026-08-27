@@ -72,8 +72,8 @@ enum SnapshotRenderer {
             ("hud-action-result-verified", .actionResult(
                 id: "action-verified",
                 status: .verified,
-                symbol: "paperplane.fill",
-                message: "Sent Hi to Gaurav Singh Bissain",
+                symbol: "checkmark.circle.fill",
+                message: "Done · Send Hi to Gaurav Singh Bissain",
                 appName: "Slack")),
             ("hud-action-result-ready", .actionResult(
                 id: "action-ready",

@@ -40,12 +40,14 @@ final class NativeMediaAutomation {
 
     private struct Binding {
         let target: ActionProcessIdentity
+        let process: CuaProcessIdentity
         let state: ActionMediaState
         let provider: any NativeMediaProvider
     }
 
     private let providers: [any NativeMediaProvider]
     private let bundleForPID: (Int) -> String?
+    private let processIdentity: (Int) -> CuaProcessIdentity?
     private let read: () -> MediaPlaybackCoordinator.Snapshot
     private let sleep: (Int) -> Void
     private let musicPermission: (Bool) -> [OSStatus]
@@ -57,6 +59,9 @@ final class NativeMediaAutomation {
         bundleForPID: @escaping (Int) -> String? = { pid in
             NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
         },
+        processIdentity: @escaping (Int) -> CuaProcessIdentity? = {
+            CuaProcessIdentity.capture(pid: pid_t($0))
+        },
         read: @escaping () -> MediaPlaybackCoordinator.Snapshot
             = MediaPlaybackSystem.snapshot,
         sleep: @escaping (Int) -> Void = { milliseconds in
@@ -67,6 +72,7 @@ final class NativeMediaAutomation {
     ) {
         self.providers = providers
         self.bundleForPID = bundleForPID
+        self.processIdentity = processIdentity
         self.read = read
         self.sleep = sleep
         self.musicPermission = musicPermission
@@ -101,22 +107,26 @@ final class NativeMediaAutomation {
     }
 
     func supports(_ target: ActionProcessIdentity) -> Bool {
-        guard let provider = provider(for: target) else { return false }
-        return provider.states.contains {
+        guard let process = processIdentity(target.pid),
+              let provider = provider(for: target) else { return false }
+        let supported = provider.states.contains {
             provider.permission(
                 $0, target: target, askUserIfNeeded: false) == noErr
         }
+        return supported && exactTarget(target, process: process)
     }
 
     func capabilities(
         for target: ActionProcessIdentity
     ) -> [ActionNativeCapability] {
-        guard let provider = provider(for: target) else { return [] }
+        guard let process = processIdentity(target.pid),
+              let provider = provider(for: target) else { return [] }
         let states = provider.states.filter {
             provider.permission(
                 $0, target: target, askUserIfNeeded: false) == noErr
         }
-        guard !states.isEmpty else { return [] }
+        guard !states.isEmpty,
+              exactTarget(target, process: process) else { return [] }
 
         lock.lock()
         defer { lock.unlock() }
@@ -126,7 +136,8 @@ final class NativeMediaAutomation {
         return states.map { state in
             let id = UUID().uuidString
             bindings[id] = Binding(
-                target: target, state: state, provider: provider)
+                target: target, process: process,
+                state: state, provider: provider)
             return ActionNativeCapability(
                 id: id, verb: .mediaControl, state: state)
         }
@@ -146,24 +157,40 @@ final class NativeMediaAutomation {
         guard let binding,
               binding.target == target,
               binding.state == control.state,
-              exactBundle(for: target),
+              exactTarget(target, process: binding.process),
               binding.provider.permission(
                 control.state, target: target,
-                askUserIfNeeded: false) == noErr else { return .unavailable }
+                askUserIfNeeded: false) == noErr,
+              exactTarget(target, process: binding.process)
+        else { return .unavailable }
 
         let before = read()
+        guard exactTarget(target, process: binding.process) else {
+            return .unavailable
+        }
         let prior = mediaMatches(
             control.state, target: target, snapshot: before)
         if prior == true { return .verified }
         if control.state == .pause, prior == nil { return .unavailable }
-        guard maySend(), exactBundle(for: target),
+        guard maySend(), exactTarget(target, process: binding.process),
               binding.provider.send(
-                control.state, target: target, maySend: maySend)
+                control.state, target: target, maySend: {
+                    maySend()
+                        && self.exactTarget(
+                            target, process: binding.process)
+                }),
+              exactTarget(target, process: binding.process)
         else { return .unavailable }
 
         for _ in 0..<Self.pollAttempts {
             sleep(Self.pollMs)
+            guard exactTarget(target, process: binding.process) else {
+                return .misdirected
+            }
             let after = read()
+            guard exactTarget(target, process: binding.process) else {
+                return .misdirected
+            }
             if mediaMatches(
                 control.state, target: target, snapshot: after) == true {
                 return .verified
@@ -186,6 +213,14 @@ final class NativeMediaAutomation {
         guard target.pid > 0, !target.name.isEmpty, !target.bundleID.isEmpty,
               let live = bundleForPID(target.pid) else { return false }
         return live.caseInsensitiveCompare(target.bundleID) == .orderedSame
+    }
+
+    private func exactTarget(
+        _ target: ActionProcessIdentity,
+        process: CuaProcessIdentity
+    ) -> Bool {
+        exactBundle(for: target)
+            && processIdentity(target.pid) == process
     }
 
     private func mediaMatches(

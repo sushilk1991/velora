@@ -3166,9 +3166,15 @@ class Engine:
                             else:
                                 raise actions.PlanError(
                                     "UI action reviewer refused: " + reason)
+                    has_state_proof = actions.turn_has_state_postcondition(
+                        parsed, session)
+                    has_exact_text_proof = actions.turn_has_exact_cua_text(
+                        parsed, session)
                     needs_goal_review = (
-                        bool(review_refusal_reason)
-                        or actions.turn_requires_goal_verifier(parsed, session))
+                        not has_state_proof and not has_exact_text_proof
+                        and (bool(review_refusal_reason)
+                             or actions.turn_requires_goal_verifier(
+                                 parsed, session)))
                     can_review_refusal = (
                         session.current_ui_snapshot.get("complete") is True
                         and actions.goal_snapshot_is_native(

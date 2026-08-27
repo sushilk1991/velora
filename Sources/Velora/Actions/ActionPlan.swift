@@ -34,6 +34,33 @@ struct ActionMediaControl: Equatable {
     }
 }
 
+enum ActionTextOperation: Equatable {
+    case type
+    case paste
+    case search
+}
+
+struct ActionTextTarget: Equatable {
+    let snapshotID: String
+    let index: Int
+    let role: String
+    let label: String
+}
+
+enum ActionStateAssertion: String, Equatable {
+    case writtenText = "written_text"
+    case selected
+}
+
+struct ActionStateCheck: Equatable {
+    let snapshotID: String
+    let index: Int
+    let role: String
+    let label: String
+    let assertion: ActionStateAssertion
+    let expectedValue: String?
+}
+
 /// One primitive the executor can perform. The vocabulary is closed by design:
 /// there is no shell step, no script step, and no raw-coordinate click, so the
 /// worst a bad plan can do is open the wrong app or type into a window the
@@ -55,6 +82,11 @@ enum ActionStep: Equatable {
     case presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope)
     case typeText(String)
+    /// Exact Cua text capability from the current routed-window snapshot.
+    /// Partialness is retained; the runtime re-reads this same element before
+    /// and after the driver write instead of manufacturing uniqueness.
+    case typeTextAt(text: String, operation: ActionTextOperation,
+                    target: ActionTextTarget)
     /// Navigation/query text, never message/document content and never
     /// eligible for Return/Enter commit authority.
     case searchText(String)
@@ -70,11 +102,14 @@ enum ActionStep: Equatable {
     /// Idempotent media command bound to one exact Cua click capability. The
     /// runtime re-reads this element and proves the target PID's audio state.
     case mediaControl(ActionMediaControl)
+    /// Closed positive postcondition. Swift, not the planner, supplies the
+    /// exact PID/window predicates and expected action-owned value.
+    case verifyState(ActionStateCheck)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
         switch self {
-        case .typeText, .searchText, .pasteText, .key: return true
+        case .typeText, .typeTextAt, .searchText, .pasteText, .key: return true
         default: return false
         }
     }
@@ -116,6 +151,47 @@ struct ActionPlan: Equatable {
     }
 
     var isExecutable: Bool { unsupported == nil && !steps.isEmpty }
+}
+
+/// A local receipt proves only its own narrow domain. Natural-language text
+/// effects need whole-goal proof; media accepts a closed basic-command shape.
+enum ActionLocalProof: Equatable {
+    case media(state: ActionMediaState, appName: String)
+    case state
+
+    func covers(_ command: String) -> Bool {
+        guard case .media(let state, let appName) = self else { return false }
+        let words = command.lowercased().split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init)
+        guard let verb = words.first,
+              state.verbs.contains(verb) else { return false }
+
+        let appWords = Set(appName.lowercased().split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init))
+        let allowed = appWords.union(Self.mediaWords)
+        let remainder = Array(words.dropFirst())
+        return !remainder.isEmpty
+            && remainder.allSatisfy { allowed.contains($0) }
+            && remainder.contains { Self.mediaNouns.contains($0) }
+    }
+
+    private static let mediaWords: Set<String> = [
+        "app", "audio", "in", "music", "on", "playback", "song", "the",
+    ]
+    private static let mediaNouns: Set<String> = [
+        "audio", "music", "playback", "song",
+    ]
+}
+
+private extension ActionMediaState {
+    var verbs: Set<String> {
+        switch self {
+        case .play: return ["play", "resume", "start"]
+        case .pause: return ["pause", "stop"]
+        }
+    }
 }
 
 enum ActionPlanError: Error, Equatable {
@@ -391,6 +467,9 @@ extension ActionPlan {
         /// "Is there typed text a committing key would deliver." Cleared
         /// only by the committing key itself.
         var pendingText = false
+        /// Exact content authored by this action. It is postcondition input,
+        /// never screen context or a durable trace value.
+        var pendingValue = ""
         /// App names observed or targeted in any turn. These are too generic
         /// to satisfy verify_context even after a batch boundary.
         var appNames: Set<String> = []
@@ -729,6 +808,84 @@ extension ActionPlan {
         }
     }
 
+    private static func textTarget(
+        _ step: [String: Any], state: BatchState, stepIndex: Int
+    ) throws -> ActionTextTarget {
+        guard let snapshot = state.structuredUISnapshot,
+              snapshot.source == .cua, snapshot.windowID != nil,
+              let snapshotID = step["snapshot"] as? String,
+              snapshotID == snapshot.id,
+              let number = step["index"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number), number.intValue >= 0,
+              let role = step["role"] as? String,
+              let label = step["label"] as? String,
+              let element = snapshot.elements.first(where: {
+                  $0.index == number.intValue
+              }),
+              element.role == role,
+              AppMatcher.normalize(element.label ?? "")
+                == AppMatcher.normalize(label),
+              element.enabled, !element.inWebContent,
+              ScreenContext.isEditableActionRole(role)
+        else {
+            throw ActionPlanError.invalidStructuredUICapability(
+                step: stepIndex)
+        }
+        return ActionTextTarget(
+            snapshotID: snapshotID, index: number.intValue,
+            role: role, label: label)
+    }
+
+    private static func stateCheck(
+        _ step: [String: Any], state: BatchState, stepIndex: Int
+    ) throws -> ActionStateCheck {
+        guard let snapshot = state.structuredUISnapshot,
+              snapshot.source == .cua, snapshot.windowID != nil,
+              let snapshotID = step["snapshot"] as? String,
+              snapshotID == snapshot.id,
+              let number = step["index"] as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              !CFNumberIsFloatType(number), number.intValue >= 0,
+              let role = step["role"] as? String,
+              let label = step["label"] as? String,
+              let rawAssertion = step["assert"] as? String,
+              let assertion = ActionStateAssertion(rawValue: rawAssertion),
+              let element = snapshot.elements.first(where: {
+                  $0.index == number.intValue
+              }),
+              element.role == role,
+              AppMatcher.normalize(element.label ?? "")
+                == AppMatcher.normalize(label),
+              element.enabled, !element.inWebContent
+        else {
+            throw ActionPlanError.invalidStructuredUICapability(
+                step: stepIndex)
+        }
+        let expected = step["expected_value"] as? String
+        switch assertion {
+        case .writtenText:
+            guard ScreenContext.isEditableActionRole(role),
+                  !state.pendingValue.isEmpty,
+                  expected == state.pendingValue,
+                  !label.isEmpty else {
+                throw ActionPlanError.invalidStructuredUICapability(
+                    step: stepIndex)
+            }
+        case .selected:
+            guard expected == nil, element.selected, !label.isEmpty,
+                  ActionPlan.commandMentionsUILabel(
+                    label, command: state.spokenCommand) else {
+                throw ActionPlanError.invalidStructuredUICapability(
+                    step: stepIndex)
+            }
+        }
+        return ActionStateCheck(
+            snapshotID: snapshotID, index: number.intValue,
+            role: role, label: label, assertion: assertion,
+            expectedValue: expected)
+    }
+
     /// True when the label names a control that would commit something.
     static func pressLabelIsCommitting(_ label: String) -> Bool {
         // Fold diacritics so localized labels compare as the engine spells
@@ -789,6 +946,7 @@ extension ActionPlan {
         var unverifiedText = state.unverifiedText
         /// True while typed text sits where a committing key could deliver it.
         var pendingText = state.pendingText
+        var pendingValue = state.pendingValue
         /// Drafts refuse committing keys once text is pending, outright.
         let isDraft = (plan["sends"] as? Bool) == false
         let needsTargetProof = state.requireUITargetVerification
@@ -825,6 +983,7 @@ extension ActionPlan {
                 focusEstablished = false
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
+                pendingValue = ""
 
             case "open_url":
                 let raw = try string("url")
@@ -882,12 +1041,17 @@ extension ActionPlan {
                 currentApp = ""
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
+                pendingValue = ""
 
             case "wait_frontmost":
                 let requested = step["timeout_ms"] as? Int ?? Limits.defaultWaitMs
                 let timeout = min(max(requested, 1), Limits.maxWaitMs)
                 let app = String(try string("app").prefix(120))
                 appNames.append(app)
+                if pendingText,
+                   !AppMatcher.namesSameApp(currentApp, app) {
+                    pendingValue = ""
+                }
                 currentApp = app
                 acquiredApp = true
                 steps.append(.waitFrontmost(app: app, timeoutMs: timeout))
@@ -961,6 +1125,14 @@ extension ActionPlan {
                 uiTargetVerified = true
                 unverifiedText = false
 
+            case "verify_state":
+                guard rawSteps.count == 1, index == 0 else {
+                    throw ActionPlanError.invalidStructuredUICapability(
+                        step: index)
+                }
+                steps.append(.verifyState(try ActionPlan.stateCheck(
+                    step, state: state, stepIndex: index)))
+
             case "type_text", "paste_text", "search_text":
                 guard focusEstablished else {
                     throw ActionPlanError.inputBeforeFocus(step: index)
@@ -982,16 +1154,40 @@ extension ActionPlan {
                 guard totalText <= Limits.maxTotalTextChars else {
                     throw ActionPlanError.textTooLong(totalText)
                 }
-                if verb == "search_text" {
+                if verb != "search_text", needsTargetProof,
+                   !uiTargetVerified {
+                    throw ActionPlanError.contentBeforeTargetVerification(
+                        step: index)
+                }
+                let hasExactTarget = step["snapshot"] != nil
+                    || step["index"] != nil || step["role"] != nil
+                    || step["label"] != nil
+                if state.structuredUISnapshot?.source == .cua,
+                   hasExactTarget {
+                    let target = try ActionPlan.textTarget(
+                        step, state: state, stepIndex: index)
+                    let operation: ActionTextOperation
+                    switch verb {
+                    case "paste_text": operation = .paste
+                    case "search_text": operation = .search
+                    default: operation = .type
+                    }
+                    steps.append(.typeTextAt(
+                        text: cleaned, operation: operation,
+                        target: target))
+                    if operation != .search {
+                        unverifiedText = true
+                        pendingText = true
+                        pendingValue += cleaned
+                    }
+                } else if verb == "search_text" {
                     steps.append(.searchText(cleaned))
                 } else {
-                    if needsTargetProof, !uiTargetVerified {
-                        throw ActionPlanError.contentBeforeTargetVerification(step: index)
-                    }
                     steps.append(verb == "type_text"
                         ? .typeText(cleaned) : .pasteText(cleaned))
                     unverifiedText = true
                     pendingText = true
+                    pendingValue += cleaned
                 }
 
             case "key":
@@ -1067,6 +1263,7 @@ extension ActionPlan {
                 if committing {
                     unverifiedText = false
                     pendingText = false
+                    pendingValue = ""
                 } else if !mods.isEmpty, pendingText,
                           !(name == "c" && Set(mods) == Set(["cmd"])) {
                     // Every allowed modified chord except Copy moves focus,
@@ -1172,6 +1369,7 @@ extension ActionPlan {
                 focusEstablished = false
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
+                if pendingText { pendingValue = "" }
 
             case "press_ui":
                 guard focusEstablished else {
@@ -1210,51 +1408,10 @@ extension ActionPlan {
                 focusEstablished = false
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
+                if pendingText { pendingValue = "" }
 
             case "present_ui":
-                let recipientPresentation = state.requireUITargetVerification
-                    && isDraft
-                    && state.structuredUISnapshot.map {
-                        ActionPlan.isRecipientContent(
-                            state.spokenCommand, bundleID: $0.bundleID)
-                            && ActionPlan.commandAllowsBundleModality(
-                                state.spokenCommand, bundleID: $0.bundleID)
-                            && ActionPlan.commandNamesOnlyApp(
-                                state.spokenCommand, appName: $0.appName,
-                                candidates: state.appNames)
-                    } == true
-                let explicitPresentation = isDraft
-                    && state.structuredUISnapshot.map {
-                        ActionPlan.isExplicitUIPresentation(
-                            state.spokenCommand, appName: $0.appName,
-                            bundleID: $0.bundleID,
-                            candidates: state.appNames)
-                    } == true
-                guard rawSteps.count == 1, index == 0,
-                      state.requireUITargetVerification,
-                      isDraft,
-                      let snapshot = state.structuredUISnapshot,
-                      recipientPresentation || explicitPresentation,
-                      snapshot.source == .cua,
-                      let windowNumber = step["window_id"] as? NSNumber,
-                      CFGetTypeID(windowNumber) != CFBooleanGetTypeID(),
-                      !CFNumberIsFloatType(windowNumber),
-                      windowNumber.intValue > 0,
-                      let bundleID = step["bundle_id"] as? String,
-                      snapshot.id == step["snapshot"] as? String,
-                      snapshot.windowID == windowNumber.intValue,
-                      snapshot.bundleID.lowercased() == bundleID.lowercased()
-                else { throw ActionPlanError.invalidUIPresentation(step: index) }
-                let scope: ActionPresentationScope =
-                    ActionPlan.isAppOnlyPresentation(
-                        state.spokenCommand, appName: snapshot.appName,
-                        bundleID: snapshot.bundleID,
-                        candidates: state.appNames) ? .app : .window
-                steps.append(.presentUI(
-                    snapshotID: snapshot.id, bundleID: snapshot.bundleID,
-                    windowID: windowNumber.intValue, scope: scope))
-                focusEstablished = false
-                uiTargetVerified = false
+                throw ActionPlanError.invalidUIPresentation(step: index)
 
             default:
                 throw ActionPlanError.unknownVerb(verb)
@@ -1265,6 +1422,7 @@ extension ActionPlan {
         state.totalText = totalText
         state.unverifiedText = unverifiedText
         state.pendingText = pendingText
+        state.pendingValue = pendingValue
         state.appNames.formUnion(appNames)
         state.currentApp = currentApp
 
@@ -1301,6 +1459,14 @@ extension ActionPlan {
                 }
                 next.unverifiedText = true
                 next.pendingText = true
+                next.pendingValue += text
+            case .typeTextAt(let text, let operation, _):
+                next.totalText += text.count
+                if operation != .search {
+                    next.unverifiedText = true
+                    next.pendingText = true
+                    next.pendingValue += text
+                }
             case .verifyContext, .verifyUI, .verifyGoal:
                 next.unverifiedText = false
             case .key(let name, let mods, _):
@@ -1312,6 +1478,7 @@ extension ActionPlan {
                 if Limits.committingKeys.contains(name) {
                     next.unverifiedText = false
                     next.pendingText = false
+                    next.pendingValue = ""
                 } else if !mods.isEmpty, next.pendingText,
                           !(name == "c" && Set(mods) == Set(["cmd"])) {
                     next.unverifiedText = true
@@ -1322,6 +1489,7 @@ extension ActionPlan {
                 next.appNames.insert(app)
                 next.currentApp = app
                 if next.pendingText { next.unverifiedText = true }
+                next.pendingValue = ""
             case .waitFrontmost(let app, _):
                 next.appNames.insert(app)
                 // Naming a DIFFERENT app moves the screen: the executor asks
@@ -1331,16 +1499,19 @@ extension ActionPlan {
                 if next.pendingText,
                    !AppMatcher.namesSameApp(next.currentApp, app) {
                     next.unverifiedText = true
+                    next.pendingValue = ""
                 }
                 next.currentApp = app
             case .openURL:
                 next.currentApp = ""
                 if next.pendingText { next.unverifiedText = true }
+                next.pendingValue = ""
             case .pressElement, .pressUI, .presentUI:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.
                 if next.pendingText { next.unverifiedText = true }
+                if next.pendingText { next.pendingValue = "" }
             default:
                 break
             }

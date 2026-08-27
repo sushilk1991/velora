@@ -1624,6 +1624,45 @@ async def test_bare_done_is_independently_verified_and_keeps_spoken_goal(engine)
     assert evt["steps"][1]["purpose"] == "goal"
 
 
+async def test_cua_state_postcondition_bypasses_native_goal_reviewer(engine):
+    eng, sock = engine
+    typed = turn([
+        {"do": "wait_frontmost", "app": "TextEdit"},
+        {"do": "type_text", "text": "hello", "index": 3,
+         "role": "AXTextArea", "label": "Body"},
+    ], goal="write hello", sends=False)
+    proof = turn([{
+        "do": "verify_state", "index": 3, "role": "AXTextArea",
+        "label": "Body", "assert": "written_text",
+    }], done=True)
+    eng.cleanup = FakePlanner(typed, proof)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client, transcript="write hello in Probe.txt",
+        context={
+            "frontmost_app": "TextEdit",
+            "frontmost_bundle": "com.apple.TextEdit",
+            "running_apps": ["TextEdit"],
+            "ui_snapshot": _cua_text_ui(),
+        })
+    await client.recv_event("action_turn")
+    await send_observe(client, observation=observation(
+        frontmost_app="TextEdit", frontmost_bundle="com.apple.TextEdit",
+        ui_snapshot=_cua_text_ui(), executed=["type_text 5 chars"],
+    ))
+
+    event = await client.recv_event("action_turn")
+
+    assert event["done"] is True
+    assert event["steps"] == [{
+        "do": "verify_state", "snapshot": "text-1", "index": 3,
+        "role": "AXTextArea", "label": "Body",
+        "assert": "written_text", "expected_value": "hello",
+    }]
+    assert len(eng.cleanup.calls) == 2
+
+
 async def test_goal_refusal_repairs_instead_of_returning_empty_turn(engine):
     eng, sock = engine
     first = turn(
@@ -4383,6 +4422,220 @@ def _media_ui() -> dict:
             "actions": ["CuaClick"], "enabled": True,
         }],
     }
+
+
+def _cua_text_ui(*, selected: bool = False) -> dict:
+    element = {
+        "index": 3, "parent_index": None, "depth": 0,
+        "role": "AXTextArea", "label": "Body",
+        "actions": ["CuaClick"], "enabled": True,
+    }
+    if selected:
+        element["selected"] = True
+    return {
+        "id": "text-1", "source": "cua", "app_name": "TextEdit",
+        "bundle_id": "com.apple.TextEdit", "window_title": "Probe.txt",
+        "window_id": 77, "complete": False, "elements": [element],
+    }
+
+
+def test_cua_text_and_state_proof_are_exact_and_closed():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+
+    typed = session.accept_reply(json.dumps({
+        "goal": "write hello", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3,
+             "role": "AXTextArea", "label": "Body"},
+        ],
+    }))
+    assert typed["steps"][-1] == {
+        "do": "type_text", "text": "hello", "snapshot": "text-1",
+        "index": 3, "role": "AXTextArea", "label": "Body",
+    }
+
+    session.observation_message({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "executed": ["type_text 5 chars"],
+    })
+    verified = session.accept_reply(json.dumps({
+        "steps": [{"do": "verify_state", "index": 3,
+                   "role": "AXTextArea", "label": "Body",
+                   "assert": "written_text"}],
+        "done": True,
+    }))
+    assert verified == {
+        "steps": [{
+            "do": "verify_state", "snapshot": "text-1", "index": 3,
+            "role": "AXTextArea", "label": "Body",
+            "assert": "written_text", "expected_value": "hello",
+        }],
+        "done": True,
+    }
+    assert "verify_state" not in actions.EFFECTIVE_VERBS
+
+
+def test_composite_command_cannot_use_partial_cua_proof():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+    })
+    command = "write hello, make it bold, and select Pop in Music"
+    session = actions.ActionSession(command, context)
+    typed = {
+        "goal": command, "sends": False, "done": True,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3,
+             "role": "AXTextArea", "label": "Body"},
+        ],
+    }
+
+    assert not actions.turn_has_exact_cua_text(typed, session)
+
+    session.accept_reply(json.dumps({**typed, "done": False}))
+    session.observation_message({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "executed": ["type_text 5 chars"],
+    })
+    proof = {
+        "steps": [{"do": "verify_state", "index": 3,
+                   "role": "AXTextArea", "label": "Body",
+                   "assert": "written_text"}],
+        "done": True,
+    }
+    assert not actions.turn_has_state_postcondition(proof, session)
+
+
+def test_local_cua_text_does_not_prove_whole_goal():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+    typed = {
+        "goal": "write hello", "sends": False, "done": True,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3,
+             "role": "AXTextArea", "label": "Body"},
+        ],
+    }
+
+    assert not actions.turn_has_exact_cua_text(typed, session)
+
+
+@pytest.mark.parametrize("command", [
+    "play music and raise volume",
+    "play music, increase the volume",
+    "play music plus raise the volume",
+    "play music while lowering the volume",
+    "write hello; underline it",
+    "find a song, queue it",
+    "write hello and underline it",
+    "find a song and queue it",
+])
+def test_conjunction_requires_whole_goal_proof(command):
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+    })
+    session = actions.ActionSession(command, context)
+    typed = {
+        "goal": command, "sends": False, "done": True,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3,
+             "role": "AXTextArea", "label": "Body"},
+        ],
+    }
+
+    assert not actions.turn_has_exact_cua_text(typed, session)
+
+
+def test_planner_prompt_teaches_exact_cua_typing():
+    assert '"do":"type_text","text":"<text>","index":12' \
+        in actions.PLANNER_RULES
+    assert "source=cua editable" in actions.PLANNER_RULES
+
+
+@pytest.mark.parametrize("extra", [
+    {"pid": 12}, {"window_id": 77}, {"expected_value": "hello"},
+    {"value": "hello"}, {"selected": False}, {"timeout_ms": 99},
+    {"stable_samples": 1}, {"predicates": []}, {"screenshot": True},
+])
+def test_state_proof_rejects_planner_mechanics(extra):
+    snapshot = actions.normalize_ui_snapshot(_cua_text_ui())
+    state = actions.SessionState(
+        current_app="TextEdit", pending_text=True, pending_value="hello",
+        ui_snapshot_id="text-1",
+        ui_elements={item["index"]: item for item in snapshot["elements"]},
+        ui_snapshot_source="cua", ui_snapshot_app_name="TextEdit",
+        ui_snapshot_bundle_id="com.apple.TextEdit",
+        ui_snapshot_window_title="Probe.txt", ui_snapshot_window_id=77,
+        spoken_command="write hello in Probe.txt")
+    step = {"do": "verify_state", "index": 3, "role": "AXTextArea",
+            "label": "Body", "assert": "written_text", **extra}
+    with pytest.raises(actions.PlanError):
+        actions.validate_plan({
+            "goal": "write hello", "sends": False, "steps": [step],
+        }, state)
+
+
+def test_state_proof_is_terminal_cua_positive_only():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+    })
+    first = actions.ActionSession("write hello in Probe.txt", context)
+    with pytest.raises(actions.PlanError, match="finished without doing anything"):
+        first.accept_reply(json.dumps({
+            "goal": "write hello", "sends": False,
+            "steps": [{"do": "verify_state", "index": 3,
+                       "role": "AXTextArea", "label": "Body",
+                       "assert": "written_text"}], "done": True,
+        }))
+
+    state = actions.SessionState(
+        pending_text=True, pending_value="hello", ui_snapshot_id="native-1",
+        ui_snapshot_source="native", ui_snapshot_app_name="TextEdit",
+        ui_snapshot_bundle_id="com.apple.TextEdit", ui_snapshot_window_id=77,
+        ui_elements={3: {"index": 3, "role": "AXTextArea", "label": "Body"}},
+        spoken_command="write hello")
+    with pytest.raises(actions.PlanError, match="source=cua"):
+        actions.validate_plan({
+            "goal": "write hello", "sends": False,
+            "steps": [{"do": "verify_state", "index": 3,
+                       "role": "AXTextArea", "label": "Body",
+                       "assert": "written_text"}],
+        }, state)
+
+
+def test_selected_state_proof_is_command_bound():
+    snapshot = actions.normalize_ui_snapshot(_cua_text_ui(selected=True))
+    snapshot["elements"][0]["role"] = "AXRadioButton"
+    snapshot["elements"][0]["label"] = "Pop"
+    state = actions.SessionState(
+        ui_snapshot_id="text-1", ui_elements={3: snapshot["elements"][0]},
+        ui_snapshot_source="cua", ui_snapshot_app_name="Music",
+        ui_snapshot_bundle_id="com.apple.Music", ui_snapshot_window_id=77,
+        spoken_command="select Pop in Music")
+    out = actions.validate_plan({
+        "goal": "select Pop", "sends": False,
+        "steps": [{"do": "verify_state", "index": 3,
+                   "role": "AXRadioButton", "label": "Pop",
+                   "assert": "selected"}],
+    }, state)
+    assert out["steps"][0]["assert"] == "selected"
+
+    state.spoken_command = "select Jazz in Music"
+    with pytest.raises(actions.PlanError, match="spoken command"):
+        actions.validate_plan({
+            "goal": "select Jazz", "sends": False,
+            "steps": [{"do": "verify_state", "index": 3,
+                       "role": "AXRadioButton", "label": "Pop",
+                       "assert": "selected"}],
+        }, state)
 
 
 def test_media_control_is_closed_and_effective():

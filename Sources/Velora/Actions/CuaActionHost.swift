@@ -97,6 +97,8 @@ struct CuaElement: Equatable {
 struct CuaSnapshot: Equatable {
     let id: String?
     let degraded: Bool
+    let degradedReason: String?
+    let refused: Bool
     /// False when the AX walk was truncated. A truncated tree can
     /// MANUFACTURE uniqueness — two text areas where one was cut off looks
     /// like an unambiguous target (review finding) — so element selection
@@ -135,6 +137,8 @@ struct CuaSnapshot: Equatable {
             && ((payload["elements_complete"] as? Bool) ?? false)
         return CuaSnapshot(id: payload["snapshot_id"] as? String,
                            degraded: degraded,
+                           degradedReason: payload["degraded_reason"] as? String,
+                           refused: refused,
                            complete: complete,
                            elements: elements)
     }
@@ -277,11 +281,9 @@ enum CuaKeyMap {
     }
 }
 
-/// Picks the window an Action should drive for a pid: the app's topmost
-/// document-sized window by z-order — the one the app itself would bring
-/// forward, which is what a user means by "the TextEdit window". Tiny
-/// layer-0 windows (palettes, accessory views) are never candidates: with
-/// only those present the pick refuses rather than guesses (review finding).
+/// Picks one exact document-sized window for a pid. One candidate needs no
+/// hint; siblings require one title named by the immutable spoken command.
+/// Z-order never decides which same-process document receives an Action.
 enum CuaWindowPick {
     /// Smallest thing that can be a document window. Observed live: an app
     /// owns full-width 30-pixel strips (menu-bar surfaces) and 64-pixel save-
@@ -290,31 +292,44 @@ enum CuaWindowPick {
     /// chrome element.
     static let minimumWidth: Double = 200
     static let minimumHeight: Double = 120
+    private static let locatorWords: Set<String> = [
+        "called", "document", "file", "in", "inside", "into", "note",
+        "titled", "window",
+    ]
+    private static let directLocatorVerbs: Set<String> = [
+        "edit", "open", "show",
+    ]
 
-    static func choose(_ windows: [[String: Any]], pid: Int) -> (id: Int, title: String?)? {
+    static func choose(
+        _ windows: [[String: Any]], pid: Int, command: String = ""
+    ) -> (id: Int, title: String?)? {
         let candidates = windows.compactMap {
-            raw -> (id: Int, title: String?, z: Int?)? in
+            raw -> (id: Int, title: String?, current: Bool?)? in
             guard isEligible(raw, pid: pid),
                   let id = raw["window_id"] as? Int else { return nil }
             let title = (raw["title"] as? String).flatMap {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
             }
-            return (id, title, raw["z_index"] as? Int)
+            return (id, title, raw["on_current_space"] as? Bool)
         }
-        // A titled window is a document; untitled ones are panels and
-        // overlays. A lone semantic candidate needs no z-order. Multiple
-        // candidates need complete, uniquely maximal ordering; null or a tie
-        // would turn missing driver evidence into a guess.
-        let titled = candidates.filter { $0.title != nil }
-        let pool = titled.isEmpty ? candidates : titled
-        guard let first = pool.first else { return nil }
-        if pool.count == 1 { return (first.id, first.title) }
-        guard !pool.contains(where: { $0.z == nil }),
-              let maximumZ = pool.compactMap(\.z).max()
-        else { return nil }
-        let top = pool.filter { $0.z == maximumZ }
-        guard top.count == 1, let chosen = top.first else { return nil }
-        return (chosen.id, chosen.title)
+        guard let first = candidates.first else { return nil }
+        if candidates.count == 1 { return (first.id, first.title) }
+        let named = candidates.filter {
+            guard let title = $0.title else { return false }
+            return commandNames(title: title, command: command)
+        }
+        if named.count == 1, let match = named.first {
+            return (match.id, match.title)
+        }
+        guard named.isEmpty else { return nil }
+        let current = candidates.filter { $0.current == true }
+        guard current.count == 1, let match = current.first else { return nil }
+        return (match.id, match.title)
+    }
+
+    static func eligible(_ windows: [[String: Any]], pid: Int)
+        -> [[String: Any]] {
+        windows.filter { isEligible($0, pid: pid) }
     }
 
     private static func isEligible(_ raw: [String: Any], pid: Int) -> Bool {
@@ -325,6 +340,31 @@ enum CuaWindowPick {
               let width = bounds["width"] as? Double,
               let height = bounds["height"] as? Double else { return false }
         return width >= minimumWidth && height >= minimumHeight
+    }
+
+    private static func commandNames(title: String, command: String) -> Bool {
+        let titleWords = words(title)
+        let commandWords = words(command)
+        guard !titleWords.isEmpty,
+              titleWords.count < commandWords.count else { return false }
+        for start in 0...(commandWords.count - titleWords.count) {
+            let end = start + titleWords.count
+            guard Array(commandWords[start..<end]) == titleWords else { continue }
+            if start > 0, locatorWords.contains(commandWords[start - 1]) {
+                return true
+            }
+            if start == 1,
+               directLocatorVerbs.contains(commandWords[0]) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func words(_ text: String) -> [String] {
+        text.lowercased().split {
+            !$0.isLetter && !$0.isNumber
+        }.map(String.init)
     }
 }
 
@@ -346,25 +386,32 @@ enum ActionResultHandoff {
         bundleID: String,
         windowID: Int,
         generation: UInt64,
+        processIsCurrent: () -> Bool = { true },
         activateStrict: () -> Bool,
-        reopen: () -> Bool,
         observe: () -> Observation?,
         inputGeneration: () -> UInt64,
         sleep: (Int) -> Void
     ) -> Bool {
         guard pid > 0, windowID > 0, !bundleID.isEmpty else { return false }
-        guard generation == inputGeneration() else { return false }
-        _ = activateStrict()
-        guard generation == inputGeneration() else { return false }
+        guard generation == inputGeneration(), processIsCurrent() else {
+            return false
+        }
+        let strictAccepted = activateStrict()
+        guard generation == inputGeneration(), processIsCurrent() else {
+            return false
+        }
         if let current = observe(),
            isExact(current, pid: pid, bundleID: bundleID, windowID: windowID) {
-            return generation == inputGeneration()
+            return generation == inputGeneration() && processIsCurrent()
         }
 
-        guard generation == inputGeneration(), reopen(),
-              generation == inputGeneration() else { return false }
+        guard strictAccepted,
+              generation == inputGeneration(), processIsCurrent()
+        else { return false }
         for attempt in 0..<maximumPolls {
-            guard generation == inputGeneration() else { return false }
+            guard generation == inputGeneration(), processIsCurrent() else {
+                return false
+            }
             if let current = observe() {
                 guard current.pid != pid
                         || current.bundleID.caseInsensitiveCompare(bundleID)
@@ -374,6 +421,7 @@ enum ActionResultHandoff {
                 if isExact(current, pid: pid, bundleID: bundleID,
                            windowID: windowID) {
                     return generation == inputGeneration()
+                        && processIsCurrent()
                 }
             }
             if attempt + 1 < maximumPolls { sleep(pollDelayMs) }
@@ -391,38 +439,6 @@ enum ActionResultHandoff {
             && observed.windowID == windowID
             && observed.bundleID.caseInsensitiveCompare(bundleID)
                 == .orderedSame
-    }
-}
-
-/// Completion and process-identity gate for AppKit's asynchronous reopen.
-/// The caller runs off-main so AppKit can deliver its callback on main.
-enum ActionReopenGate {
-    static func hasUniquePID(_ pids: [Int], expected: Int) -> Bool {
-        pids.count == 1 && pids[0] == expected
-    }
-
-    static func awaitResult(
-        start: (@escaping (Bool) -> Void) -> Void
-    ) -> Bool {
-        let semaphore = DispatchSemaphore(value: 0)
-        let lock = NSLock()
-        var result: Bool?
-        var closed = false
-        start { accepted in
-            lock.lock()
-            guard !closed else {
-                lock.unlock()
-                return
-            }
-            result = accepted
-            closed = true
-            lock.unlock()
-            semaphore.signal()
-        }
-        semaphore.wait()
-        lock.lock()
-        defer { lock.unlock() }
-        return result == true
     }
 }
 
@@ -570,6 +586,10 @@ final class BackgroundRoutingActionHost: ActionHost {
     private static let appActivationStableMs = 100
     private static let mediaPollMs = 200
     private static let mediaPollAttempts = 15
+    private static let verifyTimeoutMs = 1_500
+    private static let verifySamples = 2
+    private static let primePollMs = 50
+    private static let primePollAttempts = 6
     private let system: ActionHost
     private let transport: CuaTransport
     private let backgroundEnabled: () -> Bool
@@ -582,6 +602,9 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let mediaSnapshot: () -> MediaPlaybackCoordinator.Snapshot
     private let mediaSleep: (Int) -> Void
     private let nativeMedia: NativeMediaAutomation
+    private let offSpacePrimer: OffSpaceAXPriming
+    private let processIdentity: (Int) -> CuaProcessIdentity?
+    private let cursorPosition: () -> CGPoint?
     private let userFocusForWindow: (Int) -> ActionWindowIdentity?
     /// Resolves a spoken app name using Velora's own knowledge, so routing
     /// can be ruled out before a daemon is ever started. Returning nil just
@@ -590,23 +613,17 @@ final class BackgroundRoutingActionHost: ActionHost {
     // Routed-target state, reset every action.
     private var routed = false
     private var contentMayCommit = false
+    private var sessionCommand = ""
+    private var terminalFailureReason: String?
     private var targetPID: Int = 0
+    private var targetProcessIdentity: CuaProcessIdentity?
     private var targetWindowID: Int?
     private var targetName = ""
     private var targetBundleID = ""
     private var targetReady = false
-    /// Explicit callers may request a foreground transition. The automatic
-    /// executor never arms this boundary.
-    private var foregroundAtInteraction = false
-    private struct ForegroundTarget {
-        let name: String
-        let bundleID: String
-        let pid: Int
-        let windowID: Int?
-    }
-    private var foregroundTarget: ForegroundTarget?
     /// True once readiness has succeeded at least once this action.
     private var everReady = false
+    private var primeTried = false
     /// The exact element this action is writing into, pinned the first time
     /// one is chosen. Without it the "lone editable" rule is relative to
     /// whatever the tree looks like right now: a plan can verify against a
@@ -640,6 +657,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// background analog of the foreground draft: committing keys refuse
     /// without it, and it is dropped whenever the element or target changes.
     private var backgroundDraft = ""
+    private var mutationOrdinal = 0
     private struct RoutedUISnapshot {
         let observation: ActionUISnapshot
         let driver: CuaSnapshot
@@ -682,6 +700,13 @@ final class BackgroundRoutingActionHost: ActionHost {
              Thread.sleep(forTimeInterval: Double(milliseconds) / 1_000)
          },
          nativeMedia: NativeMediaAutomation = .shared,
+         offSpacePrimer: OffSpaceAXPriming = OffSpaceAXPrimer.shared,
+         processIdentity: @escaping (Int) -> CuaProcessIdentity? = {
+             CuaProcessIdentity.capture(pid: pid_t($0))
+         },
+         cursorPosition: @escaping () -> CGPoint? = {
+             CGEvent(source: nil)?.location
+         },
          userFocusForWindow: @escaping (Int) -> ActionWindowIdentity?
             = BackgroundRoutingActionHost.resolveUserWindow,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
@@ -699,6 +724,9 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.mediaSnapshot = mediaSnapshot
         self.mediaSleep = mediaSleep
         self.nativeMedia = nativeMedia
+        self.offSpacePrimer = offSpacePrimer
+        self.processIdentity = processIdentity
+        self.cursorPosition = cursorPosition
         self.userFocusForWindow = userFocusForWindow
         self.localResolve = localResolve
     }
@@ -752,14 +780,18 @@ final class BackgroundRoutingActionHost: ActionHost {
         return matches[0]
     }
 
-    func beginActionInputSession() {
+    func beginActionInputSession(command: String) {
         unroute()
+        sessionCommand = command
+        terminalFailureReason = nil
         contentMayCommit = false
-        system.beginActionInputSession()
+        system.beginActionInputSession(command: command)
     }
 
     func endActionInputSession() {
         unroute()
+        sessionCommand = ""
+        terminalFailureReason = nil
         contentMayCommit = false
         system.endActionInputSession()
         endDaemon()
@@ -767,61 +799,10 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func prepareForActionPlan(sends: Bool) {
         contentMayCommit = sends
-        if sends && routed { foregroundAtInteraction = true }
     }
 
     func prepareInteraction() -> ActionInteractionState {
-        guard routed else { return .ready }
-        guard foregroundAtInteraction else { return waitForTargetIdle() }
-        guard snapshotLineage == .valid, targetReady,
-              resolveDeferredWindow(), let windowID = targetWindowID
-        else { return .refused }
-
-        guard waitForQuiet() else { return .deferred }
-        let inputGeneration = UserInputActivity.snapshot()
-        guard interactionIsQuiet(),
-              inputGeneration == UserInputActivity.snapshot()
-        else { return .deferred }
-        guard presentationTargetIsLive(windowID: windowID) else { return .refused }
-        if exactTargetIsForeground(windowID: windowID) {
-            finishHandoff(windowID: windowID)
-            return .ready
-        }
-
-        guard let front = system.frontmostApp(),
-              let prior = captureFocus(front) else { return .refused }
-        guard interactionIsQuiet(),
-              inputGeneration == UserInputActivity.snapshot()
-        else { return .deferred }
-        guard presentationTargetIsLive(windowID: windowID) else { return .refused }
-        let result = transport.call(Self.presentationTool, arguments: [
-            "pid": targetPID, "window_id": windowID,
-        ], timeout: Self.callTimeout)
-        guard inputGeneration == UserInputActivity.snapshot() else {
-            _ = restoreAfterUserInput(
-                prior, generation: inputGeneration, pid: targetPID,
-                windowID: windowID, bundleID: targetBundleID)
-            return .deferred
-        }
-        let reply: [String: Any]?
-        if case .success(let value) = result {
-            reply = value
-        } else {
-            reply = nil
-        }
-        guard let reply,
-              presentationMatches(reply, pid: targetPID, windowID: windowID)
-        else {
-            _ = restoreTargetFocus(
-                prior, generation: inputGeneration, pid: targetPID,
-                windowID: windowID, bundleID: targetBundleID, reply: reply)
-            unroute()
-            endDaemon()
-            return .refused
-        }
-
-        finishHandoff(windowID: windowID)
-        return .ready
+        routed ? waitForTargetIdle() : .ready
     }
 
     private func waitForTargetIdle() -> ActionInteractionState {
@@ -854,35 +835,23 @@ final class BackgroundRoutingActionHost: ActionHost {
               let window = system.foregroundWindow(),
               window.pid == targetPID, window.windowID == windowID,
               window.bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame,
+              targetProcessIsCurrent(),
               bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame else { return false }
         return true
     }
 
-    private func finishHandoff(windowID: Int) {
-        let target = ForegroundTarget(
-            name: targetName, bundleID: targetBundleID, pid: targetPID,
-            windowID: windowID)
-        unroute()
-        foregroundTarget = target
-        endDaemon()
-    }
-
     // MARK: - Routing decision
 
     func openApp(named name: String) -> String? {
+        guard terminalFailureReason == nil else { return nil }
         guard !routed else { return openTargetApp(named: name) }
-        if let target = foregroundTarget,
-           AppMatcher.bestMatch(for: name, in: [target.name]) == 0 {
-            if exactForegroundApp() != nil { return target.name }
-            return openForeground(target)
-        }
-        foregroundTarget = nil
-        // Driver installation is part of `backgroundEnabled` (wired in the
-        // controller), keeping this host's behavior machine-independent for
-        // the selftest.
         guard backgroundEnabled() else {
-            return system.openApp(named: name)
+            guard let local = localResolve(name),
+                  isCurrentTarget(
+                    local.bundleID, frontmost: system.frontmostApp())
+            else { return nil }
+            return local.name
         }
         let frontmost = system.frontmostApp()
         // Pre-gate with Velora's OWN app knowledge before touching the
@@ -925,8 +894,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         case .routed:
             veloraLog("Velora: action driving \(resolved.name) in the background")
             return resolved.name
-        case .foreground:
-            return openForeground(resolved)
         case .failed:
             return nil
         }
@@ -973,9 +940,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         switch activateTarget(resolved) {
         case .routed:
             return resolved.name
-        case .foreground:
-            unroute()
-            return openForeground(resolved)
         case .failed:
             unroute()
             return nil
@@ -997,31 +961,6 @@ final class BackgroundRoutingActionHost: ActionHost {
         return frontmost.bundleID.caseInsensitiveCompare(bundleID) == .orderedSame
     }
 
-    private func openForeground(_ resolved: ResolvedApp) -> String? {
-        let target = ForegroundTarget(
-            name: resolved.name, bundleID: resolved.bundleID, pid: resolved.pid,
-            windowID: nil)
-        return openForeground(target)
-    }
-
-    private func openForeground(_ target: ForegroundTarget) -> String? {
-        endDaemon()
-        guard let opened = system.openApp(
-            named: target.name, bundleID: target.bundleID, pid: target.pid)
-        else { return nil }
-        let window = system.foregroundWindow()
-        let windowID: Int? = window.flatMap {
-            guard $0.pid == target.pid,
-                  $0.bundleID.caseInsensitiveCompare(target.bundleID)
-                    == .orderedSame else { return nil }
-            return $0.windowID
-        }
-        foregroundTarget = ForegroundTarget(
-            name: target.name, bundleID: target.bundleID, pid: target.pid,
-            windowID: windowID)
-        return opened
-    }
-
     private enum WindowProbe {
         case found(pid: Int, windowID: Int)
         case offSpace(pid: Int, windowID: Int)
@@ -1031,7 +970,6 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private enum RouteResult {
         case routed
-        case foreground
         case failed
     }
 
@@ -1076,13 +1014,11 @@ final class BackgroundRoutingActionHost: ActionHost {
         switch existingWindow(resolved) {
         case .found(let pid, let windowID):
             beginRoute(
-                resolved, pid: pid, windowID: windowID,
-                foregroundAtInteraction: contentMayCommit)
+                resolved, pid: pid, windowID: windowID)
             return .routed
         case .offSpace(let pid, let windowID):
             beginRoute(
-                resolved, pid: pid, windowID: windowID,
-                foregroundAtInteraction: contentMayCommit)
+                resolved, pid: pid, windowID: windowID)
             return .routed
         case .missing:
             return launchTarget(resolved)
@@ -1104,25 +1040,17 @@ final class BackgroundRoutingActionHost: ActionHost {
         else { return .invalid }
         guard windows.allSatisfy({ validWindow($0, pid: resolved.pid) })
         else { return .invalid }
-        let unknown = windows.filter {
-            exactFlag($0["on_current_space"]) == nil
-        }
-        let known = windows.filter {
-            exactFlag($0["on_current_space"]) != nil
-        }
-        let current = known.filter {
-            exactFlag($0["on_current_space"]) == true
-        }
-        if let window = CuaWindowPick.choose(current, pid: resolved.pid) {
+        let eligible = CuaWindowPick.eligible(windows, pid: resolved.pid)
+        guard !eligible.isEmpty else { return .missing }
+        guard let window = CuaWindowPick.choose(
+            eligible, pid: resolved.pid, command: sessionCommand),
+              let row = eligible.first(where: {
+                  exactInt($0["window_id"]) == window.id
+              }) else { return .invalid }
+        if exactFlag(row["on_current_space"]) == true {
             return .found(pid: resolved.pid, windowID: window.id)
         }
-        if let window = CuaWindowPick.choose(known, pid: resolved.pid) {
-            return .offSpace(pid: resolved.pid, windowID: window.id)
-        }
-        if let window = CuaWindowPick.choose(unknown, pid: resolved.pid) {
-            return .offSpace(pid: resolved.pid, windowID: window.id)
-        }
-        return .missing
+        return .offSpace(pid: resolved.pid, windowID: window.id)
     }
 
     private func validWindow(_ raw: [String: Any], pid: Int) -> Bool {
@@ -1168,8 +1096,7 @@ final class BackgroundRoutingActionHost: ActionHost {
               liveBundleID.caseInsensitiveCompare(resolved.bundleID)
                 == .orderedSame else { return false }
         beginRoute(
-            resolved, pid: pid, windowID: nil,
-            foregroundAtInteraction: contentMayCommit)
+            resolved, pid: pid, windowID: nil)
         return true
     }
 
@@ -1230,17 +1157,17 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func beginRoute(
-        _ resolved: ResolvedApp, pid: Int, windowID: Int?,
-        foregroundAtInteraction: Bool
+        _ resolved: ResolvedApp, pid: Int, windowID: Int?
     ) {
         routed = true
         targetPID = pid
+        targetProcessIdentity = processIdentity(pid)
         targetName = resolved.name
         targetBundleID = resolved.bundleID
         targetWindowID = windowID
         targetReady = false
-        self.foregroundAtInteraction = foregroundAtInteraction
         everReady = false
+        primeTried = false
         // A new target is a new window, a new element, and a new draft:
         // text delivered to the previous app must never authorize a commit
         // here (review finding — `unroute` cleared this, retargeting did
@@ -1250,6 +1177,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         routedUISnapshot = nil
         resetSnapshotLineage()
         backgroundDraft = ""
+        mutationOrdinal = 0
     }
 
     private func restoreTargetFocus(
@@ -1315,17 +1243,9 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// that will hand off before interaction needs only an independently
     /// verified exact window; a background-input route also needs AX.
     func frontmostApp() -> (name: String, bundleID: String)? {
+        guard terminalFailureReason == nil else { return nil }
         guard routed else { return exactForegroundApp() }
         guard snapshotLineage == .valid else { return nil }
-        if foregroundAtInteraction {
-            guard resolveDeferredWindow() else {
-                targetReady = false
-                return nil
-            }
-            targetReady = true
-            everReady = true
-            return (targetName, targetBundleID)
-        }
         if targetReady, verifyTargetAlive() { return (targetName, targetBundleID) }
         guard advanceReadiness() else { return nil }
         return (targetName, targetBundleID)
@@ -1336,6 +1256,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// the handoff boundary.
     private func resolveDeferredWindow() -> Bool {
         guard routed,
+              targetProcessIsCurrent(),
               bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame,
               case .success(let reply) = transport.call(
@@ -1345,12 +1266,14 @@ final class BackgroundRoutingActionHost: ActionHost {
               windows.allSatisfy({ validWindow($0, pid: targetPID) })
         else { return false }
 
+        let eligible = CuaWindowPick.eligible(windows, pid: targetPID)
         if let windowID = targetWindowID {
-            let exact = windows.filter { exactInt($0["window_id"]) == windowID }
-            return exact.count == 1
-                && CuaWindowPick.choose(exact, pid: targetPID)?.id == windowID
+            return eligible.filter {
+                exactInt($0["window_id"]) == windowID
+            }.count == 1
         }
-        guard let window = CuaWindowPick.choose(windows, pid: targetPID) else {
+        guard let window = CuaWindowPick.choose(
+            eligible, pid: targetPID, command: sessionCommand) else {
             return false
         }
         targetWindowID = window.id
@@ -1358,23 +1281,13 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func exactForegroundApp() -> (name: String, bundleID: String)? {
-        guard let target = foregroundTarget else {
-            return system.frontmostApp()
-        }
-        guard let targetWindowID = target.windowID,
-              let front = system.frontmostApp(),
-              front.bundleID.caseInsensitiveCompare(target.bundleID)
-                == .orderedSame,
-              let window = system.foregroundWindow(),
-              window.pid == target.pid, window.windowID == targetWindowID,
-              window.bundleID.caseInsensitiveCompare(target.bundleID)
-                == .orderedSame,
-              bundleForPID(target.pid)?.caseInsensitiveCompare(target.bundleID)
-                == .orderedSame else { return nil }
-        return front
+        system.frontmostApp()
     }
 
     private func verifyTargetAlive() -> Bool {
+        guard targetProcessIsCurrent() else {
+            return failRoute("The exact background target changed.")
+        }
         // A vanished target window must read as lost focus, never as "still
         // fine": the executor aborts instead of typing into nothing. A live
         // exact window without AX remains sufficient only for an app-ready
@@ -1383,14 +1296,14 @@ final class BackgroundRoutingActionHost: ActionHost {
             targetReady = nativeRouteReady()
             return targetReady
         }
-        if snapshot.degraded {
-            targetReady = resolveDeferredWindow()
-            return targetReady
-        }
+        if snapshot.degraded { return recoverDegraded(snapshot) }
         return true
     }
 
     private func advanceReadiness() -> Bool {
+        guard targetProcessIsCurrent() else {
+            return failRoute("The exact background target changed.")
+        }
         guard snapshotLineage == .valid else { return false }
         // Re-picking is allowed ONLY while the target has never been ready:
         // a cold-launched app's real document window can appear after the
@@ -1411,7 +1324,9 @@ final class BackgroundRoutingActionHost: ActionHost {
             everReady = true
             return true
         }
-        if snapshot.degraded, !resolveDeferredWindow() { return false }
+        if snapshot.degraded {
+            guard recoverDegraded(snapshot) else { return false }
+        }
         targetReady = true
         everReady = true
         return true
@@ -1424,16 +1339,275 @@ final class BackgroundRoutingActionHost: ActionHost {
         return nativeMedia.supports(target)
     }
 
+    private struct PrimeWindow: Equatable {
+        let title: String?
+        let bounds: CGRect
+    }
+
+    private struct PrimeLease {
+        let process: CuaProcessIdentity
+        let window: PrimeWindow
+        let foreground: ActionWindowIdentity
+        let cursor: CGPoint
+        let inputGeneration: UInt64
+    }
+
+    /// Some freshly launched AppKit apps publish no off-Space AX windows until
+    /// their exact window receives one WindowServer focus record. Hold that
+    /// private state only for the bounded semantic re-read, then defocus.
+    private func recoverDegraded(_ snapshot: CuaSnapshot) -> Bool {
+        if nativeRouteReady() { return true }
+        guard !snapshot.refused,
+              snapshot.degradedReason == "ax_window_unresolved" else {
+            return failRoute("The target refused background accessibility.")
+        }
+        return primeOffSpaceAX()
+    }
+
+    private func primeOffSpaceAX() -> Bool {
+        guard !primeTried else {
+            return failRoute(
+                "Restart the target app before retrying this action.")
+        }
+        primeTried = true
+        guard let lease = capturePrimeLease() else {
+            return failRoute("The exact background target changed.")
+        }
+
+        let result = offSpacePrimer.withPrime(
+            pid: targetPID, windowID: targetWindowID ?? 0
+        ) {
+            for attempt in 0..<Self.primePollAttempts {
+                guard self.primeLeaseIsLive(lease) else { return false }
+                if let snapshot = self.snapshotTarget(
+                    maxElements: Self.snapshotElements),
+                   !snapshot.degraded {
+                    return true
+                }
+                if attempt + 1 < Self.primePollAttempts {
+                    self.system.sleep(ms: Self.primePollMs)
+                }
+            }
+            return false
+        } cleanup: {
+            self.primeCleanup(lease)
+        }
+        switch result {
+        case .userEnteredTarget, .cancelled:
+            return failRoute(
+                "Action cancelled because the target window was selected.")
+        case .focusFailed, .cleanupFailed:
+            return failRoute(
+                "Background accessibility is unavailable for this target.")
+        case .observationFailed:
+            guard processIdentity(targetPID) == lease.process else {
+                return failRoute("The exact background target changed.")
+            }
+            return failRoute(
+                "Restart the target app before retrying this action.")
+        case .observed:
+            break
+        }
+        guard primeLeaseRestored(lease),
+              let after = snapshotTarget(maxElements: Self.snapshotElements),
+              !after.degraded,
+              primeLeaseRestored(lease) else {
+            return failRoute("The exact background target changed.")
+        }
+        return true
+    }
+
+    private func capturePrimeLease() -> PrimeLease? {
+        guard accessibilityGranted(), !SecureInput.isActive,
+              !system.screenIsLocked,
+              targetProcessIsCurrent(),
+              let targetProcessIdentity,
+              let process = processIdentity(targetPID),
+              process == targetProcessIdentity,
+              let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(targetBundleID)
+                != .orderedSame,
+              let foreground = system.foregroundWindow(),
+              foreground.bundleID.caseInsensitiveCompare(front.bundleID)
+                == .orderedSame,
+              let window = exactOffSpaceWindow(),
+              let cursor = cursorPosition()
+        else { return nil }
+        return PrimeLease(
+            process: process, window: window, foreground: foreground,
+            cursor: cursor,
+            inputGeneration: UserInputActivity.snapshot())
+    }
+
+    private func primeLeaseIsLive(_ lease: PrimeLease) -> Bool {
+        let activity = UserInputActivity.activity(
+            after: lease.inputGeneration, targetPID: targetPID,
+            targetWindowID: targetWindowID ?? 0)
+        guard processIdentity(targetPID) == lease.process,
+              targetProcessIdentity == lease.process,
+              accessibilityGranted(), !SecureInput.isActive,
+              !system.screenIsLocked,
+              exactOffSpaceWindow() == lease.window
+        else { return false }
+        switch activity {
+        case .unchanged:
+            return cursorPosition() == lease.cursor
+                && primeFocusIsLive(lease)
+        case .unrelated:
+            return currentFocusIsNonTarget()
+        case .target, .unknown:
+            return false
+        }
+    }
+
+    private func primeFocusIsLive(_ lease: PrimeLease) -> Bool {
+        system.foregroundWindow() == lease.foreground
+    }
+
+    private func primeLeaseRestored(_ lease: PrimeLease) -> Bool {
+        let activity = UserInputActivity.activity(
+            after: lease.inputGeneration, targetPID: targetPID,
+            targetWindowID: targetWindowID ?? 0)
+        guard processIdentity(targetPID) == lease.process,
+              targetProcessIdentity == lease.process,
+              accessibilityGranted(), !SecureInput.isActive,
+              !system.screenIsLocked,
+              exactOffSpaceWindow() == lease.window
+        else { return false }
+        switch activity {
+        case .unchanged:
+            return cursorPosition() == lease.cursor
+                && system.foregroundWindow() == lease.foreground
+        case .unrelated:
+            return currentFocusIsNonTarget()
+        case .target, .unknown:
+            return false
+        }
+    }
+
+    private func primeCleanup(_ lease: PrimeLease) -> OffSpaceAXCleanup {
+        let activity = UserInputActivity.activity(
+            after: lease.inputGeneration, targetPID: targetPID,
+            targetWindowID: targetWindowID ?? 0)
+        switch activity {
+        case .unchanged, .unrelated:
+            return .defocus
+        case .target:
+            return userSelectedTarget(lease) ? .preserveUserFocus : .cancel
+        case .unknown:
+            return .cancel
+        }
+    }
+
+    private func currentFocusIsNonTarget() -> Bool {
+        guard let front = system.frontmostApp(),
+              front.bundleID.caseInsensitiveCompare(targetBundleID)
+                != .orderedSame,
+              let window = system.foregroundWindow(),
+              window.pid > 0, window.windowID > 0,
+              window.bundleID.caseInsensitiveCompare(front.bundleID)
+                == .orderedSame
+        else { return false }
+        return true
+    }
+
+    private func userSelectedTarget(_ lease: PrimeLease) -> Bool {
+        guard let windowID = targetWindowID,
+              UserInputActivity.selectedWindow(
+                after: lease.inputGeneration) == windowID,
+              let selected = userFocusForWindow(windowID),
+              selected.pid == targetPID, selected.windowID == windowID,
+              selected.bundleID.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame
+        else { return false }
+        return true
+    }
+
+    private func exactOffSpaceWindow() -> PrimeWindow? {
+        guard let windowID = targetWindowID,
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              case .success(let reply) = transport.call(
+                "list_windows", arguments: ["pid": targetPID],
+                timeout: Self.callTimeout),
+              let windows = reply["windows"] as? [[String: Any]],
+              windows.allSatisfy({ validWindow($0, pid: targetPID) })
+        else { return nil }
+        let eligible = CuaWindowPick.eligible(windows, pid: targetPID)
+        let exact = eligible.filter {
+            exactInt($0["window_id"]) == windowID
+        }
+        guard exact.count == 1, let row = exact.first,
+              exactInt(row["window_id"]) == windowID,
+              exactFlag(row["on_current_space"]) == false,
+              let raw = row["bounds"] as? [String: Any],
+              let x = exactNumber(raw["x"]),
+              let y = exactNumber(raw["y"]),
+              let width = exactNumber(raw["width"]),
+              let height = exactNumber(raw["height"]),
+              width >= CuaWindowPick.minimumWidth,
+              height >= CuaWindowPick.minimumHeight
+        else { return nil }
+        return PrimeWindow(
+            title: row["title"] as? String,
+            bounds: CGRect(x: x, y: y, width: width, height: height))
+    }
+
+    private func exactTargetWindow() -> PrimeWindow? {
+        guard let windowID = targetWindowID,
+              targetProcessIsCurrent(),
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              case .success(let reply) = transport.call(
+                "list_windows", arguments: ["pid": targetPID],
+                timeout: Self.callTimeout),
+              let windows = reply["windows"] as? [[String: Any]],
+              windows.allSatisfy({ validWindow($0, pid: targetPID) })
+        else { return nil }
+        let eligible = CuaWindowPick.eligible(windows, pid: targetPID)
+        let exact = eligible.filter { exactInt($0["window_id"]) == windowID }
+        guard exact.count == 1, let row = exact.first,
+              let raw = row["bounds"] as? [String: Any],
+              let x = exactNumber(raw["x"]),
+              let y = exactNumber(raw["y"]),
+              let width = exactNumber(raw["width"]),
+              let height = exactNumber(raw["height"]),
+              width >= CuaWindowPick.minimumWidth,
+              height >= CuaWindowPick.minimumHeight
+        else { return nil }
+        return PrimeWindow(
+            title: row["title"] as? String,
+            bounds: CGRect(x: x, y: y, width: width, height: height))
+    }
+
+    private func targetWindowExists() -> Bool {
+        guard let windowID = targetWindowID,
+              targetProcessIsCurrent(),
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              case .success(let reply) = transport.call(
+                "list_windows", arguments: ["pid": targetPID],
+                timeout: Self.callTimeout),
+              let windows = reply["windows"] as? [[String: Any]],
+              windows.allSatisfy({ validWindow($0, pid: targetPID) })
+        else { return false }
+        return CuaWindowPick.eligible(windows, pid: targetPID).filter {
+            exactInt($0["window_id"]) == windowID
+        }.count == 1
+    }
+
     private func pickTargetWindow() -> (id: Int, title: String?)? {
         guard case .success(let reply) = transport.call(
             "list_windows", arguments: [:], timeout: Self.callTimeout),
               let windows = reply["windows"] as? [[String: Any]] else { return nil }
-        return CuaWindowPick.choose(windows, pid: targetPID)
+        return CuaWindowPick.choose(
+            windows, pid: targetPID, command: sessionCommand)
     }
 
     private func snapshotTarget(maxElements: Int) -> CuaSnapshot? {
         guard snapshotLineage == .valid,
               let windowID = targetWindowID,
+              targetProcessIsCurrent(),
               let liveBundleID = bundleForPID(targetPID),
               liveBundleID.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame else { return nil }
@@ -1482,6 +1656,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         routedUISnapshot = nil
         pinnedElement = nil
         backgroundDraft = ""
+        mutationOrdinal = 0
     }
 
     private func resetSnapshotLineage() {
@@ -1496,7 +1671,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// would let the check pass on stale evidence (review finding).
     func frontmostWindowTitle() -> String? {
         guard routed else { return system.frontmostWindowTitle() }
-        guard snapshotLineage == .valid, let windowID = targetWindowID,
+        guard snapshotLineage == .valid, targetProcessIsCurrent(),
+              let windowID = targetWindowID,
               case .success(let reply) = transport.call(
                 "list_windows", arguments: [:], timeout: Self.callTimeout),
               let windows = reply["windows"] as? [[String: Any]],
@@ -1568,16 +1744,22 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// False while routed: the window being driven is deliberately NOT in
     /// front of the user, so its labels cannot vouch for URL content.
     var screenNamesAreUserVisible: Bool {
-        routed ? false : system.screenNamesAreUserVisible
+        routed || terminalFailureReason != nil
+            ? false : system.screenNamesAreUserVisible
     }
 
     /// While routed, `wait_frontmost` is polling this host's own readiness —
     /// re-opening the app would drop the pinned window (`openTargetApp` resets
     /// `targetWindowID`/`everReady`/`pinnedElement`) or `unroute()` into the
     /// foreground path and take the screen.
-    var isDrivingInBackground: Bool { routed }
+    var isDrivingInBackground: Bool {
+        routed || terminalFailureReason != nil
+    }
+
+    var actionFailureReason: String? { terminalFailureReason }
 
     func visibleNames() -> [String] {
+        guard terminalFailureReason == nil else { return [] }
         guard routed else { return system.visibleNames() }
         guard snapshotLineage == .valid,
               let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
@@ -1600,6 +1782,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     func uiSnapshot() -> ActionUISnapshot? {
         // Foreground Action Mode uses the host's native AX capability map;
         // a background target exposes Cua's exact structured capabilities.
+        guard terminalFailureReason == nil else { return nil }
         guard routed else { return system.uiSnapshot() }
         guard snapshotLineage == .valid, targetReady,
               let windowID = targetWindowID,
@@ -1628,7 +1811,8 @@ final class BackgroundRoutingActionHost: ActionHost {
             ActionUIElement(
                 index: element.index, parentIndex: element.parentIndex,
                 depth: element.depth, role: element.role,
-                label: element.authoredLabel, frame: element.frame,
+                label: element.authoredLabel,
+                frame: element.frame,
                 actions: element.actionNames,
                 enabled: element.enabled,
                 selected: element.selected,
@@ -1653,12 +1837,10 @@ final class BackgroundRoutingActionHost: ActionHost {
     // MARK: - Input delivery
 
     func openURL(_ url: URL) -> Bool {
-        // NSWorkspace may activate the default handler. Under the background
-        // contract, an unsupported URL route refuses and leaves user focus
-        // untouched. Turning background actions off explicitly restores the
-        // classic foreground behavior.
-        guard !backgroundEnabled() else { return false }
-        return system.openURL(url)
+        guard terminalFailureReason == nil else { return false }
+        // Opening a URL can activate its handler. Action Mode has no exact
+        // background browser capability, so it refuses on every route.
+        return false
     }
 
     /// Drops the background route. The draft is dropped with the target: text
@@ -1666,45 +1848,61 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// window must never authorize a commit in the new one.
     private func unroute() {
         routed = false
-        foregroundTarget = nil
         targetPID = 0
+        targetProcessIdentity = nil
         targetWindowID = nil
         targetName = ""
         targetBundleID = ""
         targetReady = false
-        foregroundAtInteraction = false
         everReady = false
+        primeTried = false
         pinnedElement = nil
         routedUISnapshot = nil
         resetSnapshotLineage()
         backgroundDraft = ""
     }
 
+    @discardableResult
+    private func failRoute(_ reason: String) -> Bool {
+        unroute()
+        terminalFailureReason = reason
+        endDaemon()
+        veloraLog("Velora: \(reason)")
+        return false
+    }
+
     func pressElement(label: String, expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else {
             return system.pressElement(label: label, expecting: bundleID)
         }
         guard snapshotLineage == .valid,
               expectedMatchesTarget(bundleID), targetReady,
+              let lease = captureMutationLease(),
               let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
               !snapshot.degraded, snapshot.complete
         else { return false }
         guard let element = CuaPressPick.candidate(
             in: snapshot.elements, label: label),
               let token = element.token else { return false }
-        guard case .success(let reply) = transport.call("click", arguments: [
-            "pid": targetPID, "element_token": token,
-        ], timeout: Self.callTimeout) else { return false }
-        guard clickSucceeded(reply) else { return false }
+        guard mutationLeaseIsLive(lease),
+              case .success(let reply) = transport.call("click", arguments: [
+                "pid": targetPID, "window_id": lease.windowID,
+                "element_token": token,
+              ], timeout: Self.callTimeout),
+              clickSucceeded(reply), mutationLeaseIsLive(lease)
+        else { return false }
         // A click can move focus or replace the editor. Content delivered to
         // the old field must never authorize a later committing key.
         backgroundDraft = ""
         pinnedElement = nil
+        mutationOrdinal += 1
         return true
     }
 
     func pressElement(index: Int, snapshotID: String, label: String,
                       role: String, expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else {
             return system.pressElement(
                 index: index, snapshotID: snapshotID, label: label,
@@ -1717,6 +1915,7 @@ final class BackgroundRoutingActionHost: ActionHost {
               cached.windowID == targetWindowID,
               cached.bundleID == targetBundleID,
               expectedMatchesTarget(bundleID), targetReady,
+              let lease = captureMutationLease(),
               let record = cached.observation.elements.first(where: {
                   $0.index == index
               }),
@@ -1740,13 +1939,16 @@ final class BackgroundRoutingActionHost: ActionHost {
               sameElementIdentity(
                 element, prior: prior, role: role, label: label)
         else { return false }
-        guard case .success(let reply) = transport.call("click", arguments: [
-            "pid": targetPID, "window_id": cached.windowID,
-            "element_token": token, "element_index": index,
-            "snapshot_id": currentID,
-        ], timeout: Self.callTimeout), clickSucceeded(reply) else { return false }
+        guard mutationLeaseIsLive(lease),
+              case .success(let reply) = transport.call("click", arguments: [
+                "pid": targetPID, "window_id": cached.windowID,
+                "element_token": token, "element_index": index,
+                "snapshot_id": currentID,
+              ], timeout: Self.callTimeout), clickSucceeded(reply),
+              mutationLeaseIsLive(lease) else { return false }
         backgroundDraft = ""
         pinnedElement = nil
+        mutationOrdinal += 1
         return true
     }
 
@@ -1754,6 +1956,7 @@ final class BackgroundRoutingActionHost: ActionHost {
                        role: String, target: String,
                        expecting bundleID: String?,
                        purpose: ActionVerificationPurpose) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else {
             return system.verifyElement(
                 index: index, snapshotID: snapshotID, label: label,
@@ -1764,6 +1967,131 @@ final class BackgroundRoutingActionHost: ActionHost {
             index: index, snapshotID: snapshotID, label: label,
             role: role, target: target, expecting: bundleID,
             purpose: purpose)
+    }
+
+    func verifyState(
+        _ check: ActionStateCheck, expecting bundleID: String?
+    ) -> ActionStateReceipt? {
+        guard routed, mutationOrdinal > 0,
+              snapshotLineage == .valid, targetReady,
+              expectedMatchesTarget(bundleID), !check.label.isEmpty,
+              let windowID = targetWindowID,
+              let cached = routedUISnapshot,
+              cached.observation.source == .cua,
+              cached.observation.id == check.snapshotID,
+              cached.pid == targetPID, cached.windowID == windowID,
+              cached.bundleID == targetBundleID,
+              let record = cached.observation.elements.first(where: {
+                  $0.index == check.index
+              }),
+              record.role == check.role, record.enabled,
+              !record.inWebContent,
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(check.label),
+              let prior = cached.driver.elements.first(where: {
+                  $0.index == check.index
+              }),
+              let process = targetProcessIdentity,
+              let window = exactTargetWindow()
+        else { return nil }
+        switch check.assertion {
+        case .writtenText:
+            guard let expected = check.expectedValue,
+                  !expected.isEmpty, expected == backgroundDraft,
+                  ScreenContext.isEditableActionRole(check.role) else {
+                return nil
+            }
+        case .selected:
+            guard check.expectedValue == nil, prior.selected else { return nil }
+        }
+        let generation = UserInputActivity.snapshot()
+        guard let current = snapshotTarget(maxElements: Self.snapshotElements),
+              !current.degraded,
+              let element = current.elements.first(where: {
+                  $0.index == check.index
+              }),
+              sameElementIdentity(
+                element, prior: prior, role: check.role,
+                label: check.label),
+              targetActivitySafe(generation, windowID: windowID)
+        else { return nil }
+
+        let elementPredicate: [String: Any]
+        switch check.assertion {
+        case .writtenText:
+            guard let expected = check.expectedValue else { return nil }
+            elementPredicate = [
+                "selector": [
+                    "role": check.role,
+                    "label_contains": check.label,
+                ],
+                "value_equals": expected,
+            ]
+        case .selected:
+            elementPredicate = [
+                "selector": [
+                    "role": check.role,
+                    "label_contains": check.label,
+                ],
+                "selected": true,
+            ]
+        }
+        let predicates: [[String: Any]] = [
+            ["window": [
+                "exists": true,
+                "bounds": [
+                    "x": window.bounds.origin.x,
+                    "y": window.bounds.origin.y,
+                    "width": window.bounds.width,
+                    "height": window.bounds.height,
+                    "tolerance_px": 0,
+                ],
+            ]],
+            ["element": elementPredicate],
+        ]
+        guard case .success(let reply) = transport.call(
+            "verify_state", arguments: [
+                "pid": targetPID, "window_id": windowID,
+                "expect": predicates,
+                "timeout_ms": Self.verifyTimeoutMs,
+                "stable_samples": Self.verifySamples,
+                "include_screenshot": false,
+            ], timeout: 3),
+              verifyStateSucceeded(reply, predicateCount: predicates.count),
+              targetActivitySafe(generation, windowID: windowID),
+              processIdentity(targetPID) == process,
+              exactTargetWindow() == window,
+              let after = snapshotTarget(maxElements: Self.snapshotElements),
+              !after.degraded,
+              let afterElement = after.elements.first(where: {
+                  $0.index == check.index
+              }),
+              sameElementIdentity(
+                afterElement, prior: prior, role: check.role,
+                label: check.label),
+              targetActivitySafe(generation, windowID: windowID)
+        else { return nil }
+        return stateReceipt(
+            snapshotID: check.snapshotID, assertion: check.assertion)
+    }
+
+    private func verifyStateSucceeded(
+        _ reply: [String: Any], predicateCount: Int
+    ) -> Bool {
+        guard reply["status"] as? String == "satisfied",
+              exactFlag(reply["stable"]) == true,
+              exactInt(reply["samples"]).map({
+                  $0 >= Self.verifySamples
+              }) == true,
+              let outcomes = reply["predicates"] as? [[String: Any]],
+              outcomes.count == predicateCount else { return false }
+        let indices = outcomes.compactMap { exactInt($0["index"]) }
+        guard indices.count == predicateCount,
+              Set(indices) == Set(0..<predicateCount) else { return false }
+        return outcomes.allSatisfy {
+            $0["status"] as? String == "satisfied"
+                && $0["unknown_reason"] is NSNull
+        }
     }
 
     private func verifyRoutedTarget(
@@ -1808,18 +2136,23 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     func foregroundWindow() -> ActionWindowIdentity? {
-        routed ? nil : system.foregroundWindow()
+        routed || terminalFailureReason != nil
+            ? nil : system.foregroundWindow()
     }
 
     func actionWindow() -> ActionWindowIdentity? {
+        guard terminalFailureReason == nil else { return nil }
         guard routed else { return system.actionWindow() }
-        guard let windowID = targetWindowID else { return nil }
+        guard targetProcessIsCurrent(),
+              let windowID = targetWindowID else { return nil }
         return ActionWindowIdentity(
             name: targetName, bundleID: targetBundleID,
-            pid: targetPID, windowID: windowID)
+            pid: targetPID, windowID: windowID,
+            processIdentity: targetProcessIdentity)
     }
 
     func actionProcess() -> ActionProcessIdentity? {
+        guard terminalFailureReason == nil else { return nil }
         guard routed else { return system.actionProcess() }
         guard snapshotLineage == .valid else { return nil }
         if targetReady {
@@ -1834,13 +2167,16 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func exactRoutedProcess() -> ActionProcessIdentity? {
         guard routed, targetPID > 0,
               !targetName.isEmpty, !targetBundleID.isEmpty,
+              targetProcessIsCurrent(),
               bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame else { return nil }
         return ActionProcessIdentity(
-            name: targetName, bundleID: targetBundleID, pid: targetPID)
+            name: targetName, bundleID: targetBundleID, pid: targetPID,
+            processIdentity: targetProcessIdentity)
     }
 
     func mediaCapabilities() -> [ActionNativeCapability] {
+        guard terminalFailureReason == nil else { return [] }
         guard routed else {
             return system.mediaCapabilities()
         }
@@ -1852,6 +2188,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     func mediaControl(
         _ control: ActionMediaControl
     ) -> ActionMediaControlResult {
+        guard terminalFailureReason == nil else { return .unavailable }
         switch control.capability {
         case .cua(let snapshotID, let index, let role, let label):
             return clickMediaControl(
@@ -1859,10 +2196,16 @@ final class BackgroundRoutingActionHost: ActionHost {
                 role: role, label: label)
         case .appNative:
             guard routed, targetReady, let target = exactRoutedProcess(),
-                  !userIsInTarget() else { return .unavailable }
-            return nativeMedia.perform(
+                  !userIsInTarget(), let lease = captureMutationLease(),
+                  mutationLeaseIsLive(lease) else { return .unavailable }
+            let result = nativeMedia.perform(
                 control, target: target,
-                maySend: { !self.userIsInTarget() })
+                maySend: {
+                    !self.userIsInTarget()
+                        && self.mutationLeaseIsLive(lease)
+                })
+            guard mutationLeaseIsLive(lease) else { return .misdirected }
+            return result
         }
     }
 
@@ -1893,6 +2236,7 @@ final class BackgroundRoutingActionHost: ActionHost {
                   $0.index == index
               }),
               prior.token?.isEmpty == false,
+              let lease = captureMutationLease(),
               let current = snapshotTarget(maxElements: Self.snapshotElements)
         else { return .unavailable }
         defer { routedUISnapshot = nil }
@@ -1909,17 +2253,21 @@ final class BackgroundRoutingActionHost: ActionHost {
         else { return .unavailable }
 
         let before = mediaSnapshot()
+        guard mutationLeaseIsLive(lease) else { return .unavailable }
         let priorState = mediaMatches(
             control.state, target: target, snapshot: before)
         if priorState == true { return .verified }
         if control.state == .pause, priorState == nil { return .unavailable }
-        guard !userIsInTarget() else { return .unavailable }
+        guard !userIsInTarget(), mutationLeaseIsLive(lease) else {
+            return .unavailable
+        }
 
         guard case .success(let reply) = transport.call("click", arguments: [
             "pid": target.pid, "window_id": windowID,
             "element_token": token, "element_index": index,
             "snapshot_id": currentID,
-        ], timeout: Self.callTimeout), clickSucceeded(reply) else {
+        ], timeout: Self.callTimeout), clickSucceeded(reply),
+              mutationLeaseIsLive(lease) else {
             return .unavailable
         }
         backgroundDraft = ""
@@ -1927,7 +2275,9 @@ final class BackgroundRoutingActionHost: ActionHost {
 
         for _ in 0..<Self.mediaPollAttempts {
             mediaSleep(Self.mediaPollMs)
+            guard mutationLeaseIsLive(lease) else { return .misdirected }
             let after = mediaSnapshot()
+            guard mutationLeaseIsLive(lease) else { return .misdirected }
             if mediaMatches(
                 control.state, target: target, snapshot: after) == true {
                 return .verified
@@ -1965,6 +2315,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope = .window) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed, snapshotLineage == .valid, targetReady,
               let cached = routedUISnapshot,
               cached.observation.source == .cua,
@@ -2194,7 +2545,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func targetAppIsFront() -> Bool {
-        guard let front = system.frontmostApp(),
+        guard targetProcessIsCurrent(),
+              let front = system.frontmostApp(),
               front.bundleID.caseInsensitiveCompare(targetBundleID)
                 == .orderedSame,
               let window = system.foregroundWindow(),
@@ -2291,12 +2643,138 @@ final class BackgroundRoutingActionHost: ActionHost {
                 == AppMatcher.normalize(label)
     }
 
+    func typeText(
+        _ text: String, target: ActionTextTarget,
+        expecting bundleID: String?
+    ) -> ActionStateReceipt? {
+        guard routed, snapshotLineage == .valid,
+              expectedMatchesTarget(bundleID), targetReady,
+              let windowID = targetWindowID,
+              let cached = routedUISnapshot,
+              cached.observation.id == target.snapshotID,
+              cached.pid == targetPID, cached.windowID == windowID,
+              cached.bundleID == targetBundleID,
+              let record = cached.observation.elements.first(where: {
+                  $0.index == target.index
+              }),
+              record.role == target.role, record.enabled,
+              !record.inWebContent,
+              AppMatcher.normalize(record.label ?? "")
+                == AppMatcher.normalize(target.label),
+              ScreenContext.isEditableActionRole(target.role),
+              let prior = cached.driver.elements.first(where: {
+                  $0.index == target.index
+              }),
+              let priorValue = prior.value,
+              priorValue == backgroundDraft,
+              let lease = captureMutationLease()
+        else { return nil }
+        guard let current = snapshotTarget(maxElements: Self.snapshotElements),
+              !current.degraded,
+              let currentID = current.id, !currentID.isEmpty,
+              let element = current.elements.first(where: {
+                  $0.index == target.index
+              }),
+              sameElementIdentity(
+                element, prior: prior, role: target.role,
+                label: target.label),
+              let token = element.token, !token.isEmpty,
+              mutationLeaseIsLive(lease)
+        else { return nil }
+        guard case .success(let reply) = transport.call(
+            "type_text", arguments: [
+                "pid": targetPID, "window_id": windowID, "text": text,
+                "element_token": token, "element_index": target.index,
+                "snapshot_id": currentID,
+            ], timeout: 10),
+              reply["effect"] as? String == "confirmed",
+              exactFlag(reply["verified"]) == true,
+              exactInt(reply["characters"]) == text.unicodeScalars.count,
+              exactInt(reply["delivered_chars"]) == text.unicodeScalars.count,
+              mutationLeaseIsLive(lease),
+              let after = snapshotTarget(maxElements: Self.snapshotElements),
+              !after.degraded,
+              let afterElement = after.elements.first(where: {
+                  $0.index == target.index
+              }),
+              sameElementIdentity(
+                afterElement, prior: prior, role: target.role,
+                label: target.label)
+        else { return nil }
+        let expected = priorValue + text
+        guard afterElement.value == expected,
+              mutationLeaseIsLive(lease) else {
+            backgroundDraft = ""
+            return nil
+        }
+        backgroundDraft = expected
+        pinnedElement = ElementIdentity(afterElement)
+        mutationOrdinal += 1
+        return stateReceipt(
+            snapshotID: target.snapshotID, assertion: .writtenText)
+    }
+
+    private func targetActivitySafe(
+        _ generation: UInt64, windowID: Int
+    ) -> Bool {
+        switch UserInputActivity.activity(
+            after: generation, targetPID: targetPID,
+            targetWindowID: windowID) {
+        case .unchanged, .unrelated:
+            return true
+        case .target, .unknown:
+            return false
+        }
+    }
+
+    private struct TargetMutationLease {
+        let generation: UInt64
+        let process: CuaProcessIdentity
+        let windowID: Int
+    }
+
+    private func captureMutationLease() -> TargetMutationLease? {
+        guard let windowID = targetWindowID,
+              let process = targetProcessIdentity else { return nil }
+        let generation = UserInputActivity.snapshot()
+        guard processIdentity(targetPID) == process,
+              targetWindowExists(),
+              targetActivitySafe(generation, windowID: windowID)
+        else { return nil }
+        return TargetMutationLease(
+            generation: generation, process: process, windowID: windowID)
+    }
+
+    private func mutationLeaseIsLive(_ lease: TargetMutationLease) -> Bool {
+        targetWindowID == lease.windowID
+            && processIdentity(targetPID) == lease.process
+            && targetWindowExists()
+            && targetActivitySafe(
+                lease.generation, windowID: lease.windowID)
+    }
+
+    private func stateReceipt(
+        snapshotID: String, assertion: ActionStateAssertion
+    ) -> ActionStateReceipt? {
+        guard mutationOrdinal > 0, let windowID = targetWindowID else {
+            return nil
+        }
+        return ActionStateReceipt(
+            id: UUID().uuidString, appName: targetName,
+            bundleID: targetBundleID, pid: targetPID, windowID: windowID,
+            snapshotID: snapshotID, assertion: assertion,
+            mutationOrdinal: mutationOrdinal,
+            processIdentity: targetProcessIdentity)
+    }
+
     func typeText(_ text: String, expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else { return system.typeText(text, expecting: bundleID) }
         return deliverText(text, expecting: bundleID)
     }
 
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else { return system.pasteText(text, expecting: bundleID) }
         // AX insertion is one atomic write; there is no separate paste road.
         return deliverText(text, expecting: bundleID)
@@ -2305,7 +2783,8 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func deliverText(_ text: String, expecting bundleID: String?) -> Bool {
         guard snapshotLineage == .valid,
               expectedMatchesTarget(bundleID), targetReady,
-              let windowID = targetWindowID else { return false }
+              let windowID = targetWindowID,
+              let lease = captureMutationLease() else { return false }
         // Address the write to the target window's own text element. The
         // driver's default target — the PID's focused element — can live in
         // a DIFFERENT window of the same app.
@@ -2317,18 +2796,20 @@ final class BackgroundRoutingActionHost: ActionHost {
             backgroundDraft = ""
             return false
         }
-        guard case .success(let reply) = transport.call("type_text", arguments: [
+        guard mutationLeaseIsLive(lease),
+              case .success(let reply) = transport.call("type_text", arguments: [
             "pid": targetPID, "window_id": windowID, "text": text,
             "element_token": token,
         ], timeout: 10) else { return false }
-        guard !isRefused(reply) else { return false }
+        guard !isRefused(reply), mutationLeaseIsLive(lease) else { return false }
         // Driver confirmation is not draft ownership. Re-read the SAME field
         // and require its whole value to equal Velora's accumulated text.
         // This refuses pre-existing text, caret drift, and another writer.
         guard let after = freshPrimaryTextElement(),
               pinnedElement == ElementIdentity(after.element) else { return false }
         let expectedValue = priorValue + text
-        guard after.element.value == expectedValue else {
+        guard after.element.value == expectedValue,
+              mutationLeaseIsLive(lease) else {
             backgroundDraft = ""
             return false
         }
@@ -2338,6 +2819,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func pressKey(name: String, mods: [String], keyCode: CGKeyCode,
                   flags: CGEventFlags, expecting bundleID: String?) -> Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else {
             return system.pressKey(name: name, mods: mods, keyCode: keyCode,
                                    flags: flags, expecting: bundleID)
@@ -2346,6 +2828,7 @@ final class BackgroundRoutingActionHost: ActionHost {
               expectedMatchesTarget(bundleID), targetReady,
               let windowID = targetWindowID,
               let driverKey = CuaKeyMap.driverKey(forPlanKey: name),
+              let lease = captureMutationLease(),
               let snapshot = snapshotTarget(maxElements: Self.snapshotElements),
               !snapshot.degraded
         else { return false }
@@ -2374,10 +2857,12 @@ final class BackgroundRoutingActionHost: ActionHost {
         let modifiers = CuaKeyMap.driverModifiers(mods)
         if !modifiers.isEmpty { arguments["modifiers"] = modifiers }
         if committing { backgroundDraft = "" }
-        guard case .success(let reply) = transport.call(
+        guard mutationLeaseIsLive(lease),
+              case .success(let reply) = transport.call(
             "press_key", arguments: arguments, timeout: Self.callTimeout)
         else { return false }
-        guard !isRefused(reply) else { return false }
+        guard !isRefused(reply), mutationLeaseIsLive(lease) else { return false }
+        mutationOrdinal += 1
         return true
     }
 
@@ -2387,12 +2872,14 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// the complete tree's one non-web primary element, pinned to the exact
     /// target window before mutation.
     var hasFocusedTextTarget: Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else { return system.hasFocusedTextTarget }
         guard snapshotLineage == .valid, targetReady else { return false }
         return freshPrimaryTextElement() != nil
     }
 
     var canPostInput: Bool {
+        guard terminalFailureReason == nil else { return false }
         guard routed else { return system.canPostInput }
         guard snapshotLineage == .valid else { return false }
         // The driver's AX write path does not synthesize global events, so
@@ -2414,6 +2901,11 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func expectedMatchesTarget(_ bundleID: String?) -> Bool {
         guard let bundleID, !bundleID.isEmpty else { return true }
         return bundleID.caseInsensitiveCompare(targetBundleID) == .orderedSame
+    }
+
+    private func targetProcessIsCurrent() -> Bool {
+        guard let targetProcessIdentity else { return false }
+        return processIdentity(targetPID) == targetProcessIdentity
     }
 
     /// A refusal normally arrives as a transport failure now — the driver

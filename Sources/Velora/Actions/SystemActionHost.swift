@@ -109,7 +109,7 @@ final class SystemActionHost: ActionHost {
         self.browserPageOverride = browserPageOverride
     }
 
-    func beginActionInputSession() {
+    func beginActionInputSession(command _: String) {
         targetState.reset()
         actionUISnapshot = nil
     }
@@ -237,7 +237,9 @@ final class SystemActionHost: ActionHost {
             else { return nil }
             return ActionWindowIdentity(
                 name: name, bundleID: bundleID,
-                pid: Int(app.processIdentifier), windowID: windowID)
+                pid: Int(app.processIdentifier), windowID: windowID,
+                processIdentity: CuaProcessIdentity.capture(
+                    pid: app.processIdentifier))
         }
     }
 

@@ -100,15 +100,20 @@ struct ActionCompletionTarget: Equatable {
     let bundleID: String
     let pid: Int?
     let windowID: Int?
+    let processIdentity: CuaProcessIdentity?
 
     init(
         appName: String, bundleID: String,
-        pid: Int? = nil, windowID: Int? = nil
+        pid: Int? = nil, windowID: Int? = nil,
+        processIdentity: CuaProcessIdentity? = nil
     ) {
         self.appName = appName
         self.bundleID = bundleID
         self.pid = pid
         self.windowID = windowID
+        self.processIdentity = pid.flatMap { value in
+            processIdentity?.pid == pid_t(value) ? processIdentity : nil
+        }
     }
 }
 
@@ -240,6 +245,9 @@ extension ActionPlan {
             case .presentUI(_, let bundleID, let windowID, _):
                 return "present \(bundleID) window \(windowID)"
             case .typeText(let text): return "type \"\(text)\""
+            case .typeTextAt(let text, let operation, _):
+                return operation == .search
+                    ? "search for \"\(text)\"" : "type \"\(text)\""
             case .searchText(let text): return "search for \"\(text)\""
             case .pasteText(let text): return "paste \"\(text)\""
             case .key(let name, let mods, let count):
@@ -251,6 +259,8 @@ extension ActionPlan {
                 return "press [\(index)] \(role) \"\(label)\" on screen"
             case .mediaControl(let control):
                 return "set media playback to \(control.state.rawValue)"
+            case .verifyState(let check):
+                return "verify \(check.assertion.rawValue)"
             }
         }
     }

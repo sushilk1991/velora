@@ -190,9 +190,8 @@ final class DictationController: NSObject {
     private var actionsStorage: AgentSessionManager?
     private var actions: AgentSessionManager {
         if let actionsStorage { return actionsStorage }
-        // The routing host adds background delivery (via the user-installed
-        // Cua Driver) around the classic foreground host; with the driver
-        // absent or the setting off it IS the classic host.
+        // The routing host adds background delivery through Cua. Without an
+        // enabled driver, another app is refused instead of brought forward.
         let manager = AgentSessionManager(
             client: supervisor.client,
             host: BackgroundRoutingActionHost(
@@ -2916,10 +2915,14 @@ final class DictationController: NSObject {
     ) -> Bool {
         guard generation == UserInputActivity.snapshot(),
               let pid = target.pid, pid > 0,
+              let processIdentity = target.processIdentity,
+              processIdentity.pid == pid_t(pid),
+              processIdentity.isCurrent,
               let app = uniqueActionApp(pid: pid, bundleID: target.bundleID)
         else { return false }
         NSApp.yieldActivation(to: app)
-        guard generation == UserInputActivity.snapshot() else { return false }
+        guard generation == UserInputActivity.snapshot(),
+              processIdentity.isCurrent else { return false }
         return app.activate(options: [])
     }
 
@@ -2929,6 +2932,9 @@ final class DictationController: NSObject {
     ) -> Bool {
         guard let pid = target.pid, let windowID = target.windowID,
               pid > 0, windowID > 0,
+              let processIdentity = target.processIdentity,
+              processIdentity.pid == pid_t(pid),
+              processIdentity.isCurrent,
               uniqueActionApp(pid: pid, bundleID: target.bundleID) != nil
         else { return false }
         let transport = CuaSocketTransport()
@@ -2936,6 +2942,7 @@ final class DictationController: NSObject {
         return ActionResultHandoff.open(
             pid: pid, bundleID: target.bundleID, windowID: windowID,
             generation: generation,
+            processIsCurrent: { processIdentity.isCurrent },
             activateStrict: {
                 guard CuaDriver.isInstalled,
                       CuaDriverDaemon.ensureRunning(transport: transport),
@@ -2947,57 +2954,12 @@ final class DictationController: NSObject {
                 return CuaWindowActivation.matches(
                     reply, pid: pid, windowID: windowID)
             },
-            reopen: {
-                reopenActionApp(
-                    pid: pid, bundleID: target.bundleID,
-                    generation: generation)
-            },
             observe: { actionFront() },
             inputGeneration: UserInputActivity.snapshot,
             sleep: { milliseconds in
                 Thread.sleep(
                     forTimeInterval: Double(milliseconds) / 1_000)
             })
-    }
-
-    private static func reopenActionApp(
-        pid: Int,
-        bundleID: String,
-        generation: UInt64
-    ) -> Bool {
-        // Waiting on main would prevent the queued reopen from starting. The
-        // result-card caller uses a worker queue; a future main-thread caller
-        // fails closed instead of deadlocking.
-        guard !Thread.isMainThread else { return false }
-        return ActionReopenGate.awaitResult { finish in
-            DispatchQueue.main.async {
-                guard generation == UserInputActivity.snapshot(),
-                      let app = uniqueActionApp(
-                        pid: pid, bundleID: bundleID),
-                      let url = app.bundleURL else {
-                    finish(false)
-                    return
-                }
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = true
-                configuration.allowsRunningApplicationSubstitution = false
-                NSWorkspace.shared.openApplication(
-                    at: url, configuration: configuration
-                ) { opened, error in
-                    let exact = error == nil
-                        && Int(opened?.processIdentifier ?? 0) == pid
-                        && opened?.bundleIdentifier?.caseInsensitiveCompare(
-                            bundleID) == .orderedSame
-                        && uniqueActionApp(
-                            pid: pid, bundleID: bundleID) != nil
-                        && generation == UserInputActivity.snapshot()
-                    if !exact {
-                        NSLog("Velora: exact Action result reopen failed")
-                    }
-                    finish(exact)
-                }
-            }
-        }
     }
 
     private static func uniqueActionApp(
@@ -3010,9 +2972,8 @@ final class DictationController: NSObject {
                     && $0.bundleIdentifier?.caseInsensitiveCompare(bundleID)
                         == .orderedSame
             }
-            guard ActionReopenGate.hasUniquePID(
-                    matches.map { Int($0.processIdentifier) }, expected: pid)
-            else { return nil }
+            guard matches.count == 1,
+                  Int(matches[0].processIdentifier) == pid else { return nil }
             return matches[0]
         }
         return Thread.isMainThread

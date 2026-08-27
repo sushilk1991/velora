@@ -30,18 +30,45 @@ protocol HotkeyMonitorDelegate: AnyObject {
     func nonHotkeyInput()
 }
 
+/// Whether physical input since an action lease can be attributed away from
+/// its exact target window. Unknown attribution always fails closed.
+enum UserInputWindowActivity {
+    case unchanged
+    case unrelated
+    case target
+    case unknown
+}
+
 /// Monotonic guard for observed real clicks and key presses. The event-tap
 /// callback increments before controller work is queued, so a delivery check
 /// can fail closed even while its main-queue notification is still pending.
 /// Exact target/selection validation remains the authoritative safety check.
 enum UserInputActivity {
+    private enum WindowAttribution {
+        case pending
+        case process(Int)
+        case window(Int)
+        case unknown
+    }
+
+    private struct WindowRecord {
+        let generation: UInt64
+        var attribution: WindowAttribution
+    }
+
+    // The ledger is deliberately bounded. A lease older than retained history
+    // becomes unknown instead of inferring safety from incomplete evidence.
+    private static let ledgerCapacity = 64
     private static let lock = NSLock()
     private static var value: UInt64 = 0
     private static var lastNanos: UInt64 = 0
     private static var heldKeys = Set<Int64>()
     private static var heldButtons = Set<Int64>()
+    private static var windowRecords = [WindowRecord]()
+    private static var droppedThrough: UInt64 = 0
     private static var selectedGeneration: UInt64 = 0
     private static var selectedWindowID: Int?
+    private static var attributionReliable = false
 
     static func snapshot() -> UInt64 {
         lock.lock()
@@ -49,53 +76,163 @@ enum UserInputActivity {
         return value
     }
 
-    static func mark() {
+    @discardableResult
+    static func mark() -> UInt64 {
         lock.lock()
-        markLocked()
+        let generation = markLocked()
         lock.unlock()
+        return generation
     }
 
-    static func keyPressed(_ keyCode: Int64) {
+    @discardableResult
+    static func keyPressed(_ keyCode: Int64) -> UInt64 {
         lock.lock()
         heldKeys.insert(keyCode)
-        markLocked()
+        let generation = markLocked()
         lock.unlock()
+        return generation
     }
 
-    static func keyReleased(_ keyCode: Int64) {
+    @discardableResult
+    static func keyReleased(_ keyCode: Int64) -> UInt64 {
         lock.lock()
         heldKeys.remove(keyCode)
-        markLocked()
+        let generation = markLocked()
         lock.unlock()
+        return generation
     }
 
-    static func pointerPressed(button: Int64, windowID: Int?) {
+    @discardableResult
+    static func pointerPressed(button: Int64, windowID: Int?) -> UInt64 {
         lock.lock()
         heldButtons.insert(button)
-        markLocked(windowID: windowID)
+        let generation = markLocked(windowID: windowID)
         lock.unlock()
+        return generation
     }
 
-    static func pointerReleased(_ button: Int64) {
+    @discardableResult
+    static func pointerReleased(_ button: Int64) -> UInt64 {
         lock.lock()
         heldButtons.remove(button)
-        markLocked()
+        let generation = markLocked()
         lock.unlock()
+        return generation
+    }
+
+    static func activity(
+        after generation: UInt64, targetPID: Int, targetWindowID: Int
+    ) -> UserInputWindowActivity {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard attributionReliable else { return .unknown }
+        guard targetPID > 0, targetWindowID > 0 else { return .unknown }
+        guard generation <= value else { return .unknown }
+        guard generation != value else { return .unchanged }
+        guard generation >= droppedThrough else { return .unknown }
+
+        let records = windowRecords.filter { $0.generation > generation }
+        guard UInt64(records.count) == value - generation else { return .unknown }
+
+        var touchedTarget = false
+        for record in records {
+            switch record.attribution {
+            case .pending, .unknown:
+                return .unknown
+            case .process(let pid):
+                touchedTarget = touchedTarget || pid == targetPID
+            case .window(let windowID):
+                touchedTarget = touchedTarget || windowID == targetWindowID
+            }
+        }
+        return touchedTarget ? .target : .unrelated
     }
 
     static func selectedWindow(after generation: UInt64) -> Int? {
         lock.lock()
         defer { lock.unlock() }
-        guard selectedGeneration > generation else { return nil }
+        guard selectedGeneration > generation,
+              selectedGeneration == value else { return nil }
         return selectedWindowID
     }
 
     static func noteWindow(_ windowID: Int, at generation: UInt64) {
         guard windowID > 0 else { return }
         lock.lock()
-        if generation >= selectedGeneration {
+        guard let index = windowRecords.lastIndex(where: {
+            $0.generation == generation
+        }) else {
+            lock.unlock()
+            return
+        }
+
+        switch windowRecords[index].attribution {
+        case .pending:
+            windowRecords[index].attribution = .window(windowID)
+        case .process:
+            windowRecords[index].attribution = .unknown
+        case .window(let recordedWindowID):
+            if recordedWindowID != windowID {
+                windowRecords[index].attribution = .unknown
+            }
+        case .unknown:
+            windowRecords[index].attribution = .unknown
+        }
+        if generation >= selectedGeneration,
+           case .unknown = windowRecords[index].attribution {
+            selectedGeneration = generation
+            selectedWindowID = nil
+        }
+        if generation >= selectedGeneration,
+           case .window(windowID) = windowRecords[index].attribution {
             selectedGeneration = generation
             selectedWindowID = windowID
+        }
+        lock.unlock()
+    }
+
+    static func noteProcess(_ pid: Int, at generation: UInt64) {
+        guard pid > 0 else { return }
+        lock.lock()
+        guard let index = windowRecords.lastIndex(where: {
+            $0.generation == generation
+        }) else {
+            lock.unlock()
+            return
+        }
+
+        switch windowRecords[index].attribution {
+        case .pending:
+            windowRecords[index].attribution = .process(pid)
+        case .process(let recordedPID):
+            if recordedPID != pid {
+                windowRecords[index].attribution = .unknown
+            }
+        case .window, .unknown:
+            break
+        }
+        if generation >= selectedGeneration {
+            selectedGeneration = generation
+            selectedWindowID = nil
+        }
+        lock.unlock()
+    }
+
+    static func setReliable(_ reliable: Bool) {
+        lock.lock()
+        attributionReliable = reliable
+        lock.unlock()
+    }
+
+    static func invalidate() {
+        lock.lock()
+        attributionReliable = false
+        let generation = markLocked()
+        if let index = windowRecords.lastIndex(where: {
+            $0.generation == generation
+        }) {
+            windowRecords[index].attribution = .unknown
         }
         lock.unlock()
     }
@@ -107,12 +244,21 @@ enum UserInputActivity {
         lock.unlock()
     }
 
-    private static func markLocked(windowID: Int? = nil) {
+    private static func markLocked(windowID: Int? = nil) -> UInt64 {
         value &+= 1
         lastNanos = DispatchTime.now().uptimeNanoseconds
-        guard let windowID, windowID > 0 else { return }
-        selectedGeneration = value
-        selectedWindowID = windowID
+        let validWindowID = windowID.flatMap { $0 > 0 ? $0 : nil }
+        let attribution = validWindowID.map(WindowAttribution.window) ?? .pending
+        windowRecords.append(WindowRecord(
+            generation: value, attribution: attribution))
+        if windowRecords.count > ledgerCapacity {
+            droppedThrough = windowRecords.removeFirst().generation
+        }
+        if let windowID = validWindowID {
+            selectedGeneration = value
+            selectedWindowID = windowID
+        }
+        return value
     }
 
     static func isQuiet(for seconds: TimeInterval) -> Bool {
@@ -224,6 +370,7 @@ final class HotkeyMonitor {
     }
 
     func stop() {
+        UserInputActivity.invalidate()
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -241,6 +388,7 @@ final class HotkeyMonitor {
             recorderObserver = nil
         }
         canSuppressComboEvents = false
+        usingEventTap = false
         UserInputActivity.clearPressed()
     }
 
@@ -389,6 +537,7 @@ final class HotkeyMonitor {
         // The NSEvent fallback needs the very same grant, so switching paths
         // wouldn't help; instead log the grant loudly so the cause is obvious.
         let granted = Permissions.inputMonitoringGranted
+        UserInputActivity.setReliable(granted)
         veloraLog(
             "Velora: hotkey CGEvent tap installed (inputMonitoring="
             + (granted ? "granted" : "MISSING — hotkey stays dead until granted")
@@ -406,40 +555,53 @@ final class HotkeyMonitor {
             NSLog(
                 "Velora: hotkey tap disabled (%@) — re-enabling and resyncing latched state",
                 type == .tapDisabledByTimeout ? "timeout" : "userInput")
+            UserInputActivity.invalidate()
             resetLatchedState(preservePhysicallyHeldCombos: true)
-            if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+                UserInputActivity.setReliable(
+                    Permissions.inputMonitoringGranted)
+            }
             return false
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
         let sourcePID = event.getIntegerValueField(.eventSourceUnixProcessID)
+        let rawTargetPID = event.getIntegerValueField(.eventTargetUnixProcessID)
+        let targetPID = rawTargetPID > 0 ? Int(rawTargetPID) : nil
         let isVeloraEvent = sourcePID == Int64(ProcessInfo.processInfo.processIdentifier)
 
         switch type {
         case .flagsChanged:
             if !isVeloraEvent,
                Hotkey.modifierMask(forKeyCode: keyCode) != nil {
+                let generation: UInt64
                 if Self.modifierKeyIsDown(keyCode) {
-                    UserInputActivity.keyPressed(keyCode)
+                    generation = UserInputActivity.keyPressed(keyCode)
                 } else {
-                    UserInputActivity.keyReleased(keyCode)
+                    generation = UserInputActivity.keyReleased(keyCode)
                 }
-                Self.queueFrontWindow(UserInputActivity.snapshot())
+                Self.noteTargetProcess(targetPID, generation: generation)
             }
             handleFlagsChanged(keyCode: keyCode, flags: flags)
             return false
         case .keyDown:
-            if !isVeloraEvent { UserInputActivity.keyPressed(keyCode) }
+            let generation = isVeloraEvent
+                ? nil : UserInputActivity.keyPressed(keyCode)
+            if let generation {
+                Self.noteTargetProcess(targetPID, generation: generation)
+            }
             let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             return handleKeyDown(
                 keyCode: keyCode, flags: flags, isRepeat: isRepeat,
                 invalidateContinuation: !isVeloraEvent,
-                comboCanBeSuppressed: canSuppressComboEvents)
+                comboCanBeSuppressed: canSuppressComboEvents,
+                recordedGeneration: generation)
         case .keyUp:
             if !isVeloraEvent {
-                UserInputActivity.keyReleased(keyCode)
-                Self.queueFrontWindow(UserInputActivity.snapshot())
+                let generation = UserInputActivity.keyReleased(keyCode)
+                Self.noteTargetProcess(targetPID, generation: generation)
             }
             return handleKeyUp(keyCode: keyCode)
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
@@ -450,20 +612,29 @@ final class HotkeyMonitor {
                 let rawWindow = actionableWindow > 0 ? actionableWindow
                     : event.getIntegerValueField(.mouseEventWindowUnderMousePointer)
                 let windowID = rawWindow > 0 ? Int(rawWindow) : nil
-                UserInputActivity.pointerPressed(
+                let generation = UserInputActivity.pointerPressed(
                     button: button, windowID: windowID)
+                if windowID == nil {
+                    Self.noteTargetProcess(targetPID, generation: generation)
+                }
                 emit { $0.nonHotkeyInput() }
             }
             return false
         case .leftMouseUp, .rightMouseUp, .otherMouseUp:
             if !isVeloraEvent {
-                UserInputActivity.pointerReleased(
+                let generation = UserInputActivity.pointerReleased(
                     event.getIntegerValueField(.mouseEventButtonNumber))
+                Self.notePointerTarget(
+                    event, targetPID: targetPID, generation: generation)
             }
             return false
         case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
              .scrollWheel:
-            if !isVeloraEvent { UserInputActivity.mark() }
+            if !isVeloraEvent {
+                Self.notePointerTarget(
+                    event, targetPID: targetPID,
+                    generation: UserInputActivity.mark())
+            }
             return false
         default:
             return false
@@ -486,56 +657,95 @@ final class HotkeyMonitor {
             case .flagsChanged:
                 let keyCode = Int64(event.keyCode)
                 if Hotkey.modifierMask(forKeyCode: keyCode) != nil {
+                    let generation: UInt64
                     if Self.modifierKeyIsDown(keyCode) {
-                        UserInputActivity.keyPressed(Int64(event.keyCode))
+                        generation = UserInputActivity.keyPressed(
+                            Int64(event.keyCode))
                     } else {
-                        UserInputActivity.keyReleased(Int64(event.keyCode))
+                        generation = UserInputActivity.keyReleased(
+                            Int64(event.keyCode))
                     }
-                    Self.queueFrontWindow(UserInputActivity.snapshot())
+                    Self.noteTargetProcess(
+                        Self.targetPID(event), generation: generation)
                 }
                 self.handleFlagsChanged(keyCode: Int64(event.keyCode), flags: flags)
             case .keyDown:
-                UserInputActivity.keyPressed(Int64(event.keyCode))
+                let generation = UserInputActivity.keyPressed(
+                    Int64(event.keyCode))
+                Self.noteTargetProcess(
+                    Self.targetPID(event), generation: generation)
                 _ = self.handleKeyDown(
                     keyCode: Int64(event.keyCode), flags: flags,
-                    isRepeat: event.isARepeat, comboCanBeSuppressed: false)
+                    isRepeat: event.isARepeat, comboCanBeSuppressed: false,
+                    recordedGeneration: generation)
             case .keyUp:
-                UserInputActivity.keyReleased(Int64(event.keyCode))
-                Self.queueFrontWindow(UserInputActivity.snapshot())
+                let generation = UserInputActivity.keyReleased(
+                    Int64(event.keyCode))
+                Self.noteTargetProcess(
+                    Self.targetPID(event), generation: generation)
                 _ = self.handleKeyUp(keyCode: Int64(event.keyCode))
             case .leftMouseDown, .rightMouseDown, .otherMouseDown:
                 let windowID = event.windowNumber > 0 ? event.windowNumber : nil
-                UserInputActivity.pointerPressed(
+                let generation = UserInputActivity.pointerPressed(
                     button: Int64(event.buttonNumber), windowID: windowID)
+                if windowID == nil {
+                    Self.noteTargetProcess(
+                        Self.targetPID(event), generation: generation)
+                }
                 self.emit { $0.nonHotkeyInput() }
             case .leftMouseUp, .rightMouseUp, .otherMouseUp:
-                UserInputActivity.pointerReleased(Int64(event.buttonNumber))
+                let generation = UserInputActivity.pointerReleased(
+                    Int64(event.buttonNumber))
+                Self.notePointerTarget(event, generation: generation)
             case .leftMouseDragged, .rightMouseDragged, .otherMouseDragged,
                  .scrollWheel:
-                UserInputActivity.mark()
+                Self.notePointerTarget(
+                    event, generation: UserInputActivity.mark())
             default:
                 break
             }
         }
         usingEventTap = false
+        UserInputActivity.setReliable(
+            globalMonitor != nil && Permissions.inputMonitoringGranted)
         NSLog("Velora: NSEvent global monitor installed (delivery requires Accessibility)")
     }
 
-    private static func queueFrontWindow(_ generation: UInt64) {
-        DispatchQueue.main.async {
-            guard let app = NSWorkspace.shared.frontmostApplication,
-                  let rows = CGWindowListCopyWindowInfo(
-                    [.optionOnScreenOnly, .excludeDesktopElements],
-                    CGWindowID(kCGNullWindowID)) as? [[String: Any]],
-                  let row = rows.first(where: {
-                      ($0[kCGWindowOwnerPID as String] as? Int)
-                          == Int(app.processIdentifier)
-                          && ($0[kCGWindowLayer as String] as? Int) == 0
-                  }),
-                  let windowID = row[kCGWindowNumber as String] as? Int
-            else { return }
-            UserInputActivity.noteWindow(windowID, at: generation)
+    private static func noteTargetProcess(
+        _ pid: Int?, generation: UInt64
+    ) {
+        guard let pid else { return }
+        UserInputActivity.noteProcess(pid, at: generation)
+    }
+
+    private static func notePointerTarget(
+        _ event: CGEvent, targetPID: Int?, generation: UInt64
+    ) {
+        let rawWindow = event.getIntegerValueField(
+            .mouseEventWindowUnderMousePointer)
+        if rawWindow > 0 {
+            UserInputActivity.noteWindow(Int(rawWindow), at: generation)
+            return
         }
+        noteTargetProcess(targetPID, generation: generation)
+    }
+
+    private static func notePointerTarget(
+        _ event: NSEvent, generation: UInt64
+    ) {
+        if event.windowNumber > 0 {
+            UserInputActivity.noteWindow(event.windowNumber, at: generation)
+            return
+        }
+        noteTargetProcess(targetPID(event), generation: generation)
+    }
+
+    private static func targetPID(_ event: NSEvent) -> Int? {
+        if let cgEvent = event.cgEvent {
+            let pid = cgEvent.getIntegerValueField(.eventTargetUnixProcessID)
+            if pid > 0 { return Int(pid) }
+        }
+        return nil
     }
 
     // MARK: - Shared event interpretation
@@ -569,7 +779,8 @@ final class HotkeyMonitor {
     func handleKeyDown(
         keyCode: Int64, flags: UInt64, isRepeat: Bool,
         invalidateContinuation: Bool = true,
-        comboCanBeSuppressed: Bool = true
+        comboCanBeSuppressed: Bool = true,
+        recordedGeneration: UInt64? = nil
     ) -> Bool {
         if keyCode == Self.escKeyCode {
             if !suspended {
@@ -635,7 +846,13 @@ final class HotkeyMonitor {
             return secondaryComboIsDown[matchedRole] ?? false
         }
         if invalidateContinuation {
-            UserInputActivity.mark()
+            if recordedGeneration == nil {
+                let generation = UserInputActivity.mark()
+                let frontPID = NSWorkspace.shared.frontmostApplication.map {
+                    Int($0.processIdentifier)
+                }
+                Self.noteTargetProcess(frontPID, generation: generation)
+            }
             if !isRepeat { emit { $0.nonHotkeyInput() } }
         }
         return false

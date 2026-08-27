@@ -34,12 +34,37 @@ struct ActionWindowIdentity: Equatable {
     let bundleID: String
     let pid: Int
     let windowID: Int
+    let processIdentity: CuaProcessIdentity?
+
+    init(
+        name: String, bundleID: String, pid: Int, windowID: Int,
+        processIdentity: CuaProcessIdentity? = nil
+    ) {
+        self.name = name
+        self.bundleID = bundleID
+        self.pid = pid
+        self.windowID = windowID
+        self.processIdentity = processIdentity?.pid == pid_t(pid)
+            ? processIdentity : nil
+    }
 }
 
 struct ActionProcessIdentity: Equatable {
     let name: String
     let bundleID: String
     let pid: Int
+    let processIdentity: CuaProcessIdentity?
+
+    init(
+        name: String, bundleID: String, pid: Int,
+        processIdentity: CuaProcessIdentity? = nil
+    ) {
+        self.name = name
+        self.bundleID = bundleID
+        self.pid = pid
+        self.processIdentity = processIdentity?.pid == pid_t(pid)
+            ? processIdentity : nil
+    }
 }
 
 enum ActionMediaControlResult: Equatable {
@@ -48,21 +73,48 @@ enum ActionMediaControlResult: Equatable {
     case misdirected
 }
 
+struct ActionStateReceipt: Equatable {
+    let id: String
+    let appName: String
+    let bundleID: String
+    let pid: Int
+    let windowID: Int
+    let snapshotID: String
+    let assertion: ActionStateAssertion
+    let mutationOrdinal: Int
+    let processIdentity: CuaProcessIdentity?
+
+    init(
+        id: String, appName: String, bundleID: String,
+        pid: Int, windowID: Int, snapshotID: String,
+        assertion: ActionStateAssertion, mutationOrdinal: Int,
+        processIdentity: CuaProcessIdentity? = nil
+    ) {
+        self.id = id
+        self.appName = appName
+        self.bundleID = bundleID
+        self.pid = pid
+        self.windowID = windowID
+        self.snapshotID = snapshotID
+        self.assertion = assertion
+        self.mutationOrdinal = mutationOrdinal
+        self.processIdentity = processIdentity?.pid == pid_t(pid)
+            ? processIdentity : nil
+    }
+}
+
 /// Everything the executor needs from the machine. Split out from the executor
 /// so the step logic — which is where a bug sends a message to the wrong person
 /// — can be exercised headlessly against a scripted host.
 protocol ActionHost: AnyObject {
     /// Clears exact text-target/draft ownership at the boundary between user
     /// actions. The host itself survives across planner turns within one run.
-    func beginActionInputSession()
+    func beginActionInputSession(command: String)
     /// Drops every retained input capability and any owned automation child.
     func endActionInputSession()
-    /// Arms an explicit caller-owned foreground handoff. The automatic
-    /// executor never requests one.
+    /// Records whether this plan may commit user-authored content.
     func prepareForActionPlan(sends: Bool)
-    /// Gives a routed host one boundary immediately before a UI mutation. A
-    /// deferred target may be presented here immediately before the native
-    /// mutation, after exact identity and user-idle checks.
+    /// Rechecks that the user has not entered the exact background target.
     func prepareInteraction() -> ActionInteractionState
     /// Launch or switch to an app; returns the name it actually resolved to.
     func openApp(named name: String) -> String?
@@ -133,6 +185,13 @@ protocol ActionHost: AnyObject {
     /// Present the engine-attested routed app or window and leave it in front.
     func presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope) -> Bool
+    /// Exact partial-tree write selected by the engine's current Cua snapshot.
+    func typeText(_ text: String, target: ActionTextTarget,
+                  expecting bundleID: String?) -> ActionStateReceipt?
+    /// Bounded positive state proof. Implementations build every driver
+    /// predicate; the plan cannot supply process/window or polling mechanics.
+    func verifyState(_ check: ActionStateCheck,
+                     expecting bundleID: String?) -> ActionStateReceipt?
     func typeText(_ text: String, expecting bundleID: String?) -> Bool
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
@@ -153,6 +212,8 @@ protocol ActionHost: AnyObject {
     /// and the generic "app didn't come to the front" failure would send the
     /// user hunting for a bug that is really just a locked Mac.
     var screenIsLocked: Bool { get }
+    /// Terminal host failure that a retry or foreground recovery cannot fix.
+    var actionFailureReason: String? { get }
     func sleep(ms: Int)
     /// Monotonic seconds, for wait timeouts.
     func now() -> TimeInterval
@@ -161,6 +222,10 @@ protocol ActionHost: AnyObject {
 extension ActionHost {
     /// Foreground hosts drive the window the user is looking at.
     var isDrivingInBackground: Bool { false }
+    var actionFailureReason: String? { nil }
+    func beginActionInputSession() {
+        beginActionInputSession(command: "")
+    }
     func endActionInputSession() {}
     func prepareForActionPlan(sends: Bool) {}
     func prepareInteraction() -> ActionInteractionState { .ready }
@@ -183,7 +248,8 @@ extension ActionHost {
     func actionProcess() -> ActionProcessIdentity? {
         guard let window = actionWindow() else { return nil }
         return ActionProcessIdentity(
-            name: window.name, bundleID: window.bundleID, pid: window.pid)
+            name: window.name, bundleID: window.bundleID, pid: window.pid,
+            processIdentity: window.processIdentity)
     }
     func mediaCapabilities() -> [ActionNativeCapability] {
         guard let target = actionProcess() else { return [] }
@@ -198,6 +264,10 @@ extension ActionHost {
                    scope: ActionPresentationScope) -> Bool {
         false
     }
+    func typeText(_ text: String, target: ActionTextTarget,
+                  expecting bundleID: String?) -> ActionStateReceipt? { nil }
+    func verifyState(_ check: ActionStateCheck,
+                     expecting bundleID: String?) -> ActionStateReceipt? { nil }
 }
 
 enum ActionOutcome: Equatable {
@@ -220,6 +290,8 @@ enum ActionEvidenceEvent: Equatable {
     case frontmostConfirmed(requested: String, actual: String, bundleID: String)
     case uiTargetVerified(target: String)
     case goalVerified(target: String)
+    case localGoalVerified(ActionLocalProof)
+    case stateVerified(ActionStateReceipt)
     case targetResolved(ActionCompletionTarget)
     case unverifiedEffect(ActionEffectKind)
 }
@@ -351,6 +423,8 @@ final class ActionExecutor {
                 progress(.verifyingTarget)
             } else if case .verifyGoal = step {
                 progress(.verifyingTarget)
+            } else if case .verifyState = step {
+                progress(.verifyingTarget)
             } else {
                 progress(.executing(
                     step: index + 1, total: plan.steps.count,
@@ -380,7 +454,8 @@ final class ActionExecutor {
                 case .refused:
                     note("interaction boundary: exact handoff refused")
                     return failed(
-                        index, "the target window could not be presented safely",
+                        index, host.actionFailureReason
+                            ?? "the target window could not be presented safely",
                         recoverable: false)
                 }
             }
@@ -456,6 +531,10 @@ final class ActionExecutor {
                     }
                 }
                 guard let front else {
+                    if let reason = host.actionFailureReason {
+                        note("wait_frontmost \(app): terminal host refusal")
+                        return failed(index, reason, recoverable: false)
+                    }
                     let actual = host.frontmostApp()?.name ?? "nothing"
                     note("wait_frontmost \(app): timed out (front: \(actual)) — "
                          + "\(app) will not come forward; do not wait for it again")
@@ -469,6 +548,12 @@ final class ActionExecutor {
                     requested: Self.evidenceText(app, limit: 120),
                     actual: Self.evidenceText(front.name, limit: 120),
                     bundleID: Self.evidenceText(front.bundleID, limit: 256)))
+                if let window = host.actionWindow() {
+                    evidence.append(.targetResolved(ActionCompletionTarget(
+                        appName: window.name, bundleID: window.bundleID,
+                        pid: window.pid, windowID: window.windowID,
+                        processIdentity: window.processIdentity)))
+                }
                 note("wait_frontmost \(front.name)")
 
             case .verifyContext(let terms):
@@ -582,6 +667,50 @@ final class ActionExecutor {
                 evidence.append(.goalVerified(target: target))
                 note("verify_goal ok [\(elementIndex)] \(role) '\(label)' target='\(target)'")
 
+            case .verifyState(let check):
+                guard let receipt = host.verifyState(
+                    check, expecting: expectedBundleID) else {
+                    note("verify_state: positive state not proven")
+                    return failed(
+                        index, "the completion state could not be verified",
+                        recoverable: true)
+                }
+                evidence.append(.stateVerified(receipt))
+                note("verify_state satisfied \(check.assertion.rawValue)")
+
+            case .typeTextAt(let text, let operation, let target):
+                if operation != .search, plan.requiresUITargetVerification,
+                   !verifiedUITarget {
+                    note("type_text: target verifier has not confirmed the recipient")
+                    return failed(
+                        index,
+                        "the active recipient was not confirmed before typing",
+                        recoverable: true)
+                }
+                guard focusStillHeld() else {
+                    note("type_text: routed target lost")
+                    return failed(
+                        index, "the routed app target changed",
+                        recoverable: false)
+                }
+                guard let receipt = host.typeText(
+                    text, target: target, expecting: expectedBundleID) else {
+                    note("type_text: exact Cua write refused")
+                    return failed(
+                        index, "couldn't type into that exact field",
+                        recoverable: false)
+                }
+                let kind: ActionEffectKind = operation == .paste
+                    ? .pasteText : .typeText
+                evidence.append(.unverifiedEffect(kind))
+                if operation != .search {
+                    evidence.append(.stateVerified(receipt))
+                }
+                let verb = operation == .search ? "search_text" : "type_text"
+                note("\(verb) \(text.count) chars",
+                     observed: "\(verb) \(text.count) chars: "
+                        + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
+
             case .typeText(let text), .pasteText(let text), .searchText(let text):
                 let isSearch: Bool
                 if case .searchText = step { isSearch = true } else { isSearch = false }
@@ -651,21 +780,11 @@ final class ActionExecutor {
                      observed: "\(verb) \(text.count) chars: "
                          + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
 
-            case .presentUI(
-                    let snapshotID, let bundleID, let windowID, let scope):
-                guard host.presentUI(
-                    snapshotID: snapshotID, bundleID: bundleID,
-                    windowID: windowID, scope: scope) else {
-                    note("present_ui: safe handoff refused")
-                    return failed(
-                        index, "the target window could not be presented safely",
-                        recoverable: true)
-                }
-                expectedAppName = nil
-                expectedBundleID = nil
-                verifiedUITarget = false
-                evidence.append(.unverifiedEffect(.presentUI))
-                note("present_ui \(bundleID) [\(windowID)]")
+            case .presentUI:
+                note("present_ui: result-card click required")
+                return failed(
+                    index, "opening the target requires a result-card click",
+                    recoverable: false)
 
             case .key(let name, let mods, let repeatCount):
                 guard focusStillHeld() else {
@@ -782,9 +901,10 @@ final class ActionExecutor {
                 case .verified:
                     evidence.append(.targetResolved(ActionCompletionTarget(
                         appName: target.name, bundleID: target.bundleID,
-                        pid: target.pid)))
-                    evidence.append(.goalVerified(
-                        target: "media \(control.state.rawValue)"))
+                        pid: target.pid,
+                        processIdentity: target.processIdentity)))
+                    evidence.append(.localGoalVerified(.media(
+                        state: control.state, appName: target.name)))
                     note("media_control \(control.state.rawValue): verified")
                 case .unavailable:
                     note("media_control \(control.state.rawValue): unavailable")
@@ -823,12 +943,15 @@ final class ActionExecutor {
         case .pressUI(_, _, _, let label): return "Opening \(label)"
         case .mediaControl(let control):
             return control.state == .play ? "Starting playback" : "Pausing playback"
+        case .verifyState: return "Verifying completion"
+        case .typeTextAt(_, let operation, _):
+            return operation == .search ? "Searching" : "Typing"
         }
     }
 
     private static func mutatesUI(_ step: ActionStep) -> Bool {
         switch step {
-        case .typeText, .searchText, .pasteText, .key,
+        case .typeText, .typeTextAt, .searchText, .pasteText, .key,
              .pressElement, .pressUI, .presentUI, .mediaControl:
             return true
         default:
@@ -876,6 +999,7 @@ final class ActionExecutor {
         let deadline = host.now() + Double(timeoutMs) / 1000
         repeat {
             if cancelled { return nil }
+            if host.actionFailureReason != nil { return nil }
             if let front = host.frontmostApp(),
                AppMatcher.bestMatch(for: app, in: [front.name]) != nil {
                 return front
@@ -883,7 +1007,8 @@ final class ActionExecutor {
             host.sleep(ms: 60)
         } while host.now() < deadline
         // One final read: the app may have come forward during the last sleep.
-        if let front = host.frontmostApp(),
+        if host.actionFailureReason == nil,
+           let front = host.frontmostApp(),
            AppMatcher.bestMatch(for: app, in: [front.name]) != nil {
             return front
         }

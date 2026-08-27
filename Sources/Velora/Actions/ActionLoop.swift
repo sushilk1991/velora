@@ -28,6 +28,8 @@ private struct ActionCompletionEvidence {
     private(set) var hadEffect = false
     private(set) var hadGoalVerification = false
     private(set) var target: ActionCompletionTarget?
+    private var effectTarget: ActionCompletionTarget?
+    private(set) var localProof: ActionLocalProof?
 
     var provesGoal: Bool { hadGoalVerification }
 
@@ -36,23 +38,71 @@ private struct ActionCompletionEvidence {
             events.append(event)
             switch event {
             case .appOpenRequested:
+                invalidateProof()
+                target = nil
                 hadEffect = true
-            case .unverifiedEffect:
+            case .unverifiedEffect(let kind):
+                invalidateProof()
                 hadEffect = true
+                if kind != .openURL, kind != .presentUI,
+                   let target, target.pid != nil, target.windowID != nil {
+                    effectTarget = target
+                }
             case .goalVerified:
                 hadEffect = true
                 hadGoalVerification = true
+                localProof = nil
+            case .localGoalVerified(let proof):
+                hadEffect = true
+                hadGoalVerification = true
+                localProof = proof
+            case .stateVerified(let receipt):
+                guard hadEffect,
+                      receiptMatchesEffect(receipt)
+                else { continue }
+                hadGoalVerification = true
+                localProof = .state
+                target = ActionCompletionTarget(
+                    appName: receipt.appName, bundleID: receipt.bundleID,
+                    pid: receipt.pid, windowID: receipt.windowID,
+                    processIdentity: receipt.processIdentity)
             case .targetResolved(let value):
+                invalidateProof()
                 target = value
             case .uiTargetVerified:
                 break
             case .frontmostConfirmed(_, let actual, let bundleID):
                 guard !actual.isEmpty, !bundleID.isEmpty else { continue }
+                if let target, target.pid != nil, target.windowID != nil,
+                   target.bundleID.caseInsensitiveCompare(bundleID)
+                    == .orderedSame {
+                    continue
+                }
+                invalidateProof()
                 target = ActionCompletionTarget(
                     appName: actual,
                     bundleID: bundleID)
             }
         }
+    }
+
+    private mutating func invalidateProof() {
+        hadGoalVerification = false
+        localProof = nil
+        effectTarget = nil
+    }
+
+    private func receiptMatchesEffect(_ receipt: ActionStateReceipt) -> Bool {
+        guard receipt.pid > 0, receipt.windowID > 0,
+              !receipt.appName.isEmpty, !receipt.bundleID.isEmpty,
+              let effectTarget,
+              effectTarget.bundleID.caseInsensitiveCompare(receipt.bundleID)
+                == .orderedSame,
+              effectTarget.pid == receipt.pid,
+              effectTarget.windowID == receipt.windowID,
+              effectTarget.processIdentity == receipt.processIdentity
+        else { return false }
+        return true
     }
 }
 
@@ -121,7 +171,7 @@ final class ActionLoopRunner {
         // SystemActionHost persists across planner turns and user actions.
         // Draft ownership must cross turns in this run, but never leak into
         // the next action invocation.
-        host.beginActionInputSession()
+        host.beginActionInputSession(command: transcript)
         defer { host.endActionInputSession() }
         progress(.readingScreen)
         var context = context
@@ -243,7 +293,7 @@ final class ActionLoopRunner {
                             target: target)
                     }
                     return completionResult(
-                        goal: lockedGoal, trace: fullTrace,
+                        command: transcript, goal: lockedGoal, trace: fullTrace,
                         evidence: completionEvidence)
                 }
 
@@ -355,7 +405,8 @@ final class ActionLoopRunner {
                         || !needsBackgroundProof {
                         planner.end()
                         return completionResult(
-                            goal: lockedGoal, trace: fullTrace,
+                            command: transcript, goal: lockedGoal,
+                            trace: fullTrace,
                             evidence: completionEvidence)
                     }
                     guard turnsUsed < Self.maxTurns, host.now() < deadline else {
@@ -464,6 +515,7 @@ final class ActionLoopRunner {
     }
 
     private func completionResult(
+        command: String,
         goal: String,
         trace: [String],
         evidence: ActionCompletionEvidence
@@ -473,7 +525,10 @@ final class ActionLoopRunner {
                 reason: "the planner returned nothing effective to do",
                 trace: trace)
         }
-        if evidence.hadGoalVerification {
+        let localProofCoversGoal = evidence.localProof.map {
+            $0.covers(command)
+        } ?? true
+        if evidence.hadGoalVerification, localProofCoversGoal {
             return .completed(
                 goal: goal,
                 trace: trace,
@@ -494,7 +549,8 @@ final class ActionLoopRunner {
         else { return target }
         return ActionCompletionTarget(
             appName: window.name, bundleID: window.bundleID,
-            pid: window.pid, windowID: window.windowID)
+            pid: window.pid, windowID: window.windowID,
+            processIdentity: window.processIdentity)
     }
 
     private func routedTarget(
@@ -523,7 +579,8 @@ final class ActionLoopRunner {
         guard let target = host.actionWindow() else {
             return ActionCompletionTarget(
                 appName: process.name, bundleID: process.bundleID,
-                pid: process.pid, windowID: nil)
+                pid: process.pid, windowID: nil,
+                processIdentity: process.processIdentity)
         }
         guard let fresh = host.uiSnapshot(),
               fresh.source == .cua,
@@ -539,7 +596,8 @@ final class ActionLoopRunner {
         else { return nil }
         return ActionCompletionTarget(
             appName: process.name, bundleID: process.bundleID,
-            pid: process.pid, windowID: target.windowID)
+            pid: process.pid, windowID: target.windowID,
+            processIdentity: process.processIdentity)
     }
 
     /// What the model gets to look at between turns. Every string is read off

@@ -817,7 +817,7 @@ struct ShortcutsSettingsView: View {
                     Toggle(isOn: $model.backgroundActions) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Work in the background")
-                            Text("When an action targets another app, Velora drives it through your Cua Driver without taking over your screen or keyboard. Messaging apps and browsers still run in front.")
+                            Text("Velora drives an exact target through Cua while your current app stays in front. Unsupported actions stop without taking focus.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

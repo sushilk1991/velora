@@ -219,22 +219,25 @@ final class AgentTaskStore {
         durationMs: Int,
         completion: ((Bool) -> Void)? = nil
     ) {
-        let outcome: (status: AgentTaskStatus, goal: String, error: String, trace: [String])
+        let outcome: (
+            status: AgentTaskStatus, goal: String, error: String,
+            trace: [String], target: ActionCompletionTarget?
+        )
         switch result {
         case .planned(let plan):
-            outcome = (.planned, plan.goal, "", plan.describedSteps)
+            outcome = (.planned, plan.goal, "", plan.describedSteps, nil)
         case .needsSendApproval(let plan):
-            outcome = (.needsApproval, plan.goal, "", plan.describedSteps)
-        case .completed(let goal, let trace, _):
-            outcome = (.completed, goal, "", trace)
-        case .ready(let goal, let trace, _):
-            outcome = (.ready, goal, "", trace)
-        case .performedUnverified(let goal, let trace, _):
-            outcome = (.unverified, goal, "", trace)
+            outcome = (.needsApproval, plan.goal, "", plan.describedSteps, nil)
+        case .completed(let goal, let trace, let target):
+            outcome = (.completed, goal, "", trace, target)
+        case .ready(let goal, let trace, let target):
+            outcome = (.ready, goal, "", trace, target)
+        case .performedUnverified(let goal, let trace, let target):
+            outcome = (.unverified, goal, "", trace, target)
         case .failed(let reason, let trace):
-            outcome = (.failed, "", reason, trace)
+            outcome = (.failed, "", reason, trace, nil)
         case .cancelled:
-            outcome = (.cancelled, "", "", [])
+            outcome = (.cancelled, "", "", [], nil)
         }
 
         queue.async { [self] in
@@ -250,7 +253,10 @@ final class AgentTaskStore {
 
     private func finishOnQueue(
         taskID: String,
-        outcome: (status: AgentTaskStatus, goal: String, error: String, trace: [String]),
+        outcome: (
+            status: AgentTaskStatus, goal: String, error: String,
+            trace: [String], target: ActionCompletionTarget?
+        ),
         durationMs: Int
     ) -> Bool {
         guard db != nil,
@@ -292,14 +298,31 @@ final class AgentTaskStore {
             return false
         }
 
+        var finishedPayload: [String: Any] = [
+            "status": outcome.status.rawValue,
+            "error": Self.bounded(outcome.error, 500),
+        ]
+        if let target = outcome.target {
+            var targetPayload: [String: Any] = [
+                "app_name": Self.bounded(target.appName, 120),
+                "bundle_id": Self.bounded(target.bundleID, 256),
+            ]
+            if let pid = target.pid { targetPayload["pid"] = pid }
+            if let windowID = target.windowID {
+                targetPayload["window_id"] = windowID
+            }
+            if let process = target.processIdentity {
+                targetPayload["process_start_seconds"] = process.startSeconds
+                targetPayload["process_start_microseconds"] =
+                    process.startMicroseconds
+            }
+            finishedPayload["target"] = targetPayload
+        }
         guard insertEventOnQueue(
             taskID: taskID,
             kind: "finished",
             durationMs: max(0, durationMs),
-            payload: [
-                "status": outcome.status.rawValue,
-                "error": Self.bounded(outcome.error, 500),
-            ]) else { return false }
+            payload: finishedPayload) else { return false }
         for line in outcome.trace.suffix(ActionPlan.Limits.maxSteps) {
             guard insertEventOnQueue(
                 taskID: taskID,

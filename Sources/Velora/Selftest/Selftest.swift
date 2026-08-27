@@ -1978,6 +1978,116 @@ enum Selftest {
                && UserInputActivity.selectedWindow(after: clickGeneration) == 80,
                "a held pointer records the window the user selected")
         UserInputActivity.pointerReleased(0)
+        let targetWindowID = 700
+        let telegramWindowID = 701
+        let disabledGeneration = UserInputActivity.snapshot()
+        UserInputActivity.setReliable(false)
+        expect(
+            UserInputActivity.activity(
+                after: disabledGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID) == .unknown,
+            "an unavailable event monitor makes attribution unknown")
+        let disabledLease = UserInputActivity.snapshot()
+        UserInputActivity.invalidate()
+        UserInputActivity.setReliable(true)
+        expect(
+            UserInputActivity.activity(
+                after: disabledLease, targetPID: 7000,
+                targetWindowID: targetWindowID) == .unknown,
+            "tap disable poisons every active target lease")
+        let unchangedGeneration = UserInputActivity.snapshot()
+        expect(
+            UserInputActivity.activity(
+                after: unchangedGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .unchanged,
+            "no physical input leaves a target lease unchanged")
+
+        let telegramGeneration = UserInputActivity.snapshot()
+        let telegramKeyDown = UserInputActivity.keyPressed(1)
+        UserInputActivity.noteWindow(
+            telegramWindowID, at: telegramKeyDown)
+        let telegramKeyUp = UserInputActivity.keyReleased(1)
+        UserInputActivity.noteWindow(
+            telegramWindowID, at: telegramKeyUp)
+        expect(
+            UserInputActivity.activity(
+                after: telegramGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .unrelated,
+            "a Telegram key sequence is unrelated to the exact target window")
+
+        let telegramProcessGeneration = UserInputActivity.snapshot()
+        let telegramProcessInput = UserInputActivity.mark()
+        UserInputActivity.noteProcess(7001, at: telegramProcessInput)
+        expect(
+            UserInputActivity.activity(
+                after: telegramProcessGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .unrelated,
+            "a synchronously captured Telegram target process stays unrelated")
+
+        let targetProcessGeneration = UserInputActivity.snapshot()
+        let targetProcessInput = UserInputActivity.mark()
+        UserInputActivity.noteProcess(7000, at: targetProcessInput)
+        expect(
+            UserInputActivity.activity(
+                after: targetProcessGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .target,
+            "same-process keyboard input conservatively cancels the target")
+
+        let targetThenTelegram = UserInputActivity.snapshot()
+        let targetInput = UserInputActivity.mark()
+        UserInputActivity.noteWindow(
+            targetWindowID, at: targetInput)
+        let laterTelegramInput = UserInputActivity.mark()
+        UserInputActivity.noteWindow(
+            telegramWindowID, at: laterTelegramInput)
+        expect(
+            UserInputActivity.activity(
+                after: targetThenTelegram, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .target,
+            "later Telegram input never erases earlier target input")
+
+        let missingAttribution = UserInputActivity.snapshot()
+        let missingGeneration = UserInputActivity.mark()
+        expect(
+            UserInputActivity.activity(
+                after: missingAttribution, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .unknown,
+            "an unattributed physical-input generation fails closed")
+        UserInputActivity.noteWindow(telegramWindowID, at: missingGeneration)
+
+        let exactGeneration = UserInputActivity.snapshot()
+        let earlierTargetGeneration = UserInputActivity.mark()
+        let laterTelegramGeneration = UserInputActivity.mark()
+        UserInputActivity.noteWindow(
+            telegramWindowID, at: laterTelegramGeneration)
+        UserInputActivity.noteWindow(
+            targetWindowID, at: earlierTargetGeneration)
+        expect(
+            UserInputActivity.activity(
+                after: exactGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .target,
+            "window attribution updates its exact generation even when delayed")
+
+        let overflowGeneration = UserInputActivity.snapshot()
+        let ledgerOverflowCount = 128
+        for _ in 0..<ledgerOverflowCount {
+            let generation = UserInputActivity.mark()
+            UserInputActivity.noteWindow(
+                telegramWindowID, at: generation)
+        }
+        expect(
+            UserInputActivity.activity(
+                after: overflowGeneration, targetPID: 7000,
+                targetWindowID: targetWindowID)
+                == .unknown,
+            "input history overflow fails closed")
         expect(!HotkeyMonitor.modifierKeyIsDown(56, keyState: { $0 == 60 }),
                "one held Shift does not keep its released sibling active")
         expect(

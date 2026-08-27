@@ -190,6 +190,25 @@ evidence that route telemetry and toolkit classification matter, not a basis for
 calling those transports stable or App Store-safe. Global HID is incompatible
 with Velora's background coexistence requirement.
 
+### A narrow off-Space AX prime works on this Mac
+
+A live probe on macOS 26.5.2 found one bounded exception to the public-API
+limits above. Fresh Calculator, Calendar, and Dictionary windows on another
+Space sometimes remained present in WindowServer while Cua returned
+`degraded_reason=ax_window_unresolved`. Posting one SkyLight focus record to the
+exact PID/window made the AX tree readable; posting the paired defocus record
+removed the private focus state. The public foreground app and cursor stayed
+unchanged across 50 samples, and a Cua semantic click then changed Calculator's
+exact AX state without global input.
+
+This is an undocumented compatibility route, not general background input. It
+is safe enough to attempt only when the target PID generation, window ID,
+title, bounds, off-Space state, foreground lease, cursor lease, Accessibility,
+screen lock, and physical-input ledger are all current. It runs once, accepts
+only an unrelated foreground change such as Telegram, always posts defocus,
+and refuses on target or unattributed input. A stale app that still exposes no
+AX tree after the prime needs a restart; Velora must not quit it automatically.
+
 ## The universal-AX hypothesis is falsified
 
 Hypothesis: “Given an app PID and AX permission, the same semantic AX path can
@@ -304,8 +323,11 @@ Only `Postcondition.satisfied` completes the task. Examples:
 - Hidden/off-Space work is permitted only through a structured semantic route or
   an exact AX route when the leased window still exists in AX and the effect is
   readable.
-- Raw pointer and keyboard routes are unavailable for an off-Space or unresolved
-  target. Do not switch Spaces, restore, or materialize the app automatically.
+- An `ax_window_unresolved` target may receive one bounded exact-window AX prime
+  under the lease above. This does not switch Spaces, activate or raise the app,
+  move the cursor, or grant raw input. Every other degraded reason refuses.
+- Raw pointer and keyboard routes remain unavailable for an off-Space or
+  unresolved target.
 - If background launch yields no window, use a discovered semantic “new/open
   window” capability or return `requires_foreground`. “App is running” is not
   completion.

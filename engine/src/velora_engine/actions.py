@@ -311,7 +311,7 @@ VERBS = (
     "open_app", "open_url", "wait_frontmost", "verify_context",
     "type_text", "search_text", "key", "pause", "paste_text",
     "press_element", "press_ui", "verify_ui", "present_ui",
-    "media_control",
+    "media_control", "verify_state",
 )
 
 # Steps that put characters or keystrokes into another app. Each one requires a
@@ -703,10 +703,12 @@ Each step is one of:
 {"do":"press_element","label":"<visible label>"}         legacy fallback only when no structured UI snapshot exists
 {"do":"search_text","text":"<query>"}                    type navigation/search text into the focused search field; never message content
 {"do":"type_text","text":"<text>"}                       type text into the focused field (no newlines; paste_text works the same)
+{"do":"type_text","text":"<text>","index":12,"role":"AXTextArea","label":"<exact label>"} type into an exact source=cua editable (paste_text/search_text use the same identity fields)
 {"do":"key","key":"<name>","mods":["cmd", ...]}          press a key, optionally with modifiers
 {"do":"pause","ms":<milliseconds>}                       wait for the UI to settle
 {"do":"media_control","state":"play|pause","index":12,"role":"AXButton","label":"<exact label>"} set playback through the exact current Cua UI capability and verify it
 {"do":"media_control","state":"play|pause","capability":"<opaque id>"} set playback through an approved app-native capability and verify it
+{"do":"verify_state","index":12,"role":"AXTextArea","label":"<exact label>","assert":"written_text|selected"} verify one positive state after observing a successful mutation
 
 Bare key names: return, enter, tab, escape, up, down, left, right, home, end, page_up, page_down. Text entry uses type_text or paste_text, never bare character keys.
 Modifiers: cmd, shift, option, control.
@@ -724,6 +726,8 @@ Hard rules:
 10. When a step failed, inspect the fresh STRUCTURED UI and do something DIFFERENT. Never reuse a stale snapshot or repeat an unchanged failed step; choose another visible capability or reply {"fail": "..."}.
 11. When the observation shows the goal is already met, reply {"done": true} — no victory lap, no extra checks.
 12. For play or pause, open the requested player and observe its fresh STRUCTURED UI. Prefer media_control with the exact enabled Cua Play or Pause control. If none exists and the observation lists an opaque app-native media_control capability for the requested state, echo that exact capability id instead. Runtime binds either route to the observed PID/bundle and verifies the requested state without raising the app. If neither capability exists, fail immediately; never invent an id, guess a label, emit a global media key, loop, or use app-specific shortcuts.
+13. For a source=cua editable, copy index, role, and label exactly into type_text, paste_text, or search_text. Never invent or copy snapshot, PID, window, or token; the engine injects the current immutable snapshot identity.
+14. A source=cua tree may finish a prior mutation only with verify_state as the sole step and done=true. Copy index, role, label, and assert only. written_text checks the exact text this action typed; selected checks only a selected control named by the spoken command. Never add PID, window, value, booleans, predicates, timeouts, screenshots, or stability settings.
 
 The engine may insert an internal verify_ui evidence step after the separate target-verifier call. Never invent verify_ui yourself.
 
@@ -2015,6 +2019,103 @@ def _validate_verified_ui(step: dict, state: "SessionState | None") -> dict:
     return normalized
 
 
+_EDITABLE_CUA_ROLES = frozenset({
+    "AXTextArea", "AXTextField", "AXComboBox", "AXSearchField",
+})
+def _exact_cua_element(step: dict, state: "SessionState | None",
+                       verb: str) -> tuple[int, str, str, dict]:
+    if state is None or state.ui_snapshot_source != _UI_SOURCE_CUA:
+        raise PlanError(f"{verb}: exact element requires source=cua")
+    if (not state.ui_snapshot_id or not state.ui_snapshot_bundle_id
+            or state.ui_snapshot_window_id is None):
+        raise PlanError(f"{verb}: Cua snapshot has no exact app/window identity")
+    index = step.get("index")
+    if not isinstance(index, int) or isinstance(index, bool):
+        raise PlanError(f"{verb}: 'index' must be an integer")
+    element = state.ui_elements.get(index)
+    if element is None:
+        raise PlanError(f"{verb}: element [{index}] is not in that snapshot")
+    role = _require_str(step, "role", verb, 40)
+    label_raw = step.get("label")
+    if not isinstance(label_raw, str) or len(label_raw) > _MAX_UI_LABEL_CHARS:
+        raise PlanError(f"{verb}: missing or invalid 'label'")
+    label = " ".join(defang_context(_sanitize_text(label_raw)).split())
+    if role != element.get("role"):
+        raise PlanError(f"{verb}: element [{index}] role changed")
+    if normalized_term(label) != normalized_term(str(element.get("label") or "")):
+        raise PlanError(f"{verb}: element [{index}] label changed")
+    if element.get("enabled") is False:
+        raise PlanError(f"{verb}: element [{index}] is disabled")
+    if element.get("in_web_content") is True:
+        raise PlanError(f"{verb}: web content is not a trusted Cua target")
+    return index, role, label, element
+
+
+def _validate_cua_text(step: dict, state: "SessionState | None",
+                       verb: str, text: str) -> dict:
+    allowed = {"do", "text", "index", "role", "label"}
+    if set(step) - allowed:
+        raise PlanError(f"{verb}: planner supplied unsupported mechanics")
+    identity_keys = {"index", "role", "label"}
+    supplied = set(step) & identity_keys
+    if not supplied:
+        return {"do": verb, "text": text}
+    if supplied != identity_keys:
+        raise PlanError(f"{verb}: exact element identity is incomplete")
+    index, role, label, _ = _exact_cua_element(step, state, verb)
+    if role not in _EDITABLE_CUA_ROLES:
+        raise PlanError(f"{verb}: element [{index}] is not editable")
+    return {
+        "do": verb, "text": text, "snapshot": state.ui_snapshot_id,
+        "index": index, "role": role, "label": label,
+    }
+
+
+def _validate_verify_state(step: dict,
+                           state: "SessionState | None") -> dict:
+    allowed = {"do", "index", "role", "label", "assert"}
+    if set(step) != allowed:
+        raise PlanError(
+            "verify_state: planner supplied unsupported mechanics")
+    index, role, label, element = _exact_cua_element(
+        step, state, "verify_state")
+    assertion = step.get("assert")
+    if assertion not in ("written_text", "selected"):
+        raise PlanError(
+            "verify_state: 'assert' must be written_text or selected")
+    normalized = {
+        "do": "verify_state", "snapshot": state.ui_snapshot_id,
+        "index": index, "role": role, "label": label,
+        "assert": assertion,
+    }
+    if assertion == "written_text":
+        if role not in _EDITABLE_CUA_ROLES:
+            raise PlanError("verify_state: written_text requires an editable")
+        if not state.pending_value:
+            raise PlanError("verify_state: this action has no written text")
+        normalized["expected_value"] = state.pending_value
+        return normalized
+    if not label or not command_mentions_ui_label(label, state.spoken_command):
+        raise PlanError(
+            "verify_state: selected label was not named by the spoken command")
+    if element.get("selected") is not True:
+        raise PlanError("verify_state: selected state is not currently observed")
+    return normalized
+
+def turn_has_state_postcondition(parsed: dict,
+                                 session: "ActionSession") -> bool:
+    """A target-local state receipt never proves the whole spoken command."""
+    del parsed, session
+    return False
+
+
+def turn_has_exact_cua_text(parsed: dict,
+                            session: "ActionSession") -> bool:
+    """Exact Cua typing proves insertion, not arbitrary task completion."""
+    del parsed, session
+    return False
+
+
 def _validate_present_ui(step: dict, state: "SessionState | None",
                          declared_sends: object) -> dict:
     del step, state, declared_sends
@@ -2075,6 +2176,10 @@ class SessionState:
     total_text: int = 0
     unverified_text: bool = False
     pending_text: bool = False
+    # Exact text authored by this action and not yet committed. It is carried
+    # only to mint a closed runtime postcondition; it never enters screen
+    # context, visible-name pools, logs, or verifier prompts.
+    pending_value: str = ""
     # App identity is forbidden as a verify_context term because it proves
     # only which app is open, not which conversation/document is targeted.
     # Unlike focus, this identity must survive turns.
@@ -2137,6 +2242,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
     # True while typed text is sitting somewhere a committing key could
     # deliver it. Cleared only by the committing key itself.
     pending_text = state.pending_text if state else False
+    pending_value = state.pending_value if state else ""
     # False ONLY when the plan explicitly says so: drafts refuse committing
     # keys outright once text is pending — navigation goes through
     # press_element, never through a Return that might deliver.
@@ -2176,6 +2282,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             # old verification no longer describes where a Return would land.
             if pending_text:
                 unverified_text = True
+            pending_value = ""
         elif verb == "open_url":
             url = _validate_url(raw)
             _validate_url_fence(url, state.url_token_pool if state else None)
@@ -2185,6 +2292,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             ui_target_verified = False
             if pending_text:
                 unverified_text = True
+            pending_value = ""
         elif verb == "wait_frontmost":
             timeout = raw.get("timeout_ms", DEFAULT_WAIT_MS)
             if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
@@ -2201,6 +2309,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                     app_name_matches(current_app, app)
                     or app_name_matches(app, current_app)):
                 unverified_text = True
+                pending_value = ""
             current_app = app
             acquired_app = True
             steps.append({"do": verb, "app": app,
@@ -2217,6 +2326,11 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             unverified_text = False
             used_ui_attestation = True
             ui_target_verified = True
+        elif verb == "verify_state":
+            if len(raw_steps) != 1:
+                raise PlanError(
+                    "verify_state: must be the only step in its turn")
+            steps.append(_validate_verify_state(raw, state))
         elif verb == "media_control":
             requested = raw.get("state")
             if requested not in ("play", "pause"):
@@ -2273,10 +2387,14 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                 raise PlanError(
                     f"step {index}: '{verb}' would type message content before "
                     "the independent target verifier confirmed the active recipient")
-            steps.append({"do": verb, "text": text})
+            if state is not None and state.ui_snapshot_source == _UI_SOURCE_CUA:
+                steps.append(_validate_cua_text(raw, state, verb, text))
+            else:
+                steps.append({"do": verb, "text": text})
             if verb != "search_text":
                 unverified_text = True
                 pending_text = True
+                pending_value += text
         elif verb == "key":
             name, mods, repeat = _validate_key(raw)
             committing = name in COMMITTING_KEYS
@@ -2320,6 +2438,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             if committing:
                 unverified_text = False
                 pending_text = False
+                pending_value = ""
             elif mods and pending_text and not (
                     name == "c" and frozenset(mods) == frozenset(("cmd",))):
                 # Every allowed modified chord except Copy either moves focus,
@@ -2356,6 +2475,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             ui_target_verified = False
             if pending_text:
                 unverified_text = True
+                pending_value = ""
         elif verb == "press_ui":
             if index != len(raw_steps) - 1:
                 raise PlanError(
@@ -2366,6 +2486,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             ui_target_verified = False
             if pending_text:
                 unverified_text = True
+                pending_value = ""
         elif verb == "present_ui":
             if index != len(raw_steps) - 1 or len(raw_steps) != 1:
                 raise PlanError("present_ui: must be the only step in its turn")
@@ -2380,6 +2501,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
         state.total_text = total_text
         state.unverified_text = unverified_text
         state.pending_text = pending_text
+        state.pending_value = pending_value
         state.app_names.update(app_names)
         state.current_app = current_app
         if used_ui_attestation:
@@ -2697,6 +2819,16 @@ class ActionSession:
             raise PlanError(
                 "done: the first turn finished without doing anything — "
                 "either act on the command or reply {\"fail\": \"<why>\"}")
+
+        state_steps = [
+            step for step in parsed["steps"]
+            if isinstance(step, dict)
+            and str(step.get("do") or "").strip().lower() == "verify_state"
+        ]
+        if state_steps and (
+                parsed["done"] is not True or len(parsed["steps"]) != 1):
+            raise PlanError(
+                "verify_state: must be the sole terminal step with done=true")
 
         steps: list[dict] = []
         if parsed["steps"]:
