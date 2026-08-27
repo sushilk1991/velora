@@ -1385,7 +1385,10 @@ final class BackgroundRoutingActionHost: ActionHost {
         }
 
         let result = offSpacePrimer.withPrime(
-            pid: targetPID, windowID: targetWindowID ?? 0
+            pid: targetPID, windowID: targetWindowID ?? 0,
+            foregroundPID: lease.foreground.pid,
+            foregroundWindowID: lease.foreground.windowID,
+            validate: { self.primeLeaseIsLive(lease) }
         ) {
             for attempt in 0..<Self.primePollAttempts {
                 guard self.primeLeaseIsLive(lease) else { return false }
@@ -1428,6 +1431,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func capturePrimeLease() -> PrimeLease? {
+        let inputGeneration = UserInputActivity.snapshot()
         guard accessibilityGranted(), !SecureInput.isActive,
               !system.screenIsLocked,
               targetProcessIsCurrent(),
@@ -1443,10 +1447,21 @@ final class BackgroundRoutingActionHost: ActionHost {
               let window = exactOffSpaceWindow(),
               let cursor = cursorPosition()
         else { return nil }
+        guard case .unchanged = UserInputActivity.activity(
+                after: inputGeneration, targetPID: targetPID,
+                targetWindowID: targetWindowID ?? 0),
+              let frontAfter = system.frontmostApp(),
+              frontAfter.bundleID.caseInsensitiveCompare(front.bundleID)
+                == .orderedSame,
+              system.foregroundWindow() == foreground,
+              cursorPosition() == cursor,
+              processIdentity(targetPID) == process,
+              targetProcessIdentity == process,
+              exactOffSpaceWindow() == window
+        else { return nil }
         return PrimeLease(
             process: process, window: window, foreground: foreground,
-            cursor: cursor,
-            inputGeneration: UserInputActivity.snapshot())
+            cursor: cursor, inputGeneration: inputGeneration)
     }
 
     private func primeLeaseIsLive(_ lease: PrimeLease) -> Bool {
@@ -1500,7 +1515,9 @@ final class BackgroundRoutingActionHost: ActionHost {
             after: lease.inputGeneration, targetPID: targetPID,
             targetWindowID: targetWindowID ?? 0)
         switch activity {
-        case .unchanged, .unrelated:
+        case .unchanged:
+            return .restoreForeground
+        case .unrelated:
             return .defocus
         case .target:
             return userSelectedTarget(lease) ? .preserveUserFocus : .cancel

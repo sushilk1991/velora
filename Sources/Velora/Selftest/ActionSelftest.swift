@@ -59,6 +59,7 @@ final class FakeActionHost: ActionHost {
     var onStep: ((String) -> Void)?
     var onSleep: ((Int) -> Void)?
     var onForegroundWindowRead: (() -> Void)?
+    var foregroundWindowSequence: [ActionWindowIdentity?] = []
 
     private(set) var log: [String] = []
     private(set) var typed: [String] = []
@@ -80,6 +81,7 @@ final class FakeActionHost: ActionHost {
     private(set) var visibleNamesReads = 0
     private var uiSnapshotReads = 0
     private var frontmostReads = 0
+    private var foregroundWindowReads = 0
     private var clock: TimeInterval = 0
     private var actionDraft = ""
 
@@ -158,6 +160,11 @@ final class FakeActionHost: ActionHost {
     var foregroundWindowValue: ActionWindowIdentity?
     var onUISnapshotRead: ((Int) -> Void)?
     func foregroundWindow() -> ActionWindowIdentity? {
+        if foregroundWindowReads < foregroundWindowSequence.count {
+            let value = foregroundWindowSequence[foregroundWindowReads]
+            foregroundWindowReads += 1
+            return value
+        }
         onForegroundWindowRead?()
         return foregroundWindowValue
     }
@@ -4987,17 +4994,24 @@ final class FakeCuaTransport: CuaTransport {
 }
 
 final class FakeOffSpacePrimer: OffSpaceAXPriming {
-    private(set) var calls: [(pid: Int, windowID: Int)] = []
+    private(set) var calls: [(
+        pid: Int, windowID: Int,
+        foregroundPID: Int, foregroundWindowID: Int
+    )] = []
     private(set) var cleanup: [OffSpaceAXCleanup] = []
     var onPrime: (() -> Void)?
     var onCleanup: ((OffSpaceAXCleanup) -> Void)?
     var result = OffSpaceAXPrimeResult.observed
 
     func withPrime(
-        pid: Int, windowID: Int, observe: () -> Bool,
+        pid: Int, windowID: Int,
+        foregroundPID: Int, foregroundWindowID: Int,
+        validate: () -> Bool,
+        observe: () -> Bool,
         cleanup: () -> OffSpaceAXCleanup
     ) -> OffSpaceAXPrimeResult {
-        calls.append((pid, windowID))
+        calls.append((pid, windowID, foregroundPID, foregroundWindowID))
+        guard validate() else { return .focusFailed }
         onPrime?()
         let observed = observe()
         let decision = cleanup()
@@ -5369,81 +5383,191 @@ extension Selftest {
     }
 
     private static func testOffSpaceAXPrimer() {
-        var records: [[UInt8]] = []
+        func resolver() -> OffSpaceAXPrimer.ResolveWindowPSN {
+            { pid, _, output in
+                output.storeBytes(
+                    of: pid == 500 ? UInt64(42) : UInt64(77),
+                    as: UInt64.self)
+                return 0
+            }
+        }
+        func front(_ output: UnsafeMutableRawPointer) -> Int32 {
+            output.storeBytes(of: UInt64(77), as: UInt64.self)
+            return 0
+        }
+
+        var resolutions: [(pid: pid_t, windowID: UInt32)] = []
+        var records: [(psn: UInt64, bytes: [UInt8])] = []
         let primer = OffSpaceAXPrimer(
-            resolvePSN: { _, bytes in
-                bytes.storeBytes(of: UInt64(42), as: UInt64.self)
+            resolveWindowPSN: { pid, windowID, output in
+                resolutions.append((pid, windowID))
+                output.storeBytes(
+                    of: pid == 500 ? UInt64(42) : UInt64(77),
+                    as: UInt64.self)
                 return 0
             },
-            postRecord: { _, bytes in
-                records.append(Array(UnsafeBufferPointer(
-                    start: bytes, count: OffSpaceAXPrimer.recordBytes)))
+            getFrontPSN: front,
+            postRecord: { psn, bytes in
+                records.append((
+                    psn.load(as: UInt64.self),
+                    Array(UnsafeBufferPointer(
+                        start: bytes,
+                        count: OffSpaceAXPrimer.recordBytes))))
                 return 0
             })
         var observed = false
-        expect(primer.withPrime(pid: 500, windowID: 0x01020304) {
+        expect(primer.withPrime(
+            pid: 500, windowID: 0x01020304,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) {
             observed = true
             return true
-        } cleanup: { .defocus } == .observed,
+        } cleanup: { .restoreForeground } == .observed,
                "exact off-Space focus and cleanup both succeed")
-        expect(observed && records.count == 2,
-               "the semantic AX prime observes only between focus and defocus")
-        expect(records.first?[0x04] == 0xF8
-               && records.first?[0x08] == 0x0D
-               && records.first?[0x3C] == 0x04
-               && records.first?[0x3D] == 0x03
-               && records.first?[0x3E] == 0x02
-               && records.first?[0x3F] == 0x01
-               && records.first?[0x8A] == 0x01
-               && records.last?[0x8A] == 0x02,
-               "the focus lease addresses one exact window then defocuses it")
+        expect(observed && records.count == 4
+               && resolutions.map(\.pid) == [500, 700]
+               && resolutions.map(\.windowID) == [0x01020304, 70],
+               "the semantic AX prime observes inside one restored focus lease")
+        expect(records.map(\.psn) == [77, 42, 42, 77]
+               && records.map { $0.bytes[0x8A] } == [0x02, 0x01, 0x02, 0x01]
+               && records[1].bytes[0x04] == 0xF8
+               && records[1].bytes[0x08] == 0x0D
+               && records[1].bytes[0x3C] == 0x04
+               && records[1].bytes[0x3D] == 0x03
+               && records[1].bytes[0x3E] == 0x02
+               && records[1].bytes[0x3F] == 0x01
+               && records[3].bytes[0x3C] == 70,
+               "the lease defocuses previous, focuses target, then reverses it")
 
         var cleanupRecords = 0
         let cleanup = OffSpaceAXPrimer(
-            resolvePSN: { _, _ in 0 },
+            resolveWindowPSN: resolver(), getFrontPSN: front,
             postRecord: { _, _ in
                 cleanupRecords += 1
                 return 0
             })
-        expect(cleanup.withPrime(pid: 500, windowID: 9) { false }
-               cleanup: { .defocus } == .observationFailed
-               && cleanupRecords == 2,
-               "a failed observation still sends the exact target defocus")
+        expect(cleanup.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { false } cleanup: { .restoreForeground } == .observationFailed
+               && cleanupRecords == 4,
+               "a failed observation still restores the exact foreground")
 
         var failedFocusRecords = 0
         let failedFocus = OffSpaceAXPrimer(
-            resolvePSN: { _, _ in 0 },
+            resolveWindowPSN: resolver(), getFrontPSN: front,
             postRecord: { _, _ in
                 failedFocusRecords += 1
-                return failedFocusRecords == 1 ? -1 : 0
+                return failedFocusRecords == 2 ? -1 : 0
             })
-        expect(failedFocus.withPrime(pid: 500, windowID: 9) { true }
-               cleanup: { .defocus } == .focusFailed
-               && failedFocusRecords == 2,
-               "a rejected focus post still gets best-effort exact defocus")
+        expect(failedFocus.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { true } cleanup: { .restoreForeground } == .focusFailed
+               && failedFocusRecords == 4,
+               "a rejected focus post gets exact target and foreground cleanup")
 
         var failedDefocusRecords = 0
         let failedDefocus = OffSpaceAXPrimer(
-            resolvePSN: { _, _ in 0 },
+            resolveWindowPSN: resolver(), getFrontPSN: front,
             postRecord: { _, _ in
                 failedDefocusRecords += 1
-                return failedDefocusRecords == 2 ? -1 : 0
+                return failedDefocusRecords == 3 ? -1 : 0
             })
-        expect(failedDefocus.withPrime(pid: 500, windowID: 9) { true }
-               cleanup: { .defocus } == .cleanupFailed,
+        expect(failedDefocus.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { true } cleanup: { .restoreForeground } == .cleanupFailed
+               && failedDefocusRecords == 4,
                "a failed exact defocus cannot report a successful prime")
 
         var occupiedRecords = 0
         let occupied = OffSpaceAXPrimer(
-            resolvePSN: { _, _ in 0 },
+            resolveWindowPSN: resolver(), getFrontPSN: front,
             postRecord: { _, _ in
                 occupiedRecords += 1
                 return 0
             })
-        expect(occupied.withPrime(pid: 500, windowID: 9) { true }
-               cleanup: { .preserveUserFocus } == .userEnteredTarget
-               && occupiedRecords == 1,
+        expect(occupied.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { true } cleanup: { .preserveUserFocus } == .userEnteredTarget
+               && occupiedRecords == 2,
                "an exact user-selected target keeps the user's new focus")
+
+        var unrelatedPSNs: [UInt64] = []
+        let unrelated = OffSpaceAXPrimer(
+            resolveWindowPSN: resolver(), getFrontPSN: front,
+            postRecord: { psn, _ in
+                unrelatedPSNs.append(psn.load(as: UInt64.self))
+                return 0
+            })
+        expect(unrelated.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { true } cleanup: { .defocus } == .observed
+               && unrelatedPSNs == [77, 42, 42],
+               "unrelated user focus is never replaced by the stale foreground")
+
+        var mismatchPosts = 0
+        let mismatch = OffSpaceAXPrimer(
+            resolveWindowPSN: resolver(),
+            getFrontPSN: { output in
+                output.storeBytes(of: UInt64(88), as: UInt64.self)
+                return 0
+            },
+            postRecord: { _, _ in
+                mismatchPosts += 1
+                return 0
+            })
+        expect(mismatch.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { true } cleanup: { .restoreForeground } == .focusFailed
+               && mismatchPosts == 0,
+               "foreground identity drift refuses before any focus record")
+
+        var foreignPosts = 0
+        let foreign = OffSpaceAXPrimer(
+            resolveWindowPSN: { pid, _, output in
+                guard pid != 500 else { return -1 }
+                output.storeBytes(of: UInt64(77), as: UInt64.self)
+                return 0
+            },
+            getFrontPSN: front,
+            postRecord: { _, _ in
+                foreignPosts += 1
+                return 0
+            })
+        expect(foreign.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { true }
+        ) { true } cleanup: { .restoreForeground } == .focusFailed
+               && foreignPosts == 0,
+               "a window not owned by the requested PID receives no record")
+
+        var driftPosts = 0
+        let drift = OffSpaceAXPrimer(
+            resolveWindowPSN: resolver(), getFrontPSN: front,
+            postRecord: { _, _ in
+                driftPosts += 1
+                return 0
+            })
+        expect(drift.withPrime(
+            pid: 500, windowID: 9,
+            foregroundPID: 700, foregroundWindowID: 70,
+            validate: { false }
+        ) { true } cleanup: { .restoreForeground } == .focusFailed
+               && driftPosts == 0,
+               "last-moment lease drift refuses before any focus record")
     }
 
     private static func testOffSpaceAXRecovery() {
@@ -5498,6 +5622,38 @@ extension Selftest {
                && transport.callCount("bring_to_front") == 0,
                "AX materialization leaves the user's foreground untouched")
 
+        // A same-app window switch during capture must not be hidden by a
+        // later input snapshot or restore the window that lost foreground.
+        let captureSystem = FakeActionHost()
+        captureSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        captureSystem.foregroundWindowSequence = [
+            ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70),
+            ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 71),
+        ]
+        let captureTransport = FakeCuaTransport()
+        scriptNotesWorld(captureTransport)
+        captureTransport.responses["list_windows"]
+            = transport.responses["list_windows"]
+        captureTransport.responses["get_window_state"] = [
+            "degraded": true, "degraded_reason": "ax_window_unresolved",
+            "elements": [],
+        ]
+        let capturePrimer = FakeOffSpacePrimer()
+        let captureHost = makeRoutedHost(
+            system: captureSystem, transport: captureTransport,
+            offSpacePrimer: capturePrimer,
+            processIdentity: { $0 == 500 ? identity : nil })
+        captureHost.beginActionInputSession(command: "open My Note")
+        _ = captureHost.openApp(named: "Notes")
+        _ = captureHost.frontmostApp()
+        expect(capturePrimer.calls.isEmpty
+               && captureHost.actionFailureReason != nil,
+               "foreground window drift during capture posts no focus record")
+
         let publicSystem = FakeActionHost()
         publicSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         publicSystem.foregroundWindowValue = ActionWindowIdentity(
@@ -5520,7 +5676,7 @@ extension Selftest {
                 pid: 500, windowID: 9)
         }
         publicPrimer.onCleanup = { decision in
-            guard decision == .defocus else { return }
+            guard decision == .restoreForeground else { return }
             publicSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
             publicSystem.foregroundWindowValue = ActionWindowIdentity(
                 name: "Ghostty", bundleID: "com.mitchellh.ghostty",
@@ -5533,7 +5689,7 @@ extension Selftest {
         publicHost.beginActionInputSession(command: "open My Note")
         _ = publicHost.openApp(named: "Notes")
         expect(publicHost.frontmostApp() == nil
-               && publicPrimer.cleanup == [.defocus]
+               && publicPrimer.cleanup == [.restoreForeground]
                && publicSystem.frontmost?.name == "Ghostty",
                "a public-focus leak is restored and aborts the observation")
 
