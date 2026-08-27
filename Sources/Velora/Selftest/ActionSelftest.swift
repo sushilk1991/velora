@@ -2441,15 +2441,14 @@ extension Selftest {
             .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
             [{"do":"wait_frontmost","app":"Slack"}]
             """), done: true),
-            .turn(sends: false, goal: "", steps: [], done: true),
         ])
         let terminalResult = ActionLoopRunner(
             host: terminalHost, planner: terminalPlanner,
             execute: true, allowSend: false
         ).run(transcript: "Open Slack", context: loopContext())
         expect(terminalHost.presentUICalls == 0
-               && terminalPlanner.observations.count == 1,
-               "an exact background route completes without stealing focus")
+               && terminalPlanner.observations.isEmpty,
+               "fresh exact background proof completes without another turn")
         expect(terminalHost.windowTitleReads == 0
                && terminalHost.elementLabelReads == 0
                && terminalHost.focusedRoleReads == 0
@@ -2480,7 +2479,7 @@ extension Selftest {
                 windowID: 46, complete: false, elements: [])
         }
         staleHost.onUISnapshotRead = { [weak staleHost] read in
-            if read == 3 { staleHost?.frontmost = nil }
+            if read == 2 { staleHost?.frontmost = nil }
         }
         let stalePlanner = FakeTurnPlanner(turns: [
             .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""

@@ -340,6 +340,20 @@ final class ActionLoopRunner {
                             goal: lockedGoal, trace: fullTrace,
                             evidence: completionEvidence)
                     }
+                    // `wait_frontmost` already proved the routed app is
+                    // ready. Recheck its exact PID/window now; requiring an
+                    // empty planner turn made a valid result depend on luck.
+                    if done, let target = routedTarget(
+                        transcript: transcript,
+                        state: carried,
+                        sends: lockedSends
+                    ) {
+                        planner.end()
+                        return .ready(
+                            goal: lockedGoal,
+                            trace: fullTrace,
+                            target: target)
+                    }
                     guard turnsUsed < Self.maxTurns, host.now() < deadline else {
                         planner.end()
                         return .failed(
