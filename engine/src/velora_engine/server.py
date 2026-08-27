@@ -3166,8 +3166,20 @@ class Engine:
                             else:
                                 raise actions.PlanError(
                                     "UI action reviewer refused: " + reason)
-                    if (review_refusal_reason
-                            or actions.turn_requires_goal_verifier(parsed, session)):
+                    needs_goal_review = (
+                        bool(review_refusal_reason)
+                        or actions.turn_requires_goal_verifier(parsed, session))
+                    can_review_refusal = (
+                        session.current_ui_snapshot.get("complete") is True
+                        and actions.goal_snapshot_is_native(
+                            session.current_ui_snapshot))
+                    # A refused action is never executed. When its tree cannot
+                    # support native completion proof, return an evidence-free
+                    # terminal turn; the Swift runtime then reports prior
+                    # effects as unverified or refuses success when none ran.
+                    if (needs_goal_review
+                            and (not review_refusal_reason
+                                 or can_review_refusal)):
                         if not session.current_ui_snapshot.get("complete"):
                             authoritative_ui_refusal = bool(
                                 review_refusal_reason)

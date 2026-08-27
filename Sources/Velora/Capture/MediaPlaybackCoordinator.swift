@@ -18,6 +18,7 @@ final class MediaPlaybackCoordinator {
         var inputProcesses: Set<AudioObjectID>
         var isComplete: Bool
         var bundleIDs: [AudioObjectID: String]
+        var pids: [AudioObjectID: Int]
 
         init(
             processes: Set<AudioObjectID>,
@@ -25,7 +26,8 @@ final class MediaPlaybackCoordinator {
             allPlaying: Set<AudioObjectID>? = nil,
             inputProcesses: Set<AudioObjectID> = [],
             isComplete: Bool = true,
-            bundleIDs: [AudioObjectID: String] = [:]
+            bundleIDs: [AudioObjectID: String] = [:],
+            pids: [AudioObjectID: Int] = [:]
         ) {
             self.processes = processes
             self.playing = playing
@@ -33,6 +35,7 @@ final class MediaPlaybackCoordinator {
             self.inputProcesses = inputProcesses
             self.isComplete = isComplete
             self.bundleIDs = bundleIDs
+            self.pids = pids
         }
 
         func allAreBrowsers(_ processIDs: Set<AudioObjectID>) -> Bool {
@@ -318,6 +321,8 @@ final class MediaPlaybackCoordinator {
 }
 
 enum MediaPlaybackSystem {
+    private static let controlPollMs = 200
+    private static let controlAttempts = 15
     /// Dedicated communication clients are system audio, but not media. Direct
     /// dictation must not send them a play/pause command, and meeting capture
     /// never invokes this coordinator at all.
@@ -348,12 +353,15 @@ enum MediaPlaybackSystem {
         var allPlaying = Set<AudioObjectID>()
         var inputProcesses = Set<AudioObjectID>()
         var bundleIDs: [AudioObjectID: String] = [:]
+        var pids: [AudioObjectID: Int] = [:]
         var isComplete = true
         let ownBundleID = Bundle.main.bundleIdentifier ?? "com.sushil.velora"
         for process in processObjects() {
             let bundleID = stringProperty(process, kAudioProcessPropertyBundleID)
             guard let bundleID, bundleID != ownBundleID else { continue }
-            guard let isRunningOutput = uint32Property(
+            guard let rawPID = uint32Property(
+                      process, kAudioProcessPropertyPID), rawPID > 0,
+                  let isRunningOutput = uint32Property(
                       process, kAudioProcessPropertyIsRunningOutput),
                   let isRunningInput = uint32Property(
                       process, kAudioProcessPropertyIsRunningInput)
@@ -363,6 +371,7 @@ enum MediaPlaybackSystem {
             }
             processes.insert(process)
             bundleIDs[process] = bundleID
+            pids[process] = Int(rawPID)
             if isRunningInput != 0 { inputProcesses.insert(process) }
             guard isRunningOutput != 0 else { continue }
             allPlaying.insert(process)
@@ -373,7 +382,105 @@ enum MediaPlaybackSystem {
         return .init(
             processes: processes, playing: playing, allPlaying: allPlaying,
             inputProcesses: inputProcesses, isComplete: isComplete,
-            bundleIDs: bundleIDs)
+            bundleIDs: bundleIDs, pids: pids)
+    }
+
+    /// Sets the requested state through one hardware-faithful toggle, then
+    /// proves the exact bundle/PID reached that postcondition. Other possible
+    /// Now Playing owners make the command ambiguous before anything is sent.
+    static func setPlayback(
+        _ requested: ActionMediaState,
+        bundleID: String,
+        pid: Int,
+        read: () -> MediaPlaybackCoordinator.Snapshot = snapshot,
+        post: () -> Bool = postPlayPause,
+        sleep: (Int) -> Void = { milliseconds in
+            Thread.sleep(forTimeInterval: Double(milliseconds) / 1_000)
+        }
+    ) -> ActionMediaControlResult {
+        guard isAutomaticPlaybackCandidate(bundleID: bundleID) else {
+            return .unavailable
+        }
+        var before = read()
+        var target = targetProcesses(
+            in: before, bundleID: bundleID, pid: pid)
+        for attempt in 0..<controlAttempts where target.isEmpty {
+            guard before.isComplete, attempt + 1 < controlAttempts else {
+                return .unavailable
+            }
+            sleep(controlPollMs)
+            before = read()
+            target = targetProcesses(
+                in: before, bundleID: bundleID, pid: pid)
+        }
+        guard before.isComplete, !target.isEmpty else { return .unavailable }
+        if playbackMatches(requested, target: target, snapshot: before) {
+            return .verified
+        }
+        let competing = before.mediaKeyTargets(in: before.processes)
+            .subtracting(target)
+        guard competing.isEmpty else { return .ambiguous }
+        guard post() else { return .unavailable }
+
+        for _ in 0..<controlAttempts {
+            sleep(controlPollMs)
+            let after = read()
+            guard after.isComplete else { return .unavailable }
+            let liveTarget = targetProcesses(
+                in: after, bundleID: bundleID, pid: pid)
+            guard !liveTarget.isEmpty else { return .unavailable }
+            let unexpected = after.mediaKeyTargets(in: after.allPlaying)
+                .subtracting(liveTarget)
+            if !unexpected.isEmpty {
+                // A second toggle is the only generic compensation for a
+                // global media key that reached a different Now Playing app.
+                guard post() else { return .misdirected }
+                for _ in 0..<controlAttempts {
+                    sleep(controlPollMs)
+                    let restored = read()
+                    guard restored.isComplete else { return .misdirected }
+                    let restoredTarget = targetProcesses(
+                        in: restored, bundleID: bundleID, pid: pid)
+                    guard !restoredTarget.isEmpty else { return .misdirected }
+                    let remaining = restored.mediaKeyTargets(
+                        in: restored.allPlaying).subtracting(restoredTarget)
+                    guard remaining.isEmpty else { continue }
+                    if playbackMatches(
+                        requested, target: restoredTarget,
+                        snapshot: restored) {
+                        return .verified
+                    }
+                    return .compensated
+                }
+                return .misdirected
+            }
+            if playbackMatches(
+                requested, target: liveTarget, snapshot: after) {
+                return .verified
+            }
+        }
+        return .misdirected
+    }
+
+    private static func targetProcesses(
+        in snapshot: MediaPlaybackCoordinator.Snapshot,
+        bundleID: String,
+        pid: Int
+    ) -> Set<AudioObjectID> {
+        snapshot.processes.filter {
+            snapshot.pids[$0] == pid
+                && snapshot.bundleIDs[$0]?.caseInsensitiveCompare(bundleID)
+                    == .orderedSame
+        }
+    }
+
+    private static func playbackMatches(
+        _ requested: ActionMediaState,
+        target: Set<AudioObjectID>,
+        snapshot: MediaPlaybackCoordinator.Snapshot
+    ) -> Bool {
+        let isPlaying = !target.isDisjoint(with: snapshot.playing)
+        return requested == .play ? isPlaying : !isPlaying
     }
 
     private static func mediaFamily(_ bundleID: String) -> String? {

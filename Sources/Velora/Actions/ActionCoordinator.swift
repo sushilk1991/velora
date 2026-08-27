@@ -249,6 +249,8 @@ extension ActionPlan {
             case .pressElement(let label): return "press \"\(label)\" on screen"
             case .pressUI(_, let index, let role, let label):
                 return "press [\(index)] \(role) \"\(label)\" on screen"
+            case .mediaControl(let state):
+                return "set media playback to \(state.rawValue)"
             }
         }
     }

@@ -311,6 +311,7 @@ VERBS = (
     "open_app", "open_url", "wait_frontmost", "verify_context",
     "type_text", "search_text", "key", "pause", "paste_text",
     "press_element", "press_ui", "verify_ui", "present_ui",
+    "media_control",
 )
 
 # Steps that put characters or keystrokes into another app. Each one requires a
@@ -326,7 +327,7 @@ FOCUS_VERBS = ("wait_frontmost", "verify_context")
 # because Music is in front.
 EFFECTIVE_VERBS = ("open_app", "open_url", "type_text", "paste_text",
                    "search_text", "key", "press_element", "press_ui",
-                   "present_ui")
+                   "present_ui", "media_control")
 # press_element also acts on the frontmost app, so it needs the same checkpoint
 # — but it is not an input verb: it performs an AX action, not a keystroke.
 FOCUS_REQUIRED_VERBS = INPUT_VERBS + ("press_element", "press_ui")
@@ -670,6 +671,7 @@ Each step is one of:
 {"do":"type_text","text":"<text>"}                       type text into the focused field (no newlines; paste_text works the same)
 {"do":"key","key":"<name>","mods":["cmd", ...]}          press a key, optionally with modifiers
 {"do":"pause","ms":<milliseconds>}                       wait for the UI to settle
+{"do":"media_control","state":"play|pause"}             set the acquired app's playback state and verify it
 
 Bare key names: return, enter, tab, escape, up, down, left, right, home, end, page_up, page_down. Text entry uses type_text or paste_text, never bare character keys.
 Modifiers: cmd, shift, option, control.
@@ -686,6 +688,7 @@ Hard rules:
 9. Speech recognition mishears names. If the observation shows a name spelled differently from what you heard and the two clearly sound alike ("Hermes" heard for "Himesh"), use the SCREEN'S spelling in type_text, press_element, and verify_context. Never swap in an unrelated name.
 10. When a step failed, inspect the fresh STRUCTURED UI and do something DIFFERENT. Never reuse a stale snapshot or repeat an unchanged failed step; choose another visible capability or reply {"fail": "..."}.
 11. When the observation shows the goal is already met, reply {"done": true} — no victory lap, no extra checks.
+12. For play or pause, open the requested player and use media_control. It is idempotent and runtime-verified; never loop on wait_frontmost, press a guessed Play label, or use app-specific shortcuts.
 
 The engine may insert an internal verify_ui evidence step after the separate target-verifier call. Never invent verify_ui yourself.
 
@@ -2079,6 +2082,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
     total_pause = 0  # per batch: pauses bound UI settling, not the session
     app_names = list(state.app_names) if state else []
     current_app = state.current_app if state else ""
+    acquired_app = False
     # True once text has been typed that a Return would commit, and no
     # verify_context has run since it last changed or the screen moved.
     unverified_text = state.unverified_text if state else False
@@ -2114,6 +2118,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             app = _require_str(raw, "app", verb, 120)
             app_names.append(app)
             current_app = app
+            acquired_app = True
             steps.append({"do": verb, "app": app})
             # Switching apps invalidates any earlier checkpoint: activation is
             # advisory, so the plan must confirm the app arrived before typing.
@@ -2149,6 +2154,7 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                     or app_name_matches(app, current_app)):
                 unverified_text = True
             current_app = app
+            acquired_app = True
             steps.append({"do": verb, "app": app,
                           "timeout_ms": min(timeout, MAX_WAIT_MS)})
             focus_established = True
@@ -2163,6 +2169,15 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
             unverified_text = False
             used_ui_attestation = True
             ui_target_verified = True
+        elif verb == "media_control":
+            requested = raw.get("state")
+            if requested not in ("play", "pause"):
+                raise PlanError(
+                    f"step {index}: media_control state must be play or pause")
+            if not acquired_app or not current_app:
+                raise PlanError(
+                    f"step {index}: media_control has no acquired app target")
+            steps.append({"do": verb, "state": requested})
         elif verb in ("type_text", "paste_text", "search_text"):
             text = _validate_text_step(raw, verb)
             total_text += len(text)

@@ -5,6 +5,11 @@ enum ActionPresentationScope: Equatable {
     case app
 }
 
+enum ActionMediaState: String, Equatable {
+    case play
+    case pause
+}
+
 /// One primitive the executor can perform. The vocabulary is closed by design:
 /// there is no shell step, no script step, and no raw-coordinate click, so the
 /// worst a bad plan can do is open the wrong app or type into a window the
@@ -38,6 +43,9 @@ enum ActionStep: Equatable {
     /// Exact native AX or Cua driver capability selected from a structured UI
     /// snapshot. Runtime refuses stale snapshot/app/window/label/role identity.
     case pressUI(snapshotID: String, index: Int, role: String, label: String)
+    /// Idempotent system media command bound at runtime to the exact acquired
+    /// app process. No scripts, app names, or raw media-key toggles enter plans.
+    case mediaControl(ActionMediaState)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
@@ -726,6 +734,7 @@ extension ActionPlan {
         var totalPause = 0  // per batch: pauses bound UI settling, not the action
         var appNames = Array(state.appNames)
         var currentApp = state.currentApp
+        var acquiredApp = false
         /// True once text has been typed that a Return would commit, with no
         /// verify_context since it changed or the screen moved. Seeded from
         /// the previous turns.
@@ -759,6 +768,7 @@ extension ActionPlan {
                 let app = String(try string("app").prefix(120))
                 appNames.append(app)
                 currentApp = app
+                acquiredApp = true
                 steps.append(.openApp(app))
                 // Switching apps invalidates any earlier checkpoint: the plan
                 // must confirm the app actually came forward before typing —
@@ -831,6 +841,7 @@ extension ActionPlan {
                 let app = String(try string("app").prefix(120))
                 appNames.append(app)
                 currentApp = app
+                acquiredApp = true
                 steps.append(.waitFrontmost(app: app, timeoutMs: timeout))
                 focusEstablished = true
                 uiTargetVerified = false
@@ -1033,6 +1044,15 @@ extension ActionPlan {
                     throw ActionPlanError.pauseOutOfRange(totalPause)
                 }
                 steps.append(.pause(ms: ms))
+
+            case "media_control":
+                guard let rawState = step["state"] as? String,
+                      let requested = ActionMediaState(rawValue: rawState),
+                      acquiredApp, !currentApp.isEmpty else {
+                    throw ActionPlanError.missingField(
+                        step: index, field: "state or acquired app")
+                }
+                steps.append(.mediaControl(requested))
 
             case "press_element":
                 guard focusEstablished else {

@@ -1291,6 +1291,47 @@ async def test_partial_ui_reviewer_cannot_claim_goal_met(engine):
     assert len(eng.cleanup.calls) == 4
 
 
+async def test_partial_ui_refusal_preserves_prior_runtime_effect(engine):
+    eng, sock = engine
+    first = turn(
+        [{"do": "open_app", "app": "WhatsApp"}],
+        goal="open Shivangi Gupta on WhatsApp", sends=False)
+    proposed = turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+         "role": "AXButton", "label": "Shivangi Gupta"},
+    ])
+    refusal = json.dumps({
+        "safe": False,
+        "reason": "the partial tree cannot prove that press is navigation",
+    })
+    eng.cleanup = FakePlanner(first, proposed, refusal)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(
+        client,
+        transcript="open Shivangi Gupta on WhatsApp",
+        context={"frontmost_app": "Sublime Text",
+                 "frontmost_bundle": "com.sublimetext.4",
+                 "running_apps": ["WhatsApp", "Sublime Text"]},
+    )
+    await client.recv_event("action_turn")
+    partial = _structured_ui(active="Shivangi Gupta")
+    partial["complete"] = False
+    await send_observe(client, observation=observation(
+        frontmost_app="WhatsApp",
+        frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=partial,
+        executed=["open_app WhatsApp"],
+    ))
+
+    event = await client.recv_event("action_turn")
+
+    assert event["done"] is True
+    assert event["steps"] == []
+    assert len(eng.cleanup.calls) == 3
+
+
 async def test_ui_action_reviewer_replaces_active_header_press_with_proof(engine):
     eng, sock = engine
     first = turn(
@@ -4272,3 +4313,45 @@ def test_press_denylist_web_commit_verbs():
     for label in ["Saved Messages", "Renewals FAQ", "Subscriptions overview",
                   "Priya Sharma", "Cancelled orders"]:
         assert not actions.press_label_is_committing(label), label
+
+
+def test_media_control_is_closed_and_effective():
+    plan = actions.validate_plan({
+        "goal": "play music",
+        "sends": False,
+        "steps": [
+            {"do": "open_app", "app": "Music"},
+            {"do": "media_control", "state": "play"},
+        ],
+    })
+    assert plan["steps"][-1] == {"do": "media_control", "state": "play"}
+    assert "media_control" in actions.EFFECTIVE_VERBS
+
+    with pytest.raises(actions.PlanError):
+        actions.validate_plan({
+            "goal": "change music",
+            "sends": False,
+            "steps": [{"do": "open_app", "app": "Music"},
+                      {"do": "media_control", "state": "next"}],
+        })
+
+    inherited = actions.SessionState(current_app="Spotify")
+    with pytest.raises(actions.PlanError):
+        actions.validate_plan({
+            "goal": "play music",
+            "sends": False,
+            "steps": [{"do": "media_control", "state": "play"}],
+        }, inherited)
+
+
+def test_media_control_keeps_runtime_goal_verification():
+    sess = actions.ActionSession(
+        "play music", actions.ActionContext(), require_target_verifier=True)
+    sess.turns_used = 1
+    parsed = {
+        "sends": False,
+        "steps": [{"do": "media_control", "state": "play"}],
+        "done": True,
+    }
+    assert not actions.turn_requires_goal_verifier(parsed, sess)
+    assert "media_control" in actions.PLANNER_RULES

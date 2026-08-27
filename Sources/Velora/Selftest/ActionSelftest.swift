@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreAudio
 import Foundation
 
 /// Scripted stand-in for the machine, so the executor's safety logic can be
@@ -44,6 +45,8 @@ final class FakeActionHost: ActionHost {
     var keyPressSucceeds = true
     var openURLSucceeds = true
     var presentUISucceeds = false
+    var actionProcessValue: ActionProcessIdentity?
+    var mediaControlResult = ActionMediaControlResult.unavailable
     var interactionState = ActionInteractionState.ready
     var exactOpenDefers = false
     var exactOpenRequiresInactive = false
@@ -66,6 +69,7 @@ final class FakeActionHost: ActionHost {
     private(set) var sleepCalls: [Int] = []
     private(set) var endInputCount = 0
     private(set) var presentUICalls = 0
+    private(set) var mediaControlCalls: [ActionMediaState] = []
     private(set) var interactionCalls = 0
     private(set) var windowTitleReads = 0
     private(set) var elementLabelReads = 0
@@ -120,6 +124,24 @@ final class FakeActionHost: ActionHost {
         log.append("openURL(\(url.absoluteString))")
         openedURLs.append(url)
         return openURLSucceeds
+    }
+
+    func actionProcess() -> ActionProcessIdentity? {
+        if let actionProcessValue { return actionProcessValue }
+        guard let frontmost else { return nil }
+        let matches = appsByPID.filter {
+            $0.value.bundleID.caseInsensitiveCompare(frontmost.bundleID)
+                == .orderedSame
+        }
+        guard matches.count == 1, let match = matches.first else { return nil }
+        return ActionProcessIdentity(
+            name: match.value.name, bundleID: match.value.bundleID,
+            pid: match.key)
+    }
+
+    func mediaControl(_ state: ActionMediaState) -> ActionMediaControlResult {
+        mediaControlCalls.append(state)
+        return mediaControlResult
     }
 
     func frontmostApp() -> (name: String, bundleID: String)? {
@@ -393,6 +415,7 @@ extension Selftest {
         testActionExecutorHappyPath()
         testActionExecutorSafetyRails()
         testWaitFrontmostBringsTheAppForward()
+        testMediaActionControl()
         testActionExecutorPressElement()
         testStructuredUIContract()
         testActionLoopRecovery()
@@ -1909,6 +1932,53 @@ extension Selftest {
         }
         expect(stuckPlanner.observations.count == 1,
                "the third identical runtime attempt is never requested")
+
+        let noProgressHost = FakeActionHost()
+        noProgressHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        let waitingOnly = jsonSteps("""
+        [{"do":"wait_frontmost","app":"WhatsApp"}]
+        """)
+        let noProgressPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open a chat", steps: waitingOnly, done: false),
+            .turn(sends: false, goal: "", steps: waitingOnly, done: false),
+            .failure(reason: "planner should not be asked again", code: "failed"),
+        ])
+        let noProgress = ActionLoopRunner(
+            host: noProgressHost, planner: noProgressPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open a chat", context: loopContext())
+        if case .failed(let reason, _) = noProgress {
+            expect(reason.contains("without changing the target state"),
+                   "successful repeated no-progress plans stop after two turns")
+        } else {
+            expect(false, "successful no-progress must not consume all turns")
+        }
+        expect(noProgressPlanner.observations.count == 1,
+               "unchanged successful work is observed only once")
+
+        let changingHost = FakeActionHost()
+        changingHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
+        changingHost.visibleNamesValue = ["Loading"]
+        let changingPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open a chat", steps: waitingOnly, done: false),
+            .turn(sends: false, goal: "", steps: waitingOnly, done: false),
+            .failure(reason: "semantic change observed", code: "failed"),
+        ])
+        changingPlanner.onObserve = { _ in
+            changingHost.visibleNamesValue = ["Chat ready"]
+        }
+        let changed = ActionLoopRunner(
+            host: changingHost, planner: changingPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open a chat", context: loopContext())
+        if case .failed(let reason, _) = changed {
+            expect(reason.contains("semantic change observed"),
+                   "a changed target state permits another planner turn")
+        } else {
+            expect(false, "semantic progress must not trip the repeat guard")
+        }
+        expect(changingPlanner.observations.count == 2,
+               "semantic progress is observed before the loop stops")
     }
 
     private static func testActionLoopSafetyRails() {
@@ -2035,7 +2105,7 @@ extension Selftest {
         expect(sendHost.endInputCount == 1,
                "send approval refusal ends the input session once")
 
-        // 3. A model that never says done runs out of turns, not forever.
+        // 3. A model that never says done and changes nothing stops early.
         let capHost = FakeActionHost()
         capHost.appsByName["Slack"] = ("Slack", "com.tinyspeck.slackmacgap")
         capHost.frontmost = ("Slack", "com.tinyspeck.slackmacgap")
@@ -2048,13 +2118,13 @@ extension Selftest {
                                         execute: true, allowSend: false)
         if case .failed(let reason, _) = capRunner.run(transcript: "t",
                                                        context: loopContext()) {
-            expect(reason.lowercased().contains("attempt"),
-                   "running out of turns says so plainly")
+            expect(reason.contains("without changing the target state"),
+                   "unchanged successful turns say why they stopped")
         } else {
-            expect(false, "an endless loop must fail at the turn cap")
+            expect(false, "an unchanged endless loop must fail early")
         }
-        expect(capPlanner.observations.count == ActionLoopRunner.maxTurns - 1,
-               "the loop stops asking after the cap")
+        expect(capPlanner.observations.count == 1,
+               "the loop stops after two unchanged successful plans")
 
         // 4. A fatal failure ends the loop immediately — no more turns.
         let fatalHost = FakeActionHost()
@@ -2426,6 +2496,8 @@ extension Selftest {
         terminalSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         let terminalTransport = FakeCuaTransport()
         scriptNotesWorld(terminalTransport)
+        terminalTransport.responses["get_window_state"] = noteWindowState(
+            elementsComplete: false)
         let terminalHost = makeRoutedHost(
             system: terminalSystem, transport: terminalTransport)
         let terminalPlanner = FakeTurnPlanner(turns: [
@@ -2454,7 +2526,7 @@ extension Selftest {
                 pid: 500, windowID: 9),
                 "the result keeps the exact app for a user-clicked handoff")
         } else {
-            expect(false, "an exact identity-only background route reports ready")
+            expect(false, "an exact partial-tree background route reports ready")
         }
 
         let staleHost = FakeActionHost()
@@ -3514,6 +3586,24 @@ extension Selftest {
         expect(clamped?.steps.first == .waitFrontmost(app: "Slack",
                                                       timeoutMs: ActionPlan.Limits.maxWaitMs),
                "an absurd wait timeout is clamped, not honoured")
+
+        let media = decodePlan("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"media_control","state":"play"}]}
+        """)
+        expect(media?.steps.last == .mediaControl(.play),
+               "media playback is one closed target-bound action")
+        var inheritedMedia = ActionPlan.BatchState()
+        inheritedMedia.currentApp = "Spotify"
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"media_control","state":"play"}]}
+        """, state: &inheritedMedia) == nil,
+               "media playback requires target acquisition in the same batch")
+        expect(decodePlan("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"media_control","state":"next"}]}
+        """) == nil,
+               "media playback rejects states outside play and pause")
     }
 
     /// The 2026-08-21 bakeoff produced a validator-ACCEPTED exfiltration: a
@@ -3816,6 +3906,123 @@ extension Selftest {
         } else {
             expect(false, "the search plan decodes")
         }
+    }
+
+    private static func testMediaActionControl() {
+        let targetID = AudioObjectID(41)
+        let otherID = AudioObjectID(42)
+        func mediaSnapshot(
+            playing: Set<AudioObjectID>,
+            otherBundle: String? = nil
+        ) -> MediaPlaybackCoordinator.Snapshot {
+            var processes: Set<AudioObjectID> = [targetID]
+            var bundles: [AudioObjectID: String] = [targetID: "com.apple.Music"]
+            var pids: [AudioObjectID: Int] = [targetID: 900]
+            if let otherBundle {
+                processes.insert(otherID)
+                bundles[otherID] = otherBundle
+                pids[otherID] = 901
+            }
+            return MediaPlaybackCoordinator.Snapshot(
+                processes: processes, playing: playing,
+                allPlaying: playing, bundleIDs: bundles, pids: pids)
+        }
+
+        var toggles = 0
+        let alreadyPlaying = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 900,
+            read: { mediaSnapshot(playing: [targetID]) },
+            post: { toggles += 1; return true }, sleep: { _ in })
+        expect(alreadyPlaying == .verified && toggles == 0,
+               "an already-satisfied media state sends no toggle")
+
+        let alreadyPlayingWithCompetitor = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 900,
+            read: {
+                mediaSnapshot(
+                    playing: [targetID], otherBundle: "com.spotify.client")
+            }, post: { toggles += 1; return true }, sleep: { _ in })
+        expect(alreadyPlayingWithCompetitor == .verified && toggles == 0,
+               "an achieved media state needs no global ownership guess")
+
+        var discoveryReads = 0
+        let discovered = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 900,
+            read: {
+                defer { discoveryReads += 1 }
+                if discoveryReads == 0 {
+                    return MediaPlaybackCoordinator.Snapshot(
+                        processes: [], playing: [])
+                }
+                return mediaSnapshot(
+                    playing: discoveryReads == 1 ? [] : [targetID])
+            }, post: { toggles += 1; return true }, sleep: { _ in })
+        expect(discovered == .verified && discoveryReads >= 3,
+               "a cold player gets a bounded capability-discovery window")
+
+        let beforeStartedToggles = toggles
+        var reads = 0
+        let started = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 900,
+            read: {
+                defer { reads += 1 }
+                return mediaSnapshot(playing: reads == 0 ? [] : [targetID])
+            }, post: { toggles += 1; return true }, sleep: { _ in })
+        expect(started == .verified && toggles == beforeStartedToggles + 1,
+               "media playback toggles at most once and verifies the exact PID")
+
+        let beforeAmbiguousToggles = toggles
+        let ambiguous = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 900,
+            read: {
+                mediaSnapshot(
+                    playing: [], otherBundle: "com.spotify.client")
+            }, post: { toggles += 1; return true }, sleep: { _ in })
+        expect(ambiguous == .ambiguous && toggles == beforeAmbiguousToggles,
+               "another media-key owner refuses before posting anything")
+
+        let wrongPID = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 901,
+            read: { mediaSnapshot(playing: []) },
+            post: { toggles += 1; return true }, sleep: { _ in })
+        expect(wrongPID == .unavailable && toggles == beforeAmbiguousToggles,
+               "media control refuses a different PID without posting")
+
+        var misdirectedReads = 0
+        let misdirected = MediaPlaybackSystem.setPlayback(
+            .play, bundleID: "com.apple.Music", pid: 900,
+            read: {
+                defer { misdirectedReads += 1 }
+                if misdirectedReads == 0 {
+                    return mediaSnapshot(playing: [])
+                }
+                if misdirectedReads == 1 {
+                    return mediaSnapshot(
+                        playing: [otherID], otherBundle: "com.spotify.client")
+                }
+                return mediaSnapshot(
+                    playing: [], otherBundle: "com.spotify.client")
+            }, post: { toggles += 1; return true }, sleep: { _ in })
+        expect(misdirected == .compensated
+               && toggles == beforeAmbiguousToggles + 2
+               && misdirectedReads >= 3,
+               "a misdirected global toggle proves its compensation")
+
+        let host = FakeActionHost()
+        host.appsByName["Music"] = ("Music", "com.apple.Music")
+        host.actionProcessValue = ActionProcessIdentity(
+            name: "Music", bundleID: "com.apple.Music", pid: 900)
+        host.mediaControlResult = .verified
+        let plan = ActionPlan(
+            goal: "play music", sends: false,
+            steps: [.openApp("Music"), .mediaControl(.play)],
+            unsupported: nil)
+        let result = ActionExecutor(host: host).run(plan)
+        expect(result.outcome == .completed
+               && host.mediaControlCalls == [.play]
+               && host.interactionCalls == 1
+               && result.evidence.contains(.goalVerified(target: "media play")),
+               "runtime media postcondition is gated typed goal evidence")
     }
 
     /// A checkpoint that only ever waits cannot rescue a plan whose app is
@@ -4442,6 +4649,7 @@ extension Selftest {
         testCuaSnapshotParsing()
         testCuaPressPick()
         testBackgroundActionGate()
+        testProcessOnlyRouting()
         testSnapshotLineage()
         testBackgroundRoutingHost()
     }
@@ -5743,6 +5951,89 @@ extension Selftest {
         return apps.first { ($0["pid"] as? Int) == pid }?["bundle_id"] as? String
     }
 
+    private static func testProcessOnlyRouting() {
+        let system = FakeActionHost()
+        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let transport = FakeCuaTransport()
+        transport.responses["list_apps"] = ["apps": [
+            ["name": "Finder", "bundle_id": "com.apple.finder",
+             "pid": 502, "running": true],
+        ]]
+        // Finder can own small utility/status surfaces with no ordinary window
+        // suitable for UI automation. They do not turn process readiness into
+        // a guessed window capability.
+        transport.responses["list_windows"] = ["windows": [
+            ["pid": 502, "window_id": 12, "layer": 0, "z_index": 1,
+             "bounds": ["width": 120.0, "height": 40.0],
+             "title": "", "on_current_space": true],
+        ]]
+        let host = makeRoutedHost(
+            system: system, transport: transport,
+            localApps: ["Finder": "com.apple.finder"])
+        let planner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "Open Finder", steps: jsonSteps("""
+            [{"do":"open_app","app":"Finder"}]
+            """), done: true),
+        ])
+        var context = loopContext()
+        context.knownApps.append("Finder")
+        let result = ActionLoopRunner(
+            host: host, planner: planner,
+            execute: true, allowSend: false
+        ).run(transcript: "Open Finder", context: context)
+        if case .ready = result {
+            expect(false, "a process alone must not prove that Finder opened")
+        } else {
+            expect(true, "windowless app presentation refuses false completion")
+        }
+        expect(system.frontmost?.name == "Ghostty"
+               && !system.log.contains("openApp(Finder)"),
+               "failed app presentation never brings the app forward")
+
+        host.beginActionInputSession()
+        host.prepareForExecutionMode(.processOnly)
+        _ = host.openApp(named: "Finder")
+        expect(host.frontmostApp()?.name == "Finder"
+               && host.actionProcess() == ActionProcessIdentity(
+                name: "Finder", bundleID: "com.apple.finder", pid: 502),
+               "semantic process actions acquire exact PID readiness")
+        let mutation = ActionPlan(
+            goal: "press something", sends: false,
+            steps: [
+                .waitFrontmost(app: "Finder", timeoutMs: 100),
+                .pressElement(label: "Documents"),
+            ], unsupported: nil)
+        if case .failed = ActionExecutor(host: host).run(mutation).outcome {
+            expect(transport.callCount("click") == 0,
+                   "PID-only identity grants no UI mutation capability")
+        } else {
+            expect(false, "PID-only mutation must fail closed")
+        }
+
+        let musicSystem = FakeActionHost()
+        musicSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let musicTransport = FakeCuaTransport()
+        musicTransport.responses["list_apps"] = ["apps": [
+            ["name": "Music", "bundle_id": "com.apple.Music",
+             "pid": 503, "running": true],
+        ]]
+        musicTransport.responses["list_windows"] = ["windows": [
+            ["pid": 503, "window_id": 13, "layer": 0, "z_index": 1,
+             "bounds": ["width": 800.0, "height": 600.0],
+             "title": "Music", "on_current_space": true],
+        ]]
+        let musicHost = makeRoutedHost(
+            system: musicSystem, transport: musicTransport,
+            localApps: ["Music": "com.apple.Music"])
+        musicHost.beginActionInputSession()
+        musicHost.prepareForExecutionMode(.processOnly)
+        _ = musicHost.openApp(named: "Music")
+        expect(musicHost.actionProcess() == ActionProcessIdentity(
+            name: "Music", bundleID: "com.apple.Music", pid: 503)
+            && musicTransport.callCount("get_window_state") == 0,
+            "semantic process readiness does not depend on a UI tree")
+    }
+
     private static func noteWindowState(
         snapshot: String = "s00000001", value: String = "",
         elementsComplete: Bool = true, buttonToken: String? = nil
@@ -6235,6 +6526,7 @@ extension Selftest {
             transport.responses["list_windows"] = ["windows": []]
             transport.onCall = { tool in
                 guard tool == "launch_app" else { return }
+                UserInputActivity.mark()
                 transport.responses["list_windows"] = ["windows": [[
                     "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
                     "bounds": ["width": 800.0, "height": 600.0],
@@ -6248,7 +6540,7 @@ extension Selftest {
                    "hidden launch materializes a running app's missing window")
             expect(system.frontmost?.bundleID == "com.mitchellh.ghostty"
                    && system.sleepCalls.isEmpty,
-                   "Cua owns hidden launch without a Velora focus-poll loop")
+                   "unrelated input does not cancel a focus-preserving launch")
         }
 
         // A driver that admits failed suppression is not a background route.
@@ -6454,6 +6746,7 @@ extension Selftest {
             }
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
+            host.prepareForExecutionMode(.interaction)
             _ = host.openApp(named: "Notes")
             _ = host.frontmostApp()
             guard let snapshot = host.uiSnapshot() else {

@@ -293,13 +293,8 @@ enum CuaWindowPick {
     static func choose(_ windows: [[String: Any]], pid: Int) -> (id: Int, title: String?)? {
         let candidates = windows.compactMap {
             raw -> (id: Int, title: String?, z: Int?)? in
-            guard (raw["pid"] as? Int) == pid,
-                  (raw["layer"] as? Int) == 0,
+            guard isEligible(raw, pid: pid),
                   let id = raw["window_id"] as? Int else { return nil }
-            let bounds = raw["bounds"] as? [String: Any]
-            let width = (bounds?["width"] as? Double) ?? 0
-            let height = (bounds?["height"] as? Double) ?? 0
-            guard width >= minimumWidth, height >= minimumHeight else { return nil }
             let title = (raw["title"] as? String).flatMap {
                 $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
             }
@@ -319,6 +314,16 @@ enum CuaWindowPick {
         let top = pool.filter { $0.z == maximumZ }
         guard top.count == 1, let chosen = top.first else { return nil }
         return (chosen.id, chosen.title)
+    }
+
+    private static func isEligible(_ raw: [String: Any], pid: Int) -> Bool {
+        guard (raw["pid"] as? Int) == pid,
+              (raw["layer"] as? Int) == 0,
+              (raw["window_id"] as? Int).map({ $0 > 0 }) == true,
+              let bounds = raw["bounds"] as? [String: Any],
+              let width = bounds["width"] as? Double,
+              let height = bounds["height"] as? Double else { return false }
+        return width >= minimumWidth && height >= minimumHeight
     }
 }
 
@@ -579,6 +584,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     // Routed-target state, reset every action.
     private var routed = false
     private var contentMayCommit = false
+    private var executionMode = ActionExecutionMode.interaction
     private var targetPID: Int = 0
     private var targetWindowID: Int?
     private var targetName = ""
@@ -735,12 +741,14 @@ final class BackgroundRoutingActionHost: ActionHost {
     func beginActionInputSession() {
         unroute()
         contentMayCommit = false
+        executionMode = .interaction
         system.beginActionInputSession()
     }
 
     func endActionInputSession() {
         unroute()
         contentMayCommit = false
+        executionMode = .interaction
         system.endActionInputSession()
         endDaemon()
     }
@@ -748,6 +756,10 @@ final class BackgroundRoutingActionHost: ActionHost {
     func prepareForActionPlan(sends: Bool) {
         contentMayCommit = sends
         if sends && routed { foregroundAtInteraction = true }
+    }
+
+    func prepareForExecutionMode(_ mode: ActionExecutionMode) {
+        executionMode = mode
     }
 
     func prepareInteraction() -> ActionInteractionState {
@@ -1065,6 +1077,12 @@ final class BackgroundRoutingActionHost: ActionHost {
                 foregroundAtInteraction: contentMayCommit)
             return .routed
         case .missing:
+            if resolved.running, executionMode == .processOnly {
+                beginRoute(
+                    resolved, pid: resolved.pid, windowID: nil,
+                    foregroundAtInteraction: contentMayCommit)
+                return .routed
+            }
             return launchTarget(resolved)
                 ? .routed : .failed
         case .invalid:
@@ -1128,8 +1146,11 @@ final class BackgroundRoutingActionHost: ActionHost {
         if inputUnchanged && !focusPreserved {
             _ = restoreFocus(prior)
         }
+        // Unrelated input is harmless when the exact prior focus survived.
+        // If launch changed focus, only an untouched input generation permits
+        // restoration; otherwise the user's newly selected target wins.
         guard case .success(let launched) = launchResult,
-              inputUnchanged, focusPreserved,
+              focusPreserved,
               exactFlag(launched["self_activation_suppressed"]) == true,
               system.frontmostApp()?.bundleID.caseInsensitiveCompare(
                 resolved.bundleID) != .orderedSame else { return false }
@@ -1356,6 +1377,10 @@ final class BackgroundRoutingActionHost: ActionHost {
         // fine": the executor aborts instead of typing into nothing. A live
         // exact window without AX remains sufficient only for an app-ready
         // result; every mutation method independently requires its UI proof.
+        if executionMode == .processOnly {
+            targetReady = processOnlyReady()
+            return targetReady
+        }
         guard let snapshot = snapshotTarget(maxElements: 1) else {
             targetReady = false
             return false
@@ -1369,6 +1394,11 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     private func advanceReadiness() -> Bool {
         guard snapshotLineage == .valid else { return false }
+        if executionMode == .processOnly {
+            targetReady = processOnlyReady()
+            everReady = targetReady
+            return targetReady
+        }
         // Re-picking is allowed ONLY while the target has never been ready:
         // a cold-launched app's real document window can appear after the
         // first look. Once ready, the window is pinned for the rest of the
@@ -1376,8 +1406,15 @@ final class BackgroundRoutingActionHost: ActionHost {
         // window of the same app (review finding), the background analog of
         // typing into whatever took focus.
         if targetWindowID == nil || !everReady {
-            guard let window = pickTargetWindow() else { return false }
-            targetWindowID = window.id
+            if let window = pickTargetWindow() {
+                targetWindowID = window.id
+            } else if processOnlyReady() {
+                targetReady = true
+                everReady = true
+                return true
+            } else {
+                return false
+            }
         }
         guard let snapshot = snapshotTarget(maxElements: 10) else { return false }
         if snapshot.degraded, !resolveDeferredWindow() { return false }
@@ -1391,6 +1428,24 @@ final class BackgroundRoutingActionHost: ActionHost {
             "list_windows", arguments: [:], timeout: Self.callTimeout),
               let windows = reply["windows"] as? [[String: Any]] else { return nil }
         return CuaWindowPick.choose(windows, pid: targetPID)
+    }
+
+    private func processOnlyReady() -> Bool {
+        guard routed, executionMode == .processOnly, targetPID > 0,
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame,
+              case .success(let reply) = transport.call(
+                "list_apps", arguments: [:],
+                timeout: Self.callTimeout),
+              let apps = reply["apps"] as? [[String: Any]]
+        else { return false }
+        let exact = apps.filter {
+            exactInt($0["pid"]) == targetPID
+                && exactFlag($0["running"]) == true
+                && ($0["bundle_id"] as? String)?.caseInsensitiveCompare(
+                    targetBundleID) == .orderedSame
+        }
+        return exact.count == 1
     }
 
     private func snapshotTarget(maxElements: Int) -> CuaSnapshot? {
@@ -1774,12 +1829,34 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     func actionWindow() -> ActionWindowIdentity? {
-        guard routed, let windowID = targetWindowID else {
-            return system.actionWindow()
-        }
+        guard routed else { return system.actionWindow() }
+        guard let windowID = targetWindowID else { return nil }
         return ActionWindowIdentity(
             name: targetName, bundleID: targetBundleID,
             pid: targetPID, windowID: windowID)
+    }
+
+    func actionProcess() -> ActionProcessIdentity? {
+        guard routed else { return system.actionProcess() }
+        guard snapshotLineage == .valid else { return nil }
+        if targetReady {
+            guard verifyTargetAlive() else { return nil }
+        } else {
+            guard advanceReadiness() else { return nil }
+        }
+        guard targetReady, everReady,
+              targetPID > 0, !targetName.isEmpty, !targetBundleID.isEmpty,
+              bundleForPID(targetPID)?.caseInsensitiveCompare(targetBundleID)
+                == .orderedSame else { return nil }
+        return ActionProcessIdentity(
+            name: targetName, bundleID: targetBundleID, pid: targetPID)
+    }
+
+    func mediaControl(_ state: ActionMediaState) -> ActionMediaControlResult {
+        guard routed else { return system.mediaControl(state) }
+        guard let target = actionProcess() else { return .unavailable }
+        return MediaPlaybackSystem.setPlayback(
+            state, bundleID: target.bundleID, pid: target.pid)
     }
 
     private func presentationTargetIsLive(windowID: Int) -> Bool {

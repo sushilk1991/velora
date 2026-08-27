@@ -42,6 +42,8 @@ private struct ActionCompletionEvidence {
             case .goalVerified:
                 hadEffect = true
                 hadGoalVerification = true
+            case .targetResolved(let value):
+                target = value
             case .uiTargetVerified:
                 break
             case .frontmostConfirmed(_, let actual, let bundleID):
@@ -152,6 +154,8 @@ final class ActionLoopRunner {
         var lastStepFailure: String?
         var lastRecoverablePlan: String?
         var repeatedRecoverablePlans = 0
+        var lastSuccessfulProgress: String?
+        var repeatedSuccessfulPlans = 0
         var turnsUsed = 0
         var planInvalidRetries = 0
         // Every planner call, accepted or rejected. Rejected turns consume no
@@ -294,6 +298,19 @@ final class ActionLoopRunner {
                     return .planned(plan)
                 }
 
+                let executionMode: ActionExecutionMode
+                if Self.usesProcessOnly(plan) {
+                    executionMode = .processOnly
+                } else if ActionPlan.isAppOnlyPresentation(
+                    transcript, appName: probe.currentApp,
+                    bundleID: probe.structuredUISnapshot?.bundleID,
+                    candidates: probe.appNames) {
+                    executionMode = .appOnly
+                } else {
+                    executionMode = .interaction
+                }
+                host.prepareForExecutionMode(executionMode)
+
                 let executor = ActionExecutor(host: host, progress: progress)
                 lock.lock()
                 currentExecutor = executor
@@ -333,13 +350,6 @@ final class ActionLoopRunner {
                             transcript, appName: carried.currentApp,
                             bundleID: carried.structuredUISnapshot?.bundleID,
                             candidates: carried.appNames)
-                    if done, completionEvidence.provesGoal
-                        || !needsBackgroundProof {
-                        planner.end()
-                        return completionResult(
-                            goal: lockedGoal, trace: fullTrace,
-                            evidence: completionEvidence)
-                    }
                     // `wait_frontmost` already proved the routed app is
                     // ready. Recheck its exact PID/window now; requiring an
                     // empty planner turn made a valid result depend on luck.
@@ -354,6 +364,13 @@ final class ActionLoopRunner {
                             trace: fullTrace,
                             target: target)
                     }
+                    if done, completionEvidence.provesGoal
+                        || !needsBackgroundProof {
+                        planner.end()
+                        return completionResult(
+                            goal: lockedGoal, trace: fullTrace,
+                            evidence: completionEvidence)
+                    }
                     guard turnsUsed < Self.maxTurns, host.now() < deadline else {
                         planner.end()
                         return .failed(
@@ -365,6 +382,21 @@ final class ActionLoopRunner {
                     let observation = gatherObservation(
                         executed: observationTrace, failedStep: nil,
                         state: &carried)
+                    let progressFingerprint = Self.planFingerprint(stepsJSON)
+                        + "\n" + Self.observationFingerprint(observation)
+                    if progressFingerprint == lastSuccessfulProgress {
+                        repeatedSuccessfulPlans += 1
+                    } else {
+                        lastSuccessfulProgress = progressFingerprint
+                        repeatedSuccessfulPlans = 1
+                    }
+                    if repeatedSuccessfulPlans >= 2 {
+                        planner.end()
+                        return .failed(
+                            reason: "the agent repeated the same action without "
+                                + "changing the target state",
+                            trace: fullTrace)
+                    }
                     progress(.planning(turn: turnsUsed + 1))
                     reply = planner.observe(observation)
 
@@ -427,6 +459,40 @@ final class ActionLoopRunner {
         return String(decoding: data, as: UTF8.self)
     }
 
+    private static func observationFingerprint(
+        _ observation: [String: Any]
+    ) -> String {
+        var stable = observation
+        stable.removeValue(forKey: "executed")
+        stable.removeValue(forKey: "failed_step")
+        if var snapshot = stable["ui_snapshot"] as? [String: Any] {
+            snapshot.removeValue(forKey: "id")
+            stable["ui_snapshot"] = snapshot
+        }
+        guard JSONSerialization.isValidJSONObject(stable),
+              let data = try? JSONSerialization.data(
+                withJSONObject: stable, options: [.sortedKeys])
+        else { return String(describing: stable) }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// Process identity is sufficient only when every effect is a typed
+    /// semantic postcondition. A PID alone never proves an app was presented.
+    private static func usesProcessOnly(_ plan: ActionPlan) -> Bool {
+        var hasMediaControl = false
+        for step in plan.steps {
+            switch step {
+            case .mediaControl:
+                hasMediaControl = true
+            case .openApp, .waitFrontmost, .pause:
+                continue
+            default:
+                return false
+            }
+        }
+        return hasMediaControl
+    }
+
     private func completionResult(
         goal: String,
         trace: [String],
@@ -469,49 +535,41 @@ final class ActionLoopRunner {
         guard sends == false,
               host.isDrivingInBackground,
               state.requireUITargetVerification,
-              let snapshot = state.structuredUISnapshot,
-              snapshot.source == .cua,
-              !snapshot.id.isEmpty,
-              let windowID = snapshot.windowID,
-              windowID > 0,
-              !snapshot.appName.isEmpty,
-              !snapshot.bundleID.isEmpty,
+              let process = host.actionProcess(),
+              process.pid > 0,
+              !process.name.isEmpty,
+              !process.bundleID.isEmpty,
               ActionPlan.isAppOnlyPresentation(
                 transcript,
-                appName: snapshot.appName,
-                bundleID: snapshot.bundleID,
+                appName: process.name,
+                bundleID: process.bundleID,
                 candidates: state.appNames)
         else { return nil }
         guard let live = host.frontmostApp(),
-              live.bundleID.caseInsensitiveCompare(snapshot.bundleID)
+              live.bundleID.caseInsensitiveCompare(process.bundleID)
                 == .orderedSame,
-              let fresh = host.uiSnapshot(),
+              let confirmed = host.actionProcess(), confirmed == process
+        else { return nil }
+        guard let target = host.actionWindow() else {
+            return ActionCompletionTarget(
+                appName: process.name, bundleID: process.bundleID,
+                pid: process.pid, windowID: nil)
+        }
+        guard let fresh = host.uiSnapshot(),
               fresh.source == .cua,
               !fresh.id.isEmpty,
-              fresh.windowID == windowID,
-              fresh.bundleID.caseInsensitiveCompare(snapshot.bundleID)
+              fresh.windowID == target.windowID,
+              fresh.bundleID.caseInsensitiveCompare(process.bundleID)
                 == .orderedSame,
-              fresh.appName == snapshot.appName,
-              let target = host.actionWindow(),
-              target.pid > 0, target.windowID == windowID,
-              target.bundleID.caseInsensitiveCompare(fresh.bundleID)
-                == .orderedSame
-        else { return nil }
-        let identityID = "cua-window-\(target.pid)-\(windowID)"
-        let freshEvidence = fresh.complete
-            ? fresh.id != snapshot.id
-            : (fresh.elements.isEmpty
-               && snapshot.elements.isEmpty
-               && fresh.id == identityID
-               && snapshot.id == identityID)
-        guard freshEvidence,
-              let confirmed = host.frontmostApp(),
-              confirmed.bundleID.caseInsensitiveCompare(fresh.bundleID)
-                == .orderedSame
+              fresh.appName == process.name,
+              target.pid == process.pid,
+              target.bundleID.caseInsensitiveCompare(process.bundleID)
+                == .orderedSame,
+              let finalProcess = host.actionProcess(), finalProcess == process
         else { return nil }
         return ActionCompletionTarget(
-            appName: fresh.appName, bundleID: fresh.bundleID,
-            pid: target.pid, windowID: target.windowID)
+            appName: process.name, bundleID: process.bundleID,
+            pid: process.pid, windowID: target.windowID)
     }
 
     /// What the model gets to look at between turns. Every string is read off

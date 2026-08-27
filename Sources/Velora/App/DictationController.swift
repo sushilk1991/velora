@@ -2803,8 +2803,16 @@ final class DictationController: NSObject {
         hud.transition(to: .hidden(.success))
 
         if stored.target.pid != nil || stored.target.windowID != nil {
-            guard stored.target.pid != nil, stored.target.windowID != nil else {
-                showError("The exact action window is no longer available")
+            if stored.target.windowID == nil {
+                guard Self.openActionProcess(
+                    stored.target, generation: inputGeneration) else {
+                    showError("Couldn't open the exact \(stored.target.appName) app")
+                    return
+                }
+                return
+            }
+            guard stored.target.pid != nil else {
+                showError("The exact action app is no longer available")
                 return
             }
             let target = stored.target
@@ -2852,6 +2860,19 @@ final class DictationController: NSObject {
                 self?.showError("Couldn't open \(stored.target.appName)")
             }
         }
+    }
+
+    private static func openActionProcess(
+        _ target: ActionCompletionTarget,
+        generation: UInt64
+    ) -> Bool {
+        guard generation == UserInputActivity.snapshot(),
+              let pid = target.pid, pid > 0,
+              let app = uniqueActionApp(pid: pid, bundleID: target.bundleID)
+        else { return false }
+        NSApp.yieldActivation(to: app)
+        guard generation == UserInputActivity.snapshot() else { return false }
+        return app.activate(options: [])
     }
 
     private static func openActionWindow(
