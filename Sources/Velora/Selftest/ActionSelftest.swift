@@ -5468,7 +5468,8 @@ extension Selftest {
             "title": "My Note", "on_current_space": false,
         ]]]
         transport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
+            "degraded": true,
+            "degraded_reason": "ax_window_unresolved: exact window has no AXWindow",
             "elements": [],
         ]
         let primer = FakeOffSpacePrimer()

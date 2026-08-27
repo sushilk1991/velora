@@ -95,6 +95,8 @@ struct CuaElement: Equatable {
 /// refusal semantics: a degraded snapshot has no usable tree and background
 /// input against it would be refused anyway.
 struct CuaSnapshot: Equatable {
+    private static let axWindowCode = "ax_window_unresolved"
+
     let id: String?
     let degraded: Bool
     let degradedReason: String?
@@ -105,6 +107,15 @@ struct CuaSnapshot: Equatable {
     /// refuses unless the whole tree is in hand.
     let complete: Bool
     let elements: [CuaElement]
+
+    /// Cua may append diagnostics after the stable refusal code. Parse the
+    /// code token so added detail cannot disable the exact-window recovery.
+    fileprivate var axWindowUnresolved: Bool {
+        guard let code = degradedReason?.split(
+            separator: ":", maxSplits: 1
+        ).first else { return false }
+        return code == Self.axWindowCode
+    }
 
     static func parse(_ payload: [String: Any]) -> CuaSnapshot {
         // A refusal ("window_id_not_found", owner mismatch, …) is not a
@@ -1357,8 +1368,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// private state only for the bounded semantic re-read, then defocus.
     private func recoverDegraded(_ snapshot: CuaSnapshot) -> Bool {
         if nativeRouteReady() { return true }
-        guard !snapshot.refused,
-              snapshot.degradedReason == "ax_window_unresolved" else {
+        guard !snapshot.refused, snapshot.axWindowUnresolved else {
             return failRoute("The target refused background accessibility.")
         }
         return primeOffSpaceAX()
