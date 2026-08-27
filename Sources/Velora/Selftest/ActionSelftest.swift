@@ -2422,42 +2422,36 @@ extension Selftest {
             expect(false, "independent exact goal evidence completes navigation")
         }
 
-        let terminalHost = FakeActionHost()
-        terminalHost.appsByName["Slack"] = (
-            "Slack", "com.tinyspeck.slackmacgap")
-        terminalHost.frontmost = (
-            "Slack", "com.tinyspeck.slackmacgap")
-        terminalHost.isDrivingInBackground = true
-        terminalHost.foregroundWindowValue = ActionWindowIdentity(
-            name: "Slack", bundleID: "com.tinyspeck.slackmacgap",
-            pid: 500, windowID: 46)
-        terminalHost.uiSnapshotValues = (0..<3).map { _ in
-            ActionUISnapshot(
-                id: "cua-window-500-46", source: .cua, appName: "Slack",
-                bundleID: "com.tinyspeck.slackmacgap", windowTitle: "Slack",
-                windowID: 46, complete: false, elements: [])
-        }
+        let terminalSystem = FakeActionHost()
+        terminalSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let terminalTransport = FakeCuaTransport()
+        scriptNotesWorld(terminalTransport)
+        let terminalHost = makeRoutedHost(
+            system: terminalSystem, transport: terminalTransport)
         let terminalPlanner = FakeTurnPlanner(turns: [
-            .turn(sends: false, goal: "Open Slack", steps: jsonSteps("""
-            [{"do":"wait_frontmost","app":"Slack"}]
+            .turn(sends: false, goal: "Open Notes", steps: jsonSteps("""
+            [{"do":"open_app","app":"Notes"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Notes"}]
             """), done: true),
         ])
+        var terminalContext = loopContext()
+        terminalContext.frontmostApp = "Ghostty"
+        terminalContext.frontmostBundle = "com.mitchellh.ghostty"
         let terminalResult = ActionLoopRunner(
             host: terminalHost, planner: terminalPlanner,
             execute: true, allowSend: false
-        ).run(transcript: "Open Slack", context: loopContext())
-        expect(terminalHost.presentUICalls == 0
-               && terminalPlanner.observations.isEmpty,
-               "fresh exact background proof completes without another turn")
-        expect(terminalHost.windowTitleReads == 0
-               && terminalHost.elementLabelReads == 0
-               && terminalHost.focusedRoleReads == 0
-               && terminalHost.visibleNamesReads == 0,
-               "one structured background snapshot supplies one observation")
+        ).run(transcript: "Open Notes", context: terminalContext)
+        expect(terminalPlanner.observations.count == 1,
+               "fresh exact background proof needs no third planner turn")
+        expect(!terminalSystem.log.contains { $0.hasPrefix("openApp") }
+               && terminalSystem.frontmost?.name == "Ghostty",
+               "the exact background route never steals focus")
         if case .ready(_, _, let target) = terminalResult {
             expect(target == ActionCompletionTarget(
-                appName: "Slack", bundleID: "com.tinyspeck.slackmacgap",
-                pid: 500, windowID: 46),
+                appName: "Notes", bundleID: "com.apple.Notes",
+                pid: 500, windowID: 9),
                 "the result keeps the exact app for a user-clicked handoff")
         } else {
             expect(false, "an exact identity-only background route reports ready")
