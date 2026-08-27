@@ -1416,8 +1416,7 @@ final class BackgroundRoutingActionHost: ActionHost {
             guard processIdentity(targetPID) == lease.process else {
                 return failRoute("The exact background target changed.")
             }
-            return failRoute(
-                "Restart the target app before retrying this action.")
+            return recoverInForeground()
         case .observed:
             break
         }
@@ -1428,6 +1427,107 @@ final class BackgroundRoutingActionHost: ActionHost {
             return failRoute("The exact background target changed.")
         }
         return true
+    }
+
+    /// If the no-raise record cannot materialize AX, briefly foreground only
+    /// the exact attested window and immediately restore the exact window that
+    /// was in front. AX polling happens after restoration; any physical input
+    /// or identity drift closes the lease without granting a capability.
+    private func recoverInForeground() -> Bool {
+        guard waitForQuiet(),
+              let lease = capturePrimeLease(),
+              interactionIsQuiet(),
+              UserInputActivity.snapshot() == lease.inputGeneration,
+              primeLeaseIsLive(lease),
+              let windowID = targetWindowID
+        else { return failRoute("The exact background target changed.") }
+
+        guard case .success(let reply) = transport.call(
+            Self.presentationTool, arguments: [
+                "pid": targetPID, "window_id": windowID,
+            ], timeout: Self.callTimeout)
+        else {
+            _ = restoreFallback(lease, windowID: windowID)
+            return failRoute(
+                "Background accessibility is unavailable for this target.")
+        }
+        guard presentationMatches(
+                reply, pid: targetPID, windowID: windowID),
+              foregroundLeaseIsLive(lease)
+        else {
+            _ = restoreFallback(
+                lease, windowID: windowID, reply: reply)
+            return failRoute(
+                "Background accessibility is unavailable for this target.")
+        }
+
+        let inputUnchanged = UserInputActivity.snapshot()
+            == lease.inputGeneration
+        let restored = restoreFallback(
+            lease, windowID: windowID, reply: reply)
+        guard inputUnchanged, restored,
+              UserInputActivity.snapshot() == lease.inputGeneration,
+              fallbackLeaseIsLive(lease)
+        else { return failRoute("The exact background target changed.") }
+
+        for attempt in 0..<Self.primePollAttempts {
+            guard fallbackLeaseIsLive(lease) else {
+                _ = restoreFallback(
+                    lease, windowID: windowID, reply: reply)
+                return failRoute("The exact background target changed.")
+            }
+            let snapshot = snapshotTarget(maxElements: Self.snapshotElements)
+            guard fallbackLeaseIsLive(lease) else {
+                _ = restoreFallback(
+                    lease, windowID: windowID, reply: reply)
+                return failRoute("The exact background target changed.")
+            }
+            if let snapshot, !snapshot.degraded { return true }
+            if attempt + 1 < Self.primePollAttempts {
+                system.sleep(ms: Self.primePollMs)
+            }
+        }
+        return failRoute(
+            "Background accessibility is unavailable for this target.")
+    }
+
+    private func foregroundLeaseIsLive(_ lease: PrimeLease) -> Bool {
+        guard interactionIsQuiet(),
+              UserInputActivity.snapshot() == lease.inputGeneration,
+              processIdentity(targetPID) == lease.process,
+              targetProcessIdentity == lease.process,
+              accessibilityGranted(), !SecureInput.isActive,
+              !system.screenIsLocked,
+              cursorPosition() == lease.cursor,
+              let windowID = targetWindowID,
+              exactTargetWindow() == lease.window,
+              exactTargetIsForeground(windowID: windowID)
+        else { return false }
+        return interactionIsQuiet()
+            && UserInputActivity.snapshot() == lease.inputGeneration
+            && processIdentity(targetPID) == lease.process
+            && cursorPosition() == lease.cursor
+    }
+
+    private func restoreFallback(
+        _ lease: PrimeLease, windowID: Int,
+        reply: [String: Any]? = nil
+    ) -> Bool {
+        restoreTargetFocus(
+            .window(lease.foreground), generation: lease.inputGeneration,
+            pid: targetPID, windowID: windowID,
+            bundleID: targetBundleID, reply: reply)
+    }
+
+    private func fallbackLeaseIsLive(_ lease: PrimeLease) -> Bool {
+        guard interactionIsQuiet(),
+              UserInputActivity.snapshot() == lease.inputGeneration,
+              primeLeaseRestored(lease)
+        else { return false }
+        return interactionIsQuiet()
+            && UserInputActivity.snapshot() == lease.inputGeneration
+            && processIdentity(targetPID) == lease.process
+            && cursorPosition() == lease.cursor
     }
 
     private func capturePrimeLease() -> PrimeLease? {

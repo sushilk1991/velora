@@ -5578,6 +5578,79 @@ extension Selftest {
             return state
         }
 
+        func presentationReply(_ pid: Int, _ windowID: Int) -> [String: Any] {
+            [
+                "status": "activated",
+                "code": "bring_to_front_exact_window_verified",
+                "activated": true, "request_accepted": true,
+                "process_activated": true,
+                "pid": pid, "window_id": windowID, "path": "ax_raise",
+                "exact_window_effect": [
+                    "verified": true, "focused": true,
+                    "frontmost_ordinary": true,
+                    "target_visible_ordinary": true,
+                ],
+                "observed": [
+                    "frontmost_pid": pid,
+                    "workspace_frontmost_pid": pid,
+                    "front_process_matches_target": true,
+                    "focused_window_id": windowID,
+                    "frontmost_ordinary_window_id": windowID,
+                ],
+            ]
+        }
+
+        func partialReply(_ pid: Int, _ windowID: Int) -> [String: Any] {
+            [
+                "status": "partial",
+                "code": "bring_to_front_exact_window_unverified",
+                "_velora_tool_error": true,
+                "activated": false, "request_accepted": true,
+                "process_activated": true,
+                "pid": pid, "window_id": windowID,
+                "exact_window_effect": [
+                    "verified": false, "focused": true,
+                    "frontmost_ordinary": false,
+                    "target_visible_ordinary": false,
+                ],
+                "observed": [
+                    "frontmost_pid": pid,
+                    "workspace_frontmost_pid": pid,
+                    "front_process_matches_target": true,
+                    "focused_window_id": windowID,
+                    "frontmost_ordinary_window_id": 10,
+                ],
+            ]
+        }
+
+        func fallbackWorld() -> (
+            system: FakeActionHost,
+            transport: FakeCuaTransport,
+            primer: FakeOffSpacePrimer
+        ) {
+            let system = FakeActionHost()
+            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+            let transport = FakeCuaTransport()
+            scriptNotesWorld(transport)
+            transport.responses["list_windows"] = ["windows": [[
+                "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+                "bounds": ["x": 100.0, "y": 200.0,
+                           "width": 800.0, "height": 600.0],
+                "title": "My Note", "on_current_space": false,
+            ]]]
+            transport.responses["get_window_state"] = [
+                "degraded": true,
+                "degraded_reason": "ax_window_unresolved",
+                "elements": [],
+            ]
+            let primer = FakeOffSpacePrimer()
+            primer.result = .observationFailed
+            return (system, transport, primer)
+        }
+
         let system = FakeActionHost()
         system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         system.foregroundWindowValue = ActionWindowIdentity(
@@ -5621,6 +5694,204 @@ extension Selftest {
         expect(system.frontmost?.bundleID == "com.mitchellh.ghostty"
                && transport.callCount("bring_to_front") == 0,
                "AX materialization leaves the user's foreground untouched")
+
+        let fallback = fallbackWorld()
+        let fallbackSystem = fallback.system
+        let fallbackTransport = fallback.transport
+        fallbackTransport.queued["bring_to_front"] = [
+            presentationReply(500, 9), presentationReply(700, 70),
+        ]
+        var fallbackReadWhileFront = false
+        fallbackTransport.onCall = { tool in
+            if tool == "get_window_state",
+               fallbackSystem.frontmost?.bundleID == "com.apple.Notes" {
+                fallbackReadWhileFront = true
+            }
+            guard tool == "bring_to_front" else { return }
+            if fallbackTransport.callCount(tool) == 1 {
+                fallbackSystem.frontmost = ("Notes", "com.apple.Notes")
+                fallbackSystem.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.Notes",
+                    pid: 500, windowID: 9)
+                fallbackTransport.responses["get_window_state"]
+                    = recoveredState()
+                return
+            }
+            fallbackSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            fallbackSystem.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+        }
+        let fallbackHost = makeRoutedHost(
+            system: fallbackSystem, transport: fallbackTransport,
+            offSpacePrimer: fallback.primer,
+            processIdentity: { $0 == 500 ? identity : nil })
+        fallbackHost.beginActionInputSession(command: "open My Note")
+        _ = fallbackHost.openApp(named: "Notes")
+        let fallbackFront = fallbackHost.frontmostApp()
+        let fallbackBrings = fallbackTransport.calls.filter {
+            $0.tool == "bring_to_front"
+        }
+        expect(fallbackFront?.name == "Notes"
+               && fallbackBrings.count == 2
+               && fallbackBrings[0].arguments["pid"] as? Int == 500
+               && fallbackBrings[0].arguments["window_id"] as? Int == 9
+               && fallbackBrings[1].arguments["pid"] as? Int == 700
+               && fallbackBrings[1].arguments["window_id"] as? Int == 70
+               && !fallbackReadWhileFront
+               && fallbackSystem.frontmost?.name == "Ghostty"
+               && fallbackSystem.foregroundWindowValue?.windowID == 70,
+               "the bounded foreground fallback materializes AX and restores the exact prior window")
+
+        let busy = fallbackWorld()
+        let busyHost = makeRoutedHost(
+            system: busy.system, transport: busy.transport,
+            interactionIsQuiet: { false }, offSpacePrimer: busy.primer,
+            processIdentity: { $0 == 500 ? identity : nil })
+        busyHost.beginActionInputSession(command: "open My Note")
+        _ = busyHost.openApp(named: "Notes")
+        _ = busyHost.frontmostApp()
+        expect(busy.transport.callCount("bring_to_front") == 0
+               && busy.system.frontmost?.name == "Ghostty"
+               && busyHost.actionFailureReason != nil,
+               "the fallback never activates a target while user input is active")
+
+        let recycledFallback = fallbackWorld()
+        recycledFallback.transport.queued["bring_to_front"] = [
+            presentationReply(500, 9), presentationReply(700, 70),
+        ]
+        var fallbackIdentity = identity
+        recycledFallback.transport.onCall = { tool in
+            guard tool == "bring_to_front" else { return }
+            if recycledFallback.transport.callCount(tool) == 1 {
+                recycledFallback.system.frontmost
+                    = ("Notes", "com.apple.Notes")
+                recycledFallback.system.foregroundWindowValue
+                    = ActionWindowIdentity(
+                        name: "Notes", bundleID: "com.apple.Notes",
+                        pid: 500, windowID: 9)
+                fallbackIdentity = CuaProcessIdentity(
+                    pid: 500, startSeconds: 11, startMicroseconds: 20)
+                return
+            }
+            recycledFallback.system.frontmost
+                = ("Ghostty", "com.mitchellh.ghostty")
+            recycledFallback.system.foregroundWindowValue
+                = ActionWindowIdentity(
+                    name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                    pid: 700, windowID: 70)
+        }
+        let recycledFallbackHost = makeRoutedHost(
+            system: recycledFallback.system,
+            transport: recycledFallback.transport,
+            offSpacePrimer: recycledFallback.primer,
+            processIdentity: { $0 == 500 ? fallbackIdentity : nil })
+        recycledFallbackHost.beginActionInputSession(command: "open My Note")
+        _ = recycledFallbackHost.openApp(named: "Notes")
+        _ = recycledFallbackHost.frontmostApp()
+        expect(recycledFallbackHost.actionFailureReason != nil
+               && recycledFallback.transport.callCount("bring_to_front") == 2
+               && recycledFallback.system.foregroundWindowValue?.windowID == 70,
+               "a recycled target is restored away from and grants no AX tree")
+
+        let partial = fallbackWorld()
+        partial.transport.queued["bring_to_front"] = [
+            partialReply(500, 9), presentationReply(700, 70),
+        ]
+        partial.transport.onCall = { tool in
+            guard tool == "bring_to_front" else { return }
+            if partial.transport.callCount(tool) == 1 {
+                partial.system.frontmost = ("Notes", "com.apple.Notes")
+                partial.system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.Notes",
+                    pid: 500, windowID: 10)
+                return
+            }
+            partial.system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+            partial.system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+                pid: 700, windowID: 70)
+        }
+        let partialHost = makeRoutedHost(
+            system: partial.system, transport: partial.transport,
+            offSpacePrimer: partial.primer,
+            processIdentity: { $0 == 500 ? identity : nil })
+        partialHost.beginActionInputSession(command: "open My Note")
+        _ = partialHost.openApp(named: "Notes")
+        _ = partialHost.frontmostApp()
+        expect(partialHost.actionFailureReason != nil
+               && partial.transport.callCount("bring_to_front") == 2
+               && partial.system.foregroundWindowValue?.windowID == 70,
+               "partial activation restores the prior exact window and refuses")
+
+        let interrupted = fallbackWorld()
+        interrupted.transport.queued["bring_to_front"] = [
+            presentationReply(500, 9),
+        ]
+        var fallbackActivated = false
+        interrupted.transport.onCall = { tool in
+            if tool == "bring_to_front",
+               interrupted.transport.callCount(tool) == 1 {
+                fallbackActivated = true
+                interrupted.system.frontmost = ("Notes", "com.apple.Notes")
+                interrupted.system.foregroundWindowValue
+                    = ActionWindowIdentity(
+                        name: "Notes", bundleID: "com.apple.Notes",
+                        pid: 500, windowID: 9)
+                return
+            }
+            guard tool == "list_windows", fallbackActivated else { return }
+            interrupted.system.frontmost = ("Telegram", "ru.keepcoder.Telegram")
+            interrupted.system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Telegram", bundleID: "ru.keepcoder.Telegram",
+                pid: 800, windowID: 80)
+            let generation = UserInputActivity.mark()
+            UserInputActivity.noteWindow(80, at: generation)
+        }
+        let interruptedHost = makeRoutedHost(
+            system: interrupted.system, transport: interrupted.transport,
+            offSpacePrimer: interrupted.primer,
+            processIdentity: { $0 == 500 ? identity : nil },
+            userFocusForWindow: { windowID in
+                guard windowID == 80 else { return nil }
+                return ActionWindowIdentity(
+                    name: "Telegram", bundleID: "ru.keepcoder.Telegram",
+                    pid: 800, windowID: 80)
+            })
+        interruptedHost.beginActionInputSession(command: "open My Note")
+        _ = interruptedHost.openApp(named: "Notes")
+        _ = interruptedHost.frontmostApp()
+        expect(interruptedHost.actionFailureReason != nil
+               && interrupted.transport.callCount("bring_to_front") == 1
+               && interrupted.system.foregroundWindowValue?.windowID == 80,
+               "user input during the lease preserves the selected non-target window")
+
+        let restoreFailure = fallbackWorld()
+        restoreFailure.transport.queued["bring_to_front"] = [
+            presentationReply(500, 9),
+        ]
+        restoreFailure.transport.onCall = { tool in
+            guard tool == "bring_to_front",
+                  restoreFailure.transport.callCount(tool) == 1 else { return }
+            restoreFailure.system.frontmost = ("Notes", "com.apple.Notes")
+            restoreFailure.system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Notes", bundleID: "com.apple.Notes",
+                pid: 500, windowID: 9)
+            restoreFailure.transport.responses["get_window_state"]
+                = recoveredState()
+        }
+        let restoreFailureHost = makeRoutedHost(
+            system: restoreFailure.system,
+            transport: restoreFailure.transport,
+            offSpacePrimer: restoreFailure.primer,
+            processIdentity: { $0 == 500 ? identity : nil })
+        restoreFailureHost.beginActionInputSession(command: "open My Note")
+        _ = restoreFailureHost.openApp(named: "Notes")
+        _ = restoreFailureHost.frontmostApp()
+        expect(restoreFailureHost.actionFailureReason != nil
+               && restoreFailure.transport.callCount("bring_to_front") == 2
+               && restoreFailure.system.foregroundWindowValue?.windowID == 9,
+               "a failed exact restoration refuses instead of retaining the AX tree")
 
         // A same-app window switch during capture must not be hidden by a
         // later input snapshot or restore the window that lost foreground.
@@ -6065,19 +6336,21 @@ extension Selftest {
         _ = staleHost.uiSnapshot()
         _ = staleHost.frontmostApp()
         expect(stalePrimer.calls.count == 1
+               && staleTransport.callCount("bring_to_front") == 1
                && staleHost.actionWindow() == nil
-               && staleHost.actionFailureReason?.contains("Restart") == true
+               && staleHost.actionFailureReason?.contains(
+                    "Background accessibility") == true
                && staleEnds == 1,
-               "restart-required AX failure clears route, capability, and daemon")
+               "a failed fallback runs once and clears route, capability, and daemon")
         let staleRun = ActionExecutor(host: staleHost).run(ActionPlan(
             goal: "open the stale note", sends: false,
             steps: [.waitFrontmost(app: "Notes", timeoutMs: 1_000)],
             unsupported: nil))
         expect(staleRun.outcome == .failed(
             step: 0,
-            reason: "Restart the target app before retrying this action.",
+            reason: "Background accessibility is unavailable for this target.",
             recoverable: false),
-               "restart-required refusal reaches the structured action result")
+               "the fallback refusal reaches the structured action result")
     }
 
     private static func testCuaEndpointOwnership() {
