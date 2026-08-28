@@ -50,6 +50,7 @@ final class FakeActionHost: ActionHost {
     var exactTextReceipt: ActionStateReceipt?
     var stateReceipt: ActionStateReceipt?
     var interactionState = ActionInteractionState.ready
+    var failureReason: String?
     var exactOpenDefers = false
     var exactOpenRequiresInactive = false
     /// Set to make `frontmostApp()` change after N reads (focus stolen).
@@ -58,6 +59,7 @@ final class FakeActionHost: ActionHost {
     /// Fires after each host call, so a test can change the world mid-plan.
     var onStep: ((String) -> Void)?
     var onSleep: ((Int) -> Void)?
+    var onEndInputSession: (() -> Void)?
     var onForegroundWindowRead: (() -> Void)?
     var foregroundWindowSequence: [ActionWindowIdentity?] = []
 
@@ -98,6 +100,7 @@ final class FakeActionHost: ActionHost {
 
     func endActionInputSession() {
         endInputCount += 1
+        onEndInputSession?()
         actionDraft = ""
         ownsDraft = false
     }
@@ -210,6 +213,7 @@ final class FakeActionHost: ActionHost {
     var screenNamesAreUserVisible = true
     /// Set to model the Cua routing host, which drives an off-screen window.
     var isDrivingInBackground = false
+    var actionFailureReason: String? { failureReason }
     /// URL the fake browser page reports, or nil outside a browser.
     var pageURLValue: String?
     func frontmostPageURL() -> String? { pageURLValue }
@@ -241,6 +245,20 @@ final class FakeActionHost: ActionHost {
         guard let exactTextReceipt else { return nil }
         typed.append(text)
         return exactTextReceipt
+    }
+
+    func replaceText(
+        _ text: String, target: ActionTextTarget,
+        expecting bundleID: String?
+    ) -> ActionStateReceipt? {
+        typeText(text, target: target, expecting: bundleID)
+    }
+
+    func searchText(
+        _ text: String, target: ActionTextTarget,
+        expecting bundleID: String?
+    ) -> ActionStateReceipt? {
+        typeText(text, target: target, expecting: bundleID)
     }
 
     func verifyState(
@@ -1305,6 +1323,15 @@ extension Selftest {
     }
 
     private static func testStructuredUIContract() {
+        let firstAX = AXUIElementCreateApplication(getpid())
+        let duplicateAX = AXUIElementCreateApplication(getpid())
+        let distinctAX = AXUIElementCreateApplication(getpid() + 1)
+        var identityGuard = ScreenContext.AXIdentityGuard()
+        expect(identityGuard.insert(firstAX)
+               && !identityGuard.insert(duplicateAX)
+               && identityGuard.insert(distinctAX),
+               "the AX traversal visits each element identity once")
+
         var cappedRecords = (0..<500).map { index in
             ActionUIElement(
                 index: index, parentIndex: nil, depth: 1,
@@ -1561,8 +1588,8 @@ extension Selftest {
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
           {"do":"press_ui","snapshot":"snapshot-1","index":14,
            "role":"AXButton","label":"Shivangi Gupta"}]}
-        """, state: &incompleteState) != nil,
-               "a partial tree can carry an exact indexed capability")
+        """, state: &incompleteState) == nil,
+               "a partial tree cannot authorize mutation")
 
         let cuaSnapshot = ActionUISnapshot(
             id: "cua-snapshot", source: .cua, appName: "Notes",
@@ -1582,8 +1609,247 @@ extension Selftest {
         {"sends":false,"steps":[{"do":"wait_frontmost","app":"Notes"},
           {"do":"press_ui","snapshot":"cua-snapshot","index":2,
            "role":"AXButton","label":"Open Sidebar"}]}
-        """, state: &cuaState) != nil,
-               "Swift accepts CuaClick only from an exact Cua window snapshot")
+        """, state: &cuaState) == nil,
+               "Cua observations cannot authorize a background press")
+
+        let nativeTextSnapshot = ActionUISnapshot(
+            id: "native-text", source: .native, appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", windowTitle: "Draft", windowID: 19,
+            complete: true,
+            elements: [
+                ActionUIElement(
+                    index: 1, parentIndex: 0, depth: 1,
+                    role: "AXTextArea", label: "Body", frame: nil,
+                    actions: [ActionUICapability.axFocus], focused: true),
+                ActionUIElement(
+                    index: 2, parentIndex: 0, depth: 1,
+                    role: "AXTextArea", label: "Other", frame: nil,
+                    actions: [ActionUICapability.axFocus]),
+                ActionUIElement(
+                    index: 3, parentIndex: 0, depth: 1,
+                    role: "AXSearchField", label: "Search", frame: nil,
+                    actions: [ActionUICapability.axFocus]),
+            ])
+        var nativeTextState = ActionPlan.BatchState()
+        nativeTextState.structuredUIAvailable = true
+        nativeTextState.structuredUISnapshot = nativeTextSnapshot
+        nativeTextState.spokenCommand = "write hello in TextEdit"
+        let nativeTextSeed = nativeTextState
+        guard let nativeTextPlan = decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"type_text","text":"hello","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &nativeTextState) else {
+            expect(false, "the exact native text capability decodes")
+            return
+        }
+        expect(nativeTextPlan.steps.last == .typeTextAt(
+                text: "hello", operation: .type,
+                target: ActionTextTarget(
+                    snapshotID: "native-text", index: 1,
+                    role: "AXTextArea", label: "Body")),
+               "native background typing stays bound to its exact AX element")
+        expect(nativeTextState.pendingIndex == 1
+               && nativeTextState.pendingRole == "AXTextArea"
+               && nativeTextState.pendingLabel == "body",
+               "native text state carries the normalized exact target")
+
+        var bareNativeState = nativeTextSeed
+        bareNativeState.requireUITargetVerification = true
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"type_text","text":"hello"}]}
+        """, state: &bareNativeState) == nil,
+               "the Action loop cannot discard an exact native text index")
+
+        var duplicateWriteState = nativeTextState
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"type_text","text":"hello","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &duplicateWriteState)
+            == .stateProofRequired(step: 0),
+               "an exact mutation requires state proof before any next action")
+
+        var continuedWriteState = nativeTextState
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"type_text","text":"world","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &continuedWriteState) == .stateProofRequired(step: 0),
+               "state proof is required before even different text")
+
+        var replaceState = nativeTextSeed
+        replaceState.spokenCommand = "replace the document text with hello"
+        guard let replacePlan = decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"replace_text","text":"hello","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &replaceState) else {
+            expect(false, "the exact replacement capability decodes")
+            return
+        }
+        expect(replacePlan.steps.last == .typeTextAt(
+                text: "hello", operation: .replace,
+                target: ActionTextTarget(
+                    snapshotID: "native-text", index: 1,
+                    role: "AXTextArea", label: "Body")),
+               "explicit replacement binds the exact native field")
+
+        var unsafeReplaceState = nativeTextSeed
+        unsafeReplaceState.spokenCommand = "write hello in the document"
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"replace_text","text":"hello","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &unsafeReplaceState) == nil,
+               "ordinary writing cannot replace pre-existing native text")
+
+        var substringReplaceState = nativeTextSeed
+        substringReplaceState.spokenCommand =
+            "replace cat with dog in the document"
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"replace_text","text":"dog","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &substringReplaceState) == nil,
+               "a substring replacement cannot erase the whole native field")
+
+        var wrongFieldState = nativeTextState
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"verify_state","snapshot":"native-text","index":2,
+           "role":"AXTextArea","label":"Other","assert":"written_text",
+           "expected_value":"hello"}]}
+        """, state: &wrongFieldState) == nil,
+               "written text cannot verify against a sibling editable")
+
+        var provedState = nativeTextState
+        guard let proofPlan = decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"verify_state","snapshot":"native-text","index":1,
+           "role":"AXTextArea","label":"Body","assert":"written_text",
+           "expected_value":"hello"}]}
+        """, state: &provedState) else {
+            expect(false, "the exact written field can be verified")
+            return
+        }
+        let executedProofState = ActionPlan.state(
+            after: proofPlan, executedCount: proofPlan.steps.count,
+            seed: nativeTextState)
+        expect(executedProofState.pendingIndex == nil,
+               "only a successfully executed state proof clears the gate")
+
+        let incompleteTextSnapshot = ActionUISnapshot(
+            id: "native-text", source: .native, appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", windowTitle: "Draft", windowID: 19,
+            complete: false, elements: nativeTextSnapshot.elements)
+        var incompleteProofState = nativeTextState
+        incompleteProofState.structuredUISnapshot = incompleteTextSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"verify_state","snapshot":"native-text","index":1,
+           "role":"AXTextArea","label":"Body","assert":"written_text",
+           "expected_value":"hello"}]}
+        """, state: &incompleteProofState) == nil,
+               "an incomplete native tree cannot prove an exact write")
+
+        let unlabeledTextSnapshot = ActionUISnapshot(
+            id: "unlabeled-text", source: .native, appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", windowTitle: "Draft", windowID: 20,
+            complete: true,
+            elements: [ActionUIElement(
+                index: 3, parentIndex: 0, depth: 1,
+                role: "AXTextArea", label: nil, frame: nil,
+                actions: [ActionUICapability.axFocus], selected: true,
+                focused: true)])
+        var unlabeledTextState = ActionPlan.BatchState()
+        unlabeledTextState.pendingText = true
+        unlabeledTextState.pendingValue = "hello"
+        unlabeledTextState.pendingIndex = 3
+        unlabeledTextState.pendingRole = "AXTextArea"
+        unlabeledTextState.pendingLabel = ""
+        unlabeledTextState.structuredUISnapshot = unlabeledTextSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"verify_state","snapshot":"unlabeled-text","index":3,
+           "role":"AXTextArea","label":"","assert":"written_text",
+           "expected_value":"hello"}]}
+        """, state: &unlabeledTextState)?.steps.last == .verifyState(
+            ActionStateCheck(
+                snapshotID: "unlabeled-text", index: 3,
+                role: "AXTextArea", label: "", assertion: .writtenText,
+                expectedValue: "hello")),
+               "written text can verify against its exact unlabeled editable")
+        var unlabeledSelectedState = unlabeledTextState
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"verify_state","snapshot":"unlabeled-text","index":3,
+           "role":"AXTextArea","label":"","assert":"selected"}]}
+        """, state: &unlabeledSelectedState) == nil,
+               "selected state still requires a nonempty spoken label")
+
+        var searchSeed = nativeTextSeed
+        searchSeed.pendingText = true
+        searchSeed.unverifiedText = true
+        searchSeed.pendingValue = "stale navigation query"
+        var unsafeSearchState = searchSeed
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"search_text","text":"needle","snapshot":"native-text",
+           "index":1,"role":"AXTextArea","label":"Body"}]}
+        """, state: &unsafeSearchState) == nil,
+               "search cannot replace an ordinary document field")
+        var searchState = searchSeed
+        guard let searchPlan = decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"TextEdit"},
+          {"do":"search_text","text":"needle","snapshot":"native-text",
+           "index":3,"role":"AXSearchField","label":"Search"}]}
+        """, state: &searchState) else {
+            expect(false, "the exact native search capability decodes")
+            return
+        }
+        expect(!searchState.pendingText && !searchState.unverifiedText
+               && searchState.pendingValue.isEmpty
+               && searchState.pendingIndex == nil
+               && searchState.pendingRole.isEmpty
+               && searchState.pendingLabel.isEmpty,
+               "search text cannot become pending authored content")
+        let executedSearchState = ActionPlan.state(
+            after: searchPlan, executedCount: searchPlan.steps.count,
+            seed: searchSeed)
+        expect(!executedSearchState.pendingText
+               && !executedSearchState.unverifiedText
+               && executedSearchState.pendingValue.isEmpty
+               && executedSearchState.pendingIndex == nil
+               && executedSearchState.pendingRole.isEmpty
+               && executedSearchState.pendingLabel.isEmpty,
+               "executed search state also clears content ownership")
+
+        var draftState = ActionPlan.BatchState()
+        draftState.structuredUIAvailable = true
+        draftState.structuredUISnapshot = ActionUISnapshot(
+            id: "visual-1", source: .cuaVisual, appName: "Slack",
+            bundleID: "com.tinyspeck.slackmacgap",
+            windowTitle: "Hemesh", windowID: 19, complete: false,
+            elements: [])
+        draftState.spokenCommand = "Draft a message for Hemesh on Slack"
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Slack"},
+          {"do":"type_text","text":"hello"}]}
+        """, state: &draftState)
+            == .invalidStructuredUICapability(step: 1),
+               "visual foreground authority never writes communication drafts")
 
         var presentationState = cuaState
         presentationState.requireUITargetVerification = true
@@ -1600,14 +1866,20 @@ extension Selftest {
                && !ActionPlan.isRecipientContent(
                 "Draft a message for Hemesh on Slack",
                 bundleID: "com.apple.Notes")
-               && !ActionPlan.isRecipientContent(
+               && ActionPlan.isRecipientContent(
                 "Draft a message for Hemesh on Slack",
                 bundleID: "com.example.unknown")
+               && ActionPlan.isRecipientContent(
+                "Draft a chat message to Alice in Zoom",
+                bundleID: "us.zoom.xos")
                && ActionPlan.isRecipientContent(
                 "Draft_a_message_for_Hemesh_on_Slack",
                 bundleID: "com.tinyspeck.slackmacgap")
                && ActionPlan.isRecipientContent(
-                "Draft an email to Hemesh", bundleID: "com.apple.mail"),
+                "Draft an email to Hemesh", bundleID: "com.apple.mail")
+               && ActionPlan.isRecipientContent(
+                "Add hello to Alice in Slack",
+                bundleID: "com.tinyspeck.slackmacgap"),
                "recipient drafts require an explicit communication context")
         expect(decodeBatchError("""
         {"sends":false,"steps":[{"do":"present_ui",
@@ -1623,10 +1895,8 @@ extension Selftest {
         ] {
             var notesState = presentationState
             notesState.spokenCommand = command
-            expect(decodeBatch("""
-            {"sends":false,"steps":[{"do":"wait_frontmost","app":"Notes"},
-              {"do":"type_text","text":"Local outline"}]}
-            """, state: &notesState) != nil,
+            expect(!ActionPlan.isRecipientContent(
+                    command, bundleID: "com.apple.Notes"),
                    "communication words stay local on the Notes target")
             expect(decodeBatchError("""
             {"sends":false,"steps":[{"do":"present_ui",
@@ -1799,7 +2069,7 @@ extension Selftest {
           {"do":"press_ui","snapshot":"cua-snapshot","index":2,
            "role":"AXButton","label":"Open Sidebar"}]}
         """, state: &forgedNativeState)
-               == .invalidStructuredUICapability(step: 1),
+               == .incompleteStructuredUI(step: 1),
                "Swift refuses CuaClick when a native snapshot claims it")
         var unrelatedPartialState = ActionPlan.BatchState()
         unrelatedPartialState.structuredUIAvailable = true
@@ -1824,6 +2094,21 @@ extension Selftest {
           {"do":"wait_frontmost","app":"WhatsApp"}]}
         """, state: &chainedPressState) == .pressRequiresFreshObservation(step: 1),
                "an indexed press must end its turn so the next step sees a fresh tree")
+
+        var goalThenTextState = ActionPlan.BatchState()
+        goalThenTextState.requireUITargetVerification = true
+        goalThenTextState.structuredUIAvailable = true
+        goalThenTextState.structuredUIComplete = true
+        goalThenTextState.structuredUISnapshot = snapshot
+        goalThenTextState.spokenCommand = "write hello"
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
+          {"do":"verify_ui","snapshot":"snapshot-1","index":28,
+           "role":"AXButton","label":"Shivangi Gupta","target":"Shivangi Gupta",
+           "purpose":"goal","attestation":"engine"},
+          {"do":"type_text","text":"hello"}]}
+        """, state: &goalThenTextState) == nil,
+               "goal evidence cannot authorize typing into an unbound native field")
 
         var verifiedState = ActionPlan.BatchState()
         verifiedState.requireUITargetVerification = true
@@ -1998,6 +2283,28 @@ extension Selftest {
         expect(planner.ended, "the session is closed when the loop finishes")
         expect(host.endInputCount == 1,
                "a performed action ends the input session once")
+
+        let teardownHost = FakeActionHost()
+        teardownHost.appsByName["Notes"] = ("Notes", "com.apple.Notes")
+        teardownHost.onEndInputSession = {
+            teardownHost.failureReason = "focus restoration failed"
+        }
+        let teardownPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "open Notes", steps: jsonSteps("""
+            [{"do":"open_app","app":"Notes"},
+             {"do":"wait_frontmost","app":"Notes"}]
+            """), done: true),
+        ])
+        let teardownResult = ActionLoopRunner(
+            host: teardownHost, planner: teardownPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "open Notes", context: loopContext())
+        guard case .failed(let teardownReason, _) = teardownResult else {
+            expect(false, "teardown restoration failure overrides success")
+            return
+        }
+        expect(teardownReason == "focus restoration failed",
+               "the action result surfaces teardown restoration failure")
 
         let stuckHost = FakeActionHost()
         stuckHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
@@ -2410,6 +2717,47 @@ extension Selftest {
         } else {
             expect(false, "done stops the loop but cannot verify typed text")
         }
+
+        let exactSnapshot = ActionUISnapshot(
+            id: "exact-text", source: .native, appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", windowTitle: "Draft", windowID: 77,
+            complete: true, elements: [ActionUIElement(
+                index: 3, parentIndex: 0, depth: 1,
+                role: "AXTextArea", label: "Body", frame: nil,
+                actions: [ActionUICapability.axFocus], focused: true)])
+        let exactHost = FakeActionHost()
+        exactHost.frontmost = ("TextEdit", "com.apple.TextEdit")
+        exactHost.foregroundWindowValue = ActionWindowIdentity(
+            name: "TextEdit", bundleID: "com.apple.TextEdit",
+            pid: 500, windowID: 77)
+        exactHost.uiSnapshotValue = exactSnapshot
+        exactHost.exactTextReceipt = ActionStateReceipt(
+            id: "exact-write", appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", pid: 500, windowID: 77,
+            snapshotID: "exact-text", assertion: .writtenText,
+            mutationOrdinal: 1)
+        let exactPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "write hello", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"TextEdit"},
+             {"do":"type_text","text":"hello","snapshot":"exact-text",
+              "index":3,"role":"AXTextArea","label":"Body"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: [], done: true),
+            .failure(reason: "stop after proof refusal", code: "failed"),
+        ])
+        let exactResult = ActionLoopRunner(
+            host: exactHost, planner: exactPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "write hello in TextEdit", context: loopContext())
+        if case .failed(let reason, _) = exactResult {
+            expect(reason == "stop after proof refusal"
+                   && exactPlanner.observations.count == 2
+                   && (exactPlanner.observations.last?["failed_step"] as? String)?
+                       .contains("verify_state") == true,
+                   "bare done is refused until a fresh exact state proof runs")
+        } else {
+            expect(false, "bare done cannot bypass fresh exact state proof")
+        }
     }
 
     /// A model's `done` bit is a request to stop, not evidence that the
@@ -2433,22 +2781,92 @@ extension Selftest {
             expect(false, "a wait-only batch is not execution, got \(waitResult)")
         }
 
+        let textSnapshot = ActionUISnapshot(
+            id: "replace-snapshot", source: .native, appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", windowTitle: "Draft", windowID: 77,
+            complete: true, elements: [ActionUIElement(
+                index: 3, parentIndex: 0, depth: 1,
+                role: "AXTextArea", label: "Body", frame: nil,
+                actions: [ActionUICapability.axFocus], focused: true)])
+        let textReceipt = ActionStateReceipt(
+            id: "replace-receipt", appName: "TextEdit",
+            bundleID: "com.apple.TextEdit", pid: 500, windowID: 77,
+            snapshotID: "replace-snapshot", assertion: .writtenText,
+            mutationOrdinal: 1)
+        let textHost = FakeActionHost()
+        textHost.frontmost = ("TextEdit", "com.apple.TextEdit")
+        textHost.foregroundWindowValue = ActionWindowIdentity(
+            name: "TextEdit", bundleID: "com.apple.TextEdit",
+            pid: 500, windowID: 77)
+        textHost.uiSnapshotValue = textSnapshot
+        textHost.exactTextReceipt = textReceipt
+        textHost.stateReceipt = textReceipt
+        let textCommand = "In TextEdit, replace the text with hello"
+        let textPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: textCommand, steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"TextEdit"},
+             {"do":"replace_text","text":"hello",
+              "snapshot":"replace-snapshot","index":3,
+              "role":"AXTextArea","label":"Body"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"verify_state","snapshot":"replace-snapshot","index":3,
+              "role":"AXTextArea","label":"Body","assert":"written_text",
+              "expected_value":"hello"}]
+            """), done: true),
+        ])
+        let textResult = ActionLoopRunner(
+            host: textHost, planner: textPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: textCommand, context: loopContext())
+        if case .completed = textResult {
+            expect(true, "fresh exact readback completes a closed replace command")
+        } else {
+            expect(false, "closed exact replacement should complete: \(textResult)")
+        }
+
         let openHost = FakeActionHost()
         openHost.appsByName["Mail"] = ("Mail", "com.apple.mail")
+        openHost.isDrivingInBackground = true
         let openPlanner = FakeTurnPlanner(turns: [
             .turn(sends: false, goal: "send the email", steps: jsonSteps("""
             [{"do":"open_app","app":"Mail"},
              {"do":"wait_frontmost","app":"Mail"}]
             """), done: true),
+            .failure(reason: "under-planned action retried", code: "failed"),
         ])
         let openResult = ActionLoopRunner(host: openHost, planner: openPlanner,
                                           execute: true, allowSend: false)
             .run(transcript: "send the email", context: loopContext())
-        if case .performedUnverified(let goal, _, _) = openResult {
-            expect(goal == "send the email",
-                   "an under-planned request remains explicitly unverified")
+        if case .failed(let reason, _) = openResult {
+            expect(reason == "under-planned action retried"
+                   && openPlanner.observations.count == 1,
+                   "an app open cannot end an unfinished in-app request")
         } else {
-            expect(false, "app focus evidence is not bound to the user's request")
+            expect(false, "an under-planned request must get another turn")
+        }
+
+        let lateOpenHost = FakeActionHost()
+        lateOpenHost.appsByName["Calculator"] = (
+            "Calculator", "com.apple.calculator")
+        lateOpenHost.isDrivingInBackground = true
+        let lateOpenPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "press 7", steps: jsonSteps("""
+            [{"do":"open_app","app":"Calculator"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: [], done: true),
+            .failure(reason: "late under-plan retried", code: "failed"),
+        ])
+        let lateOpenResult = ActionLoopRunner(
+            host: lateOpenHost, planner: lateOpenPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "In Calculator, press 7", context: loopContext())
+        if case .failed(let reason, _) = lateOpenResult {
+            expect(reason == "late under-plan retried"
+                   && lateOpenPlanner.observations.count == 2,
+                   "a later empty done cannot finish at app-open evidence")
+        } else {
+            expect(false, "late under-planning must get another turn")
         }
 
         let crossTurnHost = FakeActionHost()
@@ -3722,11 +4140,8 @@ extension Selftest {
           {"do":"media_control","state":"play","snapshot":"music-snapshot",
            "index":2,"role":"AXButton","label":"Play"}]}
         """, state: &mediaState)
-        let mediaControl = ActionMediaControl(
-            state: .play, snapshotID: "music-snapshot", index: 2,
-            role: "AXButton", label: "Play")
-        expect(media?.steps.last == .mediaControl(mediaControl),
-               "media playback carries one exact Cua UI capability")
+        expect(media == nil,
+               "Cua observations cannot authorize media mutation")
         var unfocusedMedia = ActionPlan.BatchState()
         unfocusedMedia.structuredUIAvailable = true
         unfocusedMedia.structuredUIComplete = true
@@ -3782,6 +4197,7 @@ extension Selftest {
             windowTitle: "", complete: false, elements: [],
             capabilities: [nativeCapability])
         var nativeState = ActionPlan.BatchState()
+        nativeState.spokenCommand = "pause music in Music"
         nativeState.structuredUIAvailable = true
         nativeState.structuredUISnapshot = nativeSnapshot
         let nativePlan = decodeBatch("""
@@ -3797,6 +4213,7 @@ extension Selftest {
             "an app-native media step echoes one current opaque capability")
 
         var forgedState = ActionPlan.BatchState()
+        forgedState.spokenCommand = "play music in Music"
         forgedState.structuredUIAvailable = true
         forgedState.structuredUISnapshot = nativeSnapshot
         expect(decodeBatch("""
@@ -3806,6 +4223,30 @@ extension Selftest {
            "capability":"opaque-pause"}]}
         """, state: &forgedState) == nil,
                "an opaque capability cannot be forged for another media state")
+
+        var mismatchedMedia = ActionPlan.BatchState()
+        mismatchedMedia.spokenCommand = "play music in Music"
+        mismatchedMedia.structuredUIAvailable = true
+        mismatchedMedia.structuredUISnapshot = nativeSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"media_control","state":"pause","snapshot":"native-music",
+           "capability":"opaque-pause"}]}
+        """, state: &mismatchedMedia) == nil,
+               "media state must match the immutable spoken command")
+
+        var compoundMedia = ActionPlan.BatchState()
+        compoundMedia.spokenCommand = "pause music and raise volume"
+        compoundMedia.structuredUIAvailable = true
+        compoundMedia.structuredUISnapshot = nativeSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[{"do":"open_app","app":"Music"},
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"media_control","state":"pause","snapshot":"native-music",
+           "capability":"opaque-pause"}]}
+        """, state: &compoundMedia) == nil,
+               "basic media authority cannot execute a compound command")
     }
 
     /// The 2026-08-21 bakeoff produced a validator-ACCEPTED exfiltration: a
@@ -4130,6 +4571,37 @@ extension Selftest {
                    "extra media intent cannot use one local completion proof")
         }
 
+        let textProof = ActionLocalProof.state(
+            expectedValue: "hello", appName: "TextEdit")
+        expect(textProof.covers(
+                "In TextEdit, replace the text with hello"),
+               "an exact whole-field readback covers its closed replace command")
+        for command in [
+            "In TextEdit, replace the text with goodbye.",
+            "replace the text with hello and play music",
+            "replace the text with goodbye with hello",
+            "play music and replace the text with hello",
+            "in Notes replace the text with hello",
+            "replace the text in Notes with hello",
+            "replace the text in Notes then send the email with hello",
+            "write hello in TextEdit",
+        ] {
+            expect(!textProof.covers(command),
+                   "state proof cannot cover a different or compound command")
+        }
+        expect(!ActionLocalProof.state(
+                expectedValue: "hello in TextEdit", appName: "TextEdit")
+                .covers("replace the text with hello in TextEdit"),
+               "an app locator cannot be consumed as replacement content")
+        expect(!ActionLocalProof.state(
+                expectedValue: "hello world", appName: "TextEdit")
+                .covers("In TextEdit, replace the text with hello-world"),
+               "punctuation differences cannot collapse into equal text proof")
+        expect(!ActionLocalProof.state(
+                expectedValue: " hello\n", appName: "TextEdit")
+                .covers("In TextEdit, replace the text with hello"),
+               "boundary whitespace cannot collapse into equal text proof")
+
         let host = FakeActionHost()
         host.appsByName["Music"] = ("Music", "com.apple.Music")
         host.actionProcessValue = ActionProcessIdentity(
@@ -4155,14 +4627,13 @@ extension Selftest {
         compoundHost.appsByName["Music"] = ("Music", "com.apple.Music")
         compoundHost.actionProcessValue = host.actionProcessValue
         compoundHost.mediaControlResult = .verified
+        let mediaCapability = ActionNativeCapability(
+            id: "opaque-play", verb: .mediaControl, state: .play)
         let snapshot = ActionUISnapshot(
-            id: "music-snapshot", source: .cua,
+            id: "music-snapshot", source: .appNative,
             appName: "Music", bundleID: "com.apple.Music",
-            windowTitle: "Music", windowID: 13, complete: true,
-            elements: [ActionUIElement(
-                index: 2, parentIndex: 0, depth: 1,
-                role: "AXButton", label: "Play", frame: nil,
-                actions: [ActionUICapability.cuaClick], enabled: true)])
+            windowTitle: "", complete: false, elements: [],
+            capabilities: [mediaCapability])
         compoundHost.uiSnapshotValue = snapshot
         var compoundContext = ActionContextSnapshot()
         compoundContext.frontmostApp = "Ghostty"
@@ -4176,18 +4647,18 @@ extension Selftest {
             [{"do":"open_app","app":"Music"},
              {"do":"wait_frontmost","app":"Music"},
              {"do":"media_control","state":"play",
-              "snapshot":"music-snapshot","index":2,
-              "role":"AXButton","label":"Play"}]
+              "snapshot":"music-snapshot","capability":"opaque-play"}]
             """), done: true)])
         let compoundResult = ActionLoopRunner(
             host: compoundHost, planner: compoundPlanner,
             execute: true, allowSend: false
         ).run(transcript: compoundGoal, context: compoundContext)
-        if case .performedUnverified = compoundResult {
-            expect(true, "a media receipt cannot prove a compound command")
+        if case .failed = compoundResult {
+            expect(compoundHost.mediaControlCalls.isEmpty,
+                   "a compound command receives no basic media authority")
         } else {
             expect(false,
-                   "compound media remains unverified: \(compoundResult)")
+                   "compound media is rejected before execution: \(compoundResult)")
         }
 
         let longHost = FakeActionHost()
@@ -4203,15 +4674,15 @@ extension Selftest {
             [{"do":"open_app","app":"Music"},
              {"do":"wait_frontmost","app":"Music"},
              {"do":"media_control","state":"play",
-              "snapshot":"music-snapshot","index":2,
-              "role":"AXButton","label":"Play"}]
+              "snapshot":"music-snapshot","capability":"opaque-play"}]
             """), done: true)])
         let longResult = ActionLoopRunner(
             host: longHost, planner: longPlanner,
             execute: true, allowSend: false
         ).run(transcript: longGoal, context: compoundContext)
-        if case .performedUnverified = longResult {
-            expect(true, "proof coverage uses the untruncated spoken command")
+        if case .failed = longResult {
+            expect(longHost.mediaControlCalls.isEmpty,
+                   "proof coverage uses the untruncated spoken command")
         } else {
             expect(false, "a hidden command suffix stays visible to proof")
         }
@@ -4318,6 +4789,28 @@ extension Selftest {
             maySend: { true }) == .unavailable
             && readRaceProvider.commands.isEmpty,
             "a Music restart during readback cannot prove playback")
+
+        let noPlayableProvider = FakeNativeMediaProvider()
+        let noPlayable = NativeMediaAutomation(
+            providers: [noPlayableProvider],
+            bundleForPID: { $0 == process.pid ? process.bundleID : nil },
+            processIdentity: identity,
+            read: { audio(false) }, sleep: { _ in })
+        guard let noPlayableCapability = noPlayable.capabilities(
+            for: process
+        ).first(where: { $0.state == .play }) else {
+            expect(false, "Music exposes a play capability for the no-op fixture")
+            return
+        }
+        let noPlayableControl = ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "native-music", id: noPlayableCapability.id))
+        expect(noPlayable.perform(
+            noPlayableControl, target: process,
+            maySend: { true }) == .unavailable
+            && noPlayableProvider.commands == [.play],
+            "an intact Music target with no playable item is unavailable")
 
         let rejected = NativeMediaAutomation(
             providers: [FakeNativeMediaProvider()],
@@ -5122,8 +5615,6 @@ extension Selftest {
         UserInputActivity.mark()
         expect(UserInputActivity.selectedWindow(after: unknownLease) == nil,
                "unattributed input invalidates an older selected window")
-        testRoutedActionEndToEnd()
-        testVerifiedCuaState()
         testTypedTextAppearsInTheTrace()
         testPrivateCuaLifecycle()
         testCuaEndpointOwnership()
@@ -5132,16 +5623,12 @@ extension Selftest {
         testCuaKeyMap()
         testCuaWindowPick()
         testOffSpaceAXPrimer()
-        testOffSpaceAXRecovery()
         testActionResultHandoff()
         testCuaSnapshotParsing()
         testCuaPressPick()
         testBackgroundActionGate()
         testWindowlessRouting()
-        testRoutedMediaControl()
-        testRoutedGoalVerification()
-        testSnapshotLineage()
-        testBackgroundRoutingHost()
+        testNativeBackgroundRouting()
     }
 
     private static func testVerifiedCuaState() {
@@ -5568,789 +6055,6 @@ extension Selftest {
         ) { true } cleanup: { .restoreForeground } == .focusFailed
                && driftPosts == 0,
                "last-moment lease drift refuses before any focus record")
-    }
-
-    private static func testOffSpaceAXRecovery() {
-        func recoveredState() -> [String: Any] {
-            var state = noteWindowState(elementsComplete: false)
-            state.removeValue(forKey: "degraded")
-            state["returned_element_count"] = 3
-            return state
-        }
-
-        func presentationReply(_ pid: Int, _ windowID: Int) -> [String: Any] {
-            [
-                "status": "activated",
-                "code": "bring_to_front_exact_window_verified",
-                "activated": true, "request_accepted": true,
-                "process_activated": true,
-                "pid": pid, "window_id": windowID, "path": "ax_raise",
-                "exact_window_effect": [
-                    "verified": true, "focused": true,
-                    "frontmost_ordinary": true,
-                    "target_visible_ordinary": true,
-                ],
-                "observed": [
-                    "frontmost_pid": pid,
-                    "workspace_frontmost_pid": pid,
-                    "front_process_matches_target": true,
-                    "focused_window_id": windowID,
-                    "frontmost_ordinary_window_id": windowID,
-                ],
-            ]
-        }
-
-        func partialReply(_ pid: Int, _ windowID: Int) -> [String: Any] {
-            [
-                "status": "partial",
-                "code": "bring_to_front_exact_window_unverified",
-                "_velora_tool_error": true,
-                "activated": false, "request_accepted": true,
-                "process_activated": true,
-                "pid": pid, "window_id": windowID,
-                "exact_window_effect": [
-                    "verified": false, "focused": true,
-                    "frontmost_ordinary": false,
-                    "target_visible_ordinary": false,
-                ],
-                "observed": [
-                    "frontmost_pid": pid,
-                    "workspace_frontmost_pid": pid,
-                    "front_process_matches_target": true,
-                    "focused_window_id": windowID,
-                    "frontmost_ordinary_window_id": 10,
-                ],
-            ]
-        }
-
-        func fallbackWorld() -> (
-            system: FakeActionHost,
-            transport: FakeCuaTransport,
-            primer: FakeOffSpacePrimer
-        ) {
-            let system = FakeActionHost()
-            system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            system.foregroundWindowValue = ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 70)
-            let transport = FakeCuaTransport()
-            scriptNotesWorld(transport)
-            transport.responses["list_windows"] = ["windows": [[
-                "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-                "bounds": ["x": 100.0, "y": 200.0,
-                           "width": 800.0, "height": 600.0],
-                "title": "My Note", "on_current_space": false,
-            ]]]
-            transport.responses["get_window_state"] = [
-                "degraded": true,
-                "degraded_reason": "ax_window_unresolved",
-                "elements": [],
-            ]
-            let primer = FakeOffSpacePrimer()
-            primer.result = .observationFailed
-            return (system, transport, primer)
-        }
-
-        let system = FakeActionHost()
-        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        system.foregroundWindowValue = ActionWindowIdentity(
-            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-            pid: 700, windowID: 70)
-        let transport = FakeCuaTransport()
-        scriptNotesWorld(transport)
-        transport.responses["list_windows"] = ["windows": [[
-            "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-            "bounds": ["x": 100.0, "y": 200.0,
-                       "width": 800.0, "height": 600.0],
-            "title": "My Note", "on_current_space": false,
-        ]]]
-        transport.responses["get_window_state"] = [
-            "degraded": true,
-            "degraded_reason": "ax_window_unresolved: exact window has no AXWindow",
-            "elements": [],
-        ]
-        let primer = FakeOffSpacePrimer()
-        primer.onPrime = {
-            transport.responses["get_window_state"] = recoveredState()
-        }
-        let identity = CuaProcessIdentity(
-            pid: 500, startSeconds: 10, startMicroseconds: 20)
-        let host = makeRoutedHost(
-            system: system, transport: transport,
-            offSpacePrimer: primer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        host.beginActionInputSession(command: "open My Note in Notes")
-        _ = host.openApp(named: "Notes")
-        expect(host.frontmostApp()?.name == "Notes"
-               && primer.calls.count == 1,
-               "one exact focus lease materializes the off-Space AX tree")
-        let snapshot = host.uiSnapshot()
-        expect(snapshot?.complete == false
-               && snapshot?.elements.contains(where: {
-                   $0.label == "Open Sidebar"
-                       && $0.actions.contains(ActionUICapability.cuaClick)
-               }) == true,
-               "the post-defocus partial Cua tree supplies exact capabilities")
-        expect(system.frontmost?.bundleID == "com.mitchellh.ghostty"
-               && transport.callCount("bring_to_front") == 0,
-               "AX materialization leaves the user's foreground untouched")
-
-        let fallback = fallbackWorld()
-        let fallbackSystem = fallback.system
-        let fallbackTransport = fallback.transport
-        fallbackTransport.queued["bring_to_front"] = [
-            presentationReply(500, 9), presentationReply(700, 70),
-        ]
-        var fallbackReadWhileFront = false
-        fallbackTransport.onCall = { tool in
-            if tool == "get_window_state",
-               fallbackSystem.frontmost?.bundleID == "com.apple.Notes" {
-                fallbackReadWhileFront = true
-            }
-            guard tool == "bring_to_front" else { return }
-            if fallbackTransport.callCount(tool) == 1 {
-                fallbackSystem.frontmost = ("Notes", "com.apple.Notes")
-                fallbackSystem.foregroundWindowValue = ActionWindowIdentity(
-                    name: "Notes", bundleID: "com.apple.Notes",
-                    pid: 500, windowID: 9)
-                fallbackTransport.responses["get_window_state"]
-                    = recoveredState()
-                return
-            }
-            fallbackSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            fallbackSystem.foregroundWindowValue = ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 70)
-        }
-        let fallbackHost = makeRoutedHost(
-            system: fallbackSystem, transport: fallbackTransport,
-            offSpacePrimer: fallback.primer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        fallbackHost.beginActionInputSession(command: "open My Note")
-        _ = fallbackHost.openApp(named: "Notes")
-        let fallbackFront = fallbackHost.frontmostApp()
-        let fallbackBrings = fallbackTransport.calls.filter {
-            $0.tool == "bring_to_front"
-        }
-        expect(fallbackFront?.name == "Notes"
-               && fallbackBrings.count == 2
-               && fallbackBrings[0].arguments["pid"] as? Int == 500
-               && fallbackBrings[0].arguments["window_id"] as? Int == 9
-               && fallbackBrings[1].arguments["pid"] as? Int == 700
-               && fallbackBrings[1].arguments["window_id"] as? Int == 70
-               && !fallbackReadWhileFront
-               && fallbackSystem.frontmost?.name == "Ghostty"
-               && fallbackSystem.foregroundWindowValue?.windowID == 70,
-               "the bounded foreground fallback materializes AX and restores the exact prior window")
-
-        let busy = fallbackWorld()
-        let busyHost = makeRoutedHost(
-            system: busy.system, transport: busy.transport,
-            interactionIsQuiet: { false }, offSpacePrimer: busy.primer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        busyHost.beginActionInputSession(command: "open My Note")
-        _ = busyHost.openApp(named: "Notes")
-        _ = busyHost.frontmostApp()
-        expect(busy.transport.callCount("bring_to_front") == 0
-               && busy.system.frontmost?.name == "Ghostty"
-               && busyHost.actionFailureReason != nil,
-               "the fallback never activates a target while user input is active")
-
-        let recycledFallback = fallbackWorld()
-        recycledFallback.transport.queued["bring_to_front"] = [
-            presentationReply(500, 9), presentationReply(700, 70),
-        ]
-        var fallbackIdentity = identity
-        recycledFallback.transport.onCall = { tool in
-            guard tool == "bring_to_front" else { return }
-            if recycledFallback.transport.callCount(tool) == 1 {
-                recycledFallback.system.frontmost
-                    = ("Notes", "com.apple.Notes")
-                recycledFallback.system.foregroundWindowValue
-                    = ActionWindowIdentity(
-                        name: "Notes", bundleID: "com.apple.Notes",
-                        pid: 500, windowID: 9)
-                fallbackIdentity = CuaProcessIdentity(
-                    pid: 500, startSeconds: 11, startMicroseconds: 20)
-                return
-            }
-            recycledFallback.system.frontmost
-                = ("Ghostty", "com.mitchellh.ghostty")
-            recycledFallback.system.foregroundWindowValue
-                = ActionWindowIdentity(
-                    name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                    pid: 700, windowID: 70)
-        }
-        let recycledFallbackHost = makeRoutedHost(
-            system: recycledFallback.system,
-            transport: recycledFallback.transport,
-            offSpacePrimer: recycledFallback.primer,
-            processIdentity: { $0 == 500 ? fallbackIdentity : nil })
-        recycledFallbackHost.beginActionInputSession(command: "open My Note")
-        _ = recycledFallbackHost.openApp(named: "Notes")
-        _ = recycledFallbackHost.frontmostApp()
-        expect(recycledFallbackHost.actionFailureReason != nil
-               && recycledFallback.transport.callCount("bring_to_front") == 2
-               && recycledFallback.system.foregroundWindowValue?.windowID == 70,
-               "a recycled target is restored away from and grants no AX tree")
-
-        let partial = fallbackWorld()
-        partial.transport.queued["bring_to_front"] = [
-            partialReply(500, 9), presentationReply(700, 70),
-        ]
-        partial.transport.onCall = { tool in
-            guard tool == "bring_to_front" else { return }
-            if partial.transport.callCount(tool) == 1 {
-                partial.system.frontmost = ("Notes", "com.apple.Notes")
-                partial.system.foregroundWindowValue = ActionWindowIdentity(
-                    name: "Notes", bundleID: "com.apple.Notes",
-                    pid: 500, windowID: 10)
-                return
-            }
-            partial.system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            partial.system.foregroundWindowValue = ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 70)
-        }
-        let partialHost = makeRoutedHost(
-            system: partial.system, transport: partial.transport,
-            offSpacePrimer: partial.primer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        partialHost.beginActionInputSession(command: "open My Note")
-        _ = partialHost.openApp(named: "Notes")
-        _ = partialHost.frontmostApp()
-        expect(partialHost.actionFailureReason != nil
-               && partial.transport.callCount("bring_to_front") == 2
-               && partial.system.foregroundWindowValue?.windowID == 70,
-               "partial activation restores the prior exact window and refuses")
-
-        let interrupted = fallbackWorld()
-        interrupted.transport.queued["bring_to_front"] = [
-            presentationReply(500, 9),
-        ]
-        var fallbackActivated = false
-        interrupted.transport.onCall = { tool in
-            if tool == "bring_to_front",
-               interrupted.transport.callCount(tool) == 1 {
-                fallbackActivated = true
-                interrupted.system.frontmost = ("Notes", "com.apple.Notes")
-                interrupted.system.foregroundWindowValue
-                    = ActionWindowIdentity(
-                        name: "Notes", bundleID: "com.apple.Notes",
-                        pid: 500, windowID: 9)
-                return
-            }
-            guard tool == "list_windows", fallbackActivated else { return }
-            interrupted.system.frontmost = ("Telegram", "ru.keepcoder.Telegram")
-            interrupted.system.foregroundWindowValue = ActionWindowIdentity(
-                name: "Telegram", bundleID: "ru.keepcoder.Telegram",
-                pid: 800, windowID: 80)
-            let generation = UserInputActivity.mark()
-            UserInputActivity.noteWindow(80, at: generation)
-        }
-        let interruptedHost = makeRoutedHost(
-            system: interrupted.system, transport: interrupted.transport,
-            offSpacePrimer: interrupted.primer,
-            processIdentity: { $0 == 500 ? identity : nil },
-            userFocusForWindow: { windowID in
-                guard windowID == 80 else { return nil }
-                return ActionWindowIdentity(
-                    name: "Telegram", bundleID: "ru.keepcoder.Telegram",
-                    pid: 800, windowID: 80)
-            })
-        interruptedHost.beginActionInputSession(command: "open My Note")
-        _ = interruptedHost.openApp(named: "Notes")
-        _ = interruptedHost.frontmostApp()
-        expect(interruptedHost.actionFailureReason != nil
-               && interrupted.transport.callCount("bring_to_front") == 1
-               && interrupted.system.foregroundWindowValue?.windowID == 80,
-               "user input during the lease preserves the selected non-target window")
-
-        let restoreFailure = fallbackWorld()
-        restoreFailure.transport.queued["bring_to_front"] = [
-            presentationReply(500, 9),
-        ]
-        restoreFailure.transport.onCall = { tool in
-            guard tool == "bring_to_front",
-                  restoreFailure.transport.callCount(tool) == 1 else { return }
-            restoreFailure.system.frontmost = ("Notes", "com.apple.Notes")
-            restoreFailure.system.foregroundWindowValue = ActionWindowIdentity(
-                name: "Notes", bundleID: "com.apple.Notes",
-                pid: 500, windowID: 9)
-            restoreFailure.transport.responses["get_window_state"]
-                = recoveredState()
-        }
-        let restoreFailureHost = makeRoutedHost(
-            system: restoreFailure.system,
-            transport: restoreFailure.transport,
-            offSpacePrimer: restoreFailure.primer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        restoreFailureHost.beginActionInputSession(command: "open My Note")
-        _ = restoreFailureHost.openApp(named: "Notes")
-        _ = restoreFailureHost.frontmostApp()
-        expect(restoreFailureHost.actionFailureReason != nil
-               && restoreFailure.transport.callCount("bring_to_front") == 2
-               && restoreFailure.system.foregroundWindowValue?.windowID == 9,
-               "a failed exact restoration refuses instead of retaining the AX tree")
-
-        // A same-app window switch during capture must not be hidden by a
-        // later input snapshot or restore the window that lost foreground.
-        let captureSystem = FakeActionHost()
-        captureSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        captureSystem.foregroundWindowSequence = [
-            ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 70),
-            ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 71),
-        ]
-        let captureTransport = FakeCuaTransport()
-        scriptNotesWorld(captureTransport)
-        captureTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        captureTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let capturePrimer = FakeOffSpacePrimer()
-        let captureHost = makeRoutedHost(
-            system: captureSystem, transport: captureTransport,
-            offSpacePrimer: capturePrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        captureHost.beginActionInputSession(command: "open My Note")
-        _ = captureHost.openApp(named: "Notes")
-        _ = captureHost.frontmostApp()
-        expect(capturePrimer.calls.isEmpty
-               && captureHost.actionFailureReason != nil,
-               "foreground window drift during capture posts no focus record")
-
-        let publicSystem = FakeActionHost()
-        publicSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        publicSystem.foregroundWindowValue = ActionWindowIdentity(
-            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-            pid: 700, windowID: 70)
-        let publicTransport = FakeCuaTransport()
-        scriptNotesWorld(publicTransport)
-        publicTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        publicTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let publicPrimer = FakeOffSpacePrimer()
-        publicPrimer.onPrime = {
-            publicTransport.responses["get_window_state"] = recoveredState()
-            publicSystem.frontmost = ("Notes", "com.apple.Notes")
-            publicSystem.foregroundWindowValue = ActionWindowIdentity(
-                name: "Notes", bundleID: "com.apple.Notes",
-                pid: 500, windowID: 9)
-        }
-        publicPrimer.onCleanup = { decision in
-            guard decision == .restoreForeground else { return }
-            publicSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            publicSystem.foregroundWindowValue = ActionWindowIdentity(
-                name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-                pid: 700, windowID: 70)
-        }
-        let publicHost = makeRoutedHost(
-            system: publicSystem, transport: publicTransport,
-            offSpacePrimer: publicPrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        publicHost.beginActionInputSession(command: "open My Note")
-        _ = publicHost.openApp(named: "Notes")
-        expect(publicHost.frontmostApp() == nil
-               && publicPrimer.cleanup == [.restoreForeground]
-               && publicSystem.frontmost?.name == "Ghostty",
-               "a public-focus leak is restored and aborts the observation")
-
-        let activeSystem = FakeActionHost()
-        activeSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        activeSystem.foregroundWindowValue = ActionWindowIdentity(
-            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
-            pid: 700, windowID: 70)
-        let activeTransport = FakeCuaTransport()
-        scriptNotesWorld(activeTransport)
-        activeTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        activeTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        var activeCursor = CGPoint(x: 5, y: 6)
-        let activePrimer = FakeOffSpacePrimer()
-        activePrimer.onPrime = {
-            activeTransport.responses["get_window_state"] = recoveredState()
-            activeSystem.frontmost = ("Telegram", "ru.keepcoder.Telegram")
-            activeSystem.foregroundWindowValue = ActionWindowIdentity(
-                name: "Telegram", bundleID: "ru.keepcoder.Telegram",
-                pid: 800, windowID: 80)
-            activeCursor = CGPoint(x: 40, y: 50)
-            let generation = UserInputActivity.mark()
-            UserInputActivity.noteWindow(80, at: generation)
-        }
-        let activeHost = makeRoutedHost(
-            system: activeSystem, transport: activeTransport,
-            offSpacePrimer: activePrimer,
-            processIdentity: { $0 == 500 ? identity : nil },
-            cursorPosition: { activeCursor })
-        activeHost.beginActionInputSession(command: "open My Note")
-        _ = activeHost.openApp(named: "Notes")
-        expect(activeHost.frontmostApp()?.name == "Notes"
-               && activeSystem.frontmost?.name == "Telegram"
-               && activePrimer.cleanup == [.defocus],
-               "unrelated Telegram focus and cursor movement do not steal work")
-
-        let titleSystem = FakeActionHost()
-        titleSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let titleTransport = FakeCuaTransport()
-        scriptNotesWorld(titleTransport)
-        titleTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        titleTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let titlePrimer = FakeOffSpacePrimer()
-        titlePrimer.onPrime = {
-            titleTransport.responses["get_window_state"] = recoveredState()
-            titleTransport.responses["list_windows"] = ["windows": [[
-                "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-                "bounds": ["x": 100.0, "y": 200.0,
-                           "width": 801.0, "height": 600.0],
-                "title": "Renamed Note", "on_current_space": false,
-            ]]]
-        }
-        let titleHost = makeRoutedHost(
-            system: titleSystem, transport: titleTransport,
-            offSpacePrimer: titlePrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        titleHost.beginActionInputSession(command: "open My Note")
-        _ = titleHost.openApp(named: "Notes")
-        _ = titleHost.frontmostApp()
-        expect(titleHost.actionWindow() == nil
-               && titleHost.actionFailureReason != nil,
-               "title or bounds drift terminally invalidates the exact lease")
-
-        let cursorSystem = FakeActionHost()
-        cursorSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let cursorTransport = FakeCuaTransport()
-        scriptNotesWorld(cursorTransport)
-        cursorTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        cursorTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        var cursor = CGPoint(x: 5, y: 6)
-        let cursorPrimer = FakeOffSpacePrimer()
-        cursorPrimer.onPrime = {
-            cursorTransport.responses["get_window_state"] = recoveredState()
-            cursor = CGPoint(x: 7, y: 8)
-        }
-        let cursorHost = makeRoutedHost(
-            system: cursorSystem, transport: cursorTransport,
-            offSpacePrimer: cursorPrimer,
-            processIdentity: { $0 == 500 ? identity : nil },
-            cursorPosition: { cursor })
-        cursorHost.beginActionInputSession(command: "open My Note")
-        _ = cursorHost.openApp(named: "Notes")
-        _ = cursorHost.frontmostApp()
-        expect(cursorHost.actionWindow() == nil
-               && cursorHost.actionFailureReason != nil,
-               "unattributed cursor drift terminally invalidates the lease")
-
-        let enteredSystem = FakeActionHost()
-        enteredSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let enteredTransport = FakeCuaTransport()
-        scriptNotesWorld(enteredTransport)
-        enteredTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        enteredTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let enteredPrimer = FakeOffSpacePrimer()
-        enteredPrimer.onPrime = {
-            enteredTransport.responses["get_window_state"] = recoveredState()
-            enteredSystem.frontmost = ("Notes", "com.apple.Notes")
-            enteredSystem.foregroundWindowValue = ActionWindowIdentity(
-                name: "Notes", bundleID: "com.apple.Notes",
-                pid: 500, windowID: 9)
-            let generation = UserInputActivity.mark()
-            UserInputActivity.noteWindow(9, at: generation)
-        }
-        var enteredEnds = 0
-        let enteredHost = makeRoutedHost(
-            system: enteredSystem, transport: enteredTransport,
-            endDaemon: { enteredEnds += 1 },
-            offSpacePrimer: enteredPrimer,
-            processIdentity: { $0 == 500 ? identity : nil },
-            userFocusForWindow: { windowID in
-                guard windowID == 9 else { return nil }
-                return ActionWindowIdentity(
-                    name: "Notes", bundleID: "com.apple.Notes",
-                    pid: 500, windowID: 9)
-            })
-        enteredHost.beginActionInputSession(command: "open My Note")
-        _ = enteredHost.openApp(named: "Notes")
-        _ = enteredHost.frontmostApp()
-        expect(enteredPrimer.cleanup == [.preserveUserFocus]
-               && enteredHost.actionWindow() == nil
-               && enteredHost.actionFailureReason != nil
-               && enteredEnds == 1,
-               "exact user entry preserves focus and terminally cancels the route")
-
-        let unknownSystem = FakeActionHost()
-        unknownSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let unknownTransport = FakeCuaTransport()
-        scriptNotesWorld(unknownTransport)
-        unknownTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        unknownTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let unknownPrimer = FakeOffSpacePrimer()
-        unknownPrimer.onPrime = {
-            unknownTransport.responses["get_window_state"] = recoveredState()
-            UserInputActivity.mark()
-        }
-        let unknownHost = makeRoutedHost(
-            system: unknownSystem, transport: unknownTransport,
-            offSpacePrimer: unknownPrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        unknownHost.beginActionInputSession(command: "open My Note")
-        _ = unknownHost.openApp(named: "Notes")
-        _ = unknownHost.frontmostApp()
-        expect(unknownPrimer.cleanup == [.cancel]
-               && unknownHost.actionWindow() == nil,
-               "unknown user activity terminally cancels the route")
-
-        let siblingSystem = FakeActionHost()
-        siblingSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let siblingTransport = FakeCuaTransport()
-        scriptNotesWorld(siblingTransport)
-        siblingTransport.responses["list_windows"] = ["windows": [
-            ["pid": 500, "window_id": 9, "layer": 0, "z_index": 9,
-             "bounds": ["x": 100.0, "y": 200.0,
-                        "width": 800.0, "height": 600.0],
-             "title": "Target.txt", "on_current_space": false],
-            ["pid": 500, "window_id": 10, "layer": 0, "z_index": 10,
-             "bounds": ["x": 120.0, "y": 220.0,
-                        "width": 800.0, "height": 600.0],
-             "title": "Sibling.txt", "on_current_space": false],
-        ]]
-        siblingTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let siblingPrimer = FakeOffSpacePrimer()
-        siblingPrimer.onPrime = {
-            siblingTransport.responses["get_window_state"] = recoveredState()
-        }
-        let siblingHost = makeRoutedHost(
-            system: siblingSystem, transport: siblingTransport,
-            offSpacePrimer: siblingPrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        siblingHost.beginActionInputSession(
-            command: "click Open Sidebar in Target.txt")
-        _ = siblingHost.openApp(named: "Notes")
-        _ = siblingHost.frontmostApp()
-        siblingTransport.responses["click"] = ["effect": "confirmed"]
-        guard let siblingSnapshot = siblingHost.uiSnapshot() else {
-            expect(false, "the named lower-z target exposes its semantic tree")
-            return
-        }
-        let targetClicked = siblingHost.pressElement(
-            index: 2, snapshotID: siblingSnapshot.id,
-            label: "Open Sidebar", role: "AXButton",
-            expecting: "com.apple.notes")
-        let targetCall = siblingTransport.calls.last { $0.tool == "click" }
-        expect(siblingPrimer.calls.count == 1
-               && targetClicked
-               && targetCall?.arguments["window_id"] as? Int == 9,
-               "the immutable command selects the named lower-z same-PID window")
-        siblingHost.endActionInputSession()
-        siblingTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        siblingHost.beginActionInputSession(command: "click Open Sidebar")
-        expect(siblingHost.openApp(named: "Notes") == nil
-               && siblingPrimer.calls.count == 1,
-               "the prior command title resets at the next action boundary")
-
-        let ambiguousSystem = FakeActionHost()
-        ambiguousSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let ambiguousTransport = FakeCuaTransport()
-        scriptNotesWorld(ambiguousTransport)
-        ambiguousTransport.responses["list_windows"] = ["windows": [
-            ["pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-             "bounds": ["x": 100.0, "y": 200.0,
-                        "width": 800.0, "height": 600.0],
-             "title": "Probe.txt", "on_current_space": false],
-            ["pid": 500, "window_id": 10, "layer": 0, "z_index": 9,
-             "bounds": ["x": 120.0, "y": 220.0,
-                        "width": 800.0, "height": 600.0],
-             "title": "Probe.txt", "on_current_space": false],
-        ]]
-        ambiguousTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let ambiguousPrimer = FakeOffSpacePrimer()
-        let ambiguousHost = makeRoutedHost(
-            system: ambiguousSystem, transport: ambiguousTransport,
-            offSpacePrimer: ambiguousPrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        ambiguousHost.beginActionInputSession(command: "edit Probe.txt")
-        _ = ambiguousHost.openApp(named: "Notes")
-        _ = ambiguousHost.frontmostApp()
-        expect(ambiguousPrimer.calls.isEmpty
-               && ambiguousTransport.callCount("click") == 0,
-               "same-title same-PID windows refuse before target input")
-
-        let refusedCases: [(reason: String?, refusal: Bool)] = [
-            ("screenshot_unavailable", false),
-            (nil, false),
-            ("ax_window_unresolved", true),
-        ]
-        for item in refusedCases {
-            let refusedSystem = FakeActionHost()
-            refusedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-            let refusedTransport = FakeCuaTransport()
-            scriptNotesWorld(refusedTransport)
-            refusedTransport.responses["list_windows"]
-                = transport.responses["list_windows"]
-            var degraded: [String: Any] = [
-                "degraded": true, "elements": [],
-            ]
-            if let reason = item.reason {
-                degraded["degraded_reason"] = reason
-            }
-            if item.refusal {
-                degraded["status"] = "refused"
-                degraded["refusal"] = ["code": "owner_mismatch"]
-            }
-            refusedTransport.responses["get_window_state"] = degraded
-            let refusedPrimer = FakeOffSpacePrimer()
-            var ended = 0
-            let refusedHost = makeRoutedHost(
-                system: refusedSystem, transport: refusedTransport,
-                endDaemon: { ended += 1 },
-                offSpacePrimer: refusedPrimer,
-                processIdentity: { $0 == 500 ? identity : nil })
-            refusedHost.beginActionInputSession(command: "open My Note")
-            _ = refusedHost.openApp(named: "Notes")
-            _ = refusedHost.frontmostApp()
-            expect(refusedPrimer.calls.isEmpty
-                   && refusedHost.actionWindow() == nil
-                   && refusedHost.actionFailureReason != nil
-                   && ended == 1,
-                   "only ax_window_unresolved may enter the private primer")
-        }
-
-        let recycledSystem = FakeActionHost()
-        recycledSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let recycledTransport = FakeCuaTransport()
-        scriptNotesWorld(recycledTransport)
-        recycledTransport.responses["list_windows"]
-            = transport.responses["list_windows"]
-        recycledTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        var recycledBeforePost = false
-        recycledTransport.onCall = {
-            if $0 == "get_window_state" { recycledBeforePost = true }
-        }
-        let recycledPrimer = FakeOffSpacePrimer()
-        var recycledEnds = 0
-        let recycledHost = makeRoutedHost(
-            system: recycledSystem, transport: recycledTransport,
-            endDaemon: { recycledEnds += 1 },
-            offSpacePrimer: recycledPrimer,
-            processIdentity: { pid in
-                guard pid == 500 else { return nil }
-                return recycledBeforePost
-                    ? CuaProcessIdentity(
-                        pid: 500, startSeconds: 11, startMicroseconds: 20)
-                    : identity
-            })
-        recycledHost.beginActionInputSession(command: "open My Note")
-        _ = recycledHost.openApp(named: "Notes")
-        _ = recycledHost.frontmostApp()
-        expect(recycledPrimer.calls.isEmpty
-               && recycledHost.actionWindow() == nil
-               && recycledHost.actionFailureReason != nil
-               && recycledEnds == 1,
-               "a recycled PID before focus posting receives no primer record")
-
-        let driftSystem = FakeActionHost()
-        driftSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let driftTransport = FakeCuaTransport()
-        scriptNotesWorld(driftTransport)
-        driftTransport.responses["list_windows"] = transport.responses["list_windows"]
-        driftTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        var currentIdentity = identity
-        let driftPrimer = FakeOffSpacePrimer()
-        driftPrimer.onPrime = {
-            currentIdentity = CuaProcessIdentity(
-                pid: 500, startSeconds: 11, startMicroseconds: 20)
-            driftTransport.responses["get_window_state"] = recoveredState()
-        }
-        let driftHost = makeRoutedHost(
-            system: driftSystem, transport: driftTransport,
-            offSpacePrimer: driftPrimer,
-            processIdentity: { $0 == 500 ? currentIdentity : nil })
-        driftHost.beginActionInputSession()
-        _ = driftHost.openApp(named: "Notes")
-        _ = driftHost.frontmostApp()
-        expect(driftHost.uiSnapshot() == nil,
-               "a recycled target PID grants no semantic capability")
-
-        let staleSystem = FakeActionHost()
-        staleSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let staleTransport = FakeCuaTransport()
-        scriptNotesWorld(staleTransport)
-        staleTransport.responses["list_windows"] = transport.responses["list_windows"]
-        staleTransport.responses["get_window_state"] = [
-            "degraded": true, "degraded_reason": "ax_window_unresolved",
-            "elements": [],
-        ]
-        let stalePrimer = FakeOffSpacePrimer()
-        stalePrimer.result = .observationFailed
-        var staleEnds = 0
-        let staleHost = makeRoutedHost(
-            system: staleSystem, transport: staleTransport,
-            endDaemon: { staleEnds += 1 },
-            offSpacePrimer: stalePrimer,
-            processIdentity: { $0 == 500 ? identity : nil })
-        staleHost.beginActionInputSession()
-        _ = staleHost.openApp(named: "Notes")
-        _ = staleHost.frontmostApp()
-        _ = staleHost.uiSnapshot()
-        _ = staleHost.frontmostApp()
-        expect(stalePrimer.calls.count == 1
-               && staleTransport.callCount("bring_to_front") == 1
-               && staleHost.actionWindow() == nil
-               && staleHost.actionFailureReason?.contains(
-                    "Background accessibility") == true
-               && staleEnds == 1,
-               "a failed fallback runs once and clears route, capability, and daemon")
-        let staleRun = ActionExecutor(host: staleHost).run(ActionPlan(
-            goal: "open the stale note", sends: false,
-            steps: [.waitFrontmost(app: "Notes", timeoutMs: 1_000)],
-            unsupported: nil))
-        expect(staleRun.outcome == .failed(
-            step: 0,
-            reason: "Background accessibility is unavailable for this target.",
-            recoverable: false),
-               "the fallback refusal reaches the structured action result")
     }
 
     private static func testCuaEndpointOwnership() {
@@ -7000,6 +6704,31 @@ extension Selftest {
         } else {
             expect(false, "a well-formed ok response parses")
         }
+        let png = """
+        iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=
+        """.trimmingCharacters(in: .whitespacesAndNewlines)
+        let visual = """
+        {"ok":true,"result":{"content":[
+          {"type":"image","mimeType":"image/png","data":"\(png)"}],
+          "structuredContent":{"pid":500,"window_id":9}}}
+        """
+        if case .success(let payload) = CuaDriver.parseResponse(
+            Data(visual.utf8)) {
+            expect(CuaVisualEvidence.pngData(from: payload) != nil,
+                   "one bounded PNG survives the driver trust boundary")
+        } else {
+            expect(false, "one valid screenshot response parses")
+        }
+        let duplicate = visual.replacingOccurrences(
+            of: "]", with: ","
+                + "{\"type\":\"image\",\"mimeType\":\"image/png\","
+                + "\"data\":\"\(png)\"}]", options: [],
+            range: visual.range(of: "]"))
+        if case .failure(.malformedResponse) = CuaDriver.parseResponse(
+            Data(duplicate.utf8)) {
+        } else {
+            expect(false, "ambiguous screenshot responses fail closed")
+        }
         if case .failure(.daemonError(let message)) = CuaDriver.parseResponse(
             Data("{\"ok\":false,\"error\":\"no such tool\"}".utf8)) {
             expect(message == "no such tool", "daemon errors carry their message")
@@ -7196,7 +6925,7 @@ extension Selftest {
             [window(9, 7, z: nil, width: 900, height: 700, title: "Only")],
             pid: 9)
         expect(uniqueUnknown?.id == 7,
-               "one semantic candidate does not need a reported z-order")
+               "one titled candidate does not need reported Space ownership")
         let ambiguousUnknown = CuaWindowPick.choose(
             [window(9, 7, z: nil, width: 900, height: 700, title: "First"),
              window(9, 8, z: 8, width: 900, height: 700, title: "Second")],
@@ -7206,11 +6935,51 @@ extension Selftest {
         var current = window(
             9, 21, z: 1, width: 900, height: 700, title: "Current")
         current["on_current_space"] = true
+        current["is_on_screen"] = true
         var offSpace = window(
             9, 22, z: 2, width: 900, height: 700, title: "Elsewhere")
         offSpace["on_current_space"] = false
+        offSpace["is_on_screen"] = false
         expect(CuaWindowPick.choose([current, offSpace], pid: 9)?.id == 21,
                "one current-Space sibling is the unambiguous default")
+        var realOffSpace = window(
+            9, 23, z: 3, width: 900, height: 700, title: "Real document")
+        realOffSpace["on_current_space"] = false
+        realOffSpace["is_on_screen"] = false
+        var placeholder = window(
+            9, 24, z: 4, width: 500, height: 500)
+        placeholder["is_on_screen"] = false
+        placeholder["on_current_space"] = NSNull()
+        placeholder["current_space_id"] = NSNull()
+        placeholder["space_ids"] = NSNull()
+        expect(CuaWindowPick.choose(
+            [realOffSpace, placeholder], pid: 9)?.id == 23,
+            "an unknown-Space placeholder cannot hide one grounded window")
+        var front = window(
+            9, 31, z: 20, width: 900, height: 700, title: "Front")
+        front["on_current_space"] = true
+        front["is_on_screen"] = true
+        var back = window(
+            9, 32, z: 10, width: 900, height: 700, title: "Back")
+        back["on_current_space"] = true
+        back["is_on_screen"] = true
+        expect(CuaWindowPick.choose([back, front], pid: 9)?.id == 31,
+               "one highest current-Space on-screen window is the default")
+        var missingZ = window(
+            9, 33, z: nil, width: 900, height: 700, title: "Unknown")
+        missingZ["on_current_space"] = true
+        missingZ["is_on_screen"] = true
+        expect(CuaWindowPick.choose([front, missingZ], pid: 9) == nil,
+               "missing z-order keeps current-Space siblings ambiguous")
+        var tiedFront = front
+        tiedFront["window_id"] = 34
+        expect(CuaWindowPick.choose([front, tiedFront], pid: 9) == nil,
+               "tied current-Space z-order refuses instead of guessing")
+        var otherSpace = back
+        otherSpace["on_current_space"] = false
+        otherSpace["is_on_screen"] = false
+        expect(CuaWindowPick.choose([offSpace, otherSpace], pid: 9) == nil,
+               "off-Space siblings cannot become the default")
         let tied = CuaWindowPick.choose(
             [window(9, 7, z: 8, width: 900, height: 700, title: "Probe.txt"),
              window(9, 8, z: 8, width: 900, height: 700, title: "Probe.txt")],
@@ -7639,6 +7408,24 @@ extension Selftest {
         cursorPosition: @escaping () -> CGPoint? = {
             CGPoint(x: 5, y: 6)
         },
+        launchHidden: ((String) -> (pid: Int, bundleID: String)?)? = nil,
+        visualRecords: @escaping ([String: Any])
+            -> [CuaVisualTextRecord]? = { _ in nil },
+        nativeSnapshot: @escaping (
+            Int, Int, String, CGRect
+        ) -> ScreenActionUISnapshot? = { _, _, _, _ in nil },
+        nativePress: @escaping (
+            Int, ScreenAXReadback, ScreenActionUISnapshot
+        ) -> Bool = { _, _, _ in false },
+        nativeWrite: @escaping (
+            String, String, Int, ScreenActionUISnapshot
+        ) -> Bool = { _, _, _, _ in false },
+        nativeValueEquals: @escaping (
+            String, Int, ScreenActionUISnapshot
+        ) -> Bool = { _, _, _ in false },
+        restoreForeground: @escaping (
+            ActionWindowIdentity, () -> Bool
+        ) -> Bool = { _, _ in false },
         userFocusForWindow: @escaping (Int) -> ActionWindowIdentity? = { _ in nil },
         localApps: [String: String] = ["Notes": "com.apple.Notes",
                                        "Slack": "com.tinyspeck.slackmacgap"]
@@ -7663,6 +7450,12 @@ extension Selftest {
             offSpacePrimer: offSpacePrimer,
             processIdentity: processIdentity,
             cursorPosition: cursorPosition,
+            visualRecords: visualRecords,
+            nativeSnapshot: nativeSnapshot,
+            nativePress: nativePress,
+            nativeWrite: nativeWrite,
+            nativeValueEquals: nativeValueEquals,
+            restoreForeground: restoreForeground,
             userFocusForWindow: userFocusForWindow,
             localResolve: { name in
                 guard let index = AppMatcher.bestMatch(
@@ -8511,6 +8304,513 @@ extension Selftest {
                "later healthy evidence cannot resurrect a terminal route")
     }
 
+    private static func testNativeBackgroundRouting() {
+        let system = FakeActionHost()
+        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        system.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let transport = FakeCuaTransport()
+        scriptNotesWorld(transport)
+
+        let dummy = AXUIElementCreateApplication(
+            ProcessInfo.processInfo.processIdentifier)
+        let siblingDummy = AXUIElementCreateApplication(
+            ProcessInfo.processInfo.processIdentifier + 1)
+        let searchDummy = AXUIElementCreateApplication(
+            ProcessInfo.processInfo.processIdentifier + 2)
+        var favoritesSelected = false
+        var value = ""
+        var writes: [(value: String, prior: String, index: Int)] = []
+        var presses: [(index: Int, expected: ScreenAXReadback)] = []
+        var restoredWindows: [ActionWindowIdentity] = []
+
+        func makeNative(
+            _ writeBaseline: String = "", bodyLabel: String? = "Body"
+        )
+            -> ScreenActionUISnapshot {
+            let elements = [
+                ActionUIElement(
+                    index: 0, parentIndex: nil, depth: 0,
+                    role: "AXWindow", label: "My Note",
+                    frame: CGRect(x: 0, y: 0, width: 800, height: 600),
+                    actions: []),
+                ActionUIElement(
+                    index: 1, parentIndex: 0, depth: 1,
+                    role: "AXTextArea", label: bodyLabel, frame: nil,
+                    actions: [ActionUICapability.axFocus], focused: true),
+                ActionUIElement(
+                    index: 2, parentIndex: 0, depth: 1,
+                    role: "AXRow", label: "Favorites", frame: nil,
+                    actions: [ActionUICapability.axPress],
+                    selected: favoritesSelected),
+                ActionUIElement(
+                    index: 3, parentIndex: 0, depth: 1,
+                    role: "AXTextArea", label: "Other", frame: nil,
+                    actions: [ActionUICapability.axFocus]),
+                ActionUIElement(
+                    index: 4, parentIndex: 0, depth: 1,
+                    role: "AXSearchField", label: "Search", frame: nil,
+                    actions: [ActionUICapability.axFocus]),
+            ]
+            let observation = ActionUISnapshot(
+                id: favoritesSelected ? "native-2" : "native-1",
+                source: .native, appName: "Notes",
+                bundleID: "com.apple.Notes", windowTitle: "My Note",
+                windowID: 9, complete: true, elements: elements)
+            return ScreenActionUISnapshot(
+                observation: observation, applicationElement: dummy,
+                focusedWindow: dummy,
+                elementsByIndex: [
+                    0: dummy, 1: dummy, 2: dummy,
+                    3: siblingDummy, 4: searchDummy,
+                ],
+                pressReadbacks: [2: .selected(true)],
+                writeBaselines: [
+                    1: writeBaseline, 3: writeBaseline, 4: writeBaseline,
+                ])
+        }
+
+        let host = makeRoutedHost(
+            system: system, transport: transport,
+            endDaemon: {
+                transport.responses["list_windows"] = ["windows": []]
+            },
+            nativeSnapshot: { pid, windowID, title, bounds in
+                guard pid == 500, windowID == 9, title == "My Note",
+                      bounds == CGRect(
+                        x: 0, y: 0, width: 800, height: 600)
+                else { return nil }
+                return makeNative()
+            },
+            nativePress: { index, expected, _ in
+                presses.append((index, expected))
+                favoritesSelected = true
+                system.frontmost = ("Notes", "com.apple.Notes")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.Notes",
+                    pid: 500, windowID: 9)
+                return true
+            },
+            nativeWrite: { next, prior, index, _ in
+                guard value == prior else { return false }
+                writes.append((next, prior, index))
+                value = next
+                system.frontmost = ("Telegram", "ru.keepcoder.Telegram")
+                system.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Telegram", bundleID: "ru.keepcoder.Telegram",
+                    pid: 800, windowID: 80)
+                let generation = UserInputActivity.mark()
+                UserInputActivity.noteWindow(80, at: generation)
+                return true
+            },
+            nativeValueEquals: { expected, index, _ in
+                index == 1 && value == expected
+            },
+            restoreForeground: { target, allowed in
+                guard allowed() else { return false }
+                restoredWindows.append(target)
+                system.frontmost = (target.name, target.bundleID)
+                system.foregroundWindowValue = target
+                return allowed()
+            })
+        host.beginActionInputSession(command: "write hello in My Note")
+        _ = host.openApp(named: "Notes")
+        _ = host.frontmostApp()
+        guard let before = host.uiSnapshot() else {
+            expect(false, "the exact native background tree is available")
+            return
+        }
+        expect(before.source == .native && before.id == "native-1",
+               "public AX is preferred over a Cua mutation tree")
+        expect(before.elements.first(where: { $0.index == 1 })?.actions.isEmpty
+               == true,
+               "background observations do not advertise AXFocus")
+        expect(host.verifyElement(
+                index: 1, snapshotID: before.id, label: "Body",
+                role: "AXTextArea", target: "Body",
+                expecting: "com.apple.Notes", purpose: .target),
+               "the empty exact native field verifies without focus")
+        let receipt = host.typeText(
+            "hello",
+            target: ActionTextTarget(
+                snapshotID: before.id, index: 1,
+                role: "AXTextArea", label: "Body"),
+            expecting: "com.apple.Notes")
+        expect(receipt?.assertion == .writtenText
+               && writes.count == 1
+               && writes[0].prior.isEmpty
+               && writes[0].value == "hello"
+               && writes[0].index == 1,
+               "native background text compare-and-sets the exact field")
+        expect(system.frontmost?.name == "Telegram"
+               && system.foregroundWindowValue?.windowID == 80,
+               "a concurrent Telegram switch remains untouched")
+
+        guard let after = host.uiSnapshot() else {
+            expect(false, "the native tree can be re-observed after writing")
+            return
+        }
+        expect(host.pressElement(
+                index: 2, snapshotID: after.id, label: "Favorites",
+                role: "AXRow", expecting: "com.apple.Notes")
+               && presses.count == 1
+               && presses[0].index == 2
+               && presses[0].expected == .selected(true)
+               && restoredWindows.map(\.windowID) == [80]
+               && system.foregroundWindowValue?.windowID == 80,
+               "a self-activating native press restores the exact user window")
+        system.frontmost = ("Notes", "com.apple.Notes")
+        system.foregroundWindowValue = ActionWindowIdentity(
+            name: "Notes", bundleID: "com.apple.Notes",
+            pid: 500, windowID: 9)
+        guard let selected = host.uiSnapshot() else {
+            expect(false, "the pressed native row can be re-observed")
+            return
+        }
+        expect(restoredWindows.map(\.windowID) == [80, 80]
+               && system.foregroundWindowValue?.windowID == 80,
+               "a delayed target activation is repaired before observation")
+        expect(host.verifyElement(
+                index: 2, snapshotID: selected.id, label: "Favorites",
+                role: "AXRow", target: "Favorites",
+                expecting: "com.apple.Notes", purpose: .goal),
+               "fresh selected native evidence verifies the goal")
+        expect(!host.typeText("legacy", expecting: "com.apple.Notes")
+               && !host.pressElement(
+                    label: "Favorites", expecting: "com.apple.Notes")
+               && !host.pressKey(
+                    name: "return", mods: [], keyCode: 36, flags: [],
+                    expecting: "com.apple.Notes"),
+               "unscoped background input fails closed")
+        expect(host.mediaControl(ActionMediaControl(
+                state: .play,
+                capability: .cua(
+                    snapshotID: after.id, index: 2,
+                    role: "AXRow", label: "Favorites"))) == .unavailable,
+               "Cua media clicks are not executable")
+        expect(!host.presentUI(
+                snapshotID: after.id, bundleID: "com.apple.Notes",
+                windowID: 9),
+               "automatic target presentation is forbidden")
+        let mutations = Set([
+            "click", "type_text", "press_key",
+            "bring_to_front", "launch_app",
+        ])
+        expect(transport.calls.allSatisfy { !mutations.contains($0.tool) },
+               "automatic background execution uses Cua read-only")
+        system.onEndInputSession = {
+            system.frontmost = ("Notes", "com.apple.Notes")
+            system.foregroundWindowValue = ActionWindowIdentity(
+                name: "Notes", bundleID: "com.apple.Notes",
+                pid: 500, windowID: 9)
+        }
+        host.endActionInputSession()
+        expect(restoredWindows.map(\.windowID) == [80, 80, 80]
+               && system.foregroundWindowValue?.windowID == 80,
+               "teardown drains a target activation before dropping the lease")
+
+        favoritesSelected = false
+        let raceSystem = FakeActionHost()
+        raceSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        raceSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let raceTransport = FakeCuaTransport()
+        scriptNotesWorld(raceTransport)
+        var raceValue = ""
+        var raceRestores: [Int] = []
+        let telegram = ActionWindowIdentity(
+            name: "Telegram", bundleID: "ru.keepcoder.Telegram",
+            pid: 800, windowID: 80)
+        let raceHost = makeRoutedHost(
+            system: raceSystem, transport: raceTransport,
+            nativeSnapshot: { _, _, _, _ in makeNative(raceValue) },
+            nativeWrite: { next, prior, _, _ in
+                guard raceValue == prior else { return false }
+                raceValue = next
+                raceSystem.frontmost = ("Notes", "com.apple.Notes")
+                raceSystem.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.Notes",
+                    pid: 500, windowID: 9)
+                return true
+            },
+            restoreForeground: { target, allowed in
+                raceRestores.append(target.windowID)
+                if raceRestores.count == 1 {
+                    raceSystem.frontmost = (target.name, target.bundleID)
+                    raceSystem.foregroundWindowValue = target
+                    let generation = UserInputActivity.mark()
+                    UserInputActivity.noteWindow(80, at: generation)
+                    return allowed()
+                }
+                guard allowed() else { return false }
+                raceSystem.frontmost = (target.name, target.bundleID)
+                raceSystem.foregroundWindowValue = target
+                return true
+            },
+            userFocusForWindow: { windowID in
+                windowID == 80 ? telegram : nil
+            })
+        raceHost.beginActionInputSession(command: "write hello in My Note")
+        _ = raceHost.openApp(named: "Notes")
+        _ = raceHost.frontmostApp()
+        guard let raceBefore = raceHost.uiSnapshot() else {
+            expect(false, "the restore-race fixture has a native tree")
+            return
+        }
+        let raceReceipt = raceHost.typeText(
+            "hello",
+            target: ActionTextTarget(
+                snapshotID: raceBefore.id, index: 1,
+                role: "AXTextArea", label: "Body"),
+            expecting: "com.apple.Notes")
+        expect(raceReceipt != nil
+               && raceValue == "hello"
+               && raceRestores == [70, 80]
+               && raceSystem.foregroundWindowValue == telegram,
+               "user input during restoration wins with its exact window")
+
+        let replaceSystem = FakeActionHost()
+        replaceSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        replaceSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let replaceTransport = FakeCuaTransport()
+        scriptNotesWorld(replaceTransport)
+        var replacementValue = "existing draft"
+        let replaceHost = makeRoutedHost(
+            system: replaceSystem, transport: replaceTransport,
+            nativeSnapshot: { _, _, _, _ in
+                makeNative(replacementValue)
+            },
+            nativeWrite: { next, prior, _, _ in
+                guard replacementValue == prior else { return false }
+                replacementValue = next
+                return true
+            },
+            nativeValueEquals: { expected, _, _ in
+                replacementValue == expected
+            })
+        replaceHost.beginActionInputSession(
+            command: "replace the My Note text with hello")
+        _ = replaceHost.openApp(named: "Notes")
+        _ = replaceHost.frontmostApp()
+        guard let replaceBefore = replaceHost.uiSnapshot() else {
+            expect(false, "the replacement fixture has a native tree")
+            return
+        }
+        let replaceReceipt = replaceHost.replaceText(
+            "hello",
+            target: ActionTextTarget(
+                snapshotID: replaceBefore.id, index: 1,
+                role: "AXTextArea", label: "Body"),
+            expecting: "com.apple.Notes")
+        expect(replaceReceipt != nil && replacementValue == "hello",
+               "explicit replacement compare-and-sets the captured value")
+        guard let replaceAfter = replaceHost.uiSnapshot() else {
+            expect(false, "the replaced field can be re-observed")
+            return
+        }
+        expect(replaceHost.verifyState(
+                ActionStateCheck(
+                    snapshotID: replaceAfter.id, index: 1,
+                    role: "AXTextArea", label: "Body",
+                    assertion: .writtenText, expectedValue: "hello"),
+                expecting: "com.apple.Notes") != nil,
+               "native verification accepts the exact written element")
+        guard let siblingAfter = replaceHost.uiSnapshot() else {
+            expect(false, "the sibling field can be re-observed")
+            return
+        }
+        expect(replaceHost.verifyState(
+                ActionStateCheck(
+                    snapshotID: siblingAfter.id, index: 3,
+                    role: "AXTextArea", label: "Other",
+                    assertion: .writtenText, expectedValue: "hello"),
+                expecting: "com.apple.Notes") == nil,
+               "native verification cannot move to a sibling editable")
+        replaceHost.endActionInputSession()
+        replacementValue = "another existing draft"
+        replaceHost.beginActionInputSession(command: "write hello in My Note")
+        _ = replaceHost.openApp(named: "Notes")
+        _ = replaceHost.frontmostApp()
+        guard let ordinaryBefore = replaceHost.uiSnapshot() else {
+            expect(false, "the ordinary-write fixture has a native tree")
+            return
+        }
+        expect(replaceHost.typeText(
+                "hello",
+                target: ActionTextTarget(
+                    snapshotID: ordinaryBefore.id, index: 1,
+                    role: "AXTextArea", label: "Body"),
+                expecting: "com.apple.Notes") == nil
+               && replacementValue == "another existing draft",
+               "ordinary background typing cannot erase existing text")
+        replaceHost.endActionInputSession()
+
+        let unlabeledSystem = FakeActionHost()
+        unlabeledSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        unlabeledSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let unlabeledTransport = FakeCuaTransport()
+        scriptNotesWorld(unlabeledTransport)
+        var unlabeledValue = ""
+        let unlabeledHost = makeRoutedHost(
+            system: unlabeledSystem, transport: unlabeledTransport,
+            nativeSnapshot: { _, _, _, _ in
+                makeNative(unlabeledValue, bodyLabel: nil)
+            },
+            nativeWrite: { next, prior, _, _ in
+                guard unlabeledValue == prior else { return false }
+                unlabeledValue = next
+                return true
+            },
+            nativeValueEquals: { expected, index, _ in
+                index == 1 && unlabeledValue == expected
+            })
+        unlabeledHost.beginActionInputSession(
+            command: "write hello in My Note")
+        _ = unlabeledHost.openApp(named: "Notes")
+        _ = unlabeledHost.frontmostApp()
+        guard let unlabeledBefore = unlabeledHost.uiSnapshot(),
+              unlabeledHost.typeText(
+                "hello",
+                target: ActionTextTarget(
+                    snapshotID: unlabeledBefore.id, index: 1,
+                    role: "AXTextArea", label: ""),
+                expecting: "com.apple.Notes") != nil,
+              let unlabeledAfter = unlabeledHost.uiSnapshot() else {
+            expect(false, "an unlabeled exact native field can be written")
+            return
+        }
+        expect(unlabeledHost.verifyState(
+                ActionStateCheck(
+                    snapshotID: unlabeledAfter.id, index: 1,
+                    role: "AXTextArea", label: "",
+                    assertion: .writtenText, expectedValue: "hello"),
+                expecting: "com.apple.Notes") != nil,
+               "an unlabeled exact native field can prove its written value")
+        unlabeledHost.endActionInputSession()
+
+        let searchSystem = FakeActionHost()
+        searchSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        searchSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let searchTransport = FakeCuaTransport()
+        scriptNotesWorld(searchTransport)
+        var searchValue = "old query"
+        var searchWrites: [(value: String, prior: String)] = []
+        let searchHost = makeRoutedHost(
+            system: searchSystem, transport: searchTransport,
+            nativeSnapshot: { _, _, _, _ in makeNative(searchValue) },
+            nativeWrite: { next, prior, _, _ in
+                searchWrites.append((next, prior))
+                guard searchWrites.count == 1,
+                      searchValue == prior else { return false }
+                searchValue = next
+                return true
+            })
+        searchHost.beginActionInputSession(
+            command: "search My Note for cats")
+        _ = searchHost.openApp(named: "Notes")
+        _ = searchHost.frontmostApp()
+        guard let searchBefore = searchHost.uiSnapshot() else {
+            expect(false, "the exact native search field is observable")
+            return
+        }
+        expect(searchHost.searchText(
+                "cats",
+                target: ActionTextTarget(
+                    snapshotID: searchBefore.id, index: 1,
+                    role: "AXTextArea", label: "Body"),
+                expecting: "com.apple.Notes") == nil
+               && searchWrites.isEmpty,
+               "runtime search cannot replace an ordinary document field")
+        guard searchHost.searchText(
+                "cats",
+                target: ActionTextTarget(
+                    snapshotID: searchBefore.id, index: 4,
+                    role: "AXSearchField", label: "Search"),
+                expecting: "com.apple.Notes") != nil,
+              let searchAfter = searchHost.uiSnapshot() else {
+            expect(false, "an exact native search can replace its query")
+            return
+        }
+        expect(searchHost.typeText(
+                " videos",
+                target: ActionTextTarget(
+                    snapshotID: searchAfter.id, index: 4,
+                    role: "AXSearchField", label: "Search"),
+                expecting: "com.apple.Notes") == nil
+               && searchWrites.map(\.prior) == ["old query", ""],
+               "a search query cannot become later content ownership")
+
+        favoritesSelected = false
+        let unknownSystem = FakeActionHost()
+        unknownSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        unknownSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let unknownTransport = FakeCuaTransport()
+        scriptNotesWorld(unknownTransport)
+        var unknownRestores: [Int] = []
+        let unknownHost = makeRoutedHost(
+            system: unknownSystem, transport: unknownTransport,
+            nativeSnapshot: { _, _, _, _ in makeNative() },
+            nativePress: { _, _, _ in
+                favoritesSelected = true
+                unknownSystem.frontmost = ("Notes", "com.apple.Notes")
+                unknownSystem.foregroundWindowValue = ActionWindowIdentity(
+                    name: "Notes", bundleID: "com.apple.Notes",
+                    pid: 500, windowID: 9)
+                return false
+            },
+            restoreForeground: { target, allowed in
+                guard allowed() else { return false }
+                unknownRestores.append(target.windowID)
+                unknownSystem.frontmost = (target.name, target.bundleID)
+                unknownSystem.foregroundWindowValue = target
+                return true
+            })
+        unknownHost.beginActionInputSession(command: "open Favorites")
+        _ = unknownHost.openApp(named: "Notes")
+        _ = unknownHost.frontmostApp()
+        guard let unknownBefore = unknownHost.uiSnapshot() else {
+            expect(false, "the uncertain-readback fixture has a native tree")
+            return
+        }
+        expect(!unknownHost.pressElement(
+                index: 2, snapshotID: unknownBefore.id,
+                label: "Favorites", role: "AXRow",
+                expecting: "com.apple.Notes")
+               && unknownRestores == [70]
+               && unknownSystem.foregroundWindowValue?.windowID == 70
+               && unknownHost.actionFailureReason != nil,
+               "failed native readback restores focus and forbids retry")
+
+        let coldSystem = FakeActionHost()
+        coldSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let coldTransport = FakeCuaTransport()
+        coldTransport.responses["list_apps"] = ["apps": [[
+            "name": "Notes", "bundle_id": "com.apple.Notes",
+            "pid": 0, "running": false, "active": false,
+        ]]]
+        coldTransport.responses["list_windows"] = ["windows": []]
+        var launches = 0
+        let coldHost = makeRoutedHost(
+            system: coldSystem, transport: coldTransport,
+            launchHidden: { _ in
+                launches += 1
+                return (500, "com.apple.Notes")
+            })
+        coldHost.beginActionInputSession(command: "open Notes")
+        expect(coldHost.openApp(named: "Notes") == nil && launches == 0,
+               "strict background mode never cold-launches a regular app")
+    }
+
     private static func testBackgroundRoutingHost() {
         func presentationReply(_ pid: Int, _ windowID: Int) -> [String: Any] {
             [
@@ -8660,7 +8960,9 @@ extension Selftest {
                    "a driver-confirmed background type succeeds")
             let typeCall = transport.calls.last { $0.tool == "type_text" }
             expect((typeCall?.arguments["pid"] as? Int) == 500
-                   && (typeCall?.arguments["window_id"] as? Int) == 9,
+                   && (typeCall?.arguments["window_id"] as? Int) == 9
+                   && typeCall?.arguments["_skip_window_change_detection"]
+                        as? Bool == true,
                    "typing is addressed to the exact target window")
             expect((typeCall?.arguments["element_token"] as? String) == "s00000001:1",
                    "typing names the window's text element — the pid's focused "
@@ -8674,7 +8976,9 @@ extension Selftest {
                    "a background AX control uses the generic driver click path")
             let clickCall = transport.calls.last { $0.tool == "click" }
             expect((clickCall?.arguments["element_token"] as? String)
-                   == "s00000001:2",
+                   == "s00000001:2"
+                   && clickCall?.arguments["_skip_window_change_detection"]
+                        as? Bool == true,
                    "the background click addresses the exact tree token")
 
             transport.responses["press_key"] = ["effect": "unverifiable",
@@ -8685,6 +8989,9 @@ extension Selftest {
             let keyCall = transport.calls.last { $0.tool == "press_key" }
             expect((keyCall?.arguments["key"] as? String) == "tab",
                    "the plan's key name reaches the driver's vocabulary")
+            expect(keyCall?.arguments["_skip_window_change_detection"]
+                    as? Bool == true,
+                   "embedded input skips Cua's post-action focus observer")
             expect(!host.pressKey(name: "comma", mods: [], keyCode: 43,
                                   flags: [], expecting: "com.apple.notes"),
                    "an untranslatable key refuses instead of guessing")
@@ -8712,8 +9019,8 @@ extension Selftest {
                    "background input refuses without Accessibility permission")
         }
 
-        // A running Electron process can own zero windows after its last
-        // window closes. launch_app must materialize one without activating it.
+        // A running process can own zero windows after its last window closes.
+        // NSWorkspace must materialize one without activating it.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -8723,16 +9030,18 @@ extension Selftest {
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": []]
-            transport.onCall = { tool in
-                guard tool == "launch_app" else { return }
-                UserInputActivity.mark()
-                transport.responses["list_windows"] = ["windows": [[
-                    "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-                    "bounds": ["width": 800.0, "height": 600.0],
-                    "title": "My Note",
-                ]]]
-            }
-            let host = makeRoutedHost(system: system, transport: transport)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                launchHidden: { _ in
+                    UserInputActivity.mark()
+                    transport.responses["list_windows"] = ["windows": [[
+                        "pid": 500, "window_id": 9, "layer": 0,
+                        "z_index": 10,
+                        "bounds": ["width": 800.0, "height": 600.0],
+                        "title": "My Note",
+                    ]]]
+                    return (500, "com.apple.Notes")
+                })
             host.beginActionInputSession()
             expect(host.openApp(named: "Notes") == "Notes"
                    && host.frontmostApp()?.name == "Notes",
@@ -8742,8 +9051,8 @@ extension Selftest {
                    "unrelated input does not cancel a focus-preserving launch")
         }
 
-        // A driver that admits failed suppression is not a background route.
-        // Refuse it without adding another foreground manipulation.
+        // An app that ignores without-activation is not a background route.
+        // Restore only the exact untouched user window, then refuse.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -8754,36 +9063,30 @@ extension Selftest {
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": []]
             transport.responses["bring_to_front"] = presentationReply(700, 70)
-            transport.responses["launch_app"] = [
-                "pid": 500, "bundle_id": "com.apple.Notes",
-                "name": "Notes", "windows": [],
-                "launch_state": [
-                    "requested": true, "process_running": true,
-                    "window_ready": false,
-                ],
-                "self_activation_suppressed": false,
-            ]
             transport.onCall = { tool in
-                if tool == "launch_app" {
-                    system.frontmost = ("Notes", "com.apple.notes")
-                    transport.responses["list_windows"] = ["windows": [[
-                        "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
-                        "bounds": ["width": 800.0, "height": 600.0],
-                        "title": "My Note",
-                    ]]]
-                }
                 if tool == "bring_to_front" {
                     system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
                 }
             }
-            let host = makeRoutedHost(system: system, transport: transport)
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                launchHidden: { _ in
+                    system.frontmost = ("Notes", "com.apple.notes")
+                    transport.responses["list_windows"] = ["windows": [[
+                        "pid": 500, "window_id": 9, "layer": 0,
+                        "z_index": 10,
+                        "bounds": ["width": 800.0, "height": 600.0],
+                        "title": "My Note",
+                    ]]]
+                    return (500, "com.apple.Notes")
+                })
             host.beginActionInputSession()
             expect(host.openApp(named: "Notes") == nil,
-                   "failed Cua suppression refuses the background route")
+                   "a self-activating launch refuses the background route")
             expect(system.sleepCalls.isEmpty
                    && transport.callCount("bring_to_front") == 1
                    && system.frontmost?.bundleID == "com.mitchellh.ghostty",
-                   "failed suppression restores the exact untouched window")
+                   "a self-activating launch restores the untouched window")
         }
 
         // If focus changed to another app while Cua launched, that app belongs
@@ -8797,17 +9100,9 @@ extension Selftest {
             let transport = FakeCuaTransport()
             scriptNotesWorld(transport)
             transport.responses["list_windows"] = ["windows": []]
-            transport.responses["launch_app"] = [
-                "pid": 500, "bundle_id": "com.apple.Notes",
-                "name": "Notes", "windows": [],
-                "launch_state": [
-                    "requested": true, "process_running": true,
-                    "window_ready": false,
-                ],
-                "self_activation_suppressed": false,
-            ]
-            transport.onCall = { tool in
-                if tool == "launch_app" {
+            let host = makeRoutedHost(
+                system: system, transport: transport,
+                launchHidden: { _ in
                     UserInputActivity.mark()
                     system.frontmost = ("Finder", "com.apple.finder")
                     system.foregroundWindowValue = nil
@@ -8816,9 +9111,8 @@ extension Selftest {
                         "bounds": ["width": 800.0, "height": 600.0],
                         "title": "My Note",
                     ]]]
-                }
-            }
-            let host = makeRoutedHost(system: system, transport: transport)
+                    return (500, "com.apple.Notes")
+                })
             host.beginActionInputSession()
             expect(host.openApp(named: "Notes") == nil
                    && system.frontmost?.bundleID == "com.apple.finder"
@@ -9764,9 +10058,8 @@ extension Selftest {
                    "the exact changed field value proves delivery")
         }
 
-        // An unresolved background AX surface must stay background. Earlier
-        // code briefly activated and hid it, stealing focus before the final
-        // handoff and sometimes hiding the user's app.
+        // An unresolved AX surface retains exact target identity but earns no
+        // mutation authority without an exact screenshot.
         do {
             let system = FakeActionHost()
             system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
@@ -9781,9 +10074,10 @@ extension Selftest {
             let host = makeRoutedHost(system: system, transport: transport)
             host.beginActionInputSession()
             _ = host.openApp(named: "Notes")
-            expect(host.frontmostApp() == nil
-                   && host.actionFailureReason != nil,
-                   "a non-off-Space unresolved AX target terminally refuses")
+            expect(host.frontmostApp()?.bundleID == "com.apple.Notes"
+                   && host.actionFailureReason == nil
+                   && host.uiSnapshot() == nil,
+                   "unresolved AX retains only its exact background identity")
             expect(transport.callCount("bring_to_front") == 0,
                    "an unresolved target does not take focus")
             system.sleep(ms: 1300)
@@ -9793,8 +10087,8 @@ extension Selftest {
             expect(system.frontmost?.bundleID == "com.mitchellh.ghostty",
                    "the user's app keeps the screen throughout navigation")
             transport.responses["get_window_state"] = resolved
-            expect(host.frontmostApp() == nil,
-                   "a later tree cannot resurrect a terminal route")
+            expect(host.frontmostApp()?.bundleID == "com.apple.Notes",
+                   "the malformed visual reply does not retarget the route")
             system.sleep(ms: 5000)
             transport.responses["get_window_state"] = ["degraded": true,
                                                        "elements": []]
@@ -10090,42 +10384,33 @@ extension Selftest {
                     "name": "Notes", "bundle_id": "com.apple.Notes",
                     "pid": 0, "running": false,
                 ]]]
-                transport.failing.insert("launch_app")
-            }
-            if failure == "launch_identity" {
-                transport.responses["launch_app"] = [
-                    "pid": 900, "bundle_id": "com.attacker.impostor",
-                    "name": "Notes", "windows": [],
-                    "launch_state": [
-                        "requested": true, "process_running": true,
-                        "window_ready": false,
-                    ],
-                    "self_activation_suppressed": true,
-                ]
-            }
-            if failure == "launch_pid_identity" {
-                transport.responses["launch_app"] = [
-                    "pid": 501, "bundle_id": "com.apple.Notes",
-                    "name": "Notes", "windows": [],
-                    "launch_state": [
-                        "requested": true, "process_running": true,
-                        "window_ready": false,
-                    ],
-                    "self_activation_suppressed": true,
-                ]
             }
             if failure == "launch_focus_changed" {
                 transport.onCall = { tool in
-                    if tool == "launch_app" {
-                        system.frontmost = ("Finder", "com.apple.finder")
-                    }
                     if tool == "bring_to_front" {
                         system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
                     }
                 }
             }
+            let launchHidden: (String) -> (pid: Int, bundleID: String)? = {
+                _ in
+                switch failure {
+                case "launch":
+                    return nil
+                case "launch_identity":
+                    return (900, "com.attacker.impostor")
+                case "launch_pid_identity":
+                    return (501, "com.apple.Notes")
+                case "launch_focus_changed":
+                    system.frontmost = ("Finder", "com.apple.finder")
+                    return (500, "com.apple.Notes")
+                default:
+                    return (500, "com.apple.Notes")
+                }
+            }
             let host = makeRoutedHost(
-                system: system, transport: transport, healthy: healthy)
+                system: system, transport: transport, healthy: healthy,
+                launchHidden: launchHidden)
             host.beginActionInputSession()
             let expectedFrontmost = "com.mitchellh.ghostty"
             let opened = host.openApp(named: "Notes")

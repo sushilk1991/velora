@@ -196,7 +196,7 @@ final class NativeMediaAutomation {
                 return .verified
             }
         }
-        return .misdirected
+        return .unavailable
     }
 
     private func provider(

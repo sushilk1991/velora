@@ -1,4 +1,18 @@
-# Cua Driver audit → background Action Mode (2026-08-23)
+# Cua Driver audit → background Action Mode (2026-08-23, superseded)
+
+> Correction, 2026-08-28: this document records the original 0.21.0 audit and
+> is not the current Velora design. A source audit of Cua 0.22.2 found that
+> `type_text` constructs focus-restoration guards before it reads
+> `_skip_window_change_detection`. A user switching to Telegram during the call
+> can therefore be returned to the stale foreground app. The wire request also
+> uses `args`, not `arguments`. Velora now uses Cua only for read-only window
+> observation and verification. Automatic clicks, structured text writes, and
+> media controls use public macOS Accessibility or app-native APIs. Window-only
+> text uses a retained exact Accessibility element with compare-and-set and
+> value readback. Incomplete or screenshot-only trees stay read-only. Cua no
+> longer clicks, types, presses keys, launches apps, or changes
+> focus during automatic execution. Cold targets without an open window are
+> refused. The historical findings below remain for provenance.
 
 Goal: judge whether the user-installed [Cua Driver](https://cua.ai/cua-driver)
 (`com.trycua.driver`, v0.21.0) makes Action Mode more powerful — specifically

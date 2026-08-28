@@ -10,6 +10,7 @@ enum ActionUICapability {
 enum ActionUISnapshotSource: String {
     case native
     case cua
+    case cuaVisual = "cua_visual"
     case appNative = "app_native"
 }
 
@@ -21,16 +22,28 @@ enum ActionNativeCapabilityVerb: String {
 /// capability does; provider identity and target binding remain in Swift.
 struct ActionNativeCapability: Equatable {
     let id: String
+    let source: ActionUISnapshotSource
     let verb: ActionNativeCapabilityVerb
-    let state: ActionMediaState
+    let state: ActionMediaState?
+
+    init(
+        id: String, source: ActionUISnapshotSource = .appNative,
+        verb: ActionNativeCapabilityVerb, state: ActionMediaState? = nil
+    ) {
+        self.id = id
+        self.source = source
+        self.verb = verb
+        self.state = state
+    }
 
     var payload: [String: Any] {
-        [
+        var value: [String: Any] = [
             "id": id,
-            "source": ActionUISnapshotSource.appNative.rawValue,
+            "source": source.rawValue,
             "do": verb.rawValue,
-            "state": state.rawValue,
         ]
+        if let state { value["state"] = state.rawValue }
+        return value
     }
 }
 
@@ -136,9 +149,8 @@ enum ActionUIEvidencePolicy {
         in elements: [ActionUIElement]
     ) -> Bool {
         guard mayVerify(index: index, in: elements),
-              let element = elements.first(where: { $0.index == index })
-        else { return false }
-        guard source != .appNative else { return false }
+              let element = elements.first(where: { $0.index == index }),
+              source != .cuaVisual, source != .appNative else { return false }
         if element.selected { return true }
         if element.focused && editableRoles.contains(element.role) { return true }
         return hasInertPath(index: index, in: elements)
@@ -271,4 +283,24 @@ struct ScreenActionUISnapshot {
     let applicationElement: AXUIElement
     let focusedWindow: AXUIElement
     let elementsByIndex: [Int: AXUIElement]
+    let pressReadbacks: [Int: ScreenAXReadback]
+    /// Local-only compare values captured with the retained AX elements. They
+    /// never enter the serializable observation or planner prompt.
+    let writeBaselines: [Int: String]
+
+    init(
+        observation: ActionUISnapshot,
+        applicationElement: AXUIElement,
+        focusedWindow: AXUIElement,
+        elementsByIndex: [Int: AXUIElement],
+        pressReadbacks: [Int: ScreenAXReadback] = [:],
+        writeBaselines: [Int: String] = [:]
+    ) {
+        self.observation = observation
+        self.applicationElement = applicationElement
+        self.focusedWindow = focusedWindow
+        self.elementsByIndex = elementsByIndex
+        self.pressReadbacks = pressReadbacks
+        self.writeBaselines = writeBaselines
+    }
 }

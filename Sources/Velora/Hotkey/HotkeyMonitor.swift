@@ -157,6 +157,17 @@ enum UserInputActivity {
         return selectedWindowID
     }
 
+    static func selectedFocus(
+        after generation: UInt64
+    ) -> (generation: UInt64, windowID: Int)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard selectedGeneration > generation,
+              selectedGeneration == value,
+              let windowID = selectedWindowID else { return nil }
+        return (selectedGeneration, windowID)
+    }
+
     static func noteWindow(_ windowID: Int, at generation: UInt64) {
         guard windowID > 0 else { return }
         lock.lock()
@@ -546,6 +557,7 @@ final class HotkeyMonitor {
     }
 
     private func handleTapEvent(type: CGEventType, event: CGEvent) -> Bool {
+        let sourcePID = event.getIntegerValueField(.eventSourceUnixProcessID)
         // The system disables taps that stall or that fire while another
         // process synthesizes input (our own ⌘V paste triggers
         // `.tapDisabledByUserInput`). Re-enable and resync to physical state.
@@ -567,7 +579,6 @@ final class HotkeyMonitor {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.rawValue
-        let sourcePID = event.getIntegerValueField(.eventSourceUnixProcessID)
         let rawTargetPID = event.getIntegerValueField(.eventTargetUnixProcessID)
         let targetPID = rawTargetPID > 0 ? Int(rawTargetPID) : nil
         let isVeloraEvent = sourcePID == Int64(ProcessInfo.processInfo.processIdentifier)

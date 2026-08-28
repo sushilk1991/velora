@@ -93,6 +93,15 @@ struct ScreenStreamPreviewTarget {
     let element: AXUIElement
 }
 
+/// A closed postcondition for one background AXPress. Buttons whose effect
+/// cannot be read back from the pressed native control are not executable.
+enum ScreenAXReadback: Equatable {
+    case selected(Bool)
+    case expanded(Bool)
+    case stringValue(String)
+    case numberValue(Double)
+}
+
 enum KeystrokeStreamTargetPolicy {
     static func mayCapture(
         role: String,
@@ -138,13 +147,44 @@ enum StreamPreviewTargetPolicy {
 /// This is the AX half of the "hybrid" context engine; a small on-device VLM
 /// screen-read is layered on later for Electron apps whose AX trees are thin.
 enum ScreenContext {
+    struct AXIdentityGuard {
+        private var buckets: [CFHashCode: [AXUIElement]] = [:]
+
+        mutating func insert(_ element: AXUIElement) -> Bool {
+            let hash = CFHash(element)
+            if buckets[hash]?.contains(where: {
+                CFEqual($0, element)
+            }) == true {
+                return false
+            }
+
+            // CFHash narrows candidates; CFEqual handles hash collisions.
+            buckets[hash, default: []].append(element)
+            return true
+        }
+    }
+
+    private enum BackgroundElementUse {
+        case press
+        case readback
+    }
+
+    private enum BackgroundTitleMatch {
+        case exact
+        case observation
+    }
+
     /// Max entities returned; keeps the prompt/vocabulary bounded.
     private static let maxEntities = 4
     /// Electron applications commonly nest the useful editable surface under
     /// several layers of web containers. Slack's visible composer is depth 23;
     /// this remains bounded by the independent node and wall-clock ceilings.
     static let actionTreeDepthBudget = 30
-
+    static let actionSnapshotDeadline: TimeInterval = 2
+    private static let backgroundFrameTolerance: CGFloat = 1
+    private static let backgroundAncestorLimit = 64
+    private static let backgroundReadAttempts = 5
+    private static let backgroundReadInterval: TimeInterval = 0.05
     private static let editableActionRoles: Set<String> = [
         kAXTextFieldRole as String,
         kAXTextAreaRole as String,
@@ -176,7 +216,7 @@ enum ScreenContext {
         of app: NSRunningApplication?,
         nodeBudget: Int = 500,
         depthBudget: Int = actionTreeDepthBudget,
-        deadline: TimeInterval = 1.2
+        deadline: TimeInterval = actionSnapshotDeadline
     ) -> ScreenActionUISnapshot? {
         guard nodeBudget > 0, let app, app.processIdentifier > 0,
               Permissions.accessibilityGranted else { return nil }
@@ -188,6 +228,246 @@ enum ScreenContext {
         // AXFocused separately on every node would add avoidable IPC latency.
         let focusedElement = axElement(appElement, kAXFocusedUIElementAttribute)
 
+        return makeActionSnapshot(
+            app: app, appElement: appElement, window: window,
+            windowID: nil, windowTitle: axString(
+                window, kAXTitleAttribute) ?? "",
+            focusedElement: focusedElement, nodeBudget: nodeBudget,
+            depthBudget: depthBudget, deadline: deadline)
+    }
+
+    /// Resolve one WindowServer lease to one AXWindow without activating or
+    /// focusing its process. Title and bounds are both required because AX has
+    /// no public attribute carrying the CGWindowID.
+    static func backgroundActionUISnapshot(
+        pid: Int,
+        windowID: Int,
+        windowTitle: String,
+        windowBounds: CGRect,
+        nodeBudget: Int = 500,
+        depthBudget: Int = actionTreeDepthBudget,
+        deadline: TimeInterval = actionSnapshotDeadline
+    ) -> ScreenActionUISnapshot? {
+        guard pid > 0, windowID > 0, nodeBudget > 0,
+              depthBudget >= 0, deadline > 0,
+              validWindowFrame(windowBounds),
+              Permissions.accessibilityGranted,
+              let app = NSRunningApplication(
+                processIdentifier: pid_t(pid)),
+              !app.isTerminated,
+              app.activationPolicy == .regular,
+              let bundleID = app.bundleIdentifier,
+              !bundleID.isEmpty
+        else { return nil }
+        let appElement = AXUIElementCreateApplication(pid_t(pid))
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        guard windowServerMatches(
+                windowID: windowID, pid: pid,
+                title: windowTitle, titleMatch: .exact,
+                frame: windowBounds),
+              let window = uniqueBackgroundWindow(
+                appElement: appElement, pid: pid,
+                title: windowTitle, titleMatch: .exact,
+                frame: windowBounds)
+        else { return nil }
+
+        let focused = axElement(appElement, kAXFocusedUIElementAttribute)
+            .flatMap { belongsToWindow($0, window: window) ? $0 : nil }
+        return makeActionSnapshot(
+            app: app, appElement: appElement, window: window,
+            windowID: windowID, windowTitle: windowTitle,
+            focusedElement: focused, nodeBudget: nodeBudget,
+            depthBudget: depthBudget, deadline: deadline)
+    }
+
+    /// Perform AXPress only when the exact retained native control exposes a
+    /// readable state transition. This never writes AXFocused or sends input.
+    static func backgroundPress(
+        index: Int,
+        expecting expected: ScreenAXReadback,
+        in snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard validReadback(expected),
+              let (_, element) = backgroundElement(
+                index: index, in: snapshot, use: .press),
+              let before = readback(expected, from: element),
+              before != expected,
+              AXUIElementPerformAction(
+                element, kAXPressAction as CFString) == .success
+        else { return false }
+
+        for attempt in 0..<backgroundReadAttempts {
+            if let (_, current) = backgroundElement(
+                    index: index, in: snapshot, use: .readback),
+               readback(expected, from: current) == expected {
+                return true
+            }
+            if attempt + 1 < backgroundReadAttempts {
+                Thread.sleep(forTimeInterval: backgroundReadInterval)
+            }
+        }
+        return false
+    }
+
+    /// Replace the exact AXValue and prove it with a fresh read from the same
+    /// retained native control. Cursor-relative insertion is intentionally not
+    /// offered because it would require focus or synthesized keyboard input.
+    static func backgroundWriteValue(
+        _ value: String,
+        replacing expected: String,
+        index: Int,
+        in snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard let (record, element) = backgroundElement(
+                index: index, in: snapshot, use: .readback),
+              isEditableActionRole(record.role),
+              axAttributeIsSettable(element, kAXValueAttribute),
+              let before = axRawString(element, kAXValueAttribute),
+              before == expected, before != value,
+              AXUIElementSetAttributeValue(
+                element, kAXValueAttribute as CFString,
+                value as CFString) == .success
+        else { return false }
+
+        for attempt in 0..<backgroundReadAttempts {
+            if let (_, current) = backgroundElement(
+                    index: index, in: snapshot, use: .readback),
+               axRawString(current, kAXValueAttribute) == value {
+                return true
+            }
+            if attempt + 1 < backgroundReadAttempts {
+                Thread.sleep(forTimeInterval: backgroundReadInterval)
+            }
+        }
+        return false
+    }
+
+    static func backgroundValueEquals(
+        _ value: String,
+        index: Int,
+        in snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard let (record, element) = backgroundElement(
+                index: index, in: snapshot, use: .readback),
+              isEditableActionRole(record.role)
+        else { return false }
+        return axRawString(element, kAXValueAttribute) == value
+    }
+
+    static func restoreActionWindow(
+        _ target: ActionWindowIdentity,
+        allowed: () -> Bool
+    ) -> Bool {
+        guard target.pid > 0, target.windowID > 0,
+              let expectedProcess = target.processIdentity,
+              CuaProcessIdentity.capture(pid: pid_t(target.pid))
+                == expectedProcess,
+              Permissions.accessibilityGranted,
+              let app = NSRunningApplication(
+                processIdentifier: pid_t(target.pid)),
+              !app.isTerminated, app.activationPolicy == .regular,
+              app.bundleIdentifier?.caseInsensitiveCompare(target.bundleID)
+                == .orderedSame,
+              let lease = restoreWindowLease(target),
+              let window = uniqueBackgroundWindow(
+                appElement: lease.appElement, pid: target.pid,
+                title: lease.title, titleMatch: .exact,
+                frame: lease.frame),
+              allowed()
+        else { return false }
+
+        // AXRaise selects the exact prior window within its process. AppKit
+        // then restores that process to the foreground; neither step guesses
+        // from the app name or accepts a sibling window.
+        guard AXUIElementPerformAction(
+                window, kAXRaiseAction as CFString) == .success,
+              allowed() else { return false }
+        let activated = runOnMain {
+            guard allowed() else { return false }
+            NSApp.yieldActivation(to: app)
+            return app.activate(options: [])
+        }
+        guard activated else { return false }
+
+        for attempt in 0..<backgroundReadAttempts {
+            guard allowed(),
+                  CuaProcessIdentity.capture(pid: pid_t(target.pid))
+                    == expectedProcess else { return false }
+            if actionWindowIsFront(target) {
+                return true
+            }
+            if attempt + 1 < backgroundReadAttempts {
+                Thread.sleep(forTimeInterval: backgroundReadInterval)
+            }
+        }
+        return false
+    }
+
+    private struct RestoreWindowLease {
+        let appElement: AXUIElement
+        let title: String
+        let frame: CGRect
+    }
+
+    private static func restoreWindowLease(
+        _ target: ActionWindowIdentity
+    ) -> RestoreWindowLease? {
+        guard let rows = CGWindowListCopyWindowInfo(
+                [.optionIncludingWindow], CGWindowID(target.windowID))
+                as? [[String: Any]],
+              let row = rows.first(where: {
+                  ($0[kCGWindowNumber as String] as? Int) == target.windowID
+                      && ($0[kCGWindowOwnerPID as String] as? Int) == target.pid
+                      && ($0[kCGWindowLayer as String] as? Int) == 0
+              }),
+              let rawBounds = row[kCGWindowBounds as String]
+                as? [String: Any],
+              let frame = CGRect(
+                dictionaryRepresentation: rawBounds as CFDictionary),
+              validWindowFrame(frame)
+        else { return nil }
+        let appElement = AXUIElementCreateApplication(pid_t(target.pid))
+        AXUIElementSetMessagingTimeout(appElement, 0.3)
+        return RestoreWindowLease(
+            appElement: appElement,
+            title: row[kCGWindowName as String] as? String ?? "",
+            frame: frame)
+    }
+
+    private static func actionWindowIsFront(
+        _ target: ActionWindowIdentity
+    ) -> Bool {
+        let front = runOnMain { NSWorkspace.shared.frontmostApplication }
+        guard front?.processIdentifier == pid_t(target.pid),
+              front?.bundleIdentifier?.caseInsensitiveCompare(target.bundleID)
+                == .orderedSame,
+              let rows = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements],
+                CGWindowID(kCGNullWindowID)) as? [[String: Any]],
+              let first = rows.first(where: {
+                  ($0[kCGWindowLayer as String] as? Int) == 0
+              })
+        else { return false }
+        return (first[kCGWindowOwnerPID as String] as? Int) == target.pid
+            && (first[kCGWindowNumber as String] as? Int) == target.windowID
+    }
+
+    private static func runOnMain<T>(_ body: () -> T) -> T {
+        if Thread.isMainThread { return body() }
+        return DispatchQueue.main.sync(execute: body)
+    }
+
+    private static func makeActionSnapshot(
+        app: NSRunningApplication,
+        appElement: AXUIElement,
+        window: AXUIElement,
+        windowID: Int?,
+        windowTitle: String,
+        focusedElement: AXUIElement?,
+        nodeBudget: Int,
+        depthBudget: Int,
+        deadline: TimeInterval
+    ) -> ScreenActionUISnapshot? {
         let stopAt = Date().addingTimeInterval(deadline)
         var queue: [(element: AXUIElement, parent: Int?, depth: Int)] = [
             (window, nil, 0),
@@ -196,13 +476,19 @@ enum ScreenContext {
         var references: [Int: AXUIElement] = [:]
         var nextIndex = 0
         var truncated = false
+        var visited = AXIdentityGuard()
 
         while !queue.isEmpty {
-            guard records.count < nodeBudget, Date() < stopAt else {
+            guard Date() < stopAt else {
                 truncated = true
                 break
             }
             let item = queue.removeFirst()
+            guard visited.insert(item.element) else { continue }
+            guard records.count < nodeBudget else {
+                truncated = true
+                break
+            }
             let index = nextIndex
             nextIndex += 1
             AXUIElementSetMessagingTimeout(item.element, 0.2)
@@ -242,19 +528,262 @@ enum ScreenContext {
             }
         }
 
-        let title = axString(window, kAXTitleAttribute) ?? ""
+        var pressReadbacks: [Int: ScreenAXReadback] = [:]
+        var writeBaselines: [Int: String] = [:]
+        if windowID != nil {
+            records = records.map { record in
+                guard let element = references[record.index] else {
+                    return record
+                }
+                if isEditableActionRole(record.role), record.enabled,
+                   !record.inWebContent,
+                   axAttributeIsSettable(element, kAXValueAttribute),
+                   let value = axRawString(element, kAXValueAttribute) {
+                    writeBaselines[record.index] = value
+                }
+                let readback = pressReadback(for: element)
+                if let readback { pressReadbacks[record.index] = readback }
+                let actions = record.actions.filter {
+                    $0 != ActionUICapability.axFocus
+                        && ($0 != kAXPressAction as String || readback != nil)
+                }
+                guard actions != record.actions else {
+                    return record
+                }
+                return ActionUIElement(
+                    index: record.index, parentIndex: record.parentIndex,
+                    depth: record.depth, role: record.role,
+                    label: record.label, frame: record.frame,
+                    actions: actions,
+                    enabled: record.enabled, selected: record.selected,
+                    focused: record.focused,
+                    inWebContent: record.inWebContent)
+            }
+        }
+
         let observation = ActionUISnapshot(
             id: UUID().uuidString,
             appName: app.localizedName ?? "",
             bundleID: app.bundleIdentifier ?? "",
-            windowTitle: String(title.prefix(180)),
+            windowTitle: String(windowTitle.prefix(180)),
+            windowID: windowID,
             complete: !truncated && queue.isEmpty,
             elements: records)
         return ScreenActionUISnapshot(
             observation: observation,
             applicationElement: appElement,
             focusedWindow: window,
-            elementsByIndex: references)
+            elementsByIndex: references,
+            pressReadbacks: pressReadbacks,
+            writeBaselines: writeBaselines)
+    }
+
+    private static func backgroundElement(
+        index: Int,
+        in snapshot: ScreenActionUISnapshot,
+        use: BackgroundElementUse
+    ) -> (ActionUIElement, AXUIElement)? {
+        guard backgroundWindowIsCurrent(snapshot),
+              let record = snapshot.observation.elements.first(where: {
+                $0.index == index
+              }),
+              let element = snapshot.elementsByIndex[index],
+              belongsToWindow(element, window: snapshot.focusedWindow),
+              axString(element, kAXRoleAttribute) == record.role,
+              axBool(element, kAXEnabledAttribute) != false
+        else { return nil }
+        var appPID = pid_t(0)
+        var elementPID = pid_t(0)
+        guard AXUIElementGetPid(
+                snapshot.applicationElement, &appPID) == .success,
+              AXUIElementGetPid(element, &elementPID) == .success,
+              appPID > 0, appPID == elementPID
+        else { return nil }
+        let authored = [
+            axString(element, kAXTitleAttribute),
+            axString(element, kAXDescriptionAttribute),
+            axString(element, kAXPlaceholderValueAttribute),
+        ].compactMap { $0 }
+        let actions = modelActionNames(from: axActionNames(element))
+        let label = actionUILabel(
+            role: record.role, authored: authored, actions: actions)
+        guard AppMatcher.normalize(label ?? "")
+                == AppMatcher.normalize(record.label ?? "")
+        else { return nil }
+        if case .press = use {
+            guard let label = record.label, !label.isEmpty,
+                  actions.contains(kAXPressAction as String),
+                  !ActionPlan.pressLabelIsCommitting(label)
+            else { return nil }
+        }
+        return (record, element)
+    }
+
+    private static func backgroundWindowIsCurrent(
+        _ snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard snapshot.observation.source == .native,
+              let windowID = snapshot.observation.windowID,
+              windowID > 0,
+              !snapshot.observation.bundleID.isEmpty,
+              let root = snapshot.observation.elements.first(where: {
+                $0.parentIndex == nil && $0.depth == 0
+              }),
+              let rootElement = snapshot.elementsByIndex[root.index],
+              CFEqual(rootElement, snapshot.focusedWindow),
+              let frame = root.frame,
+              validWindowFrame(frame)
+        else { return false }
+        var pid = pid_t(0)
+        guard AXUIElementGetPid(
+                snapshot.applicationElement, &pid) == .success,
+              pid > 0,
+              let app = NSRunningApplication(processIdentifier: pid),
+              !app.isTerminated,
+              app.bundleIdentifier?.caseInsensitiveCompare(
+                snapshot.observation.bundleID) == .orderedSame,
+              windowServerMatches(
+                windowID: windowID, pid: Int(pid),
+                title: snapshot.observation.windowTitle,
+                titleMatch: .observation, frame: frame),
+              let current = uniqueBackgroundWindow(
+                appElement: snapshot.applicationElement, pid: Int(pid),
+                title: snapshot.observation.windowTitle,
+                titleMatch: .observation, frame: frame),
+              CFEqual(current, snapshot.focusedWindow)
+        else { return false }
+        return true
+    }
+
+    private static func uniqueBackgroundWindow(
+        appElement: AXUIElement,
+        pid: Int,
+        title: String,
+        titleMatch: BackgroundTitleMatch,
+        frame: CGRect
+    ) -> AXUIElement? {
+        let matches = axElements(appElement, kAXWindowsAttribute).filter {
+            var ownerPID = pid_t(0)
+            return AXUIElementGetPid($0, &ownerPID) == .success
+                && ownerPID == pid_t(pid)
+                && axRawString($0, kAXTitleAttribute).map {
+                    windowTitlesMatch($0, title, mode: titleMatch)
+                } == true
+                && axFrame($0).map { windowFramesMatch($0, frame) } == true
+        }
+        guard matches.count == 1 else { return nil }
+        return matches[0]
+    }
+
+    private static func windowServerMatches(
+        windowID: Int,
+        pid: Int,
+        title: String,
+        titleMatch: BackgroundTitleMatch,
+        frame: CGRect
+    ) -> Bool {
+        guard let rows = CGWindowListCopyWindowInfo(
+                [.optionIncludingWindow], CGWindowID(windowID))
+                as? [[String: Any]],
+              let row = rows.first(where: {
+                ($0[kCGWindowNumber as String] as? Int) == windowID
+                    && ($0[kCGWindowOwnerPID as String] as? Int) == pid
+                    && ($0[kCGWindowLayer as String] as? Int) == 0
+              }),
+              let rawBounds = row[kCGWindowBounds as String]
+                as? [String: Any],
+              let bounds = CGRect(
+                dictionaryRepresentation: rawBounds as CFDictionary),
+              windowFramesMatch(bounds, frame)
+        else { return false }
+        if let currentTitle = row[kCGWindowName as String] as? String {
+            return windowTitlesMatch(
+                currentTitle, title, mode: titleMatch)
+        }
+        return true
+    }
+
+    private static func windowTitlesMatch(
+        _ current: String,
+        _ expected: String,
+        mode: BackgroundTitleMatch
+    ) -> Bool {
+        if case .exact = mode { return current == expected }
+        guard expected.count == 180 else { return current == expected }
+        return current.hasPrefix(expected)
+    }
+
+    private static func belongsToWindow(
+        _ element: AXUIElement,
+        window: AXUIElement
+    ) -> Bool {
+        var current: AXUIElement? = element
+        for _ in 0..<backgroundAncestorLimit {
+            guard let candidate = current else { return false }
+            if CFEqual(candidate, window) { return true }
+            current = axElement(candidate, kAXParentAttribute)
+        }
+        return false
+    }
+
+    private static func validWindowFrame(_ frame: CGRect) -> Bool {
+        frame.origin.x.isFinite
+            && frame.origin.y.isFinite
+            && frame.width.isFinite
+            && frame.height.isFinite
+            && frame.width > 0
+            && frame.height > 0
+    }
+
+    private static func windowFramesMatch(
+        _ first: CGRect,
+        _ second: CGRect
+    ) -> Bool {
+        abs(first.minX - second.minX) <= backgroundFrameTolerance
+            && abs(first.minY - second.minY) <= backgroundFrameTolerance
+            && abs(first.width - second.width) <= backgroundFrameTolerance
+            && abs(first.height - second.height) <= backgroundFrameTolerance
+    }
+
+    private static func validReadback(_ value: ScreenAXReadback) -> Bool {
+        guard case .numberValue(let number) = value else { return true }
+        return number.isFinite
+    }
+
+    private static func pressReadback(
+        for element: AXUIElement
+    ) -> ScreenAXReadback? {
+        if let selected = axBool(element, kAXSelectedAttribute) {
+            return .selected(!selected)
+        }
+        if let expanded = axBool(element, kAXExpandedAttribute) {
+            return .expanded(!expanded)
+        }
+        return nil
+    }
+
+    private static func readback(
+        _ expected: ScreenAXReadback,
+        from element: AXUIElement
+    ) -> ScreenAXReadback? {
+        switch expected {
+        case .selected:
+            return axBool(element, kAXSelectedAttribute).map {
+                .selected($0)
+            }
+        case .expanded:
+            return axBool(element, kAXExpandedAttribute).map {
+                .expanded($0)
+            }
+        case .stringValue:
+            return axRawString(element, kAXValueAttribute).map {
+                .stringValue($0)
+            }
+        case .numberValue:
+            return axNumber(element, kAXValueAttribute).map {
+                .numberValue($0)
+            }
+        }
     }
 
     private static func actionUIRecord(
@@ -1526,6 +2055,20 @@ enum ScreenContext {
               let number = ref as? NSNumber
         else { return nil }
         return number.boolValue
+    }
+
+    private static func axNumber(
+        _ element: AXUIElement, _ attr: String
+    ) -> Double? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, attr as CFString, &ref) == .success,
+              let number = ref as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite
+        else { return nil }
+        return number.doubleValue
     }
 
     private static func axParameterizedAttributeIsAvailable(

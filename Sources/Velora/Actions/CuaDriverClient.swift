@@ -40,10 +40,9 @@ struct CuaPeerTrustCache {
 
 /// Client for the Cua Driver daemon (github.com/trycua — `com.trycua.driver`),
 /// an MIT-licensed computer-use daemon the user installs separately. It can
-/// deliver clicks and text to a CHOSEN window without moving the cursor or
-/// stealing focus, which is what lets an Action run while the user keeps
-/// working. Velora talks to it over its unix socket in newline-delimited
-/// JSON: `{"method":"call","name":<tool>,"arguments":{…}}` per request
+/// observe and address a chosen process and window. Velora talks to it over
+/// its unix socket in newline-delimited JSON:
+/// `{"method":"call","name":<tool>,"args":{…}}` per request
 /// (protocol verified live against driver 0.21.0, 2026-08-23).
 ///
 /// Everything here is transport. What Action Mode may DO with the transport
@@ -208,7 +207,10 @@ enum CuaDriver {
             }
             return .failure(.daemonError(code ?? text ?? "tool error"))
         }
-        if let structured = result["structuredContent"] as? [String: Any] {
+        if var structured = result["structuredContent"] as? [String: Any] {
+            guard CuaVisualEvidence.preserve(
+                content: result["content"], in: &structured
+            ) else { return .failure(.malformedResponse) }
             return .success(structured)
         }
         // No structured payload and no error marker: the tool answered with

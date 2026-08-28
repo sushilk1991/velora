@@ -188,6 +188,13 @@ protocol ActionHost: AnyObject {
     /// Exact partial-tree write selected by the engine's current Cua snapshot.
     func typeText(_ text: String, target: ActionTextTarget,
                   expecting bundleID: String?) -> ActionStateReceipt?
+    /// Full-value write for an explicit replacement or navigation search.
+    func replaceText(_ text: String, target: ActionTextTarget,
+                     expecting bundleID: String?) -> ActionStateReceipt?
+    /// Navigation-only query write. It never establishes document draft
+    /// ownership for a later content write or commit.
+    func searchText(_ text: String, target: ActionTextTarget,
+                    expecting bundleID: String?) -> ActionStateReceipt?
     /// Bounded positive state proof. Implementations build every driver
     /// predicate; the plan cannot supply process/window or polling mechanics.
     func verifyState(_ check: ActionStateCheck,
@@ -266,6 +273,10 @@ extension ActionHost {
     }
     func typeText(_ text: String, target: ActionTextTarget,
                   expecting bundleID: String?) -> ActionStateReceipt? { nil }
+    func replaceText(_ text: String, target: ActionTextTarget,
+                     expecting bundleID: String?) -> ActionStateReceipt? { nil }
+    func searchText(_ text: String, target: ActionTextTarget,
+                    expecting bundleID: String?) -> ActionStateReceipt? { nil }
     func verifyState(_ check: ActionStateCheck,
                      expecting bundleID: String?) -> ActionStateReceipt? { nil }
 }
@@ -291,7 +302,7 @@ enum ActionEvidenceEvent: Equatable {
     case uiTargetVerified(target: String)
     case goalVerified(target: String)
     case localGoalVerified(ActionLocalProof)
-    case stateVerified(ActionStateReceipt)
+    case stateVerified(ActionStateReceipt, expectedValue: String?)
     case targetResolved(ActionCompletionTarget)
     case unverifiedEffect(ActionEffectKind)
 }
@@ -675,7 +686,8 @@ final class ActionExecutor {
                         index, "the completion state could not be verified",
                         recoverable: true)
                 }
-                evidence.append(.stateVerified(receipt))
+                evidence.append(.stateVerified(
+                    receipt, expectedValue: check.expectedValue))
                 note("verify_state satisfied \(check.assertion.rawValue)")
 
             case .typeTextAt(let text, let operation, let target):
@@ -693,9 +705,19 @@ final class ActionExecutor {
                         index, "the routed app target changed",
                         recoverable: false)
                 }
-                guard let receipt = host.typeText(
-                    text, target: target, expecting: expectedBundleID) else {
-                    note("type_text: exact Cua write refused")
+                let receipt: ActionStateReceipt?
+                if operation == .replace {
+                    receipt = host.replaceText(
+                        text, target: target, expecting: expectedBundleID)
+                } else if operation == .search {
+                    receipt = host.searchText(
+                        text, target: target, expecting: expectedBundleID)
+                } else {
+                    receipt = host.typeText(
+                        text, target: target, expecting: expectedBundleID)
+                }
+                guard let receipt else {
+                    note("type_text: exact background write refused")
                     return failed(
                         index, "couldn't type into that exact field",
                         recoverable: false)
@@ -704,9 +726,15 @@ final class ActionExecutor {
                     ? .pasteText : .typeText
                 evidence.append(.unverifiedEffect(kind))
                 if operation != .search {
-                    evidence.append(.stateVerified(receipt))
+                    evidence.append(.stateVerified(
+                        receipt, expectedValue: nil))
                 }
-                let verb = operation == .search ? "search_text" : "type_text"
+                let verb: String
+                switch operation {
+                case .replace: verb = "replace_text"
+                case .search: verb = "search_text"
+                case .type, .paste: verb = "type_text"
+                }
                 note("\(verb) \(text.count) chars",
                      observed: "\(verb) \(text.count) chars: "
                         + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
@@ -870,6 +898,10 @@ final class ActionExecutor {
                     index: elementIndex, snapshotID: snapshotID,
                     label: label, role: role, expecting: expectedBundleID)
                 else {
+                    if let reason = host.actionFailureReason {
+                        note("press_ui [\(elementIndex)] \(label): \(reason)")
+                        return failed(index, reason, recoverable: false)
+                    }
                     note("press_ui [\(elementIndex)] \(label): stale or refused")
                     return failed(
                         index,
@@ -945,7 +977,11 @@ final class ActionExecutor {
             return control.state == .play ? "Starting playback" : "Pausing playback"
         case .verifyState: return "Verifying completion"
         case .typeTextAt(_, let operation, _):
-            return operation == .search ? "Searching" : "Typing"
+            switch operation {
+            case .replace: return "Replacing text"
+            case .search: return "Searching"
+            case .type, .paste: return "Typing"
+            }
         }
     }
 

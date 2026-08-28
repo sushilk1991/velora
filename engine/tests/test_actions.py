@@ -919,7 +919,7 @@ async def test_partial_cua_draft_never_presents(engine):
     assert len(eng.cleanup.calls) == 2
 
 
-async def test_complete_cua_send_stays_background(engine):
+async def test_native_send_text_waits_for_readback(engine):
     eng, sock = engine
     eng.cleanup = FakePlanner(
         turn([
@@ -928,10 +928,10 @@ async def test_complete_cua_send_stays_background(engine):
         turn([
             {"do": "wait_frontmost", "app": "Slack"},
             {"do": "verify_context", "expect": ["Gaurav Singh Bissain"]},
-            {"do": "type_text", "text": "Hi"},
-            {"do": "verify_context", "expect": ["Gaurav Singh Bissain"]},
-            {"do": "key", "key": "return"},
-        ], done=True, goal="Say hi to Gaurav Singh Bissain on Slack",
+                {"do": "type_text", "text": "Hi", "index": 30,
+                 "role": "AXTextArea",
+                 "label": "Message to Gaurav Singh Bissain"},
+            ], done=True, goal="Say hi to Gaurav Singh Bissain on Slack",
              sends=True),
         json.dumps({
             "safe": True,
@@ -945,7 +945,7 @@ async def test_complete_cua_send_stays_background(engine):
     )
     raw = _structured_send_ui("Gaurav Singh Bissain")
     raw.update({
-        "complete": True, "source": "cua", "window_id": 1316,
+        "complete": True, "source": "native", "window_id": 1316,
         "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
     })
     client = await connect(sock)
@@ -969,10 +969,9 @@ async def test_complete_cua_send_stays_background(engine):
 
     assert event["event"] == "action_turn"
     assert event["sends"] is True
-    assert event["done"] is True
+    assert event["done"] is False
     assert [step["do"] for step in event["steps"]] == [
         "wait_frontmost", "verify_context", "verify_ui", "type_text",
-        "verify_context", "verify_ui", "key",
     ]
     assert all(step["do"] != "present_ui" for step in event["steps"])
     assert len(eng.cleanup.calls) == 3
@@ -1037,25 +1036,28 @@ async def test_action_controller_bounds_turn_at_first_observation_barrier(engine
     calculator_ui = {
         "id": "calc-1", "app_name": "Calculator",
         "bundle_id": "com.apple.calculator", "window_title": "Calculator",
-        "complete": True,
-        "elements": [{
-            "index": 8, "role": "AXButton", "label": "Add",
-            "actions": ["AXPress"],
-        }],
+        "source": "native", "window_id": 81, "complete": True,
+        "elements": [
+            {"index": 3, "role": "AXTextField", "label": "Display"},
+            {"index": 8, "role": "AXButton", "label": "Add",
+             "actions": ["AXPress"]},
+        ],
     }
     stale_batch = turn([
         {"do": "wait_frontmost", "app": "Calculator"},
-        {"do": "type_text", "text": "17"},
+        {"do": "type_text", "text": "17", "index": 3,
+         "role": "AXTextField", "label": "Display"},
         {"do": "press_ui", "snapshot": "calc-1", "index": 8,
          "role": "AXButton", "label": "Add"},
-        {"do": "type_text", "text": "25"},
+        {"do": "type_text", "text": "25", "index": 3,
+         "role": "AXTextField", "label": "Display"},
     ], goal="calculate 17 plus 25", sends=False, done=True)
     continuation = turn([
-        {"do": "wait_frontmost", "app": "Calculator"},
-        {"do": "type_text", "text": "25"},
-    ])
+        {"do": "verify_state", "index": 3,
+         "assert": "written_text"},
+    ], done=True)
     eng, sock = engine
-    eng.cleanup = FakePlanner(stale_batch, '{"safe":true}', continuation)
+    eng.cleanup = FakePlanner(stale_batch, continuation)
     client = await connect(sock)
     await client.recv_event("ready")
     await send_start(
@@ -1072,23 +1074,22 @@ async def test_action_controller_bounds_turn_at_first_observation_barrier(engine
     event = await client.recv_event("action_turn")
 
     assert [step["do"] for step in event["steps"]] == [
-        "wait_frontmost", "type_text", "press_ui",
+        "wait_frontmost", "type_text",
     ]
     assert event["done"] is False
-    assert '"text":"25"' not in eng.cleanup.calls[1][0]
 
     await send_observe(client, observation=observation(
         frontmost_app="Calculator",
         frontmost_bundle="com.apple.calculator",
         ui_snapshot=calculator_ui,
-        executed=["type_text 17", "press_ui Add"],
+        executed=["type_text 17"],
     ))
     next_event = await client.recv_event("action_turn")
 
-    assert [step["do"] for step in next_event["steps"]] == [
-        "wait_frontmost", "type_text",
-    ]
-    assert next_event["steps"][-1]["text"] == "25"
+    assert [step["do"] for step in next_event["steps"]] == ["verify_state"]
+    assert next_event["done"] is True
+    assert next_event["steps"][-1]["expected_value"] == "17"
+    assert "STATE PROOF REQUIRED" in eng.cleanup.calls[1][0]
 
 
 async def test_hibernated_action_model_load_does_not_block_control_frames(engine):
@@ -1190,7 +1191,6 @@ async def test_action_start_chains_controller_and_target_verifier(engine):
     controller = turn([
         {"do": "wait_frontmost", "app": "WhatsApp"},
         {"do": "type_text", "text": "hi"},
-        {"do": "key", "key": "return"},
     ], goal="send hi to Shivangi Gupta", sends=True)
     verdict = json.dumps({
         "safe": True, "target": "Shivangi Gupta",
@@ -1210,8 +1210,9 @@ async def test_action_start_chains_controller_and_target_verifier(engine):
     )
     evt = await client.recv_event("action_turn")
     assert [step["do"] for step in evt["steps"]] == [
-        "wait_frontmost", "verify_ui", "type_text", "verify_ui", "key",
+        "wait_frontmost", "verify_ui", "type_text",
     ]
+    assert evt["done"] is False
     assert len(eng.cleanup.calls) == 2
     assert "independent target verifier" in eng.cleanup.calls[1][1]
     assert "\"text\":\"hi\"" not in eng.cleanup.calls[1][0], (
@@ -1254,7 +1255,7 @@ async def test_partial_ui_target_refusal_skips_inline_repair(engine):
     assert len(eng.cleanup.calls) == 2
 
 
-async def test_partial_ui_reviewer_can_approve_exact_navigation(engine):
+async def test_partial_ui_reviewer_cannot_authorize_mutation(engine):
     partial = _structured_ui(active="Shivangi Gupta")
     partial["complete"] = False
     controller = turn([
@@ -1263,7 +1264,7 @@ async def test_partial_ui_reviewer_can_approve_exact_navigation(engine):
          "role": "AXButton", "label": "Shivangi Gupta"},
     ], goal="open Shivangi Gupta on WhatsApp", sends=False)
     eng, sock = engine
-    eng.cleanup = FakePlanner(controller, '{"safe":true}')
+    eng.cleanup = FakePlanner(controller, controller)
     client = await connect(sock)
     await client.recv_event("ready")
     await send_start(
@@ -1275,20 +1276,20 @@ async def test_partial_ui_reviewer_can_approve_exact_navigation(engine):
                  "ui_snapshot": partial},
     )
 
-    event = await client.recv_event("action_turn")
+    event = await client.recv_event("action_failed")
 
-    assert event["steps"][-1]["do"] == "press_ui"
-    assert len(eng.cleanup.calls) == 2
+    assert event["code"] == "plan_invalid"
+    assert len(eng.cleanup.calls) >= 2
 
 
-async def test_media_control_is_reviewed_and_bound_to_current_ui(engine):
+async def test_media_control_is_locally_bound_to_current_ui(engine):
     controller = turn([
         {"do": "wait_frontmost", "app": "Music"},
-        {"do": "media_control", "state": "pause", "index": 8,
-         "role": "AXButton", "label": "Pause"},
+        {"do": "media_control", "state": "pause",
+         "capability": "opaque-pause"},
     ], goal="pause music in Music", sends=False)
     eng, sock = engine
-    eng.cleanup = FakePlanner(controller, '{"safe":true}')
+    eng.cleanup = FakePlanner(controller)
     client = await connect(sock)
     await client.recv_event("ready")
     await send_start(
@@ -1306,13 +1307,9 @@ async def test_media_control_is_reviewed_and_bound_to_current_ui(engine):
 
     assert event["steps"][-1] == {
         "do": "media_control", "state": "pause", "snapshot": "music-1",
-        "index": 8, "role": "AXButton", "label": "Pause",
+        "capability": "opaque-pause",
     }
-    review_prompt = eng.cleanup.calls[1][1]
-    assert "independent UI-action reviewer" in review_prompt
-    assert "media_control" in review_prompt
-    assert "Play or Pause" in review_prompt
-    assert "cannot prove the entire spoken goal" in review_prompt
+    assert len(eng.cleanup.calls) == 1
 
 
 async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(engine):
@@ -1477,7 +1474,7 @@ async def test_exact_collection_navigation_skips_redundant_ui_reviewer(engine):
     ])
     completed = json.dumps({
         "safe": True, "target": "Shivangi Gupta",
-        "evidence": {"snapshot": "snap-1", "index": 28,
+        "evidence": {"snapshot": "snap-2", "index": 28,
                      "role": "AXButton", "label": "Shivangi Gupta"},
     })
     eng.cleanup = FakePlanner(first, proposed, completed)
@@ -1619,7 +1616,7 @@ async def test_ui_review_refusal_uses_exact_completion_verifier(engine):
     })
     completion = json.dumps({
         "safe": True, "target": "Shivangi Gupta",
-        "evidence": {"snapshot": "snap-1", "index": 28,
+        "evidence": {"snapshot": "snap-2", "index": 28,
                      "role": "AXButton", "label": "Shivangi Gupta"},
     })
     eng.cleanup = FakePlanner(first, proposed, loose_review, completion)
@@ -1682,7 +1679,7 @@ async def test_bare_done_is_independently_verified_and_keeps_spoken_goal(engine)
     assert evt["steps"][1]["purpose"] == "goal"
 
 
-async def test_cua_goal_bridge(engine):
+async def test_native_goal_bridge(engine):
     eng, sock = engine
     first = turn(
         [{"do": "open_app", "app": "WhatsApp"}],
@@ -1692,17 +1689,12 @@ async def test_cua_goal_bridge(engine):
         {"do": "press_ui", "snapshot": "snap-1", "index": 14,
          "role": "AXButton", "label": "Shivangi Gupta"},
     ], sends=False)
-    review = json.dumps({
-        "safe": True, "target": "Shivangi Gupta",
-        "evidence": {"snapshot": "snap-1", "index": 14,
-                     "role": "AXButton", "label": "Shivangi Gupta"},
-    })
     completion = json.dumps({
         "safe": True, "target": "Shivangi Gupta",
-        "evidence": {"snapshot": "snap-1", "index": 28,
+        "evidence": {"snapshot": "snap-2", "index": 28,
                      "role": "AXButton", "label": "Shivangi Gupta"},
     })
-    eng.cleanup = FakePlanner(first, proposed, review, completion)
+    eng.cleanup = FakePlanner(first, proposed, completion)
     client = await connect(sock)
     await client.recv_event("ready")
     await send_start(
@@ -1712,27 +1704,21 @@ async def test_cua_goal_bridge(engine):
                  "running_apps": ["WhatsApp", "Sublime Text"]},
     )
     await client.recv_event("action_turn")
-    cua_before = _structured_ui(active="Someone Else")
-    cua_before.update({"source": "cua", "window_id": 91})
-    for element in cua_before["elements"]:
-        if "AXPress" in element.get("actions", []):
-            element["actions"] = ["CuaClick"]
+    native_before = _structured_ui(active="Someone Else")
+    native_before.update({"source": "native", "window_id": 91})
     await send_observe(client, observation=observation(
         frontmost_app="WhatsApp",
         frontmost_bundle="net.whatsapp.WhatsApp",
-        ui_snapshot=cua_before,
+        ui_snapshot=native_before,
         executed=["open_app WhatsApp"],
     ))
     await client.recv_event("action_turn")
-    cua_after = _structured_ui(active="Shivangi Gupta")
-    cua_after.update({"source": "cua", "window_id": 91})
-    for element in cua_after["elements"]:
-        if "AXPress" in element.get("actions", []):
-            element["actions"] = ["CuaClick"]
+    native_after = _structured_ui(active="Shivangi Gupta")
+    native_after.update({"id": "snap-2", "source": "native", "window_id": 91})
     await send_observe(client, observation=observation(
         frontmost_app="WhatsApp",
         frontmost_bundle="net.whatsapp.WhatsApp",
-        ui_snapshot=cua_after,
+        ui_snapshot=native_after,
         executed=["open_app WhatsApp", "press_ui Shivangi Gupta"],
     ))
 
@@ -1743,10 +1729,10 @@ async def test_cua_goal_bridge(engine):
         "wait_frontmost", "verify_ui",
     ]
     assert event["steps"][1]["purpose"] == "goal"
-    assert len(eng.cleanup.calls) == 4
+    assert len(eng.cleanup.calls) == 3
 
 
-async def test_cua_state_postcondition_bypasses_native_goal_reviewer(engine):
+async def test_native_state_postcondition_bypasses_goal_reviewer(engine):
     eng, sock = engine
     typed = turn([
         {"do": "wait_frontmost", "app": "TextEdit"},
@@ -1766,12 +1752,12 @@ async def test_cua_state_postcondition_bypasses_native_goal_reviewer(engine):
             "frontmost_app": "TextEdit",
             "frontmost_bundle": "com.apple.TextEdit",
             "running_apps": ["TextEdit"],
-            "ui_snapshot": _cua_text_ui(),
+            "ui_snapshot": _native_text_ui(),
         })
     await client.recv_event("action_turn")
     await send_observe(client, observation=observation(
         frontmost_app="TextEdit", frontmost_bundle="com.apple.TextEdit",
-        ui_snapshot=_cua_text_ui(), executed=["type_text 5 chars"],
+        ui_snapshot=_native_text_ui(), executed=["type_text 5 chars"],
     ))
 
     event = await client.recv_event("action_turn")
@@ -3224,7 +3210,7 @@ def _structured_ui(active="Shivangi Gupta"):
     return {
         "id": "snap-1", "app_name": "WhatsApp",
         "bundle_id": "net.whatsapp.WhatsApp", "window_title": "WhatsApp",
-        "complete": True,
+        "source": "native", "window_id": 91, "complete": True,
         "elements": [
             {"index": 0, "depth": 0, "role": "AXWindow",
              "label": "WhatsApp", "frame": {"x": 0, "y": 0, "w": 900, "h": 700}},
@@ -3289,34 +3275,34 @@ def test_structured_ui_preserves_partial_capability_identity():
 
     assert snapshot["source"] == "cua"
     assert snapshot["window_id"] == 91
-    assert snapshot["elements"][2]["actions"] == ["CuaClick"]
+    assert "actions" not in snapshot["elements"][2]
     assert snapshot["elements"][2]["enabled"] is False
     assert snapshot["elements"][2]["in_web_content"] is True
     snapshot["complete"] = False
     prompt = actions.build_ui_action_review_prompt(snapshot)
     assert "goal_met" not in prompt
-    assert "missing peers or controls prove nothing" in prompt
+    assert "cannot authorize" in prompt
+    assert "missing peers or controls prove nothing" in prompt.lower()
     assert "enabled=false" in prompt and "web_content=true" in prompt
 
 
-def test_cua_click_is_accepted_only_from_an_exact_cua_snapshot():
+def test_cua_click_never_authorizes_mutation():
     raw = _structured_ui(active="Shivangi Gupta")
-    raw.update({"source": "cua", "window_id": 91, "complete": False})
+    raw.update({"source": "cua", "window_id": 91, "complete": True})
     next(item for item in raw["elements"] if item["index"] == 28)[
         "actions"] = ["CuaClick"]
     context = actions.ActionContext.from_dict({"ui_snapshot": raw})
 
-    accepted = actions.ActionSession(
-        "open Shivangi Gupta on WhatsApp", context).accept_reply(turn([
-            {"do": "wait_frontmost", "app": "WhatsApp"},
-            {"do": "press_ui", "snapshot": "snap-1", "index": 28,
-             "role": "AXButton", "label": "Shivangi Gupta"},
-        ], goal="open Shivangi Gupta", sends=False))
-
-    assert accepted["steps"][-1]["do"] == "press_ui"
+    with pytest.raises(actions.PlanError, match="Cua observations"):
+        actions.ActionSession(
+            "open Shivangi Gupta on WhatsApp", context).accept_reply(turn([
+                {"do": "wait_frontmost", "app": "WhatsApp"},
+                {"do": "press_ui", "snapshot": "snap-1", "index": 28,
+                 "role": "AXButton", "label": "Shivangi Gupta"},
+            ], goal="open Shivangi Gupta", sends=False))
 
     native = _structured_ui(active="Shivangi Gupta")
-    native.update({"window_id": 91, "complete": False})
+    native.update({"window_id": 91, "complete": True})
     next(item for item in native["elements"] if item["index"] == 28)[
         "actions"] = ["CuaClick"]
     context = actions.ActionContext.from_dict({"ui_snapshot": native})
@@ -3491,6 +3477,36 @@ def test_goal_evidence_requires_active_or_changed_state():
         }), completed, "In Calendar, show today", partial)
 
 
+def test_visual_goal_never_proves_completion():
+    before = actions.normalize_ui_snapshot({
+        "id": "visual-before", "source": "cua_visual",
+        "app_name": "Calculator", "bundle_id": "com.apple.calculator",
+        "window_title": "Calculator", "window_id": 77,
+        "complete": False,
+        "elements": [{
+            "index": 0, "role": "VisualText", "label": "0",
+            "frame": {"x": 10, "y": 10, "w": 40, "h": 20},
+        }],
+    })
+    after = actions.normalize_ui_snapshot({
+        **before, "id": "visual-after",
+        "elements": [{
+            "index": 0, "role": "VisualText", "label": "42",
+            "frame": {"x": 10, "y": 10, "w": 40, "h": 20},
+        }],
+    })
+    verdict = json.dumps({
+        "safe": True, "target": "42",
+        "evidence": {"index": 0, "role": "VisualText", "label": "42"},
+    })
+
+    assert not actions.goal_snapshot_can_verify(before)
+    assert not actions.goal_snapshot_can_verify(after)
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        actions.parse_goal_verdict(
+            verdict, after, "calculate 17 plus 25", before)
+
+
 def test_model_projection_omits_inert_leaves_but_preserves_their_ancestors():
     raw = _structured_ui()
     raw["elements"].extend([
@@ -3563,7 +3579,7 @@ def test_only_executable_ax_capabilities_reach_the_model():
     assert "Message to Hemesh Singh" in prompt
 
 
-def test_exact_editable_axpress_is_reviewed_as_a_focus_step():
+def test_exact_editable_axfocus_is_not_executable():
     raw = {
         "id": "slack-1", "app_name": "Slack",
         "bundle_id": "com.tinyspeck.slackmacgap",
@@ -3586,13 +3602,11 @@ def test_exact_editable_axpress_is_reviewed_as_a_focus_step():
     ], goal="send hi to Hemesh Singh", sends=True))
 
     assert actions.turn_requires_ui_action_review(parsed, session)
-    reviewer = actions.build_ui_action_review_prompt(
-        actions.normalize_ui_snapshot(raw))
-    assert "focus" in reviewer.lower()
-    assert "own turn" in actions.PLANNER_RULES.lower()
+    with pytest.raises(actions.PlanError, match="does not expose AXPress"):
+        session.accept_reply(json.dumps(parsed))
 
 
-def test_partial_snapshot_can_authorize_command_mentioned_focus():
+def test_partial_snapshot_cannot_authorize_command_mentioned_focus():
     raw = _structured_send_ui("Hemesh Singh", focused=False)
     raw["complete"] = False
     context = actions.ActionContext.from_dict({"ui_snapshot": raw})
@@ -3604,8 +3618,8 @@ def test_partial_snapshot_can_authorize_command_mentioned_focus():
     ], goal="focus Hemesh composer", sends=False))
 
     assert actions.turn_requires_ui_action_review(parsed, session)
-    accepted = session.accept_reply(json.dumps(parsed))
-    assert accepted["steps"][-1]["do"] == "press_ui"
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        session.accept_reply(json.dumps(parsed))
 
 
 def test_indexed_focus_requires_a_fresh_observation_before_more_steps():
@@ -3813,7 +3827,7 @@ def test_only_exact_navigation_only_collection_press_skips_ui_review():
     }, calculator)
 
 
-def test_partial_ui_allows_only_command_mentioned_exact_capability():
+def test_partial_ui_refuses_all_exact_mutation():
     raw = _structured_ui(active="Someone Else")
     raw["complete"] = False
     context = actions.ActionContext.from_dict({"ui_snapshot": raw})
@@ -3829,11 +3843,10 @@ def test_partial_ui_allows_only_command_mentioned_exact_capability():
         ],
     })
 
-    accepted = session.accept_reply(proposed)
-
-    assert accepted["steps"][-1]["do"] == "press_ui"
+    with pytest.raises(actions.PlanError, match="incomplete"):
+        session.accept_reply(proposed)
     unrelated = actions.ActionSession("open Priya on WhatsApp", context)
-    with pytest.raises(actions.PlanError, match="spoken command"):
+    with pytest.raises(actions.PlanError, match="incomplete"):
         unrelated.accept_reply(proposed)
     disabled_raw = _structured_ui(active="Someone Else")
     disabled_raw["complete"] = False
@@ -3841,7 +3854,7 @@ def test_partial_ui_allows_only_command_mentioned_exact_capability():
     disabled = actions.ActionSession(
         "open the Shivangi Gupta chat on WhatsApp",
         actions.ActionContext.from_dict({"ui_snapshot": disabled_raw}))
-    with pytest.raises(actions.PlanError, match="disabled"):
+    with pytest.raises(actions.PlanError, match="incomplete"):
         disabled.accept_reply(proposed)
     review = actions.parse_ui_action_review(json.dumps({
         "safe": False, "goal_met": True, "target": "Shivangi Gupta",
@@ -3850,7 +3863,7 @@ def test_partial_ui_allows_only_command_mentioned_exact_capability():
     }), context.ui_snapshot, session.transcript)
     assert review["safe"] is False and review["goal_met"] is False
     session.turns_used = 1
-    assert actions.turn_requires_goal_verifier(
+    assert not actions.turn_requires_goal_verifier(
         {"steps": [], "done": True}, session)
     with pytest.raises(actions.PlanError, match="incomplete"):
         actions.parse_goal_verdict(json.dumps({
@@ -4169,7 +4182,17 @@ def test_draft_recipient_gate():
             ],
         }, state=draft)
 
-    local_base = dict(base, ui_snapshot_bundle_id="com.apple.Notes")
+    local_snapshot = actions.normalize_ui_snapshot(_native_text_ui())
+    local_base = dict(
+        base,
+        ui_snapshot_id="text-1",
+        ui_elements={
+            item["index"]: item for item in local_snapshot["elements"]
+        },
+        ui_snapshot_bundle_id="com.apple.Notes",
+        ui_snapshot_window_title="Local note",
+        ui_snapshot_window_id=77,
+    )
     local_commands = [
         "Write a local note in Notes about Sunny",
         "Write a Slack integration note in Notes",
@@ -4182,7 +4205,8 @@ def test_draft_recipient_gate():
             "goal": "write a local note", "sends": False,
             "steps": [
                 {"do": "wait_frontmost", "app": "Notes"},
-                {"do": "type_text", "text": "Sunny is available"},
+                {"do": "type_text", "text": "Sunny is available",
+                 "index": 3, "role": "AXTextArea", "label": "Body"},
             ],
         }, state=local)
         assert accepted["steps"][-1]["do"] == "type_text"
@@ -4197,10 +4221,12 @@ def test_recipient_mirror():
         ("Draft a message for Hemesh on Slack", "com.apple.Notes", False),
         ("Draft an email outline in Notes", "com.apple.Notes", False),
         ("Write a reply in Notes", "com.apple.Notes", False),
-        ("Draft a message for Hemesh on Slack", "com.example.unknown", False),
+        ("Draft a message for Hemesh on Slack", "com.example.unknown", True),
+        ("Draft a chat message to Alice in Zoom", "us.zoom.xos", True),
         ("Draft_a_message_for_Hemesh_on_Slack",
          "com.tinyspeck.slackmacgap", True),
         ("Draft an email to Hemesh", "com.apple.mail", True),
+        ("Add hello to Alice in Slack", "com.tinyspeck.slackmacgap", True),
     ]
     for transcript, bundle_id, expected in cases:
         assert actions.is_recipient_content(transcript, bundle_id) is expected
@@ -4270,13 +4296,20 @@ def test_present_ui_attestation():
             web_command, context, require_target_verifier=True)
         assert not actions.turn_requires_ui_presentation(parsed, web_session)
 
-    for bundle_id in ("com.apple.Notes", "com.example.unknown"):
+    for bundle_id in ("com.apple.Notes",):
         local_raw = dict(raw, bundle_id=bundle_id)
         local_session = actions.ActionSession(
             "Draft a message for Hemesh on Slack",
             actions.ActionContext.from_dict({"ui_snapshot": local_raw}),
             require_target_verifier=True)
         assert not actions.turn_requires_ui_presentation(parsed, local_session)
+
+    unknown_raw = dict(raw, bundle_id="com.example.unknown")
+    unknown_session = actions.ActionSession(
+        "Draft a message for Hemesh on Slack",
+        actions.ActionContext.from_dict({"ui_snapshot": unknown_raw}),
+        require_target_verifier=True)
+    assert actions.turn_requires_ui_presentation(parsed, unknown_session)
 
     wrong_app_raw = dict(
         raw, app_name="WhatsApp", bundle_id="net.whatsapp.WhatsApp")
@@ -4405,7 +4438,7 @@ def test_search_text_is_navigation_and_cannot_arm_return():
         }, state=state)
 
 
-def test_verifier_attestation_brackets_content_and_commit():
+def test_verifier_attestation_binds_content_before_commit():
     snapshot = actions.normalize_ui_snapshot(_structured_send_ui())
     parsed = {
         "goal": "send Shivangi hi", "sends": True, "done": True,
@@ -4424,15 +4457,16 @@ def test_verifier_attestation_brackets_content_and_commit():
     assert [step["do"] for step in attached["steps"]] == [
         "wait_frontmost", "verify_ui", "type_text", "verify_ui", "key",
     ]
+    assert attached["steps"][2]["index"] == 30
+    assert attached["steps"][2]["label"] == "Message to Shivangi Gupta"
     state = actions.SessionState(
         current_app="WhatsApp", ui_snapshot_id="snap-1",
         ui_elements={item["index"]: item for item in snapshot["elements"]},
         ui_snapshot_complete=True, allowed_ui_attestation="token-1",
         spoken_command="send hi to Shivangi Gupta",
         require_ui_target_verification=True)
-    out = actions.validate_plan(attached, state=state)
-    assert out["steps"][1]["do"] == "verify_ui"
-    assert out["steps"][3]["do"] == "verify_ui"
+    with pytest.raises(actions.PlanError, match="fresh screen"):
+        actions.validate_plan(attached, state=state)
 
 
 def test_rejected_space_does_not_mutate_carried_state():
@@ -4762,27 +4796,184 @@ def _media_ui() -> dict:
             "role": "AXButton", "label": "Pause",
             "actions": ["CuaClick"], "enabled": True,
         }],
+        "capabilities": [{
+            "id": "opaque-pause", "source": "app_native",
+            "do": "media_control", "state": "pause",
+        }],
     }
 
 
-def _cua_text_ui(*, selected: bool = False) -> dict:
+def _native_text_ui(*, selected: bool = False) -> dict:
     element = {
         "index": 3, "parent_index": None, "depth": 0,
         "role": "AXTextArea", "label": "Body",
-        "actions": ["CuaClick"], "enabled": True,
+        "actions": ["AXFocus"], "enabled": True,
     }
     if selected:
         element["selected"] = True
     return {
-        "id": "text-1", "source": "cua", "app_name": "TextEdit",
+        "id": "text-1", "source": "native", "app_name": "TextEdit",
         "bundle_id": "com.apple.TextEdit", "window_title": "Probe.txt",
-        "window_id": 77, "complete": False, "elements": [element],
+        "window_id": 77, "complete": True, "elements": [element],
     }
 
 
-def test_cua_text_and_state_proof_are_exact_and_closed():
+def _cua_background_ui(**over) -> dict:
+    raw = {
+        "id": "calculator-1", "source": "cua_visual",
+        "app_name": "Calculator",
+        "bundle_id": "com.apple.calculator", "window_title": "Calculator",
+        "window_id": 77, "complete": False, "elements": [],
+        "capabilities": [{
+            "id": "background-text-1", "source": "cua",
+            "do": "background_type_text",
+        }],
+    }
+    raw.update(over)
+    return raw
+
+
+def test_cua_background_text_capability_is_discarded():
+    snapshot = actions.normalize_ui_snapshot(_cua_background_ui())
+
+    assert snapshot["source"] == "cua_visual"
+    assert snapshot["capabilities"] == []
+    prompt = "\n".join(actions.ui_snapshot_lines(snapshot))
+    assert "background_type_text" not in prompt
+    assert "pid=321" not in prompt
+    assert "background_type_text" not in actions.VERBS
+
+
+def test_cua_background_text_cannot_authorize_input():
     context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "Calculator", "ui_snapshot": _cua_background_ui(),
+    })
+    session = actions.ActionSession(
+        "In Calculator, calculate 17 plus 25", context)
+
+    with pytest.raises(actions.PlanError, match="Cua observations"):
+        session.accept_reply(json.dumps({
+            "goal": "calculate 17 plus 25", "sends": False, "done": True,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Calculator"},
+                {"do": "type_text", "text": "17+25="},
+            ],
+        }))
+
+
+@pytest.mark.parametrize(("command", "sends", "verb", "text"), [
+    ("send the result", True, "type_text", "42"),
+    ("draft a message in Slack", False, "type_text", "42"),
+    ("draft a chat message to Alice in Zoom", False, "type_text", "42"),
+    ("calculate 17 plus 25", False, "paste_text", "17+25="),
+    ("calculate 17 plus 25", False, "search_text", "17+25="),
+    ("calculate 17 plus 25", False, "type_text", "17+25=\n"),
+])
+def test_cua_background_text_refuses_unsafe_content(
+        command, sends, verb, text):
+    raw = _cua_background_ui()
+    if "Slack" in command:
+        raw.update({
+            "app_name": "Slack",
+            "bundle_id": "com.tinyspeck.slackmacgap",
+        })
+    if "Zoom" in command:
+        raw.update({
+            "app_name": "zoom.us",
+            "bundle_id": "us.zoom.xos",
+        })
+    app_name = raw["app_name"]
+    session = actions.ActionSession(
+        command,
+        actions.ActionContext.from_dict({
+            "frontmost_app": app_name, "ui_snapshot": raw,
+        }),
+    )
+
+    with pytest.raises(actions.PlanError):
+        session.accept_reply(json.dumps({
+            "goal": command, "sends": sends,
+            "steps": [
+                {"do": "wait_frontmost", "app": app_name},
+                {"do": verb, "text": text},
+            ],
+        }))
+
+
+@pytest.mark.parametrize("mutation", [
+    {"capabilities": []},
+    {"window_id": None},
+    {"capabilities": [
+        {"id": "background-text-1", "source": "cua",
+         "do": "background_type_text"},
+        {"id": "background-text-2", "source": "cua",
+         "do": "background_type_text"},
+    ]},
+])
+def test_cua_background_text_requires_one_exact_target(mutation):
+    raw = _cua_background_ui(**mutation)
+    session = actions.ActionSession(
+        "calculate 17 plus 25",
+        actions.ActionContext.from_dict({
+            "frontmost_app": "Calculator", "ui_snapshot": raw,
+        }),
+    )
+
+    with pytest.raises(actions.PlanError):
+        session.accept_reply(json.dumps({
+            "goal": "calculate 17 plus 25", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Calculator"},
+                {"do": "type_text", "text": "17+25="},
+            ],
+        }))
+
+
+def test_cua_background_text_cannot_share_a_turn_with_a_key():
+    session = actions.ActionSession(
+        "calculate 17 plus 25",
+        actions.ActionContext.from_dict({
+            "frontmost_app": "Calculator",
+            "ui_snapshot": _cua_background_ui(),
+        }),
+    )
+
+    with pytest.raises(actions.PlanError):
+        session.accept_reply(json.dumps({
+            "goal": "calculate 17 plus 25", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Calculator"},
+                {"do": "type_text", "text": "17+25"},
+                {"do": "key", "key": "return"},
+            ],
+        }))
+
+
+def test_cua_visual_rejects_obsolete_foreground_capability():
+    raw = _cua_background_ui(capabilities=[{
+        "id": "obsolete-foreground", "source": "cua",
+        "do": "foreground_type_text",
+    }])
+    session = actions.ActionSession(
+        "calculate 17 plus 25",
+        actions.ActionContext.from_dict({
+            "frontmost_app": "Calculator", "ui_snapshot": raw,
+        }),
+    )
+
+    with pytest.raises(actions.PlanError, match="Cua observations"):
+        session.accept_reply(json.dumps({
+            "goal": "calculate 17 plus 25", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Calculator"},
+                {"do": "type_text", "text": "17+25="},
+            ],
+        }))
+
+
+def test_native_text_and_state_proof_are_exact_and_closed():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
     })
     session = actions.ActionSession("write hello in Probe.txt", context)
 
@@ -4800,7 +4991,7 @@ def test_cua_text_and_state_proof_are_exact_and_closed():
     }
 
     session.observation_message({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
         "executed": ["type_text 5 chars"],
     })
     verified = session.accept_reply(json.dumps({
@@ -4820,9 +5011,224 @@ def test_cua_text_and_state_proof_are_exact_and_closed():
     assert "verify_state" not in actions.EFFECTIVE_VERBS
 
 
-def test_composite_command_cannot_use_partial_cua_proof():
+def test_native_text_binds_identity_from_current_index():
+    raw = _native_text_ui()
+    raw["elements"][0]["label"] = ""
     context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "TextEdit", "ui_snapshot": raw,
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+
+    typed = session.accept_reply(json.dumps({
+        "goal": "write hello", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3,
+             "role": "AXButton", "label": "Document body"},
+        ],
+    }))
+
+    assert typed["steps"][-1] == {
+        "do": "type_text", "text": "hello", "snapshot": "text-1",
+        "index": 3, "role": "AXTextArea", "label": "",
+    }
+
+    session.observation_message({
+        "frontmost_app": "TextEdit", "ui_snapshot": raw,
+        "executed": ["type_text 5 chars"],
+    })
+    verified = session.accept_reply(json.dumps({
+        "steps": [{"do": "verify_state", "index": 3,
+                   "assert": "written_text"}],
+        "done": True,
+    }))
+
+    assert verified["steps"][0]["role"] == "AXTextArea"
+    assert verified["steps"][0]["label"] == ""
+
+
+def test_native_replace_requires_explicit_intent():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+    })
+    session = actions.ActionSession(
+        "replace the document text with hello", context)
+
+    replaced = session.accept_reply(json.dumps({
+        "goal": "replace the document text", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "replace_text", "text": "hello", "index": 3},
+        ],
+    }))
+
+    assert replaced["steps"][-1] == {
+        "do": "replace_text", "text": "hello", "snapshot": "text-1",
+        "index": 3, "role": "AXTextArea", "label": "Body",
+    }
+
+    unsafe = actions.ActionSession("write hello in the document", context)
+    with pytest.raises(actions.PlanError, match="explicit replace"):
+        unsafe.accept_reply(json.dumps({
+            "goal": "write hello", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "TextEdit"},
+                {"do": "replace_text", "text": "hello", "index": 3},
+            ],
+        }))
+
+    substring = actions.ActionSession(
+        "replace cat with dog in the document", context)
+    with pytest.raises(actions.PlanError, match="whole-field"):
+        substring.accept_reply(json.dumps({
+            "goal": "replace cat with dog", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "TextEdit"},
+                {"do": "replace_text", "text": "dog", "index": 3},
+            ],
+        }))
+
+
+def test_written_state_stays_bound_to_mutated_index():
+    raw = _native_text_ui()
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": raw,
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+    session.accept_reply(json.dumps({
+        "goal": "write hello", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3},
+        ],
+    }))
+
+    fresh = _native_text_ui()
+    fresh["elements"].append({
+        "index": 4, "role": "AXTextArea", "label": "Other",
+        "enabled": True, "focused": False,
+    })
+    note = session.observation_message({
+        "frontmost_app": "TextEdit", "ui_snapshot": fresh,
+        "executed": ["type_text 5 chars"],
+    })
+
+    assert "STATE PROOF REQUIRED" in note
+    with pytest.raises(actions.PlanError, match="mutated element"):
+        session.accept_reply(json.dumps({
+            "steps": [{"do": "verify_state", "index": 4,
+                       "assert": "written_text"}],
+            "done": True,
+        }))
+
+
+def test_native_write_requires_state_proof_before_another_write():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+    session.accept_reply(json.dumps({
+        "goal": "write hello", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3},
+        ],
+    }))
+    session.observation_message({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+        "executed": ["type_text 5 chars"],
+    })
+
+    with pytest.raises(actions.PlanError, match="must verify_state"):
+        session.accept_reply(json.dumps({
+            "steps": [
+                {"do": "wait_frontmost", "app": "TextEdit"},
+                {"do": "type_text", "text": "hello.", "index": 3},
+            ],
+            "done": True,
+        }))
+
+    with pytest.raises(actions.PlanError, match="must verify_state"):
+        session.accept_reply(json.dumps({"steps": [], "done": True}))
+
+
+def test_native_search_requires_search_field():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+    })
+    session = actions.ActionSession("search TextEdit for cats", context)
+
+    with pytest.raises(actions.PlanError, match="search field"):
+        session.accept_reply(json.dumps({
+            "goal": "search", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "TextEdit"},
+                {"do": "search_text", "text": "cats", "index": 3},
+            ],
+        }))
+
+    search_ui = _native_text_ui()
+    search_ui["elements"][0]["role"] = "AXSearchField"
+    search_ui["elements"][0]["label"] = "Search"
+    allowed = actions.ActionSession(
+        "search TextEdit for cats",
+        actions.ActionContext.from_dict({
+            "frontmost_app": "TextEdit", "ui_snapshot": search_ui,
+        }))
+    turn = allowed.accept_reply(json.dumps({
+        "goal": "search", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "search_text", "text": "cats", "index": 3},
+        ],
+    }))
+
+    assert turn["steps"][-1]["do"] == "search_text"
+
+
+def test_native_prompt_names_allowed_input_indices():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+
+    first = session.first_message()
+
+    assert "NATIVE INPUT CONTRACT" in first
+    assert "editable indices: 3" in first
+    assert "Bare type_text is invalid" in first
+    assert "replace_text" in first
+
+    later = session.observation_message({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+    })
+
+    assert "NATIVE INPUT CONTRACT" in later
+    assert later.index("NATIVE INPUT CONTRACT") > later.index("STRUCTURED UI")
+
+
+def test_native_text_requires_a_fresh_observation_before_done():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
+    })
+    session = actions.ActionSession("write hello in Probe.txt", context)
+
+    turn = session.accept_reply(json.dumps({
+        "goal": "write hello", "sends": False, "done": True,
+        "steps": [
+            {"do": "wait_frontmost", "app": "TextEdit"},
+            {"do": "type_text", "text": "hello", "index": 3,
+             "role": "AXTextArea", "label": "Body"},
+        ],
+    }))
+
+    assert turn["done"] is False
+    assert session.direct_goal_check_pending is True
+
+
+def test_composite_command_cannot_use_partial_native_proof():
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
     })
     command = "write hello, make it bold, and select Pop in Music"
     session = actions.ActionSession(command, context)
@@ -4839,7 +5245,7 @@ def test_composite_command_cannot_use_partial_cua_proof():
 
     session.accept_reply(json.dumps({**typed, "done": False}))
     session.observation_message({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
         "executed": ["type_text 5 chars"],
     })
     proof = {
@@ -4851,9 +5257,9 @@ def test_composite_command_cannot_use_partial_cua_proof():
     assert not actions.turn_has_state_postcondition(proof, session)
 
 
-def test_local_cua_text_does_not_prove_whole_goal():
+def test_local_native_text_does_not_prove_whole_goal():
     context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
     })
     session = actions.ActionSession("write hello in Probe.txt", context)
     typed = {
@@ -4880,7 +5286,7 @@ def test_local_cua_text_does_not_prove_whole_goal():
 ])
 def test_conjunction_requires_whole_goal_proof(command):
     context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
     })
     session = actions.ActionSession(command, context)
     typed = {
@@ -4895,10 +5301,11 @@ def test_conjunction_requires_whole_goal_proof(command):
     assert not actions.turn_has_exact_cua_text(typed, session)
 
 
-def test_planner_prompt_teaches_exact_cua_typing():
+def test_planner_prompt_teaches_exact_native_typing():
     assert '"do":"type_text","text":"<text>","index":12' \
         in actions.PLANNER_RULES
-    assert "source=cua editable" in actions.PLANNER_RULES
+    assert "source=native editable" in actions.PLANNER_RULES
+    assert "copy only its current index" in actions.PLANNER_RULES
 
 
 @pytest.mark.parametrize("extra", [
@@ -4907,12 +5314,15 @@ def test_planner_prompt_teaches_exact_cua_typing():
     {"stable_samples": 1}, {"predicates": []}, {"screenshot": True},
 ])
 def test_state_proof_rejects_planner_mechanics(extra):
-    snapshot = actions.normalize_ui_snapshot(_cua_text_ui())
+    snapshot = actions.normalize_ui_snapshot(_native_text_ui())
     state = actions.SessionState(
         current_app="TextEdit", pending_text=True, pending_value="hello",
+        pending_ui_index=3, pending_ui_role="AXTextArea",
+        pending_ui_label="Body",
         ui_snapshot_id="text-1",
         ui_elements={item["index"]: item for item in snapshot["elements"]},
-        ui_snapshot_source="cua", ui_snapshot_app_name="TextEdit",
+        ui_snapshot_complete=True, ui_snapshot_source="native",
+        ui_snapshot_app_name="TextEdit",
         ui_snapshot_bundle_id="com.apple.TextEdit",
         ui_snapshot_window_title="Probe.txt", ui_snapshot_window_id=77,
         spoken_command="write hello in Probe.txt")
@@ -4924,9 +5334,9 @@ def test_state_proof_rejects_planner_mechanics(extra):
         }, state)
 
 
-def test_state_proof_is_terminal_cua_positive_only():
+def test_state_proof_is_terminal_native_positive_only():
     context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _cua_text_ui(),
+        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
     })
     first = actions.ActionSession("write hello in Probe.txt", context)
     with pytest.raises(actions.PlanError, match="finished without doing anything"):
@@ -4939,11 +5349,24 @@ def test_state_proof_is_terminal_cua_positive_only():
 
     state = actions.SessionState(
         pending_text=True, pending_value="hello", ui_snapshot_id="native-1",
-        ui_snapshot_source="native", ui_snapshot_app_name="TextEdit",
+        pending_ui_index=3, pending_ui_role="AXTextArea",
+        pending_ui_label="Body",
+        ui_snapshot_complete=True, ui_snapshot_source="native",
+        ui_snapshot_app_name="TextEdit",
         ui_snapshot_bundle_id="com.apple.TextEdit", ui_snapshot_window_id=77,
-        ui_elements={3: {"index": 3, "role": "AXTextArea", "label": "Body"}},
+        ui_elements={3: {"index": 3, "role": "AXTextArea", "label": "Body",
+                         "enabled": True}},
         spoken_command="write hello")
-    with pytest.raises(actions.PlanError, match="source=cua"):
+    verified = actions.validate_plan({
+        "goal": "write hello", "sends": False,
+        "steps": [{"do": "verify_state", "index": 3,
+                   "role": "AXTextArea", "label": "Body",
+                   "assert": "written_text"}],
+    }, state)
+    assert verified["steps"][0]["expected_value"] == "hello"
+
+    state.ui_snapshot_source = "cua"
+    with pytest.raises(actions.PlanError, match="source=native"):
         actions.validate_plan({
             "goal": "write hello", "sends": False,
             "steps": [{"do": "verify_state", "index": 3,
@@ -4953,12 +5376,13 @@ def test_state_proof_is_terminal_cua_positive_only():
 
 
 def test_selected_state_proof_is_command_bound():
-    snapshot = actions.normalize_ui_snapshot(_cua_text_ui(selected=True))
+    snapshot = actions.normalize_ui_snapshot(_native_text_ui(selected=True))
     snapshot["elements"][0]["role"] = "AXRadioButton"
     snapshot["elements"][0]["label"] = "Pop"
     state = actions.SessionState(
         ui_snapshot_id="text-1", ui_elements={3: snapshot["elements"][0]},
-        ui_snapshot_source="cua", ui_snapshot_app_name="Music",
+        ui_snapshot_complete=True, ui_snapshot_source="native",
+        ui_snapshot_app_name="Music",
         ui_snapshot_bundle_id="com.apple.Music", ui_snapshot_window_id=77,
         spoken_command="select Pop in Music")
     out = actions.validate_plan({
@@ -4989,13 +5413,13 @@ def test_media_control_is_closed_and_effective():
         "goal": "pause music", "sends": False,
         "steps": [
             {"do": "wait_frontmost", "app": "Music"},
-            {"do": "media_control", "state": "pause", "index": 8,
-             "role": "AXButton", "label": "Pause"},
+            {"do": "media_control", "state": "pause",
+             "capability": "opaque-pause"},
         ],
     }))
     assert turn["steps"][-1] == {
         "do": "media_control", "state": "pause", "snapshot": "music-1",
-        "index": 8, "role": "AXButton", "label": "Pause",
+        "capability": "opaque-pause",
     }
     assert "media_control" in actions.EFFECTIVE_VERBS
 
@@ -5023,7 +5447,7 @@ def test_media_control_is_closed_and_effective():
     native["complete"] = True
     native["elements"][0]["actions"] = ["AXPress"]
     native_context = actions.ActionContext.from_dict({"ui_snapshot": native})
-    with pytest.raises(actions.PlanError, match="source=cua"):
+    with pytest.raises(actions.PlanError, match="app-native"):
         actions.ActionSession(
             "pause music in Music", native_context
         ).accept_reply(json.dumps({
@@ -5059,15 +5483,59 @@ def test_media_control_keeps_runtime_goal_verification():
     parsed = {
         "sends": False,
         "steps": [{
-            "do": "media_control", "state": "pause", "index": 8,
-            "role": "AXButton", "label": "Pause",
+            "do": "media_control", "state": "pause",
+            "capability": "opaque-pause",
         }],
         "done": True,
     }
     assert not actions.turn_requires_goal_verifier(parsed, sess)
-    assert actions.turn_requires_ui_action_review(parsed, sess)
+    assert not actions.turn_requires_ui_action_review(parsed, sess)
     assert "media_control" in actions.PLANNER_RULES
     assert "media_control step" in actions.PLANNER_RULES
+
+
+def test_media_control_is_bound_to_spoken_intent():
+    raw = _media_ui()
+    raw["capabilities"].append({
+        "id": "opaque-play", "source": "app_native",
+        "do": "media_control", "state": "play",
+    })
+    context = actions.ActionContext.from_dict({
+        "frontmost_app": "Music", "ui_snapshot": raw,
+    })
+
+    for command, state in (
+        ("play music", "play"),
+        ("resume the music in Music app", "play"),
+        ("pause music in Music", "pause"),
+        ("stop the audio on Music", "pause"),
+    ):
+        turn = actions.ActionSession(command, context).accept_reply(json.dumps({
+            "goal": "model summary cannot grant authority", "sends": False,
+            "steps": [
+                {"do": "wait_frontmost", "app": "Music"},
+                {"do": "media_control", "state": state,
+                 "capability": f"opaque-{state}"},
+            ],
+        }))
+        assert turn["steps"][-1]["state"] == state
+
+    for command, state in (
+        ("pause music in Music", "play"),
+        ("pause music in Spotify", "pause"),
+        ("pause music and raise volume", "pause"),
+        ("pause music, increase the volume", "pause"),
+        ("pause", "pause"),
+    ):
+        with pytest.raises(actions.PlanError, match="spoken command"):
+            actions.ActionSession(command, context).accept_reply(json.dumps({
+                "goal": command, "sends": False,
+                "steps": [
+                    {"do": "wait_frontmost", "app": "Music"},
+                    {"do": "media_control", "state": state,
+                     "capability": f"opaque-{state}"},
+                ],
+            }))
 
 
 def test_native_media_capability_is_opaque_and_current():
@@ -5128,15 +5596,15 @@ def test_native_media_capability_is_opaque_and_current():
 
     cua = _media_ui()
     cua["capabilities"] = raw["capabilities"]
-    with pytest.raises(actions.PlanError, match="prefer the exact Cua"):
-        actions.ActionSession(
-            "pause music in Music",
-            actions.ActionContext.from_dict({"ui_snapshot": cua}),
-        ).accept_reply(json.dumps({
-            "goal": "pause music", "sends": False,
-            "steps": [
-                {"do": "wait_frontmost", "app": "Music"},
-                {"do": "media_control", "state": "pause",
-                 "capability": "opaque-pause"},
-            ],
-        }))
+    turn = actions.ActionSession(
+        "pause music in Music",
+        actions.ActionContext.from_dict({"ui_snapshot": cua}),
+    ).accept_reply(json.dumps({
+        "goal": "pause music", "sends": False,
+        "steps": [
+            {"do": "wait_frontmost", "app": "Music"},
+            {"do": "media_control", "state": "pause",
+             "capability": "opaque-pause"},
+        ],
+    }))
+    assert turn["steps"][-1]["capability"] == "opaque-pause"

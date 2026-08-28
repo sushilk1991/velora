@@ -27,11 +27,16 @@ private struct ActionCompletionEvidence {
     private(set) var events: [ActionEvidenceEvent] = []
     private(set) var hadEffect = false
     private(set) var hadGoalVerification = false
+    private(set) var hadAppOpen = false
+    private(set) var hadOtherEffect = false
     private(set) var target: ActionCompletionTarget?
     private var effectTarget: ActionCompletionTarget?
     private(set) var localProof: ActionLocalProof?
 
     var provesGoal: Bool { hadGoalVerification }
+    var onlyOpenedApp: Bool {
+        hadAppOpen && !hadOtherEffect && !hadGoalVerification
+    }
 
     mutating func record(_ result: ActionRunResult) {
         for event in result.evidence {
@@ -41,9 +46,11 @@ private struct ActionCompletionEvidence {
                 invalidateProof()
                 target = nil
                 hadEffect = true
+                hadAppOpen = true
             case .unverifiedEffect(let kind):
                 invalidateProof()
                 hadEffect = true
+                hadOtherEffect = true
                 if kind != .openURL, kind != .presentUI,
                    let target, target.pid != nil, target.windowID != nil {
                     effectTarget = target
@@ -56,12 +63,14 @@ private struct ActionCompletionEvidence {
                 hadEffect = true
                 hadGoalVerification = true
                 localProof = proof
-            case .stateVerified(let receipt):
+            case .stateVerified(let receipt, let expectedValue):
                 guard hadEffect,
                       receiptMatchesEffect(receipt)
                 else { continue }
                 hadGoalVerification = true
-                localProof = .state
+                localProof = .state(
+                    expectedValue: expectedValue,
+                    appName: receipt.appName)
                 target = ActionCompletionTarget(
                     appName: receipt.appName, bundleID: receipt.bundleID,
                     pid: receipt.pid, windowID: receipt.windowID,
@@ -172,7 +181,28 @@ final class ActionLoopRunner {
         // Draft ownership must cross turns in this run, but never leak into
         // the next action invocation.
         host.beginActionInputSession(command: transcript)
-        defer { host.endActionInputSession() }
+        let result = runSession(transcript: transcript, context: context)
+        host.endActionInputSession()
+        guard let reason = host.actionFailureReason else { return result }
+        return .failed(reason: reason, trace: Self.resultTrace(result))
+    }
+
+    private static func resultTrace(_ result: ActionResult) -> [String] {
+        switch result {
+        case .completed(_, let trace, _),
+             .ready(_, let trace, _),
+             .performedUnverified(_, let trace, _),
+             .failed(_, let trace):
+            return trace
+        case .planned, .needsSendApproval, .cancelled:
+            return []
+        }
+    }
+
+    private func runSession(
+        transcript: String,
+        context: ActionContextSnapshot
+    ) -> ActionResult {
         progress(.readingScreen)
         var context = context
         context.uiSnapshot = host.uiSnapshot()
@@ -273,12 +303,33 @@ final class ActionLoopRunner {
                 }
 
                 if stepsJSON.isEmpty {
-                    planner.end()
+                    if carried.pendingIndex != nil {
+                        let message = ActionPlanError.stateProofRequired(step: 0).message
+                        guard execute, turnsUsed < Self.maxTurns,
+                              asks < Self.maxTurns + 2, host.now() < deadline
+                        else {
+                            planner.end()
+                            return .failed(
+                                reason: "fresh state proof was required before completion",
+                                trace: fullTrace)
+                        }
+                        asks += 1
+                        progress(.retrying(message))
+                        progress(.readingScreen)
+                        let observation = gatherObservation(
+                            executed: observationTrace,
+                            failedStep: "steps rejected before running: \(message)",
+                            state: &carried)
+                        progress(.planning(turn: turnsUsed + 1))
+                        reply = planner.observe(observation)
+                        continue
+                    }
                     // A FIRST turn that reports done without doing anything is
                     // the planner shrugging. On later turns `done` may stop the
                     // loop, but only the accumulated executor evidence decides
                     // whether that stop is verified completion.
                     guard done, turnsUsed > 1 else {
+                        planner.end()
                         return .failed(reason: "the planner returned nothing to do",
                                        trace: fullTrace)
                     }
@@ -292,6 +343,21 @@ final class ActionLoopRunner {
                             trace: fullTrace,
                             target: target)
                     }
+                    if needsOpenFollowUp(
+                        command: transcript, state: carried,
+                        evidence: completionEvidence
+                    ), turnsUsed < Self.maxTurns,
+                       asks < Self.maxTurns + 2, host.now() < deadline {
+                        asks += 1
+                        progress(.readingScreen)
+                        let observation = gatherObservation(
+                            executed: observationTrace, failedStep: nil,
+                            state: &carried)
+                        progress(.planning(turn: turnsUsed + 1))
+                        reply = planner.observe(observation)
+                        continue
+                    }
+                    planner.end()
                     return completionResult(
                         command: transcript, goal: lockedGoal, trace: fullTrace,
                         evidence: completionEvidence)
@@ -387,6 +453,9 @@ final class ActionLoopRunner {
                             transcript, appName: carried.currentApp,
                             bundleID: carried.structuredUISnapshot?.bundleID,
                             candidates: carried.appNames)
+                    let shouldReplanOpen = done && needsOpenFollowUp(
+                        command: transcript, state: carried,
+                        evidence: completionEvidence)
                     // `wait_frontmost` already proved the routed app is
                     // ready. Recheck its exact PID/window now; requiring an
                     // empty planner turn made a valid result depend on luck.
@@ -402,7 +471,8 @@ final class ActionLoopRunner {
                             target: target)
                     }
                     if done, completionEvidence.provesGoal
-                        || !needsBackgroundProof {
+                        || (!needsBackgroundProof
+                            && !shouldReplanOpen) {
                         planner.end()
                         return completionResult(
                             command: transcript, goal: lockedGoal,
@@ -540,6 +610,38 @@ final class ActionLoopRunner {
             target: exactTarget(evidence.target))
     }
 
+    private static func namesOtherApp(
+        _ command: String, target: String, candidates: Set<String>
+    ) -> Bool {
+        let words = AppMatcher.words(command)
+        let targetID = AppMatcher.normalize(target)
+
+        return candidates.contains { candidate in
+            guard AppMatcher.normalize(candidate) != targetID else {
+                return false
+            }
+            let appWords = AppMatcher.words(candidate)
+            guard !appWords.isEmpty, appWords.count <= words.count else {
+                return false
+            }
+
+            return (0...(words.count - appWords.count)).contains { index in
+                Array(words[index..<(index + appWords.count)]) == appWords
+            }
+        }
+    }
+
+    private func needsOpenFollowUp(
+        command: String, state: ActionPlan.BatchState,
+        evidence: ActionCompletionEvidence
+    ) -> Bool {
+        host.isDrivingInBackground
+            && evidence.onlyOpenedApp
+            && !Self.namesOtherApp(
+                command, target: state.currentApp,
+                candidates: state.appNames)
+    }
+
     private func exactTarget(
         _ target: ActionCompletionTarget?
     ) -> ActionCompletionTarget? {
@@ -582,15 +684,14 @@ final class ActionLoopRunner {
                 pid: process.pid, windowID: nil,
                 processIdentity: process.processIdentity)
         }
-        guard let fresh = host.uiSnapshot(),
-              fresh.source == .cua,
-              !fresh.id.isEmpty,
-              fresh.windowID == target.windowID,
-              fresh.bundleID.caseInsensitiveCompare(process.bundleID)
-                == .orderedSame,
-              fresh.appName == process.name,
-              target.pid == process.pid,
+        // App-only readiness needs no element tree. Requiring one made the
+        // safe completion card depend on Cua's mutation-shaped AX output.
+        guard target.pid == process.pid,
               target.bundleID.caseInsensitiveCompare(process.bundleID)
+                == .orderedSame,
+              target.processIdentity == process.processIdentity,
+              let finalLive = host.frontmostApp(),
+              finalLive.bundleID.caseInsensitiveCompare(process.bundleID)
                 == .orderedSame,
               let finalProcess = host.actionProcess(), finalProcess == process
         else { return nil }

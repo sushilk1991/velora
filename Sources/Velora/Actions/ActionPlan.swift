@@ -37,6 +37,7 @@ struct ActionMediaControl: Equatable {
 enum ActionTextOperation: Equatable {
     case type
     case paste
+    case replace
     case search
 }
 
@@ -82,9 +83,8 @@ enum ActionStep: Equatable {
     case presentUI(snapshotID: String, bundleID: String, windowID: Int,
                    scope: ActionPresentationScope)
     case typeText(String)
-    /// Exact Cua text capability from the current routed-window snapshot.
-    /// Partialness is retained; the runtime re-reads this same element before
-    /// and after the driver write instead of manufacturing uniqueness.
+    /// Exact native text capability from the current routed-window snapshot.
+    /// The runtime compare-and-sets the retained AX element and reads it back.
     case typeTextAt(text: String, operation: ActionTextOperation,
                     target: ActionTextTarget)
     /// Navigation/query text, never message/document content and never
@@ -96,11 +96,11 @@ enum ActionStep: Equatable {
     /// Legacy fallback when the app cannot expose a structured snapshot.
     /// The host requires an authored label and a real AXPress capability.
     case pressElement(label: String)
-    /// Exact native AX or Cua driver capability selected from a structured UI
-    /// snapshot. Runtime refuses stale snapshot/app/window/label/role identity.
+    /// Exact native AX capability selected from a structured UI snapshot.
+    /// Runtime refuses stale snapshot/app/window/label/role identity.
     case pressUI(snapshotID: String, index: Int, role: String, label: String)
-    /// Idempotent media command bound to one exact Cua click capability. The
-    /// runtime re-reads this element and proves the target PID's audio state.
+    /// Idempotent media command bound to an app-native capability. The runtime
+    /// proves the target PID's audio state after delivery.
     case mediaControl(ActionMediaControl)
     /// Closed positive postcondition. Swift, not the planner, supplies the
     /// exact PID/window predicates and expected action-owned value.
@@ -109,7 +109,8 @@ enum ActionStep: Equatable {
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
         switch self {
-        case .typeText, .typeTextAt, .searchText, .pasteText, .key: return true
+        case .typeText, .typeTextAt, .searchText, .pasteText, .key:
+            return true
         default: return false
         }
     }
@@ -157,24 +158,28 @@ struct ActionPlan: Equatable {
 /// effects need whole-goal proof; media accepts a closed basic-command shape.
 enum ActionLocalProof: Equatable {
     case media(state: ActionMediaState, appName: String)
-    case state
+    case state(expectedValue: String?, appName: String)
 
     func covers(_ command: String) -> Bool {
-        guard case .media(let state, let appName) = self else { return false }
-        let words = command.lowercased().split {
-            !$0.isLetter && !$0.isNumber
-        }.map(String.init)
-        guard let verb = words.first,
-              state.verbs.contains(verb) else { return false }
+        switch self {
+        case .media(let state, let appName):
+            let words = AppMatcher.words(command)
+            guard let verb = words.first,
+                  state.verbs.contains(verb) else { return false }
 
-        let appWords = Set(appName.lowercased().split {
-            !$0.isLetter && !$0.isNumber
-        }.map(String.init))
-        let allowed = appWords.union(Self.mediaWords)
-        let remainder = Array(words.dropFirst())
-        return !remainder.isEmpty
-            && remainder.allSatisfy { allowed.contains($0) }
-            && remainder.contains { Self.mediaNouns.contains($0) }
+            let appWords = Set(AppMatcher.words(appName))
+            let allowed = appWords.union(Self.mediaWords)
+            let remainder = Array(words.dropFirst())
+            return !remainder.isEmpty
+                && remainder.allSatisfy { allowed.contains($0) }
+                && remainder.contains { Self.mediaNouns.contains($0) }
+
+        case .state(let expectedValue, let appName):
+            guard let expectedValue else { return false }
+            return ActionPlan.replaceCovers(
+                command, expectedValue: expectedValue,
+                appName: appName)
+        }
     }
 
     private static let mediaWords: Set<String> = [
@@ -217,6 +222,8 @@ enum ActionPlanError: Error, Equatable {
     case partialUIUnmentioned(step: Int)
     case invalidStructuredUICapability(step: Int)
     case invalidUIPresentation(step: Int)
+    case stateProofRequired(step: Int)
+    case mutationRequiresFreshObservation(step: Int)
     case pressRequiresFreshObservation(step: Int)
     case committingPressLabel(String)
     case sendInDraft(step: Int)
@@ -264,6 +271,10 @@ enum ActionPlanError: Error, Equatable {
             return "step \(step) does not cite an exact current UI capability"
         case .invalidUIPresentation(let step):
             return "step \(step) does not cite the exact routed UI window"
+        case .stateProofRequired(let step):
+            return "step \(step) follows an exact text write; verify_state first"
+        case .mutationRequiresFreshObservation(let step):
+            return "step \(step) changes UI; observe the fresh screen before any later step"
         case .pressRequiresFreshObservation(let step):
             return "step \(step) presses UI; observe the fresh screen before any later step"
         case .committingPressLabel(let label):
@@ -473,6 +484,11 @@ extension ActionPlan {
         /// Exact content authored by this action. It is postcondition input,
         /// never screen context or a durable trace value.
         var pendingValue = ""
+        /// Exact native element written by this action. A fresh snapshot may
+        /// rotate its ID, but verification cannot move to a sibling field.
+        var pendingIndex: Int?
+        var pendingRole = ""
+        var pendingLabel = ""
         /// App names observed or targeted in any turn. These are too generic
         /// to satisfy verify_context even after a batch boundary.
         var appNames: Set<String> = []
@@ -527,9 +543,10 @@ extension ActionPlan {
         "switch", "take", "the", "to", "up", "with",
     ]
 
-    // recipient_intent: comment dm email mail message post reply text | draft prepare write + chat channel comment conversation discord dm email gmail imessage mail messenger post recipient reply signal slack teams telegram thread whatsapp
+    // recipient_intent: add comment dm email enter insert mail message post put reply text type | draft prepare write + chat channel comment conversation discord dm email gmail imessage mail messenger post recipient reply signal slack teams telegram thread whatsapp
     private static let contentWords: Set<String> = [
-        "comment", "dm", "email", "mail", "message", "post", "reply", "text",
+        "add", "comment", "dm", "email", "enter", "insert", "mail",
+        "message", "post", "put", "reply", "text", "type",
     ]
     private static let contextWords: Set<String> = [
         "chat", "channel", "comment", "conversation", "discord", "dm",
@@ -537,7 +554,20 @@ extension ActionPlan {
         "recipient", "reply", "signal", "slack", "teams", "telegram",
         "thread", "whatsapp",
     ]
+    private static let genericContextWords: Set<String> = [
+        "chat", "channel", "conversation", "discord", "dm", "email",
+        "gmail", "imessage", "mail", "messenger", "recipient", "signal",
+        "slack", "teams", "telegram", "thread", "whatsapp", "zoom",
+    ]
     private static let composeWords: Set<String> = ["draft", "prepare", "write"]
+    private static let replacementWords: Set<String> = ["overwrite", "replace"]
+    private static let wholeTextPrefixes: [[String]] = [
+        [], ["all"], ["document"], ["entire"], ["the"],
+        ["the", "document"], ["the", "entire"],
+    ]
+    private static let searchLabelWords: Set<String> = [
+        "find", "query", "search",
+    ]
     private static let presentationIntentPrefixes: [[String]] = [
         ["open"], ["show"], ["display"], ["launch"],
         ["navigate", "to"], ["go", "to"], ["switch", "to"],
@@ -555,14 +585,94 @@ extension ActionPlan {
     static func isRecipientContent(
         _ command: String, bundleID: String?
     ) -> Bool {
-        guard let category = ModeCategory.category(forBundleID: bundleID)
-        else { return false }
-        guard category == .chat || category == .email else { return false }
         let words = Set(AppMatcher.words(command))
         let hasIntent = !words.intersection(contentWords).isEmpty
             || !words.intersection(composeWords).isEmpty
-        return hasIntent
-            && !words.intersection(contextWords).isEmpty
+        let hasContext = !words.intersection(contextWords).isEmpty
+        if let category = ModeCategory.category(forBundleID: bundleID) {
+            return (category == .chat || category == .email)
+                && hasIntent && hasContext
+        }
+        let hasGenericContext = !words.intersection(genericContextWords).isEmpty
+        let hasRecipientRoute = !words.intersection(contentWords).isEmpty
+            && !words.intersection(["for", "to"]).isEmpty
+        return hasIntent && (hasGenericContext || hasRecipientRoute)
+    }
+
+    static func replaceRequested(_ command: String) -> Bool {
+        let words = AppMatcher.words(command)
+        for (offset, word) in words.enumerated()
+        where replacementWords.contains(word) {
+            let tail = Array(words.dropFirst(offset + 1))
+            guard let textIndex = tail.firstIndex(of: "text"),
+                  wholeTextPrefixes.contains(Array(tail[..<textIndex])),
+                  textIndex + 1 < tail.count,
+                  ["in", "with"].contains(tail[textIndex + 1])
+            else { continue }
+            return true
+        }
+        return false
+    }
+
+    static func replaceCovers(
+        _ command: String, expectedValue: String, appName: String
+    ) -> Bool {
+        let whitespace = CharacterSet.whitespacesAndNewlines
+        let source = command.trimmingCharacters(in: whitespace)
+        let expected = expectedValue
+        let app = appName.trimmingCharacters(in: whitespace)
+        guard !expected.trimmingCharacters(in: whitespace).isEmpty,
+              !app.isEmpty
+        else { return false }
+
+        let appForms = [app, "the \(app)", "\(app) app", "the \(app) app"]
+        let textPrefixes = [
+            "", "all ", "document ", "entire ", "the ",
+            "the document ", "the entire ",
+        ]
+        let matchOptions: String.CompareOptions = [
+            .anchored, .caseInsensitive, .diacriticInsensitive,
+            .widthInsensitive,
+        ]
+
+        // Completion proof accepts only closed whole-field commands. The raw
+        // payload remains untouched so punctuation cannot disappear into tokens.
+        for appForm in appForms {
+            let appLeads = [
+                "in \(appForm), ", "in \(appForm) ",
+                "please in \(appForm), ", "please in \(appForm) ",
+                "in \(appForm), please ", "in \(appForm) please ",
+            ]
+
+            for verb in replacementWords {
+                for textPrefix in textPrefixes {
+                    let beforeApp = appLeads.map {
+                        "\($0)\(verb) \(textPrefix)text with "
+                    }
+                    let afterApp = ["", "please "].map {
+                        "\($0)\(verb) \(textPrefix)text in \(appForm) with "
+                    }
+
+                    for prefix in beforeApp + afterApp {
+                        guard let range = source.range(
+                            of: prefix, options: matchOptions
+                        ) else { continue }
+                        let payload = String(source[range.upperBound...])
+                        if payload == expected { return true }
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    static func isSearchTextTarget(role: String, label: String) -> Bool {
+        if role == "AXSearchField" { return true }
+        guard role == "AXTextField" || role == "AXComboBox" else {
+            return false
+        }
+        return !Set(AppMatcher.words(label))
+            .intersection(searchLabelWords).isEmpty
     }
 
     static func isExplicitUIPresentation(
@@ -722,42 +832,17 @@ extension ActionPlan {
               !pressLabelIsCommitting(label) else {
             throw ActionPlanError.invalidStructuredUICapability(step: step)
         }
-        if !snapshot.complete {
-            guard !snapshot.bundleID.isEmpty,
-                  !snapshot.windowTitle.isEmpty || snapshot.windowID != nil,
-                  commandMentionsUILabel(
-                    label, command: state.spokenCommand) else {
-                throw ActionPlanError.invalidStructuredUICapability(step: step)
-            }
+        guard snapshot.complete else {
+            throw ActionPlanError.incompleteStructuredUI(step: step)
         }
         switch snapshot.source {
-        case .cua:
-            guard !snapshot.bundleID.isEmpty, snapshot.windowID != nil,
-                  element.actions.contains(ActionUICapability.cuaClick) else {
-                throw ActionPlanError.invalidStructuredUICapability(step: step)
-            }
         case .native:
-            let capability = ScreenContext.isEditableActionRole(role)
-                ? ActionUICapability.axFocus : ActionUICapability.axPress
             guard !element.actions.contains(ActionUICapability.cuaClick),
-                  element.actions.contains(capability) else {
+                  element.actions.contains(ActionUICapability.axPress) else {
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
-        case .appNative:
+        case .cua, .cuaVisual, .appNative:
             throw ActionPlanError.invalidStructuredUICapability(step: step)
-        }
-    }
-
-    private static func hasCuaMediaControl(
-        _ state: ActionMediaState,
-        snapshot: ActionUISnapshot
-    ) -> Bool {
-        guard snapshot.source == .cua else { return false }
-        return snapshot.elements.contains { element in
-            element.enabled
-                && element.actions.contains(ActionUICapability.cuaClick)
-                && AppMatcher.words(element.label ?? "")
-                    .contains(state.rawValue)
         }
     }
 
@@ -796,7 +881,7 @@ extension ActionPlan {
                 else {
                     throw ActionPlanError.invalidStructuredUICapability(step: step)
                 }
-            case .appNative:
+            case .cuaVisual, .appNative:
                 throw ActionPlanError.invalidStructuredUICapability(step: step)
             }
             if snapshot.complete,
@@ -817,7 +902,8 @@ extension ActionPlan {
         _ step: [String: Any], state: BatchState, stepIndex: Int
     ) throws -> ActionTextTarget {
         guard let snapshot = state.structuredUISnapshot,
-              snapshot.source == .cua, snapshot.windowID != nil,
+              snapshot.source == .native, snapshot.complete,
+              snapshot.windowID != nil,
               let snapshotID = step["snapshot"] as? String,
               snapshotID == snapshot.id,
               let number = step["index"] as? NSNumber,
@@ -831,7 +917,7 @@ extension ActionPlan {
               element.role == role,
               AppMatcher.normalize(element.label ?? "")
                 == AppMatcher.normalize(label),
-              element.enabled, !element.inWebContent,
+              element.enabled,
               ScreenContext.isEditableActionRole(role)
         else {
             throw ActionPlanError.invalidStructuredUICapability(
@@ -846,7 +932,8 @@ extension ActionPlan {
         _ step: [String: Any], state: BatchState, stepIndex: Int
     ) throws -> ActionStateCheck {
         guard let snapshot = state.structuredUISnapshot,
-              snapshot.source == .cua, snapshot.windowID != nil,
+              snapshot.source == .native, snapshot.complete,
+              snapshot.windowID != nil,
               let snapshotID = step["snapshot"] as? String,
               snapshotID == snapshot.id,
               let number = step["index"] as? NSNumber,
@@ -862,7 +949,7 @@ extension ActionPlan {
               element.role == role,
               AppMatcher.normalize(element.label ?? "")
                 == AppMatcher.normalize(label),
-              element.enabled, !element.inWebContent
+              element.enabled
         else {
             throw ActionPlanError.invalidStructuredUICapability(
                 step: stepIndex)
@@ -873,7 +960,9 @@ extension ActionPlan {
             guard ScreenContext.isEditableActionRole(role),
                   !state.pendingValue.isEmpty,
                   expected == state.pendingValue,
-                  !label.isEmpty else {
+                  number.intValue == state.pendingIndex,
+                  role == state.pendingRole,
+                  AppMatcher.normalize(label) == state.pendingLabel else {
                 throw ActionPlanError.invalidStructuredUICapability(
                     step: stepIndex)
             }
@@ -934,6 +1023,15 @@ extension ActionPlan {
         guard let rawSteps = plan["steps"] as? [Any], !rawSteps.isEmpty else {
             throw ActionPlanError.noSteps
         }
+        if state.pendingIndex != nil {
+            guard rawSteps.count == 1,
+                  let step = rawSteps[0] as? [String: Any],
+                  (step["do"] as? String)?
+                    .trimmingCharacters(in: .whitespaces).lowercased()
+                    == "verify_state" else {
+                throw ActionPlanError.stateProofRequired(step: 0)
+            }
+        }
         guard state.stepsUsed + rawSteps.count <= Limits.maxSteps else {
             throw ActionPlanError.tooManySteps(state.stepsUsed + rawSteps.count)
         }
@@ -952,6 +1050,15 @@ extension ActionPlan {
         /// True while typed text sits where a committing key could deliver it.
         var pendingText = state.pendingText
         var pendingValue = state.pendingValue
+        var pendingIndex = state.pendingIndex
+        var pendingRole = state.pendingRole
+        var pendingLabel = state.pendingLabel
+
+        func clearPendingTarget() {
+            pendingIndex = nil
+            pendingRole = ""
+            pendingLabel = ""
+        }
         /// Drafts refuse committing keys once text is pending, outright.
         let isDraft = (plan["sends"] as? Bool) == false
         let needsTargetProof = state.requireUITargetVerification
@@ -989,6 +1096,7 @@ extension ActionPlan {
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
                 pendingValue = ""
+                clearPendingTarget()
 
             case "open_url":
                 let raw = try string("url")
@@ -1047,6 +1155,7 @@ extension ActionPlan {
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
                 pendingValue = ""
+                clearPendingTarget()
 
             case "wait_frontmost":
                 let requested = step["timeout_ms"] as? Int ?? Limits.defaultWaitMs
@@ -1056,6 +1165,7 @@ extension ActionPlan {
                 if pendingText,
                    !AppMatcher.namesSameApp(currentApp, app) {
                     pendingValue = ""
+                    clearPendingTarget()
                 }
                 currentApp = app
                 acquiredApp = true
@@ -1130,7 +1240,7 @@ extension ActionPlan {
                         role: role, label: label, target: target))
                 }
                 focusEstablished = true
-                uiTargetVerified = true
+                if purpose == .target { uiTargetVerified = true }
                 unverifiedText = false
 
             case "verify_state":
@@ -1141,7 +1251,7 @@ extension ActionPlan {
                 steps.append(.verifyState(try ActionPlan.stateCheck(
                     step, state: state, stepIndex: index)))
 
-            case "type_text", "paste_text", "search_text":
+            case "type_text", "paste_text", "replace_text", "search_text":
                 guard focusEstablished else {
                     throw ActionPlanError.inputBeforeFocus(step: index)
                 }
@@ -1170,32 +1280,83 @@ extension ActionPlan {
                 let hasExactTarget = step["snapshot"] != nil
                     || step["index"] != nil || step["role"] != nil
                     || step["label"] != nil
-                if state.structuredUISnapshot?.source == .cua,
+                if let source = state.structuredUISnapshot?.source,
+                   source == .cua || source == .cuaVisual
+                    || source == .appNative {
+                    throw ActionPlanError.invalidStructuredUICapability(
+                        step: index)
+                }
+                if state.requireUITargetVerification,
+                   state.structuredUISnapshot?.source == .native,
+                   !hasExactTarget, !uiTargetVerified {
+                    throw ActionPlanError.invalidStructuredUICapability(
+                        step: index)
+                }
+                if verb == "replace_text" {
+                    guard ActionPlan.replaceRequested(state.spokenCommand),
+                          state.structuredUISnapshot?.source == .native,
+                          hasExactTarget else {
+                        throw ActionPlanError.invalidStructuredUICapability(
+                            step: index)
+                    }
+                }
+                if state.structuredUISnapshot?.source == .native,
                    hasExactTarget {
+                    guard index == rawSteps.count - 1 else {
+                        throw ActionPlanError.mutationRequiresFreshObservation(
+                            step: index)
+                    }
                     let target = try ActionPlan.textTarget(
                         step, state: state, stepIndex: index)
                     let operation: ActionTextOperation
                     switch verb {
                     case "paste_text": operation = .paste
+                    case "replace_text": operation = .replace
                     case "search_text": operation = .search
                     default: operation = .type
+                    }
+                    if operation == .search,
+                       !ActionPlan.isSearchTextTarget(
+                        role: target.role, label: target.label) {
+                        throw ActionPlanError.invalidStructuredUICapability(
+                            step: index)
                     }
                     steps.append(.typeTextAt(
                         text: cleaned, operation: operation,
                         target: target))
-                    if operation != .search {
+                    if operation == .search {
+                        unverifiedText = false
+                        pendingText = false
+                        pendingValue = ""
+                        clearPendingTarget()
+                    } else {
                         unverifiedText = true
                         pendingText = true
-                        pendingValue += cleaned
+                        if operation == .replace {
+                            pendingValue = cleaned
+                        } else {
+                            pendingValue += cleaned
+                        }
+                        pendingIndex = target.index
+                        pendingRole = target.role
+                        pendingLabel = AppMatcher.normalize(target.label)
                     }
                 } else if verb == "search_text" {
                     steps.append(.searchText(cleaned))
+                    unverifiedText = false
+                    pendingText = false
+                    pendingValue = ""
+                    clearPendingTarget()
+                } else if verb == "replace_text" {
+                    throw ActionPlanError.invalidStructuredUICapability(
+                        step: index)
                 } else {
                     steps.append(verb == "type_text"
                         ? .typeText(cleaned) : .pasteText(cleaned))
                     unverifiedText = true
                     pendingText = true
                     pendingValue += cleaned
+                    clearPendingTarget()
                 }
 
             case "key":
@@ -1272,6 +1433,7 @@ extension ActionPlan {
                     unverifiedText = false
                     pendingText = false
                     pendingValue = ""
+                    clearPendingTarget()
                 } else if !mods.isEmpty, pendingText,
                           !(name == "c" && Set(mods) == Set(["cmd"])) {
                     // Every allowed modified chord except Copy moves focus,
@@ -1315,43 +1477,34 @@ extension ActionPlan {
                       AppMatcher.namesSameApp(currentApp, snapshot.appName) else {
                     throw ActionPlanError.invalidStructuredUICapability(step: index)
                 }
+                guard ActionLocalProof.media(
+                    state: requested, appName: snapshot.appName
+                ).covers(state.spokenCommand) else {
+                    throw ActionPlanError.invalidStructuredUICapability(step: index)
+                }
                 let snapshotID = String(try string("snapshot").prefix(80))
                 guard snapshot.id == snapshotID else {
                     throw ActionPlanError.invalidStructuredUICapability(step: index)
                 }
-                if let rawCapability = step["capability"] as? String {
-                    let capabilityID = String(rawCapability.prefix(80))
-                    guard !capabilityID.isEmpty,
-                          !ActionPlan.hasCuaMediaControl(
-                            requested, snapshot: snapshot),
-                          snapshot.capabilities.contains(where: {
-                              $0.id == capabilityID
-                                  && $0.verb == .mediaControl
-                                  && $0.state == requested
-                          }) else {
-                        throw ActionPlanError.invalidStructuredUICapability(step: index)
-                    }
-                    steps.append(.mediaControl(ActionMediaControl(
-                        state: requested,
-                        capability: .appNative(
-                            snapshotID: snapshotID, id: capabilityID))))
-                    break
+                guard let rawCapability = step["capability"] as? String else {
+                    throw ActionPlanError.invalidStructuredUICapability(
+                        step: index)
                 }
-                guard snapshot.source == .cua,
-                      let number = step["index"] as? NSNumber,
-                      CFGetTypeID(number) != CFBooleanGetTypeID(),
-                      !CFNumberIsFloatType(number), number.intValue >= 0 else {
-                    throw ActionPlanError.missingField(step: index, field: "index")
+                let capabilityID = String(rawCapability.prefix(80))
+                guard !capabilityID.isEmpty,
+                      snapshot.capabilities.contains(where: {
+                          $0.id == capabilityID
+                              && $0.source == .appNative
+                              && $0.verb == .mediaControl
+                              && $0.state == requested
+                      }) else {
+                    throw ActionPlanError.invalidStructuredUICapability(
+                        step: index)
                 }
-                let role = String(try string("role").prefix(40))
-                let label = String(ActionPlan.sanitize(try string("label"))
-                    .prefix(Limits.maxStructuredUILabelCharacters))
-                try ActionPlan.validatePressUI(
-                    snapshotID: snapshotID, index: number.intValue,
-                    role: role, label: label, state: state, step: index)
                 steps.append(.mediaControl(ActionMediaControl(
-                    state: requested, snapshotID: snapshotID,
-                    index: number.intValue, role: role, label: label)))
+                    state: requested,
+                    capability: .appNative(
+                        snapshotID: snapshotID, id: capabilityID))))
 
             case "press_element":
                 guard focusEstablished else {
@@ -1377,7 +1530,10 @@ extension ActionPlan {
                 focusEstablished = false
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
-                if pendingText { pendingValue = "" }
+                if pendingText {
+                    pendingValue = ""
+                    clearPendingTarget()
+                }
 
             case "press_ui":
                 guard focusEstablished else {
@@ -1416,7 +1572,10 @@ extension ActionPlan {
                 focusEstablished = false
                 uiTargetVerified = false
                 if pendingText { unverifiedText = true }
-                if pendingText { pendingValue = "" }
+                if pendingText {
+                    pendingValue = ""
+                    clearPendingTarget()
+                }
 
             case "present_ui":
                 throw ActionPlanError.invalidUIPresentation(step: index)
@@ -1431,6 +1590,9 @@ extension ActionPlan {
         state.unverifiedText = unverifiedText
         state.pendingText = pendingText
         state.pendingValue = pendingValue
+        state.pendingIndex = pendingIndex
+        state.pendingRole = pendingRole
+        state.pendingLabel = pendingLabel
         state.appNames.formUnion(appNames)
         state.currentApp = currentApp
 
@@ -1457,26 +1619,53 @@ extension ActionPlan {
     static func state(after plan: ActionPlan, executedCount: Int,
                       seed: BatchState) -> BatchState {
         var next = seed
+
+        func clearPendingTarget() {
+            next.pendingIndex = nil
+            next.pendingRole = ""
+            next.pendingLabel = ""
+        }
+
         next.stepsUsed = seed.stepsUsed + plan.steps.count
         for step in plan.steps.prefix(max(0, executedCount)) {
             switch step {
-            case .typeText(let text), .pasteText(let text), .searchText(let text):
+            case .typeText(let text), .pasteText(let text):
                 next.totalText += text.count
-                if case .searchText = step {
-                    break
-                }
                 next.unverifiedText = true
                 next.pendingText = true
                 next.pendingValue += text
-            case .typeTextAt(let text, let operation, _):
+                clearPendingTarget()
+            case .searchText(let text):
                 next.totalText += text.count
-                if operation != .search {
+                next.unverifiedText = false
+                next.pendingText = false
+                next.pendingValue = ""
+                clearPendingTarget()
+            case .typeTextAt(let text, let operation, let target):
+                next.totalText += text.count
+                if operation == .search {
+                    next.unverifiedText = false
+                    next.pendingText = false
+                    next.pendingValue = ""
+                    clearPendingTarget()
+                } else {
                     next.unverifiedText = true
                     next.pendingText = true
-                    next.pendingValue += text
+                    if operation == .replace {
+                        next.pendingValue = text
+                    } else {
+                        next.pendingValue += text
+                    }
+                    next.pendingIndex = target.index
+                    next.pendingRole = target.role
+                    next.pendingLabel = AppMatcher.normalize(target.label)
                 }
             case .verifyContext, .verifyUI, .verifyGoal:
                 next.unverifiedText = false
+            case .verifyState(let check):
+                if check.assertion == .writtenText {
+                    clearPendingTarget()
+                }
             case .key(let name, let mods, _):
                 // The committing and focus-moving branches must mirror
                 // `decode` exactly: this function is what actually carries
@@ -1487,6 +1676,7 @@ extension ActionPlan {
                     next.unverifiedText = false
                     next.pendingText = false
                     next.pendingValue = ""
+                    clearPendingTarget()
                 } else if !mods.isEmpty, next.pendingText,
                           !(name == "c" && Set(mods) == Set(["cmd"])) {
                     next.unverifiedText = true
@@ -1498,6 +1688,7 @@ extension ActionPlan {
                 next.currentApp = app
                 if next.pendingText { next.unverifiedText = true }
                 next.pendingValue = ""
+                clearPendingTarget()
             case .waitFrontmost(let app, _):
                 next.appNames.insert(app)
                 // Naming a DIFFERENT app moves the screen: the executor asks
@@ -1508,18 +1699,23 @@ extension ActionPlan {
                    !AppMatcher.namesSameApp(next.currentApp, app) {
                     next.unverifiedText = true
                     next.pendingValue = ""
+                    clearPendingTarget()
                 }
                 next.currentApp = app
             case .openURL:
                 next.currentApp = ""
                 if next.pendingText { next.unverifiedText = true }
                 next.pendingValue = ""
+                clearPendingTarget()
             case .pressElement, .pressUI, .presentUI:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.
                 if next.pendingText { next.unverifiedText = true }
-                if next.pendingText { next.pendingValue = "" }
+                if next.pendingText {
+                    next.pendingValue = ""
+                    clearPendingTarget()
+                }
             default:
                 break
             }
