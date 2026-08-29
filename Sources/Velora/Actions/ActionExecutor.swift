@@ -474,6 +474,10 @@ final class ActionExecutor {
             switch step {
             case .openApp(let name):
                 guard let resolved = host.openApp(named: name) else {
+                    if let reason = host.actionFailureReason {
+                        note("open_app \(name): background route refused")
+                        return failed(index, reason, recoverable: false)
+                    }
                     note("open_app \(name): not found")
                     return failed(index, "couldn't find an app called \(name)",
                                   recoverable: true)

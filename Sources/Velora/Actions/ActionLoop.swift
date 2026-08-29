@@ -489,7 +489,11 @@ final class ActionLoopRunner {
                     // `wait_frontmost` already proved the routed app is
                     // ready. Recheck its exact PID/window now; requiring an
                     // empty planner turn made a valid result depend on luck.
-                    if done, let target = routedTarget(
+                    // Exact runtime routing outranks a stale model `done` bit.
+                    // routedTarget re-reads the current PID/window itself, so
+                    // app-only open needs no second planner turn.
+                    if !completionEvidence.hadOtherEffect,
+                       let target = routedTarget(
                         transcript: transcript,
                         state: carried,
                         sends: lockedSends

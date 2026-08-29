@@ -617,6 +617,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private let ensureDaemon: (CuaTransport) -> Bool
     private let endDaemon: () -> Void
     private let bundleForPID: (Int) -> String?
+    private let launchInactive: (String) -> (pid: Int, bundleID: String)?
     private let interactionIsQuiet: () -> Bool
     private let mediaSnapshot: () -> MediaPlaybackCoordinator.Snapshot
     private let mediaSleep: (Int) -> Void
@@ -660,6 +661,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// True once readiness has succeeded at least once this action.
     private var everReady = false
     private var primeTried = false
+    private var materializeTried = false
     /// The exact element this action is writing into, pinned the first time
     /// one is chosen. Without it the "lone editable" rule is relative to
     /// whatever the tree looks like right now: a plan can verify against a
@@ -710,6 +712,15 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// without it, and it is dropped whenever the element or target changes.
     private var backgroundDraft = ""
     private var mutationOrdinal = 0
+    private struct LaunchFocusLease {
+        let generation: UInt64
+        let pid: Int
+        let process: CuaProcessIdentity?
+        let windowID: Int?
+        let bundleID: String
+        let foreground: ActionWindowIdentity
+    }
+    private var launchFocusLease: LaunchFocusLease?
     private var pendingMutationLease: TargetMutationLease?
     private struct NavigationNode: Hashable {
         let role: String
@@ -775,6 +786,9 @@ final class BackgroundRoutingActionHost: ActionHost {
          bundleForPID: @escaping (Int) -> String? = { pid in
             NSRunningApplication(processIdentifier: pid_t(pid))?.bundleIdentifier
          },
+         launchInactive: @escaping (String)
+            -> (pid: Int, bundleID: String)?
+            = BackgroundRoutingActionHost.launchInactive,
          interactionIsQuiet: (() -> Bool)? = nil,
          mediaSnapshot: @escaping () -> MediaPlaybackCoordinator.Snapshot
             = MediaPlaybackSystem.snapshot,
@@ -837,6 +851,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.ensureDaemon = ensureDaemon
         self.endDaemon = endDaemon
         self.bundleForPID = bundleForPID
+        self.launchInactive = launchInactive
         self.interactionIsQuiet = interactionIsQuiet ?? {
             UserInputActivity.isQuiet(for: Self.handoffQuietSeconds)
         }
@@ -878,6 +893,45 @@ final class BackgroundRoutingActionHost: ActionHost {
             processIdentity: CuaProcessIdentity.capture(pid: pid_t(pid)))
     }
 
+    private static func launchInactive(
+        _ bundleID: String
+    ) -> (pid: Int, bundleID: String)? {
+        guard !Thread.isMainThread else { return nil }
+        let appURL: URL? = DispatchQueue.main.sync {
+            NSWorkspace.shared.urlForApplication(
+                withBundleIdentifier: bundleID)
+        }
+        guard let appURL else { return nil }
+
+        let finished = DispatchSemaphore(value: 0)
+        let lock = NSLock()
+        var launched: (pid: Int, bundleID: String)?
+        let request = {
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            configuration.addsToRecentItems = false
+            configuration.promptsUserIfNeeded = false
+            NSWorkspace.shared.openApplication(
+                at: appURL, configuration: configuration
+            ) { app, error in
+                if error == nil, let app, app.processIdentifier > 0,
+                   let liveBundleID = app.bundleIdentifier {
+                    lock.lock()
+                    launched = (Int(app.processIdentifier), liveBundleID)
+                    lock.unlock()
+                }
+                finished.signal()
+            }
+        }
+        DispatchQueue.main.sync(execute: request)
+        guard finished.wait(
+            timeout: .now() + .milliseconds(appActivationWaitMs)
+        ) == .success else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return launched
+    }
+
     /// Best-effort local identity for a spoken app name: the running apps
     /// are what a background action almost always means, and they carry
     /// their bundle ids already.
@@ -908,6 +962,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func beginActionInputSession(command: String) {
         unroute()
+        materializeTried = false
         sessionCommand = command
         terminalFailureReason = nil
         contentMayCommit = false
@@ -1154,13 +1209,86 @@ final class BackgroundRoutingActionHost: ActionHost {
                 resolved, pid: pid, windowID: windowID)
             return .routed
         case .missing:
-            // Even activates=false is a request, not a guarantee that a
-            // regular app will not self-activate. Strict background mode acts
-            // only on an already-running exact window.
-            return .failed
+            return materializeTarget(resolved, frontBefore: frontBefore)
         case .invalid:
-            return .failed
+            return routeFailure(
+                "The target app's window identity could not be verified.")
         }
+    }
+
+    private func materializeTarget(
+        _ resolved: ResolvedApp,
+        frontBefore: (name: String, bundleID: String)
+    ) -> RouteResult {
+        guard !materializeTried,
+              let foreground = system.foregroundWindow(),
+              foreground.bundleID.caseInsensitiveCompare(frontBefore.bundleID)
+                == .orderedSame
+        else {
+            return routeFailure(
+                "The user foreground could not be pinned for background launch.")
+        }
+        materializeTried = true
+
+        let generation = UserInputActivity.snapshot()
+        launchFocusLease = LaunchFocusLease(
+            generation: generation, pid: resolved.pid,
+            process: resolved.pid > 0 ? processIdentity(resolved.pid) : nil,
+            windowID: nil, bundleID: resolved.bundleID,
+            foreground: foreground)
+        guard let launched = launchInactive(resolved.bundleID),
+              launched.pid > 0,
+              launched.bundleID.caseInsensitiveCompare(resolved.bundleID)
+                == .orderedSame,
+              let liveBundleID = bundleForPID(launched.pid),
+              liveBundleID.caseInsensitiveCompare(resolved.bundleID)
+                == .orderedSame,
+              let process = processIdentity(launched.pid)
+        else {
+            return routeFailure(
+                "The target app could not launch safely in the background.")
+        }
+        let live = ResolvedApp(
+            name: resolved.name, bundleID: resolved.bundleID,
+            pid: launched.pid, running: true)
+        launchFocusLease = LaunchFocusLease(
+            generation: generation, pid: launched.pid, process: process,
+            windowID: nil, bundleID: live.bundleID,
+            foreground: foreground)
+        guard preserveLaunchFocus() else { return .failed }
+
+        for elapsed in stride(
+            from: 0, through: Self.appActivationWaitMs,
+            by: Self.appActivationStableMs
+        ) {
+            guard preserveLaunchFocus() else { return .failed }
+            switch existingWindow(live) {
+            case .found(let pid, let windowID),
+                 .offSpace(let pid, let windowID):
+                launchFocusLease = LaunchFocusLease(
+                    generation: generation, pid: pid, process: process,
+                    windowID: windowID, bundleID: live.bundleID,
+                    foreground: foreground)
+                guard preserveLaunchFocus() else { return .failed }
+                beginRoute(live, pid: pid, windowID: windowID)
+                return .routed
+            case .invalid:
+                return routeFailure(
+                    "The launched app's window identity could not be verified.")
+            case .missing:
+                if elapsed < Self.appActivationWaitMs {
+                    system.sleep(ms: Self.appActivationStableMs)
+                }
+            }
+        }
+        return routeFailure(
+            "The target app did not create a background window.")
+    }
+
+    private func routeFailure(_ reason: String) -> RouteResult {
+        guard preserveLaunchFocus() else { return .failed }
+        _ = failRoute(reason)
+        return .failed
     }
 
     private func existingWindow(_ resolved: ResolvedApp) -> WindowProbe {
@@ -2038,6 +2166,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         backgroundDraft = ""
         writtenElement = nil
         writtenNativeElement = nil
+        launchFocusLease = nil
         pendingMutationLease = nil
         navigationReceipt = nil
     }
@@ -2912,8 +3041,67 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func preserveUserFocus() -> Bool {
+        guard preserveLaunchFocus() else { return false }
         guard let lease = pendingMutationLease else { return true }
         return finalizeMutation(lease)
+    }
+
+    private func preserveLaunchFocus() -> Bool {
+        guard let lease = launchFocusLease else { return true }
+        if let process = lease.process,
+           processIdentity(lease.pid) != process {
+            return failRoute("The background launch target changed.")
+        }
+        guard let front = system.frontmostApp() else {
+            return failRoute("The background launch target changed.")
+        }
+        guard front.bundleID.caseInsensitiveCompare(lease.bundleID)
+            == .orderedSame else { return true }
+
+        let generation: UInt64
+        let foreground: ActionWindowIdentity
+        if UserInputActivity.snapshot() == lease.generation {
+            generation = lease.generation
+            foreground = lease.foreground
+        } else if let selection = UserInputActivity.selectedFocus(
+                    after: lease.generation),
+                  let selected = userFocusForWindow(selection.windowID),
+                  UserInputActivity.snapshot() == selection.generation {
+            guard selected.bundleID.caseInsensitiveCompare(lease.bundleID)
+                != .orderedSame else {
+                return failRoute(
+                    "Action cancelled because the target app was selected.")
+            }
+            generation = selection.generation
+            foreground = selected
+        } else if let windowID = lease.windowID, lease.pid > 0 {
+            switch UserInputActivity.activity(
+                after: lease.generation,
+                targetPID: lease.pid,
+                targetWindowID: windowID
+            ) {
+            case .target:
+                return failRoute(
+                    "Action cancelled because the target app was selected.")
+            case .unchanged, .unrelated, .unknown:
+                return failRoute(
+                    "The target app took focus while user input was ambiguous.")
+            }
+        } else {
+            return failRoute(
+                "The target app took focus while user input was ambiguous.")
+        }
+
+        guard restoreForeground(foreground, {
+                  UserInputActivity.snapshot() == generation
+              }),
+              UserInputActivity.snapshot() == generation,
+              system.foregroundWindow() == foreground
+        else {
+            return failRoute(
+                "The target app took focus and could not be restored safely.")
+        }
+        return true
     }
 
     private func targetOwnsForeground() -> Bool {

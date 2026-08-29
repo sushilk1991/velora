@@ -3115,9 +3115,7 @@ extension Selftest {
             .turn(sends: false, goal: "Open Notes", steps: jsonSteps("""
             [{"do":"open_app","app":"Notes"}]
             """), done: false),
-            .turn(sends: false, goal: "", steps: jsonSteps("""
-            [{"do":"wait_frontmost","app":"Notes"}]
-            """), done: true),
+            .failure(reason: "exact route should finish", code: "failed"),
         ])
         var terminalContext = loopContext()
         terminalContext.frontmostApp = "Ghostty"
@@ -3126,8 +3124,8 @@ extension Selftest {
             host: terminalHost, planner: terminalPlanner,
             execute: true, allowSend: false
         ).run(transcript: "Open Notes", context: terminalContext)
-        expect(terminalPlanner.observations.count == 1,
-               "fresh exact background proof needs no third planner turn")
+        expect(terminalPlanner.observations.isEmpty,
+               "fresh exact app routing overrides a stale done bit")
         expect(!terminalSystem.log.contains { $0.hasPrefix("openApp") }
                && terminalSystem.frontmost?.name == "Ghostty",
                "the exact background route never steals focus")
@@ -7665,6 +7663,7 @@ extension Selftest {
                 return healthy
             }, endDaemon: endDaemon,
             bundleForPID: { fakeBundleID($0, transport: transport) },
+            launchInactive: launchHidden ?? { _ in nil },
             interactionIsQuiet: interactionIsQuiet,
             mediaSnapshot: mediaSnapshot, mediaSleep: mediaSleep,
             nativeMedia: nativeMedia,
@@ -7732,6 +7731,93 @@ extension Selftest {
         expect(system.frontmost?.name == "Ghostty"
                && !system.log.contains("openApp(Finder)"),
                "failed app presentation never brings the app forward")
+
+        let textSystem = FakeActionHost()
+        textSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let textTransport = FakeCuaTransport()
+        textTransport.responses["list_apps"] = ["apps": [[
+            "name": "TextEdit", "bundle_id": "com.apple.TextEdit",
+            "pid": 503, "running": true,
+        ]]]
+        textTransport.responses["list_windows"] = ["windows": []]
+        var materializations = 0
+        let telegramWindow = ActionWindowIdentity(
+            name: "Telegram", bundleID: "ru.keepcoder.Telegram",
+            pid: 800, windowID: 80)
+        let textHost = makeRoutedHost(
+            system: textSystem, transport: textTransport,
+            launchHidden: { bundleID in
+                materializations += 1
+                textTransport.responses["list_windows"] = ["windows": [[
+                    "pid": 503, "window_id": 13, "layer": 0,
+                    "bounds": ["width": 800.0, "height": 600.0],
+                    "title": "Untitled", "on_current_space": false,
+                ]]]
+                return (503, bundleID)
+            },
+            restoreForeground: { target, allowed in
+                guard allowed() else { return false }
+                textSystem.frontmost = (target.name, target.bundleID)
+                textSystem.foregroundWindowValue = target
+                return true
+            },
+            userFocusForWindow: { windowID in
+                windowID == telegramWindow.windowID ? telegramWindow : nil
+            },
+            localApps: ["TextEdit": "com.apple.TextEdit"])
+        textHost.beginActionInputSession(command: "Open TextEdit")
+        expect(textHost.openApp(named: "TextEdit") == "TextEdit"
+               && materializations == 1,
+               "a native inactive launch materializes a windowless app")
+        expect(textSystem.frontmost?.name == "Ghostty",
+               "window materialization preserves the user's foreground app")
+
+        let selectedTelegram = UserInputActivity.mark()
+        UserInputActivity.noteWindow(
+            telegramWindow.windowID, at: selectedTelegram)
+        textSystem.frontmost = ("TextEdit", "com.apple.TextEdit")
+        textSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "TextEdit", bundleID: "com.apple.TextEdit",
+            pid: 503, windowID: 13)
+        expect(textHost.prepareInteraction() == .ready
+               && textSystem.foregroundWindowValue == telegramWindow,
+               "a late self-activation restores the user's latest window")
+
+        let failedSystem = FakeActionHost()
+        failedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let failedTransport = FakeCuaTransport()
+        failedTransport.responses["list_apps"] = ["apps": [[
+            "name": "TextEdit", "bundle_id": "com.apple.TextEdit",
+            "pid": 504, "running": true,
+        ]]]
+        failedTransport.responses["list_windows"] = ["windows": []]
+        var failedLaunches = 0
+        let failedHost = makeRoutedHost(
+            system: failedSystem, transport: failedTransport,
+            launchHidden: { bundleID in
+                failedLaunches += 1
+                failedSystem.frontmost = ("TextEdit", bundleID)
+                failedSystem.foregroundWindowValue = ActionWindowIdentity(
+                    name: "TextEdit", bundleID: bundleID,
+                    pid: 504, windowID: 14)
+                return (504, bundleID)
+            },
+            restoreForeground: { target, allowed in
+                guard allowed() else { return false }
+                failedSystem.frontmost = (target.name, target.bundleID)
+                failedSystem.foregroundWindowValue = target
+                return true
+            },
+            localApps: ["TextEdit": "com.apple.TextEdit"])
+        failedHost.beginActionInputSession(command: "Open TextEdit")
+        expect(failedHost.openApp(named: "TextEdit") == nil
+               && failedLaunches == 1
+               && failedHost.actionFailureReason != nil,
+               "a missing materialized window is a terminal route failure")
+        expect(failedSystem.frontmost?.name == "Ghostty"
+               && failedTransport.callCount("launch_app") == 0
+               && failedTransport.callCount("bring_to_front") == 0,
+               "failed materialization restores focus without Cua mutation")
     }
 
     private static func testRoutedMediaControl() {
@@ -9164,8 +9250,8 @@ extension Selftest {
                 return (500, "com.apple.Notes")
             })
         coldHost.beginActionInputSession(command: "open Notes")
-        expect(coldHost.openApp(named: "Notes") == nil && launches == 0,
-               "strict background mode never cold-launches a regular app")
+        expect(coldHost.openApp(named: "Notes") == nil && launches == 1,
+               "a cold inactive launch still needs an exact routed window")
     }
 
     private static func testBackgroundRoutingHost() {
