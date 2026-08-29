@@ -925,7 +925,12 @@ extension Selftest {
         // or signs out is refused by label — sending stays behind the keyboard
         // path and its verify-before-return gate.
         for label in ["Send", "Send to Shivangi", "Delete Chat", "Buy now",
-                      "Log Out", "Sign out", "Confirm order"] {
+                      "Log Out", "Sign out", "Confirm order", "Close", "Quit",
+                      "Restart", "Play", "Pause", "Stop", "Resume",
+                      "Start Recording", "Toggle Wi-Fi", "Turn Wi-Fi Off",
+                      "Turn Wi-Fi On", "Enable Bluetooth", "Connect",
+                      "Disconnect", "Record", "Shut Down", "Sleep",
+                      "Lock Screen", "Eject"] {
             expect(decodePlanError("""
             {"steps":[{"do":"wait_frontmost","app":"WhatsApp"},
               {"do":"press_element","label":"\(label)"}]}
@@ -2354,6 +2359,92 @@ extension Selftest {
         expect(noProgressPlanner.observations.count == 1,
                "unchanged successful work is observed only once")
 
+        let emptyHost = FakeActionHost()
+        emptyHost.appsByName["Calculator"] = (
+            "Calculator", "com.apple.calculator")
+        emptyHost.isDrivingInBackground = true
+        emptyHost.visibleNamesValue = ["0"]
+        let emptyPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "press 7", steps: jsonSteps("""
+            [{"do":"open_app","app":"Calculator"}]
+            """), done: true),
+            .turn(sends: false, goal: "", steps: [], done: true),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"unknown_step"}]
+            """), done: false),
+            .turn(sends: false, goal: "", steps: [], done: true),
+            .failure(reason: "planner should not be asked again", code: "failed"),
+        ])
+        var emptyReads = 0
+        emptyPlanner.onObserve = { _ in
+            emptyReads += 1
+            emptyHost.visibleNamesValue = ["tick \(emptyReads)"]
+        }
+        let emptyResult = ActionLoopRunner(
+            host: emptyHost, planner: emptyPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "In Calculator, press 7", context: loopContext())
+        if case .failed(let reason, _) = emptyResult {
+            expect(reason.contains("no verifiable follow-up"),
+                   "empty background follow-ups stop without burning turns")
+        } else {
+            expect(false, "empty follow-ups cannot finish an unopened goal")
+        }
+        expect(emptyPlanner.observations.count == 2,
+               "an invalid batch cannot renew an empty background retry")
+
+        let invalidFollowUpHost = FakeActionHost()
+        invalidFollowUpHost.appsByName["Calculator"] = (
+            "Calculator", "com.apple.calculator")
+        invalidFollowUpHost.isDrivingInBackground = true
+        let invalidFollowUpPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "press 7", steps: jsonSteps("""
+            [{"do":"open_app","app":"Calculator"}]
+            """), done: true),
+            .turn(sends: false, goal: "", steps: [], done: true),
+            .failure(reason: "still invalid", code: "plan_invalid"),
+            .failure(reason: "planner should not be asked again", code: "failed"),
+        ])
+        let invalidFollowUp = ActionLoopRunner(
+            host: invalidFollowUpHost, planner: invalidFollowUpPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "In Calculator, press 7", context: loopContext())
+        if case .failed(let reason, _) = invalidFollowUp {
+            expect(reason.contains("no verifiable follow-up"),
+                   "plan_invalid cannot extend an empty open follow-up")
+        } else {
+            expect(false, "plan_invalid cannot extend an empty open follow-up")
+        }
+        expect(invalidFollowUpPlanner.observations.count == 2,
+               "plan_invalid gets no separate retry after an empty follow-up")
+
+        let idleFollowUpHost = FakeActionHost()
+        idleFollowUpHost.appsByName["Calculator"] = (
+            "Calculator", "com.apple.calculator")
+        idleFollowUpHost.isDrivingInBackground = true
+        let idleFollowUpPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "press 7", steps: jsonSteps("""
+            [{"do":"open_app","app":"Calculator"}]
+            """), done: true),
+            .turn(sends: false, goal: "", steps: [], done: true),
+            .turn(sends: false, goal: "", steps: jsonSteps("""
+            [{"do":"wait_frontmost","app":"Calculator"}]
+            """), done: true),
+            .failure(reason: "planner should not be asked again", code: "failed"),
+        ])
+        let idleFollowUp = ActionLoopRunner(
+            host: idleFollowUpHost, planner: idleFollowUpPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "In Calculator, press 7", context: loopContext())
+        if case .failed(let reason, _) = idleFollowUp {
+            expect(reason.contains("no verifiable follow-up"),
+                   "non-progress work cannot extend an empty open follow-up")
+        } else {
+            expect(false, "non-progress work cannot extend an empty open follow-up")
+        }
+        expect(idleFollowUpPlanner.observations.count == 2,
+               "non-progress work gets no new open follow-up")
+
         let changingHost = FakeActionHost()
         changingHost.frontmost = ("WhatsApp", "net.whatsapp.WhatsApp")
         changingHost.visibleNamesValue = ["Loading"]
@@ -3107,6 +3198,96 @@ extension Selftest {
             expect(true, "ambiguous navigation stays performed but unverified")
         } else {
             expect(false, "ambiguous navigation cannot claim completion")
+        }
+        expect(ActionPlan.hasPresentationIntent(
+                    "Could you open Slack integration settings in Notes")
+               && ActionPlan.hasPresentationIntent(
+                    "Kindly open Slack integration settings in Notes")
+               && ActionPlan.hasPresentationIntent(
+                    "I want you to open Slack integration settings in Notes")
+               && ActionPlan.hasPresentationIntent(
+                    "I would like to open Slack integration settings in Notes")
+               && ActionPlan.hasPresentationIntent(
+                    "I'd like to open Slack integration settings in Notes")
+               && !ActionPlan.hasPresentationIntent(
+                    "In TextEdit, write could you open Slack"),
+               "courtesy words do not hide the primary presentation intent")
+
+        for command in ["Could you open Notes", "I'd like to open Notes"] {
+            let politeHost = FakeActionHost()
+            politeHost.appsByName["Notes"] = (
+                "Notes", "com.apple.Notes")
+            politeHost.isDrivingInBackground = true
+            politeHost.actionProcessValue = ActionProcessIdentity(
+                name: "Notes", bundleID: "com.apple.Notes", pid: 500)
+            politeHost.foregroundWindowValue = ActionWindowIdentity(
+                name: "Notes", bundleID: "com.apple.Notes",
+                pid: 500, windowID: 9)
+            let politePlanner = FakeTurnPlanner(turns: [
+                .turn(sends: false, goal: command, steps: jsonSteps("""
+                [{"do":"open_app","app":"Notes"}]
+                """), done: true),
+            ])
+            let politeResult = ActionLoopRunner(
+                host: politeHost, planner: politePlanner,
+                execute: true, allowSend: false
+            ).run(transcript: command, context: loopContext())
+            if case .ready = politeResult {
+                expect(true, "polite app-only presentation completes")
+            } else {
+                expect(false, "polite app-only presentation completes")
+            }
+        }
+
+        let payloadHost = FakeActionHost()
+        payloadHost.appsByName["TextEdit"] = (
+            "TextEdit", "com.apple.TextEdit")
+        payloadHost.isDrivingInBackground = true
+        let payloadPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "replace text", steps: jsonSteps("""
+            [{"do":"open_app","app":"TextEdit"}]
+            """), done: true),
+            .failure(reason: "open-only payload retried", code: "failed"),
+        ])
+        var payloadContext = loopContext()
+        payloadContext.runningApps.append("Velora")
+        let payloadResult = ActionLoopRunner(
+            host: payloadHost, planner: payloadPlanner,
+            execute: true, allowSend: false
+        ).run(
+            transcript: "In TextEdit window Draft, replace the text with Velora",
+            context: payloadContext)
+        expect(payloadHost.presentUICalls == 0
+               && payloadPlanner.observations.count == 1,
+               "an installed app name inside payload does not stop follow-up")
+        if case .failed(let reason, _) = payloadResult {
+            expect(reason == "open-only payload retried",
+                   "the bounded planner turn decides the payload command")
+        } else {
+            expect(false, "an open-only payload command must get another turn")
+        }
+
+        let writePayloadHost = FakeActionHost()
+        writePayloadHost.appsByName["TextEdit"] = (
+            "TextEdit", "com.apple.TextEdit")
+        writePayloadHost.isDrivingInBackground = true
+        let writePayloadPlanner = FakeTurnPlanner(turns: [
+            .turn(sends: false, goal: "write text", steps: jsonSteps("""
+            [{"do":"open_app","app":"TextEdit"}]
+            """), done: true),
+            .failure(reason: "open-only write retried", code: "failed"),
+        ])
+        let writePayloadResult = ActionLoopRunner(
+            host: writePayloadHost, planner: writePayloadPlanner,
+            execute: true, allowSend: false
+        ).run(transcript: "In TextEdit, write Slack", context: loopContext())
+        expect(writePayloadPlanner.observations.count == 1,
+               "an app name inside write payload does not stop follow-up")
+        if case .failed(let reason, _) = writePayloadResult {
+            expect(reason == "open-only write retried",
+                   "the bounded planner turn decides the write command")
+        } else {
+            expect(false, "an open-only write command must get another turn")
         }
 
         let repeatedRows = (14...19).map { index in
@@ -4247,6 +4428,44 @@ extension Selftest {
            "capability":"opaque-pause"}]}
         """, state: &compoundMedia) == nil,
                "basic media authority cannot execute a compound command")
+
+        for fallback in [
+            "{\"do\":\"press_element\",\"label\":\"Pause\"}",
+            "{\"do\":\"type_text\",\"text\":\"pause\"}",
+            "{\"do\":\"key\",\"key\":\"right\"}",
+        ] {
+            var fallbackState = ActionPlan.BatchState()
+            fallbackState.currentApp = "Spotify"
+            fallbackState.spokenCommand = "pause music in Spotify"
+            expect(decodeBatch("""
+            {"sends":false,"steps":[
+              {"do":"wait_frontmost","app":"Spotify"},\(fallback)]}
+            """, state: &fallbackState) == nil,
+                   "closed media intent requires app-native control")
+        }
+
+        var staleMediaState = ActionPlan.BatchState()
+        staleMediaState.currentApp = "Music"
+        staleMediaState.spokenCommand = "pause music in Spotify"
+        staleMediaState.structuredUIAvailable = true
+        staleMediaState.structuredUISnapshot = nativeSnapshot
+        expect(decodeBatch("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Spotify"},
+          {"do":"key","key":"right"}]}
+        """, state: &staleMediaState) == nil,
+               "stale UI identity cannot hide the current media target")
+
+        var knownPlayerState = ActionPlan.BatchState()
+        knownPlayerState.currentApp = "Music"
+        knownPlayerState.appNames = ["Music", "Spotify"]
+        knownPlayerState.spokenCommand = "pause music in Spotify"
+        expect(decodeBatchError("""
+        {"sends":false,"steps":[
+          {"do":"wait_frontmost","app":"Music"},
+          {"do":"key","key":"right"}]}
+        """, state: &knownPlayerState) == .mediaNativeRequired(step: 1),
+               "another known player cannot receive a media fallback")
     }
 
     /// The 2026-08-21 bakeoff produced a validator-ACCEPTED exfiltration: a
@@ -5628,6 +5847,8 @@ extension Selftest {
         testCuaPressPick()
         testBackgroundActionGate()
         testWindowlessRouting()
+        testRoutedMediaControl()
+        testPoisonedNativeReady()
         testNativeBackgroundRouting()
     }
 
@@ -7415,7 +7636,7 @@ extension Selftest {
             Int, Int, String, CGRect
         ) -> ScreenActionUISnapshot? = { _, _, _, _ in nil },
         nativePress: @escaping (
-            Int, ScreenAXReadback, ScreenActionUISnapshot
+            Int, ScreenAXReadback?, ScreenActionUISnapshot
         ) -> Bool = { _, _, _ in false },
         nativeWrite: @escaping (
             String, String, Int, ScreenActionUISnapshot
@@ -7522,7 +7743,6 @@ extension Selftest {
                 pids: [targetID: 503])
         }
         func world(_ transport: FakeCuaTransport) {
-            transport.freshWindowSnapshots = true
             transport.responses["list_apps"] = ["apps": [[
                 "name": "Music", "bundle_id": "com.apple.Music",
                 "pid": 503, "running": true,
@@ -7533,121 +7753,233 @@ extension Selftest {
                 "title": "Music", "on_current_space": true,
             ]]]
             transport.responses["get_window_state"] = [
-                "snapshot_id": "music", "degraded": false,
-                "elements_complete": true,
-                "element_count": 2, "total_element_count": 2,
-                "elements": [
-                    ["element_index": 0, "role": "AXWindow",
-                     "label": "Music", "element_token": "music:0"],
-                    ["element_index": 2, "role": "AXButton", "label": "Play",
-                     "parent_index": 0, "element_token": "music:2",
-                     "enabled": true],
-                ],
+                "degraded": true,
+                "degraded_reason": "ax_window_unresolved",
+                "elements_complete": false,
+                "element_count": 0, "total_element_count": 0,
+                "elements": [],
             ]
-            transport.responses["click"] = ["effect": "confirmed"]
+        }
+        func native(
+            _ provider: FakeNativeMediaProvider,
+            identity: @escaping (Int) -> CuaProcessIdentity? = {
+                $0 == 503
+                    ? CuaProcessIdentity(
+                        pid: 503, startSeconds: 1, startMicroseconds: 1)
+                    : nil
+            },
+            read: @escaping () -> MediaPlaybackCoordinator.Snapshot
+        ) -> NativeMediaAutomation {
+            NativeMediaAutomation(
+                providers: [provider],
+                bundleForPID: { $0 == 503 ? "com.apple.Music" : nil },
+                processIdentity: identity,
+                read: read, sleep: { _ in })
+        }
+        func cuaMutationCount(_ transport: FakeCuaTransport) -> Int {
+            ["click", "type_text", "press_key"].reduce(0) {
+                $0 + transport.callCount($1)
+            }
         }
 
         let system = FakeActionHost()
         system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         let transport = FakeCuaTransport()
         world(transport)
+        let provider = FakeNativeMediaProvider(pid: 503)
         var reads = 0
+        let automation = native(provider, read: {
+            defer { reads += 1 }
+            return audio(reads > 0)
+        })
         let host = makeRoutedHost(
             system: system, transport: transport,
-            mediaSnapshot: {
-                defer { reads += 1 }
-                return audio(reads > 0)
-            }, localApps: ["Music": "com.apple.Music"])
+            nativeMedia: automation,
+            localApps: ["Music": "com.apple.Music"])
         host.beginActionInputSession()
         _ = host.openApp(named: "Music")
-        _ = host.frontmostApp()
-        guard let snapshot = host.uiSnapshot() else {
-            expect(false, "the routed player exposes an exact UI capability")
+        guard host.frontmostApp()?.bundleID == "com.apple.Music",
+              let play = host.mediaCapabilities().first(where: {
+                  $0.state == .play
+              }) else {
+            expect(false, "the exact Music route exposes native media control")
             return
         }
-        let control = ActionMediaControl(
-            state: .play, snapshotID: snapshot.id, index: 2,
+        let callsBeforeCua = transport.calls.count
+        let cuaControl = ActionMediaControl(
+            state: .play, snapshotID: "observation-only", index: 2,
             role: "AXButton", label: "Play")
+        expect(host.mediaControl(cuaControl) == .unavailable
+               && transport.calls.count == callsBeforeCua,
+               "Cua media capabilities are observation-only")
+        let control = ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "app-native", id: play.id))
         let result = ActionExecutor(host: host).run(ActionPlan(
             goal: "play music", sends: false,
             steps: [.mediaControl(control)], unsupported: nil))
-        let click = transport.calls.last { $0.tool == "click" }
         expect(result.outcome == .completed
-               && transport.callCount("click") == 1
-               && click?.arguments["pid"] as? Int == 503
-               && click?.arguments["window_id"] as? Int == 13
-               && click?.arguments["element_index"] as? Int == 2,
-               "media control clicks one exact background Cua capability")
-        expect(system.frontmost?.name == "Ghostty"
+               && provider.commands == [.play]
+               && cuaMutationCount(transport) == 0
+               && system.frontmost?.name == "Ghostty"
                && result.evidence.contains(
                     .localGoalVerified(.media(
                         state: .play, appName: "Music"))),
-               "the exact target PID postcondition proves media without focus theft")
+               "one exact native command verifies playback without focus theft")
 
         let inputSystem = FakeActionHost()
         inputSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         let inputTransport = FakeCuaTransport()
         world(inputTransport)
+        let inputProvider = FakeNativeMediaProvider(pid: 503)
+        let inputAutomation = native(inputProvider, read: {
+            let generation = UserInputActivity.mark()
+            UserInputActivity.noteWindow(13, at: generation)
+            return audio(false)
+        })
         let inputHost = makeRoutedHost(
             system: inputSystem, transport: inputTransport,
-            mediaSnapshot: { audio(false) },
+            nativeMedia: inputAutomation,
             localApps: ["Music": "com.apple.Music"])
         inputHost.beginActionInputSession()
         _ = inputHost.openApp(named: "Music")
-        _ = inputHost.frontmostApp()
-        guard let inputSnapshot = inputHost.uiSnapshot() else {
-            expect(false, "the media input-lease fixture has routed UI")
+        guard inputHost.frontmostApp()?.bundleID == "com.apple.Music",
+              let inputPlay = inputHost.mediaCapabilities().first(where: {
+                  $0.state == .play
+              }) else {
+            expect(false, "the input-lease fixture has native media authority")
             return
-        }
-        inputTransport.onCall = { tool in
-            guard tool == "click" else { return }
-            let generation = UserInputActivity.mark()
-            UserInputActivity.noteWindow(13, at: generation)
         }
         let inputControl = ActionMediaControl(
-            state: .play, snapshotID: inputSnapshot.id, index: 2,
-            role: "AXButton", label: "Play")
-        expect(inputHost.mediaControl(inputControl) != .verified,
-               "target-window input during media control invalidates its lease")
+            state: .play,
+            capability: .appNative(
+                snapshotID: "app-native", id: inputPlay.id))
+        expect(inputHost.mediaControl(inputControl) != .verified
+               && inputProvider.commands.isEmpty
+               && cuaMutationCount(inputTransport) == 0,
+               "target-window input invalidates native media before send")
 
-        let readRaceSystem = FakeActionHost()
-        readRaceSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let readRaceTransport = FakeCuaTransport()
-        world(readRaceTransport)
-        let readRaceHost = makeRoutedHost(
-            system: readRaceSystem, transport: readRaceTransport,
-            mediaSnapshot: {
-                let generation = UserInputActivity.mark()
-                UserInputActivity.noteWindow(13, at: generation)
-                return audio(true)
-            }, localApps: ["Music": "com.apple.Music"])
-        readRaceHost.beginActionInputSession()
-        _ = readRaceHost.openApp(named: "Music")
-        _ = readRaceHost.frontmostApp()
-        guard let readRaceSnapshot = readRaceHost.uiSnapshot() else {
-            expect(false, "the media read-race fixture has routed UI")
+        let staleSystem = FakeActionHost()
+        staleSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let staleTransport = FakeCuaTransport()
+        world(staleTransport)
+        let staleProvider = FakeNativeMediaProvider(pid: 503)
+        let firstIdentity = CuaProcessIdentity(
+            pid: 503, startSeconds: 1, startMicroseconds: 1)
+        let secondIdentity = CuaProcessIdentity(
+            pid: 503, startSeconds: 2, startMicroseconds: 1)
+        var mediaIdentity = firstIdentity
+        let staleAutomation = native(
+            staleProvider,
+            identity: { $0 == 503 ? mediaIdentity : nil },
+            read: { audio(false) })
+        let staleHost = makeRoutedHost(
+            system: staleSystem, transport: staleTransport,
+            nativeMedia: staleAutomation,
+            localApps: ["Music": "com.apple.Music"])
+        staleHost.beginActionInputSession()
+        _ = staleHost.openApp(named: "Music")
+        guard staleHost.frontmostApp()?.bundleID == "com.apple.Music",
+              let stalePlay = staleHost.mediaCapabilities().first(where: {
+                  $0.state == .play
+              }) else {
+            expect(false, "the PID-reuse fixture mints native media authority")
             return
         }
-        let readRaceControl = ActionMediaControl(
-            state: .play, snapshotID: readRaceSnapshot.id, index: 2,
-            role: "AXButton", label: "Play")
-        expect(readRaceHost.mediaControl(readRaceControl) != .verified,
-               "target input during Cua media readback cannot prove playback")
+        mediaIdentity = secondIdentity
+        let staleResult = staleHost.mediaControl(ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "app-native", id: stalePlay.id)))
+        expect(staleResult == .unavailable
+               && staleProvider.commands.isEmpty
+               && cuaMutationCount(staleTransport) == 0,
+               "a recycled target PID cannot consume native media authority")
 
-        let degradedSystem = FakeActionHost()
-        degradedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let degradedTransport = FakeCuaTransport()
-        world(degradedTransport)
-        degradedTransport.responses["get_window_state"] = [
-            "snapshot_id": "unresolved", "degraded": true,
-            "degraded_reason": "ax_window_unresolved",
-            "elements_complete": false, "element_count": 0,
-            "total_element_count": 0, "elements": [],
+        let unreadSystem = FakeActionHost()
+        unreadSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let unreadTransport = FakeCuaTransport()
+        world(unreadTransport)
+        let unreadProvider = FakeNativeMediaProvider(pid: 503)
+        let unreadAutomation = native(
+            unreadProvider, read: { audio(false) })
+        let unreadHost = makeRoutedHost(
+            system: unreadSystem, transport: unreadTransport,
+            nativeMedia: unreadAutomation,
+            localApps: ["Music": "com.apple.Music"])
+        unreadHost.beginActionInputSession()
+        _ = unreadHost.openApp(named: "Music")
+        guard unreadHost.frontmostApp()?.bundleID == "com.apple.Music",
+              let unreadPlay = unreadHost.mediaCapabilities().first(where: {
+                  $0.state == .play
+              }) else {
+            expect(false, "the readback fixture mints native media authority")
+            return
+        }
+        let unreadResult = unreadHost.mediaControl(ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "app-native", id: unreadPlay.id)))
+        expect(unreadResult == .unavailable
+               && unreadProvider.commands == [.play]
+               && cuaMutationCount(unreadTransport) == 0,
+               "native media without matching readback fails closed")
+
+        let occupiedSystem = FakeActionHost()
+        occupiedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let occupiedTransport = FakeCuaTransport()
+        world(occupiedTransport)
+        let occupiedProvider = FakeNativeMediaProvider(pid: 503)
+        let occupiedAutomation = native(
+            occupiedProvider, read: { audio(false) })
+        let occupiedHost = makeRoutedHost(
+            system: occupiedSystem, transport: occupiedTransport,
+            nativeMedia: occupiedAutomation,
+            localApps: ["Music": "com.apple.Music"])
+        occupiedHost.beginActionInputSession()
+        _ = occupiedHost.openApp(named: "Music")
+        guard occupiedHost.frontmostApp()?.bundleID == "com.apple.Music",
+              let occupiedPlay = occupiedHost.mediaCapabilities().first(where: {
+                  $0.state == .play
+              }) else {
+            expect(false, "the occupancy fixture mints native media authority")
+            return
+        }
+        occupiedSystem.frontmost = ("Music", "com.apple.Music")
+        let occupiedControl = ActionMediaControl(
+            state: .play,
+            capability: .appNative(
+                snapshotID: "app-native", id: occupiedPlay.id))
+        expect(occupiedHost.mediaControl(occupiedControl) == .unavailable
+               && occupiedProvider.commands.isEmpty
+               && cuaMutationCount(occupiedTransport) == 0,
+               "entering the target cancels native media before send")
+    }
+
+    private static func testPoisonedNativeReady() {
+        let system = FakeActionHost()
+        system.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let transport = FakeCuaTransport()
+        transport.responses["list_apps"] = ["apps": [[
+            "name": "Music", "bundle_id": "com.apple.Music",
+            "pid": 503, "running": true,
+        ]]]
+        transport.responses["list_windows"] = ["windows": [[
+            "pid": 503, "window_id": 13, "layer": 0, "z_index": 1,
+            "bounds": ["width": 800.0, "height": 600.0],
+            "title": "Music", "on_current_space": true,
+        ]]]
+        transport.responses["get_window_state"] = [
+            "snapshot_id": "music", "degraded": false,
+            "elements_complete": true,
+            "element_count": 0, "total_element_count": 0,
+            "elements": [],
         ]
-        let nativeProvider = FakeNativeMediaProvider(pid: 503)
-        var nativeReads = 0
-        let nativeAutomation = NativeMediaAutomation(
-            providers: [nativeProvider],
+
+        let provider = FakeNativeMediaProvider(pid: 503)
+        let automation = NativeMediaAutomation(
+            providers: [provider],
             bundleForPID: { $0 == 503 ? "com.apple.Music" : nil },
             processIdentity: {
                 $0 == 503
@@ -7656,158 +7988,42 @@ extension Selftest {
                     : nil
             },
             read: {
-                defer { nativeReads += 1 }
-                return audio(nativeReads > 0)
-            }, sleep: { _ in })
-        let degradedHost = makeRoutedHost(
-            system: degradedSystem, transport: degradedTransport,
-            nativeMedia: nativeAutomation,
-            localApps: ["Music": "com.apple.Music"])
-        degradedHost.beginActionInputSession()
-        _ = degradedHost.openApp(named: "Music")
-        _ = degradedHost.frontmostApp()
-        let nativeCapabilities = degradedHost.mediaCapabilities()
-        guard let nativePlay = nativeCapabilities.first(where: {
-            $0.state == .play
-        }) else {
-            expect(false,
-                   "a degraded exact Music route exposes its native capability")
-            return
-        }
-        let nativeResult = degradedHost.mediaControl(ActionMediaControl(
-            state: .play,
-            capability: .appNative(
-                snapshotID: "app-native", id: nativePlay.id)))
-        expect(nativeResult == .verified
-               && nativeProvider.commands == [.play]
-               && degradedTransport.callCount("click") == 0,
-               "degraded Cua falls back to one exact app-native command")
-        expect(degradedSystem.frontmost?.name == "Ghostty",
-               "native media fallback preserves the user's foreground app")
-
-        let staleSystem = FakeActionHost()
-        staleSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let staleTransport = FakeCuaTransport()
-        world(staleTransport)
-        let staleHost = makeRoutedHost(
-            system: staleSystem, transport: staleTransport,
-            mediaSnapshot: { audio(false) },
-            localApps: ["Music": "com.apple.Music"])
-        staleHost.beginActionInputSession()
-        _ = staleHost.openApp(named: "Music")
-        _ = staleHost.frontmostApp()
-        guard let staleSnapshot = staleHost.uiSnapshot() else {
-            expect(false, "the stale fixture first exposes its exact capability")
-            return
-        }
-        var changed = staleTransport.responses["get_window_state"] ?? [:]
-        var elements = changed["elements"] as? [[String: Any]] ?? []
-        elements[1]["label"] = "Shuffle"
-        changed["elements"] = elements
-        staleTransport.responses["get_window_state"] = changed
-        let staleControl = ActionMediaControl(
-            state: .play, snapshotID: staleSnapshot.id, index: 2,
-            role: "AXButton", label: "Play")
-        let staleResult = ActionExecutor(host: staleHost).run(ActionPlan(
-            goal: "play music", sends: false,
-            steps: [.mediaControl(staleControl)], unsupported: nil))
-        expect(staleResult.outcome != .completed
-               && staleTransport.callCount("click") == 0,
-               "a changed media capability fails closed before any click")
-
-        let outputSystem = FakeActionHost()
-        outputSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let outputTransport = FakeCuaTransport()
-        world(outputTransport)
-        var outputReads = 0
-        let outputHost = makeRoutedHost(
-            system: outputSystem, transport: outputTransport,
-            mediaSnapshot: {
-                defer { outputReads += 1 }
-                return MediaPlaybackCoordinator.Snapshot(
-                    processes: [targetID], playing: [],
-                    allPlaying: outputReads == 0 ? [targetID] : [],
-                    bundleIDs: [targetID: "com.apple.Music"],
-                    pids: [targetID: 503])
-            }, localApps: ["Music": "com.apple.Music"])
-        outputHost.beginActionInputSession()
-        _ = outputHost.openApp(named: "Music")
-        _ = outputHost.frontmostApp()
-        var pausedState = outputTransport.responses["get_window_state"] ?? [:]
-        var pausedElements = pausedState["elements"] as? [[String: Any]] ?? []
-        pausedElements[1]["label"] = "Pause"
-        pausedState["elements"] = pausedElements
-        outputTransport.responses["get_window_state"] = pausedState
-        guard let outputSnapshot = outputHost.uiSnapshot() else {
-            expect(false, "the generic output fixture exposes its exact capability")
-            return
-        }
-        let pause = ActionMediaControl(
-            state: .pause, snapshotID: outputSnapshot.id, index: 2,
-            role: "AXButton", label: "Pause")
-        let outputResult = ActionExecutor(host: outputHost).run(ActionPlan(
-            goal: "pause music", sends: false,
-            steps: [.mediaControl(pause)], unsupported: nil))
-        expect(outputResult.outcome == .completed
-               && outputTransport.callCount("click") == 1,
-               "exact media pause verifies generic target output rather than a player allowlist")
-
-        let unknownSystem = FakeActionHost()
-        unknownSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let unknownTransport = FakeCuaTransport()
-        world(unknownTransport)
-        let unknownHost = makeRoutedHost(
-            system: unknownSystem, transport: unknownTransport,
-            mediaSnapshot: {
                 MediaPlaybackCoordinator.Snapshot(
-                    processes: [targetID], playing: [], allPlaying: [],
-                    isComplete: false,
-                    bundleIDs: [targetID: "com.apple.Music"],
-                    pids: [targetID: 503])
-            }, localApps: ["Music": "com.apple.Music"])
-        unknownHost.beginActionInputSession()
-        _ = unknownHost.openApp(named: "Music")
-        _ = unknownHost.frontmostApp()
-        guard let unknownSnapshot = unknownHost.uiSnapshot() else {
-            expect(false, "the incomplete-output fixture exposes its exact capability")
+                    processes: [], playing: [], bundleIDs: [:], pids: [:])
+            }, sleep: { _ in })
+        let host = makeRoutedHost(
+            system: system, transport: transport,
+            nativeMedia: automation,
+            localApps: ["Music": "com.apple.Music"])
+        host.beginActionInputSession()
+        _ = host.openApp(named: "Music")
+        guard host.frontmostApp()?.bundleID == "com.apple.Music",
+              let play = host.mediaCapabilities().first(where: {
+                  $0.state == .play
+              }) else {
+            expect(false,
+                   "the replay fixture mints exact native media authority")
             return
         }
-        let unknownControl = ActionMediaControl(
-            state: .pause, snapshotID: unknownSnapshot.id, index: 2,
-            role: "AXButton", label: "Play")
-        let unknownResult = ActionExecutor(host: unknownHost).run(ActionPlan(
-            goal: "pause music", sends: false,
-            steps: [.mediaControl(unknownControl)], unsupported: nil))
-        expect(unknownResult.outcome != .completed
-               && unknownTransport.callCount("click") == 0,
-               "incomplete Core Audio evidence cannot prove an absent output state")
 
-        let occupiedSystem = FakeActionHost()
-        occupiedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
-        let occupiedTransport = FakeCuaTransport()
-        world(occupiedTransport)
-        let occupiedHost = makeRoutedHost(
-            system: occupiedSystem, transport: occupiedTransport,
-            mediaSnapshot: {
-                occupiedSystem.frontmost = ("Music", "com.apple.Music")
-                return audio(false)
-            }, localApps: ["Music": "com.apple.Music"])
-        occupiedHost.beginActionInputSession()
-        _ = occupiedHost.openApp(named: "Music")
-        _ = occupiedHost.frontmostApp()
-        guard let occupiedSnapshot = occupiedHost.uiSnapshot() else {
-            expect(false, "the target-occupancy fixture exposes its exact capability")
-            return
-        }
-        let occupiedControl = ActionMediaControl(
-            state: .play, snapshotID: occupiedSnapshot.id, index: 2,
-            role: "AXButton", label: "Play")
-        let occupiedResult = ActionExecutor(host: occupiedHost).run(ActionPlan(
-            goal: "play music", sends: false,
-            steps: [.mediaControl(occupiedControl)], unsupported: nil))
-        expect(occupiedResult.outcome != .completed
-               && occupiedTransport.callCount("click") == 0,
-               "a user entering the target before the click cancels background media control")
+        // Drop readiness without poisoning it, then replay the same healthy
+        // ID after native media becomes available again. The replay must win.
+        provider.permissionStatus = OSStatus(
+            errAEEventWouldRequireUserConsent)
+        transport.failing.insert("get_window_state")
+        expect(host.frontmostApp() == nil,
+               "a transient exact-read outage drops readiness")
+        transport.failing.remove("get_window_state")
+        provider.permissionStatus = noErr
+        expect(host.frontmostApp() == nil
+               && host.mediaCapabilities().isEmpty
+               && host.mediaControl(ActionMediaControl(
+                    state: .play,
+                    capability: .appNative(
+                        snapshotID: "app-native", id: play.id)))
+                    == .unavailable
+               && provider.commands.isEmpty,
+               "a healthy repeated snapshot cannot resurrect poisoned authority")
     }
 
     private static func noteWindowState(
@@ -8320,16 +8536,17 @@ extension Selftest {
         let searchDummy = AXUIElementCreateApplication(
             ProcessInfo.processInfo.processIdentifier + 2)
         var favoritesSelected = false
+        var aboutShown = false
         var value = ""
         var writes: [(value: String, prior: String, index: Int)] = []
-        var presses: [(index: Int, expected: ScreenAXReadback)] = []
+        var presses: [(index: Int, expected: ScreenAXReadback?)] = []
         var restoredWindows: [ActionWindowIdentity] = []
 
         func makeNative(
             _ writeBaseline: String = "", bodyLabel: String? = "Body"
         )
             -> ScreenActionUISnapshot {
-            let elements = [
+            var elements = [
                 ActionUIElement(
                     index: 0, parentIndex: nil, depth: 0,
                     role: "AXWindow", label: "My Note",
@@ -8352,9 +8569,20 @@ extension Selftest {
                     index: 4, parentIndex: 0, depth: 1,
                     role: "AXSearchField", label: "Search", frame: nil,
                     actions: [ActionUICapability.axFocus]),
+                ActionUIElement(
+                    index: 5, parentIndex: 0, depth: 1,
+                    role: "AXButton", label: "About", frame: nil,
+                    actions: [ActionUICapability.axPress]),
             ]
+            if aboutShown {
+                elements.append(ActionUIElement(
+                    index: 6, parentIndex: 0, depth: 1,
+                    role: "AXStaticText", label: "About This Mac", frame: nil,
+                    actions: []))
+            }
             let observation = ActionUISnapshot(
-                id: favoritesSelected ? "native-2" : "native-1",
+                id: aboutShown ? "native-3"
+                    : favoritesSelected ? "native-2" : "native-1",
                 source: .native, appName: "Notes",
                 bundleID: "com.apple.Notes", windowTitle: "My Note",
                 windowID: 9, complete: true, elements: elements)
@@ -8364,6 +8592,7 @@ extension Selftest {
                 elementsByIndex: [
                     0: dummy, 1: dummy, 2: dummy,
                     3: siblingDummy, 4: searchDummy,
+                    5: dummy, 6: siblingDummy,
                 ],
                 pressReadbacks: [2: .selected(true)],
                 writeBaselines: [
@@ -8385,7 +8614,11 @@ extension Selftest {
             },
             nativePress: { index, expected, _ in
                 presses.append((index, expected))
-                favoritesSelected = true
+                if index == 2 {
+                    favoritesSelected = true
+                } else if index == 5 {
+                    aboutShown = true
+                }
                 system.frontmost = ("Notes", "com.apple.Notes")
                 system.foregroundWindowValue = ActionWindowIdentity(
                     name: "Notes", bundleID: "com.apple.Notes",
@@ -8476,6 +8709,33 @@ extension Selftest {
                 role: "AXRow", target: "Favorites",
                 expecting: "com.apple.Notes", purpose: .goal),
                "fresh selected native evidence verifies the goal")
+        guard let aboutBefore = host.uiSnapshot() else {
+            expect(false, "the native navigation button is available")
+            return
+        }
+        expect(host.pressElement(
+                index: 5, snapshotID: aboutBefore.id, label: "About",
+                role: "AXButton", expecting: "com.apple.Notes")
+               && presses.count == 2
+               && presses[1].index == 5
+               && presses[1].expected == nil,
+               "an exact noncommitting AXPress can mint one receipt")
+        guard let aboutAfter = host.uiSnapshot() else {
+            expect(false, "the navigation effect has a fresh native tree")
+            return
+        }
+        expect(host.verifyElement(
+                index: 6, snapshotID: aboutAfter.id,
+                label: "About This Mac", role: "AXStaticText",
+                target: "About This Mac", expecting: "com.apple.Notes",
+                purpose: .goal),
+               "new inert native content consumes the navigation receipt")
+        expect(!host.verifyElement(
+                index: 6, snapshotID: aboutAfter.id,
+                label: "About This Mac", role: "AXStaticText",
+                target: "About This Mac", expecting: "com.apple.Notes",
+                purpose: .goal),
+               "a navigation receipt cannot verify twice")
         expect(!host.typeText("legacy", expecting: "com.apple.Notes")
                && !host.pressElement(
                     label: "Favorites", expecting: "com.apple.Notes")
@@ -8506,11 +8766,12 @@ extension Selftest {
                 pid: 500, windowID: 9)
         }
         host.endActionInputSession()
-        expect(restoredWindows.map(\.windowID) == [80, 80, 80]
+        expect(restoredWindows.map(\.windowID) == [80, 80, 80, 80]
                && system.foregroundWindowValue?.windowID == 80,
                "teardown drains a target activation before dropping the lease")
 
         favoritesSelected = false
+        aboutShown = false
         let raceSystem = FakeActionHost()
         raceSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
         raceSystem.foregroundWindowValue = ActionWindowIdentity(
@@ -8790,6 +9051,102 @@ extension Selftest {
                && unknownSystem.foregroundWindowValue?.windowID == 70
                && unknownHost.actionFailureReason != nil,
                "failed native readback restores focus and forbids retry")
+
+        favoritesSelected = false
+        aboutShown = false
+        let inertSystem = FakeActionHost()
+        inertSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        inertSystem.foregroundWindowValue = ActionWindowIdentity(
+            name: "Ghostty", bundleID: "com.mitchellh.ghostty",
+            pid: 700, windowID: 70)
+        let inertTransport = FakeCuaTransport()
+        scriptNotesWorld(inertTransport)
+        var inertPresses = 0
+        let inertHost = makeRoutedHost(
+            system: inertSystem, transport: inertTransport,
+            nativeSnapshot: { _, _, _, _ in makeNative() },
+            nativePress: { index, expected, _ in
+                guard index == 5, expected == nil else { return false }
+                inertPresses += 1
+                return true
+            })
+        inertHost.beginActionInputSession(command: "open About")
+        _ = inertHost.openApp(named: "Notes")
+        _ = inertHost.frontmostApp()
+        guard let inertBefore = inertHost.uiSnapshot() else {
+            expect(false, "the inert navigation fixture has a native tree")
+            return
+        }
+        expect(inertHost.pressElement(
+                index: 5, snapshotID: inertBefore.id, label: "About",
+                role: "AXButton", expecting: "com.apple.Notes"),
+               "an accepted navigation press waits for observation")
+        expect(inertHost.uiSnapshot() == nil
+               && inertHost.actionFailureReason != nil
+               && inertPresses == 1
+               && !inertHost.pressElement(
+                    index: 5, snapshotID: inertBefore.id, label: "About",
+                    role: "AXButton", expecting: "com.apple.Notes")
+               && inertPresses == 1,
+               "an unchanged native tree terminates without retry")
+
+        let nativeReadySystem = FakeActionHost()
+        nativeReadySystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let nativeReadyTransport = FakeCuaTransport()
+        scriptNotesWorld(nativeReadyTransport)
+        nativeReadyTransport.responses["get_window_state"] = [
+            "degraded": true,
+            "degraded_reason": "ax_window_unresolved", "elements": [],
+        ]
+        let unusedPrimer = FakeOffSpacePrimer()
+        var nativeReadyReads = 0
+        let nativeReadyHost = makeRoutedHost(
+            system: nativeReadySystem, transport: nativeReadyTransport,
+            offSpacePrimer: unusedPrimer,
+            nativeSnapshot: { _, _, _, _ in
+                nativeReadyReads += 1
+                return nativeReadyReads == 1 ? makeNative() : nil
+            })
+        nativeReadyHost.beginActionInputSession(command: "open My Note")
+        _ = nativeReadyHost.openApp(named: "Notes")
+        expect(nativeReadyHost.frontmostApp()?.bundleID == "com.apple.Notes"
+               && nativeReadyHost.frontmostApp()?.bundleID == "com.apple.Notes"
+               && nativeReadyReads == 1 && unusedPrimer.calls.isEmpty,
+               "an exact native AX route stays pinned without Cua priming")
+
+        let primeSystem = FakeActionHost()
+        primeSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let primeTransport = FakeCuaTransport()
+        scriptNotesWorld(primeTransport)
+        primeTransport.freshWindowSnapshots = false
+        let resolvedState = primeTransport.responses["get_window_state"]!
+        primeTransport.responses["list_windows"] = ["windows": [[
+            "pid": 500, "window_id": 9, "layer": 0, "z_index": 10,
+            "bounds": ["x": 100.0, "y": 200.0,
+                       "width": 800.0, "height": 600.0],
+            "title": "My Note", "on_current_space": false,
+        ]]]
+        primeTransport.responses["get_window_state"] = [
+            "degraded": true,
+            "degraded_reason": "ax_window_unresolved", "elements": [],
+        ]
+        let primer = FakeOffSpacePrimer()
+        primer.onPrime = {
+            primeTransport.freshWindowSnapshots = true
+            primeTransport.responses["get_window_state"] = resolvedState
+        }
+        let primeHost = makeRoutedHost(
+            system: primeSystem, transport: primeTransport,
+            offSpacePrimer: primer)
+        primeHost.beginActionInputSession(command: "open My Note in Notes")
+        _ = primeHost.openApp(named: "Notes")
+        expect(primeHost.frontmostApp()?.bundleID == "com.apple.Notes"
+               && primeHost.actionFailureReason == nil
+               && primer.calls.isEmpty,
+               "an unresolved AX tree never triggers focus priming")
+        expect(primeSystem.frontmost?.bundleID == "com.mitchellh.ghostty"
+               && primeTransport.callCount("bring_to_front") == 0,
+               "the AX primer never activates the target")
 
         let coldSystem = FakeActionHost()
         coldSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")

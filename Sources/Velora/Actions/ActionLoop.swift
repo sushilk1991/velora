@@ -140,6 +140,8 @@ final class ActionLoopRunner {
     static let maxTurns = 8
     /// Hard wall for the whole loop, model thinking included.
     static let wallClockSeconds: TimeInterval = 180
+    private static let openFollowUpFailure =
+        "the planner returned no verifiable follow-up for the opened app"
 
     private let host: ActionHost
     private let planner: ActionTurnPlanner
@@ -236,6 +238,7 @@ final class ActionLoopRunner {
         var repeatedRecoverablePlans = 0
         var lastSuccessfulProgress: String?
         var repeatedSuccessfulPlans = 0
+        var emptyFollowUps = 0
         var turnsUsed = 0
         var planInvalidRetries = 0
         // Every planner call, accepted or rejected. Rejected turns consume no
@@ -254,11 +257,15 @@ final class ActionLoopRunner {
             }
             switch reply {
             case .failure(let reason, let code):
+                if code == "plan_invalid", emptyFollowUps > 0,
+                   completionEvidence.onlyOpenedApp {
+                    planner.end()
+                    return .failed(
+                        reason: Self.openFollowUpFailure, trace: fullTrace)
+                }
                 // A rejected turn (the engine's validator refused what the
-                // model proposed, twice) is recoverable the same way a failed
-                // checkpoint is: tell the model and let it look again. Seen
-                // live: the inline repair repeated the rejected shape, while
-                // a fresh observation broke the fixation.
+                // model proposed, twice) normally gets one fresh observation.
+                // The bounded empty open follow-up above has already spent it.
                 if code == "plan_invalid", execute,
                    planInvalidRetries < 1,
                    asks < Self.maxTurns + 2, host.now() < deadline, !isCancelled {
@@ -346,16 +353,25 @@ final class ActionLoopRunner {
                     if needsOpenFollowUp(
                         command: transcript, state: carried,
                         evidence: completionEvidence
-                    ), turnsUsed < Self.maxTurns,
-                       asks < Self.maxTurns + 2, host.now() < deadline {
-                        asks += 1
-                        progress(.readingScreen)
-                        let observation = gatherObservation(
-                            executed: observationTrace, failedStep: nil,
-                            state: &carried)
-                        progress(.planning(turn: turnsUsed + 1))
-                        reply = planner.observe(observation)
-                        continue
+                    ) {
+                        emptyFollowUps += 1
+                        guard emptyFollowUps < 2 else {
+                            planner.end()
+                            return .failed(
+                                reason: Self.openFollowUpFailure,
+                                trace: fullTrace)
+                        }
+                        if turnsUsed < Self.maxTurns,
+                           asks < Self.maxTurns + 2, host.now() < deadline {
+                            asks += 1
+                            progress(.readingScreen)
+                            let observation = gatherObservation(
+                                executed: observationTrace, failedStep: nil,
+                                state: &carried)
+                            progress(.planning(turn: turnsUsed + 1))
+                            reply = planner.observe(observation)
+                            continue
+                        }
                     }
                     planner.end()
                     return completionResult(
@@ -387,6 +403,12 @@ final class ActionLoopRunner {
                 } catch {
                     let message = (error as? ActionPlanError)?.message ?? "invalid steps"
                     NSLog("Velora: action batch rejected locally — %@", message)
+                    if emptyFollowUps > 0, completionEvidence.onlyOpenedApp {
+                        planner.end()
+                        return .failed(
+                            reason: Self.openFollowUpFailure,
+                            trace: fullTrace)
+                    }
                     // The app's validator is stricter than the engine's here —
                     // it knows what actually RAN, not what was proposed. Its
                     // rejection is itself an observation the model can act on.
@@ -431,6 +453,14 @@ final class ActionLoopRunner {
                 fullTrace.append(contentsOf: result.trace)
                 observationTrace.append(contentsOf: result.observationTrace)
                 completionEvidence.record(result)
+                if emptyFollowUps > 0, completionEvidence.onlyOpenedApp {
+                    planner.end()
+                    return .failed(
+                        reason: Self.openFollowUpFailure, trace: fullTrace)
+                }
+                if !completionEvidence.onlyOpenedApp {
+                    emptyFollowUps = 0
+                }
                 // Runtime truth, not batch intent: only steps that actually
                 // completed update the carried safety state.
                 carried = ActionPlan.state(after: plan,
@@ -637,9 +667,10 @@ final class ActionLoopRunner {
     ) -> Bool {
         host.isDrivingInBackground
             && evidence.onlyOpenedApp
-            && !Self.namesOtherApp(
-                command, target: state.currentApp,
-                candidates: state.appNames)
+            && (!ActionPlan.hasPresentationIntent(command)
+                || !Self.namesOtherApp(
+                    command, target: state.currentApp,
+                    candidates: state.appNames))
     }
 
     private func exactTarget(

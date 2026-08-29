@@ -629,7 +629,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         Int, Int, String, CGRect
     ) -> ScreenActionUISnapshot?
     private let nativePress: (
-        Int, ScreenAXReadback, ScreenActionUISnapshot
+        Int, ScreenAXReadback?, ScreenActionUISnapshot
     ) -> Bool
     private let nativeWrite: (
         String, String, Int, ScreenActionUISnapshot
@@ -656,6 +656,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private var targetName = ""
     private var targetBundleID = ""
     private var targetReady = false
+    private var nativeAXReady = false
     /// True once readiness has succeeded at least once this action.
     private var everReady = false
     private var primeTried = false
@@ -710,6 +711,26 @@ final class BackgroundRoutingActionHost: ActionHost {
     private var backgroundDraft = ""
     private var mutationOrdinal = 0
     private var pendingMutationLease: TargetMutationLease?
+    private struct NavigationNode: Hashable {
+        let role: String
+        let label: String
+    }
+
+    private struct NavigationPath: Hashable {
+        let nodes: [NavigationNode]
+    }
+
+    private struct NavigationReceipt {
+        let process: CuaProcessIdentity
+        let windowID: Int
+        let bundleID: String
+        let mutationOrdinal: Int
+        let beforeSnapshotID: String
+        let inputGeneration: UInt64
+        let baseline: Set<NavigationPath>
+        var observedSnapshotID: String?
+    }
+    private var navigationReceipt: NavigationReceipt?
     private struct RoutedUISnapshot {
         let observation: ActionUISnapshot
         let driver: CuaSnapshot
@@ -783,7 +804,7 @@ final class BackgroundRoutingActionHost: ActionHost {
                 windowTitle: title, windowBounds: bounds)
          },
          nativePress: @escaping (
-            Int, ScreenAXReadback, ScreenActionUISnapshot
+            Int, ScreenAXReadback?, ScreenActionUISnapshot
          ) -> Bool = { index, expected, snapshot in
              ScreenContext.backgroundPress(
                 index: index, expecting: expected, in: snapshot)
@@ -1188,6 +1209,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetBundleID = resolved.bundleID
         targetWindowID = windowID
         targetReady = false
+        nativeAXReady = false
         everReady = false
         primeTried = false
         // A new target is a new window, a new element, and a new draft:
@@ -1203,6 +1225,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         writtenElement = nil
         writtenNativeElement = nil
         mutationOrdinal = 0
+        navigationReceipt = nil
     }
 
     // MARK: - Target readiness (drives the executor's wait_frontmost poll)
@@ -1257,11 +1280,18 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard targetProcessIsCurrent() else {
             return failRoute("The exact background target changed.")
         }
+        if nativeAXReady {
+            guard targetWindowExists() else {
+                return failRoute("The exact background target changed.")
+            }
+            return true
+        }
         // A vanished target window must read as lost focus, never as "still
         // fine": the executor aborts instead of typing into nothing. A live
         // exact window without AX remains sufficient only for an app-ready
         // result; every mutation method independently requires its UI proof.
         guard let snapshot = snapshotTarget(maxElements: 1) else {
+            guard snapshotLineage == .valid else { return false }
             targetReady = nativeRouteReady()
             return targetReady
         }
@@ -1302,10 +1332,29 @@ final class BackgroundRoutingActionHost: ActionHost {
     }
 
     private func nativeRouteReady() -> Bool {
-        guard resolveDeferredWindow(), let target = exactRoutedProcess() else {
+        guard snapshotLineage == .valid,
+              resolveDeferredWindow(), let windowID = targetWindowID else {
             return false
         }
-        return nativeMedia.supports(target)
+        if let target = exactRoutedProcess(), nativeMedia.supports(target) {
+            return true
+        }
+
+        let generation = UserInputActivity.snapshot()
+        guard targetActivitySafe(generation, windowID: windowID),
+              let window = exactTargetWindow(),
+              let snapshot = nativeSnapshot(
+                targetPID, windowID, window.title ?? "", window.bounds),
+              snapshot.observation.source == .native,
+              snapshot.observation.complete,
+              snapshot.observation.windowID == windowID,
+              snapshot.observation.bundleID.caseInsensitiveCompare(
+                targetBundleID) == .orderedSame,
+              targetActivitySafe(generation, windowID: windowID),
+              exactTargetWindow() == window
+        else { return false }
+        nativeAXReady = true
+        return true
     }
 
     private struct PrimeWindow: Equatable {
@@ -1329,9 +1378,9 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard !snapshot.refused, snapshot.axWindowUnresolved else {
             return failRoute("The target refused background accessibility.")
         }
-        // The exact WindowServer owner and frame remain usable even when AX
-        // cannot resolve this off-Space window. Mutation stays impossible
-        // until a fresh screenshot mints the one-shot background capability.
+        // A degraded Cua observation can establish window liveness, but it
+        // never authorizes focus priming or input. Mutation still requires a
+        // fresh complete native AX snapshot.
         return true
     }
 
@@ -1709,6 +1758,7 @@ final class BackgroundRoutingActionHost: ActionHost {
     private func poisonSnapshotLineage() {
         snapshotLineage = .poisoned
         targetReady = false
+        nativeAXReady = false
         routedUISnapshot = nil
         routedNativeSnapshot = nil
         pinnedElement = nil
@@ -1716,6 +1766,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         writtenElement = nil
         writtenNativeElement = nil
         mutationOrdinal = 0
+        navigationReceipt = nil
     }
 
     private func resetSnapshotLineage() {
@@ -1873,12 +1924,41 @@ final class BackgroundRoutingActionHost: ActionHost {
                 == .orderedSame,
            targetActivitySafe(inputGeneration, windowID: windowID),
            exactTargetWindow() == window {
+            nativeAXReady = true
+            if var receipt = navigationReceipt {
+                guard receipt.observedSnapshotID == nil,
+                      receipt.process == targetProcessIdentity,
+                      receipt.windowID == windowID,
+                      receipt.bundleID.caseInsensitiveCompare(targetBundleID)
+                        == .orderedSame,
+                      receipt.mutationOrdinal == mutationOrdinal,
+                      receipt.beforeSnapshotID != native.observation.id,
+                      targetActivitySafe(
+                        receipt.inputGeneration, windowID: windowID),
+                      !Set(navigationPaths(
+                        in: native.observation).values)
+                        .isSubset(of: receipt.baseline)
+                else {
+                    _ = failRoute(
+                        "The UI action produced no verifiable state change. "
+                            + "It was not retried.")
+                    return nil
+                }
+                receipt.observedSnapshotID = native.observation.id
+                navigationReceipt = receipt
+            }
             routedUISnapshot = nil
             routedNativeSnapshot = RoutedNativeSnapshot(
                 snapshot: native, pid: targetPID, windowID: windowID,
                 bundleID: targetBundleID,
                 inputGeneration: inputGeneration)
             return backgroundObservation(native.observation)
+        }
+        if navigationReceipt != nil {
+            _ = failRoute(
+                "The UI action produced no complete native observation. "
+                    + "It was not retried.")
+            return nil
         }
         routedNativeSnapshot = nil
 
@@ -1948,6 +2028,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         targetName = ""
         targetBundleID = ""
         targetReady = false
+        nativeAXReady = false
         everReady = false
         primeTried = false
         pinnedElement = nil
@@ -1958,6 +2039,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         writtenElement = nil
         writtenNativeElement = nil
         pendingMutationLease = nil
+        navigationReceipt = nil
     }
 
     @discardableResult
@@ -2005,23 +2087,44 @@ final class BackgroundRoutingActionHost: ActionHost {
               !ActionPlan.pressLabelIsCommitting(label),
               record.actions.contains(ActionUICapability.axPress),
               !record.selected,
-              let expected = cached.snapshot.pressReadbacks[index],
               mutationLeaseIsLive(lease)
         else { return false }
+        let expected = cached.snapshot.pressReadbacks[index]
+        let receipt: NavigationReceipt?
+        if expected == nil {
+            guard let process = targetProcessIdentity,
+                  process.pid == pid_t(targetPID)
+            else { return false }
+            receipt = NavigationReceipt(
+                process: process, windowID: cached.windowID,
+                bundleID: cached.bundleID,
+                mutationOrdinal: mutationOrdinal + 1,
+                beforeSnapshotID: cached.snapshot.observation.id,
+                inputGeneration: lease.generation,
+                baseline: Set(navigationPaths(
+                    in: cached.snapshot.observation).values),
+                observedSnapshotID: nil)
+        } else {
+            receipt = nil
+        }
+        navigationReceipt = nil
         routedNativeSnapshot = nil
         pendingMutationLease = lease
-        let verified = nativePress(index, expected, cached.snapshot)
+        let effectAccepted = nativePress(index, expected, cached.snapshot)
         let focusPreserved = finalizeMutation(lease)
         guard focusPreserved else { return false }
-        guard verified else {
+        guard effectAccepted else {
             return failMutation(
-                "The UI action could not be verified. It was not retried.")
+                expected == nil
+                    ? "The UI action was not accepted. It was not retried."
+                    : "The UI action could not be verified. It was not retried.")
         }
         backgroundDraft = ""
         writtenElement = nil
         writtenNativeElement = nil
         pinnedElement = nil
         mutationOrdinal += 1
+        navigationReceipt = receipt
         return true
     }
 
@@ -2297,6 +2400,23 @@ final class BackgroundRoutingActionHost: ActionHost {
         target: String, expecting bundleID: String?
     ) -> Bool {
         if let cached = routedNativeSnapshot {
+            let receiptPath: NavigationPath?
+            if let receipt = navigationReceipt,
+               receipt.process == targetProcessIdentity,
+               receipt.windowID == cached.windowID,
+               receipt.bundleID.caseInsensitiveCompare(cached.bundleID)
+                    == .orderedSame,
+               receipt.mutationOrdinal == mutationOrdinal,
+               receipt.observedSnapshotID == snapshotID,
+               targetActivitySafe(
+                    receipt.inputGeneration, windowID: cached.windowID),
+               let path = navigationPaths(
+                    in: cached.snapshot.observation)[index],
+               !receipt.baseline.contains(path) {
+                receiptPath = path
+            } else {
+                receiptPath = nil
+            }
             guard snapshotLineage == .valid,
                   expectedMatchesTarget(bundleID), targetReady,
                   cached.snapshot.observation.id == snapshotID,
@@ -2312,7 +2432,9 @@ final class BackgroundRoutingActionHost: ActionHost {
                   AppMatcher.normalize(record.label ?? "")
                     == AppMatcher.normalize(label),
                   AppMatcher.bestMatch(for: target, in: [label]) != nil,
-                  record.selected || record.focused,
+                  navigationReceipt == nil
+                    ? record.selected || record.focused
+                    : receiptPath != nil,
                   ActionUIEvidencePolicy.mayVerifyGoal(
                     index: index, source: .native,
                     in: cached.snapshot.observation.elements),
@@ -2321,6 +2443,7 @@ final class BackgroundRoutingActionHost: ActionHost {
                     cached.inputGeneration, windowID: cached.windowID),
                   exactTargetWindow() == window
             else { return false }
+            navigationReceipt = nil
             return true
         }
         guard snapshotLineage == .valid,
@@ -2400,6 +2523,42 @@ final class BackgroundRoutingActionHost: ActionHost {
         }
     }
 
+    private func navigationPaths(
+        in snapshot: ActionUISnapshot
+    ) -> [Int: NavigationPath] {
+        let elements = Dictionary(
+            uniqueKeysWithValues: snapshot.elements.map { ($0.index, $0) })
+        var result: [Int: NavigationPath] = [:]
+
+        for candidate in snapshot.elements {
+            var current = candidate
+            var visited = Set<Int>()
+            var nodes: [NavigationNode] = []
+
+            while true {
+                guard visited.insert(current.index).inserted,
+                      current.actions.isEmpty else {
+                    nodes.removeAll()
+                    break
+                }
+                nodes.append(NavigationNode(
+                    role: current.role,
+                    label: AppMatcher.normalize(current.label ?? "")))
+                guard let parent = current.parentIndex else { break }
+                guard let ancestor = elements[parent] else {
+                    nodes.removeAll()
+                    break
+                }
+                current = ancestor
+            }
+            if !nodes.isEmpty {
+                result[candidate.index] = NavigationPath(
+                    nodes: nodes.reversed())
+            }
+        }
+        return result
+    }
+
     func foregroundWindow() -> ActionWindowIdentity? {
         routed || terminalFailureReason != nil
             ? nil : system.foregroundWindow()
@@ -2447,7 +2606,7 @@ final class BackgroundRoutingActionHost: ActionHost {
         guard routed else {
             return system.mediaCapabilities()
         }
-        guard targetReady, everReady,
+        guard snapshotLineage == .valid, targetReady, everReady,
               let target = exactRoutedProcess() else { return [] }
         return nativeMedia.capabilities(for: target)
     }
@@ -2460,7 +2619,8 @@ final class BackgroundRoutingActionHost: ActionHost {
         case .cua:
             return .unavailable
         case .appNative:
-            guard routed, targetReady, let target = exactRoutedProcess(),
+            guard routed, snapshotLineage == .valid, targetReady,
+                  let target = exactRoutedProcess(),
                   !userIsInTarget(), let lease = captureMutationLease(),
                   mutationLeaseIsLive(lease) else { return .unavailable }
             pendingMutationLease = lease
@@ -2587,6 +2747,7 @@ final class BackgroundRoutingActionHost: ActionHost {
                 role: target.role, label: target.label),
               let lease = captureMutationLease()
         else { return nil }
+        navigationReceipt = nil
         let priorValue: String
         let expected: String
         switch operation {
@@ -2744,6 +2905,7 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     @discardableResult
     private func failMutation(_ reason: String) -> Bool {
+        navigationReceipt = nil
         terminalFailureReason = reason
         veloraLog("Velora: \(reason)")
         return false

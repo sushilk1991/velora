@@ -93,8 +93,7 @@ struct ScreenStreamPreviewTarget {
     let element: AXUIElement
 }
 
-/// A closed postcondition for one background AXPress. Buttons whose effect
-/// cannot be read back from the pressed native control are not executable.
+/// A closed same-control postcondition for one background AXPress.
 enum ScreenAXReadback: Equatable {
     case selected(Bool)
     case expanded(Bool)
@@ -162,6 +161,36 @@ enum ScreenContext {
             buckets[hash, default: []].append(element)
             return true
         }
+    }
+
+    /// Merges the three native window sources without treating the same AX
+    /// identity as multiple matches. The caller owns the exact-match policy.
+    private static func uniqueAXWindow(
+        windows: [AXUIElement],
+        focused: AXUIElement?,
+        main: AXUIElement?,
+        matches: (AXUIElement) -> Bool
+    ) -> AXUIElement? {
+        var candidates = windows
+        if let focused {
+            candidates.append(focused)
+        }
+        if let main {
+            candidates.append(main)
+        }
+
+        var identities = AXIdentityGuard()
+        var match: AXUIElement?
+        for candidate in candidates {
+            guard identities.insert(candidate), matches(candidate) else {
+                continue
+            }
+            guard match == nil else {
+                return nil
+            }
+            match = candidate
+        }
+        return match
     }
 
     private enum BackgroundElementUse {
@@ -280,16 +309,33 @@ enum ScreenContext {
             depthBudget: depthBudget, deadline: deadline)
     }
 
-    /// Perform AXPress only when the exact retained native control exposes a
-    /// readable state transition. This never writes AXFocused or sends input.
+    /// Perform AXPress against one exact retained native control. Prefer a
+    /// same-control state transition. A control without one returns only that
+    /// the exact noncommitting AX action was accepted; the routing host binds
+    /// its effect to the next complete native tree before goal verification.
     static func backgroundPress(
         index: Int,
-        expecting expected: ScreenAXReadback,
+        expecting expected: ScreenAXReadback?,
+        in snapshot: ScreenActionUISnapshot
+    ) -> Bool {
+        guard let (_, element) = backgroundElement(
+                index: index, in: snapshot, use: .press)
+        else { return false }
+        if let expected {
+            return backgroundStatePress(
+                element, index: index, expected: expected, in: snapshot)
+        }
+        return AXUIElementPerformAction(
+            element, kAXPressAction as CFString) == .success
+    }
+
+    private static func backgroundStatePress(
+        _ element: AXUIElement,
+        index: Int,
+        expected: ScreenAXReadback,
         in snapshot: ScreenActionUISnapshot
     ) -> Bool {
         guard validReadback(expected),
-              let (_, element) = backgroundElement(
-                index: index, in: snapshot, use: .press),
               let before = readback(expected, from: element),
               before != expected,
               AXUIElementPerformAction(
@@ -545,7 +591,6 @@ enum ScreenContext {
                 if let readback { pressReadbacks[record.index] = readback }
                 let actions = record.actions.filter {
                     $0 != ActionUICapability.axFocus
-                        && ($0 != kAXPressAction as String || readback != nil)
                 }
                 guard actions != record.actions else {
                     return record
@@ -662,7 +707,12 @@ enum ScreenContext {
         titleMatch: BackgroundTitleMatch,
         frame: CGRect
     ) -> AXUIElement? {
-        let matches = axElements(appElement, kAXWindowsAttribute).filter {
+        let windows = axElements(appElement, kAXWindowsAttribute)
+        let focused = axElement(appElement, kAXFocusedWindowAttribute)
+        let main = axElement(appElement, kAXMainWindowAttribute)
+        return uniqueAXWindow(
+            windows: windows, focused: focused, main: main
+        ) {
             var ownerPID = pid_t(0)
             return AXUIElementGetPid($0, &ownerPID) == .success
                 && ownerPID == pid_t(pid)
@@ -671,8 +721,6 @@ enum ScreenContext {
                 } == true
                 && axFrame($0).map { windowFramesMatch($0, frame) } == true
         }
-        guard matches.count == 1 else { return nil }
-        return matches[0]
     }
 
     private static func windowServerMatches(

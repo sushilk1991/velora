@@ -235,6 +235,7 @@ enum ActionPlanError: Error, Equatable {
     case unsafeBareKey(String)
     case urlCarriesUnspokenData(token: String)
     case urlEmbedsCredentials
+    case mediaNativeRequired(step: Int)
 
     var message: String {
         switch self {
@@ -293,6 +294,8 @@ enum ActionPlanError: Error, Equatable {
             return "the URL query carries '\(token)', which the user never said"
         case .urlEmbedsCredentials:
             return "URLs with embedded credentials are not allowed"
+        case .mediaNativeRequired(let step):
+            return "step \(step): a play or pause command requires app-native media control"
         case .bareSpace:
             return "bare Space can activate ambient controls; use type_text to enter spaces"
         case .unsafeBareKey(let key):
@@ -316,6 +319,10 @@ extension ActionPlan {
         static let defaultWaitMs = 8_000
         static let maxKeyRepeat = 12
         static let minVerifyTermCharacters = 3
+        static let mediaFallbackVerbs: Set<String> = [
+            "type_text", "replace_text", "search_text", "paste_text", "key",
+            "press_element", "press_ui",
+        ]
         // A changed exact result may be one character; the engine attests its
         // complete before/after tree and the app rechecks the live label.
         static let minChangedVerifyCharacters = 1
@@ -347,21 +354,25 @@ extension ActionPlan {
         /// Exact structured labels are already bounded at the AX projection.
         /// Do not apply the shorter fuzzy-search bound to their identity.
         static let maxStructuredUILabelCharacters = 180
-        /// Words that mark a control as committing or destructive — a press
-        /// may navigate, never commit. Checked word-by-word AND against each
+        /// Words that mark a control as committing or state-changing — a
+        /// press may navigate, never change app state. Checked word-by-word
+        /// AND against each
         /// adjacent pair joined ("Log Out" → "logout"), so "Ascending" never
         /// trips on the substring "send" but "Send to Priya" is refused.
         /// Mirrored from `velora_engine/actions.py`; the engine test
         /// `test_press_denylist_matches_the_swift_mirror` reads the marker
         /// line below, so keep it in sync with this set.
-        // press_denylist: abmelden abschicken absenden accept acheter afmelden agree antworten apagar approve archivar archive archiver beantwoorden bestaetigen bestatigen betalen bevestigen bezahlen block borrar buy call cancel cancella cerrarsesion checkout compartilhar compartir comprar condividi conferma confirm confirmar confirmer deactivate deconnecter delen delete disable discard disconnetti donate doorsturen effacer elimina eliminar eliminare encaminhar enviar envoyer erase excluir forward inoltra invia inviare kaufen kopen leave loeschen logoff logout loschen mute order paga pagar pagare partager pay payer post publicar publier publish purchase reenviar remove renew reply repondre report reset responder rispondi sairdaconta save sedeconnecter send senden share signout submit subscribe subscription supprimer teilen transfer transferer trash tweet uitloggen unfollow unsubscribe verwijderen verzenden weiterleiten withdraw
+        // press_denylist: abmelden abschicken absenden accept acheter afmelden agree antworten apagar approve archivar archive archiver beantwoorden bestaetigen bestatigen betalen bevestigen bezahlen block borrar buy call cancel cancella cerrarsesion checkout close compartilhar compartir comprar connect condividi conferma confirm confirmar confirmer deactivate deconnecter delen delete disable discard disconnect disconnetti donate doorsturen effacer eject elimina eliminar eliminare enable encaminhar enviar envoyer erase excluir forward inoltra invia inviare kaufen kopen leave lock loeschen logoff logout loschen mute order paga pagar pagare partager pause pay payer play post publicar publier publish purchase quit record reenviar remove renew reply repondre report reset responder restart resume rispondi sairdaconta save sedeconnecter send senden share shutdown signout sleep start stop submit subscribe subscription supprimer teilen toggle transfer transferer trash turn tweet uitloggen unfollow unsubscribe verwijderen verzenden weiterleiten withdraw
         static let pressDenyWords: Set<String> = [
             "send", "submit", "post", "publish", "reply", "delete", "remove",
             "discard", "pay", "buy", "purchase", "order", "checkout", "confirm",
             "accept", "agree", "call", "transfer", "forward", "share", "tweet",
             "block", "leave", "archive", "unsubscribe", "logout", "signout",
             "trash", "erase", "reset", "approve", "withdraw", "report", "mute",
-            "unfollow", "subscribe",
+            "unfollow", "subscribe", "close", "quit", "restart",
+            "play", "pause", "stop", "resume", "start", "toggle", "turn",
+            "enable", "connect", "disconnect", "record", "shutdown", "sleep",
+            "lock", "eject",
             // Web-commit verbs (2026-08-21 review): links are pressable in
             // browsers now, and billing/settings pages commit through
             // link-styled controls ("Cancel subscription", "Deactivate
@@ -387,8 +398,7 @@ extension ActionPlan {
             "beantwoorden", "doorsturen", "delen",
             // Sign-out, which the first pass covered only in English.
             // Two-word forms are caught by the joined-pair check, so the pair
-            // spelling is what goes here — "cerrar" alone would refuse an
-            // ordinary Close.
+            // spelling is what goes here.
             "cerrarsesion", "deconnecter", "sedeconnecter", "abmelden",
             "afmelden", "disconnetti", "sairdaconta", "uitloggen",
         ]
@@ -573,6 +583,15 @@ extension ActionPlan {
         ["navigate", "to"], ["go", "to"], ["switch", "to"],
         ["switch", "me", "to"], ["take", "me", "to"], ["bring", "up"],
     ]
+    private static let presentationCourtesyPrefixes: [[String]] = [
+        ["please"], ["kindly"], ["can", "you"], ["could", "you"],
+        ["will", "you"], ["would", "you"],
+        ["i", "want", "you", "to"],
+        ["i", "would", "like", "you", "to"],
+        ["i", "d", "like", "you", "to"],
+        ["i", "would", "like", "to"],
+        ["i", "d", "like", "to"],
+    ]
     private static let appOnlyIgnoredWords: Set<String> = [
         "app", "application", "please", "the",
     ]
@@ -675,6 +694,25 @@ extension ActionPlan {
             .intersection(searchLabelWords).isEmpty
     }
 
+    /// Classifies the leading request before app names or payload can
+    /// confuse it.
+    static func hasPresentationIntent(_ command: String) -> Bool {
+        let words = presentationWords(command)
+        return presentationIntentPrefixes.contains { prefix in
+            words.starts(with: prefix)
+        }
+    }
+
+    private static func presentationWords(_ command: String) -> [String] {
+        var words = AppMatcher.words(command)
+        while let prefix = presentationCourtesyPrefixes.first(where: {
+            words.starts(with: $0)
+        }) {
+            words.removeFirst(prefix.count)
+        }
+        return words
+    }
+
     static func isExplicitUIPresentation(
         _ command: String, appName: String,
         bundleID: String? = nil,
@@ -685,14 +723,10 @@ extension ActionPlan {
         ) else {
             return false
         }
-        var words = AppMatcher.words(command)
         if !commandAllowsBundleModality(command, bundleID: bundleID) {
             return false
         }
-        if words.first == "please" { words.removeFirst() }
-        return presentationIntentPrefixes.contains { prefix in
-            words.starts(with: prefix)
-        }
+        return hasPresentationIntent(command)
     }
 
     static func isAppOnlyPresentation(
@@ -704,8 +738,7 @@ extension ActionPlan {
             command, appName: appName, bundleID: bundleID,
             candidates: candidates
         ) else { return false }
-        var words = AppMatcher.words(command)
-        if words.first == "please" { words.removeFirst() }
+        let words = presentationWords(command)
         guard let prefix = presentationIntentPrefixes.first(where: {
             words.starts(with: $0)
         }) else { return false }
@@ -980,7 +1013,7 @@ extension ActionPlan {
             expectedValue: expected)
     }
 
-    /// True when the label names a control that would commit something.
+    /// True when the label names a committing or state-changing control.
     static func pressLabelIsCommitting(_ label: String) -> Bool {
         // Fold diacritics so localized labels compare as the engine spells
         // them: the engine's word regex is ASCII-only and folds first, so
@@ -1079,6 +1112,22 @@ extension ActionPlan {
                       !value.isEmpty
                 else { throw ActionPlanError.missingField(step: index, field: field) }
                 return value
+            }
+
+            var mediaApps = state.appNames
+            mediaApps.insert(currentApp)
+            if let appName = state.structuredUISnapshot?.appName {
+                mediaApps.insert(appName)
+            }
+            if Limits.mediaFallbackVerbs.contains(verb),
+               mediaApps.contains(where: { appName in
+                   [.play, .pause].contains(where: {
+                       ActionLocalProof.media(
+                           state: $0, appName: appName
+                       ).covers(state.spokenCommand)
+                   })
+               }) {
+                throw ActionPlanError.mediaNativeRequired(step: index)
             }
 
             switch verb {
