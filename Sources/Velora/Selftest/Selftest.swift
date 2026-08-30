@@ -1796,10 +1796,22 @@ enum Selftest {
                     allowAutomaticInsertion: false),
             "a cleanup-empty late voice command is recognized but never executed")
         expect(
-            LateFinalPolicy.preserveDuringEdit(hasPendingEdit: true),
+            LateFinalPolicy.preserveDuringEdit(
+                finalSession: "late-session",
+                hasPendingEdit: true,
+                protectedSession: nil),
             "a late dictation final is history-only while a selection edit owns the target")
         expect(
-            !LateFinalPolicy.preserveDuringEdit(hasPendingEdit: false),
+            LateFinalPolicy.preserveDuringEdit(
+                finalSession: "late-session",
+                hasPendingEdit: false,
+                protectedSession: "late-session"),
+            "a direct edit keeps its late-final fence after the model reply")
+        expect(
+            !LateFinalPolicy.preserveDuringEdit(
+                finalSession: "ordinary-session",
+                hasPendingEdit: false,
+                protectedSession: "different-session"),
             "ordinary late-final delivery remains unchanged outside a selection edit")
         expect(
             ErrorRetryIntent.resolve(
@@ -1841,6 +1853,15 @@ enum Selftest {
         expect(
             retryRoute == "proofread",
             "Proofread Retry never starts the microphone")
+
+        let selectionGeneration = UserInputActivity.selectionSnapshot()
+        UserInputActivity.keyPressed(46)
+        let generationAfterPress = UserInputActivity.selectionSnapshot()
+        UserInputActivity.keyReleased(46)
+        expect(
+            generationAfterPress == selectionGeneration &+ 1
+                && UserInputActivity.selectionSnapshot() == generationAfterPress,
+            "selection capture ignores shortcut release but rejects new input")
 
         var markerReads = 0
         let native = ScreenContext.resolvedSelectionText(

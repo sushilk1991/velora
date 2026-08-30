@@ -30,8 +30,12 @@ enum LateFinalPolicy {
         allowAutomaticInsertion
     }
 
-    static func preserveDuringEdit(hasPendingEdit: Bool) -> Bool {
-        hasPendingEdit
+    static func preserveDuringEdit(
+        finalSession: String,
+        hasPendingEdit: Bool,
+        protectedSession: String?
+    ) -> Bool {
+        hasPendingEdit || protectedSession == finalSession
     }
 
     static func errorCancelsSession(
@@ -219,7 +223,7 @@ final class DictationController: NSObject {
     /// Edit round-trip ceiling — above the engine's own 20 s edit budget so
     /// the engine's `edit_failed` normally arrives first; this only fires if
     /// the reply is lost entirely.
-    private static let editTimeout: TimeInterval = 25
+    private static let editTimeout: TimeInterval = 45
 
     weak var delegate: DictationControllerDelegate?
     /// App-owned foreground capture exclusion (currently meeting recording).
@@ -376,6 +380,9 @@ final class DictationController: NSObject {
     private var pendingEdit: (
         id: String, selection: ScreenTextSelection, bundleID: String?,
         kind: EditRequestKind)?
+    /// Direct proofreading can start after a dictation timeout. Keep that
+    /// session history-only even after the edit request itself has completed.
+    private var protectedLateFinalSessionID: String?
     /// Sublime selection capture and replacement use its plugin host, never
     /// the app's main thread. IDs make late callbacks one-shot and ignorable.
     private var sublimeCaptureID: UUID?
@@ -865,6 +872,7 @@ final class DictationController: NSObject {
             return
         }
         terminating = true
+        protectedLateFinalSessionID = nil
         clearSublimeCapture()
         cancelSublimeApply()
         cancelStreamDraft()
@@ -1044,6 +1052,10 @@ final class DictationController: NSObject {
     func beginEditSession(locked: Bool) {
         guard phase == .idle else { return }
         guard config.voiceEdit else { return }
+        guard !SecureInput.isActive else {
+            showEditStartError("Secure input active — editing unavailable")
+            return
+        }
         guard sublimeApplyID == nil else {
             showNotice(symbol: "hourglass", message: "Finishing edit")
             return
@@ -1053,7 +1065,7 @@ final class DictationController: NSObject {
             return
         }
         guard sublimeCaptureID == nil else { return }
-        let inputGeneration = UserInputActivity.snapshot()
+        let inputGeneration = UserInputActivity.selectionSnapshot()
         // Read the live owner first. The activation observer is intentionally
         // cached and can trail a just-focused editor by one run-loop turn.
         let app = NSWorkspace.shared.frontmostApplication
@@ -1090,6 +1102,18 @@ final class DictationController: NSObject {
             showNotice(symbol: "hourglass", message: "Velora is busy")
             return
         }
+        if !sessionID.isEmpty {
+            protectedLateFinalSessionID = sessionID
+        }
+        guard !SecureInput.isActive else {
+            showProofreadStartError("Secure input active — proofreading unavailable")
+            return
+        }
+        guard supervisor.isReady else {
+            showProofreadStartError(
+                supervisor.loadingStatus ?? "Writing engine is starting…")
+            return
+        }
         guard sublimeApplyID == nil else {
             showNotice(symbol: "hourglass", message: "Finishing edit")
             return
@@ -1100,7 +1124,7 @@ final class DictationController: NSObject {
         }
         guard sublimeCaptureID == nil else { return }
 
-        let inputGeneration = UserInputActivity.snapshot()
+        let inputGeneration = UserInputActivity.selectionSnapshot()
         let app = NSWorkspace.shared.frontmostApplication
             ?? contextTracker.frontmost
         if let app, SublimeTextSelectionBridge.supports(app) {
@@ -1153,7 +1177,8 @@ final class DictationController: NSObject {
                     self.sublimeCaptureReleasedBeforeStart
                 self.clearSublimeCapture()
                 guard self.phase == .idle,
-                      inputGeneration == UserInputActivity.snapshot(),
+                      inputGeneration == UserInputActivity.selectionSnapshot(),
+                      self.actionsStorage?.isRunning != true,
                       NSWorkspace.shared.frontmostApplication?
                           .processIdentifier == app.processIdentifier
                 else {
@@ -1308,6 +1333,14 @@ final class DictationController: NSObject {
         instruction: String,
         kind: EditRequestKind
     ) {
+        guard supervisor.isReady else {
+            selection.discardMutableIdentity()
+            phase = .idle
+            showError(
+                supervisor.loadingStatus ?? "Writing engine is starting…",
+                retryIntent: kind.retryIntent)
+            return
+        }
         guard !instruction.isEmpty else {
             selection.discardMutableIdentity()
             phase = .idle
@@ -1382,6 +1415,13 @@ final class DictationController: NSObject {
         guard !trimmed.isEmpty else {
             pending.selection.discardMutableIdentity()
             showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
+            return
+        }
+        guard !SecureInput.isActive else {
+            pending.selection.discardMutableIdentity()
+            showNotice(
+                symbol: "lock.fill",
+                message: "Secure input active — edit not copied")
             return
         }
         if let token = pending.selection.sublimeToken {
@@ -1829,6 +1869,10 @@ final class DictationController: NSObject {
         contextPolicy: RecordingContextPolicy = .ordinary
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
+        guard pendingEdit == nil else {
+            showNotice(symbol: "hourglass", message: "Current edit is still finishing")
+            return false
+        }
         guard streamCancellation == nil else {
             NSLog("Velora: recording deferred — restoring a cancelled stream draft")
             return false
@@ -1879,6 +1923,7 @@ final class DictationController: NSObject {
         mediaPlayback.pauseForDictation()
 
         sessionID = UUID().uuidString
+        protectedLateFinalSessionID = nil
         stopEnqueuedSession = nil
         rawTranscript = nil
         sttMs = nil
@@ -2102,6 +2147,16 @@ final class DictationController: NSObject {
 
     /// Esc or explicit cancel: stop everything, insert nothing.
     func cancel() {
+        if let pending = pendingEdit {
+            pending.selection.discardMutableIdentity()
+            supervisor.send(["cmd": "edit_cancel", "id": pending.id])
+            pendingEdit = nil
+            editTimer?.invalidate()
+            editTimer = nil
+            if phase == .editing { phase = .idle }
+            hud.transition(to: .hidden(.cancel))
+            return
+        }
         if phase == .idle, sublimeCaptureID != nil {
             clearSublimeCapture()
             hud.transition(to: .hidden(.cancel))
@@ -2263,8 +2318,13 @@ final class DictationController: NSObject {
             }
             let effectiveRaw = raw.isEmpty ? (rawTranscript ?? text) : raw
             if LateFinalPolicy.preserveDuringEdit(
-                hasPendingEdit: pendingEdit != nil
+                finalSession: session,
+                hasPendingEdit: pendingEdit != nil,
+                protectedSession: protectedLateFinalSessionID
             ) {
+                if protectedLateFinalSessionID == session {
+                    protectedLateFinalSessionID = nil
+                }
                 consumedSessionID = session
                 timeoutErrorAt = nil
                 transcribeTimer?.invalidate()
@@ -3369,6 +3429,7 @@ extension DictationController: HotkeyMonitorDelegate {
         // Read the live owner first; the activation observer can trail a newly
         // focused editor by one run-loop turn.
         let inputGeneration = UserInputActivity.snapshot()
+        let selectionGeneration = UserInputActivity.selectionSnapshot()
         let app = NSWorkspace.shared.frontmostApplication
             ?? contextTracker.frontmost
         let nativeTarget = ScreenContext.streamTarget(of: app)
@@ -3400,7 +3461,8 @@ extension DictationController: HotkeyMonitorDelegate {
             beginSublimeStreamCapture(
                 app: app,
                 locked: locked,
-                inputGeneration: inputGeneration)
+                inputGeneration: inputGeneration,
+                selectionGeneration: selectionGeneration)
         case .keystroke:
             guard let keystrokeTarget else { return }
             veloraLog(
@@ -3442,7 +3504,8 @@ extension DictationController: HotkeyMonitorDelegate {
     private func beginSublimeStreamCapture(
         app: NSRunningApplication,
         locked: Bool,
-        inputGeneration: UInt64
+        inputGeneration: UInt64,
+        selectionGeneration: UInt64
     ) {
         let captureID = UUID()
         sublimeCaptureID = captureID
@@ -3473,7 +3536,7 @@ extension DictationController: HotkeyMonitorDelegate {
                     self.sublimeCaptureReleasedBeforeStart
                 self.clearSublimeCapture()
                 guard self.phase == .idle,
-                      inputGeneration == UserInputActivity.snapshot(),
+                      selectionGeneration == UserInputActivity.selectionSnapshot(),
                       NSWorkspace.shared.frontmostApplication?
                           .processIdentifier == app.processIdentifier
                 else {
@@ -3789,6 +3852,10 @@ extension DictationController: HotkeyMonitorDelegate {
             // merely being planned nothing is touching the machine, and Esc
             // still belongs to whatever else is on screen.
             if actionsStorage?.isExecuting == true { return }
+        }
+        if pendingEdit != nil {
+            cancel()
+            return
         }
         switch phase {
         case .starting, .recording, .transcribing, .editing:

@@ -231,6 +231,26 @@ async def test_edit_text_hard_timeout_is_retryable_failure(engine):
     assert failed["code"] == "cleanup_timeout"
 
 
+async def test_edit_text_unhealthy_model_is_retryable_failure(engine):
+    eng, sock = engine
+    eng.cleanup = FakeCleanup(
+        "the original sentence stays intact",
+        applied=False,
+        reason="llm_unhealthy",
+    )
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "edit_text", "id": "unhealthy",
+        "text": "the original sentence stays intact",
+        "instruction": "fix the grammar",
+    })
+
+    failed = await asyncio.wait_for(
+        client.recv_event("edit_failed"), timeout=0.2)
+    assert failed["code"] == "cleanup_timeout"
+
+
 async def test_edit_text_identical_output_is_no_change(engine):
     eng, sock = engine
     original = "This sentence is already correct."
