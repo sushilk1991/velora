@@ -17,6 +17,10 @@ import re
 
 MAX_TEXT_CHARS = 8_000
 MAX_INSTRUCTION_CHARS = 500
+MIN_EDIT_TIMEOUT_MS = 12_000
+MAX_EDIT_TIMEOUT_MS = 20_000
+EDIT_TIMEOUT_MS_PER_CHAR = 8
+TIMEOUT_REASONS = frozenset({"timeout", "timeout_hard", "timeout_queue"})
 
 EDIT_SYSTEM_PROMPT_TEMPLATE = """You are the text-editing stage of a dictation app. The user selected a passage in their document and spoke one edit instruction. You receive the passage as the next message; your entire reply is pasted over the selection, so reply with the edited passage only.
 Rules — follow ALL of them:

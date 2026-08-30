@@ -3426,12 +3426,16 @@ extension Selftest {
     /// hard-coded "edit" slot into a role table. These cover the routing that
     /// refactor introduced — a chord must reach exactly one feature.
     private static func testSecondaryHotkeyRouting() {
+        expect(SecondaryHotkeyRole.allCases.map(\.rawValue).contains("proofread"),
+               "selected-text proofreading has an independent hotkey role")
+
         let monitor = HotkeyMonitor()
         let probe = HotkeySelftestDelegate()
         monitor.delegate = probe
         monitor.hotkey = .rightOption
         monitor.secondaryHotkeys = [
             .edit: .optionShiftE,
+            .proofread: .controlShiftG,
             .stream: .controlShiftS,
             .action: .optionShiftA,
         ]
@@ -3448,6 +3452,20 @@ extension Selftest {
         expect(monitor.handleKeyUp(keyCode: 1), "the stream key-up is suppressed")
         expect(waitUntil { probe.streamHotkeyUpCount == 1 },
                "the stream key-up is delivered")
+
+        // ⌃⇧G is a one-shot proofread role; the controller ignores its up edge.
+        expect(monitor.handleKeyDown(
+            keyCode: 5, flags: Hotkey.controlShiftG.modifiers,
+            isRepeat: false, invalidateContinuation: false),
+            "the proofread combo is suppressed by a filtering tap")
+        expect(waitUntil { probe.proofreadHotkeyDownCount == 1 },
+               "the proofread hotkey callback is delivered")
+        expect(probe.editHotkeyDownCount == 0 && probe.actionHotkeyDownCount == 0,
+               "proofreading fires no voice mode")
+        expect(monitor.handleKeyUp(keyCode: 5),
+               "the proofread key-up is suppressed")
+        expect(waitUntil { probe.proofreadHotkeyUpCount == 1 },
+               "the proofread key-up is delivered")
 
         // ⌥⇧A reaches Action Mode, and only Action Mode.
         expect(monitor.handleKeyDown(keyCode: 0, flags: Hotkey.optionShiftA.modifiers,
@@ -3532,6 +3550,10 @@ extension Selftest {
         }
         expect(shortcuts.dictation == .rightOption, "the existing hotkey survives the upgrade")
         expect(shortcuts.voiceEdit, "the existing Voice Edit preference survives")
+        expect(shortcuts.proofreadSelection == .controlShiftG,
+               "a missing proofread hotkey defaults to ⌃⇧G")
+        expect(shortcuts.proofreadEnabled,
+               "selected-text proofreading is on after an upgrade")
         expect(shortcuts.streamTyping == .controlShiftS,
                "a missing Stream Typing hotkey gets the collision-safe default")
         expect(shortcuts.streamTypingEnabled,
@@ -3556,9 +3578,30 @@ extension Selftest {
             expect(false, "a pre-Stream settings collision still decodes")
         }
 
+        let proofreadDefaultAlreadyUsed = """
+        {"dictation":{"keyCode":5,"modifiers":393216,"isModifierOnly":false},
+         "editSelection":{"keyCode":14,"modifiers":655360,"isModifierOnly":false},
+         "voiceEdit":true,"behavior":"hold",
+         "streamTyping":{"keyCode":1,"modifiers":393216,"isModifierOnly":false},
+         "streamTypingEnabled":true,
+         "action":{"keyCode":0,"modifiers":393216,"isModifierOnly":false},
+         "actionsEnabled":true}
+        """
+        if let collisionData = proofreadDefaultAlreadyUsed.data(using: .utf8),
+           let collisionSafe = try? JSONDecoder().decode(
+                SettingsDocument.Shortcuts.self, from: collisionData) {
+            expect(collisionSafe.proofreadSelection != collisionSafe.dictation,
+                   "a pre-Proofread collision receives a deterministic spare")
+            expect(!collisionSafe.proofreadSelection.isModifierOnly,
+                   "an upgraded one-shot proofread shortcut is never a bare modifier")
+        } else {
+            expect(false, "a pre-Proofread settings collision still decodes")
+        }
+
         // And a full round trip keeps a customized binding.
         var custom = SettingsDocument.Shortcuts.defaults
         custom.action = .f19
+        custom.proofreadSelection = .optionShiftA
         custom.actionsEnabled = false
         guard let encoded = try? JSONEncoder().encode(custom),
               let decoded = try? JSONDecoder().decode(
@@ -4089,6 +4132,12 @@ extension Selftest {
                 cancellationInFlight: false,
                 actionIsRunning: false),
             "Action Mode becomes available after Stream restoration releases ownership")
+        expect(
+            StreamInteractionGate.selectionEditIsBusy(
+                phaseIsIdle: true,
+                cancellationInFlight: false,
+                actionIsRunning: true),
+            "selected-text edits wait until Action Mode releases UI ownership")
 
         expect(
             StreamTypingFinalPolicy.shouldDeferFinal(

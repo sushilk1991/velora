@@ -772,6 +772,27 @@ struct ShortcutsSettingsView: View {
                 SettingsFooter("If you type or move the cursor mid-stream, Velora stops rewriting and copies the final instead.")
             }
             Section {
+                Toggle(isOn: $model.proofreadEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Fix spelling and grammar")
+                        Text("Select text and press the shortcut. Velora replaces editable selections; for read-only text, it copies the result. No microphone or speech model is used.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                LabeledContent("Proofread selection") {
+                    HotkeyRecorderView(hotkey: $model.proofreadHotkey)
+                }
+                .disabled(!model.proofreadEnabled)
+                if model.proofreadHotkeyConflict {
+                    Text("Proofread selection needs a shortcut of its own.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            } header: {
+                Text("Proofread")
+            }
+            Section {
                 Toggle(isOn: $model.voiceEdit) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Voice edit selection")

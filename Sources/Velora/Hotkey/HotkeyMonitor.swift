@@ -11,6 +11,8 @@ import Foundation
 enum SecondaryHotkeyRole: String, CaseIterable {
     /// Safe Voice Edit: select text, hold, speak an instruction.
     case edit
+    /// Proofread the current selection directly, without recording.
+    case proofread
     /// Stream Typing: show provisional speech at the exact text cursor.
     case stream
     /// Action Mode: hold, speak a command, Velora carries it out.

@@ -483,17 +483,23 @@ final class AppConfig {
         document.settings.meetings.audioRetentionDays =
             min(365, max(1, defaults.integer(forKey: Key.meetingAudioRetentionDays)))
         document.settings.meetings.diarization = defaults.bool(forKey: Key.meetingDiarization)
+        let migratedAction = SettingsDocument.Shortcuts.defaultActionHotkey
+        let migratedStream = SettingsDocument.Shortcuts.defaultStreamHotkey(
+            excluding: [storedHotkey, storedEditHotkey, migratedAction])
+        let migratedProofread = SettingsDocument.Shortcuts.defaultProofreadHotkey(
+            excluding: [storedHotkey, storedEditHotkey,
+                        migratedStream, migratedAction])
         document.settings.shortcuts = .init(
             dictation: storedHotkey,
             editSelection: storedEditHotkey,
             voiceEdit: defaults.bool(forKey: Key.voiceEdit),
-            streamTyping: SettingsDocument.Shortcuts.defaultStreamHotkey(
-                excluding: [storedHotkey, storedEditHotkey,
-                            SettingsDocument.Shortcuts.defaultActionHotkey]),
+            proofreadSelection: migratedProofread,
+            proofreadEnabled: true,
+            streamTyping: migratedStream,
             streamTypingEnabled: true,
             behavior: HotkeyMode(
                 rawValue: defaults.string(forKey: Key.hotkeyMode) ?? "") ?? .hold,
-            action: SettingsDocument.Shortcuts.defaultActionHotkey,
+            action: migratedAction,
             actionsEnabled: true,
             backgroundActions: true)
         document.settings.updates = .init(
@@ -764,6 +770,21 @@ final class AppConfig {
     /// What the monitor should listen for — nil when the feature is off.
     var activeEditHotkey: Hotkey? { voiceEdit ? editHotkey : nil }
 
+    /// Fix spelling and grammar in the exact selected range, without speech.
+    var proofreadHotkey: Hotkey {
+        get { readSetting(\.shortcuts.proofreadSelection) }
+        set { updateSettings { $0.shortcuts.proofreadSelection = newValue } }
+    }
+
+    var proofreadEnabled: Bool {
+        get { readSetting(\.shortcuts.proofreadEnabled) }
+        set { updateSettings { $0.shortcuts.proofreadEnabled = newValue } }
+    }
+
+    var activeProofreadHotkey: Hotkey? {
+        proofreadEnabled ? proofreadHotkey : nil
+    }
+
     /// Stream Typing: hold this to see provisional speech at the cursor.
     var streamTypingHotkey: Hotkey {
         get { readSetting(\.shortcuts.streamTyping) }
@@ -811,12 +832,17 @@ final class AppConfig {
         var table: [SecondaryHotkeyRole: Hotkey] = [:]
         let dictation = hotkey
         if let edit = activeEditHotkey, edit != dictation { table[.edit] = edit }
+        if let proofread = activeProofreadHotkey, proofread != dictation,
+           proofread != table[.edit] {
+            table[.proofread] = proofread
+        }
         if let stream = activeStreamTypingHotkey, stream != dictation,
-           stream != table[.edit] {
+           stream != table[.edit], stream != table[.proofread] {
             table[.stream] = stream
         }
         if let action = activeActionHotkey, action != dictation,
-           action != table[.edit], action != table[.stream] {
+           action != table[.edit], action != table[.proofread],
+           action != table[.stream] {
             table[.action] = action
         }
         return table

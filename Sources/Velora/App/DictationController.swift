@@ -30,6 +30,10 @@ enum LateFinalPolicy {
         allowAutomaticInsertion
     }
 
+    static func preserveDuringEdit(hasPendingEdit: Bool) -> Bool {
+        hasPendingEdit
+    }
+
     static func errorCancelsSession(
         _ failedSession: String,
         editInstructionSession: String?,
@@ -45,6 +49,7 @@ enum LateFinalPolicy {
 enum ErrorRetryIntent: Equatable {
     case dictation
     case voiceEdit
+    case proofread
 
     static func resolve(
         explicit: ErrorRetryIntent?,
@@ -57,11 +62,13 @@ enum ErrorRetryIntent: Equatable {
 
     func perform(
         dictation: () -> Void,
-        voiceEdit: () -> Void
+        voiceEdit: () -> Void,
+        proofread: () -> Void
     ) {
         switch self {
         case .dictation: dictation()
         case .voiceEdit: voiceEdit()
+        case .proofread: proofread()
         }
     }
 }
@@ -97,6 +104,51 @@ enum ExternalDictationError: LocalizedError {
 ///   the next tap (or Esc) stops it and transcribes
 /// - Esc always cancels cleanly; nothing is inserted
 final class DictationController: NSObject {
+    private enum EditRequestKind: Equatable {
+        case voiceEdit
+        case proofread
+
+        var retryIntent: ErrorRetryIntent {
+            switch self {
+            case .voiceEdit: return .voiceEdit
+            case .proofread: return .proofread
+            }
+        }
+
+        var successNotice: (symbol: String, message: String) {
+            switch self {
+            case .voiceEdit: return ("pencil.line", "Edited")
+            case .proofread: return ("text.badge.checkmark", "Spelling and grammar fixed")
+            }
+        }
+
+        var clipboardNotice: String {
+            switch self {
+            case .voiceEdit: return "Edited text on clipboard"
+            case .proofread: return "Proofread text on clipboard"
+            }
+        }
+    }
+
+    private enum SelectionCaptureIntent {
+        case voiceEdit(locked: Bool)
+        case proofread
+        case streamTyping(locked: Bool)
+
+        var editKind: EditRequestKind? {
+            switch self {
+            case .voiceEdit: return .voiceEdit
+            case .proofread: return .proofread
+            case .streamTyping: return nil
+            }
+        }
+    }
+
+    private static let proofreadInstruction =
+        "Fix spelling, punctuation, capitalization, and grammar. "
+        + "Preserve meaning, tone, formatting, names, numbers, dates, URLs, and code."
+    private static let maximumEditScalars = 8_000
+
     enum RecordingContextPolicy {
         case ordinary
         case action
@@ -109,6 +161,7 @@ final class DictationController: NSObject {
         case starting(locked: Bool)
         case recording(locked: Bool)
         case transcribing
+        case editing
 
         /// Short label for log lines.
         var label: String {
@@ -117,6 +170,7 @@ final class DictationController: NSObject {
             case .starting(let locked): return locked ? "starting(locked)" : "starting(hold)"
             case .recording(let locked): return locked ? "recording(locked)" : "recording(hold)"
             case .transcribing: return "transcribing"
+            case .editing: return "editing"
             }
         }
     }
@@ -320,11 +374,12 @@ final class DictationController: NSObject {
     /// The engine `edit_text` round-trip in flight after an edit session's
     /// final: verify-and-replace happens when `edited` comes back.
     private var pendingEdit: (
-        id: String, selection: ScreenTextSelection, bundleID: String?)?
+        id: String, selection: ScreenTextSelection, bundleID: String?,
+        kind: EditRequestKind)?
     /// Sublime selection capture and replacement use its plugin host, never
     /// the app's main thread. IDs make late callbacks one-shot and ignorable.
     private var sublimeCaptureID: UUID?
-    private var sublimeCaptureLocksRecording = false
+    private var sublimeCaptureIntent: SelectionCaptureIntent?
     private var sublimeCaptureReleasedBeforeStart = false
     private var sublimeApplyID: UUID?
     private var sublimeApplyingToken: SublimeTextSelectionToken?
@@ -469,7 +524,7 @@ final class DictationController: NSObject {
             cancel()
         case .recording:
             stopAndTranscribe()
-        case .transcribing:
+        case .transcribing, .editing:
             break
         }
     }
@@ -824,6 +879,14 @@ final class DictationController: NSObject {
         }
         editSession?.selection.discardMutableIdentity()
         editSession = nil
+        if let pending = pendingEdit {
+            pending.selection.discardMutableIdentity()
+            supervisor.send(["cmd": "edit_cancel", "id": pending.id])
+            pendingEdit = nil
+        }
+        editTimer?.invalidate()
+        editTimer = nil
+        if phase == .editing { phase = .idle }
 
         guard phase != .idle else {
             mediaPlayback.restoreImmediatelyForTermination()
@@ -998,7 +1061,7 @@ final class DictationController: NSObject {
         if let app, SublimeTextSelectionBridge.supports(app) {
             beginSublimeEditCapture(
                 app: app,
-                locked: locked,
+                intent: .voiceEdit(locked: locked),
                 inputGeneration: inputGeneration)
             return
         }
@@ -1015,14 +1078,53 @@ final class DictationController: NSObject {
             locked: locked)
     }
 
+    /// Proofreads the exact current selection in one step. This path never
+    /// starts audio capture or invokes the speech model.
+    private func beginProofreadSession() {
+        guard config.proofreadEnabled, !terminating else { return }
+        guard !StreamInteractionGate.selectionEditIsBusy(
+            phaseIsIdle: phase == .idle,
+            cancellationInFlight: streamCancellation != nil,
+            actionIsRunning: actionsStorage?.isRunning == true
+        ) else {
+            showNotice(symbol: "hourglass", message: "Velora is busy")
+            return
+        }
+        guard sublimeApplyID == nil else {
+            showNotice(symbol: "hourglass", message: "Finishing edit")
+            return
+        }
+        guard pendingEdit == nil else {
+            showNotice(symbol: "hourglass", message: "Current edit is still finishing")
+            return
+        }
+        guard sublimeCaptureID == nil else { return }
+
+        let inputGeneration = UserInputActivity.snapshot()
+        let app = NSWorkspace.shared.frontmostApplication
+            ?? contextTracker.frontmost
+        if let app, SublimeTextSelectionBridge.supports(app) {
+            beginSublimeEditCapture(
+                app: app,
+                intent: .proofread,
+                inputGeneration: inputGeneration)
+            return
+        }
+        guard let selected = ScreenContext.selectedText(of: app) else {
+            showProofreadStartError("Select some text first, then proofread")
+            return
+        }
+        startCapturedProofread(selected, app: app)
+    }
+
     private func beginSublimeEditCapture(
         app: NSRunningApplication,
-        locked: Bool,
+        intent: SelectionCaptureIntent,
         inputGeneration: UInt64
     ) {
         let captureID = UUID()
         sublimeCaptureID = captureID
-        sublimeCaptureLocksRecording = locked
+        sublimeCaptureIntent = intent
         sublimeCaptureReleasedBeforeStart = false
         sublimeQueue.async { [weak self] in
             let result = SublimeTextSelectionBridge.capture(of: app)
@@ -1033,7 +1135,20 @@ final class DictationController: NSObject {
                     }
                     return
                 }
-                let captureLocksRecording = self.sublimeCaptureLocksRecording
+                guard let captureIntent = self.sublimeCaptureIntent else {
+                    if case .success(let capture) = result {
+                        capture.token.discard()
+                    }
+                    self.clearSublimeCapture()
+                    return
+                }
+                guard let captureKind = captureIntent.editKind else {
+                    if case .success(let capture) = result {
+                        capture.token.discard()
+                    }
+                    self.clearSublimeCapture()
+                    return
+                }
                 let releasedBeforeStart =
                     self.sublimeCaptureReleasedBeforeStart
                 self.clearSublimeCapture()
@@ -1049,7 +1164,7 @@ final class DictationController: NSObject {
                 }
                 switch result {
                 case .success(let capture):
-                    guard !releasedBeforeStart else {
+                    if case .voiceEdit = captureIntent, releasedBeforeStart {
                         capture.token.discard()
                         self.showEditStartError(
                             "Sublime Text took too long — retry the edit")
@@ -1062,35 +1177,57 @@ final class DictationController: NSObject {
                         element: element,
                         identity: .sublimeToken(capture.token),
                         isEditable: true)
-                    self.startCapturedEdit(
-                        selected,
-                        app: app,
-                        locked: captureLocksRecording)
-                case .failure(.emptySelection):
-                    self.showEditStartError(
-                        "Select some text first, then speak an edit")
-                case .failure(.multipleSelections):
-                    self.showEditStartError(
-                        "Select one text range, then speak an edit")
-                case .failure(.selectionTooLong):
-                    self.showEditStartError(
-                        "Select a shorter text range, then speak an edit")
-                case .failure(.unsupportedView):
-                    self.showEditStartError(
-                        "Select text in a Sublime document, not Find or Console")
-                case .failure(.integrationNeedsRestart):
-                    self.showEditStartError(
-                        "Restart Sublime Text once, then retry")
-                case .failure(.integrationUnavailable):
-                    if !releasedBeforeStart,
-                       let selected = ScreenContext.selectedText(of: app) {
+                    switch captureIntent {
+                    case .voiceEdit(let locked):
                         self.startCapturedEdit(
                             selected,
                             app: app,
-                            locked: captureLocksRecording)
+                            locked: locked)
+                    case .proofread:
+                        self.startCapturedProofread(selected, app: app)
+                    case .streamTyping:
+                        selected.discardMutableIdentity()
+                    }
+                case .failure(.emptySelection):
+                    self.showSelectionStartError(
+                        captureKind == .proofread
+                            ? "Select some text first, then proofread"
+                            : "Select some text first, then speak an edit",
+                        kind: captureKind)
+                case .failure(.multipleSelections):
+                    self.showSelectionStartError(
+                        "Select one text range, then retry",
+                        kind: captureKind)
+                case .failure(.selectionTooLong):
+                    self.showSelectionStartError(
+                        "Select a shorter text range, then retry",
+                        kind: captureKind)
+                case .failure(.unsupportedView):
+                    self.showSelectionStartError(
+                        "Select text in a Sublime document, not Find or Console",
+                        kind: captureKind)
+                case .failure(.integrationNeedsRestart):
+                    self.showSelectionStartError(
+                        "Restart Sublime Text once, then retry",
+                        kind: captureKind)
+                case .failure(.integrationUnavailable):
+                    if (captureKind == .proofread || !releasedBeforeStart),
+                       let selected = ScreenContext.selectedText(of: app) {
+                        switch captureIntent {
+                        case .voiceEdit(let locked):
+                            self.startCapturedEdit(
+                                selected,
+                                app: app,
+                                locked: locked)
+                        case .proofread:
+                            self.startCapturedProofread(selected, app: app)
+                        case .streamTyping:
+                            selected.discardMutableIdentity()
+                        }
                     } else {
-                        self.showEditStartError(
-                            "Couldn't connect to Sublime Text — try again")
+                        self.showSelectionStartError(
+                            "Couldn't connect to Sublime Text — try again",
+                            kind: captureKind)
                     }
                 }
             }
@@ -1099,7 +1236,7 @@ final class DictationController: NSObject {
 
     private func clearSublimeCapture() {
         sublimeCaptureID = nil
-        sublimeCaptureLocksRecording = false
+        sublimeCaptureIntent = nil
         sublimeCaptureReleasedBeforeStart = false
     }
 
@@ -1108,7 +1245,7 @@ final class DictationController: NSObject {
         app: NSRunningApplication?,
         locked: Bool
     ) {
-        guard selected.text.count <= 8_000 else {
+        guard selected.text.unicodeScalars.count <= Self.maximumEditScalars else {
             selected.discardMutableIdentity()
             showEditStartError("Selection too long to voice-edit")
             return
@@ -1127,11 +1264,38 @@ final class DictationController: NSObject {
               selected.text.count, app?.bundleIdentifier ?? "unknown")
     }
 
+    private func startCapturedProofread(
+        _ selected: ScreenTextSelection,
+        app: NSRunningApplication?
+    ) {
+        guard selected.text.unicodeScalars.count <= Self.maximumEditScalars else {
+            selected.discardMutableIdentity()
+            showProofreadStartError("Selection too long to proofread")
+            return
+        }
+        sendEditCommand(
+            selection: selected,
+            bundleID: app?.bundleIdentifier,
+            instruction: Self.proofreadInstruction,
+            kind: .proofread)
+    }
+
     /// The error capsule's Retry button must retry Safe Voice Edit, not start
     /// an unrelated normal dictation. A click is a toggle-style action, so it
     /// always starts locked even when the configured hotkey uses hold mode.
     private func showEditStartError(_ message: String) {
-        showError(message, retryIntent: .voiceEdit)
+        showSelectionStartError(message, kind: .voiceEdit)
+    }
+
+    private func showProofreadStartError(_ message: String) {
+        showSelectionStartError(message, kind: .proofread)
+    }
+
+    private func showSelectionStartError(
+        _ message: String,
+        kind: EditRequestKind
+    ) {
+        showError(message, retryIntent: kind.retryIntent)
     }
 
     private func installEditStartRetry() {
@@ -1139,24 +1303,36 @@ final class DictationController: NSObject {
     }
 
     private func sendEditCommand(
-        edit: (
-            session: String, selection: ScreenTextSelection, bundleID: String?
-        ),
-        instruction: String
+        selection: ScreenTextSelection,
+        bundleID: String?,
+        instruction: String,
+        kind: EditRequestKind
     ) {
         guard !instruction.isEmpty else {
-            edit.selection.discardMutableIdentity()
+            selection.discardMutableIdentity()
             phase = .idle
             showError(
                 "Didn't catch an instruction — try again",
-                retryIntent: .voiceEdit)
+                retryIntent: kind.retryIntent)
             return
         }
         let id = UUID().uuidString
         pendingEdit = (
-            id: id, selection: edit.selection,
-            bundleID: edit.bundleID)
-        phase = .transcribing
+            id: id, selection: selection,
+            bundleID: bundleID, kind: kind)
+        phase = .editing
+        if kind == .proofread {
+            hud.model.recordingStart = nil
+            hud.model.levels.reset()
+            let app = bundleID.flatMap {
+                NSRunningApplication.runningApplications(
+                    withBundleIdentifier: $0).first
+            }
+            hud.model.beginSession(context: HUDSessionContext(
+                appIcon: app?.icon,
+                modeName: "Proofread"))
+            hud.transition(to: .transcribing)
+        }
         editTimer?.invalidate()
         editTimer = Timer.scheduledTimer(
             withTimeInterval: Self.editTimeout, repeats: false
@@ -1165,30 +1341,41 @@ final class DictationController: NSObject {
             pending.selection.discardMutableIdentity()
             self.pendingEdit = nil
             self.supervisor.send(["cmd": "edit_cancel", "id": id])
-            if self.phase == .transcribing { self.phase = .idle }
-            self.showError("Edit timed out", retryIntent: .voiceEdit)
+            if self.phase == .editing { self.phase = .idle }
+            self.showError("Edit timed out", retryIntent: pending.kind.retryIntent)
         }
         supervisor.send([
             "cmd": "edit_text", "id": id,
-            "text": edit.selection.text, "instruction": instruction,
+            "text": selection.text, "instruction": instruction,
         ])
         NSLog("Velora: edit_text sent — %ld chars, instruction %ld words",
-              edit.selection.text.count,
+              selection.text.count,
               instruction.split(separator: " ").count)
     }
 
     private func applyEdit(
         pending: (
-            id: String, selection: ScreenTextSelection, bundleID: String?
+            id: String, selection: ScreenTextSelection, bundleID: String?,
+            kind: EditRequestKind
         ),
         text: String, applied: Bool, ms: Int, reason: String?
     ) {
+        if !applied, reason == "no_change" {
+            pending.selection.discardMutableIdentity()
+            showNotice(symbol: "checkmark.circle", message: "No changes needed")
+            return
+        }
         guard applied else {
             pending.selection.discardMutableIdentity()
             // A guarded edit returns the original text — nothing worth
             // staging (the document still has it); leave the clipboard alone.
             NSLog("Velora: edit not applied (reason=%@)", reason ?? "model declined")
             showNotice(symbol: "pencil.slash", message: "Couldn't apply that edit")
+            return
+        }
+        guard text != pending.selection.text else {
+            pending.selection.discardMutableIdentity()
+            showNotice(symbol: "checkmark.circle", message: "No changes needed")
             return
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1210,7 +1397,7 @@ final class DictationController: NSObject {
         // user's clipboard.
         inserter.copyToClipboard(text)
         guard pending.selection.isEditable else {
-            showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
+            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
             return
         }
         guard Permissions.accessibilityGranted, TextInserter.canPostEvents,
@@ -1218,7 +1405,7 @@ final class DictationController: NSObject {
               let bundleID = pending.bundleID,
               NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
         else {
-            showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
+            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
             return
         }
         // The selection must still be what we edited, in the SAME field — the
@@ -1247,15 +1434,16 @@ final class DictationController: NSObject {
                 return pending.selection.canReplace(with: latest)
             })
         else {
-            showNotice(symbol: "doc.on.clipboard", message: "Edited text on clipboard")
+            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
             return
         }
-        finishAppliedEdit(bundleID: bundleID, ms: ms)
+        finishAppliedEdit(bundleID: bundleID, ms: ms, kind: pending.kind)
     }
 
     private func applySublimeEdit(
         pending: (
-            id: String, selection: ScreenTextSelection, bundleID: String?
+            id: String, selection: ScreenTextSelection, bundleID: String?,
+            kind: EditRequestKind
         ),
         token: SublimeTextSelectionToken,
         text: String,
@@ -1286,7 +1474,8 @@ final class DictationController: NSObject {
                 self.sublimeApplyingToken = nil
                 switch result {
                 case .applied:
-                    self.finishAppliedEdit(bundleID: bundleID, ms: ms)
+                    self.finishAppliedEdit(
+                        bundleID: bundleID, ms: ms, kind: pending.kind)
                 case .rejected:
                     NSLog("Velora: Sublime edit skipped — plugin validation failed")
                     self.showNotice(
@@ -1308,14 +1497,19 @@ final class DictationController: NSObject {
         sublimeApplyingToken = nil
     }
 
-    private func finishAppliedEdit(bundleID: String, ms: Int) {
+    private func finishAppliedEdit(
+        bundleID: String,
+        ms: Int,
+        kind: EditRequestKind
+    ) {
         // The edit rewrote text in place; the remembered delivery tail no
         // longer describes what sits before the caret.
         inserter.resetContinuationContext()
         lastInsertion = (bundleID: bundleID, at: Date())
         sounds.play(.stop)
         NSLog("Velora: edit applied (%d ms)", ms)
-        showNotice(symbol: "pencil.line", message: "Edited")
+        let notice = kind.successNotice
+        showNotice(symbol: notice.symbol, message: notice.message)
     }
 
     /// Pastes the last dictation's ORIGINAL raw transcript — exactly what the
@@ -1618,6 +1812,9 @@ final class DictationController: NSObject {
             },
             voiceEdit: { [weak self] in
                 self?.beginEditSession(locked: true)
+            },
+            proofread: { [weak self] in
+                self?.beginProofreadSession()
             })
     }
 
@@ -2065,6 +2262,24 @@ final class DictationController: NSObject {
                 return
             }
             let effectiveRaw = raw.isEmpty ? (rawTranscript ?? text) : raw
+            if LateFinalPolicy.preserveDuringEdit(
+                hasPendingEdit: pendingEdit != nil
+            ) {
+                consumedSessionID = session
+                timeoutErrorAt = nil
+                transcribeTimer?.invalidate()
+                transcribeTimer = nil
+                recordHistory(
+                    text: text, raw: effectiveRaw, context: sessionContext,
+                    mode: mode, cleanupMs: cleanupMs,
+                    cleanupApplied: cleanupApplied,
+                    cleanupWallMs: cleanupWallMs,
+                    finalizationMs: totalMs, audio: audio)
+                NSLog(
+                    "Velora: preserved late final during selection edit — session=%@",
+                    session)
+                return
+            }
             if terminating {
                 // The bounded quit timer may already have released AppKit.
                 // Never turn its late final into a paste; the unacknowledged
@@ -2132,7 +2347,11 @@ final class DictationController: NSObject {
                 editSession = nil
                 let instruction = (raw.isEmpty ? text : raw)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                sendEditCommand(edit: edit, instruction: instruction)
+                sendEditCommand(
+                    selection: edit.selection,
+                    bundleID: edit.bundleID,
+                    instruction: instruction,
+                    kind: .voiceEdit)
                 ackFinalAudio(audio, session: session)
                 return
             }
@@ -2214,27 +2433,32 @@ final class DictationController: NSObject {
             pendingEdit = nil
             editTimer?.invalidate()
             editTimer = nil
-            if phase == .transcribing { phase = .idle }
+            if phase == .editing { phase = .idle }
             applyEdit(pending: pending, text: text, applied: applied, ms: ms, reason: reason)
 
         case .editFailed(let id, let error, let code):
             guard let pending = pendingEdit, pending.id == id else { break }
+            let retryIntent = pending.kind.retryIntent
             pending.selection.discardMutableIdentity()
             pendingEdit = nil
             editTimer?.invalidate()
             editTimer = nil
-            if phase == .transcribing { phase = .idle }
+            if phase == .editing { phase = .idle }
             switch code {
             case "busy":
                 showError(
                     "Velora is busy — try the edit again",
-                    retryIntent: .voiceEdit)
+                    retryIntent: retryIntent)
             case "cleanup_unavailable":
                 showError(
                     "The writing model is still loading — try again shortly",
-                    retryIntent: .voiceEdit)
+                    retryIntent: retryIntent)
+            case "cleanup_timeout":
+                showError(
+                    "The writing model timed out — retry",
+                    retryIntent: retryIntent)
             default:
-                showError(error, retryIntent: .voiceEdit)
+                showError(error, retryIntent: retryIntent)
             }
 
         case .error(let session, let message):
@@ -2276,6 +2500,7 @@ final class DictationController: NSObject {
         // pendingEdit is created only after the raw instruction final has set
         // consumedSessionID, so clearing it here blocks both a stale `.edited`
         // response and any duplicate raw final from reaching normal insertion.
+        let retryIntent = pendingEdit?.kind.retryIntent ?? .voiceEdit
         if let pending = pendingEdit {
             pending.selection.discardMutableIdentity()
             supervisor.send(["cmd": "edit_cancel", "id": pending.id])
@@ -2283,7 +2508,7 @@ final class DictationController: NSObject {
         }
         editTimer?.invalidate()
         editTimer = nil
-        showError(message, retryIntent: .voiceEdit)
+        showError(message, retryIntent: retryIntent)
     }
 
     private func finishInsertion(
@@ -3080,6 +3305,8 @@ extension DictationController: HotkeyMonitorDelegate {
             stopAndTranscribe()
         case (.toggle, .transcribing):
             break
+        case (.toggle, .editing):
+            break
 
         case (.hold, .idle):
             hotkeyDownAt = Date()
@@ -3091,7 +3318,8 @@ extension DictationController: HotkeyMonitorDelegate {
         case (.hold, .recording(locked: true)):
             // Tap while locked → finish.
             stopAndTranscribe()
-        case (.hold, .recording(locked: false)), (.hold, .transcribing):
+        case (.hold, .recording(locked: false)), (.hold, .transcribing),
+             (.hold, .editing):
             break
         }
     }
@@ -3121,6 +3349,7 @@ extension DictationController: HotkeyMonitorDelegate {
     func secondaryHotkeyDown(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyDown()
+        case .proofread: beginProofreadSession()
         case .stream: streamHotkeyDown()
         case .action: actionHotkeyDown()
         }
@@ -3129,6 +3358,7 @@ extension DictationController: HotkeyMonitorDelegate {
     func secondaryHotkeyUp(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyUp()
+        case .proofread: break
         case .stream: streamHotkeyUp()
         case .action: actionHotkeyUp()
         }
@@ -3216,7 +3446,7 @@ extension DictationController: HotkeyMonitorDelegate {
     ) {
         let captureID = UUID()
         sublimeCaptureID = captureID
-        sublimeCaptureLocksRecording = locked
+        sublimeCaptureIntent = .streamTyping(locked: locked)
         sublimeCaptureReleasedBeforeStart = false
         sublimeQueue.async { [weak self] in
             let result = SublimeTextSelectionBridge.captureStream(of: app)
@@ -3229,7 +3459,16 @@ extension DictationController: HotkeyMonitorDelegate {
                     }
                     return
                 }
-                let captureLocksRecording = self.sublimeCaptureLocksRecording
+                guard case .streamTyping(let captureLocksRecording) =
+                        self.sublimeCaptureIntent else {
+                    if case .success(let capture) = result {
+                        DispatchQueue.global(qos: .utility).async {
+                            _ = capture.token.cancel()
+                        }
+                    }
+                    self.clearSublimeCapture()
+                    return
+                }
                 let releasedBeforeStart =
                     self.sublimeCaptureReleasedBeforeStart
                 self.clearSublimeCapture()
@@ -3369,7 +3608,7 @@ extension DictationController: HotkeyMonitorDelegate {
             let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
             switch Self.delayedEditCaptureRelease(heldFor: heldFor) {
             case .lockRecording:
-                sublimeCaptureLocksRecording = true
+                sublimeCaptureIntent = .streamTyping(locked: true)
             case .cancel:
                 sublimeCaptureReleasedBeforeStart = true
             }
@@ -3513,7 +3752,7 @@ extension DictationController: HotkeyMonitorDelegate {
             let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
             switch Self.delayedEditCaptureRelease(heldFor: heldFor) {
             case .lockRecording:
-                sublimeCaptureLocksRecording = true
+                sublimeCaptureIntent = .voiceEdit(locked: true)
             case .cancel:
                 sublimeCaptureReleasedBeforeStart = true
             }
@@ -3552,7 +3791,7 @@ extension DictationController: HotkeyMonitorDelegate {
             if actionsStorage?.isExecuting == true { return }
         }
         switch phase {
-        case .starting, .recording, .transcribing:
+        case .starting, .recording, .transcribing, .editing:
             cancel()
         case .idle:
             if sublimeCaptureID != nil || sublimeApplyID != nil {
