@@ -10,6 +10,13 @@ enum SnapshotRenderer {
     static func run(outputDir: String) -> Never {
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
+        // VELORA_SNAPSHOT_APPEARANCE=light|dark forces both themes to be
+        // checkable from the CLI regardless of the system setting.
+        switch ProcessInfo.processInfo.environment["VELORA_SNAPSHOT_APPEARANCE"] {
+        case "light": app.appearance = NSAppearance(named: .aqua)
+        case "dark": app.appearance = NSAppearance(named: .darkAqua)
+        default: break
+        }
         let dir = URL(fileURLWithPath: outputDir, isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -305,6 +312,16 @@ enum SnapshotRenderer {
             write(view: content, to: dir.appendingPathComponent("settings-\(tab.rawValue).png"))
         }
 
+        // Full-height card panes, seeded so the charts render with real
+        // shapes (the windowed pane snapshots above cut below the fold and
+        // draw from the live — possibly empty — history).
+        renderSeededStats(model: model, into: dir)
+        let shortcutsView = NSHostingView(
+            rootView: ShortcutsSettingsView(model: model))
+        snapshot(
+            shortcutsView, size: NSSize(width: 660, height: 1050),
+            name: "settings-shortcuts-tall", dir: dir)
+
         // The collapsed icon rail, once.
         selection.tab = .general
         selection.sidebarCollapsed = true
@@ -314,6 +331,71 @@ enum SnapshotRenderer {
             write(view: content, to: dir.appendingPathComponent("settings-general-collapsed.png"))
         }
         selection.sidebarCollapsed = userCollapsed
+    }
+
+    /// Stats dashboard over a deterministic 12-week fixture history — proves
+    /// the heatmap intensity ramp, gradient bars, breakdown rows, and the
+    /// below-the-fold Performance/Accuracy/Share cards actually render.
+    @MainActor
+    private static func renderSeededStats(model: SettingsModel, into dir: URL) {
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-stats-snapshot-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(
+            at: fixtureRoot, withIntermediateDirectories: true)
+        let store = HistoryStore(
+            url: fixtureRoot.appendingPathComponent("history.sqlite3"),
+            removeArchivedClip: { _ in })
+
+        let apps: [(name: String, bundle: String, mode: String)] = [
+            ("Slack", "com.tinyspeck.slackmacgap", "Message"),
+            ("Notes", "com.apple.Notes", "Notes"),
+            ("Mail", "com.apple.mail", "Email"),
+            ("Safari", "com.apple.Safari", "Default"),
+            ("Terminal", "com.apple.Terminal", "Terminal"),
+        ]
+        for daysAgo in 0..<HistoryStore.heatmapDays {
+            // Deterministic gaps + a weekly rhythm so the heatmap shows all
+            // four intensity buckets and the bar chart varies visibly.
+            if daysAgo % 9 == 3 || daysAgo % 13 == 7 { continue }
+            let dictations = 1 + (daysAgo % 3)
+            for slot in 0..<dictations {
+                let words = 30 + ((daysAgo * 37 + slot * 61) % 320)
+                let app = apps[(daysAgo + slot) % apps.count]
+                let text = Array(repeating: "word", count: words)
+                    .joined(separator: " ")
+                var record = DictationRecord(
+                    timestamp: Date().addingTimeInterval(
+                        TimeInterval(-daysAgo * 86_400 - slot * 600)),
+                    bundleID: app.bundle, appName: app.name,
+                    raw: text, final: text, mode: app.mode,
+                    durationMs: words * 380,
+                    cleanupMs: 250 + (daysAgo % 5) * 40)
+                record.cleanupWallMs = 400 + (daysAgo % 5) * 50
+                record.finalizationMs = 700 + (daysAgo % 7) * 60
+                record.sessionID = "snap-\(daysAgo)-\(slot)"
+                record.sttMs = 650 + (daysAgo % 6) * 90
+                record.cleanupApplied = daysAgo % 4 != 0
+                store.insert(record)
+            }
+        }
+        // Serial write queue: this barrier returns only after every insert
+        // above is durable, so the view model's first load sees all rows.
+        let drained = DispatchSemaphore(value: 0)
+        store.drain { drained.signal() }
+        drained.wait()
+
+        // Preload insights on this thread (serial history queue, so it sees
+        // every row) instead of trusting `.onAppear`'s async reload to finish
+        // inside the snapshot's runloop budget.
+        let vm = IntelligenceViewModel(history: store)
+        vm.insights = store.insights()
+
+        let view = NSHostingView(
+            rootView: IntelligenceSettingsView(model: model, viewModel: vm))
+        snapshot(
+            view, size: NSSize(width: 780, height: 1560),
+            name: "settings-stats-seeded", dir: dir)
+        try? FileManager.default.removeItem(at: fixtureRoot)
     }
 
     @MainActor

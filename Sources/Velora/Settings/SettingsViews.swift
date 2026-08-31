@@ -728,132 +728,28 @@ struct ModelSettingsView: View {
 
 // MARK: - Shortcuts
 
+/// Card-per-feature Shortcuts pane: each voice feature gets one card with a
+/// colored icon tile, its master toggle, and a keycap-styled recorder. The
+/// Music permission row appears only while the user can actually act on it —
+/// a permanently "Allowed" status row is dead weight.
 struct ShortcutsSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var musicPermission: NativeMediaPermission?
     @State private var requestingMusicPermission = false
 
     var body: some View {
-        Form {
-            Section {
-                LabeledContent("Start dictation") {
-                    HotkeyRecorderView(hotkey: $model.hotkey)
-                }
-                LabeledContent("Cancel dictation", value: "Esc")
-            } footer: {
-                SettingsFooter("Click the shortcut, then press a new key combo — a bare modifier like Right Option works too.")
+        ScrollView {
+            VStack(alignment: .leading, spacing: VeloraSpacing.l) {
+                dictationCard
+                streamTypingCard
+                voiceEditCard
+                voiceActionsCard
             }
-            Section {
-                Toggle(isOn: $model.streamTypingEnabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("Stream typing")
-                            Text("NEW")
-                                .font(.caption2.weight(.bold))
-                                .foregroundStyle(.tint)
-                        }
-                        Text("See your words appear at the cursor while you speak. Velora replaces its own live draft with the polished final when you finish.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                LabeledContent("Type as you speak") {
-                    HotkeyRecorderView(hotkey: $model.streamTypingHotkey)
-                }
-                .disabled(!model.streamTypingEnabled)
-                if model.streamTypingHotkeyConflict {
-                    Text("Stream typing needs a shortcut of its own.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            } header: {
-                Text("Stream typing")
-            } footer: {
-                SettingsFooter("If you type or move the cursor mid-stream, Velora stops rewriting and copies the final instead.")
-            }
-            Section {
-                Toggle(isOn: $model.voiceEdit) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Voice edit selection")
-                        Text("Select text anywhere, press the shortcut, and speak an edit — \u{201C}make this more formal\u{201D}, \u{201C}fix the grammar\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                LabeledContent("Edit selection") {
-                    HotkeyRecorderView(hotkey: $model.editHotkey)
-                }
-                .disabled(!model.voiceEdit)
-                if model.editHotkeyConflict {
-                    Text("Dictation and Edit selection need different shortcuts.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-            } header: {
-                Text("Voice edit")
-            }
-            Section {
-                Toggle(isOn: $model.actionsEnabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
-                            Text("Voice actions")
-                            ExperimentalBadge()
-                        }
-                        Text("Hold the shortcut and say what you want done — \u{201C}search YouTube for the match highlights\u{201D}, \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora opens the app and carries it out. Say \u{201C}draft\u{201D} to stop before sending.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                LabeledContent("Run an action") {
-                    HotkeyRecorderView(hotkey: $model.actionHotkey)
-                }
-                .disabled(!model.actionsEnabled)
-                if model.actionHotkeyConflict {
-                    Text("Voice actions need a shortcut of their own.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
-                if CuaDriver.isInstalled {
-                    Toggle(isOn: $model.backgroundActions) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Work in the background")
-                            Text("Velora drives an exact target through Cua while your current app stays in front. Unsupported actions stop without taking focus.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .disabled(!model.actionsEnabled)
-                }
-                LabeledContent {
-                    musicPermissionControl
-                } label: {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Music control")
-                        Text("Allow once to play or pause Music without bringing it forward.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .disabled(!model.actionsEnabled)
-            } header: {
-                Text("Voice actions")
-            } footer: {
-                SettingsFooter("Actions need Accessibility permission, and run entirely on this Mac.")
-            }
-            Section {
-                Picker("When pressed", selection: $model.hotkeyMode) {
-                    ForEach(HotkeyMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.radioGroup)
-            } header: {
-                Text("Hotkey behavior")
-            } footer: {
-                SettingsFooter("With Hold to talk, a quick tap locks recording on; tap again to finish.")
-            }
+            .padding(VeloraSpacing.xl)
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
         }
-        .formStyle(.grouped)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear(perform: refreshMusicPermission)
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification
@@ -862,27 +758,190 @@ struct ShortcutsSettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private var musicPermissionControl: some View {
-        switch musicPermission {
-        case .allowed?:
-            Label("Allowed", systemImage: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-        case .needsConsent?:
-            Button(requestingMusicPermission ? "Waiting…" : "Allow…",
-                   action: requestMusicPermission)
-                .disabled(requestingMusicPermission)
-        case .denied?:
-            Button("Open Settings") {
-                Permissions.openAutomationSettings()
+    // MARK: Dictation
+
+    private var dictationCard: some View {
+        SettingsCard {
+            CardHeader(
+                symbol: "mic.fill", color: VeloraBrand.violet.color,
+                title: "Dictation",
+                subtitle: "Press your shortcut and speak — anywhere you can type. Esc cancels.")
+            CardDivider()
+            shortcutRow(title: "Start dictation", hotkey: $model.hotkey)
+            HStack {
+                Text("When pressed")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("When pressed", selection: $model.hotkeyMode) {
+                    ForEach(HotkeyMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
             }
-        case .unavailable?:
-            Text("Open Music, then return here")
-                .foregroundStyle(.secondary)
-        case nil:
-            ProgressView()
-                .controlSize(.small)
+            if model.hotkeyMode == .hold {
+                Text("A quick tap locks recording on; tap again to finish.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
+    }
+
+    // MARK: Stream typing
+
+    private var streamTypingCard: some View {
+        SettingsCard {
+            CardHeader(
+                symbol: "keyboard.fill", color: .blue,
+                title: "Stream typing",
+                subtitle: "See your words appear at the cursor while you speak. The live draft is replaced with the polished final when you finish."
+            ) {
+                Toggle("Stream typing", isOn: $model.streamTypingEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            Group {
+                CardDivider()
+                shortcutRow(title: "Type as you speak", hotkey: $model.streamTypingHotkey)
+                if model.streamTypingHotkeyConflict {
+                    conflictLabel("Stream typing needs a shortcut of its own.")
+                }
+                Text("If you type or move the cursor mid-stream, Velora stops rewriting and copies the final instead.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .disabled(!model.streamTypingEnabled)
+            .opacity(model.streamTypingEnabled ? 1 : 0.5)
+        }
+    }
+
+    // MARK: Voice edit
+
+    private var voiceEditCard: some View {
+        SettingsCard {
+            CardHeader(
+                symbol: "wand.and.stars", color: .teal,
+                title: "Voice edit selection",
+                subtitle: "Select text anywhere, press the shortcut, and speak an edit — \u{201C}make this more formal\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it."
+            ) {
+                Toggle("Voice edit selection", isOn: $model.voiceEdit)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            Group {
+                CardDivider()
+                shortcutRow(title: "Edit selection", hotkey: $model.editHotkey)
+                if model.editHotkeyConflict {
+                    conflictLabel("Dictation and Edit selection need different shortcuts.")
+                }
+            }
+            .disabled(!model.voiceEdit)
+            .opacity(model.voiceEdit ? 1 : 0.5)
+        }
+    }
+
+    // MARK: Voice actions
+
+    private var voiceActionsCard: some View {
+        SettingsCard {
+            CardHeader(
+                symbol: "sparkles", color: .orange,
+                title: "Voice actions",
+                subtitle: "Hold the shortcut and say what you want done — \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora opens the app and carries it out. Say \u{201C}draft\u{201D} to stop before sending."
+            ) {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Toggle("Voice actions", isOn: $model.actionsEnabled)
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                    ExperimentalBadge()
+                }
+            }
+            Group {
+                CardDivider()
+                shortcutRow(title: "Run an action", hotkey: $model.actionHotkey)
+                if model.actionHotkeyConflict {
+                    conflictLabel("Voice actions need a shortcut of their own.")
+                }
+                if CuaDriver.isInstalled {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Work in the background")
+                                .font(.system(size: 12))
+                            Text("Velora drives an exact target through Cua while your current app stays in front.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Toggle("Work in the background", isOn: $model.backgroundActions)
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                    }
+                }
+                musicPermissionRow
+                Text("Actions need Accessibility permission, and run entirely on this Mac.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .disabled(!model.actionsEnabled)
+            .opacity(model.actionsEnabled ? 1 : 0.5)
+        }
+    }
+
+    /// Shown only while there is something to do: grant consent, fix a denial
+    /// in System Settings, or open Music so consent becomes requestable (this
+    /// pane is the only interactive Automation prompt — actions fail closed).
+    /// Granted state renders nothing — a permanent "Allowed" row is dead weight.
+    @ViewBuilder
+    private var musicPermissionRow: some View {
+        let actionable: [NativeMediaPermission?] = [.needsConsent, .denied, .unavailable]
+        if actionable.contains(musicPermission) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Music control")
+                        .font(.system(size: 12))
+                    Text("Allow once to play or pause Music without bringing it forward.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                Spacer()
+                switch musicPermission {
+                case .needsConsent:
+                    Button(requestingMusicPermission ? "Waiting…" : "Allow…",
+                           action: requestMusicPermission)
+                        .disabled(requestingMusicPermission)
+                case .denied:
+                    Button("Open Settings") {
+                        Permissions.openAutomationSettings()
+                    }
+                default:
+                    Text("Open Music, then return here")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: Shared rows
+
+    private func shortcutRow(title: String, hotkey: Binding<Hotkey>) -> some View {
+        HStack(alignment: .top) {
+            Text(title)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+            Spacer(minLength: VeloraSpacing.l)
+            HotkeyRecorderView(hotkey: hotkey)
+        }
+    }
+
+    private func conflictLabel(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(.orange)
     }
 
     private func refreshMusicPermission() {

@@ -4223,6 +4223,10 @@ enum Selftest {
                    "daily series ends with today's word total")
             expect(insights.daily.count <= 30 && insights.daily.allSatisfy { $0.count > 0 },
                    "daily series is bounded to active days in the last 30")
+            expect(insights.heatmapDaily.contains(where: { $0.words == 50 }),
+                   "heatmap series reaches beyond 30 days (12-week span)")
+            expect(insights.heatmapDaily.last == insights.daily.last,
+                   "heatmap and 30-day series agree on today")
             expect(insights.apps.first?.name == "Notes" && insights.apps.first?.words == 60,
                    "app breakdown ranks by words over the last 30 days")
             expect(!insights.apps.contains(where: { $0.name == "Terminal" }),

@@ -22,7 +22,7 @@ struct HotkeyRecorderView: View {
     @State private var candidateModifierKeyCode: Int64?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+        VStack(alignment: .trailing, spacing: VeloraSpacing.s) {
             recorderField
             if showsQuickPicks {
                 quickPicks
@@ -38,21 +38,32 @@ struct HotkeyRecorderView: View {
         Button {
             isRecording ? endRecording(reason: "clicked away") : beginRecording()
         } label: {
-            Text(isRecording ? "Press your shortcut…" : hotkey.displayLabel)
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundStyle(isRecording ? Color.secondary : Color.primary)
-                .frame(minWidth: 150)
-                .padding(.horizontal, VeloraSpacing.l)
-                .padding(.vertical, 10)
-                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .strokeBorder(
-                            isRecording ? Color.accentColor : Color(nsColor: .separatorColor),
-                            lineWidth: 1))
-                .contentShape(RoundedRectangle(cornerRadius: 6))
+            Group {
+                if isRecording {
+                    Text("Press your shortcut…")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                } else {
+                    KeycapsLabel(hotkey: hotkey)
+                }
+            }
+            .frame(minWidth: 130)
+            .padding(.horizontal, VeloraSpacing.m)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isRecording
+                          ? Color.accentColor.opacity(0.08)
+                          : Color.primary.opacity(0.03)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .strokeBorder(
+                        isRecording ? Color.accentColor : Color(nsColor: .separatorColor),
+                        lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        .help("Click, then press a new key combo — a bare modifier like Right Option works too")
         .accessibilityLabel(
             isRecording ? "Recording shortcut; press keys now" : "Change shortcut")
     }

@@ -168,8 +168,13 @@ struct SettingsRootView: View {
             }
             .buttonStyle(.plain)
             .help(selection.sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar")
-            Text(selection.current.title)
-                .font(.system(size: 15, weight: .semibold))
+            HStack(spacing: VeloraSpacing.s) {
+                IconTile(
+                    symbol: selection.current.symbol,
+                    color: selection.current.tileColor, side: 22)
+                Text(selection.current.title)
+                    .font(.system(size: 15, weight: .semibold))
+            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, VeloraSpacing.xl)
@@ -392,8 +397,11 @@ struct SettingsSidebarRow: View {
                             .fill(tab.tileColor.gradient))
                 if !collapsed {
                     Text(tab.title)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.primary)
+                        .font(.system(size: 13, weight: selected ? .medium : .regular))
+                        .foregroundStyle(
+                            selected
+                                ? Color(nsColor: .alternateSelectedControlTextColor)
+                                : Color.primary)
                     Spacer(minLength: 0)
                 }
             }
@@ -403,8 +411,16 @@ struct SettingsSidebarRow: View {
             .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
+        // Selected row fills with the accent (the System Settings source-list
+        // idiom) — unmistakable, which a settings sidebar must be
+        // (user-reported failure, twice). Collapsed rail keeps the neutral
+        // fill so the colored tile itself stays legible.
         .background(
-            selected ? Color.primary.opacity(0.09) : Color.clear,
+            selected
+                ? (collapsed
+                   ? AnyShapeStyle(Color.primary.opacity(0.09))
+                   : AnyShapeStyle(Color.accentColor.gradient))
+                : AnyShapeStyle(Color.clear),
             in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .help(tab.title)
         .accessibilityAddTraits(selected ? [.isSelected] : [])

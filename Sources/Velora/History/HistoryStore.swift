@@ -629,6 +629,9 @@ final class HistoryStore {
     static func streak(days: [String]) -> Int {
         guard !days.isEmpty else { return 0 }
         let formatter = DateFormatter()
+        // POSIX locale: SQLite's day strings are Gregorian ASCII regardless
+        // of the user's calendar or digit set.
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = .current
         let calendar = Calendar.current
@@ -653,6 +656,8 @@ final class HistoryStore {
     static func longestStreak(days: [String]) -> Int {
         guard !days.isEmpty else { return 0 }
         let formatter = DateFormatter()
+        // POSIX locale: same reason as `streak`.
+        formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = .current
         let calendar = Calendar.current
@@ -764,10 +769,16 @@ final class HistoryStore {
         var longestStreak = 0
         /// Days with activity in the last 30 (ascending; gaps omitted).
         var daily: [DaySample] = []
+        /// Days with activity in the last `heatmapDays` (ascending; gaps
+        /// omitted) — feeds the Stats tab's 12-week activity heatmap.
+        var heatmapDaily: [DaySample] = []
         /// Top apps / modes by words over the last 30 days.
         var apps: [BreakdownSlice] = []
         var modes: [BreakdownSlice] = []
     }
+
+    /// Calendar span of the Stats heatmap (12 weeks).
+    static let heatmapDays = 84
 
     private static let localDay = "date(ts, 'unixepoch', 'localtime')"
 
@@ -779,7 +790,8 @@ final class HistoryStore {
             result.week = windowStatsOnQueue(daysBack: 6)
             result.month = windowStatsOnQueue(daysBack: 29)
             result.allTime = windowStatsOnQueue(daysBack: nil)
-            result.daily = dailySeriesOnQueue()
+            result.daily = dailySeriesOnQueue(daysBack: 29)
+            result.heatmapDaily = dailySeriesOnQueue(daysBack: Self.heatmapDays - 1)
             result.apps = breakdownOnQueue(
                 expr: "COALESCE(app_name, 'Unknown app')")
             result.modes = breakdownOnQueue(
@@ -837,13 +849,14 @@ final class HistoryStore {
         return stats
     }
 
-    /// Per-day activity for the last 30 calendar days. MUST be called on `queue`.
-    private func dailySeriesOnQueue() -> [DaySample] {
+    /// Per-day activity for the last `daysBack + 1` calendar days. MUST be
+    /// called on `queue`.
+    private func dailySeriesOnQueue(daysBack: Int) -> [DaySample] {
         let sql = """
             SELECT \(Self.localDay), COUNT(*), \(Self.wordsExpr)
             FROM dictations
             WHERE \(Self.nonEmpty)
-              AND \(Self.localDay) >= date('now', 'localtime', '-29 days')
+              AND \(Self.localDay) >= date('now', 'localtime', '-\(daysBack) days')
             GROUP BY 1 ORDER BY 1 ASC;
             """
         var stmt: OpaquePointer?
