@@ -154,6 +154,7 @@ struct MeetingsSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             // A live capture must never scroll its controls out of reach —
             // the form scrolls, so Stop/Discard get a pinned bottom bar for

@@ -220,7 +220,9 @@ struct SettingsSearchBox: View {
         }
         .padding(.horizontal, VeloraSpacing.s)
         .padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: 8).fill(Color(.textBackgroundColor)))
+        // Card, not textBackgroundColor: the semantic color drops to #1E1E1E
+        // in dark mode and reads as a hole in the canvas.
+        .background(RoundedRectangle(cornerRadius: 8).fill(VeloraPanel.card))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separatorColor)))
     }
 }
@@ -342,6 +344,7 @@ struct GeneralSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear { model.refreshAgentIntegration() }
     }
 
@@ -527,6 +530,7 @@ struct DictationSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .task(id: model.saveAudio) { archiveSize = await Self.archiveSizeDescription() }
         .onAppear {
             AudioInputDevices.beginObserving()
@@ -636,6 +640,7 @@ struct ModelSettingsView: View {
             storageSection
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .task { await refreshStorage() }
         .onAppear { model.requestStatus() }
         .alert(item: $pendingDelete) { target in
@@ -749,7 +754,7 @@ struct ShortcutsSettingsView: View {
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(VeloraPanel.canvas)
         .onAppear(perform: refreshMusicPermission)
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification
@@ -825,7 +830,7 @@ struct ShortcutsSettingsView: View {
             CardHeader(
                 symbol: "wand.and.stars", color: .teal,
                 title: "Voice edit selection",
-                subtitle: "Select text anywhere, press the shortcut, and speak an edit — \u{201C}make this more formal\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it."
+                subtitle: "Select text anywhere, press the shortcut, and speak an edit — \u{201C}fix the grammar\u{201D}, \u{201C}make this more formal\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it."
             ) {
                 Toggle("Voice edit selection", isOn: $model.voiceEdit)
                     .toggleStyle(.switch)
@@ -934,7 +939,7 @@ struct ShortcutsSettingsView: View {
                 .foregroundStyle(.secondary)
                 .padding(.top, 8)
             Spacer(minLength: VeloraSpacing.l)
-            HotkeyRecorderView(hotkey: hotkey)
+            HotkeyRecorderView(hotkey: hotkey, showsQuickPicks: false)
         }
     }
 

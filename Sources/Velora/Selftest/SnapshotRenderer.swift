@@ -251,7 +251,7 @@ enum SnapshotRenderer {
         }
         .padding(VeloraSpacing.m)
         .frame(width: 215)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(VeloraPanel.canvas)
         let view = NSHostingView(rootView: rows)
         snapshot(view, size: NSSize(width: 215, height: 480), name: "settings-sidebar-rows", dir: dir)
     }
@@ -293,7 +293,8 @@ enum SnapshotRenderer {
         // (bisected). The flag only affects the titlebar strip, which these
         // contentView snapshots exclude anyway.
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.titleVisibility = .hidden
+        window.titleVisibility = .visible
+        window.backgroundColor = VeloraPanel.canvasColor
         window.setContentSize(NSSize(width: 820, height: 620))
 
         // Deterministic panes regardless of the user's persisted sidebar

@@ -222,7 +222,7 @@ struct IntelligenceSettingsView: View {
             .frame(maxWidth: 780)
             .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(VeloraPanel.canvas)
     }
 
     // MARK: Hero tiles

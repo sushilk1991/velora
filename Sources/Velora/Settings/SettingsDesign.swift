@@ -1,11 +1,32 @@
 import AppKit
 import SwiftUI
 
-// Shared visual language for the card-based settings panes (Stats, Shortcuts).
-// Everything renders with solid system colors — the offscreen snapshot
-// renderer composites materials as blank surfaces, so cards use
-// `textBackgroundColor` on the window background plus a hairline, the same
-// recipe the grouped Form boxes resolve to.
+// Shared visual language for the settings window. Everything renders with
+// solid colors — the offscreen snapshot renderer composites materials as
+// blank surfaces — and every pane sits on the one canvas/card pair below
+// (grouped Forms hide their own scroll background to reveal it), so the
+// whole window reads as a single surface in both themes.
+
+/// The settings window's canonical background pair. Canvas is the window and
+/// pane ground, card the elevated surface on top of it. Defined as explicit
+/// sRGB values because no public semantic NSColor gives one consistent
+/// answer across Forms, ScrollViews, and the titlebar.
+enum VeloraPanel {
+    static let canvasColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 48 / 255, green: 48 / 255, blue: 48 / 255, alpha: 1)
+            : NSColor(srgbRed: 247 / 255, green: 247 / 255, blue: 247 / 255, alpha: 1)
+    }
+
+    static let cardColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(srgbRed: 41 / 255, green: 41 / 255, blue: 41 / 255, alpha: 1)
+            : NSColor.white
+    }
+
+    static let canvas = Color(nsColor: canvasColor)
+    static let card = Color(nsColor: cardColor)
+}
 
 /// One elevated card: rounded 12 pt surface, hairline border, whisper shadow.
 struct SettingsCard<Content: View>: View {
@@ -23,7 +44,7 @@ struct SettingsCard<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor)))
+                .fill(VeloraPanel.card))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
@@ -109,7 +130,7 @@ struct StatTile: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .textBackgroundColor)))
+                .fill(VeloraPanel.card))
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))

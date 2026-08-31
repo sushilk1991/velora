@@ -345,8 +345,10 @@ final class SettingsModel: ObservableObject {
             }
             self.syncingHUDPrefs = false
         }
-        dictionaryRowsObserver = dictionary.$rows.sink { [weak self] _ in
-            self?.dictionaryRows = dictionary.rows
+        // Consume the emitted array: @Published fires during willSet, when
+        // dictionary.rows still holds the previous value.
+        dictionaryRowsObserver = dictionary.$rows.sink { [weak self] rows in
+            self?.dictionaryRows = rows
         }
         dictionarySyncObserver = dictionarySync.$status.sink { [weak self] status in
             self?.dictionarySyncStatus = status

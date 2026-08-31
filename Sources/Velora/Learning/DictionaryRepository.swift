@@ -17,6 +17,7 @@ struct DictionaryRow: Identifiable, Equatable {
     let heardAs: String?
     let source: DictionarySource
     let isSoftCorrection: Bool
+    let modifiedAt: Date
 }
 
 enum DictionaryRepositoryError: Error, LocalizedError {
@@ -577,6 +578,10 @@ final class DictionaryRepository: ObservableObject {
             }
             return row(for: entry)
         }.sorted {
+            // Newest first, so a term Velora just learned surfaces at the top
+            // instead of vanishing into an alphabetical middle (users read the
+            // unchanged list head as "learning stopped"). Search covers lookup.
+            if $0.modifiedAt != $1.modifiedAt { return $0.modifiedAt > $1.modifiedAt }
             let comparison = $0.writeAs.localizedCaseInsensitiveCompare($1.writeAs)
             return comparison == .orderedSame ? $0.id < $1.id : comparison == .orderedAscending
         }
@@ -594,7 +599,8 @@ final class DictionaryRepository: ObservableObject {
             writeAs: entry.writeAs,
             heardAs: entry.heardAs,
             source: source,
-            isSoftCorrection: entry.kind == .learnedSoft)
+            isSoftCorrection: entry.kind == .learnedSoft,
+            modifiedAt: entry.modifiedAt)
     }
 
     private func upsertingCaptured(

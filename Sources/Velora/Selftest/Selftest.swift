@@ -100,6 +100,7 @@ enum Selftest {
         testDictionarySyncSkipsSelfTriggeredRewrite()
         testDictionarySyncRequiresIdentityMarker()
         testDictionarySettingsLogic()
+        testDictionaryRowsOrderNewestFirst()
         testCorrectionDiff()
         testEventParsing()
         testOnboardingSetup()
@@ -3521,17 +3522,48 @@ enum Selftest {
         fixture.remove()
     }
 
+    private static func testDictionaryRowsOrderNewestFirst() {
+        let fixture = DictionaryRepositoryFixture()
+        let repository = DictionaryRepository(
+            stateURL: fixture.state,
+            configURL: fixture.config,
+            learnedURL: fixture.learned,
+            autoURL: fixture.auto,
+            deviceID: "mac-a",
+            now: { Date(timeIntervalSince1970: 100) })
+
+        let day: TimeInterval = 86_400
+        try! repository.replace(with: DictionaryDocument(entries: [
+            try! DictionaryEntry.manual(
+                writeAs: "Aardvark", deviceID: "mac-a",
+                at: Date(timeIntervalSince1970: day)),
+            try! DictionaryEntry.manual(
+                writeAs: "Beta", deviceID: "mac-a",
+                at: Date(timeIntervalSince1970: 2 * day)),
+            try! DictionaryEntry.manual(
+                writeAs: "Alpha", deviceID: "mac-a",
+                at: Date(timeIntervalSince1970: 2 * day)),
+            try! DictionaryEntry.manual(
+                writeAs: "Zephyr", deviceID: "mac-a",
+                at: Date(timeIntervalSince1970: 3 * day)),
+        ]))
+
+        expect(repository.rows.map(\.writeAs) == ["Zephyr", "Alpha", "Beta", "Aardvark"],
+               "dictionary rows sort newest first, alphabetical within one date")
+        fixture.remove()
+    }
+
     private static func testDictionarySettingsLogic() {
         let rows = [
             DictionaryRow(
                 id: "1", writeAs: "Airlearn", heardAs: "air learn",
-                source: .added, isSoftCorrection: false),
+                source: .added, isSoftCorrection: false, modifiedAt: Date()),
             DictionaryRow(
                 id: "2", writeAs: "Sushil Kumar", heardAs: "social kumar",
-                source: .learned, isSoftCorrection: true),
+                source: .learned, isSoftCorrection: true, modifiedAt: Date()),
             DictionaryRow(
                 id: "3", writeAs: "node.js", heardAs: nil,
-                source: .automatic, isSoftCorrection: false),
+                source: .automatic, isSoftCorrection: false, modifiedAt: Date()),
         ]
         expect(DictionarySettingsLogic.filtered(rows, query: "AIR").map(\.id) == ["1"],
                "dictionary search matches written and heard forms case-insensitively")

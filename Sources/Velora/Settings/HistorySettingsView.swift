@@ -262,7 +262,7 @@ struct HistorySettingsView: View {
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(VeloraPanel.canvas)
         .onAppear {
             model.requestStatus()
             vm.reload()  // fresh rows every time the tab appears
@@ -356,7 +356,7 @@ struct HistorySettingsView: View {
         }
         .padding(.vertical, VeloraSpacing.xs)
         .padding(.horizontal, VeloraSpacing.xs)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+        .background(VeloraPanel.canvas.opacity(0.96))
     }
 
     /// Groups the loaded records (already newest-first) into date buckets,
@@ -467,7 +467,7 @@ private struct HistoryCard: View {
         .padding(VeloraSpacing.m)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
+                .fill(VeloraPanel.card)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12, style: .continuous)

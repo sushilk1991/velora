@@ -57,16 +57,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             meetingProcessor: meetingProcessor)
 
         let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-        // A transparent, title-hidden titlebar melts into the window
-        // background, so the traffic lights sit in a seamless strip above the
-        // sidebar card (the Raycast/System Settings hybrid look). Deliberately
-        // NOT `.fullSizeContentView`: hosting SwiftUI under the titlebar left
-        // the detail column blank (snapshot-verified), and the plain titled
-        // window needs no safe-area games.
+        // A transparent titlebar melts into the window background, so the
+        // traffic lights sit in a seamless strip above the sidebar card (the
+        // Raycast/System Settings hybrid look) while the pane name stays
+        // visible in the titlebar. Deliberately NOT `.fullSizeContentView`:
+        // hosting SwiftUI under the titlebar left the detail column blank
+        // (snapshot-verified), and the plain titled window needs no
+        // safe-area games.
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
+        window.titleVisibility = .visible
         window.isMovableByWindowBackground = true
+        // The transparent titlebar shows the NSWindow background — keep it on
+        // the same canvas as the SwiftUI shell or the strip reads as a band.
+        window.backgroundColor = VeloraPanel.canvasColor
         window.title = SettingsTab.general.title
         window.setContentSize(NSSize(width: 820, height: 620))
         window.center()
@@ -74,9 +78,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
 
-        // The visible title lives in the detail header now, but the window
-        // title still names the pane for Mission Control and accessibility.
-        // The log line makes "clicked a tab, nothing happened" diagnosable.
+        // The titlebar carries the one visible pane title; keep window.title
+        // in step for Mission Control and accessibility. The log line makes
+        // "clicked a tab, nothing happened" diagnosable.
         titleObserver = selection.$tab.sink { [weak window] tab in
             let resolved = tab ?? .general
             window?.title = resolved.title
@@ -148,13 +152,13 @@ struct SettingsRootView: View {
                 .safeAreaInset(edge: .top, spacing: 0) { detailHeader }
         }
         .frame(minWidth: 760, minHeight: 560)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(VeloraPanel.canvas)
     }
 
-    /// Pane title above the detail column — the visible replacement for the
-    /// window title. Leads with the sidebar toggle, anchored here like
-    /// Superwhisper/Finder/Notes (its menu counterpart is View → Hide
-    /// Sidebar). Content scrolls under the bar.
+    /// Toolbar strip above the detail column. The pane title lives in the
+    /// titlebar (the window's one visible title); this strip anchors the
+    /// sidebar toggle like Superwhisper/Finder/Notes (its menu counterpart
+    /// is View → Hide Sidebar). Content scrolls under the bar.
     private var detailHeader: some View {
         HStack(spacing: VeloraSpacing.m) {
             Button {
@@ -168,20 +172,13 @@ struct SettingsRootView: View {
             }
             .buttonStyle(.plain)
             .help(selection.sidebarCollapsed ? "Show Sidebar" : "Hide Sidebar")
-            HStack(spacing: VeloraSpacing.s) {
-                IconTile(
-                    symbol: selection.current.symbol,
-                    color: selection.current.tileColor, side: 22)
-                Text(selection.current.title)
-                    .font(.system(size: 15, weight: .semibold))
-            }
             Spacer(minLength: 0)
         }
         .padding(.horizontal, VeloraSpacing.xl)
-        .frame(height: 46)
+        .frame(height: 38)
         // Matches the (transparent) titlebar strip above, so the top chrome
         // reads as one surface; scrolled form content hides behind it.
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(VeloraPanel.canvas)
         .overlay(alignment: .bottom) {
             // An explicit hairline: Divider kept picking the vertical
             // orientation inside the overlay (snapshot-verified, twice).
