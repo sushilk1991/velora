@@ -143,6 +143,9 @@ extension SettingsDocument {
         var dictation: Hotkey
         var editSelection: Hotkey
         var voiceEdit: Bool
+        /// One-shot selected-text spelling, punctuation, and grammar repair.
+        var proofreadSelection: Hotkey
+        var proofreadEnabled: Bool
         /// Stream Typing writes provisional speech at the owned cursor.
         var streamTyping: Hotkey
         var streamTypingEnabled: Bool
@@ -158,6 +161,8 @@ extension SettingsDocument {
             dictation: .rightOption,
             editSelection: .optionShiftE,
             voiceEdit: true,
+            proofreadSelection: .controlShiftG,
+            proofreadEnabled: true,
             streamTyping: .controlShiftS,
             streamTypingEnabled: true,
             behavior: .hold,
@@ -168,12 +173,15 @@ extension SettingsDocument {
         // Older settings have neither Stream Typing nor Action Mode keys;
         // decoding fills them rather than resetting unrelated preferences.
         init(dictation: Hotkey, editSelection: Hotkey, voiceEdit: Bool,
+             proofreadSelection: Hotkey, proofreadEnabled: Bool,
              streamTyping: Hotkey, streamTypingEnabled: Bool,
              behavior: HotkeyMode, action: Hotkey, actionsEnabled: Bool,
              backgroundActions: Bool) {
             self.dictation = dictation
             self.editSelection = editSelection
             self.voiceEdit = voiceEdit
+            self.proofreadSelection = proofreadSelection
+            self.proofreadEnabled = proofreadEnabled
             self.streamTyping = streamTyping
             self.streamTypingEnabled = streamTypingEnabled
             self.behavior = behavior
@@ -200,9 +208,21 @@ extension SettingsDocument {
                     excluding: [dictation, editSelection, action])
             streamTypingEnabled = try container.decodeIfPresent(
                 Bool.self, forKey: .streamTypingEnabled) ?? true
+            proofreadSelection = try container.decodeIfPresent(
+                Hotkey.self, forKey: .proofreadSelection)
+                ?? Shortcuts.defaultProofreadHotkey(
+                    excluding: [dictation, editSelection, streamTyping, action])
+            proofreadEnabled = try container.decodeIfPresent(
+                Bool.self, forKey: .proofreadEnabled) ?? true
         }
 
         static let defaultActionHotkey = Hotkey.controlShiftA
+
+        static func defaultProofreadHotkey(excluding used: [Hotkey]) -> Hotkey {
+            [Hotkey.controlShiftG, .f19, .optionShiftA,
+             .controlShiftA, .controlShiftS, .optionShiftE]
+                .first { !used.contains($0) } ?? .controlShiftG
+        }
 
         static func defaultStreamHotkey(excluding used: [Hotkey]) -> Hotkey {
             // A pre-Stream settings file can already use the new default.
@@ -441,14 +461,16 @@ enum SettingsDocumentCodec {
         }
         guard value.shortcuts.dictation.isValidSettingsHotkey,
               value.shortcuts.editSelection.isValidSettingsHotkey,
+              value.shortcuts.proofreadSelection.isValidSettingsHotkey,
               value.shortcuts.streamTyping.isValidSettingsHotkey,
               value.shortcuts.action.isValidSettingsHotkey else {
             throw SettingsDocumentError.invalidValue("keyboard shortcuts")
         }
-        // All four must differ. The monitor resolves a collision by
+        // Every binding must differ. The monitor resolves a collision by
         // first-match, so a duplicate binding is not an error the user would
         // ever see — it is a shortcut that silently does something else.
         let bindings = [value.shortcuts.dictation, value.shortcuts.editSelection,
+                        value.shortcuts.proofreadSelection,
                         value.shortcuts.streamTyping, value.shortcuts.action]
         for (index, binding) in bindings.enumerated()
         where bindings[(index + 1)...].contains(binding) {

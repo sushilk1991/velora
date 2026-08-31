@@ -167,12 +167,23 @@ enum StreamFinalOutputStagingPolicy {
 }
 
 enum StreamInteractionGate {
-    static func actionRequestIsBusy(
+    static func selectionEditIsBusy(
         phaseIsIdle: Bool,
         cancellationInFlight: Bool,
         actionIsRunning: Bool
     ) -> Bool {
         !phaseIsIdle || cancellationInFlight || actionIsRunning
+    }
+
+    static func actionRequestIsBusy(
+        phaseIsIdle: Bool,
+        cancellationInFlight: Bool,
+        actionIsRunning: Bool
+    ) -> Bool {
+        selectionEditIsBusy(
+            phaseIsIdle: phaseIsIdle,
+            cancellationInFlight: cancellationInFlight,
+            actionIsRunning: actionIsRunning)
     }
 }
 

@@ -980,7 +980,7 @@ extension AppDelegate: DictationControllerDelegate {
             statusController.setIconState(.idle)
         case .starting, .recording:
             statusController.setIconState(.recording)
-        case .transcribing:
+        case .transcribing, .editing:
             statusController.setIconState(.transcribing)
         }
     }

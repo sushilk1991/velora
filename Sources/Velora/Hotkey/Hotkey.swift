@@ -84,6 +84,11 @@ extension Hotkey {
         keyCode: 1,
         modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
         isModifierOnly: false)
+    /// Default selected-text proofread hotkey: ⌃⇧G (G for grammar).
+    static let controlShiftG = Hotkey(
+        keyCode: 5,
+        modifiers: CGEventFlags.maskControl.rawValue | CGEventFlags.maskShift.rawValue,
+        isModifierOnly: false)
     /// Kept for the tests that exercise the collision this default avoids.
     static let optionShiftA = Hotkey(
         keyCode: 0,

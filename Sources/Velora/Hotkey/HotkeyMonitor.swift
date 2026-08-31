@@ -11,6 +11,8 @@ import Foundation
 enum SecondaryHotkeyRole: String, CaseIterable {
     /// Safe Voice Edit: select text, hold, speak an instruction.
     case edit
+    /// Proofread the current selection directly, without recording.
+    case proofread
     /// Stream Typing: show provisional speech at the exact text cursor.
     case stream
     /// Action Mode: hold, speak a command, Velora carries it out.
@@ -61,6 +63,9 @@ enum UserInputActivity {
     private static let ledgerCapacity = 64
     private static let lock = NSLock()
     private static var value: UInt64 = 0
+    /// Presses and clicks can mutate a selection; ordinary shortcut releases
+    /// cannot. Sublime's asynchronous capture uses this narrower generation.
+    private static var selectionValue: UInt64 = 0
     private static var lastNanos: UInt64 = 0
     private static var heldKeys = Set<Int64>()
     private static var heldButtons = Set<Int64>()
@@ -76,9 +81,16 @@ enum UserInputActivity {
         return value
     }
 
+    static func selectionSnapshot() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return selectionValue
+    }
+
     @discardableResult
     static func mark() -> UInt64 {
         lock.lock()
+        markSelectionLocked()
         let generation = markLocked()
         lock.unlock()
         return generation
@@ -88,6 +100,7 @@ enum UserInputActivity {
     static func keyPressed(_ keyCode: Int64) -> UInt64 {
         lock.lock()
         heldKeys.insert(keyCode)
+        markSelectionLocked()
         let generation = markLocked()
         lock.unlock()
         return generation
@@ -106,6 +119,7 @@ enum UserInputActivity {
     static func pointerPressed(button: Int64, windowID: Int?) -> UInt64 {
         lock.lock()
         heldButtons.insert(button)
+        markSelectionLocked()
         let generation = markLocked(windowID: windowID)
         lock.unlock()
         return generation
@@ -239,6 +253,7 @@ enum UserInputActivity {
     static func invalidate() {
         lock.lock()
         attributionReliable = false
+        markSelectionLocked()
         let generation = markLocked()
         if let index = windowRecords.lastIndex(where: {
             $0.generation == generation
@@ -270,6 +285,10 @@ enum UserInputActivity {
             selectedWindowID = windowID
         }
         return value
+    }
+
+    private static func markSelectionLocked() {
+        selectionValue &+= 1
     }
 
     static func isQuiet(for seconds: TimeInterval) -> Bool {

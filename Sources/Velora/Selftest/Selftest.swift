@@ -10,6 +10,8 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     var hotkeyUpCount = 0
     var editHotkeyDownCount = 0
     var editHotkeyUpCount = 0
+    var proofreadHotkeyDownCount = 0
+    var proofreadHotkeyUpCount = 0
     var streamHotkeyDownCount = 0
     var streamHotkeyUpCount = 0
     var actionHotkeyDownCount = 0
@@ -23,6 +25,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     func secondaryHotkeyDown(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyDownCount += 1
+        case .proofread: proofreadHotkeyDownCount += 1
         case .stream: streamHotkeyDownCount += 1
         case .action: actionHotkeyDownCount += 1
         }
@@ -31,6 +34,7 @@ final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     func secondaryHotkeyUp(_ role: SecondaryHotkeyRole) {
         switch role {
         case .edit: editHotkeyUpCount += 1
+        case .proofread: proofreadHotkeyUpCount += 1
         case .stream: streamHotkeyUpCount += 1
         case .action: actionHotkeyUpCount += 1
         }
@@ -1531,6 +1535,27 @@ enum Selftest {
             expect(collisionSafe.settings.shortcuts.dictation == .optionShiftE
                    && collisionSafe.settings.shortcuts.editSelection == .rightOption,
                    "shortcut migration chooses a distinct fallback when dictation uses the edit default")
+            legacy.set(
+                Hotkey.controlShiftS.defaultsRepresentation,
+                forKey: "velora.hotkey.v2")
+            legacy.set(
+                Hotkey.controlShiftG.defaultsRepresentation,
+                forKey: "velora.editHotkey.v1")
+            let doubleCollisionSafe = AppConfig.migratedSettingsDocument(
+                defaults: legacy, engineConfigURL: engineConfig)
+            let migratedBindings = [
+                doubleCollisionSafe.settings.shortcuts.dictation,
+                doubleCollisionSafe.settings.shortcuts.editSelection,
+                doubleCollisionSafe.settings.shortcuts.streamTyping,
+                doubleCollisionSafe.settings.shortcuts.proofreadSelection,
+                doubleCollisionSafe.settings.shortcuts.action,
+            ]
+            let bindingsAreDistinct = migratedBindings.enumerated().allSatisfy {
+                index, binding in
+                !migratedBindings[(index + 1)...].contains(binding)
+            }
+            expect(bindingsAreDistinct,
+                   "legacy migration keeps Stream and Proofread defaults distinct")
             legacy.set(Hotkey.f19.defaultsRepresentation, forKey: "velora.hotkey.v2")
 
             // Drive the real import transaction against isolated files. A
@@ -1772,6 +1797,24 @@ enum Selftest {
                     allowAutomaticInsertion: false),
             "a cleanup-empty late voice command is recognized but never executed")
         expect(
+            LateFinalPolicy.preserveDuringEdit(
+                finalSession: "late-session",
+                hasPendingEdit: true,
+                protectedSession: nil),
+            "a late dictation final is history-only while a selection edit owns the target")
+        expect(
+            LateFinalPolicy.preserveDuringEdit(
+                finalSession: "late-session",
+                hasPendingEdit: false,
+                protectedSession: "late-session"),
+            "a direct edit keeps its late-final fence after the model reply")
+        expect(
+            !LateFinalPolicy.preserveDuringEdit(
+                finalSession: "ordinary-session",
+                hasPendingEdit: false,
+                protectedSession: "different-session"),
+            "ordinary late-final delivery remains unchanged outside a selection edit")
+        expect(
             ErrorRetryIntent.resolve(
                 explicit: nil,
                 failedSession: "edit-session",
@@ -1792,16 +1835,34 @@ enum Selftest {
         var retryRoute = ""
         ErrorRetryIntent.voiceEdit.perform(
             dictation: { retryRoute = "dictation" },
-            voiceEdit: { retryRoute = "edit" })
+            voiceEdit: { retryRoute = "edit" },
+            proofread: { retryRoute = "proofread" })
         expect(
             retryRoute == "edit",
             "Voice Edit Retry executes the edit route, never ordinary dictation")
         ErrorRetryIntent.dictation.perform(
             dictation: { retryRoute = "dictation" },
-            voiceEdit: { retryRoute = "edit" })
+            voiceEdit: { retryRoute = "edit" },
+            proofread: { retryRoute = "proofread" })
         expect(
             retryRoute == "dictation",
             "normal Retry still executes the ordinary dictation route")
+        ErrorRetryIntent.proofread.perform(
+            dictation: { retryRoute = "dictation" },
+            voiceEdit: { retryRoute = "edit" },
+            proofread: { retryRoute = "proofread" })
+        expect(
+            retryRoute == "proofread",
+            "Proofread Retry never starts the microphone")
+
+        let selectionGeneration = UserInputActivity.selectionSnapshot()
+        UserInputActivity.keyPressed(46)
+        let generationAfterPress = UserInputActivity.selectionSnapshot()
+        UserInputActivity.keyReleased(46)
+        expect(
+            generationAfterPress == selectionGeneration &+ 1
+                && UserInputActivity.selectionSnapshot() == generationAfterPress,
+            "selection capture ignores shortcut release but rejects new input")
 
         var markerReads = 0
         let native = ScreenContext.resolvedSelectionText(

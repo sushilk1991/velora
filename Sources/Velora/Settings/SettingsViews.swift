@@ -747,6 +747,7 @@ struct ShortcutsSettingsView: View {
             VStack(alignment: .leading, spacing: VeloraSpacing.l) {
                 dictationCard
                 streamTypingCard
+                proofreadCard
                 voiceEditCard
                 voiceActionsCard
             }
@@ -820,6 +821,31 @@ struct ShortcutsSettingsView: View {
             }
             .disabled(!model.streamTypingEnabled)
             .opacity(model.streamTypingEnabled ? 1 : 0.5)
+        }
+    }
+
+    // MARK: Proofread
+
+    private var proofreadCard: some View {
+        SettingsCard {
+            CardHeader(
+                symbol: "text.badge.checkmark", color: .green,
+                title: "Fix spelling and grammar",
+                subtitle: "Select text and press the shortcut. Velora replaces editable selections; for read-only text, it copies the result. No microphone or speech model is used."
+            ) {
+                Toggle("Fix spelling and grammar", isOn: $model.proofreadEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            Group {
+                CardDivider()
+                shortcutRow(title: "Proofread selection", hotkey: $model.proofreadHotkey)
+                if model.proofreadHotkeyConflict {
+                    conflictLabel("Proofread selection needs a shortcut of its own.")
+                }
+            }
+            .disabled(!model.proofreadEnabled)
+            .opacity(model.proofreadEnabled ? 1 : 0.5)
         }
     }
 

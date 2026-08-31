@@ -95,6 +95,7 @@ class FakeCleanup:
     def __init__(self, text: str, applied: bool = True, reason: str = "") -> None:
         self._result = SimpleNamespace(text=text, applied=applied, ms=5, reason=reason)
         self.calls: list[tuple[str, str]] = []
+        self.timeouts: list[int | None] = []
 
     @property
     def unhealthy(self) -> bool:
@@ -104,6 +105,7 @@ class FakeCleanup:
                       check_ratio=True, cancel_event=None, allowed_terms=None):
         assert check_ratio is False  # transformations must bypass the guard
         self.calls.append((raw, system_prompt))
+        self.timeouts.append(timeout_ms)
         return self._result
 
 
@@ -137,6 +139,7 @@ async def test_edit_text_round_trip(engine):
     raw, prompt = eng.cleanup.calls[0]
     assert raw == "launch delayed friday"
     assert "fix the grammar" in prompt
+    assert eng.cleanup.timeouts == [12_000]
 
 
 async def test_hibernated_edit_load_keeps_ping_and_cancel_responsive(engine):
@@ -209,6 +212,60 @@ async def test_edit_text_not_applied_returns_original(engine):
     edited = await client.recv_event("edited")
     assert edited["applied"] is False
     assert edited["text"] == "the original sentence stays intact"
+
+
+async def test_edit_text_hard_timeout_is_retryable_failure(engine):
+    eng, sock = engine
+    eng.cleanup = FakeCleanup(
+        "truncated half sen", applied=False, reason="timeout_hard")
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "edit_text", "id": "timeout",
+        "text": "the original sentence stays intact",
+        "instruction": "fix the grammar",
+    })
+
+    failed = await asyncio.wait_for(
+        client.recv_event("edit_failed"), timeout=0.2)
+    assert failed["code"] == "cleanup_timeout"
+
+
+async def test_edit_text_unhealthy_model_is_retryable_failure(engine):
+    eng, sock = engine
+    eng.cleanup = FakeCleanup(
+        "the original sentence stays intact",
+        applied=False,
+        reason="llm_unhealthy",
+    )
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "edit_text", "id": "unhealthy",
+        "text": "the original sentence stays intact",
+        "instruction": "fix the grammar",
+    })
+
+    failed = await asyncio.wait_for(
+        client.recv_event("edit_failed"), timeout=0.2)
+    assert failed["code"] == "cleanup_timeout"
+
+
+async def test_edit_text_identical_output_is_no_change(engine):
+    eng, sock = engine
+    original = "This sentence is already correct."
+    eng.cleanup = FakeCleanup(original)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "edit_text", "id": "same",
+        "text": original, "instruction": "fix the grammar",
+    })
+
+    edited = await client.recv_event("edited")
+    assert edited["applied"] is False
+    assert edited["reason"] == "no_change"
+    assert edited["text"] == original
 
 
 async def test_edit_text_validates_arguments(engine):

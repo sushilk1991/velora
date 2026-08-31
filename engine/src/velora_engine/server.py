@@ -2624,7 +2624,11 @@ class Engine:
             # A dedicated budget scaled to selection size — the default
             # adaptive timeout tops out at 6 s (tuned for dictation cleanup),
             # so a long selection would always "time out" mid-rewrite.
-            timeout_ms = min(20_000, max(6_000, len(text) * 8))
+            timeout_ms = min(
+                editing.MAX_EDIT_TIMEOUT_MS,
+                max(editing.MIN_EDIT_TIMEOUT_MS,
+                    len(text) * editing.EDIT_TIMEOUT_MS_PER_CHAR),
+            )
             result = await self.cleanup.cleanup(
                 text, editing.build_edit_prompt(instruction), timeout_ms=timeout_ms,
                 check_ratio=False, cancel_event=self._edit_cancel)
@@ -2634,12 +2638,24 @@ class Engine:
             reason = result.reason or ""
             if applied and not edited_core:
                 applied, out, reason = False, text, "empty_output"
+            elif applied and out == text:
+                applied, out, reason = False, text, "no_change"
             elif applied and editing.instruction_echoed(text, instruction, out):
                 # The one benchmarked failure mode (out-of-scope command
                 # echoed into the document) — keep the selection unchanged.
                 applied, out, reason = False, text, "instruction_echo"
             elif applied and len(out) > max(4 * len(text), len(text) + 2_000):
                 applied, out, reason = False, text, "runaway_growth"
+            if not applied and reason in editing.TIMEOUT_REASONS:
+                await self._send({
+                    "event": "edit_failed", "id": msg.get("id"),
+                    "code": "cleanup_timeout",
+                    "error": "edit: writing model timed out",
+                })
+                self._restart_if_cleanup_unhealthy()
+                log.warning("edit_text timed out: %d chars reason=%s",
+                            len(text), reason)
+                return
             evt: dict[str, Any] = {
                 "event": "edited",
                 "text": out if applied else text,

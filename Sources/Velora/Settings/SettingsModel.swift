@@ -283,6 +283,8 @@ final class SettingsModel: ObservableObject {
         launchAtLogin = Self.launchAtLoginEnabled
         hotkey = config.hotkey
         editHotkey = config.editHotkey
+        proofreadHotkey = config.proofreadHotkey
+        proofreadEnabled = config.proofreadEnabled
         streamTypingHotkey = config.streamTypingHotkey
         streamTypingEnabled = config.streamTypingEnabled
         actionHotkey = config.actionHotkey
@@ -422,6 +424,8 @@ final class SettingsModel: ObservableObject {
 
         hotkey = imported.shortcuts.dictation
         editHotkey = imported.shortcuts.editSelection
+        proofreadHotkey = imported.shortcuts.proofreadSelection
+        proofreadEnabled = imported.shortcuts.proofreadEnabled
         streamTypingHotkey = imported.shortcuts.streamTyping
         streamTypingEnabled = imported.shortcuts.streamTypingEnabled
         actionHotkey = imported.shortcuts.action
@@ -897,6 +901,11 @@ final class SettingsModel: ObservableObject {
                 hotkey = oldValue
                 return
             }
+            guard hotkey != proofreadHotkey else {
+                proofreadHotkeyConflict = true
+                hotkey = oldValue
+                return
+            }
             guard hotkey != actionHotkey else {
                 actionHotkeyConflict = true
                 hotkey = oldValue
@@ -908,6 +917,7 @@ final class SettingsModel: ObservableObject {
                 return
             }
             editHotkeyConflict = false
+            proofreadHotkeyConflict = false
             actionHotkeyConflict = false
             streamTypingHotkeyConflict = false
             config.hotkey = hotkey
@@ -923,7 +933,8 @@ final class SettingsModel: ObservableObject {
             // would silently disable Voice Edit, so reject it visibly. The same
             // applies to a collision with Action Mode, where the first role in
             // the table would silently win.
-            guard editHotkey != hotkey, editHotkey != actionHotkey,
+            guard editHotkey != hotkey, editHotkey != proofreadHotkey,
+                  editHotkey != actionHotkey,
                   editHotkey != streamTypingHotkey else {
                 editHotkeyConflict = true
                 editHotkey = oldValue
@@ -935,11 +946,36 @@ final class SettingsModel: ObservableObject {
         }
     }
 
+    @Published var proofreadHotkey: Hotkey {
+        didSet {
+            guard !applyingImportedSettings, proofreadHotkey != oldValue else { return }
+            guard proofreadHotkey != hotkey, proofreadHotkey != editHotkey,
+                  proofreadHotkey != streamTypingHotkey,
+                  proofreadHotkey != actionHotkey else {
+                proofreadHotkeyConflict = true
+                proofreadHotkey = oldValue
+                return
+            }
+            proofreadHotkeyConflict = false
+            config.proofreadHotkey = proofreadHotkey
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
+    @Published var proofreadEnabled: Bool {
+        didSet {
+            guard !applyingImportedSettings, proofreadEnabled != oldValue else { return }
+            config.proofreadEnabled = proofreadEnabled
+            NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
+        }
+    }
+
     @Published var streamTypingHotkey: Hotkey {
         didSet {
             guard !applyingImportedSettings, streamTypingHotkey != oldValue else { return }
             guard streamTypingHotkey != hotkey,
                   streamTypingHotkey != editHotkey,
+                  streamTypingHotkey != proofreadHotkey,
                   streamTypingHotkey != actionHotkey else {
                 streamTypingHotkeyConflict = true
                 streamTypingHotkey = oldValue
@@ -963,6 +999,7 @@ final class SettingsModel: ObservableObject {
         didSet {
             guard !applyingImportedSettings, actionHotkey != oldValue else { return }
             guard actionHotkey != hotkey, actionHotkey != editHotkey,
+                  actionHotkey != proofreadHotkey,
                   actionHotkey != streamTypingHotkey else {
                 actionHotkeyConflict = true
                 actionHotkey = oldValue
@@ -991,6 +1028,7 @@ final class SettingsModel: ObservableObject {
 
     /// Set when a recorder would make two shortcuts collide.
     @Published var editHotkeyConflict = false
+    @Published var proofreadHotkeyConflict = false
     @Published var streamTypingHotkeyConflict = false
     @Published var actionHotkeyConflict = false
 
