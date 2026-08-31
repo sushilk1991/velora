@@ -72,6 +72,9 @@ that downloaded users cannot open.
 
 ## Conventions
 
+- **Work directly on `main`** — no feature branches or worktrees. The owner is
+  the only developer, and unmerged branches have twice hidden finished features
+  (the ⌃⇧G proofread shortcut sat unshipped on one for a full release).
 - Push is per-round to `main` of the **private** repo `sushilk1991/velora`.
 - Adversarial review before "done": `yoyo ask codex,claude --role review
   --read-only --background "…"` — it has repeatedly caught shipping blockers.
