@@ -2641,6 +2641,21 @@ enum Selftest {
                "auto apply preserves unknown engine keys")
         expect(Set(root["terms"] as? [String] ?? []) == ["Velora", "RemoteTerm"],
                "auto apply unions promoted terms without dropping a concurrent miner term")
+        expect((root["terms"] as? [String]) == ["RemoteTerm", "Velora"],
+               "foreign terms join at the head so the miner ages them out first")
+
+        // The miner keeps terms[-MAX_TERMS:], evicting from the head — the
+        // list's order is its age order. A synced snapshot must not resurrect
+        // an evicted term at the TAIL, where the next truncation would keep
+        // it and evict the genuinely newest term instead (audit finding).
+        let device = (1...100).map { "Term\($0)" }
+        try! JSONSerialization.data(withJSONObject: ["version": 1, "terms": device])
+            .write(to: url)
+        store.applyPortableSnapshot(.init(terms: ["Term0"], banned: []))
+        let capped = (try! JSONSerialization.jsonObject(
+            with: Data(contentsOf: url)) as! [String: Any])["terms"] as? [String]
+        expect(capped == device,
+               "auto apply never exceeds the miner cap or displaces newer terms")
 
         let blockedParent = dir.appendingPathComponent("blocked-auto")
         try! Data("not a directory".utf8).write(to: blockedParent)

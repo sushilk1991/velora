@@ -24,6 +24,9 @@ final class AutoVocabStore {
     /// limit; the oldest bans fall off first (the miner has long since
     /// checkpointed past the history rows that produced them).
     private static let maxBanned = 500
+    /// Mirror of the miner's MAX_TERMS (vocab_miner.py): the engine keeps
+    /// `terms[-100:]`, evicting from the head, so list order is age order.
+    private static let maxTerms = 100
 
     init() {
         url = FileManager.default.homeDirectoryForCurrentUser
@@ -69,9 +72,21 @@ final class AutoVocabStore {
                 : self.appendingBanned(validatedBans, in: ["banned": [String]()])
             let bannedKeys = Set(banned.map(Self.normalized))
             let existing = preservingDeviceState ? ((root["terms"] as? [String]) ?? []) : []
-            root["terms"] = Self.deduplicatedTerms(
-                existing + Self.validatedTerms(snapshot.terms))
+            // Foreign terms join at the HEAD, oldest position: appended at
+            // the tail, a snapshot re-projecting terms the miner already
+            // evicted would survive its next `terms[-MAX_TERMS:]` cut while
+            // the genuinely newest terms got evicted. Terms on both sides
+            // keep their device position, and the cap holds here too so the
+            // two writers never fight over list length.
+            let existingKeys = Set(existing.map(Self.normalized))
+            let foreign = Self.validatedTerms(snapshot.terms)
+                .filter { !existingKeys.contains(Self.normalized($0)) }
+            var merged = Self.deduplicatedTerms(foreign + existing)
                 .filter { !bannedKeys.contains(Self.normalized($0)) }
+            if merged.count > Self.maxTerms {
+                merged.removeFirst(merged.count - Self.maxTerms)
+            }
+            root["terms"] = merged
             root["banned"] = banned
             if !preservingDeviceState {
                 root["candidates"] = [String: Any]()

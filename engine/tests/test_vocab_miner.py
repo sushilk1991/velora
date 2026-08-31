@@ -124,6 +124,25 @@ async def test_candidate_promotes_across_steps(tmp_path):
     assert state["checkpoint_id"] == 2
 
 
+async def test_stored_candidate_promotes_without_renomination(tmp_path):
+    home = tmp_path / "vh"
+    seed_history(home, ["deployed Velora to prod"])
+    miner = VocabMiner(home, make_generate(["Velora"]))
+    await miner.step()
+    assert read_state(home)["candidates"]["Velora"] == {"count": 1, "rows": [1]}
+
+    # The next batch mentions the candidate again, but the LLM spends its
+    # nomination slots elsewhere. Recurrence in the text must still count:
+    # promotion is "seen in ≥2 dictations", not "nominated twice".
+    seed_history(home, ["Velora crashed while I ran authCheck"])
+    miner._generate = make_generate(["authCheck"])
+    await miner.step()
+    state = read_state(home)
+    assert "Velora" in state["terms"]
+    assert "Velora" not in state["candidates"]
+    assert state["candidates"]["authCheck"] == {"count": 1, "rows": [2]}
+
+
 async def test_checkpoint_advances_on_empty_yield(tmp_path):
     home = tmp_path / "vh"
     seed_history(home, ["just ordinary words here"])

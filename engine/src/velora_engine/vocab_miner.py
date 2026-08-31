@@ -357,6 +357,31 @@ class VocabMiner:
                 existing_low.add(key.lower())
                 promoted += 1
 
+        # Re-scan the batch against the STORED candidate pool. The LLM has
+        # ~10 nomination slots per batch, so a term nominated once and then
+        # merely spoken again would otherwise wait to win that lottery twice
+        # — "seen in ≥2 dictations" must count recurrence in the text, not
+        # re-nomination luck. (Terms updated by the loop above just union
+        # the same rows again — idempotent.)
+        for key in list(candidates):
+            if key.lower() in banned_low or key.lower() in existing_low:
+                continue
+            pattern = _term_pattern(key)
+            hit_rows = [row_id for row_id, final in rows if pattern.search(final)]
+            if not hit_rows:
+                continue
+            entry = candidates[key]
+            known_rows = {int(r) for r in entry.get("rows", []) if isinstance(r, (int, float))}
+            known_rows.update(hit_rows)
+            entry["rows"] = sorted(known_rows)
+            entry["count"] = len(known_rows)
+            if entry["count"] >= PROMOTE_AT:
+                del candidates[key]
+                candidates_low.pop(key.lower(), None)
+                terms.append(key)
+                existing_low.add(key.lower())
+                promoted += 1
+
         # Caps: terms evict the OLDEST (list head); candidates evict the
         # lowest-count first, oldest among ties — deterministic either way.
         if len(terms) > MAX_TERMS:
