@@ -921,32 +921,49 @@ class CleanupEngine:
         first_token_at: float | None = None
         status = "ok"
         sampler = make_sampler(temp=0.0)
-        for resp in stream_generate(
-            self._model,
-            self._tokenizer,
-            prompt=suffix,
-            max_tokens=max_tokens,
-            sampler=sampler,
-            prompt_cache=cache,
-        ):
-            now = time.perf_counter()
+
+        def progress(_processed: int, _total: int) -> None:
+            # Cancel at existing prefill boundaries, before further GPU work.
+            # Batch sizes and uncancelled generation stay unchanged.
             if cancel_event is not None and cancel_event.is_set():
-                status = "cancelled"
-                break
-            if first_token_at is None:
-                first_token_at = now
-            out_text.append(resp.text)
-            generation_tokens = getattr(resp, "generation_tokens", None)
-            if generation_tokens is None:
-                gen_tokens.append(resp.token)
-            elif generation_tokens > len(gen_tokens):
-                gen_tokens.extend([resp.token] * (generation_tokens - len(gen_tokens)))
-            # Prompt prefill/TTFT is deliberately outside the soft quality
-            # budget. Once output begins, however, slow or runaway decoding is
-            # still bounded between tokens.
-            if now - first_token_at > output_timeout_s:
-                status = "timeout"
-                break
+                raise _PrefixCancelled
+
+        try:
+            for resp in stream_generate(
+                self._model,
+                self._tokenizer,
+                prompt=suffix,
+                max_tokens=max_tokens,
+                sampler=sampler,
+                prompt_cache=cache,
+                prompt_progress_callback=progress,
+            ):
+                now = time.perf_counter()
+                if cancel_event is not None and cancel_event.is_set():
+                    status = "cancelled"
+                    break
+                if first_token_at is None:
+                    first_token_at = now
+                out_text.append(resp.text)
+                generation_tokens = getattr(resp, "generation_tokens", None)
+                if generation_tokens is None:
+                    gen_tokens.append(resp.token)
+                elif generation_tokens > len(gen_tokens):
+                    gen_tokens.extend([resp.token] * (generation_tokens - len(gen_tokens)))
+                # Prompt prefill/TTFT is deliberately outside the soft quality
+                # budget. Once output begins, however, slow or runaway decoding is
+                # still bounded between tokens.
+                if now - first_token_at > output_timeout_s:
+                    status = "timeout"
+                    break
+        except _PrefixCancelled:
+            status = "cancelled"
+
+        if status == "cancelled":
+            # A prefill callback can exit before MLX clears temporary buffers.
+            # Release this request's cache first; prepared snapshots stay warm.
+            cache.clear()
+            mx.clear_cache()
         # Hitting the token ceiling means the output was CUT OFF mid-thought.
         # For dictation the divergence guard catches the too-short result, but
         # a transformation path (check_ratio off) has no such net — flag it so

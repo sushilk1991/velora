@@ -340,9 +340,11 @@ def test_auto_vocab_excludes_prompt_artifacts_and_user_corrected_wrongs(home):
 # ---- server hooks ---------------------------------------------------------------
 
 
-async def test_engine_mines_when_idle_and_reloads_config(home, fake_stt):
+async def test_engine_mines_when_idle_and_reloads_config(home, fake_stt, monkeypatch):
+    import velora_engine.server as server
     from velora_engine.server import Engine
 
+    monkeypatch.setattr(server, "_memory_pressure_level", lambda: 1)
     config = Config()
     eng = Engine(config, parent_pid=None)
     seed_history(config.home, ["Velora demo one", "Velora demo two"])
@@ -396,3 +398,64 @@ async def test_engine_mining_skips_when_busy_or_disabled(home, fake_stt):
     eng.config.data["vocab_mining"] = False
     await eng._mine_when_idle(0)  # noqa: SLF001
     assert called == []  # user disabled mining
+
+
+@pytest.mark.parametrize("ready_pressure", [0, 1])
+async def test_mining_waits_for_memory(home, fake_stt, monkeypatch, ready_pressure):
+    import velora_engine.server as server
+    from velora_engine.cleanup import CleanupResult
+
+    eng = server.Engine(Config(), parent_pid=None)
+    seed_history(eng.config.home, ["Velora demo one", "Velora demo two"])
+    pressures = iter([2, 4, ready_pressure])
+    observed = []
+    calls = []
+
+    def pressure():
+        # Postponement must leave the history cursor and vocabulary intact.
+        assert not (eng.config.home / "auto_learned.json").exists()
+        level = next(pressures)
+        observed.append(level)
+        return level
+
+    class MinerCleanup:
+        loaded = True
+        model_id = "fake"
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            calls.append(raw)
+            return CleanupResult("Velora", True, 3)
+
+    eng.cleanup = MinerCleanup()
+    monkeypatch.setattr(server, "_memory_pressure_level", pressure)
+    monkeypatch.setattr(server, "MINE_IDLE_S", 0)
+    await eng._mine_when_idle(0)
+
+    assert observed == [2, 4, ready_pressure]
+    assert len(calls) == 1
+    assert read_state(eng.config.home)["terms"] == ["Velora"]
+
+
+@pytest.mark.parametrize("busy_flag", ["_starting", "_finalizing"])
+async def test_mining_rechecks_idle(home, fake_stt, monkeypatch, busy_flag):
+    import velora_engine.server as server
+    from types import SimpleNamespace
+
+    eng = server.Engine(Config(), parent_pid=None)
+    eng.cleanup = SimpleNamespace(loaded=True)
+    calls = []
+
+    async def mine():
+        calls.append("mined")
+        return False
+
+    eng._miner = SimpleNamespace(step=mine, last_step_new_terms=0)
+
+    def pressure():
+        # A foreground transition can begin while the pressure probe yields.
+        setattr(eng, busy_flag, True)
+        return 1
+
+    monkeypatch.setattr(server, "_memory_pressure_level", pressure)
+    await eng._mine_when_idle(0)
+    assert calls == []

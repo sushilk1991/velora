@@ -145,6 +145,7 @@ STREAM_GATHER_TIMEOUT_S = 1.5
 # Idle gap before (and between) vocab-mining steps — mining must only ever use
 # compute nobody is waiting on, and yields the moment a session starts.
 MINE_IDLE_S = 20.0
+_MEMORY_PRESSURE_WARNING = 2
 MINE_STARTUP_DELAY_S = 60.0
 
 # Resume cursors are indexes into this exact cached plan. Bump whenever plan
@@ -2368,8 +2369,12 @@ class Engine:
             while True:
                 await asyncio.sleep(delay)
                 delay = MINE_IDLE_S
+                pressure = await asyncio.to_thread(_memory_pressure_level)
                 if (
-                    self.session is not None
+                    self.shutdown.is_set()
+                    or self.session is not None
+                    or self._starting
+                    or self._finalizing
                     or self._reprocessing
                     or self._editing
                     or self._transcribing
@@ -2380,6 +2385,11 @@ class Engine:
                     or not self.config.vocab_mining
                 ):
                     return
+                # Keep the history cursor untouched while memory is pressured.
+                # Optional mining must not page in the shared model or trigger
+                # a timeout/reload just before the next dictation needs it.
+                if pressure >= _MEMORY_PRESSURE_WARNING:
+                    continue
                 if self._miner is None:
                     self._miner = VocabMiner(self.config.home, self._mine_generate)
                 # Idle mining is the definition of interruptible batch work —

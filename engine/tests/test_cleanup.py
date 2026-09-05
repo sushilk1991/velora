@@ -543,6 +543,53 @@ def test_cooperative_cancel_is_not_reported_as_quality_timeout(monkeypatch):
         engine.close()
 
 
+@pytest.mark.parametrize("cancel_at", [0, 256, 1024])
+def test_prefill_cancel_is_safe(monkeypatch, cancel_at):
+    engine = RecordingCleanup()
+    cancel = threading.Event()
+    completed = []
+    caches = []
+    released = []
+
+    def prefill(*_args, **kwargs):
+        caches.append(kwargs["prompt_cache"])
+        progress = kwargs.get("prompt_progress_callback", lambda *_: None)
+        for processed in [0, 256, 1024]:
+            if processed == cancel_at:
+                cancel.set()
+            progress(processed, 1024)
+            completed.append(processed)
+        yield SimpleNamespace(text="raw", token=1, generation_tokens=1)
+
+    import mlx.core as mx
+    import mlx_lm
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", prefill)
+    monkeypatch.setattr(mx, "clear_cache", lambda: released.append(list(caches[-1])))
+    try:
+        engine._warm("system")
+        snapshot = engine._prepared_cache
+        result = engine._run(
+            "raw", "system", timeout_ms=100, cancel_event=cancel,
+        )
+
+        assert result.reason == "cancelled"
+        assert completed == [step for step in [0, 256, 1024] if step < cancel_at]
+        assert result.text == "raw"
+        assert result.applied is False
+        assert engine.loaded is True
+        assert engine.unhealthy is False
+        assert engine._prepared_cache is snapshot
+        assert released == [[]]
+
+        # A later uncancelled request must use the same warm model normally.
+        final = engine._run("raw", "system", timeout_ms=100)
+        assert final.text == "raw"
+        assert final.applied is True
+    finally:
+        engine.close()
+
+
 def test_input_token_ceiling_refuses_before_mlx_prefill(monkeypatch):
     engine = RecordingCleanup()
 

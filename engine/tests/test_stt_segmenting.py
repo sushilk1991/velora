@@ -212,6 +212,58 @@ def test_audio_span_copies_only_requested_chunk_overlap(whisper, monkeypatch):
     assert concatenated_lengths == [[3, 3]]
 
 
+def _full_speech_reference(backend):
+    parts = []
+    frame_samples = stt_mod._SPEECH_FRAME_SAMPLES
+    for chunk in backend._chunks:
+        frames = len(chunk) // frame_samples
+        if not frames:
+            continue
+        audio = np.asarray(chunk[:frames * frame_samples], dtype=np.float32)
+        frames = audio.reshape(frames, frame_samples)
+        parts.append(np.sqrt(np.mean(np.square(frames, dtype=np.float64), axis=1)))
+
+    if not parts:
+        return backend._silence.speech_level
+    return max(backend._silence.speech_level, float(np.percentile(np.concatenate(parts), 90)))
+
+
+def test_speech_reference_parity():
+    backend = WhisperBackend("unused")
+    rng = np.random.default_rng(42)
+    for size in [0, 1, 319, 320, 321, 1600, 48000, 640, 0]:
+        backend.feed_chunk(rng.normal(0, 0.1, size).astype(np.float32))
+        assert backend._speech_reference() == _full_speech_reference(backend)
+
+    backend.reset()
+    backend.feed_chunk(quiet())
+    assert backend._speech_reference() == _full_speech_reference(backend)
+
+
+def test_speech_rms_analyzed_once(monkeypatch):
+    backend = WhisperBackend("unused")
+    backend.feed_chunk(loud())
+    backend._speech_reference()
+    squared_samples = []
+    real_square = np.square
+
+    def square(audio, **kwargs):
+        squared_samples.append(audio.size)
+        return real_square(audio, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(np, "square", square)
+        backend._speech_reference()
+    assert squared_samples == []
+
+    backend.feed_chunk(loud(0.2))
+    with monkeypatch.context() as patch:
+        patch.setattr(np, "square", square)
+        reference = backend._speech_reference()
+    assert squared_samples == [CHUNK]
+    assert reference == _full_speech_reference(backend)
+
+
 def test_segment_closes_on_pause(whisper):
     backend, fake = whisper(["seg one"])
     partials = feed_seconds(backend, MIN_SEGMENT_S)  # 10s speech: not yet

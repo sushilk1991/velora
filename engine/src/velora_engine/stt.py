@@ -580,6 +580,9 @@ class WhisperBackend:
         self._segments: list[str] = []
         self._new_segments: list[str] = []
         self._silence = SilenceTracker()
+        self._speech_rms = np.empty(0, dtype=np.float64)
+        self._speech_rms_chunks = 0
+        self._speech_p90 = 0.0
         # Samples of tracker-flagged speech since the last decode point. A
         # span only counts as speech-bearing past a sustained run — a single
         # 100 ms room-tone blip over the adaptive threshold used to arm the
@@ -638,8 +641,15 @@ class WhisperBackend:
         dictation whose speech ran 0.02-0.15). The p90 of 20 ms frame RMS
         over the whole buffered recording sits inside actual speech for any
         real dictation, so the gates key off the louder of the two."""
-        rms_parts: list[np.ndarray] = []
-        for chunk in self._chunks:
+        # Buffered PCM is immutable. Analyze each chunk once and retain only
+        # its frame RMS (400 bytes/second), preserving the exact percentile
+        # and per-chunk framing used by the speech guards.
+        if self._speech_rms_chunks == len(self._chunks):
+            return max(self._silence.speech_level, self._speech_p90)
+
+        rms_parts = [self._speech_rms]
+        for index in range(self._speech_rms_chunks, len(self._chunks)):
+            chunk = self._chunks[index]
             frame_count = len(chunk) // _SPEECH_FRAME_SAMPLES
             if frame_count:
                 framed = np.asarray(
@@ -649,11 +659,11 @@ class WhisperBackend:
                 rms_parts.append(
                     np.sqrt(np.mean(np.square(framed, dtype=np.float64), axis=1))
                 )
-        if not rms_parts:
-            return self._silence.speech_level
-        # Tiny arrays (one float per 20 ms), never the recording itself.
-        all_rms = np.concatenate(rms_parts)
-        return max(self._silence.speech_level, float(np.percentile(all_rms, 90)))
+        self._speech_rms_chunks = len(self._chunks)
+        if len(rms_parts) > 1:
+            self._speech_rms = np.concatenate(rms_parts)
+            self._speech_p90 = float(np.percentile(self._speech_rms, 90))
+        return max(self._silence.speech_level, self._speech_p90)
 
     def _transcribe(
         self,
@@ -1017,6 +1027,9 @@ class WhisperBackend:
         self._segments = []
         self._new_segments = []
         self._silence.reset()
+        self._speech_rms = np.empty(0, dtype=np.float64)
+        self._speech_rms_chunks = 0
+        self._speech_p90 = 0.0
         self._segment_decode_failed = False
         self._span_speech_samples = 0
         self._session_had_speech = False
