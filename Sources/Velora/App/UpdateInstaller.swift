@@ -48,6 +48,9 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     static let requiredTeamID = "JZFVKGDPU4"
     static let requiredBundleID = "com.sushil.velora"
 
+    private static let quitFallbackDelay: TimeInterval = 75
+    private static let toolTerminationGrace: TimeInterval = 5
+
     /// Main-queue only.
     private(set) var state: State = .idle {
         didSet {
@@ -66,6 +69,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// Set once a swap helper has been spawned so quit-time install never
     /// races a restart-time install.
     private var helperSpawned = false
+    private var installingVersion: String?
     /// Set by the explicit "Install Update" action. Verification still
     /// completes first; reaching `.ready` then immediately enters the existing
     /// reverify → swap-helper → quit → relaunch path instead of asking again.
@@ -88,9 +92,6 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// install waits for user-owned foreground work instead of cancelling it
     /// when a slow download happens to finish.
     var relaunchBlockReason: (() -> String?)?
-    /// Headless update E2E exits directly after the helper starts; the app
-    /// default requests normal AppKit termination so lifecycle cleanup runs.
-    var terminationHandler: (() -> Void)?
     private var installRetryWorkItem: DispatchWorkItem?
     private var lastRelaunchBlockReason: String?
 
@@ -542,6 +543,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             return
         }
         let staged = Self.stagedURL(for: version)
+        installingVersion = version
         state = .installing
         generation += 1
         let gen = generation
@@ -588,11 +590,6 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                     guard self.spawnHelper(
                         staged: staged, version: version, relaunch: true)
                     else { return }
-                    if let terminationHandler = self.terminationHandler {
-                        terminationHandler()
-                    } else {
-                        NSApp.terminate(nil)
-                    }
                     // Last-resort guarantee on a queue the main-thread quit
                     // cannot starve: if graceful termination still stalls,
                     // hard-exit so the swap helper (which re-verifies the exact
@@ -602,12 +599,15 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                     // quit (AppDelegate's watchdog), so this never clips a real
                     // finalize — only a genuine hang.
                     DispatchQueue.global(qos: .userInitiated).asyncAfter(
-                        deadline: .now() + 75
+                        deadline: .now() + Self.quitFallbackDelay
                     ) {
                         veloraLog(
                             "Velora: update quit stalled >75s — forcing exit for the swap helper")
                         exit(0)
                     }
+                    // Arm the fallback before AppKit can enter a nested quit
+                    // loop that never returns to this callback.
+                    NSApp.terminate(nil)
                 }
                 RunLoop.main.add(quit, forMode: .common)
             }
@@ -672,7 +672,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// the helper itself re-validates the signature of the exact bytes it
     /// installs, so no slow verification happens on the quit path.
     func installOnQuitIfReady() {
-        guard case .ready(let version) = state else { return }
+        guard let version = exitInstallVersion else { return }
         let config = AppConfig.shared
         let explicitlyRequested = installAndRelaunchWhenReady
         guard explicitlyRequested || (
@@ -686,14 +686,23 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         installOnExit()
     }
 
-    /// The quit-install core, config gate not included (the update e2e
-    /// harness uses it directly).
+    /// The quit-install core, config gate not included.
     func installOnExit() {
-        guard !helperSpawned, case .ready(let version) = state,
+        guard !helperSpawned, let version = exitInstallVersion,
               Self.installBlocker() == nil else { return }
         let staged = Self.stagedURL(for: version)
         guard FileManager.default.fileExists(atPath: staged.path) else { return }
         _ = spawnHelper(staged: staged, version: version, relaunch: false)
+    }
+
+    // A manual Quit can arrive during re-verification. Keep the requested
+    // install, with the helper verifying it after exit and no relaunch.
+    private var exitInstallVersion: String? {
+        switch state {
+        case .ready(let version): return version
+        case .installing: return installingVersion
+        default: return nil
+        }
     }
 
     @discardableResult
@@ -758,6 +767,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     # $7 bundle identifier   $8 expected marketing version
     PID="$1"; STAGED="$2"; TARGET="$3"; RELAUNCH="$4"; LOG="$5"; TEAM="$6"
     BUNDLE_ID="$7"; VERSION="$8"
+    TOOL_TIMEOUT=300; TERMINATION_GRACE=5
     exec >> "$LOG" 2>&1
 
     # Reopen an app for the user on failure: the target if it survived,
@@ -777,11 +787,33 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     # The app-side 180 s tool watchdog died with the app — a wedged ditto or
     # codesign here would otherwise leave Velora exited forever.
     run_to() {
+      # Give each tool its own process group so a timeout also stops children
+      # that could otherwise keep output pipes or staged files open.
+      set -m
       "$@" &
       CMD=$!
+      set +m
       # Watchdog gets /dev/null stdio: it must never hold open a pipe the
       # caller is reading (grep would block on it until the sleep expired).
-      ( sleep 300; kill "$CMD" 2>/dev/null ) >/dev/null 2>&1 &
+      (
+        TIMED_OUT=0
+        trap '
+          kill "$SLEEP" 2>/dev/null
+          # The leader can exit on TERM before a resistant child. Finish
+          # timeout cleanup even when the caller cancels this watchdog.
+          if [ "$TIMED_OUT" -eq 1 ]; then
+            kill -KILL -- "-$CMD" 2>/dev/null
+          fi
+          exit
+        ' TERM
+        sleep "$TOOL_TIMEOUT" & SLEEP=$!
+        wait "$SLEEP"
+        TIMED_OUT=1
+        kill -TERM -- "-$CMD" 2>/dev/null
+        sleep "$TERMINATION_GRACE" & SLEEP=$!
+        wait "$SLEEP"
+        kill -KILL -- "-$CMD" 2>/dev/null
+      ) >/dev/null 2>&1 &
       WATCH=$!
       wait "$CMD"
       RC=$?
@@ -938,27 +970,46 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         let pipe = Pipe()
         proc.standardOutput = pipe
         proc.standardError = pipe
+        let exitDone = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exitDone.signal() }
         do {
             try proc.run()
         } catch {
             return (-1, error.localizedDescription)
         }
+        let pid = proc.processIdentifier
+        // Foundation creates a tool process group on macOS. Check ownership
+        // before targeting the group, so the app's own group is never killed.
+        let signalTarget = getpgid(pid) == pid ? -pid : pid
         var data = Data()
         let readDone = DispatchSemaphore(value: 0)
         Thread {
             data = pipe.fileHandleForReading.readDataToEndOfFile()
             readDone.signal()
         }.start()
-        if readDone.wait(timeout: .now() + timeout) == .timedOut {
-            proc.terminate()
-            if readDone.wait(timeout: .now() + 5) == .timedOut {
-                kill(proc.processIdentifier, SIGKILL)
-                _ = readDone.wait(timeout: .now() + 5)
+        // Pipe EOF is not process exit: a verifier can close its output and
+        // keep running. Both must finish within the same deadline.
+        let deadline = DispatchTime.now() + timeout
+        let exited = exitDone.wait(timeout: deadline) == .success
+        let drained = readDone.wait(timeout: deadline) == .success
+        if !exited || !drained {
+            if proc.isRunning || (!drained && signalTarget < 0) {
+                kill(signalTarget, SIGTERM)
+            }
+            let grace = DispatchTime.now() + toolTerminationGrace
+            let stopped = exited || exitDone.wait(timeout: grace) == .success
+            let closed = drained || readDone.wait(timeout: grace) == .success
+            if !stopped || !closed {
+                if proc.isRunning || (!closed && signalTarget < 0) {
+                    kill(signalTarget, SIGKILL)
+                }
+                let killed = DispatchTime.now() + toolTerminationGrace
+                if !stopped { _ = exitDone.wait(timeout: killed) }
+                if !closed { _ = readDone.wait(timeout: killed) }
             }
             veloraLog("Velora: updater tool timed out — \(tool) \(args.joined(separator: " "))")
             return (-1, "timed out: \(tool)")
         }
-        proc.waitUntilExit()
         return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 }

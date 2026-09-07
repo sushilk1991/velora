@@ -20,9 +20,9 @@ if migratedPreferenceCount > 0 {
           migratedPreferenceCount)
 }
 
-// Headless updater end-to-end: exercises check → download → verify → stage
-// (→ swap with --install) against the real pipeline without starting the
-// app. See UpdateE2E; point VELORA_UPDATE_FEED_URL at a local feed to drive.
+// Updater end-to-end: check → download → verify → stage. With --install,
+// start the real app lifecycle in a disposable bundle to test quit/relaunch.
+// See UpdateE2E; point VELORA_UPDATE_FEED_URL at a local feed to drive.
 if CommandLine.arguments.contains("--update-e2e") {
     exit(UpdateE2E.run(install: CommandLine.arguments.contains("--install")))
 }

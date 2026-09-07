@@ -2,7 +2,7 @@
 
 .PHONY: build release app dmg verify-dmg run sounds clean test test-swift \
 	test-engine test-site test-sublime-plugin test-release-scripts test-coverage \
-	test-live-audio test-ios perf-test
+	test-live-audio test-ios perf-test test-update-lifecycle
 
 build:
 	swift build
@@ -28,7 +28,7 @@ sounds:
 clean:
 	rm -rf .build build
 
-test: test-swift test-engine test-site test-sublime-plugin test-release-scripts
+test: test-swift test-engine test-site test-sublime-plugin test-release-scripts test-update-lifecycle
 
 test-swift: build
 	.build/debug/Velora --selftest
@@ -45,6 +45,9 @@ test-sublime-plugin:
 test-release-scripts:
 	./scripts/test-signing-config.sh
 	./scripts/test-publish-release.sh
+
+test-update-lifecycle:
+	python3 scripts/test-update-lifecycle.py
 
 test-coverage:
 	cd engine && uv run pytest -q --cov=velora_engine --cov-branch \

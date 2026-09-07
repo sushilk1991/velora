@@ -604,7 +604,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         hotkeyMonitor.start()
 
         UpdateInstaller.shared.relaunchBlockReason = { [weak self] in
-            self?.restartBlockReason() ?? "Velora is unavailable"
+            guard let self else { return "Velora is unavailable" }
+            return self.restartBlockReason()
         }
 
         UpdateChecker.shared.onUpdate = { [weak self] update, origin in
@@ -682,9 +683,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if !Thread.isMainThread {
             return DispatchQueue.main.sync { restartBlockReason() }
         }
+        if terminationPending {
+            return "Velora is quitting"
+        }
         return UpdateRelaunchSafety.blockReason(
             dictationBusy: dictation.hasUserOperationInFlight,
-            fileTranscriptionBusy: transcriber.isTranscribing,
+            fileTranscriptionBusy: transcriber.isTranscribing
+                || !openFileTranscriptionQueue.pendingURLs.isEmpty
+                || openFileRetryPending,
             meetingCaptureBusy: meetingCoordinator.foregroundCaptureActive
                 || meetingCoordinator.terminationWorkInFlight)
     }
