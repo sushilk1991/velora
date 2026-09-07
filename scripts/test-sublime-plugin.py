@@ -410,9 +410,17 @@ class SublimePluginTests(unittest.TestCase):
         self.assertTrue(status["known"])
         self.assertTrue(status["result_ok"])
 
-    def test_bridge_rejects_a_same_user_process_without_velora_signature(self):
+    def test_unsigned_peer_rejected(self):
         PLUGIN._peer_is_velora = REAL_PEER_IS_VELORA
-        _, response = self.stream_capture(View("", [Region(0, 0)]))
+
+        # Authentication rejects the peer before reading a request. Sending
+        # here races the server closing the rejected connection.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(1)
+            client.connect(PLUGIN._socket_path())
+            with client.makefile("rb") as stream:
+                response = json.loads(stream.readline())
+
         self.assertFalse(response["ok"])
         self.assertEqual(response.get("error"), "unauthorized")
         self.assertFalse(PLUGIN._STREAM_SESSIONS)
