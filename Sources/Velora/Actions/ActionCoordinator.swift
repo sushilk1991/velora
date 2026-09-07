@@ -12,17 +12,17 @@ enum ActionProgress: Equatable {
     var hudMessage: String {
         switch self {
         case .readingScreen:
-            return "Reading screen · Esc to stop"
+            return "Reading screen · Esc cancels"
         case .planning(let turn):
             return "Planning" + (turn > 1 ? " turn \(turn)" : "")
-                + " · Esc to stop"
+                + " · Esc cancels"
         case .verifyingTarget:
-            return "Confirming recipient · Esc to stop"
+            return "Confirming recipient · Esc cancels"
         case .executing(let step, let total, let description):
             let short = String(description.prefix(42))
-            return "\(step)/\(total) \(short) · Esc to stop"
+            return "\(step)/\(total) \(short) · Esc cancels"
         case .retrying:
-            return "Screen changed; trying a new path · Esc to stop"
+            return "Screen changed; trying a new path · Esc cancels"
         }
     }
 }

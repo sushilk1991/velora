@@ -128,7 +128,7 @@ final class OnboardingModel: ObservableObject {
             onFinish?()
             return
         }
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.85)) {
+        withAnimation(VeloraMotion.springSlow) {
             step = next
         }
     }
@@ -254,7 +254,7 @@ struct OnboardingView: View {
         permissionStep(
             title: "Let Velora hear your hotkey",
             card: PermissionCard(
-                symbol: "keyboard",
+                symbol: "keyboard.fill",
                 title: "Input Monitoring",
                 explanation: "Your dictation key works anywhere only if Velora may watch for key presses. Without this the hotkey stays silent — even though everything else looks fine.",
                 granted: model.inputMonitoringGranted,
@@ -350,7 +350,7 @@ struct OnboardingView: View {
                 Group {
                     if model.dictationSucceeded {
                         Label("That's it — you're ready.", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(Color(nsColor: .systemGreen))
+                            .foregroundStyle(VeloraStatus.success)
                             .font(.callout.weight(.medium))
                             .transition(.opacity)
                     }
@@ -372,7 +372,7 @@ struct OnboardingView: View {
                     .controlSize(.large)
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: setup.canTryIt)
+        .animation(VeloraMotion.standard, value: setup.canTryIt)
     }
 
     // MARK: - Footer (dots + skip)
@@ -383,7 +383,7 @@ struct OnboardingView: View {
             HStack(spacing: VeloraSpacing.s) {
                 ForEach(OnboardingModel.Step.allCases, id: \.rawValue) { step in
                     Circle()
-                        .fill(step == model.step ? Color.accentColor : Color.secondary.opacity(0.3))
+                        .fill(step == model.step ? VeloraBrand.violet.color : Color.secondary.opacity(0.3))
                         .frame(width: 6, height: 6)
                 }
             }
@@ -418,7 +418,7 @@ private struct ModelSetupCard: View {
         VStack(spacing: VeloraSpacing.l) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.system(size: 46))
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(VeloraBrand.violet.color)
 
             VStack(spacing: VeloraSpacing.s) {
                 Text(state.status ?? "Preparing the model downloads…")
@@ -445,10 +445,10 @@ private struct ModelSetupCard: View {
         }
         .padding(VeloraSpacing.xl)
         .frame(width: 480)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(VeloraPanel.card, in: RoundedRectangle(cornerRadius: VeloraRadius.card))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.quaternary, lineWidth: 1))
+            RoundedRectangle(cornerRadius: VeloraRadius.card)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
     }
 }
 
@@ -466,21 +466,21 @@ struct PermissionCard: View {
         HStack(spacing: VeloraSpacing.m) {
             ZStack {
                 Circle()
-                    .fill(Color.accentColor.opacity(granted ? 0.0 : 0.15))
+                    .fill(VeloraBrand.violet.color.opacity(granted ? 0.0 : 0.15))
                     .frame(width: 44, height: 44)
                 if granted {
                     Image(systemName: "checkmark.circle.fill")
                         .font(.system(size: 28))
-                        .foregroundStyle(Color(nsColor: .systemGreen))
+                        .foregroundStyle(VeloraStatus.success)
                         .symbolEffect(.bounce, value: granted)
                         .transition(.opacity)
                 } else {
                     Image(systemName: symbol)
                         .font(.system(size: 22))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(VeloraBrand.violet.color)
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: granted)
+            .animation(VeloraMotion.quick, value: granted)
 
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 Text(title)
@@ -498,29 +498,10 @@ struct PermissionCard: View {
         }
         .padding(VeloraSpacing.l)
         .frame(width: 480)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(VeloraPanel.card, in: RoundedRectangle(cornerRadius: VeloraRadius.card))
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(.quaternary, lineWidth: 1))
-    }
-}
-
-// MARK: - Keycap (design brief §4.2 step 4)
-
-/// Static keycap chip (menus, labels). The interactive recorder in
-/// `HotkeyRecorderView` shares this design language.
-struct KeycapView: View {
-    let label: String
-
-    var body: some View {
-        Text(label)
-            .font(.system(size: 13, weight: .semibold, design: .rounded))
-            .padding(.horizontal, 18)
-            .padding(.vertical, 10)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
+            RoundedRectangle(cornerRadius: VeloraRadius.card)
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
     }
 }
 
@@ -534,9 +515,9 @@ private struct TryItEditor: View {
             .font(.body)
             .scrollContentBackground(.hidden)
             .padding(VeloraSpacing.s)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .background(VeloraPanel.card, in: RoundedRectangle(cornerRadius: VeloraRadius.tile))
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .strokeBorder(.quaternary, lineWidth: 1))
+                RoundedRectangle(cornerRadius: VeloraRadius.tile)
+                    .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
     }
 }

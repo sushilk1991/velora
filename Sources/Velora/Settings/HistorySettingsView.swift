@@ -278,7 +278,7 @@ struct HistorySettingsView: View {
             Button(role: .destructive) {
                 showClearConfirm = true
             } label: {
-                Label("Clear All", systemImage: "trash")
+                Label("Delete All…", systemImage: "trash")
             }
             .disabled(vm.records.isEmpty)
             .confirmationDialog(
@@ -457,27 +457,27 @@ private struct HistoryCard: View {
             header
             transcript
             if reprocessFailed {
-                Label("Reprocess failed — try again", systemImage: "exclamationmark.triangle.fill")
+                Label("Reprocess failed — try again.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(VeloraStatus.warning)
             }
             Divider().opacity(hovering ? 0.5 : 0.25)
             actions
         }
         .padding(VeloraSpacing.m)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .fill(VeloraPanel.card)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .strokeBorder(
                     hovering ? VeloraBrand.violet.color.opacity(0.45) : Color(.separatorColor).opacity(0.7),
                     lineWidth: 1)
         )
         .shadow(color: .black.opacity(hovering ? 0.18 : 0.06),
                 radius: hovering ? 8 : 3, x: 0, y: hovering ? 3 : 1)
-        .animation(.easeOut(duration: 0.15), value: hovering)
+        .animation(VeloraMotion.quick, value: hovering)
         .onHover { hovering = $0 }
         .sheet(isPresented: $editing) { editSheet }
     }
@@ -493,10 +493,10 @@ private struct HistoryCard: View {
                 .scrollContentBackground(.hidden)
                 .padding(VeloraSpacing.s)
                 .background(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color(nsColor: .textBackgroundColor)))
+                    RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
+                        .fill(VeloraPanel.card))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                         .strokeBorder(Color(.separatorColor)))
                 .frame(minHeight: 160)
             HStack {
@@ -546,7 +546,7 @@ private struct HistoryCard: View {
 
     private var appIconTile: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 7, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.control, style: .continuous)
                 .fill(Color(.separatorColor).opacity(0.25))
                 .frame(width: 30, height: 30)
             if let icon = Self.appIcon(record.bundleID) {
@@ -575,7 +575,7 @@ private struct HistoryCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             if Self.isLong(record.final) {
                 Button(expanded ? "Show less" : "Show more") {
-                    withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+                    withAnimation(VeloraMotion.quick) { expanded.toggle() }
                 }
                 .buttonStyle(.plain)
                 .font(.caption.weight(.medium))
@@ -583,7 +583,7 @@ private struct HistoryCard: View {
             }
             if hasDistinctRaw {
                 Button(showRaw ? "Hide original" : "As heard") {
-                    withAnimation(.easeInOut(duration: 0.15)) { showRaw.toggle() }
+                    withAnimation(VeloraMotion.quick) { showRaw.toggle() }
                 }
                 .buttonStyle(.plain)
                 .font(.caption.weight(.medium))
@@ -598,7 +598,7 @@ private struct HistoryCard: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(VeloraSpacing.xs)
                         .background(
-                            RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: VeloraRadius.control)
                                 .fill(Color(.separatorColor).opacity(0.18)))
                 }
             }
@@ -606,7 +606,7 @@ private struct HistoryCard: View {
         .contentShape(Rectangle())
         .onTapGesture {
             guard Self.isLong(record.final) else { return }
-            withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() }
+            withAnimation(VeloraMotion.quick) { expanded.toggle() }
         }
     }
 
@@ -619,7 +619,7 @@ private struct HistoryCard: View {
                     .copy,
                     copied ? "checkmark" : "doc.on.doc",
                     actionHelp(.copy),
-                    tint: copied ? Color(nsColor: .systemGreen) : nil
+                    tint: copied ? VeloraStatus.success : nil
                 ) {
                     onCopy()
                     copied = true
@@ -650,7 +650,7 @@ private struct HistoryCard: View {
 
             actionButton(
                 .delete, "trash", actionHelp(.delete),
-                tint: .secondary, hoverTint: .red, action: onDelete)
+                tint: .secondary, hoverTint: VeloraStatus.danger, action: onDelete)
         }
     }
 
@@ -713,7 +713,7 @@ private struct HistoryCard: View {
                 .foregroundStyle(color)
                 .frame(width: 22, height: 20)
                 .background(
-                    RoundedRectangle(cornerRadius: 5)
+                    RoundedRectangle(cornerRadius: VeloraRadius.control)
                         .fill(isHovered ? Color(.separatorColor).opacity(0.35) : .clear))
         }
         .buttonStyle(.plain)
@@ -765,9 +765,9 @@ private struct HistoryCard: View {
             .fixedSize()
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: VeloraRadius.control))
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: VeloraRadius.control)
                     .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8)))
             .shadow(color: .black.opacity(0.18), radius: 4, y: 2)
             .allowsHitTesting(false)

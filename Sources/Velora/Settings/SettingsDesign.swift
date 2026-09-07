@@ -28,6 +28,13 @@ enum VeloraPanel {
     static let card = Color(nsColor: cardColor)
 }
 
+/// Corner radii. Nested surfaces stay concentric (outer = inner + padding).
+enum VeloraRadius {
+    static let control: CGFloat = 6   // keycaps, chips, small buttons
+    static let tile: CGFloat = 8      // icon tiles, thumbnails, rows
+    static let card: CGFloat = 12     // cards and sheets
+}
+
 /// One elevated card: rounded 12 pt surface, hairline border, whisper shadow.
 struct SettingsCard<Content: View>: View {
     private let content: Content
@@ -43,10 +50,10 @@ struct SettingsCard<Content: View>: View {
         .padding(VeloraSpacing.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .fill(VeloraPanel.card))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
         .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
     }
@@ -129,10 +136,10 @@ struct StatTile: View {
         .padding(VeloraSpacing.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .fill(VeloraPanel.card))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
                 .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
         .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
         .accessibilityElement(children: .combine)
@@ -167,10 +174,10 @@ struct KeycapsLabel: View {
                     .padding(.horizontal, cap.count > 1 ? 8 : 0)
                     .frame(minWidth: 24, minHeight: 24)
                     .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: VeloraRadius.control, style: .continuous)
                             .fill(Color.primary.opacity(0.06)))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        RoundedRectangle(cornerRadius: VeloraRadius.control, style: .continuous)
                             .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
             }
         }

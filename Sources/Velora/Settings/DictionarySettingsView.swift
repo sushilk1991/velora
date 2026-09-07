@@ -176,7 +176,7 @@ struct DictionarySettingsView: View {
                     } description: {
                         Text("Add names, product terms, acronyms, or a phrase Velora often mishears.")
                     } actions: {
-                        Button("Add a word") {
+                        Button("Add Word") {
                             editor = EditorContext(row: nil, promotesLearned: false)
                         }
                             .buttonStyle(.borderedProminent)
@@ -222,9 +222,9 @@ struct DictionarySettingsView: View {
         }
         .alert(item: $pendingDelete) { row in
             Alert(
-                title: Text("Forget “\(row.writeAs)”?"),
+                title: Text("\(deleteVerb(row)) “\(row.writeAs)”?"),
                 message: Text(deleteMessage(row)),
-                primaryButton: .destructive(Text("Forget")) {
+                primaryButton: .destructive(Text(deleteVerb(row))) {
                     do {
                         try model.removeDictionaryEntry(row)
                         operationError = nil
@@ -319,7 +319,7 @@ struct DictionarySettingsView: View {
     @ViewBuilder private var confirmationActions: some View {
         switch confirmation {
         case .bulkDelete(let source):
-            Button("Forget all", role: .destructive) {
+            Button("Forget All", role: .destructive) {
                 do {
                     try model.clearDictionaryEntries(source)
                     operationError = nil
@@ -365,7 +365,7 @@ struct DictionarySettingsView: View {
                     ProgressView().controlSize(.small)
                 } else {
                     Image(systemName: presentation.symbol)
-                        .foregroundStyle(presentation.isWarning ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(presentation.isWarning ? AnyShapeStyle(VeloraStatus.warning) : AnyShapeStyle(.secondary))
                         .accessibilityHidden(true)
                 }
                 Text(presentation.title)
@@ -383,8 +383,8 @@ struct DictionarySettingsView: View {
             }
             if let operationError {
                 HStack(spacing: 5) {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .foregroundStyle(.red)
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(VeloraStatus.danger)
                         .accessibilityHidden(true)
                     Text(operationError)
                         .font(.caption2)
@@ -415,6 +415,11 @@ struct DictionarySettingsView: View {
         .padding(.horizontal, VeloraSpacing.m)
         .padding(.vertical, 9)
         .background(.bar)
+    }
+
+    /// "Remove" for entries the user added, "Forget" for learned ones.
+    private func deleteVerb(_ row: DictionaryRow) -> String {
+        row.source == .added ? "Remove" : "Forget"
     }
 
     private func deleteMessage(_ row: DictionaryRow) -> String {
@@ -461,9 +466,9 @@ private struct DictionarySettingsRow: View {
                 } else if row.source == .learned {
                     Button("Make Permanent…", systemImage: "pin", action: onPromote)
                 }
-                Button("Forget", systemImage: "trash", role: .destructive, action: onDelete)
+                Button(row.source == .added ? "Remove" : "Forget", systemImage: "trash", role: .destructive, action: onDelete)
             } label: {
-                Image(systemName: "ellipsis")
+                Image(systemName: "ellipsis.circle")
                     .frame(width: 24, height: 24)
                     .contentShape(Rectangle())
             }
@@ -476,7 +481,7 @@ private struct DictionarySettingsRow: View {
         .contextMenu {
             if row.source == .added { Button("Edit…", action: onEdit) }
             if row.source == .learned { Button("Make Permanent…", action: onPromote) }
-            Button("Forget", role: .destructive, action: onDelete)
+            Button(row.source == .added ? "Remove" : "Forget", role: .destructive, action: onDelete)
         }
         .onTapGesture(count: 2) {
             if row.source == .added { onEdit() }
@@ -588,7 +593,7 @@ private struct DictionaryEditorSheet: View {
                     if let warning = draft.riskWarning {
                         Label(warning, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(VeloraStatus.warning)
                     }
                 } footer: {
                     Text(heardAsHelp)
@@ -598,9 +603,9 @@ private struct DictionaryEditorSheet: View {
 
                 if let errorMessage {
                     Section {
-                        Label(errorMessage, systemImage: "exclamationmark.circle.fill")
+                        Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                             .font(.callout)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(VeloraStatus.danger)
                     }
                 }
             }

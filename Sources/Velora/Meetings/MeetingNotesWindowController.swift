@@ -165,8 +165,8 @@ struct MeetingNotesWindowView: View {
             if let error = record.error {
                 Label(
                     "Recreate did not finish; the previous notes were kept. \(error)",
-                    systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
+                    systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(VeloraStatus.warning)
             }
         case .recording:
             Label("Recording is still in progress", systemImage: "record.circle")
@@ -176,8 +176,8 @@ struct MeetingNotesWindowView: View {
                 .foregroundStyle(.secondary)
         case .failed:
             Label(record.error ?? "Meeting processing failed",
-                  systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+                  systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(VeloraStatus.warning)
         }
     }
 

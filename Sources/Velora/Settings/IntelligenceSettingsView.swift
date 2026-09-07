@@ -277,7 +277,7 @@ struct IntelligenceSettingsView: View {
             CardHeader(
                 symbol: "chart.bar.fill", color: .blue,
                 title: "Daily activity",
-                subtitle: "Words dictated each day — last 30 days")
+                subtitle: "Words dictated each day — last 30 days.")
             DailyActivityChart(daily: vm.insights.daily)
         }
     }
@@ -294,7 +294,7 @@ struct IntelligenceSettingsView: View {
                         CardHeader(
                             symbol: "square.grid.2x2.fill", color: .indigo,
                             title: "Where you dictate",
-                            subtitle: "Top apps — last 30 days")
+                            subtitle: "Top apps — last 30 days.")
                         BreakdownList(slices: vm.insights.apps, totalWords: monthWords)
                     }
                 }
@@ -303,7 +303,7 @@ struct IntelligenceSettingsView: View {
                         CardHeader(
                             symbol: "slider.horizontal.3", color: .teal,
                             title: "Modes",
-                            subtitle: "Top modes — last 30 days")
+                            subtitle: "Top modes — last 30 days.")
                         BreakdownList(slices: vm.insights.modes, totalWords: monthWords)
                     }
                 }
@@ -342,7 +342,7 @@ struct IntelligenceSettingsView: View {
             }
             SettingsCard {
                 CardHeader(
-                    symbol: "checkmark.seal.fill", color: .green,
+                    symbol: "checkmark.circle.fill", color: .green,
                     title: "Accuracy signals",
                     subtitle: window.title)
                 CardMetricRow(label: "Kept without edits", value: Self.rate(stats.zeroEditRate))
@@ -369,7 +369,7 @@ struct IntelligenceSettingsView: View {
     private var shareCard: some View {
         SettingsCard {
             CardHeader(
-                symbol: "square.and.arrow.up.fill", color: VeloraBrand.violet.color,
+                symbol: "square.and.arrow.up", color: VeloraBrand.violet.color,
                 title: "Share your stats",
                 subtitle: "Aggregate numbers only — never transcripts, app names, or contacts."
             ) {

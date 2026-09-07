@@ -125,7 +125,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     /// View → Hide/Show Sidebar (⌃⌘S).
     func toggleSidebar() {
-        withAnimation(.easeInOut(duration: 0.18)) {
+        withAnimation(VeloraMotion.quick) {
             selection.sidebarCollapsed.toggle()
         }
     }
@@ -162,7 +162,7 @@ struct SettingsRootView: View {
     private var detailHeader: some View {
         HStack(spacing: VeloraSpacing.m) {
             Button {
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(VeloraMotion.quick) {
                     selection.sidebarCollapsed.toggle()
                 }
             } label: {
@@ -288,7 +288,7 @@ struct SettingsSidebar: View {
                     Text("Velora")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(.primary)
-                    Text("v\(VeloraAppInfo.shortVersion)")
+                    Text(VeloraAppInfo.shortVersion)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                     Spacer(minLength: 0)
@@ -330,7 +330,7 @@ struct SettingsSearchField: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(.secondary)
-            TextField("Search settings…", text: $query)
+            TextField("Search settings", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .focused($focused)
@@ -359,10 +359,10 @@ struct SettingsSearchField: View {
         .padding(.horizontal, VeloraSpacing.s)
         .frame(height: 30)
         .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                 .fill(Color.primary.opacity(0.05)))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
+            RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                 .strokeBorder(
                     focused ? Color.accentColor.opacity(0.7) : Color(nsColor: .separatorColor),
                     lineWidth: 1))
@@ -390,7 +390,7 @@ struct SettingsSidebarRow: View {
                     .foregroundStyle(.white)
                     .frame(width: 25, height: 25)
                     .background(
-                        RoundedRectangle(cornerRadius: 6.5, style: .continuous)
+                        RoundedRectangle(cornerRadius: VeloraRadius.control, style: .continuous)
                             .fill(tab.tileColor.gradient))
                 if !collapsed {
                     Text(tab.title)
@@ -405,7 +405,7 @@ struct SettingsSidebarRow: View {
             .padding(.horizontal, collapsed ? 0 : VeloraSpacing.s)
             .frame(height: 34)
             .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         }
         .buttonStyle(.plain)
         // Selected row fills with the accent (the System Settings source-list
@@ -418,7 +418,7 @@ struct SettingsSidebarRow: View {
                    ? AnyShapeStyle(Color.primary.opacity(0.09))
                    : AnyShapeStyle(Color.accentColor.gradient))
                 : AnyShapeStyle(Color.clear),
-            in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            in: RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         .help(tab.title)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
     }

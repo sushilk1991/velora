@@ -462,10 +462,10 @@ private struct ModeEditor: View {
                         .frame(minHeight: 120)
                         .padding(VeloraSpacing.xs)
                         .background(
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(Color(.textBackgroundColor)))
+                            RoundedRectangle(cornerRadius: VeloraRadius.control)
+                                .fill(VeloraPanel.card))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: VeloraRadius.control)
                                 .strokeBorder(Color(.separatorColor)))
                         .padding(.vertical, VeloraSpacing.xs)
                 } header: {
@@ -594,8 +594,8 @@ private struct ModeEditor: View {
             Button {
                 setApplications(vm.draft.apps.filter { $0.caseInsensitiveCompare(bundleID) != .orderedSame })
             } label: {
-                Image(systemName: "minus.circle")
-                    .foregroundStyle(.red)
+                Image(systemName: "trash")
+                    .foregroundStyle(VeloraStatus.danger)
             }
             .buttonStyle(.plain)
             .help("Remove \(name)")
@@ -663,7 +663,7 @@ private struct ModeEditor: View {
                     Button {
                         vm.draft.replacements.removeAll { $0.id == pair.id }
                     } label: {
-                        Image(systemName: "minus.circle").foregroundStyle(.red)
+                        Image(systemName: "trash").foregroundStyle(VeloraStatus.danger)
                     }
                     .buttonStyle(.plain)
                 }
@@ -671,7 +671,7 @@ private struct ModeEditor: View {
             Button {
                 vm.draft.replacements.append(Mode.Replacement(key: "", value: ""))
             } label: {
-                Label("Add replacement", systemImage: "plus")
+                Label("Add Replacement", systemImage: "plus")
             }
             .buttonStyle(.link)
         }

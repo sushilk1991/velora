@@ -50,7 +50,7 @@ struct WaveformView: View {
                     }
 
                     let color: Color = flashGreen
-                        ? Color(nsColor: .systemGreen)
+                        ? VeloraStatus.success
                         : VeloraBrand.barColor(
                             fraction: Double(index) / Double(WaveformLevelStore.barCount - 1),
                             darkMode: true)

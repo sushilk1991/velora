@@ -502,7 +502,7 @@ final class MeetingCoordinator: ObservableObject {
         alert.alertStyle = .informational
         alert.messageText = title
         alert.informativeText = Self.consentDescription
-        alert.addButton(withTitle: "Record")
+        alert.addButton(withTitle: "Start Meeting Notes")
         alert.addButton(withTitle: "Not Now")
         return alert
     }

@@ -110,7 +110,8 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .shortcuts:
             return [
                 "hotkey", "keyboard", "key combo", "hold to talk", "toggle",
-                "voice edit", "selection", "escape", "cancel",
+                "voice edit", "proofread", "action mode", "stream typing",
+                "selection", "escape", "cancel",
             ]
         case .about:
             return [
@@ -185,9 +186,9 @@ struct ExperimentalBadge: View {
             .kerning(0.5)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .foregroundStyle(.orange)
+            .foregroundStyle(VeloraStatus.warning)
             .background(
-                Capsule().fill(Color.orange.opacity(0.15))
+                Capsule().fill(VeloraStatus.warning.opacity(0.15))
             )
             .accessibilityLabel("Experimental feature")
     }
@@ -222,8 +223,8 @@ struct SettingsSearchBox: View {
         .padding(.vertical, 6)
         // Card, not textBackgroundColor: the semantic color drops to #1E1E1E
         // in dark mode and reads as a hole in the canvas.
-        .background(RoundedRectangle(cornerRadius: 8).fill(VeloraPanel.card))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Color(.separatorColor)))
+        .background(RoundedRectangle(cornerRadius: VeloraRadius.tile).fill(VeloraPanel.card))
+        .overlay(RoundedRectangle(cornerRadius: VeloraRadius.tile).strokeBorder(Color(.separatorColor)))
     }
 }
 
@@ -295,7 +296,7 @@ struct GeneralSettingsView: View {
                     if let error = model.agentIntegrationError {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(VeloraStatus.warning)
                     }
                 }
             } header: {
@@ -312,7 +313,7 @@ struct GeneralSettingsView: View {
                         if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
                             Label(result, systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption)
-                                .foregroundStyle(.orange)
+                                .foregroundStyle(VeloraStatus.warning)
                         } else {
                             Label(result, systemImage: "checkmark.circle.fill")
                                 .font(.caption)
@@ -340,7 +341,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("Updates")
             } footer: {
-                SettingsFooter("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations. Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace the app.")
+                SettingsFooter("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations. Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace Velora.")
             }
         }
         .formStyle(.grouped)
@@ -411,7 +412,7 @@ struct UpdateActionRow: View {
                     Button("View Release Notes…") { model.startUpdateInstall() }
                 }
                 Text(model.autoInstallUpdates
-                     ? "Velora \(version) is ready — it installs when the app restarts or quits."
+                     ? "Velora \(version) is ready — it installs when Velora restarts or quits."
                      : "Velora \(version) is downloaded and verified.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -802,10 +803,10 @@ struct ShortcutsSettingsView: View {
         SettingsCard {
             CardHeader(
                 symbol: "keyboard.fill", color: .blue,
-                title: "Stream typing",
+                title: "Stream Typing",
                 subtitle: "See your words appear at the cursor while you speak. The live draft is replaced with the polished final when you finish."
             ) {
-                Toggle("Stream typing", isOn: $model.streamTypingEnabled)
+                Toggle("Stream Typing", isOn: $model.streamTypingEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
@@ -813,7 +814,7 @@ struct ShortcutsSettingsView: View {
                 CardDivider()
                 shortcutRow(title: "Type as you speak", hotkey: $model.streamTypingHotkey)
                 if model.streamTypingHotkeyConflict {
-                    conflictLabel("Stream typing needs a shortcut of its own.")
+                    conflictLabel("Stream Typing needs a shortcut of its own.")
                 }
                 Text("If you type or move the cursor mid-stream, Velora stops rewriting and copies the final instead.")
                     .font(.caption2)
@@ -830,18 +831,18 @@ struct ShortcutsSettingsView: View {
         SettingsCard {
             CardHeader(
                 symbol: "text.badge.checkmark", color: .green,
-                title: "Fix spelling and grammar",
-                subtitle: "Select text and press the shortcut. Velora replaces editable selections; for read-only text, it copies the result. No microphone or speech model is used."
+                title: "Proofread",
+                subtitle: "Fix spelling and grammar in selected text, no microphone needed."
             ) {
-                Toggle("Fix spelling and grammar", isOn: $model.proofreadEnabled)
+                Toggle("Proofread", isOn: $model.proofreadEnabled)
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
             Group {
                 CardDivider()
-                shortcutRow(title: "Proofread selection", hotkey: $model.proofreadHotkey)
+                shortcutRow(title: "Proofread", hotkey: $model.proofreadHotkey)
                 if model.proofreadHotkeyConflict {
-                    conflictLabel("Proofread selection needs a shortcut of its own.")
+                    conflictLabel("Proofread needs a shortcut of its own.")
                 }
             }
             .disabled(!model.proofreadEnabled)
@@ -855,18 +856,18 @@ struct ShortcutsSettingsView: View {
         SettingsCard {
             CardHeader(
                 symbol: "wand.and.stars", color: .teal,
-                title: "Voice edit selection",
+                title: "Voice Edit",
                 subtitle: "Select text anywhere, press the shortcut, and speak an edit — \u{201C}fix the grammar\u{201D}, \u{201C}make this more formal\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it."
             ) {
-                Toggle("Voice edit selection", isOn: $model.voiceEdit)
+                Toggle("Voice Edit", isOn: $model.voiceEdit)
                     .toggleStyle(.switch)
                     .labelsHidden()
             }
             Group {
                 CardDivider()
-                shortcutRow(title: "Edit selection", hotkey: $model.editHotkey)
+                shortcutRow(title: "Voice Edit", hotkey: $model.editHotkey)
                 if model.editHotkeyConflict {
-                    conflictLabel("Dictation and Edit selection need different shortcuts.")
+                    conflictLabel("Dictation and Voice Edit need different shortcuts.")
                 }
             }
             .disabled(!model.voiceEdit)
@@ -880,11 +881,11 @@ struct ShortcutsSettingsView: View {
         SettingsCard {
             CardHeader(
                 symbol: "sparkles", color: .orange,
-                title: "Voice actions",
-                subtitle: "Hold the shortcut and say what you want done — \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora opens the app and carries it out. Say \u{201C}draft\u{201D} to stop before sending."
+                title: "Action Mode",
+                subtitle: "Hold the shortcut and say what you want done — \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora carries it out in the app you’re in, or in another app’s window with the Cua Driver. Say \u{201C}draft\u{201D} to stop before sending."
             ) {
                 VStack(alignment: .trailing, spacing: 4) {
-                    Toggle("Voice actions", isOn: $model.actionsEnabled)
+                    Toggle("Action Mode", isOn: $model.actionsEnabled)
                         .toggleStyle(.switch)
                         .labelsHidden()
                     ExperimentalBadge()
@@ -892,9 +893,9 @@ struct ShortcutsSettingsView: View {
             }
             Group {
                 CardDivider()
-                shortcutRow(title: "Run an action", hotkey: $model.actionHotkey)
+                shortcutRow(title: "Action Mode", hotkey: $model.actionHotkey)
                 if model.actionHotkeyConflict {
-                    conflictLabel("Voice actions need a shortcut of their own.")
+                    conflictLabel("Action Mode needs a shortcut of its own.")
                 }
                 if CuaDriver.isInstalled {
                     HStack(alignment: .firstTextBaseline) {
@@ -912,7 +913,7 @@ struct ShortcutsSettingsView: View {
                     }
                 }
                 musicPermissionRow
-                Text("Actions need Accessibility permission, and run entirely on this Mac.")
+                Text("Action Mode needs Accessibility permission, and runs entirely on this Mac.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -972,7 +973,7 @@ struct ShortcutsSettingsView: View {
     private func conflictLabel(_ text: String) -> some View {
         Label(text, systemImage: "exclamationmark.triangle.fill")
             .font(.caption)
-            .foregroundStyle(.orange)
+            .foregroundStyle(VeloraStatus.warning)
     }
 
     private func refreshMusicPermission() {

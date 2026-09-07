@@ -51,16 +51,16 @@ struct HotkeyRecorderView: View {
             .padding(.horizontal, VeloraSpacing.m)
             .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                     .fill(isRecording
                           ? Color.accentColor.opacity(0.08)
                           : Color.primary.opacity(0.03)))
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                     .strokeBorder(
                         isRecording ? Color.accentColor : Color(nsColor: .separatorColor),
                         lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         }
         .buttonStyle(.plain)
         .help("Click, then press a new key combo — a bare modifier like Right Option works too")
@@ -90,7 +90,7 @@ struct HotkeyRecorderView: View {
         if !isRecording, let warning = hotkey.conflictWarning {
             Label(warning, systemImage: "exclamationmark.triangle.fill")
                 .font(.callout)
-                .foregroundStyle(Color(nsColor: .systemOrange))
+                .foregroundStyle(VeloraStatus.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

@@ -160,7 +160,7 @@ struct HUDView: View {
         .offset(y: yOffset)
         .opacity(opacity)
         .onHover { hovering = $0 }
-        .animation(.easeOut(duration: 0.15), value: hovering)
+        .animation(VeloraMotion.quick, value: hovering)
         .accessibilityElement(children: usesContainedAccessibility ? .contain : .ignore)
         .accessibilityLabel(meetingAccessibilityLabel)
         .accessibilityHint(meetingAccessibilityHint)
@@ -203,7 +203,7 @@ struct HUDView: View {
                 lineWidth: 1.5)
         }
         .opacity(isListening ? 0.25 : 0)
-        .animation(.easeOut(duration: 0.25), value: isListening)
+        .animation(VeloraMotion.standard, value: isListening)
     }
 
     private var content: some View {
@@ -359,7 +359,7 @@ struct HUDView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(hudSecondaryText)
-            .help("Not now")
+            .help("Not Now")
             .accessibilityLabel("Dismiss meeting suggestion")
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
@@ -387,7 +387,7 @@ struct HUDView: View {
                 if meetingValue?.systemAudio == false {
                     Text("Mic only")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundStyle(Color(nsColor: .systemOrange))
+                        .foregroundStyle(VeloraStatus.warning)
                 }
             }
             .frame(width: HUDGeometry.meetingTitleWidth, alignment: .leading)
@@ -420,7 +420,7 @@ struct HUDView: View {
         HStack(spacing: VeloraSpacing.s) {
             Image(systemName: "questionmark.circle.fill")
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Color(nsColor: .systemOrange))
+                .foregroundStyle(VeloraStatus.warning)
                 .frame(
                     width: HUDGeometry.meetingPromptIconSide,
                     height: HUDGeometry.meetingPromptIconSide)
@@ -470,7 +470,7 @@ struct HUDView: View {
                 .frame(height: 28)
                 .background(
                     Color.white.opacity(0.94),
-                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    in: RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -625,7 +625,7 @@ struct HUDView: View {
                 .symbolEffect(.bounce, value: isLearned)
             Text(pair.wrong)
                 .font(.system(size: 12, weight: .medium))
-                .strikethrough(true, color: Color(nsColor: .systemRed).opacity(0.85))
+                .strikethrough(true, color: VeloraStatus.danger.opacity(0.85))
                 .foregroundStyle(hudSecondaryText)
                 .lineLimit(1)
             Image(systemName: "arrow.right")
@@ -735,7 +735,7 @@ struct HUDView: View {
 
     private func actionResultOpenLabel(_ value: ActionResultValue) -> String {
         guard let appName = value.appName, !appName.isEmpty else {
-            return "Action result"
+            return "Action Mode result"
         }
         return "Open \(appName)"
     }
@@ -755,11 +755,11 @@ struct HUDView: View {
     private func actionResultColor(for status: HUDState.ActionResultStatus) -> Color {
         switch status {
         case .verified:
-            return Color(nsColor: .systemGreen)
+            return VeloraStatus.success
         case .ready:
             return Color(nsColor: .systemBlue)
         case .unverified:
-            return Color(nsColor: .systemOrange)
+            return VeloraStatus.warning
         }
     }
 
@@ -811,8 +811,8 @@ struct HUDView: View {
             if let appName, !appName.isEmpty {
                 return "Click the result to open \(appName)"
             }
-            return "Action result"
-        case .notice(_, let message) where message.contains("Esc to stop"):
+            return "Action Mode result"
+        case .notice(_, let message) where message.contains("Esc cancels"):
             return "Press Escape to cancel the running action"
         default:
             return isStandby ? "Click to start dictation" : "Click to stop dictation"
@@ -915,7 +915,7 @@ struct HUDView: View {
                 resetInstant(
                     width: HUDGeometry.standbySize.width,
                     height: HUDGeometry.standbySize.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -923,7 +923,7 @@ struct HUDView: View {
             } else {
                 // Session just ended — the capsule shrinks back into the pill.
                 flashGreen = false
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.springSlow) {
                     width = HUDGeometry.standbySize.width
                     height = HUDGeometry.standbySize.height
                     showCheck = false
@@ -933,13 +933,13 @@ struct HUDView: View {
         case .listening:
             if old == .standby {
                 // The pill blooms into the listening capsule in place.
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     width = desiredListeningWidth
                     height = HUDGeometry.height
                 }
             } else {
                 resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -954,7 +954,7 @@ struct HUDView: View {
             // session capsule rather than stay invisible.
             if old != .listening && old != .transcribing {
                 resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -965,13 +965,13 @@ struct HUDView: View {
             let target = HUDGeometry.meetingPromptWidth
             if old.isHidden {
                 resetInstant(width: target, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
                 }
             } else {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = target
                     height = HUDGeometry.height
                     showCheck = false
@@ -982,13 +982,13 @@ struct HUDView: View {
             let target = HUDGeometry.meetingWidth
             if old.isHidden {
                 resetInstant(width: target, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
                 }
             } else {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = target
                     height = HUDGeometry.height
                     showCheck = false
@@ -1001,7 +1001,7 @@ struct HUDView: View {
             // before it shrinks into the checkmark circle.
             if old != .listening && old != .transcribing {
                 resetInstant(width: desiredListeningWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -1010,7 +1010,7 @@ struct HUDView: View {
             flashGreen = true
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 guard case .inserted = model.state else { return }
-                withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.springSlow) {
                     width = HUDGeometry.insertedDiameter
                     height = HUDGeometry.height
                     showCheck = true
@@ -1020,13 +1020,13 @@ struct HUDView: View {
         case .error, .meetingFailure:
             if old.isHidden {
                 resetInstant(width: errorCapsuleWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
                 }
             } else {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = errorCapsuleWidth
                     height = HUDGeometry.height
                     showCheck = false
@@ -1035,13 +1035,13 @@ struct HUDView: View {
 
         case .learned:
             if old == .standby {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = learnedWidth
                     height = HUDGeometry.height
                 }
             } else {
                 resetInstant(width: learnedWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -1053,17 +1053,17 @@ struct HUDView: View {
                 // Same surface, new text (meeting progress ticks every few
                 // seconds). A full exit/enter reset here blanked the capsule
                 // on every update; resize in place instead.
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = noticeWidth
                 }
             } else if old == .standby {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = noticeWidth
                     height = HUDGeometry.height
                 }
             } else {
                 resetInstant(width: noticeWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -1072,17 +1072,17 @@ struct HUDView: View {
 
         case .actionResult:
             if case .actionResult = old {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = actionResultWidth
                 }
             } else if old == .standby {
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                withAnimation(VeloraMotion.spring) {
                     width = actionResultWidth
                     height = HUDGeometry.height
                 }
             } else {
                 resetInstant(width: actionResultWidth, height: HUDGeometry.height)
-                withAnimation(.spring(response: 0.35, dampingFraction: 0.75)) {
+                withAnimation(VeloraMotion.spring) {
                     opacity = 1
                     scale = 1
                     yOffset = 0
@@ -1092,12 +1092,12 @@ struct HUDView: View {
         case .hidden(let style):
             switch style {
             case .success:
-                withAnimation(.easeOut(duration: 0.25)) {
+                withAnimation(VeloraMotion.standard) {
                     opacity = 0
                     scale = 0.85
                 }
             case .cancel:
-                withAnimation(.easeOut(duration: 0.18)) {
+                withAnimation(VeloraMotion.quick) {
                     opacity = 0
                     scale = 0.9
                     yOffset = 8

@@ -116,7 +116,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         let root = UpdateWindowView(model: model)
         let window = NSWindow(contentViewController: NSHostingController(rootView: root))
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.title = "Software Update"
+        window.title = "Velora Update"
         window.setContentSize(NSSize(width: 760, height: 600))
         window.minSize = NSSize(width: 680, height: 520)
         window.isReleasedWhenClosed = false
@@ -551,10 +551,10 @@ struct UpdateWindowView: View {
                     ReleaseNotesContentView(notes: release.notes)
                         .padding(VeloraSpacing.m)
                 }
-                .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .background(VeloraPanel.card)
+                .clipShape(RoundedRectangle(cornerRadius: VeloraRadius.tile))
                 .overlay {
-                    RoundedRectangle(cornerRadius: 8)
+                    RoundedRectangle(cornerRadius: VeloraRadius.tile)
                         .strokeBorder(Color(nsColor: .separatorColor))
                 }
             }
@@ -606,7 +606,7 @@ struct UpdateWindowView: View {
             if let reason = model.installUnavailableReason {
                 Label(reason, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(VeloraStatus.warning)
             }
         case .downloading(let version, let progress):
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
@@ -626,7 +626,7 @@ struct UpdateWindowView: View {
             Label(model.userRequestedInstall
                   ? "Velora \(version) is ready and will restart when current work finishes."
                   : "Velora \(version) is downloaded, verified, and ready to install.",
-                  systemImage: "checkmark.seal.fill")
+                  systemImage: "checkmark.circle.fill")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .installing:
@@ -639,7 +639,7 @@ struct UpdateWindowView: View {
         case .failed(let reason):
             Label(reason, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(VeloraStatus.warning)
                 .textSelection(.enabled)
         }
     }
@@ -693,7 +693,7 @@ struct ReleaseNotesContentView: View {
                         .padding(VeloraSpacing.s)
                         .background(
                             Color(nsColor: .controlBackgroundColor),
-                            in: RoundedRectangle(cornerRadius: 6))
+                            in: RoundedRectangle(cornerRadius: VeloraRadius.control))
                 case .paragraph(let text):
                     Text(Self.inertInlineMarkdown(text))
                         .frame(maxWidth: .infinity, alignment: .leading)

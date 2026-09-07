@@ -174,7 +174,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(discard)
         } else {
             let record = NSMenuItem(
-                title: meetingPreparingTitle ?? "Record Meeting…",
+                title: meetingPreparingTitle ?? "Start Meeting Notes…",
                 action: #selector(startMeeting), keyEquivalent: "")
             record.target = self
             record.isEnabled = meetingPreparingTitle == nil
@@ -302,7 +302,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             title: "Meetings…", action: #selector(openMeetings), keyEquivalent: "")
         meetingsItem.target = self
         meetingsItem.image = NSImage(
-            systemSymbolName: "person.2", accessibilityDescription: nil)
+            systemSymbolName: "person.2.wave.2.fill", accessibilityDescription: nil)
         menu.addItem(meetingsItem)
 
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -313,7 +313,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             title: "Setup Assistant…", action: #selector(openSetupAssistant), keyEquivalent: "")
         assistant.target = self
         assistant.image = NSImage(
-            systemSymbolName: "wand.and.stars", accessibilityDescription: nil)
+            systemSymbolName: "sparkles", accessibilityDescription: nil)
         menu.addItem(assistant)
 
         let checkForUpdates = NSMenuItem(
@@ -366,7 +366,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.isEnabled = false
             item.image = NSImage(
-                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
             menu.addItem(item)
         }
         switch UpdateInstaller.shared.state {
@@ -398,7 +398,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     item.representedObject = URL(
                         string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest")
                     item.image = NSImage(
-                        systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+                        systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
                     menu.addItem(item)
                 }
                 return
@@ -420,7 +420,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             }
             item.target = self
             item.image = NSImage(
-                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
             menu.addItem(item)
         }
     }

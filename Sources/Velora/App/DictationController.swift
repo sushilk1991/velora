@@ -1656,7 +1656,7 @@ final class DictationController: NSObject {
                 case .unknown:
                     NSLog("Velora: Sublime edit result could not be confirmed")
                     self.showNotice(
-                        symbol: "exclamationmark.triangle",
+                        symbol: "exclamationmark.triangle.fill",
                         message: "Couldn't confirm whether Sublime applied the edit")
                 }
             }

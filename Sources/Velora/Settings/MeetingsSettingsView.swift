@@ -59,7 +59,7 @@ struct MeetingsSettingsView: View {
                     }
                 }
             } footer: {
-                SettingsFooter("Detection checks local call-app and microphone state and, with Accessibility enabled, recognized meeting addresses and titles in browser windows. Meeting addresses become a temporary private identity and are never logged or saved. Every recording still needs Start Notes. Native-app calls can stop when their own microphone closes; uncertain browser endings ask first. Transcripts and notes stay until you delete them; this setting removes only audio.")
+                SettingsFooter("Detection checks local call-app and microphone state and, with Accessibility enabled, recognized meeting addresses and titles in browser windows. Meeting addresses become a temporary private identity and are never logged or saved. Every recording still needs Start Meeting Notes. Native-app calls can stop when their own microphone closes; uncertain browser endings ask first. Transcripts and notes stay until you delete them; this setting removes only audio.")
             }
 
             Section("Notes style") {
@@ -207,7 +207,7 @@ struct MeetingsSettingsView: View {
                             }
                             .frame(width: 180, alignment: .leading)
                             .padding(8)
-                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: VeloraRadius.tile))
                         }
                         .buttonStyle(.plain)
                         .help("Open cited local meeting")
@@ -232,7 +232,7 @@ struct MeetingsSettingsView: View {
                     ProgressView(value: fraction).frame(width: 220)
                 }
             case .failed(_, let message):
-                Label(message, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                Label(message, systemImage: "exclamationmark.triangle.fill").foregroundStyle(VeloraStatus.warning)
             }
         case .preparing(let title):
             Label(title, systemImage: "hourglass")
@@ -240,7 +240,7 @@ struct MeetingsSettingsView: View {
             Label(
                 "\(sourceApp ?? "Call") detected · \(title)",
                 systemImage: "video.fill")
-                .foregroundStyle(.orange)
+                .foregroundStyle(VeloraStatus.warning)
         case .recording(_, let title, let startedAt, let systemAudio, let endDetected):
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
@@ -249,7 +249,7 @@ struct MeetingsSettingsView: View {
                         ? "Did \(title) end?"
                         : "Recording \(title) · \(elapsed / 60):\(String(format: "%02d", elapsed % 60)) · \(systemAudio ? "Mic + system" : "Mic only")",
                     systemImage: endDetected ? "questionmark.circle.fill" : "record.circle.fill")
-                    .foregroundStyle(endDetected ? .orange : .red)
+                    .foregroundStyle(endDetected ? VeloraStatus.warning : Color(nsColor: .systemRed))
             }
         }
     }
@@ -257,10 +257,10 @@ struct MeetingsSettingsView: View {
     @ViewBuilder private var meetingAction: some View {
         switch coordinator.state {
         case .idle:
-            Button("Start Meeting…") { coordinator.startManual() }
+            Button("Start Meeting Notes…") { coordinator.startManual() }
                 .controlSize(.small)
         case .suggesting:
-            Button("Start Notes") { coordinator.acceptSuggestion() }
+            Button("Start Meeting Notes") { coordinator.acceptSuggestion() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
             Button("Not Now") { coordinator.declineSuggestion() }
@@ -277,8 +277,8 @@ struct MeetingsSettingsView: View {
                 Button("Discard…") { coordinator.cancelRecording() }
                     .controlSize(.small)
             } else {
-                Button("Stop & Create Notes") { coordinator.stopRecording() }
-                    .buttonStyle(.borderedProminent).tint(.red)
+                Button("Finish Notes") { coordinator.stopRecording() }
+                    .buttonStyle(.borderedProminent).tint(VeloraStatus.danger)
                     .controlSize(.small)
                 Button("Discard") { coordinator.cancelRecording() }
                     .controlSize(.small)
@@ -297,7 +297,7 @@ struct MeetingsSettingsView: View {
             .padding(7)
             .background(
                 selected?.id == record.id ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: 8))
+                in: RoundedRectangle(cornerRadius: VeloraRadius.tile))
         }
         .buttonStyle(.plain)
     }
@@ -345,17 +345,17 @@ struct MeetingsSettingsView: View {
                     }
                     if record.status != .recording {
                         Divider()
-                        Button("Delete meeting", role: .destructive) { delete(record) }
+                        Button("Delete Meeting", role: .destructive) { delete(record) }
                     }
                 }
             }
 
             if record.status == .processing {
-                Label("Local transcription and notes are still processing", systemImage: "hourglass")
+                Label("Local transcription and notes are still processing.", systemImage: "hourglass")
                     .font(.callout).foregroundStyle(.secondary)
             } else if record.status == .failed {
-                Label(record.error ?? "Processing failed", systemImage: "exclamationmark.triangle")
-                    .font(.callout).foregroundStyle(.orange)
+                Label(record.error ?? "Processing failed", systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(VeloraStatus.warning)
                 if !selectedHasRecoverableAudio {
                     Text("No usable audio was captured, so this meeting cannot be transcribed.")
                         .font(.caption)
@@ -365,8 +365,8 @@ struct MeetingsSettingsView: View {
                 Label(selectedCanRetryNotes
                       ? "Notes were not generated. \(error)"
                       : "Recreate did not finish; the previous notes were kept. \(error)",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.callout).foregroundStyle(.orange)
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(VeloraStatus.warning)
             }
 
             // No inner ScrollView: a same-axis nested scroller inside the

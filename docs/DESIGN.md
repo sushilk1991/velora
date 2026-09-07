@@ -46,8 +46,9 @@ point of the product: the sentence is finished, and it was finished here.
 |---|---|---|
 | Plate top | `#1b1745` | icon gradient start |
 | Plate mid | `#3a1f96` | icon gradient middle |
-| Plate bottom / violet | `#6d2bd9` | icon gradient end, `VeloraBrand.violet` |
-| Indigo | `#3b1f96` ≈ `VeloraBrand.indigo` | HUD accent gradient start |
+| Plate bottom | `#6d2bd9` | icon gradient end |
+| UI violet | `#8c45f5` `VeloraBrand.violet` | HUD accent, links, onboarding; lifted from the plate so it passes contrast on dark cards |
+| UI indigo | `#42389e` `VeloraBrand.indigo` | HUD accent gradient start |
 | Coral | `#ff8f66` | the full stop, `VeloraBrand.coral`, site `--accent-2` |
 | Bloom edge | `#d94fa0` | icon lower-left bloom only |
 
@@ -156,7 +157,9 @@ Use exactly these, capitalised as shown, everywhere: **Dictation**,
 Destructive verbs: **Delete** (a record), **Remove** (from a list),
 **Forget** (a learned term). Never "Clear" for data.
 
-Privacy line, verbatim: **Everything stays on this Mac.**
+Privacy line, verbatim: **Your voice never leaves this Mac.** Scope it to
+audio and transcripts; the optional iCloud dictionary sync means "everything"
+would be false.
 
 ## 6. The HUD
 

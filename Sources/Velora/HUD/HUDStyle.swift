@@ -12,9 +12,9 @@ enum VeloraSpacing {
     static let xl: CGFloat = 20
 }
 
-/// Brand palette sampled from `Resources/branding/AppIcon-1024.png`:
-/// midnight indigo fading into electric violet behind glowing white
-/// waveform bars. The HUD borrows the hue as a whisper, not a costume.
+/// Brand palette sampled from `Resources/branding/velora-mark.svg`:
+/// midnight indigo fading into electric violet behind the white mark, with
+/// a coral full stop. The HUD borrows the hue as a whisper, not a costume.
 enum VeloraBrand {
     /// Raw sRGB components so per-bar colors can be blended by hand
     /// (`Color.mix` needs macOS 15; the deployment target is 14).
@@ -26,10 +26,13 @@ enum VeloraBrand {
         var color: Color { Color(.sRGB, red: r, green: g, blue: b, opacity: 1) }
     }
 
-    /// Midnight indigo (upper stop of the icon gradient, lifted to a midtone).
+    /// Midnight indigo: the mark's plate, lifted to a midtone so it reads
+    /// as UI text on dark cards (the icon's own #3a1f96 falls to 2.1:1).
     static let indigo = RGB(r: 0.26, g: 0.22, b: 0.62)
-    /// Electric violet (lower stop of the icon gradient).
+    /// Electric violet, lifted from the plate's #6d2bd9 for the same reason.
     static let violet = RGB(r: 0.55, g: 0.27, b: 0.96)
+    /// Coral (#ff8f66, the full stop in the mark). Reserved for warm accents.
+    static let coral = RGB(r: 1.0, g: 0.56, b: 0.40)
 
     /// The brand gradient for icons and accents (top-leading indigo →
     /// bottom-trailing violet, matching the app icon).
@@ -59,6 +62,26 @@ enum VeloraBrand {
             : lerp(brand, RGB(r: 0, g: 0, b: 0), 0.75)
         return blended.color
     }
+}
+
+/// Semantic status colors. One color per meaning, everywhere: never bare
+/// `.orange` / `.red` / `.green` at a call site.
+enum VeloraStatus {
+    static let warning = Color(nsColor: .systemOrange)
+    static let danger = Color(nsColor: .systemRed)
+    static let success = Color(nsColor: .systemGreen)
+}
+
+/// Motion scale. Every `withAnimation` / `.animation` picks one of these.
+enum VeloraMotion {
+    /// Hover, press, highlight.
+    static let quick: Animation = .easeOut(duration: 0.15)
+    /// State changes inside a view (toggle, swap, fade).
+    static let standard: Animation = .easeOut(duration: 0.25)
+    /// Capsule/geometry changes in the HUD and page transitions.
+    static let spring: Animation = .spring(response: 0.35, dampingFraction: 0.8)
+    /// Larger repositioning (HUD morph, onboarding step).
+    static let springSlow: Animation = .spring(response: 0.4, dampingFraction: 0.85)
 }
 
 /// HUD capsule geometry. Recording stays a single row; only deliberate state
@@ -124,7 +147,7 @@ enum HUDGeometry {
     static let meetingPromptWidth: CGFloat = maxListeningWidth
     static let meetingPromptIconSide: CGFloat = 24
     static let chipIconSide: CGFloat = 22
-    static let chipIconCornerRadius: CGFloat = 5
+    static let chipIconCornerRadius: CGFloat = VeloraRadius.control
     static let maximumChipWidth =
         maxListeningWidth / 2
         - contentInsetH
