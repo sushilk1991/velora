@@ -1,0 +1,268 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["cairosvg>=2.7", "fonttools>=4.50", "brotli>=1.1", "pillow>=10"]
+# ///
+"""Build every Velora brand asset from one vector mark.
+
+The mark is the italic capital V of Instrument Serif — the same letter the
+site wordmark is set in — closed by a coral full stop: "Say it once. It's
+already typed." The V is white on an indigo→violet plate with a warm bloom
+low-left; the dot is the brand's second accent (`--accent-2` on the site).
+
+    ┌──────────────────────────┐
+    │  plate: indigo → violet  │   1024 canvas
+    │        ╲   ╱             │   824 squircle (Apple's macOS grid)
+    │         ╲ ╱   ●  coral   │   V cap height 640
+    │   bloom  V               │
+    └──────────────────────────┘
+
+Outputs (all committed; re-run after changing anything here):
+
+    Resources/branding/velora-mark.svg        the master, 1024 canvas
+    Resources/branding/AppIcon-1024.png       macOS 1024 preview / og fallback
+    Resources/AppIcon.icns                    Dock + Finder (iconutil)
+    ios/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png
+                                              full-bleed square (iOS masks it)
+    site/assets/velora-mark.svg               favicon + header brand, filter-free
+    site/assets/app-icon.png                  apple-touch-icon, ≤ 50 KB
+    site/assets/og.png                        1200×630 social card
+
+Run:  uv run scripts/make-icon.py
+"""
+from __future__ import annotations
+
+import math
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import cairosvg
+from fontTools.pens.svgPathPen import SVGPathPen
+from fontTools.ttLib import TTFont
+from PIL import Image
+
+ROOT = Path(__file__).resolve().parents[1]
+SITE_ASSETS = ROOT / "site" / "assets"
+BRANDING = ROOT / "Resources" / "branding"
+ITALIC_FONT = SITE_ASSETS / "instrument-serif-italic-latin.woff2"
+ROMAN_FONT = SITE_ASSETS / "instrument-serif-latin.woff2"
+
+CANVAS = 1024
+ICON = 824  # Apple's macOS template: an 824 px squircle on a 1024 canvas
+SQUIRCLE_EXPONENT = 4.6
+SQUIRCLE_STEPS = 240
+
+# Palette — keep in step with docs/DESIGN.md and site/styles.css.
+PLATE_TOP = "#1b1745"
+PLATE_MID = "#3a1f96"
+PLATE_BOTTOM = "#6d2bd9"
+BLOOM = "#ff8a5c"
+BLOOM_EDGE = "#d94fa0"
+CORAL = "#ff8f66"
+WHITE = "#ffffff"
+
+# Glyph placement: cap height 720 font units → 640 px, nudged left so the
+# full stop sits on the baseline to its right.
+CAP_HEIGHT_UNITS = 720
+CAP_HEIGHT_PX = 640
+GLYPH_SHIFT_X = -40
+DOT_RADIUS = 48
+DOT_GAP = 92
+DOT_BASELINE_LIFT = 44
+
+# iconutil's expected iconset members (point size, scale).
+ICONSET_SIZES = [(16, 1), (16, 2), (32, 1), (32, 2), (128, 1), (128, 2),
+                 (256, 1), (256, 2), (512, 1), (512, 2)]
+SITE_ICON_PX = 256
+SITE_ICON_BUDGET_BYTES = 50_000
+OG_SIZE = (1200, 630)
+
+
+def glyph(font_file: Path, char: str) -> tuple[str, float]:
+    """SVG path data for `char` in font units (y-up) plus its advance."""
+    font = TTFont(font_file)
+    glyph_set = font.getGlyphSet()
+    name = font.getBestCmap()[ord(char)]
+    pen = SVGPathPen(glyph_set)
+    glyph_set[name].draw(pen)
+    compact = re.sub(r"(-?\d+\.\d+)", lambda m: f"{float(m.group(1)):.1f}".rstrip("0").rstrip("."), pen.getCommands())
+    return compact, glyph_set[name].width
+
+
+def glyph_bounds(font_file: Path, char: str) -> tuple[float, float, float, float]:
+    from fontTools.pens.boundsPen import BoundsPen
+
+    font = TTFont(font_file)
+    glyph_set = font.getGlyphSet()
+    pen = BoundsPen(glyph_set)
+    glyph_set[font.getBestCmap()[ord(char)]].draw(pen)
+    return pen.bounds
+
+
+def squircle(cx: float, cy: float, half: float) -> str:
+    """Superellipse |x/a|^n + |y/a|^n = 1 sampled as a closed path."""
+    points = []
+    for i in range(SQUIRCLE_STEPS):
+        t = 2 * math.pi * i / SQUIRCLE_STEPS
+        c, s = math.cos(t), math.sin(t)
+        x = cx + half * math.copysign(abs(c) ** (2 / SQUIRCLE_EXPONENT), c)
+        y = cy + half * math.copysign(abs(s) ** (2 / SQUIRCLE_EXPONENT), s)
+        points.append(f"{x:.1f},{y:.1f}")
+    return "M" + " L".join(points) + "Z"
+
+
+def mark_svg(*, full_bleed: bool, effects: bool, view_box: str | None = None) -> str:
+    """The icon. `full_bleed` fills the whole canvas (iOS); `effects` adds
+    the drop shadow, which small favicons do not need."""
+    plate = f'<rect width="{CANVAS}" height="{CANVAS}"/>' if full_bleed else f'<path d="{squircle(CANVAS / 2, CANVAS / 2, ICON / 2)}"/>'
+    d, _ = glyph(ITALIC_FONT, "V")
+    x0, y0, x1, y1 = glyph_bounds(ITALIC_FONT, "V")
+    scale = CAP_HEIGHT_PX / CAP_HEIGHT_UNITS
+    tx = CANVAS / 2 - (x0 + x1) / 2 * scale + GLYPH_SHIFT_X
+    ty = CANVAS / 2 + (y1 + y0) / 2 * scale
+    dot_x = x1 * scale + tx + DOT_GAP
+    dot_y = ty - DOT_BASELINE_LIFT * scale
+    shadow = ' filter="url(#shadow)"' if effects else ""
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{CANVAS}" height="{CANVAS}" viewBox="{view_box or f'0 0 {CANVAS} {CANVAS}'}">
+  <!-- Generated by scripts/make-icon.py — edit that script, not this file. -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="{PLATE_TOP}"/>
+      <stop offset="0.55" stop-color="{PLATE_MID}"/>
+      <stop offset="1" stop-color="{PLATE_BOTTOM}"/>
+    </linearGradient>
+    <radialGradient id="bloom" cx="0.16" cy="1.02" r="0.72">
+      <stop offset="0" stop-color="{BLOOM}" stop-opacity="0.85"/>
+      <stop offset="0.45" stop-color="{BLOOM_EDGE}" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="{BLOOM_EDGE}" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="haze" cx="0.25" cy="0.05" r="0.9">
+      <stop offset="0" stop-color="{WHITE}" stop-opacity="0.16"/>
+      <stop offset="0.5" stop-color="{WHITE}" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="clip">{plate}</clipPath>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="18"/>
+      <feOffset dy="22"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.45"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect width="{CANVAS}" height="{CANVAS}" fill="url(#plate)"/>
+    <rect width="{CANVAS}" height="{CANVAS}" fill="url(#bloom)"/>
+    <rect width="{CANVAS}" height="{CANVAS}" fill="url(#haze)"/>
+  </g>
+  <g{shadow}>
+    <path transform="translate({tx:.1f},{ty:.1f}) scale({scale:.4f},-{scale:.4f})" d="{d}" fill="{WHITE}"/>
+    <circle cx="{dot_x:.1f}" cy="{dot_y:.1f}" r="{DOT_RADIUS}" fill="{CORAL}"/>
+  </g>
+</svg>
+"""
+
+
+def render(svg: str, out: Path, size: int) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cairosvg.svg2png(bytestring=svg.encode(), write_to=str(out), output_width=size, output_height=size)
+
+
+def build_icns(svg: str, out: Path) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        iconset = Path(tmp) / "AppIcon.iconset"
+        iconset.mkdir()
+        for points, scale in ICONSET_SIZES:
+            suffix = "" if scale == 1 else f"@{scale}x"
+            render(svg, iconset / f"icon_{points}x{points}{suffix}.png", points * scale)
+        subprocess.run(["iconutil", "--convert", "icns", "--output", str(out), str(iconset)], check=True)
+
+
+def wordmark_paths(text: str, font_file: Path) -> tuple[str, float]:
+    """Outlines for `text`, laid out with the font's advances, in font units."""
+    font = TTFont(font_file)
+    glyph_set = font.getGlyphSet()
+    cmap = font.getBestCmap()
+    kern = font["kern"].kernTables[0].kernTable if "kern" in font else {}
+    parts, x = [], 0.0
+    previous = None
+    for ch in text:
+        name = cmap[ord(ch)]
+        if previous is not None:
+            x += kern.get((previous, name), 0)
+        pen = SVGPathPen(glyph_set)
+        glyph_set[name].draw(pen)
+        parts.append(f'<path transform="translate({x:.1f}0)" d="{pen.getCommands()}"/>')
+        x += glyph_set[name].width
+        previous = name
+    return "".join(parts), x
+
+
+def og_svg() -> str:
+    """1200×630 card: mark on the left, wordmark and tagline in the site's
+    display face, on the site's dark ground."""
+    width, height = OG_SIZE
+    icon_size = 300
+    icon_x, icon_y = 96, (height - icon_size) / 2
+    mark = mark_svg(full_bleed=False, effects=True)
+    inner = mark.split("<defs>", 1)[1].rsplit("</svg>", 1)[0]
+    wordmark, advance = wordmark_paths("Velora", ROMAN_FONT)
+    tagline, _ = wordmark_paths("Private voice typing for Mac.", ITALIC_FONT)
+    text_x = icon_x + icon_size + 72
+    scale_word = 0.19
+    scale_tag = 0.056
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">
+  <defs>
+    <radialGradient id="ground" cx="0.18" cy="0.5" r="0.9">
+      <stop offset="0" stop-color="#241d4d"/>
+      <stop offset="1" stop-color="#141220"/>
+    </radialGradient>
+    <linearGradient id="word" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#f4f1ea"/>
+      <stop offset="1" stop-color="#d9cff5"/>
+    </linearGradient>
+  </defs>
+  <rect width="{width}" height="{height}" fill="url(#ground)"/>
+  <svg x="{icon_x}" y="{icon_y}" width="{icon_size}" height="{icon_size}" viewBox="0 0 {CANVAS} {CANVAS}">
+    <defs>{inner}
+  </svg>
+  <g transform="translate({text_x} 318) scale({scale_word} -{scale_word})" fill="url(#word)">{wordmark}</g>
+  <g transform="translate({text_x + 8} 392) scale({scale_tag} -{scale_tag})" fill="#b9b3d6">{tagline}</g>
+  <g transform="translate({text_x + 8} 452)" fill="#8f89b0" font-family="-apple-system, Helvetica Neue, Helvetica, Arial, sans-serif" font-size="22" letter-spacing="0.08">
+    <text>FREE · OPEN SOURCE · RUNS ON YOUR MAC</text>
+  </g>
+</svg>
+"""
+
+
+def main() -> None:
+    master = mark_svg(full_bleed=False, effects=True)
+    (BRANDING / "velora-mark.svg").write_text(master)
+    render(master, BRANDING / "AppIcon-1024.png", CANVAS)
+    build_icns(master, ROOT / "Resources" / "AppIcon.icns")
+
+    ios = mark_svg(full_bleed=True, effects=True)
+    render(ios, ROOT / "ios/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-1024.png", CANVAS)
+
+    inset = (CANVAS - ICON) / 2
+    favicon = mark_svg(full_bleed=False, effects=False, view_box=f"{inset:.0f} {inset:.0f} {ICON} {ICON}")
+    (SITE_ASSETS / "velora-mark.svg").write_text(favicon)
+
+    # apple-touch-icon: the squircle cropped to its own bounds, PNG, small.
+    touch = SITE_ASSETS / "app-icon.png"
+    with tempfile.TemporaryDirectory() as tmp:
+        full = Path(tmp) / "full.png"
+        render(mark_svg(full_bleed=False, effects=False), full, CANVAS)
+        image = Image.open(full).convert("RGBA")
+        image.crop((inset, inset, inset + ICON, inset + ICON)).resize((SITE_ICON_PX, SITE_ICON_PX), Image.LANCZOS).save(touch, optimize=True)
+    size = touch.stat().st_size
+    if size > SITE_ICON_BUDGET_BYTES:
+        raise SystemExit(f"{touch} is {size} bytes; the site budget is {SITE_ICON_BUDGET_BYTES}")
+
+    cairosvg.svg2png(bytestring=og_svg().encode(), write_to=str(SITE_ASSETS / "og.png"), output_width=OG_SIZE[0], output_height=OG_SIZE[1])
+    print("brand assets rebuilt")
+
+
+if __name__ == "__main__":
+    main()
