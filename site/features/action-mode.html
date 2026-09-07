@@ -10,11 +10,11 @@
   <meta property="og:description" content="Hold ⌃⇧A and say what you want done. Velora plans locally and drives real Mac apps like an agent — reading the screen, adjusting, and stopping rather than guessing.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://sushilk1991.github.io/velora/features/action-mode.html">
-  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta property="og:image" content="https://sushilk1991.github.io/velora/assets/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <title>Action Mode — Velora</title>
   <link rel="canonical" href="https://sushilk1991.github.io/velora/features/action-mode.html">
-  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="icon" href="../assets/velora-mark.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="../assets/app-icon.png">
   <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -39,7 +39,7 @@
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="../" aria-label="Velora home">
-        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <img src="../assets/velora-mark.svg" alt="" width="36" height="36">
         <span>Velora</span>
       </a>
 
@@ -82,9 +82,9 @@
         <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
           <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>Action Mode</b>
         </nav>
-        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature · new</p>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature</p>
         <h1 class="reveal" style="--reveal-order: 2">Say the errand.<br><em>Watch it run.</em></h1>
-        <p class="hero-lede reveal" style="--reveal-order: 3">Hold ⌃⇧A and speak — “message Priya on Slack that I’m running late,” “search YouTube for the match highlights.” Velora opens the app and does it, planning on your Mac with the same local models that clean your dictation.</p>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Hold ⌃⇧A and speak — “message Priya on Slack that I’m running late,” “search YouTube for the match highlights.” Velora plans the steps on your Mac with the same local models that clean your dictation, then carries them out in the app you are already in. With the open-source Cua Driver installed it can also drive another app in a background window while yours stays in front.</p>
         <div class="hero-actions reveal" style="--reveal-order: 4">
           <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
             Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
@@ -134,14 +134,15 @@
           <li>Action Mode uses a closed set of primitives — it cannot run arbitrary shell commands, and Velora refuses to add that on purpose.</li>
           <li>It acts through the same accessibility permission as dictation; there is no network port and no remote control surface.</li>
           <li>It is new and deliberately conservative: expect it to stop and tell you rather than push through ambiguity.</li>
-          <li>Every action happens on your Mac, visibly — you can watch it work and take the keyboard back at any time.</li>
+          <li>Every action happens on your Mac. Without the optional Cua Driver, Velora only acts in the app in front of you and refuses errands that need another app; with it, “Work in the background” drives the target app’s window while your current app stays in front. You can take the keyboard back at any time.</li>
+          <li>Web tasks read the front browser tab’s address: through accessibility in Safari and Firefox, and in Chrome-family browsers through the Automation permission that dictation asks for once. Action Mode never prompts for it and never reads page contents that way.</li>
         </ul>
       </div>
     </section>
 
     <nav class="page-next reveal" aria-label="More pages">
       <a href="stream-typing.html"><small>Previous</small><b>Stream Typing</b></a>
-      <a class="is-next" href="voice-edit.html"><small>Next</small><b>Voice Edit</b></a>
+      <a class="is-next" href="proofread.html"><small>Next</small><b>Proofread</b></a>
     </nav>
 
     <section class="closing">
@@ -166,7 +167,7 @@
     <div class="footer-inner">
       <div class="footer-brand">
         <a class="brand" href="../">
-          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <img src="../assets/velora-mark.svg" alt="" width="32" height="32">
           <span>Velora</span>
         </a>
         <p>Private voice typing for Mac.</p>

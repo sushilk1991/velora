@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#f8f3e9" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#141220" media="(prefers-color-scheme: dark)">
-  <meta name="description" content="Wispr Flow is polished and cross-platform — and processes every dictation in the cloud. Velora is free, open source, and never uploads your voice. The full comparison.">
-  <meta property="og:title" content="Velora vs Wispr Flow">
-  <meta property="og:description" content="Wispr Flow is polished and cross-platform — and processes every dictation in the cloud. Velora is free, open source, and never uploads your voice. The full comparison.">
+  <meta name="description" content="Select text, press ⌃⇧G, and Velora fixes spelling, punctuation and grammar in place — on your Mac, with no microphone and no upload. Your phrasing and your dictionary stay untouched.">
+  <meta property="og:title" content="Proofread — Velora">
+  <meta property="og:description" content="Select text, press ⌃⇧G, and Velora fixes spelling, punctuation and grammar in place — locally, with no microphone. Your phrasing stays yours.">
   <meta property="og:type" content="website">
-  <meta property="og:url" content="https://sushilk1991.github.io/velora/compare/wispr-flow.html">
+  <meta property="og:url" content="https://sushilk1991.github.io/velora/features/proofread.html">
   <meta property="og:image" content="https://sushilk1991.github.io/velora/assets/og.png">
   <meta name="twitter:card" content="summary_large_image">
-  <title>Velora vs Wispr Flow — an honest comparison</title>
-  <link rel="canonical" href="https://sushilk1991.github.io/velora/compare/wispr-flow.html">
+  <title>Proofread — Velora</title>
+  <link rel="canonical" href="https://sushilk1991.github.io/velora/features/proofread.html">
   <link rel="icon" href="../assets/velora-mark.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="../assets/app-icon.png">
   <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -80,11 +80,11 @@
       <div class="hero-scene" data-voice-scene="page" aria-hidden="true"></div>
       <div class="page-hero-inner">
         <nav class="crumbs reveal" style="--reveal-order: 0" aria-label="Breadcrumb">
-          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="index.html">Compare</a><span aria-hidden="true">/</span><b>vs Wispr Flow</b>
+          <a href="../">Velora</a><span aria-hidden="true">/</span><a href="../#features">Features</a><span aria-hidden="true">/</span><b>Proofread</b>
         </nav>
-        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Compare · checked August 2026</p>
-        <h1 class="reveal" style="--reveal-order: 2">Velora vs<br><em>Wispr Flow.</em></h1>
-        <p class="hero-lede reveal" style="--reveal-order: 3">Wispr Flow is probably the most polished dictation product on the market. The comparison isn’t about polish — it’s about architecture: every Wispr Flow dictation is processed on their servers, and every Velora dictation is processed on your Mac.</p>
+        <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Feature · New</p>
+        <h1 class="reveal" style="--reveal-order: 2">Fix the typos.<br><em>Keep your voice.</em></h1>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Select any text, press ⌃⇧G. Spelling, punctuation, capitalisation and grammar are corrected in place. Your phrasing, your tone and the names in your dictionary are left exactly as they were. There is no microphone involved and nothing is uploaded.</p>
         <div class="hero-actions reveal" style="--reveal-order: 4">
           <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
             Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
@@ -96,61 +96,50 @@
 
     <section class="section">
       <div class="section-head reveal">
-        <p class="eyebrow">The core difference</p>
-        <h2>Their words, not ours.</h2>
+        <p class="eyebrow">Corrections only</p>
+        <h2>It fixes mistakes. It does not have opinions.</h2>
       </div>
-      <figure class="quote-strip reveal">
-        <p>“Transcription always occurs on the cloud. This is the best way for us to provide accurate, low latency transcription.”</p>
-        <cite>— Wispr Flow’s data-controls page, checked August 2026</cite>
-      </figure>
-      <div class="section-head reveal" style="margin-top: 3rem; margin-bottom: 0;">
-        <p class="section-lede">
-          That is a legitimate engineering choice — and it means your audio, your
-          transcripts, and context from the app you’re typing in travel to their
-          servers on every dictation. Privacy mode reduces retention and opts out of
-          model training; it does not change where the processing happens. Velora’s
-          answer is structural: the models live on your disk, so there is nowhere to
-          send your voice.
-        </p>
+      <div class="detail-grid">
+        <article class="detail reveal" style="--reveal-order: 0">
+          <p class="detail-kicker">The brief</p>
+          <h3>Spelling, punctuation and grammar are the whole job</h3>
+          <p>The local cleanup model is given one instruction: fix spelling, punctuation, capitalisation and grammar, and preserve meaning, tone, formatting, names, numbers, dates, URLs and code. It is not asked to make you sound better, only correct.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 1">
+          <p class="detail-kicker">Your dictionary</p>
+          <h3>It knows your nouns</h3>
+          <p>The terms you added and the corrections Velora learned from your edits ride along with every proofread. Words it picked up on its own stay out, because those are guesses. A colleague’s unusual surname, your product name or an internal acronym is not “corrected” into something ordinary.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 2">
+          <p class="detail-kicker">In place</p>
+          <h3>The selection is the contract</h3>
+          <p>Velora captures the exact editable range you selected and replaces only that. If the selection moves before the fix is ready, it refuses rather than guessing. The result is a normal edit, so ⌘Z in the app restores the original.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 3">
+          <p class="detail-kicker">Anywhere</p>
+          <h3>Native apps and the browser</h3>
+          <p>Where macOS exposes the selection through accessibility, it is read directly. Where it does not (a text box in Chrome, for instance) Velora asks the app to copy, reads the text and restores your clipboard. Read-only text, such as a web page, is proofread onto the clipboard instead.</p>
+        </article>
       </div>
     </section>
 
     <section class="section">
-      <div class="section-head reveal">
-        <p class="eyebrow">Head to head</p>
-        <h2>Where each one wins.</h2>
+      <div class="truth reveal">
+        <h2>The fine print</h2>
+        <ul>
+          <li>Proofread uses no audio and never invokes the speech model. It is a text-in, text-out pass through the local cleanup model.</li>
+          <li>Selections longer than 8,000 characters are refused with a notice rather than truncated.</li>
+          <li>Secure input fields (password prompts) block it, by design.</li>
+          <li>The corrected text is pasted as plain text. Line breaks and Markdown survive; bold, links and other rich formatting inside the selection may not.</li>
+          <li>If the app will not accept the replacement, the corrected text is left on your clipboard and Velora says so.</li>
+          <li>The default shortcut is ⌃⇧G and can be changed in Settings. Proofread can be switched off entirely.</li>
+        </ul>
       </div>
-      <div class="tally">
-        <div class="tally-col is-for reveal" style="--reveal-order: 0">
-          <h3>Choose Velora if you want</h3>
-          <ul>
-            <li>Dictation that works with the network cable unplugged — audio and transcripts never leave your Mac.</li>
-            <li>Free forever: no $12–15/month, no 2,000-words-per-week meter on the free tier.</li>
-            <li>No account, no sign-in, nothing to be breached upstream.</li>
-            <li>Open source you can read, build, and verify — MIT-licensed.</li>
-            <li>Local extras no cloud tool matches: consent-first meeting notes, Voice Edit, and Action Mode driving real apps.</li>
-            <li>Sensitive work — legal, medical, unreleased code — where “processed on our servers” is a non-starter regardless of policy.</li>
-          </ul>
-        </div>
-        <div class="tally-col is-against reveal" style="--reveal-order: 1">
-          <h3>Choose Wispr Flow if you need</h3>
-          <ul>
-            <li>Windows, iPhone, or Android — Velora is Mac-only (Apple Silicon), full stop.</li>
-            <li>A managed team rollout: SSO, admin controls, SOC 2 Type II, HIPAA agreements.</li>
-            <li>Zero local compute: their cloud does the work, so an older or busy machine stays free.</li>
-            <li>Their cross-device consistency — the same tool on your phone and your laptop.</li>
-          </ul>
-        </div>
-      </div>
-      <p class="vs-foot reveal">
-        Pricing checked August 2026: Wispr Flow Pro is $12/user/month billed annually or
-        $15 monthly; the free tier allows about 2,000 words/week on desktop. Velora is free.
-      </p>
     </section>
 
     <nav class="page-next reveal" aria-label="More pages">
-      <a href="index.html"><small>Previous</small><b>The whole field</b></a>
-      <a class="is-next" href="superwhisper.html"><small>Next</small><b>Velora vs Superwhisper</b></a>
+      <a href="action-mode.html"><small>Previous</small><b>Action Mode</b></a>
+      <a class="is-next" href="voice-edit.html"><small>Next</small><b>Voice Edit</b></a>
     </nav>
 
     <section class="closing">

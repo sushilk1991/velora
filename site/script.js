@@ -47,6 +47,45 @@
     window.addEventListener("scroll", syncHeader, { passive: true });
   }
 
+  /* Headline word reveal. Each word of a [data-split] element becomes
+     .w > span so CSS can slide it up out of a clipped line box. A headline
+     with no .reveal ancestor becomes its own reveal target, otherwise the
+     words would never be released. */
+  const WORD_LIMIT = 16;
+  document.querySelectorAll("[data-split]").forEach((headline) => {
+    let index = 0;
+    const wrap = (node) => {
+      const parts = node.textContent.split(/(\s+)/);
+      const fragment = document.createDocumentFragment();
+      parts.forEach((part) => {
+        if (!part) return;
+        if (/^\s+$/.test(part)) {
+          fragment.appendChild(document.createTextNode(part));
+          return;
+        }
+        const outer = document.createElement("span");
+        outer.className = "w";
+        outer.style.setProperty("--w", String(Math.min(index, WORD_LIMIT)));
+        const inner = document.createElement("span");
+        inner.textContent = part;
+        outer.appendChild(inner);
+        fragment.appendChild(outer);
+        index += 1;
+      });
+      node.replaceWith(fragment);
+    };
+    Array.from(headline.childNodes).forEach((child) => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        wrap(child);
+        return;
+      }
+      Array.from(child.childNodes)
+        .filter((grandchild) => grandchild.nodeType === Node.TEXT_NODE)
+        .forEach(wrap);
+    });
+    if (!headline.closest(".reveal")) headline.classList.add("reveal");
+  });
+
   const revealItems = document.querySelectorAll(".reveal");
   const revealAll = () => revealItems.forEach((item) => item.classList.add("is-visible"));
 
@@ -61,7 +100,7 @@
           observer.unobserve(entry.target);
         });
       },
-      { rootMargin: "0px 0px -8%", threshold: 0.08 }
+      { rootMargin: "0px 0px -5%", threshold: 0 }
     );
 
     revealItems.forEach((item) => observer.observe(item));
@@ -155,9 +194,12 @@
 
     const after = (delay, run) => timers.push(window.setTimeout(run, delay));
 
+    /* The hero's voice field listens for this and swells while the demo
+       is "hearing" speech, so the page reacts as one surface. */
     const setState = (name) => {
       stage.classList.remove("is-listening", "is-polishing", "is-done");
       if (name) stage.classList.add(`is-${name}`);
+      document.dispatchEvent(new CustomEvent("velora:voice", { detail: { level: name === "listening" ? 1 : 0 } }));
     };
 
     const announce = (message) => {
@@ -488,6 +530,58 @@
       }, 2200);
     });
   });
+
+  /* ---------------------------------------------------------------------
+     Count-up numbers: [data-count] runs from 0 to its value once visible.
+     --------------------------------------------------------------------- */
+
+  const COUNT_DURATION = 1400;
+  document.querySelectorAll("[data-count]").forEach((counter) => {
+    const target = Number(counter.dataset.count);
+    if (!Number.isFinite(target) || reducedMotion() || !("IntersectionObserver" in window)) return;
+
+    const run = () => {
+      const started = performance.now();
+      const step = (now) => {
+        const t = Math.min((now - started) / COUNT_DURATION, 1);
+        const eased = 1 - Math.pow(1 - t, 4);
+        counter.textContent = String(Math.round(target * eased));
+        if (t < 1) window.requestAnimationFrame(step);
+      };
+      window.requestAnimationFrame(step);
+      /* A background tab throttles animation frames; the final value must
+         never depend on them. */
+      window.setTimeout(() => { counter.textContent = String(target); }, COUNT_DURATION + 200);
+    };
+
+    const once = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        once.disconnect();
+        run();
+      },
+      { threshold: 0.4 }
+    );
+    counter.textContent = "0";
+    once.observe(counter);
+  });
+
+  /* ---------------------------------------------------------------------
+     Pointer spotlight: cards inside [data-spotlight] track the cursor in
+     --mx/--my so a soft light can follow it (see styles.css).
+     --------------------------------------------------------------------- */
+
+  if (window.matchMedia("(hover: hover)").matches && !reducedMotion()) {
+    document.querySelectorAll("[data-spotlight]").forEach((group) => {
+      group.addEventListener("pointermove", (event) => {
+        const card = event.target.closest("[data-spotlight] > *");
+        if (!card || card.parentElement !== group) return;
+        const box = card.getBoundingClientRect();
+        card.style.setProperty("--mx", `${event.clientX - box.left}px`);
+        card.style.setProperty("--my", `${event.clientY - box.top}px`);
+      });
+    });
+  }
 
   document.querySelectorAll(".mobile-nav a").forEach((link) => {
     link.addEventListener("click", () => {

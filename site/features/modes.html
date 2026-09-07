@@ -10,11 +10,11 @@
   <meta property="og:description" content="The app in front decides the format: Slack gets a message, Mail gets paragraphs, your terminal gets verbatim commands. Custom modes with a native app picker.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://sushilk1991.github.io/velora/features/modes.html">
-  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta property="og:image" content="https://sushilk1991.github.io/velora/assets/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <title>App-aware modes — Velora</title>
   <link rel="canonical" href="https://sushilk1991.github.io/velora/features/modes.html">
-  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="icon" href="../assets/velora-mark.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="../assets/app-icon.png">
   <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -39,7 +39,7 @@
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="../" aria-label="Velora home">
-        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <img src="../assets/velora-mark.svg" alt="" width="36" height="36">
         <span>Velora</span>
       </a>
 
@@ -107,13 +107,13 @@
           <p class="mode-rule">Terse. No invented greeting. A short line keeps its missing full stop.</p>
         </article>
         <article class="mode reveal" style="--reveal-order: 1">
-          <header><h3>Email</h3><span class="mode-app">Mail · Outlook · Spark</span></header>
+          <header><h3>Email</h3><span class="mode-app">Mail · Gmail · Outlook</span></header>
           <p class="mode-said">“thanks for sending that over i read it last night separately we should talk about the pricing page”</p>
           <p class="mode-got">Thanks for sending that over — I read it last night.<br><br>Separately, we should talk about the pricing page.</p>
           <p class="mode-rule">Paragraph breaks where the topic shifts. Never invents a sign-off you didn’t say.</p>
         </article>
         <article class="mode reveal" style="--reveal-order: 2">
-          <header><h3>Note</h3><span class="mode-app">Notes · Obsidian · Bear</span></header>
+          <header><h3>Note</h3><span class="mode-app">Notes · Notion · Obsidian</span></header>
           <p class="mode-said">“first pull the logs second check the retry counter third file the ticket”</p>
           <p class="mode-got">1. Pull the logs<br>2. Check the retry counter<br>3. File the ticket</p>
           <p class="mode-rule">Spoken ordinals become a numbered list. Plain prose stays prose.</p>
@@ -161,6 +161,7 @@
         <h2>The fine print</h2>
         <ul>
           <li>Per-mode shortcuts, paste policies, and tone controls are not there yet — the mode follows the app in front.</li>
+          <li>Velora reads the front tab’s address (through accessibility in Safari and Firefox, and a one-time Automation permission in Chrome, Brave, Edge, Arc and other Chromium browsers) and routes by site: Gmail and Google Docs, Notion, Linear, Slack’s web app and others each land in the right mode.</li>
           <li>Per-site rules inside a browser are coarse today: assigning the whole browser to a mode overrides automatic site-aware routing, and Velora tells you so.</li>
         </ul>
       </div>
@@ -193,7 +194,7 @@
     <div class="footer-inner">
       <div class="footer-brand">
         <a class="brand" href="../">
-          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <img src="../assets/velora-mark.svg" alt="" width="32" height="32">
           <span>Velora</span>
         </a>
         <p>Private voice typing for Mac.</p>

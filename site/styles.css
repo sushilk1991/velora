@@ -2723,16 +2723,299 @@ html:not(.js) .theme-toggle { display: none; }
 
 .reveal { opacity: 1; transform: none; }
 
+/* Rise, un-blur, settle. The blur reads as focus arriving rather than a
+   plain fade; the observer fires at the first visible pixel so a fast
+   scroll never lands on a blank card. */
 .js .reveal {
   opacity: 0;
-  transform: translateY(1.15rem);
+  transform: translateY(1.4rem);
+  filter: blur(6px);
   transition:
-    opacity 700ms var(--ease),
-    transform 700ms var(--ease);
-  transition-delay: calc(var(--reveal-order, 0) * 85ms);
+    opacity 780ms var(--ease),
+    transform 900ms var(--ease),
+    filter 720ms var(--ease-soft);
+  transition-delay: calc(var(--reveal-order, 0) * 90ms);
+  will-change: opacity, transform, filter;
 }
 
-.js .reveal.is-visible { opacity: 1; transform: none; }
+.js .reveal.is-visible { opacity: 1; transform: none; filter: none; will-change: auto; }
+
+/* Headline word reveal: script.js wraps each word of [data-split] in
+   .w > span; the inner span rises out of a clipped line box once the
+   nearest .reveal ancestor becomes visible.
+
+     ┌────────────┐
+     │ Talk  like │  ← .w (clips)
+     └────────────┘
+        ▲ span rises from translateY(110%) */
+.w {
+  display: inline-block;
+  /* Room for ascenders, descenders and italic overhang inside the clip. */
+  padding: 0.12em 0.08em 0.16em;
+  margin: -0.12em -0.08em -0.16em;
+  overflow: hidden;
+  vertical-align: bottom;
+}
+
+.w > span { display: inline-block; }
+
+.js .w > span {
+  transform: translateY(112%);
+  transition: transform 1000ms var(--ease);
+  transition-delay: calc(var(--w, 0) * 46ms + 80ms);
+}
+
+.js .is-visible .w > span { transform: none; }
+
+/* --------------------------------------------------------------------------
+   Apps marquee — a quiet, endless list under the hero
+   -------------------------------------------------------------------------- */
+
+.apps {
+  width: min(100% - (var(--gutter) * 2), var(--shell));
+  margin-inline: auto;
+  padding-block: 2.2rem 0.4rem;
+}
+
+.apps-label {
+  margin: 0 0 0.9rem;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.apps-track {
+  display: flex;
+  width: 100%;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 12%, #000 88%, transparent);
+}
+
+.apps-list {
+  display: flex;
+  flex: none;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0 0.3rem;
+  list-style: none;
+  animation: marquee 58s linear infinite;
+}
+
+.apps-track:hover .apps-list,
+.apps-track:focus-within .apps-list,
+.apps-track:focus-visible .apps-list { animation-play-state: paused; }
+
+.apps-track:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: var(--r-xs);
+}
+
+.apps-list li {
+  padding: 0.42rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-raised);
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
+@keyframes marquee { to { transform: translateX(-100%); } }
+
+/* The frame around the steps would otherwise sit as a grey slab while its
+   children are still hidden; it fades in with the first step. */
+.js .steps { background: transparent; border-color: transparent; transition: background-color 600ms var(--ease-soft), border-color 600ms var(--ease-soft); }
+.js .steps:has(li.is-visible) { background: var(--line); border-color: var(--line); }
+
+/* --------------------------------------------------------------------------
+   Step art, animated once the step scrolls in
+   -------------------------------------------------------------------------- */
+
+.step-art-key b { transition: translate 140ms var(--ease-both), box-shadow 140ms var(--ease-both); }
+
+.js .steps li.is-visible .step-art-key b { animation: key-press 1.9s var(--ease-both) 500ms 2; }
+
+@keyframes key-press {
+  0%, 100% { translate: 0 0; box-shadow: 0 2px 0 var(--line-strong); }
+  18%, 52% { translate: 0 2px; box-shadow: 0 0 0 var(--line-strong); }
+}
+
+.js .steps li.is-visible .step-art-wave i { animation: ambient-wave 1.1s var(--ease-both) infinite alternate; }
+
+.step-art-wave i:nth-child(1) { animation-delay: -0.05s; }
+.step-art-wave i:nth-child(2) { animation-delay: -0.3s; }
+.step-art-wave i:nth-child(3) { animation-delay: -0.55s; }
+.step-art-wave i:nth-child(4) { animation-delay: -0.2s; }
+.step-art-wave i:nth-child(5) { animation-delay: -0.75s; }
+.step-art-wave i:nth-child(6) { animation-delay: -0.4s; }
+.step-art-wave i:nth-child(7) { animation-delay: -0.1s; }
+
+/* The field types its sentence in: max-width steps through the characters. */
+.js .step-art-field em {
+  display: inline-block;
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition: max-width 1100ms steps(16) 700ms;
+}
+
+.js .steps li.is-visible .step-art-field em { max-width: 16ch; }
+
+/* --------------------------------------------------------------------------
+   Proofread tile
+   -------------------------------------------------------------------------- */
+
+.kicker-new {
+  display: inline-block;
+  margin-right: 0.45rem;
+  padding: 0.12rem 0.4rem;
+  border-radius: 0.35rem;
+  background: var(--accent-2);
+  color: oklch(99% 0.01 60);
+  font-size: 0.58rem;
+  letter-spacing: 0.1em;
+  vertical-align: 0.08em;
+}
+
+.proof-demo {
+  position: relative;
+  margin-top: 1.4rem;
+  padding: 1.5rem 1rem 2.2rem;
+  border: 1px solid var(--line);
+  border-radius: 1rem;
+  background: var(--bg);
+  font-family: var(--font-display);
+  font-size: 1.02rem;
+  line-height: 1.7;
+}
+
+.tile-proof p.proof-text { max-width: none; margin: 0; color: var(--ink); font-size: 1.2rem; line-height: 1.75; }
+
+.proof-fix,
+.proof-keep {
+  position: relative;
+  display: inline-block;
+  padding: 0 0.08em;
+  border-radius: 0.25rem;
+}
+
+.proof-fix { text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 0.18em; }
+.proof-keep { text-decoration: underline dotted; text-decoration-color: var(--signal); text-underline-offset: 0.18em; }
+
+/* The original word floats above each fix, struck through. */
+.proof-fix::before,
+.proof-keep::before {
+  position: absolute;
+  bottom: calc(100% - 0.35em);
+  left: 0.1em;
+  color: var(--ink-faint);
+  content: attr(data-was);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  line-height: 1;
+  text-decoration: line-through;
+  white-space: nowrap;
+}
+
+.proof-keep::before { color: var(--signal); content: "dictionary"; text-decoration: none; letter-spacing: 0.04em; }
+
+.js .tile-proof .proof-fix { background: transparent; }
+
+.js .tile-proof.is-visible .proof-fix { animation: proof-pop 900ms var(--ease) both; }
+.js .tile-proof.is-visible .proof-fix:nth-of-type(1) { animation-delay: 500ms; }
+.js .tile-proof.is-visible .proof-fix:nth-of-type(2) { animation-delay: 800ms; }
+.js .tile-proof.is-visible .proof-fix:nth-of-type(3) { animation-delay: 1100ms; }
+
+@keyframes proof-pop {
+  0% { background: transparent; }
+  35% { background: var(--accent-wash); }
+  100% { background: transparent; }
+}
+
+/* --------------------------------------------------------------------------
+   Stats tile — a tiny bar chart that grows in
+   -------------------------------------------------------------------------- */
+
+.stats-demo {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.22rem;
+  height: 3.4rem;
+  margin-top: 1.4rem;
+}
+
+.stats-demo i {
+  flex: 1 1 0;
+  height: calc(var(--h) * 1%);
+  border-radius: 0.2rem 0.2rem 0 0;
+  background: var(--accent);
+  opacity: 0.85;
+  transform-origin: bottom;
+}
+
+.stats-demo i:nth-child(1) { --h: 28; }
+.stats-demo i:nth-child(2) { --h: 46; }
+.stats-demo i:nth-child(3) { --h: 38; }
+.stats-demo i:nth-child(4) { --h: 62; }
+.stats-demo i:nth-child(5) { --h: 54; }
+.stats-demo i:nth-child(6) { --h: 30; }
+.stats-demo i:nth-child(7) { --h: 72; }
+.stats-demo i:nth-child(8) { --h: 66; }
+.stats-demo i:nth-child(9) { --h: 44; }
+.stats-demo i:nth-child(10) { --h: 82; }
+.stats-demo i:nth-child(11) { --h: 58; }
+.stats-demo i:nth-child(12) { --h: 90; }
+.stats-demo i:nth-child(13) { --h: 74; }
+.stats-demo i:nth-child(14) { --h: 100; background: var(--accent-2); }
+
+.js .stats-demo i { scale: 1 0; transition: scale 700ms var(--ease); transition-delay: calc(var(--n, 0) * 45ms + 300ms); }
+.js .tile-stats.is-visible .stats-demo i { scale: 1 1; }
+
+.stats-demo i:nth-child(2) { --n: 1; }
+.stats-demo i:nth-child(3) { --n: 2; }
+.stats-demo i:nth-child(4) { --n: 3; }
+.stats-demo i:nth-child(5) { --n: 4; }
+.stats-demo i:nth-child(6) { --n: 5; }
+.stats-demo i:nth-child(7) { --n: 6; }
+.stats-demo i:nth-child(8) { --n: 7; }
+.stats-demo i:nth-child(9) { --n: 8; }
+.stats-demo i:nth-child(10) { --n: 9; }
+.stats-demo i:nth-child(11) { --n: 10; }
+.stats-demo i:nth-child(12) { --n: 11; }
+.stats-demo i:nth-child(13) { --n: 12; }
+.stats-demo i:nth-child(14) { --n: 13; }
+
+/* --------------------------------------------------------------------------
+   Pointer spotlight on cards — a soft light that follows the cursor
+   -------------------------------------------------------------------------- */
+
+@media (hover: hover) {
+  [data-spotlight] > * { position: relative; overflow: hidden; }
+
+  [data-spotlight] > *::after {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    content: "";
+    background: radial-gradient(
+      18rem circle at var(--mx, 50%) var(--my, 50%),
+      var(--spot, color-mix(in oklch, var(--accent) 14%, transparent)),
+      transparent 60%
+    );
+    opacity: 0;
+    transition: opacity 400ms var(--ease-soft);
+    pointer-events: none;
+  }
+
+  [data-spotlight] > *:hover::after { opacity: 1; }
+  [data-spotlight] > * > * { position: relative; z-index: 1; }
+  .tile-meeting { --spot: oklch(80% 0.1 292 / 0.22); }
+}
 
 /* --------------------------------------------------------------------------
    Responsive
@@ -2756,6 +3039,7 @@ html:not(.js) .theme-toggle { display: none; }
   .modes { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .bento { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .tile-wide { grid-column: span 2; }
+  .tile-stats { grid-column: span 2; }
   .tile-stream { grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); align-items: end; }
   .tile-meeting { grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); align-items: end; }
   .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -2772,11 +3056,13 @@ html:not(.js) .theme-toggle { display: none; }
   .bento { grid-template-columns: repeat(6, minmax(0, 1fr)); }
   .tile-wide { grid-column: span 6; }
   .tile-action { grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); align-items: end; }
-  .tile-music { grid-column: span 3; }
+  .tile-proof { grid-column: span 3; }
   .tile-edit { grid-column: span 3; }
+  .tile-music { grid-column: span 3; }
+  .tile-history { grid-column: span 3; }
   .tile-lang { grid-column: span 2; }
   .tile-dict { grid-column: span 2; }
-  .tile-history { grid-column: span 2; }
+  .tile-stats { grid-column: span 2; }
   .modes { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .privacy-grid { grid-template-columns: minmax(0, 1fr) minmax(22rem, 0.85fr); align-items: start; }
   .install-grid { grid-template-columns: minmax(0, 1fr) minmax(24rem, 1fr); }
@@ -2818,6 +3104,13 @@ html:not(.js) .theme-toggle { display: none; }
     transition-delay: 0ms !important;
   }
 
-  .reveal { opacity: 1; transform: none; }
+  .reveal { opacity: 1; transform: none; filter: none; }
   .demo-list li { opacity: 1; translate: none; }
+  .w > span { transform: none; }
+  .step-art-field em { max-width: none; }
+  .stats-demo i { scale: 1 1; }
+  /* The marquee becomes a plain wrapped list: one copy, no clipping, no fade. */
+  .apps-track { overflow: visible; -webkit-mask-image: none; mask-image: none; }
+  .apps-list { animation: none; flex-wrap: wrap; justify-content: center; }
+  .apps-list[aria-hidden="true"] { display: none; }
 }

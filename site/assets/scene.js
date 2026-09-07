@@ -241,12 +241,22 @@ function mount(host) {
   let rafId = 0;
   let last = performance.now();
 
+  /* The dictation demo raises the field's amplitude while it "listens";
+     the wave then settles back over a couple of seconds. */
+  const VOICE_SWELL = 0.9;
+  let ampTarget = spec.amp;
+  document.addEventListener("velora:voice", (event) => {
+    const level = Number(event.detail?.level ?? 0);
+    ampTarget = spec.amp * (1 + VOICE_SWELL * Math.max(0, Math.min(1, level)));
+  });
+
   const frame = (now) => {
     rafId = window.requestAnimationFrame(frame);
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
     uniforms.uTime.value += dt;
     uniforms.uPointer.value += (pointerTarget - uniforms.uPointer.value) * 0.045;
+    uniforms.uAmp.value += (ampTarget - uniforms.uAmp.value) * 0.03;
     renderOnce();
   };
 

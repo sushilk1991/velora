@@ -10,11 +10,11 @@
   <meta property="og:description" content="Teach Velora your names, products, and jargon. It learns from your corrections, imports and exports CSV, and syncs only if you ask — via your own iCloud Drive.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://sushilk1991.github.io/velora/features/dictionary.html">
-  <meta property="og:image" content="https://raw.githubusercontent.com/sushilk1991/velora/main/Resources/branding/AppIcon-1024.png">
+  <meta property="og:image" content="https://sushilk1991.github.io/velora/assets/og.png">
   <meta name="twitter:card" content="summary_large_image">
   <title>Personal dictionary — Velora</title>
   <link rel="canonical" href="https://sushilk1991.github.io/velora/features/dictionary.html">
-  <link rel="icon" href="../assets/app-icon.png">
+  <link rel="icon" href="../assets/velora-mark.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="../assets/app-icon.png">
   <link rel="preload" href="../assets/instrument-serif-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="../assets/instrument-serif-italic-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -39,7 +39,7 @@
   <header class="site-header">
     <div class="header-inner">
       <a class="brand" href="../" aria-label="Velora home">
-        <img src="../assets/app-icon.png" alt="" width="36" height="36">
+        <img src="../assets/velora-mark.svg" alt="" width="36" height="36">
         <span>Velora</span>
       </a>
 
@@ -113,12 +113,12 @@
         <article class="detail reveal" style="--reveal-order: 2">
           <p class="detail-kicker">Learning</p>
           <h3>Your edits teach it</h3>
-          <p>Velora mines the corrections you actually make and proposes dictionary entries with a visible receipt — you confirm what it learned; it never silently rewires itself.</p>
+          <p>Velora learns from the corrections you actually make and from terms that keep recurring in your dictations — quietly, on your Mac. Every learned term is listed in Settings, where you can delete one or all of them. A deleted auto-learned word is banned from being picked up again; a deleted correction can return if you keep making the same edit.</p>
         </article>
         <article class="detail reveal" style="--reveal-order: 3">
           <p class="detail-kicker">Portable</p>
           <h3>CSV in, CSV out</h3>
-          <p>Bring a term list from anywhere, export yours anytime. Optional sync uses your own iCloud Drive and carries confirmed terms only — never audio, never transcripts.</p>
+          <p>Bring a term list from anywhere, export yours anytime. Optional sync uses your own iCloud Drive and carries dictionary terms only — never audio, never transcripts.</p>
         </article>
       </div>
     </section>
@@ -128,6 +128,7 @@
         <h2>The fine print</h2>
         <ul>
           <li>The Whisper speech models consume the dictionary during transcription; the Parakeet models do not yet — their replacements still apply after the fact.</li>
+          <li>Automatically learned vocabulary is capped at the 100 most recent terms; older ones fall off as new ones arrive. Terms you add yourself have no such cap.</li>
           <li>Sync is off by default. Turning it on uses your iCloud Drive, not a Velora server — there isn’t one.</li>
         </ul>
       </div>
@@ -160,7 +161,7 @@
     <div class="footer-inner">
       <div class="footer-brand">
         <a class="brand" href="../">
-          <img src="../assets/app-icon.png" alt="" width="32" height="32">
+          <img src="../assets/velora-mark.svg" alt="" width="32" height="32">
           <span>Velora</span>
         </a>
         <p>Private voice typing for Mac.</p>
