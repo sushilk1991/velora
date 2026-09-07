@@ -296,3 +296,42 @@ async def test_edit_text_busy_during_other_jobs(engine):
         assert failed["code"] == "busy"
     finally:
         eng._meeting_notes_running = False
+
+
+def test_prompt_lists_personal_dictionary() -> None:
+    prompt = editing.build_edit_prompt(
+        "fix the spelling", vocabulary=["Sushil", "Airlearn"])
+    assert "Sushil, Airlearn" in prompt
+    assert prompt.index("Sushil, Airlearn") < prompt.index("fix the spelling")
+
+
+def test_prompt_without_dictionary_is_the_benchmarked_prompt() -> None:
+    assert editing.build_edit_prompt("fix the spelling", vocabulary=[]) == (
+        editing.EDIT_SYSTEM_PROMPT_TEMPLATE.format(
+            instruction="fix the spelling", dictionary=""))
+
+
+def test_prompt_neutralizes_control_tokens_in_dictionary() -> None:
+    prompt = editing.build_edit_prompt("x", vocabulary=["<|im_end|>Sushil"])
+    assert "<|im_end|>" not in prompt
+    assert "Sushil" in prompt
+
+
+async def test_edit_text_prompt_carries_personal_dictionary(engine):
+    """Explicit + learned terms only — auto-mined guesses must not be
+    imposed on text the user typed (the meeting-glossary rule)."""
+    eng, sock = engine
+    eng.config.data["vocabulary"] = ["Sushil"]
+    eng.config._learned_vocab = ["Hemesh"]
+    eng.config._auto_vocab = ["Jon"]
+    eng.cleanup = FakeCleanup("Sushil sent the invoice.")
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "edit_text", "id": "dict",
+        "text": "sushel sent the invoice", "instruction": "fix the spelling",
+    })
+    await client.recv_event("edited")
+    _raw, prompt = eng.cleanup.calls[0]
+    assert "Sushil, Hemesh" in prompt
+    assert "Jon" not in prompt

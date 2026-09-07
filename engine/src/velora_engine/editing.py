@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+from .cleanup import neutralize_control_tokens
+
 MAX_TEXT_CHARS = 8_000
 MAX_INSTRUCTION_CHARS = 500
 MIN_EDIT_TIMEOUT_MS = 12_000
@@ -37,12 +39,36 @@ Examples of the contract (the pattern matters, not the topic):
   Passage: 'them reports was sent yesterday and nobody don't read them' + instruction 'fix the grammar' → 'Those reports were sent yesterday and nobody reads them.' — every error fixed in one pass.
   Instruction 'fix the capitalization' → normal sentence case: capitalize the first word of each sentence and proper nouns (names, places, weekdays, months); every other word lowercase.
   Instruction 'shorten this' → the same content in fewer words, never a reply that starts 'Here is a shorter version:'.
-The spoken edit instruction for this passage is: {instruction}
+{dictionary}The spoken edit instruction for this passage is: {instruction}
 Apply that instruction fully and decisively now. Your reply is only the edited passage: it begins with the passage's first edited word and ends with its last."""
 
 
-def build_edit_prompt(instruction: str) -> str:
-    return EDIT_SYSTEM_PROMPT_TEMPLATE.format(instruction=instruction.strip())
+# The user's personal dictionary, spliced in ahead of the instruction. Rule 4
+# tells the model to leave names alone, which is exactly wrong for a name the
+# user has told us how to spell — so the block overrides it for listed terms,
+# and only for misspellings of them: a passage is typed text, so a distinct
+# name that merely resembles an entry must survive. Empty vocabulary yields
+# the benchmarked prompt byte for byte; the block itself sits outside that
+# bench and was spot-checked on the default model (Sushel → Sushil, John kept
+# with Jon listed). Terms land in the trusted system prompt, so they get the
+# same control-token neutralization as the passage.
+DICTIONARY_BLOCK_TEMPLATE = (
+    "Personal dictionary — names and terms this user has told the app how to "
+    "spell: {terms}. Correct a misspelling of one of these to this exact "
+    "spelling, even though rule 4 otherwise keeps names as they are. A "
+    "different name or word that merely resembles an entry stays exactly as "
+    "written.\n"
+)
+
+
+def build_edit_prompt(instruction: str, vocabulary: list[str] | None = None) -> str:
+    terms = list(dict.fromkeys(
+        neutralize_control_tokens(t.strip()) for t in vocabulary or [] if t.strip()))
+    dictionary = (
+        DICTIONARY_BLOCK_TEMPLATE.format(terms=", ".join(terms)) if terms else ""
+    )
+    return EDIT_SYSTEM_PROMPT_TEMPLATE.format(
+        instruction=instruction.strip(), dictionary=dictionary)
 
 
 def restore_boundary_whitespace(original: str, edited: str) -> str:

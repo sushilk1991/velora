@@ -2639,8 +2639,15 @@ class Engine:
                 max(editing.MIN_EDIT_TIMEOUT_MS,
                     len(text) * editing.EDIT_TIMEOUT_MS_PER_CHAR),
             )
+            # Explicit vocabulary and learned corrections only, as for the
+            # meeting glossary: auto-mined terms are guesses from prior STT
+            # output, and an edit rewrites typed text the user already spelled.
+            vocabulary = list(dict.fromkeys(
+                self.config.user_vocabulary + self.config.learned_vocabulary))
             result = await self.cleanup.cleanup(
-                text, editing.build_edit_prompt(instruction), timeout_ms=timeout_ms,
+                text,
+                editing.build_edit_prompt(instruction, vocabulary=vocabulary),
+                timeout_ms=timeout_ms,
                 check_ratio=False, cancel_event=self._edit_cancel)
             edited_core = result.text.strip()
             out = editing.restore_boundary_whitespace(text, edited_core)
