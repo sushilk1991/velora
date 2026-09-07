@@ -60,15 +60,18 @@ final class TextInserter {
     private let pasteboard: NSPasteboard
     private let pasteDeliveryOverride: ((String?, AXUIElement?) -> Bool)?
     private let pasteCommandOverride: (() -> Bool)?
+    private let copyCommandOverride: (() -> Bool)?
 
     init(
         pasteboard: NSPasteboard = .general,
         pasteDeliveryOverride: ((String?, AXUIElement?) -> Bool)? = nil,
-        pasteCommandOverride: (() -> Bool)? = nil
+        pasteCommandOverride: (() -> Bool)? = nil,
+        copyCommandOverride: (() -> Bool)? = nil
     ) {
         self.pasteboard = pasteboard
         self.pasteDeliveryOverride = pasteDeliveryOverride
         self.pasteCommandOverride = pasteCommandOverride
+        self.copyCommandOverride = copyCommandOverride
     }
 
     // MARK: - Continuation boundary (targets with no readable AX caret)
@@ -85,6 +88,10 @@ final class TextInserter {
     }
 
     private var priorDelivery: PriorDelivery?
+    /// The last paste's deferred clipboard restore, so a selection capture
+    /// that starts inside `restoreDelay` can settle it first.
+    private var pendingRestore: (
+        saved: [NSPasteboardItem], changeCount: Int, work: DispatchWorkItem)?
     /// Follow-up dictations this close together into the same target count as
     /// a continuation of the prior text. Bounded and short: past it, the caret
     /// has too often moved (message sent, click elsewhere) for the memory to
@@ -371,13 +378,31 @@ final class TextInserter {
             return false
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreDelay) {
+        let work = DispatchWorkItem { [weak self] in
             // Only restore if the pasteboard still holds our write. If the
             // user (or anything else) wrote to it during the window, restoring
             // would clobber their copy — skip entirely.
             _ = Self.restore(saved, to: pasteboard, ifUnchanged: ourChangeCount)
+            if self?.pendingRestore?.changeCount == ourChangeCount {
+                self?.pendingRestore = nil
+            }
         }
+        pendingRestore = (saved: saved, changeCount: ourChangeCount, work: work)
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + Self.restoreDelay, execute: work)
         return true
+    }
+
+    /// Runs the last paste's deferred restore now, if it is still waiting.
+    /// A selection capture that starts inside the restore window would
+    /// otherwise snapshot the staged dictation as the user's clipboard, and
+    /// the restore firing mid-poll would pass for the app's copy.
+    private func settlePendingRestore() {
+        guard let pending = pendingRestore else { return }
+        pendingRestore = nil
+        pending.work.cancel()
+        _ = Self.restore(
+            pending.saved, to: pasteboard, ifUnchanged: pending.changeCount)
     }
 
     /// Copies all pasteboard items and representations. Kept internal so the
@@ -410,6 +435,64 @@ final class TextInserter {
     private func postCommandV() -> Bool {
         if let pasteCommandOverride { return pasteCommandOverride() }
         return pressKey(Hotkey.keyCode(for: "v") ?? 9, flags: .maskCommand)
+    }
+
+    // MARK: - Selection capture via ⌘C
+
+    /// How long the target app gets to service a synthetic ⌘C before Velora
+    /// concludes nothing was selected. Chrome copies in well under 100 ms;
+    /// a loaded Electron app needs more.
+    private static let copySettleSeconds: TimeInterval = 0.5
+
+    /// Reads the frontmost app's selection by asking the app itself to copy
+    /// it. This is the path for apps whose Accessibility tree exposes no
+    /// selection at all — Chrome, for any selection on a web page.
+    ///
+    ///   snapshot clipboard → ⌘C → wait for changeCount to move
+    ///        → read string → put the user's clipboard back → completion
+    ///
+    /// Nil when the app copies nothing (an app with no selection ignores ⌘C,
+    /// so the pasteboard never changes) or copies only whitespace. The wait
+    /// is asynchronous for the same reason `ScreenContext.settle` is: the
+    /// hotkey tap lives on the main run loop.
+    func captureSelectionViaClipboard(
+        completion: @escaping (String?) -> Void
+    ) {
+        let pasteboard = self.pasteboard
+        settlePendingRestore()
+        let saved = Self.snapshotItems(from: pasteboard)
+        let changeCountBefore = pasteboard.changeCount
+        guard postCommandC() else {
+            completion(nil)
+            return
+        }
+        // An app declares its types before the string lands, so a moved
+        // change count alone can read as nil mid-write.
+        ScreenContext.settle(
+            until: {
+                pasteboard.changeCount != changeCountBefore
+                    && pasteboard.string(forType: .string) != nil
+            },
+            seconds: Self.copySettleSeconds
+        ) { copied in
+            let text = copied ? pasteboard.string(forType: .string) : nil
+            if pasteboard.changeCount != changeCountBefore {
+                _ = Self.restore(saved, to: pasteboard, ifUnchanged: pasteboard.changeCount)
+            }
+            guard let text else {
+                NSLog("Velora: clipboard capture — app copied nothing")
+                completion(nil)
+                return
+            }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            NSLog("Velora: clipboard capture — %ld chars", text.count)
+            completion(trimmed.isEmpty ? nil : text)
+        }
+    }
+
+    private func postCommandC() -> Bool {
+        if let copyCommandOverride { return copyCommandOverride() }
+        return pressKey(Hotkey.keyCode(for: "c") ?? 8, flags: .maskCommand)
     }
 
     private func pasteDeliveryAllowed(

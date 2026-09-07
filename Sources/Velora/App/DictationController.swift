@@ -132,6 +132,13 @@ final class DictationController: NSObject {
             case .proofread: return "Proofread text on clipboard"
             }
         }
+
+        var selectTextPrompt: String {
+            switch self {
+            case .voiceEdit: return "Select some text first, then speak an edit"
+            case .proofread: return "Select some text first, then proofread"
+            }
+        }
     }
 
     private enum SelectionCaptureIntent {
@@ -375,6 +382,9 @@ final class DictationController: NSObject {
     /// INSTRUCTION for `selection`, not text to paste.
     private var editSession: (
         session: String, selection: ScreenTextSelection, bundleID: String?)?
+    /// Physical-input generation when the edit recording stopped: the last
+    /// legitimate input before a clipboard-captured edit is pasted back.
+    private var editStopGeneration: UInt64?
     /// The engine `edit_text` round-trip in flight after an edit session's
     /// final: verify-and-replace happens when `edited` comes back.
     private var pendingEdit: (
@@ -386,6 +396,9 @@ final class DictationController: NSObject {
     /// Sublime selection capture and replacement use its plugin host, never
     /// the app's main thread. IDs make late callbacks one-shot and ignorable.
     private var sublimeCaptureID: UUID?
+    private var clipboardCaptureInFlight = false
+    private var clipboardCaptureIntent: SelectionCaptureIntent?
+    private var clipboardCaptureReleasedBeforeStart = false
     private var sublimeCaptureIntent: SelectionCaptureIntent?
     private var sublimeCaptureReleasedBeforeStart = false
     private var sublimeApplyID: UUID?
@@ -1078,10 +1091,7 @@ final class DictationController: NSObject {
             return
         }
         guard let selected = ScreenContext.selectedText(of: app) else {
-            veloraLog(
-                "Velora: voice edit selection unavailable in "
-                    + (app?.bundleIdentifier ?? "unknown"))
-            showEditStartError("Select some text first, then speak an edit")
+            beginClipboardCapture(app: app, intent: .voiceEdit(locked: locked))
             return
         }
         startCapturedEdit(
@@ -1135,10 +1145,80 @@ final class DictationController: NSObject {
             return
         }
         guard let selected = ScreenContext.selectedText(of: app) else {
-            showProofreadStartError("Select some text first, then proofread")
+            beginClipboardCapture(app: app, intent: .proofread)
             return
         }
         startCapturedProofread(selected, app: app)
+    }
+
+    /// Selection capture for apps whose Accessibility tree exposes no
+    /// selection — Chrome, for any web page. Velora asks the app to copy,
+    /// reads the pasteboard, and puts the user's clipboard back. Such a
+    /// selection has no range identity, so the result is later pasted over
+    /// whatever is selected, guarded by the frontmost app rather than an AX
+    /// range; a static page ignores the paste and the result stays on the
+    /// clipboard.
+    private func beginClipboardCapture(
+        app: NSRunningApplication?,
+        intent: SelectionCaptureIntent
+    ) {
+        guard let kind = intent.editKind else { return }
+        guard let app, Permissions.accessibilityGranted, TextInserter.canPostEvents,
+              !ScreenContext.selectionKnownEmpty(of: app)
+        else {
+            showSelectionStartError(kind.selectTextPrompt, kind: kind)
+            return
+        }
+        guard !clipboardCaptureInFlight else { return }
+        clipboardCaptureInFlight = true
+        clipboardCaptureIntent = intent
+        clipboardCaptureReleasedBeforeStart = false
+        veloraLog(
+            "Velora: selection unavailable via AX in "
+                + (app.bundleIdentifier ?? "unknown") + " — capturing via clipboard")
+        inserter.captureSelectionViaClipboard { [weak self] text in
+            guard let self else { return }
+            // Hold-mode release during the capture may have changed the
+            // intent (a tap locks the recording) or cancelled it.
+            let intent = self.clipboardCaptureIntent ?? intent
+            let releasedBeforeStart = self.clipboardCaptureReleasedBeforeStart
+            self.clipboardCaptureInFlight = false
+            self.clipboardCaptureIntent = nil
+            self.clipboardCaptureReleasedBeforeStart = false
+            guard self.phase == .idle,
+                  NSWorkspace.shared.frontmostApplication?
+                      .processIdentifier == app.processIdentifier
+            else {
+                veloraLog("Velora: clipboard capture dropped — app or phase changed")
+                return
+            }
+            guard let text else {
+                self.showSelectionStartError(kind.selectTextPrompt, kind: kind)
+                return
+            }
+            // The paste guard's baseline is read after ⌘C, not before: the
+            // system can flag Velora's own synthetic key as user input and
+            // bump the generation (see the tap-disabled handling in
+            // HotkeyMonitor), which would silently void every capture.
+            let selected = ScreenTextSelection(
+                text: text,
+                element: AXUIElementCreateApplication(app.processIdentifier),
+                identity: .clipboardCapture(
+                    inputGeneration: UserInputActivity.selectionSnapshot()),
+                isEditable: true)
+            switch intent {
+            case .voiceEdit(let locked):
+                if releasedBeforeStart {
+                    self.showEditStartError("Selection took too long — retry the edit")
+                    return
+                }
+                self.startCapturedEdit(selected, app: app, locked: locked)
+            case .proofread:
+                self.startCapturedProofread(selected, app: app)
+            case .streamTyping:
+                break
+            }
+        }
     }
 
     private func beginSublimeEditCapture(
@@ -1436,6 +1516,11 @@ final class DictationController: NSObject {
         // the exact replacement inside its plugin and must never touch the
         // user's clipboard.
         inserter.copyToClipboard(text)
+        if case .clipboardCapture(let generation) = pending.selection.identity {
+            applyClipboardCapturedEdit(
+                pending: pending, text: text, ms: ms, generation: generation)
+            return
+        }
         guard pending.selection.isEditable else {
             showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
             return
@@ -1473,6 +1558,48 @@ final class DictationController: NSObject {
                 else { return false }
                 return pending.selection.canReplace(with: latest)
             })
+        else {
+            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            return
+        }
+        finishAppliedEdit(bundleID: bundleID, ms: ms, kind: pending.kind)
+    }
+
+    /// Pastes over a clipboard-captured selection. No AX range exists to
+    /// verify, so the guard is the frontmost app plus the physical-input
+    /// generation: any press or click since the baseline means the selection
+    /// may have moved. The baseline is the capture for proofread and the
+    /// recording stop for voice edit, whose stop chord is itself input.
+    /// Clicks made while the edit recording runs are not caught.
+    private func applyClipboardCapturedEdit(
+        pending: (
+            id: String, selection: ScreenTextSelection, bundleID: String?,
+            kind: EditRequestKind
+        ),
+        text: String,
+        ms: Int,
+        generation: UInt64
+    ) {
+        guard let bundleID = pending.bundleID else {
+            showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
+            return
+        }
+        let baseline: UInt64? = pending.kind == .proofread
+            ? generation : editStopGeneration
+        let stillOwned = {
+            guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == bundleID
+            else { return false }
+            return baseline == UserInputActivity.selectionSnapshot()
+        }
+        guard stillOwned() else {
+            NSLog("Velora: edit paste skipped — selection changed")
+            showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
+            return
+        }
+        guard inserter.insertViaPasteboard(
+            text,
+            targetBundleID: bundleID,
+            additionalDeliveryCheck: stillOwned)
         else {
             showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
             return
@@ -2072,6 +2199,9 @@ final class DictationController: NSObject {
     private func stopAndTranscribe() {
         guard isRecording else { return }
 
+        if editSession != nil {
+            editStopGeneration = UserInputActivity.selectionSnapshot()
+        }
         recordingDurationMs = elapsedRecordingMs
         sounds.play(.stop)
         // Attach the background-gathered rich context (if it finished) so the
@@ -3818,6 +3948,16 @@ extension DictationController: HotkeyMonitorDelegate {
                 sublimeCaptureIntent = .voiceEdit(locked: true)
             case .cancel:
                 sublimeCaptureReleasedBeforeStart = true
+            }
+            return
+        }
+        if phase == .idle, clipboardCaptureInFlight {
+            let heldFor = hotkeyDownAt.map { -$0.timeIntervalSinceNow } ?? 0
+            switch Self.delayedEditCaptureRelease(heldFor: heldFor) {
+            case .lockRecording:
+                clipboardCaptureIntent = .voiceEdit(locked: true)
+            case .cancel:
+                clipboardCaptureReleasedBeforeStart = true
             }
             return
         }

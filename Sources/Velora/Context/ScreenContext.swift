@@ -18,6 +18,10 @@ enum ScreenTextSelectionIdentity {
     case characterRange(location: Int, length: Int)
     case textMarkerRange(CFTypeRef)
     case sublimeToken(SublimeTextSelectionToken)
+    /// Read by asking the app to copy (⌘C) because Accessibility exposed no
+    /// selection. Carries the physical-input generation at capture so the
+    /// paste can tell "untouched since" from "moved".
+    case clipboardCapture(inputGeneration: UInt64)
     case unavailable
 }
 
@@ -47,6 +51,9 @@ struct ScreenTextSelection {
         case (.sublimeToken, _), (_, .sublimeToken):
             // Sublime tokens are validated and replaced inside Sublime; AX
             // cannot produce a comparable current range.
+            return false
+        case (.clipboardCapture, _), (_, .clipboardCapture):
+            // No range exists to compare; the paste path guards itself.
             return false
         case (.unavailable, _), (_, .unavailable),
              (.characterRange, .textMarkerRange), (.textMarkerRange, .characterRange):
@@ -1510,6 +1517,21 @@ enum ScreenContext {
             // Static webpage selections are readable but not replaceable.
             // They still enter edit mode and return the result on clipboard.
             isEditable: axAttributeIsSettable(focused, kAXValueAttribute))
+    }
+
+    /// True when Accessibility positively reports an empty selection in an
+    /// editable text control. That is a real "nothing selected", not a blind
+    /// read, so the clipboard fallback must not run: editors such as VS Code
+    /// answer ⌘C on an empty selection by copying the whole line, and the
+    /// proofread would then paste that line at the caret.
+    static func selectionKnownEmpty(of app: NSRunningApplication?) -> Bool {
+        guard let focused = focusedElement(of: app),
+              axAttributeIsSettable(focused, kAXValueAttribute)
+        else { return false }
+        if let range = axRange(focused, kAXSelectedTextRangeAttribute) {
+            return range.length == 0
+        }
+        return axRawString(focused, kAXSelectedTextAttribute)?.isEmpty == true
     }
 
     /// Resolves the native text-control representation first, then the web

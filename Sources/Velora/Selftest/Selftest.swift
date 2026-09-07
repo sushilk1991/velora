@@ -188,6 +188,7 @@ enum Selftest {
         testEngineRestartDelay()
         testEmptyFinalFeedback()
         testClipboardStaging()
+        testClipboardSelectionCapture()
         testActionMode()
         testFinderFileTranscriptionQueue()
         testUpdateChecker()
@@ -8623,6 +8624,113 @@ enum Selftest {
         expect(
             DictationOutputFailure.message(for: "Recognized text.") == nil,
             "recognized output does not produce an error")
+    }
+
+    private static func testClipboardSelectionCapture() {
+        let name = NSPasteboard.Name("com.velora.selftest.\(UUID().uuidString)")
+        let pasteboard = NSPasteboard(name: name)
+        pasteboard.clearContents()
+        pasteboard.setString("Original clipboard", forType: .string)
+
+        // The target app services ⌘C by writing its selection.
+        var copied: String?? = nil
+        TextInserter(
+            pasteboard: pasteboard,
+            copyCommandOverride: {
+                pasteboard.clearContents()
+                pasteboard.setString("Teh selected words", forType: .string)
+                return true
+            }
+        ).captureSelectionViaClipboard { copied = .some($0) }
+        expect(
+            waitUntil { copied != nil } && copied == .some("Teh selected words"),
+            "clipboard capture returns what the app copied")
+        expect(
+            pasteboard.string(forType: .string) == "Original clipboard",
+            "clipboard capture puts the user's clipboard back")
+
+        // Nothing selected: the app ignores ⌘C and the pasteboard never moves.
+        copied = nil
+        let untouched = pasteboard.changeCount
+        TextInserter(
+            pasteboard: pasteboard,
+            copyCommandOverride: { true }
+        ).captureSelectionViaClipboard { copied = .some($0) }
+        expect(
+            waitUntil { copied != nil } && copied == .some(nil),
+            "clipboard capture reports no selection when the app copies nothing")
+        expect(
+            pasteboard.changeCount == untouched,
+            "a failed clipboard capture never writes the pasteboard")
+
+        // Whitespace is not a selection worth editing.
+        copied = nil
+        TextInserter(
+            pasteboard: pasteboard,
+            copyCommandOverride: {
+                pasteboard.clearContents()
+                pasteboard.setString("  \n", forType: .string)
+                return true
+            }
+        ).captureSelectionViaClipboard { copied = .some($0) }
+        expect(
+            waitUntil { copied != nil } && copied == .some(nil)
+                && pasteboard.string(forType: .string) == "Original clipboard",
+            "a whitespace copy counts as no selection and restores the clipboard")
+
+        // An app declares its types before the string lands, so the change
+        // count moves while the text is still nil.
+        copied = nil
+        TextInserter(
+            pasteboard: pasteboard,
+            copyCommandOverride: {
+                pasteboard.clearContents()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    pasteboard.setString("Teh selected words", forType: .string)
+                }
+                return true
+            }
+        ).captureSelectionViaClipboard { copied = .some($0) }
+        expect(
+            waitUntil { copied != nil } && copied == .some("Teh selected words"),
+            "clipboard capture waits for the copied text, not just the change count")
+        expect(
+            pasteboard.string(forType: .string) == "Original clipboard",
+            "a staggered copy still puts the user's clipboard back")
+
+        // A dictation paste is still holding the user's clipboard back for
+        // its restore delay when the capture starts. The capture must settle
+        // that first, or it snapshots the staged dictation as "the user's
+        // clipboard" and the deferred restore can pass for the app's copy.
+        copied = nil
+        let overlapped = TextInserter(
+            pasteboard: pasteboard,
+            pasteDeliveryOverride: { _, _ in true },
+            pasteCommandOverride: { true },
+            copyCommandOverride: {
+                pasteboard.clearContents()
+                pasteboard.setString("Teh selected words", forType: .string)
+                return true
+            })
+        expect(
+            overlapped.insertViaPasteboard("Dictated sentence"),
+            "a paste immediately before a capture goes through")
+        overlapped.captureSelectionViaClipboard { copied = .some($0) }
+        expect(
+            waitUntil { copied != nil } && copied == .some("Teh selected words"),
+            "clipboard capture inside a paste's restore window reads the selection")
+        expect(
+            pasteboard.string(forType: .string) == "Original clipboard",
+            "clipboard capture inside a paste's restore window keeps the pre-paste clipboard")
+
+        let element = AXUIElementCreateSystemWide()
+        let captured = ScreenTextSelection(
+            text: "Teh selected words", element: element,
+            identity: .clipboardCapture(inputGeneration: 7), isEditable: true)
+        expect(
+            !captured.canReplace(with: captured),
+            "a clipboard-captured selection never claims an exact AX range")
+        pasteboard.clearContents()
     }
 
     private static func testClipboardStaging() {
