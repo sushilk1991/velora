@@ -1592,7 +1592,11 @@ final class DictationController: NSObject {
             return baseline == UserInputActivity.selectionSnapshot()
         }
         guard stillOwned() else {
-            NSLog("Velora: edit paste skipped — selection changed")
+            veloraLog(
+                "Velora: edit paste skipped — selection changed (front="
+                    + (NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")
+                    + " baseline=\(baseline.map(String.init) ?? "none")"
+                    + " now=\(UserInputActivity.selectionSnapshot()))")
             showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
             return
         }
@@ -1601,6 +1605,7 @@ final class DictationController: NSObject {
             targetBundleID: bundleID,
             additionalDeliveryCheck: stillOwned)
         else {
+            veloraLog("Velora: edit paste refused by delivery guard — result left on clipboard")
             showNotice(symbol: "doc.on.clipboard", message: pending.kind.clipboardNotice)
             return
         }

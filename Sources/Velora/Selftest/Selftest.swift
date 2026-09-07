@@ -2031,6 +2031,28 @@ enum Selftest {
         expect(
             UserInputActivity.snapshot() == generationAfterUserKey &+ 1,
             "key autorepeat keeps a foreground handoff deferred")
+        let proofreadCombo = Hotkey(
+            keyCode: 5,
+            modifiers: CGEventFlags.maskControl.rawValue
+                | CGEventFlags.maskShift.rawValue,
+            isModifierOnly: false)
+        monitor.secondaryHotkeys[.proofread] = proofreadCombo
+        expect(
+            !monitor.isLatchedComboRepeat(keyCode: 5, isRepeat: false),
+            "the first press of a combo key is physical input")
+        _ = monitor.handleKeyDown(
+            keyCode: 5, flags: proofreadCombo.modifiers,
+            isRepeat: false, invalidateContinuation: false)
+        expect(
+            monitor.isLatchedComboRepeat(keyCode: 5, isRepeat: true),
+            "a held proofread chord's autorepeat never reaches the app, so it is not input")
+        expect(
+            !monitor.isLatchedComboRepeat(keyCode: 0, isRepeat: true),
+            "autorepeat of an unrelated key stays physical input")
+        _ = monitor.handleKeyUp(keyCode: 5)
+        expect(
+            !monitor.isLatchedComboRepeat(keyCode: 5, isRepeat: true),
+            "a released chord no longer claims its key's repeats")
         UserInputActivity.keyPressed(0)
         expect(!UserInputActivity.isQuiet(for: 0),
                "a held user key is never classified as quiet")

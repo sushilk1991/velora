@@ -617,12 +617,13 @@ final class HotkeyMonitor {
             handleFlagsChanged(keyCode: keyCode, flags: flags)
             return false
         case .keyDown:
+            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             let generation = isVeloraEvent
+                || isLatchedComboRepeat(keyCode: keyCode, isRepeat: isRepeat)
                 ? nil : UserInputActivity.keyPressed(keyCode)
             if let generation {
                 Self.noteTargetProcess(targetPID, generation: generation)
             }
-            let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
             return handleKeyDown(
                 keyCode: keyCode, flags: flags, isRepeat: isRepeat,
                 invalidateContinuation: !isVeloraEvent,
@@ -700,12 +701,16 @@ final class HotkeyMonitor {
                 }
                 self.handleFlagsChanged(keyCode: Int64(event.keyCode), flags: flags)
             case .keyDown:
-                let generation = UserInputActivity.keyPressed(
-                    Int64(event.keyCode))
-                Self.noteTargetProcess(
-                    Self.targetPID(event), generation: generation)
+                let keyCode = Int64(event.keyCode)
+                let generation = self.isLatchedComboRepeat(
+                    keyCode: keyCode, isRepeat: event.isARepeat)
+                    ? nil : UserInputActivity.keyPressed(keyCode)
+                if let generation {
+                    Self.noteTargetProcess(
+                        Self.targetPID(event), generation: generation)
+                }
                 _ = self.handleKeyDown(
-                    keyCode: Int64(event.keyCode), flags: flags,
+                    keyCode: keyCode, flags: flags,
                     isRepeat: event.isARepeat, comboCanBeSuppressed: false,
                     recordedGeneration: generation)
             case .keyUp:
@@ -802,6 +807,24 @@ final class HotkeyMonitor {
             secondaryModifierIsDown[role] = isDown
             emitSecondaryHotkey(role, down: isDown)
             return
+        }
+    }
+
+    /// Whether a key-down is the autorepeat of a chord Velora is holding
+    /// latched. `handleKeyDown` swallows such repeats, so the target app never
+    /// sees them and they cannot move its selection — they are not physical
+    /// input. Counting them bumped the selection generation whenever the
+    /// proofread chord was held past the autorepeat delay, which voided every
+    /// clipboard-captured edit with "Selection changed".
+    func isLatchedComboRepeat(keyCode: Int64, isRepeat: Bool) -> Bool {
+        guard isRepeat else { return false }
+        if !hotkey.isModifierOnly, keyCode == hotkey.keyCode, comboIsDown {
+            return true
+        }
+        return SecondaryHotkeyRole.allCases.contains { role in
+            guard let secondary = secondaryHotkeys[role], !secondary.isModifierOnly
+            else { return false }
+            return keyCode == secondary.keyCode && secondaryComboIsDown[role] == true
         }
     }
 
