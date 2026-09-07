@@ -298,12 +298,12 @@ struct SettingsSidebar: View {
             .frame(height: 40)
             .frame(maxWidth: .infinity, alignment: collapsed ? .center : .leading)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                     .fill(Color.primary.opacity(0.05)))
             .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous)
                     .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         }
         .buttonStyle(.plain)
         .help("About Velora")

@@ -434,8 +434,8 @@ struct HUDView: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
-            .frame(width: 150, alignment: .leading)
-            Button("Keep") { model.onMeetingEndKeep?() }
+            .frame(width: 130, alignment: .leading)
+            Button("Keep Recording") { model.onMeetingEndKeep?() }
                 .buttonStyle(.borderless)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(hudSecondaryText)
@@ -466,6 +466,8 @@ struct HUDView: View {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(Color.black.opacity(0.88))
+                .lineLimit(1)
+                .fixedSize()
                 .padding(.horizontal, 11)
                 .frame(height: 28)
                 .background(
