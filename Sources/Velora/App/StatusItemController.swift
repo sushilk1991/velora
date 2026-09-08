@@ -331,71 +331,59 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
     }
 
-    /// One menu line reflecting the updater's state: an offer to update
-    /// in-place, live download progress, or a restart button once a verified
-    /// build is staged. Falls back to the releases page when in-place
-    /// installs are impossible (dev builds, unwritable /Applications, …).
+    /// One menu line reflecting the updater's state, in the shared
+    /// `UpdateCopy` vocabulary: an offer to update in place, live progress,
+    /// or a restart button once a verified build is staged. Falls back to
+    /// the releases page when in-place installs are impossible (dev builds,
+    /// unwritable /Applications, …).
     private func addUpdateItems(to menu: NSMenu) {
-        func disabled(_ title: String) {
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            item.image = NSImage(
-                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+        let symbol = NSImage(
+            systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
+        func add(_ title: String, action: Selector?, represented: Any? = nil,
+                 toolTip: String? = nil) {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            item.isEnabled = action != nil
+            item.target = action == nil ? nil : self
+            item.representedObject = represented
+            item.toolTip = toolTip
+            item.image = symbol
             menu.addItem(item)
         }
-        switch UpdateInstaller.shared.state {
-        case .downloading(let version, let progress):
-            disabled("Downloading Velora \(version) — \(Int(progress * 100))%")
-        case .verifying(let version):
-            disabled("Verifying Velora \(version)…")
-        case .installing:
-            disabled("Installing Update…")
+        let installer = UpdateInstaller.shared
+        let caption = UpdateCopy.caption(
+            for: installer.state, installsWhenReady: installer.installsWhenReady)
+        switch installer.state {
+        case .downloading, .verifying, .installing:
+            add(caption ?? "", action: nil)
         case .ready(let version):
-            let item = NSMenuItem(
-                title: "Restart to Update to \(version)",
-                action: #selector(installStagedUpdate), keyEquivalent: "")
-            item.target = self
-            item.image = NSImage(
-                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
-            menu.addItem(item)
+            if installer.installsWhenReady {
+                add(UpdateCopy.waitingTitle, action: nil, toolTip: caption)
+                return
+            }
+            add(UpdateCopy.restartTitle(version), action: #selector(installStagedUpdate))
         case .idle, .failed:
             guard let update = updateAvailable else {
                 // A resume-adopted update that failed at install time has no
                 // checker discovery to fall back on — still leave the user a
                 // path forward.
-                if case .failed(let reason) = UpdateInstaller.shared.state {
-                    let item = NSMenuItem(
-                        title: "Update Failed — Open Releases Page…",
-                        action: #selector(openUpdatePage), keyEquivalent: "")
-                    item.target = self
-                    item.toolTip = reason
-                    item.representedObject = URL(
-                        string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest")
-                    item.image = NSImage(
-                        systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
-                    menu.addItem(item)
+                if case .failed(let reason) = installer.state {
+                    add("Update Failed — \(UpdateCopy.releasesPageTitle)…",
+                        action: #selector(openUpdatePage),
+                        represented: URL(
+                            string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest"),
+                        toolTip: reason)
                 }
                 return
             }
-            let item: NSMenuItem
+            let failure = caption.map { "Last attempt failed: \($0)" }
             if update.asset != nil, UpdateInstaller.canInstallInPlace {
-                item = NSMenuItem(
-                    title: "Update to Velora \(update.version)…",
-                    action: #selector(startUpdate), keyEquivalent: "")
-                item.representedObject = update
+                add(UpdateCopy.updateTitle(update.version),
+                    action: #selector(startUpdate), represented: update, toolTip: failure)
             } else {
-                item = NSMenuItem(
-                    title: "Update Available — \(update.version)…",
-                    action: #selector(openUpdatePage), keyEquivalent: "")
-                item.representedObject = update.page
+                add("Update Available — \(update.version)…",
+                    action: #selector(openUpdatePage), represented: update.page,
+                    toolTip: failure)
             }
-            if case .failed(let reason) = UpdateInstaller.shared.state {
-                item.toolTip = "Last attempt failed: \(reason)"
-            }
-            item.target = self
-            item.image = NSImage(
-                systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
-            menu.addItem(item)
         }
     }
 

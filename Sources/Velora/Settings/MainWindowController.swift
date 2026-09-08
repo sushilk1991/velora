@@ -55,24 +55,6 @@ struct MainWindowActions {
     var openMeetingNotes: (String) -> Void
 }
 
-/// Sidebar geometry shared by the main and Settings windows.
-enum WindowShellMetrics {
-    /// Sidebar width including its 8 pt inset on each side.
-    static let sidebarWidth: CGFloat = 200
-    /// Room left at the top of the glass sidebar for the traffic lights,
-    /// which sit inside it under `.fullSizeContentView`.
-    static let trafficLightClearance: CGFloat = 52
-    /// Gap between the sidebar's outer edge and the detail column.
-    static let sidebarGap: CGFloat = 16
-    static let detailTop: CGFloat = 18
-    static let detailTrailing: CGFloat = 24
-    static let detailBottom: CGFloat = 22
-    static let detailLeading: CGFloat = 20
-    /// Grouped forms centre themselves at any width; capping them keeps the
-    /// Meetings form hugging the pane title instead of floating mid-window.
-    static let formMaxWidth: CGFloat = 740
-}
-
 /// The main window: a floating glass sidebar (Home, History, Stats, Meetings,
 /// Dictionary, Modes, then Settings and the engine status) beside one pane.
 ///
@@ -144,9 +126,34 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        // A separator would paint a second "titlebar" band and make the
+        // traffic lights look offset from the glass rail.
+        window.titlebarSeparatorStyle = .none
         window.isMovableByWindowBackground = true
         window.backgroundColor = VeloraPanel.canvasColor
         window.title = title
+    }
+
+    /// Shared show sequence for the main, Settings, and About windows.
+    /// Accessory apps can swallow `makeKeyAndOrderFront` until the window is
+    /// on screen — grey traffic lights on a front window were the symptom
+    /// (see VisibleAlert). Order regardless, then activate, then key.
+    static func presentShell(
+        _ controller: NSWindowController,
+        holding holds: inout Bool
+    ) {
+        if !holds {
+            holds = true
+            AppActivation.acquireRegular()
+        }
+        guard let window = controller.window else {
+            return
+        }
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        controller.showWindow(nil)
+        window.orderFrontRegardless()
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// Shows the window, activating the app so it becomes key. Optionally
@@ -157,13 +164,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         if let pane {
             selection.pane = pane
         }
-        if !holdsActivation {
-            holdsActivation = true
-            AppActivation.acquireRegular()
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        Self.presentShell(self, holding: &holdsActivation)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -188,21 +189,13 @@ struct MainRootView: View {
     let actions: MainWindowActions
 
     var body: some View {
-        HStack(spacing: 0) {
-            MainSidebar(selection: selection, supervisor: supervisor, openSettings: actions.openSettings)
-                .frame(width: WindowShellMetrics.sidebarWidth)
+        WindowShell {
+            MainSidebar(
+                selection: selection, supervisor: supervisor,
+                openSettings: actions.openSettings)
+        } detail: {
             detail(for: selection.current)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .padding(.top, WindowShellMetrics.detailTop)
-                .padding(.trailing, WindowShellMetrics.detailTrailing)
-                .padding(.bottom, WindowShellMetrics.detailBottom)
-                .padding(.leading, WindowShellMetrics.detailLeading + WindowShellMetrics.sidebarGap
-                    - VeloraSpacing.s)  // the sidebar already insets itself 8 pt
         }
-        .background(WindowGlow())
-        .background(VeloraPanel.canvas)
-        // Full-size content: the shell owns the titlebar strip too.
-        .ignoresSafeArea()
     }
 
     @ViewBuilder
@@ -290,7 +283,7 @@ struct MainSidebar: View {
 
     var body: some View {
         FloatingSidebar {
-            Color.clear.frame(height: WindowShellMetrics.trafficLightClearance - VeloraSpacing.s)
+            SidebarTopSpace()
             ForEach(MainPane.allCases) { pane in
                 Button {
                     selection.pane = pane

@@ -469,17 +469,23 @@ Spike finding: grants must be earned by the signed .app bundle (stable ad-hoc id
 
 `UpdateChecker` reads the latest GitHub release, including its complete release
 body and publication date. Automatic discoveries, manual checks, the menubar,
-and Settings all converge on one native release window. Skip and Remind Me
-Later are machine-local and scoped to the exact version, so a newer release is
-never hidden by an older decision. That policy gates every automatic path:
-prompting, background staging, staged-update adoption, and quit-time install.
-Settings exposes a bounded machine-local cache of the latest fetched notes and
-the public release history. A cached update remains actionable during the
-daily-check interval only when its DMG metadata still points to an allowed
-GitHub host; the normal size, signature, identity, version, and Gatekeeper
-checks remain mandatory. Remote Markdown links are inert inside Velora, with
-the separately validated GitHub release-page button as the only navigation
-action.
+and Settings all converge on one native release window, and every surface
+reads installer state through the shared `UpdateCopy` vocabulary. A daily
+check opens the window at most once a day per version and never for a version
+the user chose to **Skip**; closing the window decides nothing. Skip is
+machine-local and scoped to the exact version, so a newer release is never
+hidden by an older decision; it is the only choice that also excludes a
+version from background staging, launch adoption, and quit-time install. With
+"Download and install updates automatically" on, a discovery stages silently
+and the menubar and Settings offer **Restart to Update** instead of a prompt.
+The menubar's Check for Updates runs through Settings › General so its result
+lands in that pane's status line. Settings exposes a bounded machine-local
+cache of the latest fetched notes and the public release history. A cached
+update remains actionable during the daily-check interval only when its DMG
+metadata still points to an allowed GitHub host; the normal size, signature,
+identity, version, and Gatekeeper checks remain mandatory. Remote Markdown
+links are inert inside Velora, with the separately validated GitHub
+release-page button as the only navigation action.
 
 An explicit **Install Update** is one decision: `UpdateInstaller` downloads,
 mounts, stages, verifies, swaps, and relaunches without a second Install or

@@ -973,134 +973,113 @@ enum Selftest {
             "release-note Markdown links render as inert labels")
 
         let now = Date(timeIntervalSince1970: 10_000)
-        expect(!UpdatePromptPolicy.shouldPresent(
+        expect(!UpdatePromptPolicy.shouldPrompt(
             version: "1.2.3", skippedVersion: "1.2.3",
-            deferredVersion: nil, deferredUntil: .distantPast, now: now),
-            "skip suppresses only the exact automatic update prompt")
-        expect(UpdatePromptPolicy.shouldPresent(
+            promptedVersion: nil, promptedUntil: .distantPast, now: now),
+            "skip silences the daily prompt for that exact version")
+        expect(UpdatePromptPolicy.shouldPrompt(
             version: "1.2.4", skippedVersion: "1.2.3",
-            deferredVersion: nil, deferredUntil: .distantPast, now: now),
+            promptedVersion: nil, promptedUntil: .distantPast, now: now),
             "a newer release bypasses the previously skipped version")
-        expect(!UpdatePromptPolicy.shouldPresent(
+        expect(!UpdatePromptPolicy.shouldPrompt(
             version: "1.2.3", skippedVersion: nil,
-            deferredVersion: "1.2.3", deferredUntil: now.addingTimeInterval(60), now: now),
-            "remind-later suppresses the exact version until its deadline")
-        expect(UpdatePromptPolicy.shouldPresent(
+            promptedVersion: "1.2.3",
+            promptedUntil: now.addingTimeInterval(60), now: now),
+            "a version prompted within the last day stays quiet")
+        expect(UpdatePromptPolicy.shouldPrompt(
             version: "1.2.4", skippedVersion: nil,
-            deferredVersion: "1.2.3", deferredUntil: now.addingTimeInterval(60), now: now),
-            "a new release bypasses an older version's reminder")
-        expect(UpdatePromptPolicy.shouldPresent(
+            promptedVersion: "1.2.3",
+            promptedUntil: now.addingTimeInterval(60), now: now),
+            "a new release prompts regardless of an older version's stamp")
+        expect(UpdatePromptPolicy.shouldPrompt(
             version: "1.2.3", skippedVersion: nil,
-            deferredVersion: "1.2.3", deferredUntil: now, now: now),
-            "the automatic prompt returns when the reminder deadline arrives")
-        var skippedVersion: String? = "1.2.3"
-        var deferredVersion: String? = "1.2.3"
-        var deferredUntil = now.addingTimeInterval(60)
-        UpdatePromptPolicy.clearSuppression(
-            for: "1.2.3",
-            skippedVersion: &skippedVersion,
-            deferredVersion: &deferredVersion,
-            deferredUntil: &deferredUntil)
+            promptedVersion: "1.2.3", promptedUntil: now, now: now),
+            "the daily prompt returns once its interval has passed")
         expect(
-            skippedVersion == nil && deferredVersion == nil
-                && deferredUntil == .distantPast,
-            "an explicit install clears exact-version Skip and Later suppression")
-        skippedVersion = "1.2.4"
-        deferredVersion = "1.2.4"
-        deferredUntil = now.addingTimeInterval(60)
-        UpdatePromptPolicy.clearSuppression(
-            for: "1.2.3",
-            skippedVersion: &skippedVersion,
-            deferredVersion: &deferredVersion,
-            deferredUntil: &deferredUntil)
-        expect(
-            skippedVersion == "1.2.4" && deferredVersion == "1.2.4"
-                && deferredUntil > now,
-            "an explicit install preserves suppression for a different release")
-        skippedVersion = "1.2.3"
-        deferredVersion = nil
-        deferredUntil = .distantPast
-        UpdatePromptPolicy.setReminder(
-            for: "1.2.3",
-            skippedVersion: &skippedVersion,
-            deferredVersion: &deferredVersion,
-            deferredUntil: &deferredUntil,
-            now: now)
-        expect(
-            skippedVersion == nil && deferredVersion == "1.2.3"
-                && deferredUntil == now.addingTimeInterval(
-                    UpdatePromptPolicy.reminderInterval),
-            "Remind Me Later replaces an earlier Skip for the exact release")
-        expect(
-            !UpdateWindowPresentation.manual.defersOnClose
-                && UpdateWindowPresentation.automatic.defersOnClose,
-            "only an automatically presented update treats window close as Remind Me Later")
-        expect(
-            UpdateWindowPresentation.resolved(
-                current: .manual,
-                incoming: .automatic,
-                windowIsVisible: true) == .manual,
-            "an automatic check cannot reclassify an already-visible manual changelog")
-        expect(
-            !UpdateWindowController.shouldDeferOnClose(
-                presentation: .manual,
-                closingProgrammatically: false)
-                && UpdateWindowController.shouldDeferOnClose(
-                    presentation: .automatic,
-                    closingProgrammatically: false)
-                && !UpdateWindowController.shouldDeferOnClose(
-                    presentation: .automatic,
-                    closingProgrammatically: true),
-            "window-close wiring defers only a user-closed automatic prompt")
+            !UpdatePromptPolicy.allowsAutomaticInstall(
+                version: "1.2.3", skippedVersion: "1.2.3")
+                && UpdatePromptPolicy.allowsAutomaticInstall(
+                    version: "1.2.4", skippedVersion: "1.2.3")
+                && UpdatePromptPolicy.allowsAutomaticInstall(
+                    version: "1.2.3", skippedVersion: nil),
+            "only a skipped version is excluded from background staging and quit-time install")
 
         let backgroundDownloadAction = UpdateWindowModel.primaryAction(
             releaseVersion: "1.2.3", isUpdateAvailable: true,
             canInstallInPlace: true,
             installerState: .downloading(version: "1.2.3", progress: 0.4),
-            userRequestedInstall: false)
+            installsWhenReady: false)
         expect(
             backgroundDownloadAction
-                == .init(title: "Install Update", disabled: false),
+                == .init(title: UpdateCopy.installTitle, disabled: false),
             "an automatic download still accepts the user's one-click install intent")
         let committedDownloadAction = UpdateWindowModel.primaryAction(
             releaseVersion: "1.2.3", isUpdateAvailable: true,
             canInstallInPlace: true,
             installerState: .verifying(version: "1.2.3"),
-            userRequestedInstall: true)
+            installsWhenReady: true)
         expect(
             committedDownloadAction
-                == .init(title: "Installing…", disabled: true),
+                == .init(title: UpdateCopy.installingTitle, disabled: true),
             "an explicit install intent cannot be submitted twice while verification runs")
+        let stagedAction = UpdateWindowModel.primaryAction(
+            releaseVersion: "1.2.3", isUpdateAvailable: true,
+            canInstallInPlace: true,
+            installerState: .ready(version: "1.2.3"),
+            installsWhenReady: false)
+        expect(
+            stagedAction == .init(title: UpdateCopy.restartTitle, disabled: false),
+            "a staged update offers the same Restart to Update as the menubar")
+        let otherStagedAction = UpdateWindowModel.primaryAction(
+            releaseVersion: "1.2.4", isUpdateAvailable: true,
+            canInstallInPlace: true,
+            installerState: .ready(version: "1.2.3"),
+            installsWhenReady: false)
+        expect(
+            otherStagedAction == .init(title: UpdateCopy.installTitle, disabled: false),
+            "a staged older release does not pose as a restart into the newer one")
+        expect(
+            !UpdateWindowModel.installsWhenReady(
+                true, state: .ready(version: "1.2.3"), releaseVersion: "1.2.4")
+                && UpdateWindowModel.installsWhenReady(
+                    true, state: .ready(version: "1.2.3"), releaseVersion: "1.2.3")
+                && UpdateWindowModel.installsWhenReady(
+                    true, state: .installing, releaseVersion: "1.2.4")
+                && !UpdateWindowModel.installsWhenReady(
+                    false, state: .ready(version: "1.2.4"), releaseVersion: "1.2.4"),
+            "install intent is scoped to the release the window shows")
         let waitingAction = UpdateWindowModel.primaryAction(
             releaseVersion: "1.2.3", isUpdateAvailable: true,
             canInstallInPlace: true,
             installerState: .ready(version: "1.2.3"),
-            userRequestedInstall: true)
+            installsWhenReady: true)
         expect(
-            waitingAction
-                == .init(title: "Waiting to Install…", disabled: true),
+            waitingAction == .init(title: UpdateCopy.waitingTitle, disabled: true),
             "a verified update shows that it is waiting for foreground work")
-        expect(
-            UpdateWindowModel.installIntentApplies(
-                to: "1.2.3",
-                installerState: .ready(version: "1.2.3"),
-                explicitInstallRequested: true),
-            "the update window adopts explicit restart intent from another surface")
-        expect(
-            !UpdateWindowModel.installIntentApplies(
-                to: "1.2.4",
-                installerState: .ready(version: "1.2.3"),
-                explicitInstallRequested: true),
-            "external install intent does not leak onto a different release")
         let differentDownloadAction = UpdateWindowModel.primaryAction(
             releaseVersion: "1.2.4", isUpdateAvailable: true,
             canInstallInPlace: true,
             installerState: .downloading(version: "1.2.3", progress: 0.4),
-            userRequestedInstall: false)
+            installsWhenReady: false)
         expect(
             differentDownloadAction.disabled
                 && differentDownloadAction.title.contains("1.2.3"),
             "a different in-flight release is identified instead of accepting a no-op install")
+        expect(
+            UpdateCopy.caption(
+                for: .ready(version: "1.2.3"), installsWhenReady: true)?
+                .contains("current work") == true
+                && UpdateCopy.caption(for: .idle, installsWhenReady: false) == nil
+                && UpdateCopy.caption(
+                    for: .downloading(version: "1.2.3", progress: 0.42),
+                    installsWhenReady: false) == "Downloading Velora 1.2.3 — 42%",
+            "every surface reads installer state through one caption vocabulary")
+        expect(
+            UpdateWindowView.subtitle(current: "1.2.2", publishedAt: nil) == "You have 1.2.2"
+                && UpdateWindowView.subtitle(
+                    current: "1.2.2", publishedAt: Date(timeIntervalSince1970: 0))
+                    .hasPrefix("You have 1.2.2 · Released "),
+            "the update window subtitle drops the date when the feed carried none")
         expect(UpdateRelaunchSafety.blockReason(
             dictationBusy: false,
             fileTranscriptionBusy: false,
@@ -4600,8 +4579,8 @@ enum Selftest {
         expect(HistoryJournal.entryMeta(record) == "Default · 33 words · 15.8 s",
                "entry meta without latency, got \(HistoryJournal.entryMeta(record))")
         record.finalizationMs = 900
-        expect(HistoryJournal.entryMeta(record).hasSuffix("· ready in 900 ms"),
-               "entry meta appends the recorded latency")
+        expect(!HistoryJournal.entryMeta(record).contains("ready in"),
+               "entry meta leaves latency to Stats, got \(HistoryJournal.entryMeta(record))")
         expect(HistoryJournal.isCodeMode("Code/Terminal") && HistoryJournal.isCodeMode("terminal")
                 && !HistoryJournal.isCodeMode("Email"),
                "terminal/code modes get the mono face")

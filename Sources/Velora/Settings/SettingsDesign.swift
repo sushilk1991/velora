@@ -291,10 +291,125 @@ struct CardDivider: View {
 
 // MARK: - Brand v2 window chrome
 
+/// Sidebar and detail geometry shared by the main and Settings windows.
+/// One row height, one symbol well, one rail inset, one top clearance, one
+/// selection fill — MainSidebar and SettingsSidebar cannot drift. Title
+/// baseline is `detailTop` + a `PaneHeader` (`titleHeight`); both shells
+/// wrap their detail column in `WindowShell` so those numbers live once.
+enum WindowShellMetrics {
+    /// Sidebar width including its rail inset on each side.
+    static let sidebarWidth: CGFloat = 200
+    /// Room left at the top of the glass sidebar for the traffic lights,
+    /// which sit inside it under `.fullSizeContentView`.
+    static let trafficLightClearance: CGFloat = 52
+    /// Gap between the sidebar's outer edge and the detail column.
+    static let sidebarGap: CGFloat = 16
+    static let detailTop: CGFloat = 18
+    static let detailTrailing: CGFloat = 24
+    static let detailBottom: CGFloat = 22
+    static let detailLeading: CGFloat = 20
+    /// Grouped forms centre themselves at any width; capping them keeps the
+    /// Meetings form hugging the pane title instead of floating mid-window.
+    static let formMaxWidth: CGFloat = 740
+    /// Finder/Notes-style rail row (MainSidebar and SettingsSidebar).
+    static let rowHeight: CGFloat = 32
+    /// 22 pt well for the monochrome symbol and the coloured IconTile.
+    static let symbolWell: CGFloat = 22
+    /// SF Symbol point size inside the monochrome well.
+    static let symbolSize: CGFloat = 16
+    /// Inset inside and around the glass rail.
+    static let railInset: CGFloat = VeloraSpacing.s
+    /// `PaneHeader` height — both shells place this under `detailTop`.
+    static let titleHeight: CGFloat = 36
+
+    /// Room above the first rail row: clearance minus the inner inset
+    /// `FloatingSidebar` already applies.
+    ///
+    ///     window top
+    ///       ├ outer railInset
+    ///       ├ inner railInset
+    ///       ├ sidebarTopClearance  ← this
+    ///       └ first row
+    static var sidebarTopClearance: CGFloat {
+        trafficLightClearance - railInset
+    }
+
+    /// Detail column leading: form inset + gap, minus the rail's outer inset.
+    static var detailColumnLeading: CGFloat {
+        detailLeading + sidebarGap - railInset
+    }
+}
+
+/// The one chrome both shell windows compose: glass sidebar on the left,
+/// padded detail column on the right, glow + canvas behind. Callers put a
+/// `PaneHeader` at the top of `detail` so the title baseline is identical
+/// by construction, not by copying padding numbers.
+struct WindowShell<Sidebar: View, Detail: View>: View {
+    private let sidebar: Sidebar
+    private let detail: Detail
+
+    init(
+        @ViewBuilder sidebar: () -> Sidebar,
+        @ViewBuilder detail: () -> Detail
+    ) {
+        self.sidebar = sidebar()
+        self.detail = detail()
+    }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            sidebar
+                .frame(width: WindowShellMetrics.sidebarWidth)
+            detail
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .padding(.top, WindowShellMetrics.detailTop)
+                .padding(.trailing, WindowShellMetrics.detailTrailing)
+                .padding(.bottom, WindowShellMetrics.detailBottom)
+                .padding(.leading, WindowShellMetrics.detailColumnLeading)
+        }
+        .background(WindowGlow())
+        .background(VeloraPanel.canvas)
+        .ignoresSafeArea()
+    }
+}
+
+/// Empty band at the top of a glass rail so the first row clears the
+/// traffic lights sitting inside `.fullSizeContentView`.
+struct SidebarTopSpace: View {
+    var body: some View {
+        Color.clear.frame(height: WindowShellMetrics.sidebarTopClearance)
+    }
+}
+
+/// Shared row chrome: one height, one horizontal inset, one selection fill.
+/// Main rows drop a monochrome symbol into this; Settings rows drop a
+/// coloured `IconTile` — the one deliberate difference.
+struct SidebarRowFrame<Content: View>: View {
+    let selected: Bool
+    private let content: Content
+
+    init(selected: Bool, @ViewBuilder content: () -> Content) {
+        self.selected = selected
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .padding(.horizontal, WindowShellMetrics.railInset)
+            .frame(height: WindowShellMetrics.rowHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous)
+                    .fill(selected ? VeloraPanel.sidebarSelection : .clear))
+            .contentShape(
+                RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous))
+    }
+}
+
 /// The window's ambient glow: a sky radial at the top-left and an apricot
 /// radial at the bottom-right, placed behind all window content. The
-/// opacities differ per theme (sky 16 % dark / 18 % light, apricot 10 % /
-/// 14 %) so the tint reads the same against ink and paper.
+/// opacities differ per theme (sky 22 % dark / 18 % light, apricot 16 % /
+/// 14 %): ink swallows a tint that paper shows, so dark runs stronger.
 ///
 ///     ┌────────────────────────┐
 ///     │ ◜ sky                  │
@@ -304,9 +419,9 @@ struct CardDivider: View {
 struct WindowGlow: View {
     @Environment(\.colorScheme) private var colorScheme
 
-    private static let skyOpacityDark = 0.16
+    private static let skyOpacityDark = 0.22
     private static let skyOpacityLight = 0.18
-    private static let apricotOpacityDark = 0.10
+    private static let apricotOpacityDark = 0.16
     private static let apricotOpacityLight = 0.14
     /// Radius as a fraction of the window's longer side.
     private static let reach = 0.65
@@ -365,7 +480,7 @@ struct FloatingSidebar<Content: View>: View {
         VStack(alignment: .leading, spacing: 2) {
             content
         }
-        .padding(VeloraSpacing.s)
+        .padding(WindowShellMetrics.railInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .background(Self.shape.fill(VeloraPanel.sidebar))
         .modifier(SidebarGlass())
@@ -379,7 +494,7 @@ struct FloatingSidebar<Content: View>: View {
                 lineWidth: 1)
             .padding(1))
         .shadow(color: .black.opacity(0.12), radius: 10, y: 3)
-        .padding(VeloraSpacing.s)
+        .padding(WindowShellMetrics.railInset)
     }
 }
 
@@ -410,33 +525,27 @@ struct SidebarRow<Trailing: View>: View {
     let selected: Bool
     @ViewBuilder var trailing: Trailing
 
-    private static var height: CGFloat { 32 }
-    private static var symbolSize: CGFloat { 16 }
-    private static var symbolWell: CGFloat { 22 }
-
     private var symbolStyle: AnyShapeStyle {
         selected ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary)
     }
 
     var body: some View {
-        HStack(spacing: VeloraSpacing.s) {
-            Image(systemName: symbol)
-                .font(.system(size: Self.symbolSize, weight: .medium))
-                .foregroundStyle(symbolStyle)
-                .frame(width: Self.symbolWell)
-                .accessibilityHidden(true)
-            Text(title)
-                .font(.system(size: 13, weight: selected ? .medium : .regular))
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            trailing
+        SidebarRowFrame(selected: selected) {
+            HStack(spacing: VeloraSpacing.s) {
+                Image(systemName: symbol)
+                    .font(.system(size: WindowShellMetrics.symbolSize, weight: .medium))
+                    .foregroundStyle(symbolStyle)
+                    .frame(
+                        width: WindowShellMetrics.symbolWell,
+                        height: WindowShellMetrics.symbolWell)
+                    .accessibilityHidden(true)
+                Text(title)
+                    .font(.system(size: 13, weight: selected ? .medium : .regular))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                trailing
+            }
         }
-        .padding(.horizontal, VeloraSpacing.s)
-        .frame(height: Self.height)
-        .background(
-            RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous)
-                .fill(selected ? VeloraPanel.sidebarSelection : .clear))
-        .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(title)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
@@ -468,15 +577,13 @@ struct PaneHeader<Trailing: View>: View {
     let title: String
     @ViewBuilder var trailing: Trailing
 
-    private static var height: CGFloat { 36 }
-
     var body: some View {
         HStack(alignment: .center, spacing: VeloraSpacing.m) {
             PaneTitle(title: title)
             Spacer(minLength: VeloraSpacing.m)
             trailing
         }
-        .frame(height: Self.height)
+        .frame(height: WindowShellMetrics.titleHeight)
     }
 }
 
@@ -520,10 +627,11 @@ struct SerifHeadline: View {
 }
 
 /// The Tahoe grouped card for use outside a `Form`: an optional uppercase
-/// section header above, a radius-12 card with a hairline border holding
-/// `GroupRow`s separated by `GroupDivider`s, and an optional footer below.
+/// section header above (with an optional trailing link), a radius-12 card
+/// with a hairline border holding `GroupRow`s separated by `GroupDivider`s,
+/// and an optional footer below.
 ///
-///     SECTION                       11.5 pt semibold uppercase
+///     SECTION               Link   11.5 pt semibold uppercase · 12 pt link
 ///     ┌───────────────────────────┐
 ///     │ Label            [toggle] │  GroupRow
 ///     │   ├──────────────────────┤ │  GroupDivider (inset 14)
@@ -531,14 +639,22 @@ struct SerifHeadline: View {
 ///     └───────────────────────────┘
 ///     Footer note.                  11 pt tertiary
 struct GroupCard<Content: View>: View {
+    /// A link on the header's trailing edge ("Open History").
+    typealias HeaderLink = (title: String, action: () -> Void)
+
     private let header: String?
+    private let headerLink: HeaderLink?
     private let footer: String?
     private let content: Content
 
     private static var labelInset: CGFloat { 14 }
 
-    init(header: String? = nil, footer: String? = nil, @ViewBuilder content: () -> Content) {
+    init(
+        header: String? = nil, headerLink: HeaderLink? = nil, footer: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
         self.header = header
+        self.headerLink = headerLink
         self.footer = footer
         self.content = content()
     }
@@ -546,11 +662,20 @@ struct GroupCard<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: VeloraSpacing.s) {
             if let header {
-                Text(header)
-                    .textCase(.uppercase)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, Self.labelInset)
+                HStack(alignment: .firstTextBaseline) {
+                    Text(header)
+                        .textCase(.uppercase)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    if let headerLink {
+                        Spacer(minLength: VeloraSpacing.s)
+                        Button(headerLink.title, action: headerLink.action)
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12))
+                            .foregroundStyle(VeloraBrand.link)
+                    }
+                }
+                .padding(.horizontal, Self.labelInset)
             }
             VStack(alignment: .leading, spacing: 0) {
                 content

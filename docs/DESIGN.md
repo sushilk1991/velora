@@ -103,7 +103,7 @@ App (`HUDStyle.swift`, `SettingsDesign.swift`):
 | Card | `VeloraPanel.card` fill, hairline `separatorColor` at 0.8, shadow black 5 % radius 2 y 1 |
 | Group card | `VeloraPanel.card` fill, `VeloraPanel.hairline` border, no shadow |
 | Sidebar | inset 8 pt, glass over `VeloraPanel.sidebar`, rows 32 pt |
-| Window glow | `WindowGlow`: sky radial top-left (16 % dark / 18 % light), apricot bottom-right (10 % / 14 %) |
+| Window glow | `WindowGlow`: sky radial top-left (22 % dark / 18 % light), apricot bottom-right (16 % / 14 %); dark runs stronger because ink swallows the tint |
 
 Site (`styles.css :root`): `--r-xs … --r-xl` (0.5 → 2.25 rem), shadows
 `--shadow-sm/md/lg/accent`, shell 76 rem, gutter `clamp(1.25rem, 4.5vw, 3rem)`.

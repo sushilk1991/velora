@@ -160,7 +160,7 @@ final class AppConfig {
     let deferredUpdateUntil = Date.distantPast
 }
 enum UpdatePromptPolicy {
-    static func allowsAutomaticAction(version: String, skippedVersion: String?, deferredVersion: String?, deferredUntil: Date) -> Bool { false }
+    static func allowsAutomaticInstall(version: String, skippedVersion: String?) -> Bool { false }
 }
 switch CommandLine.arguments[1] {
 case "idle", "busy", "gone":

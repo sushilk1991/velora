@@ -67,13 +67,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         if let tab {
             selection.tab = tab
         }
-        if !holdsActivation {
-            holdsActivation = true
-            AppActivation.acquireRegular()
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        MainWindowController.presentShell(self, holding: &holdsActivation)
     }
 
     /// Persists debounced free-text edits immediately (app termination).
@@ -100,22 +94,14 @@ struct SettingsRootView: View {
     let openSetupAssistant: () -> Void
 
     var body: some View {
-        HStack(spacing: 0) {
+        WindowShell {
             SettingsSidebar(selection: selection)
-                .frame(width: WindowShellMetrics.sidebarWidth)
-            VStack(alignment: .leading, spacing: VeloraSpacing.s) {
-                PaneTitle(title: selection.current.title)
-                    .padding(.leading, VeloraSpacing.xl)  // lines up with the form's rows
+        } detail: {
+            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+                PaneHeader(title: selection.current.title)
                 detail(for: selection.current)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(.top, WindowShellMetrics.detailTop)
-            .padding(.bottom, VeloraSpacing.s)
-            .padding(.leading, WindowShellMetrics.sidebarGap - VeloraSpacing.s)
         }
-        .background(WindowGlow())
-        .background(VeloraPanel.canvas)
-        .ignoresSafeArea()
     }
 
     @ViewBuilder
@@ -143,7 +129,7 @@ struct SettingsSidebar: View {
 
     var body: some View {
         FloatingSidebar {
-            Color.clear.frame(height: WindowShellMetrics.trafficLightClearance - VeloraSpacing.s)
+            SidebarTopSpace()
             ForEach(SettingsTab.allCases) { tab in
                 SettingsSidebarRow(tab: tab, selection: selection)
             }
@@ -151,35 +137,28 @@ struct SettingsSidebar: View {
     }
 }
 
-/// One rail row: 22 pt coloured icon tile + tab name on a 32 pt row, the
-/// selected row on the sidebar selection fill. Internal so `--snapshot`
-/// renders the real row, selection state included.
+/// One rail row: coloured `IconTile` in the shared `SidebarRowFrame`.
+/// Internal so `--snapshot` renders the real row, selection included.
 struct SettingsSidebarRow: View {
     let tab: SettingsTab
     @ObservedObject var selection: SettingsWindowSelection
-
-    private static var height: CGFloat { 32 }
-    private static var tileSide: CGFloat { 22 }
 
     var body: some View {
         let selected = selection.current == tab
         Button {
             selection.tab = tab
         } label: {
-            HStack(spacing: VeloraSpacing.s) {
-                IconTile(symbol: tab.symbol, color: tab.tileColor, side: Self.tileSide)
-                Text(tab.title)
-                    .font(.system(size: 13, weight: selected ? .medium : .regular))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
+            SidebarRowFrame(selected: selected) {
+                HStack(spacing: VeloraSpacing.s) {
+                    IconTile(
+                        symbol: tab.symbol, color: tab.tileColor,
+                        side: WindowShellMetrics.symbolWell)
+                    Text(tab.title)
+                        .font(.system(size: 13, weight: selected ? .medium : .regular))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                }
             }
-            .padding(.horizontal, VeloraSpacing.s)
-            .frame(height: Self.height)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous)
-                    .fill(selected ? VeloraPanel.sidebarSelection : .clear))
-            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous))
         }
         .buttonStyle(.plain)
         .help(tab.title)

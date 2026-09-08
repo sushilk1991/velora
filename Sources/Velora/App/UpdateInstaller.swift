@@ -39,6 +39,17 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         case ready(version: String)
         case installing
         case failed(String)
+
+        /// The release this state is about; nil while idle, installing or
+        /// failed.
+        var version: String? {
+            switch self {
+            case .downloading(let version, _), .verifying(let version), .ready(let version):
+                return version
+            case .idle, .installing, .failed:
+                return nil
+            }
+        }
     }
 
     static let shared = UpdateInstaller()
@@ -80,10 +91,10 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                 name: .veloraUpdateStateChanged, object: nil)
         }
     }
-    /// Shared truth for every install surface. The update window must reflect
-    /// an explicit restart requested from Settings or the status menu too, so
-    /// closing that window cannot reinterpret the request as Remind Me Later.
-    var explicitInstallRequested: Bool {
+    /// The one install-intent flag every surface reads (update window,
+    /// Settings, menubar): an explicit Install from any of them is visible on
+    /// all of them, and only the installer owns it.
+    var installsWhenReady: Bool {
         if installAndRelaunchWhenReady || helperSpawned { return true }
         if case .installing = state { return true }
         return false
@@ -150,12 +161,16 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// install and relaunch as soon as verification succeeds.
     func beginAndInstall(_ update: UpdateChecker.Update) {
         dispatchPrecondition(condition: .onQueue(.main))
-        clearPromptSuppression(for: update.version)
+        UpdatePromptPolicy.clearSkip(of: update.version)
         begin(update, installAfterStaging: true)
     }
 
     private func begin(_ update: UpdateChecker.Update, installAfterStaging: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
+        // A "Restart to Update" the user already gave (say, held back by a
+        // meeting) carries over when a newer release supersedes the staged
+        // one — the decision was "update now", not a version number.
+        let carriedIntent = installAndRelaunchWhenReady
         switch state {
         case .downloading(let version, _):
             if version == update.version {
@@ -182,35 +197,35 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         }
         cancelInstallRetry()
         if let blocker = Self.installBlocker() {
-            state = .failed(blocker)
+            failCurrent(blocker)
             return
         }
         guard let current = UpdateChecker.currentVersion,
               UpdateChecker.isNewer(update.version, than: current) else {
-            state = .failed("Already running the latest version")
+            failCurrent("Already running the latest version")
             return
         }
         // The version becomes part of the staging path — never let feed
         // content smuggle path separators or anything else exotic in.
         guard update.version.range(
             of: "^[0-9A-Za-z.-]+$", options: .regularExpression) != nil else {
-            state = .failed("Release version looks invalid")
+            failCurrent("Release version looks invalid")
             return
         }
         guard let asset = update.asset else {
-            state = .failed("Release \(update.version) has no DMG to download")
+            failCurrent("Release \(update.version) has no DMG to download")
             return
         }
         do {
             try FileManager.default.createDirectory(
                 at: Self.updatesDirectory, withIntermediateDirectories: true)
         } catch {
-            state = .failed("Could not create the updates folder: \(error.localizedDescription)")
+            failCurrent("Could not create the updates folder: \(error.localizedDescription)")
             return
         }
         veloraLog("Velora: update \(update.version) — downloading \(asset.url.absoluteString)")
         generation += 1
-        installAndRelaunchWhenReady = installAfterStaging
+        installAndRelaunchWhenReady = installAfterStaging || carriedIntent
         pendingUpdate = update
         state = .downloading(version: update.version, progress: 0)
         let task = session.downloadTask(with: asset.url)
@@ -474,35 +489,9 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     func installAndRelaunch() {
         dispatchPrecondition(condition: .onQueue(.main))
         guard case .ready(let version) = state, !helperSpawned else { return }
-        clearPromptSuppression(for: version)
+        UpdatePromptPolicy.clearSkip(of: version)
         installAndRelaunchWhenReady = true
         installWhenSafe()
-    }
-
-    private func clearPromptSuppression(for version: String) {
-        dispatchPrecondition(condition: .onQueue(.main))
-        // The disposable-copy E2E deliberately shares the production bundle
-        // identifier. A local feed must never mutate the installed app's real
-        // Skip/Later choices.
-        guard UpdateChecker.persistentStateAllowed else { return }
-        let config = AppConfig.shared
-        var skippedVersion = config.skippedUpdateVersion
-        var deferredVersion = config.deferredUpdateVersion
-        var deferredUntil = config.deferredUpdateUntil
-        UpdatePromptPolicy.clearSuppression(
-            for: version,
-            skippedVersion: &skippedVersion,
-            deferredVersion: &deferredVersion,
-            deferredUntil: &deferredUntil)
-        if skippedVersion != config.skippedUpdateVersion {
-            config.skippedUpdateVersion = skippedVersion
-        }
-        if deferredVersion != config.deferredUpdateVersion {
-            config.deferredUpdateVersion = deferredVersion
-        }
-        if deferredUntil != config.deferredUpdateUntil {
-            config.deferredUpdateUntil = deferredUntil
-        }
     }
 
     private func installWhenSafe() {
@@ -649,10 +638,10 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         }
     }
 
-    /// Skip/Later suppress automatic work for the exact release. Explicit
-    /// install intent never exposes those controls, so this cannot cancel a
-    /// user-committed install.
-    func suppressAutomaticAttempt(for version: String) {
+    /// Skip This Version stops background work on that exact release. The
+    /// control is hidden once the user commits to an install, so this never
+    /// cancels a requested one.
+    func abandon(version: String) {
         dispatchPrecondition(condition: .onQueue(.main))
         switch state {
         case .downloading(let active, _) where active == version:
@@ -677,11 +666,9 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
         let explicitlyRequested = installAndRelaunchWhenReady
         guard explicitlyRequested || (
             config.autoInstallUpdates
-                && UpdatePromptPolicy.allowsAutomaticAction(
+                && UpdatePromptPolicy.allowsAutomaticInstall(
                     version: version,
-                    skippedVersion: config.skippedUpdateVersion,
-                    deferredVersion: config.deferredUpdateVersion,
-                    deferredUntil: config.deferredUpdateUntil))
+                    skippedVersion: config.skippedUpdateVersion))
         else { return }
         installOnExit()
     }
@@ -914,11 +901,9 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                    name.hasPrefix("Velora-"), entry.pathExtension == "app" {
                     let version = String(name.dropFirst("Velora-".count).dropLast(".app".count))
                     if UpdateChecker.isNewer(version, than: current),
-                       UpdatePromptPolicy.allowsAutomaticAction(
+                       UpdatePromptPolicy.allowsAutomaticInstall(
                             version: version,
-                            skippedVersion: config.skippedUpdateVersion,
-                            deferredVersion: config.deferredUpdateVersion,
-                            deferredUntil: config.deferredUpdateUntil),
+                            skippedVersion: config.skippedUpdateVersion),
                        UpdateChecker.isNewer(version, than: adopted?.version ?? current),
                        Self.verifyStagedApp(at: entry, expectedVersion: version) == nil {
                         if let previous = adopted { try? fm.removeItem(at: previous.url) }
@@ -937,15 +922,13 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                 // cleanup to that pipeline (or the next launch) rather than
                 // deleting bytes out from under it.
                 guard case .idle = self.state else { return }
-                guard UpdatePromptPolicy.allowsAutomaticAction(
+                guard UpdatePromptPolicy.allowsAutomaticInstall(
                         version: adopted.version,
-                        skippedVersion: config.skippedUpdateVersion,
-                        deferredVersion: config.deferredUpdateVersion,
-                        deferredUntil: config.deferredUpdateUntil)
+                        skippedVersion: config.skippedUpdateVersion)
                 else {
-                    // Skip/Later may have been chosen while the slow
+                    // Skip may have been chosen while the slow
                     // signature/Gatekeeper pass above was in flight. Do not
-                    // publish stale ready state or leave the suppressed bundle.
+                    // publish stale ready state or leave the skipped bundle.
                     self.workQueue.async {
                         try? FileManager.default.removeItem(at: adopted.url)
                     }

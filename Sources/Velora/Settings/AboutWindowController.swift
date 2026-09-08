@@ -10,15 +10,19 @@ final class AboutWindowController: NSWindowController, NSWindowDelegate {
     private var holdsActivation = false
 
     init(model: SettingsModel) {
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: Self.contentSize),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false)
-        window.title = "About Velora"
-        window.backgroundColor = VeloraPanel.canvasColor
-        window.contentViewController = NSHostingController(
-            rootView: AboutSettingsView(model: model).background(VeloraPanel.canvas))
+        // Same paint as the shells (canvas + glow + transparent titlebar)
+        // so About is not a third design; strip resize after chrome apply
+        // because this panel stays small and fixed.
+        let root = AboutSettingsView(model: model)
+            .padding(.top, WindowShellMetrics.trafficLightClearance)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(WindowGlow())
+            .background(VeloraPanel.canvas)
+            .ignoresSafeArea()
+        let window = NSWindow(contentViewController: NSHostingController(rootView: root))
+        MainWindowController.applyShellChrome(to: window, title: "About Velora")
+        window.styleMask.remove(.resizable)
+        window.styleMask.remove(.miniaturizable)
         window.setContentSize(Self.contentSize)
         window.center()
 
@@ -32,13 +36,7 @@ final class AboutWindowController: NSWindowController, NSWindowDelegate {
     }
 
     func show() {
-        if !holdsActivation {
-            holdsActivation = true
-            AppActivation.acquireRegular()
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        MainWindowController.presentShell(self, holding: &holdsActivation)
     }
 
     func windowWillClose(_ notification: Notification) {

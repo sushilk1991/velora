@@ -177,34 +177,33 @@ enum SnapshotRenderer {
     @MainActor
     private static func renderUpdateWindow(into dir: URL) {
         renderUpdateWindow(
-            state: .idle, userRequestedInstall: false,
+            state: .idle, installsWhenReady: false,
             name: "software-update", into: dir)
         renderUpdateWindow(
             state: .downloading(version: "9.9.9", progress: 0.42),
-            userRequestedInstall: false,
+            installsWhenReady: false,
             name: "software-update-auto-downloading", into: dir)
         renderUpdateWindow(
             state: .ready(version: "9.9.9"),
-            userRequestedInstall: true,
+            installsWhenReady: true,
             name: "software-update-waiting", into: dir)
     }
 
     @MainActor
     private static func renderUpdateWindow(
         state: UpdateInstaller.State,
-        userRequestedInstall: Bool,
+        installsWhenReady: Bool,
         name: String,
         into dir: URL
     ) {
-        let model = UpdateWindowModel(
-            installBlockerOverride: nil, usesInstallBlockerOverride: true)
-        model.present(sampleUpdateRelease)
-        model.configureSnapshot(
+        let model = UpdateWindowModel(preview: .init(
             installerState: state,
-            userRequestedInstall: userRequestedInstall)
+            installsWhenReady: installsWhenReady,
+            installBlocker: nil))
+        model.present(sampleUpdateRelease)
         let view = NSHostingView(rootView: UpdateWindowView(model: model))
         snapshot(
-            view, size: NSSize(width: 760, height: 600),
+            view, size: UpdateWindowController.contentSize,
             name: name, dir: dir)
     }
 
@@ -221,7 +220,7 @@ enum SnapshotRenderer {
             ## Fixes
 
             - Removed the duplicate Install or Discard decision after verification.
-            - Added version-scoped Skip and Remind Me Later controls.
+            - Skip This Version hides a release until the next one ships.
             """,
             publishedAt: Date(timeIntervalSince1970: 1_775_000_000),
             asset: .init(
@@ -308,11 +307,37 @@ enum SnapshotRenderer {
         // shapes (the windowed pane snapshots above cut below the fold and
         // draw from the live — possibly empty — history).
         renderSeededStats(model: model, into: dir)
+        renderExpandedHistory(model: model, history: history, into: dir)
         let shortcutsView = NSHostingView(
             rootView: ShortcutsSettingsView(model: model))
         snapshot(
             shortcutsView, size: NSSize(width: 660, height: 1050),
             name: "settings-shortcuts-tall", dir: dir)
+    }
+
+    /// The History journal with its newest entry expanded
+    /// (`main-history-expanded.png`): the raised card, the "As heard"
+    /// disclosure and the action capsules never show in the pane snapshot,
+    /// which draws every row collapsed. Skipped when the store is empty.
+    @MainActor
+    private static func renderExpandedHistory(
+        model: SettingsModel, history: HistoryStore, into dir: URL
+    ) {
+        let viewModel = HistoryViewModel(history: history, supervisor: nil)
+        guard let newest = viewModel.records.first else { return }
+        let view = NSHostingView(
+            rootView: HistorySettingsView(model: model, viewModel: viewModel)
+                .padding(VeloraSpacing.l)
+                .background(VeloraPanel.canvas))
+        view.frame = NSRect(origin: .zero, size: NSSize(width: 840, height: 560))
+        // `onAppear` fires on the first layout and reloads (collapsing
+        // everything), so lay out first and expand after it ran.
+        view.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.5))
+        viewModel.expandedID = newest.id
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+        view.layoutSubtreeIfNeeded()
+        write(view: view, to: dir.appendingPathComponent("main-history-expanded.png"))
     }
 
     /// A window mirroring the production shell (`applyShellChrome`) — a

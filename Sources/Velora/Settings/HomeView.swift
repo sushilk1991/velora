@@ -172,21 +172,10 @@ struct HomeView: View {
 
     // MARK: Recent
 
+    /// Same uppercase section header as the cards beside it; the title used
+    /// to sit inside the card and read as a third header style.
     private var recentCard: some View {
-        GroupCard {
-            HStack {
-                Text("Recent")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                Button("Open History") { selection.pane = .history }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12))
-                    .foregroundStyle(VeloraBrand.link)
-            }
-            .padding(.horizontal, 14)
-            .padding(.top, VeloraSpacing.m)
-            .padding(.bottom, VeloraSpacing.s)
-            GroupDivider()
+        GroupCard(header: "Recent", headerLink: ("Open History", { selection.pane = .history })) {
             HistoryRecentList(history: history, limit: Self.recentLimit)
                 .id(reloadToken)
                 .padding(.horizontal, 14)
@@ -239,15 +228,15 @@ struct HomeView: View {
 
     // MARK: Meetings
 
+    /// A row that says what meeting notes do, with Start on its trailing
+    /// edge, then the latest meeting. A lone button in a card read as empty.
     private var meetingsCard: some View {
         GroupCard(header: "Meetings") {
-            HStack {
-                Button("Start Meeting Notes…", action: actions.startMeeting)
+            GroupRow(label: "Meeting notes", sub: "Records the room, writes notes at the end") {
+                Button("Start…", action: actions.startMeeting)
                     .buttonStyle(.capsule)
-                Spacer()
+                    .accessibilityLabel("Start Meeting Notes")
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, VeloraSpacing.m)
             if let meeting = latestMeeting {
                 GroupDivider()
                 GroupRow(label: meeting.title, sub: HomeFormat.meetingMeta(meeting)) {

@@ -392,16 +392,13 @@ enum HistoryJournal {
         return parts.joined(separator: " · ")
     }
 
-    /// "Default · 33 words · 15.8 s · ready in 0.9 s". A row with no text
-    /// says so instead, since its numbers would describe nothing.
+    /// "Default · 33 words · 15.8 s". A row with no text says so instead,
+    /// since its numbers would describe nothing. Latency stays in Stats.
     static func entryMeta(_ record: DictationRecord) -> String {
         guard hasTranscript(record) else { return "Needs reprocessing" }
         var parts: [String] = [modeName(record.mode), plural(wordCount(record.final), "word")]
         if record.durationMs > 0 {
             parts.append(String(format: "%.1f s", Double(record.durationMs) / 1000))
-        }
-        if let ready = record.finalizationMs, ready > 0 {
-            parts.append("ready in " + latency(ms: ready))
         }
         return parts.joined(separator: " · ")
     }
@@ -589,9 +586,13 @@ struct HistorySettingsView: View {
     @StateObject private var vm: HistoryViewModel
     @State private var showClearConfirm = false
 
-    private static let columnWidth: CGFloat = 720
+    /// Widest the journal text runs; the column starts at the pane title's
+    /// leading edge (centring it left a dead gutter beside the title).
+    private static let columnWidth: CGFloat = 760
     private static let daySpacing: CGFloat = 28
-    private static let entrySpacing: CGFloat = 18
+    /// Rows carry 8 pt of their own vertical padding (the hover fill), so
+    /// the gap between them stays tight.
+    private static let entrySpacing: CGFloat = 8
 
     init(model: SettingsModel, history: HistoryStore, supervisor: EngineSupervisor?) {
         self.model = model
@@ -632,8 +633,8 @@ struct HistorySettingsView: View {
                     }
                     footer
                 }
-                .frame(maxWidth: Self.columnWidth)
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: Self.columnWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.bottom, VeloraSpacing.xl)
             }
         }
@@ -732,7 +733,7 @@ struct HistorySettingsView: View {
         }
         .font(.system(size: 11.5))
         .foregroundStyle(.tertiary)
-        .frame(maxWidth: .infinity)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.top, VeloraSpacing.m)
     }
 
@@ -757,8 +758,9 @@ struct HistorySettingsView: View {
 // MARK: - Journal entry
 
 /// One dictation in the journal. Collapsed: a 56 pt time gutter beside the
-/// app line and the final text. Expanded (one at a time): a raised card with
-/// the full text, the raw transcript, and the action capsules.
+/// app line and the final text, with a hover fill so the click-to-expand is
+/// discoverable. Expanded (one at a time): a raised card with the full text,
+/// an "As heard" disclosure for the raw transcript, and the action capsules.
 ///
 ///     13:21 │ ▣ Slack  Default · 33 words · 15.8 s
 ///           │ Final text …
@@ -766,9 +768,7 @@ struct HistorySettingsView: View {
 ///     ┌────────────────────────────────────────────┐ raised, radius 12
 ///     │ 13:21  ▣ Slack  Default · 33 words · 15.8 s │
 ///     │ Full final text …                          │
-///     │ ┌ As heard · before cleanup ─────────────┐ │
-///     │ │ raw transcript                          │ │
-///     │ └────────────────────────────────────────┘ │
+///     │ ▸ As heard                                 │  toggles the raw text
 ///     │ (Copy)(Insert Again)(Edit)(Reprocess ▸)(Play)   (🗑) │
 ///     └────────────────────────────────────────────┘
 private struct JournalEntry: View {
@@ -790,6 +790,8 @@ private struct JournalEntry: View {
     @State private var copied = false
     @State private var editing = false
     @State private var editDraft = ""
+    @State private var hovering = false
+    @State private var showsRaw = false
 
     private static let timeColumn: CGFloat = 56
     private static let iconSide: CGFloat = 18
@@ -799,8 +801,14 @@ private struct JournalEntry: View {
     /// Extra leading that lifts the system font's ~1.2 line height to the
     /// journal's 1.45 (14 pt → about 3.5 pt between lines).
     private static let extraLeadingRatio: CGFloat = 0.25
-    private static let rawRadius: CGFloat = 9
-    private static let rawFill = 0.06
+    /// Hover fill behind a collapsed row, bled `rowBleed` past the text so
+    /// the text itself stays on the column's edge.
+    private static let hoverFill = 0.05
+    private static let rowBleed: CGFloat = 10
+    private static let rowRadius: CGFloat = 10
+    /// Raw transcript: 12.5 pt secondary text behind a 2 pt hairline rule.
+    private static let rawTextSize: CGFloat = 12.5
+    private static let rawRuleWidth: CGFloat = 2
     private static let copiedFlash: TimeInterval = 1.2
 
     /// Built-in modes offered in the reprocess menu (mirrors the Modes editor).
@@ -830,7 +838,15 @@ private struct JournalEntry: View {
                 transcript(size: Self.textSize, lineLimit: nil)
             }
         }
+        .padding(.vertical, VeloraSpacing.s)
+        .padding(.horizontal, Self.rowBleed)
+        .padding(.horizontal, -Self.rowBleed)
+        .background(
+            RoundedRectangle(cornerRadius: Self.rowRadius, style: .continuous)
+                .fill(Color.primary.opacity(hovering ? Self.hoverFill : 0))
+                .padding(.horizontal, -Self.rowBleed))
         .contentShape(Rectangle())
+        .onHover { hovering = $0 }
         .onTapGesture(perform: onToggle)
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -853,7 +869,7 @@ private struct JournalEntry: View {
                 .padding(.leading, Self.timeColumn)
 
             if HistoryJournal.hasDistinctRaw(record) {
-                rawBox
+                rawDisclosure
                     .padding(.leading, Self.timeColumn)
             }
 
@@ -876,22 +892,42 @@ private struct JournalEntry: View {
                 .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
     }
 
-    private var rawBox: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-            Text("As heard · before cleanup")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.tertiary)
-            Text(record.raw)
-                .font(.system(size: 12.5))
+    /// "▸ As heard" toggles the pre-cleanup transcript under the final text.
+    /// Closed by default: the cleaned text is the record, the raw is a check.
+    private var rawDisclosure: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.xs + 2) {
+            Button {
+                withAnimation(VeloraMotion.standard) { showsRaw.toggle() }
+            } label: {
+                HStack(spacing: VeloraSpacing.xs + 1) {
+                    Image(systemName: showsRaw ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .frame(width: 10)
+                    Text("As heard")
+                }
+                .font(.system(size: 11.5, weight: .medium))
                 .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Shows the transcript before cleanup")
+
+            if showsRaw {
+                Text(record.raw)
+                    .font(.system(size: Self.rawTextSize))
+                    .lineSpacing(Self.rawTextSize * Self.extraLeadingRatio)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, VeloraSpacing.m)
+                    .overlay(alignment: .leading) {
+                        RoundedRectangle(cornerRadius: Self.rawRuleWidth / 2)
+                            .fill(VeloraPanel.hairline)
+                            .frame(width: Self.rawRuleWidth)
+                    }
+                    .padding(.leading, VeloraSpacing.xs)
+            }
         }
-        .padding(VeloraSpacing.m)
-        .background(
-            RoundedRectangle(cornerRadius: Self.rawRadius, style: .continuous)
-                .fill(Color.primary.opacity(Self.rawFill)))
     }
 
     // MARK: Shared pieces

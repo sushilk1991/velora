@@ -63,7 +63,6 @@ final class SettingsModel: ObservableObject {
     private var hudPrefsObserver: NSObjectProtocol?
     private var updateStateObserver: NSObjectProtocol?
     private var updateCheckObserver: NSObjectProtocol?
-    private var updatePreferencesObserver: NSObjectProtocol?
     let dictionary: DictionaryRepository
     let dictionarySync: ICloudDictionarySync
     private var dictionaryRowsObserver: AnyCancellable?
@@ -313,6 +312,7 @@ final class SettingsModel: ObservableObject {
         updateChecks = config.updateChecks
         autoInstallUpdates = config.autoInstallUpdates
         updateState = UpdateInstaller.shared.state
+        updateInstallsWhenReady = UpdateInstaller.shared.installsWhenReady
         availableUpdate = UpdateChecker.shared.available
         meetingSuggestions = config.meetingSuggestions
         meetingCalendar = config.meetingCalendar
@@ -364,6 +364,7 @@ final class SettingsModel: ObservableObject {
         ) { [weak self] _ in
             guard let self else { return }
             self.updateState = UpdateInstaller.shared.state
+            self.updateInstallsWhenReady = UpdateInstaller.shared.installsWhenReady
             let available = UpdateChecker.shared.available
             self.availableUpdate = available
             // Installer transitions can arrive after the check notification.
@@ -385,16 +386,6 @@ final class SettingsModel: ObservableObject {
                 availableUpdate: available,
                 currentVersion: VeloraAppInfo.shortVersion)
         }
-        updatePreferencesObserver = NotificationCenter.default.addObserver(
-            forName: .veloraUpdatePreferencesChanged, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            let current = self.config.autoInstallUpdates
-            guard self.autoInstallUpdates != current else { return }
-            self.syncingUpdatePreferences = true
-            self.autoInstallUpdates = current
-            self.syncingUpdatePreferences = false
-        }
         requestStatus()
     }
 
@@ -403,9 +394,6 @@ final class SettingsModel: ObservableObject {
         if let hudPrefsObserver { NotificationCenter.default.removeObserver(hudPrefsObserver) }
         if let updateStateObserver { NotificationCenter.default.removeObserver(updateStateObserver) }
         if let updateCheckObserver { NotificationCenter.default.removeObserver(updateCheckObserver) }
-        if let updatePreferencesObserver {
-            NotificationCenter.default.removeObserver(updatePreferencesObserver)
-        }
     }
 
     /// Asks the engine for its current status (models, retention, …). Cheap;
@@ -506,7 +494,6 @@ final class SettingsModel: ObservableObject {
     /// prevents published-property observers from writing it dozens more times
     /// or starting unrelated work such as an updater download.
     private var applyingImportedSettings = false
-    private var syncingUpdatePreferences = false
 
     // MARK: - General
 
@@ -700,18 +687,14 @@ final class SettingsModel: ObservableObject {
 
     @Published var autoInstallUpdates: Bool {
         didSet {
-            guard !applyingImportedSettings, !syncingUpdatePreferences else { return }
+            guard !applyingImportedSettings else { return }
             config.autoInstallUpdates = autoInstallUpdates
-            NotificationCenter.default.post(
-                name: .veloraUpdatePreferencesChanged, object: nil)
             // Flipping the toggle on with an update already discovered should
             // act on it now, not wait for tomorrow's check.
             if autoInstallUpdates, let update = availableUpdate,
-               UpdatePromptPolicy.allowsAutomaticAction(
+               UpdatePromptPolicy.allowsAutomaticInstall(
                     version: update.version,
-                    skippedVersion: config.skippedUpdateVersion,
-                    deferredVersion: config.deferredUpdateVersion,
-                    deferredUntil: config.deferredUpdateUntil),
+                    skippedVersion: config.skippedUpdateVersion),
                UpdateInstaller.canInstallInPlace {
                 UpdateInstaller.shared.begin(update)
             }
@@ -724,6 +707,8 @@ final class SettingsModel: ObservableObject {
     /// Mirrors UpdateInstaller.shared.state / UpdateChecker.shared.available
     /// for the Updates section (kept fresh by the state-change observer).
     @Published var updateState: UpdateInstaller.State
+    /// True once the user committed to an install on any surface.
+    @Published var updateInstallsWhenReady: Bool
     @Published var availableUpdate: UpdateChecker.Update?
 
     static func statusAfterSuccessfulUpdateCheck(
@@ -766,17 +751,13 @@ final class SettingsModel: ObservableObject {
         availableUpdate?.asset != nil && UpdateInstaller.canInstallInPlace
     }
 
-    func startUpdateInstall() {
+    func showUpdateWindow() {
         guard let update = availableUpdate else { return }
         UpdateWindowController.shared.show(update)
     }
 
     func installStagedUpdate() {
         UpdateInstaller.shared.installAndRelaunch()
-    }
-
-    func discardStagedUpdate() {
-        UpdateInstaller.shared.discardStagedUpdate()
     }
 
     func cancelUpdateDownload() {

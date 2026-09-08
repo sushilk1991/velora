@@ -175,81 +175,75 @@ struct GeneralSettingsView: View {
     }
 }
 
-/// Update controls mirroring the updater's state: check → download progress →
-/// verify → restart. Failures show the reason and fall back to the releases
-/// page. Shared by Settings → General → Updates and the About window.
+/// Update controls mirroring the updater's state with the shared
+/// `UpdateCopy` vocabulary: check → download progress → verify → restart.
+/// Failures show the reason and keep both Try Again and Check Now within
+/// reach. Shared by Settings › General › Updates and the About window.
 struct UpdateActionRow: View {
     @ObservedObject var model: SettingsModel
     /// The idle-state button title ("Check Now" in the Updates section,
     /// "Check for Updates" in About).
     var checkLabel = "Check Now"
 
+    private static let progressWidth: CGFloat = 160
+
     var body: some View {
-        switch model.updateState {
-        case .downloading(let version, let progress):
-            HStack(spacing: 12) {
+        HStack(spacing: VeloraSpacing.m) {
+            switch model.updateState {
+            case .downloading(_, let progress):
                 ProgressView(value: progress)
-                    .frame(maxWidth: 220)
-                Text("Downloading Velora \(version) — \(Int(progress * 100))%")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: Self.progressWidth)
+                caption(stateCaption)
                 Button("Cancel") { model.cancelUpdateDownload() }
-            }
-        case .verifying(let version):
-            HStack(spacing: 8) {
+            case .verifying, .installing:
                 ProgressView().controlSize(.small)
-                Text("Verifying Velora \(version)…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .installing:
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text("Installing…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .ready(let version):
-            HStack {
-                Button("Restart to Update") { model.installStagedUpdate() }
+                caption(stateCaption)
+            case .ready:
+                Button(model.updateInstallsWhenReady
+                       ? UpdateCopy.waitingTitle : UpdateCopy.restartTitle) {
+                    model.installStagedUpdate()
+                }
+                .disabled(model.updateInstallsWhenReady)
                 if model.availableUpdate != nil {
-                    Button("View Release Notes…") { model.startUpdateInstall() }
+                    Button("Release Notes…") { model.showUpdateWindow() }
                 }
-                Text(model.autoInstallUpdates
-                     ? "Velora \(version) is ready — it installs when Velora restarts or quits."
-                     : "Velora \(version) is downloaded and verified.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .failed(let reason):
-            HStack {
+                caption(stateCaption)
+            case .failed:
                 if model.canInstallUpdateInPlace {
-                    Button("Retry Update…") { model.startUpdateInstall() }
+                    Button(UpdateCopy.tryAgainTitle) { model.showUpdateWindow() }
                 } else {
-                    Button("Open Releases Page") { model.openReleasesPage() }
+                    Button(UpdateCopy.releasesPageTitle) { model.openReleasesPage() }
                 }
-                Text(reason)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        case .idle:
-            HStack {
+                Button(checkLabel) { model.checkForUpdatesNow() }
+                caption(stateCaption)
+                caption(model.updateCheckStatus)
+            case .idle:
                 Button(checkLabel) { model.checkForUpdatesNow() }
                 if let update = model.availableUpdate {
                     if model.canInstallUpdateInPlace {
-                        Button("Install Velora \(update.version)…") {
-                            model.startUpdateInstall()
+                        Button(UpdateCopy.updateTitle(update.version)) {
+                            model.showUpdateWindow()
                         }
                     } else {
-                        Button("Open Releases Page") { model.openReleasesPage() }
+                        Button(UpdateCopy.releasesPageTitle) { model.openReleasesPage() }
                     }
                 }
-                if let status = model.updateCheckStatus {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                caption(model.updateCheckStatus)
             }
+        }
+    }
+
+    private var stateCaption: String? {
+        UpdateCopy.caption(
+            for: model.updateState, installsWhenReady: model.updateInstallsWhenReady)
+    }
+
+    @ViewBuilder
+    private func caption(_ text: String?) -> some View {
+        if let text {
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

@@ -129,6 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var meetingNotesController: MeetingNotesWindowController?
     private var onboardingController: OnboardingWindowController?
     private var hotkeyObserver: NSObjectProtocol?
+    private var updateCheckObserver: NSObjectProtocol?
     private var accessibilityObserver: NSObjectProtocol?
     private var loadingObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
@@ -612,25 +613,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return self.restartBlockReason()
         }
 
+        // The menubar mirrors the checker after every completed check, so an
+        // "up to date" result from any surface clears a stale offer.
+        updateCheckObserver = NotificationCenter.default.addObserver(
+            forName: .veloraUpdateCheckCompleted, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.statusController.updateAvailable = UpdateChecker.shared.available
+        }
         UpdateChecker.shared.onUpdate = { [weak self] update, origin in
             guard let self else { return }
-            self.statusController.updateAvailable = update
-            let automaticAllowed = UpdatePromptPolicy.allowsAutomaticAction(
-                version: update.version,
-                skippedVersion: self.config.skippedUpdateVersion,
-                deferredVersion: self.config.deferredUpdateVersion,
-                deferredUntil: self.config.deferredUpdateUntil)
             // Opt-in autoupdate: fetch + verify + stage silently; the swap
             // happens on the next quit or via "Restart to Update". begin()
             // no-ops while busy or when this version is already staged.
-            if self.config.autoInstallUpdates, automaticAllowed,
-               UpdateInstaller.canInstallInPlace {
+            let installsSilently = self.config.autoInstallUpdates
+                && UpdateInstaller.canInstallInPlace
+                && UpdatePromptPolicy.allowsAutomaticInstall(
+                    version: update.version,
+                    skippedVersion: self.config.skippedUpdateVersion)
+            if installsSilently {
                 UpdateInstaller.shared.begin(update)
+                return
             }
-            // A daily check surfaces the full release notes without taking
-            // keyboard focus from the app the user is working in. Manual
-            // checks always reopen the release window even when this exact
-            // version's automatic path is skipped or deferred.
+            // Otherwise a daily check opens the release window without taking
+            // keyboard focus; manual checks open it from their own surface.
             if origin == .automatic {
                 UpdateWindowController.shared.showAutomatically(update)
             }
@@ -1062,34 +1067,12 @@ extension AppDelegate: StatusItemControllerDelegate {
         showMain(selecting: .home)
     }
 
+    /// The menubar check runs through Settings › General, the one surface
+    /// with a status line: "up to date" and failures land in its caption,
+    /// and a newer release opens the update window from there.
     func statusItemCheckForUpdates() {
-        UpdateChecker.shared.check(origin: .manual) { [weak self] outcome in
-            guard let self else { return }
-            switch outcome {
-            case .upToDate:
-                self.statusController.updateAvailable = nil
-                let alert = NSAlert()
-                alert.alertStyle = .informational
-                alert.messageText = "Velora is up to date"
-                alert.informativeText =
-                    "You’re using Velora \(VeloraAppInfo.shortVersion), the latest version."
-                alert.addButton(withTitle: "OK")
-                VisibleAlert.present(alert) { _ in }
-            case .updateAvailable(let update):
-                self.statusController.updateAvailable = update
-            case .failed(let reason):
-                let alert = NSAlert()
-                alert.alertStyle = .warning
-                alert.messageText = "Couldn’t Check for Updates"
-                alert.informativeText = reason
-                alert.addButton(withTitle: "OK")
-                VisibleAlert.present(alert) { _ in }
-            }
-            if outcome.shouldOpenUpdateWindow,
-               case .updateAvailable(let update) = outcome {
-                UpdateWindowController.shared.show(update)
-            }
-        }
+        showSettings(selecting: .general)
+        sharedSettingsModel().checkForUpdatesNow()
     }
 
     func statusItemCheckPermissions() {

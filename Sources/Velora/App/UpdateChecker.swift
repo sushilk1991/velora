@@ -104,7 +104,7 @@ final class UpdateChecker {
     }
     /// 20h, not 24: a "same time every morning" launch pattern still checks
     /// daily instead of skipping every other day.
-    private static let interval: TimeInterval = 20 * 60 * 60
+    static let checkInterval: TimeInterval = 20 * 60 * 60
 
     static let maximumReleaseNotesBytes = 524_288
 
@@ -149,7 +149,7 @@ final class UpdateChecker {
     /// model loads, and the check is idle work.
     func checkAfterLaunch() {
         guard config.updateChecks,
-              Date().timeIntervalSince(config.lastUpdateCheck) >= Self.interval
+              Date().timeIntervalSince(config.lastUpdateCheck) >= Self.checkInterval
         else { return }
         // Re-gate on the timestamp after the deferral: a manual "Check Now"
         // in the meantime already satisfied today's check — firing again
@@ -161,7 +161,7 @@ final class UpdateChecker {
 
     private func checkIfDue() {
         guard config.updateChecks,
-              Date().timeIntervalSince(config.lastUpdateCheck) >= Self.interval
+              Date().timeIntervalSince(config.lastUpdateCheck) >= Self.checkInterval
         else { return }
         check(origin: .automatic) { _ in }
     }

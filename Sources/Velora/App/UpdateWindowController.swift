@@ -2,123 +2,97 @@ import AppKit
 import Combine
 import SwiftUI
 
-extension Notification.Name {
-    /// Keeps the Settings toggle and the update-window checkbox coherent when
-    /// both windows are open.
-    static let veloraUpdatePreferencesChanged =
-        Notification.Name("VeloraUpdatePreferencesChanged")
-}
-
-/// Automatic update actions are version-scoped. A newly published release
-/// must not inherit "Later" or "Skip" from the previous version.
+/// When a daily check may open the update window, and which releases the
+/// automatic install path may touch. Both decisions are scoped to the exact
+/// version, so a newer release never inherits a choice made about an older
+/// one.
+///
+///     daily check finds 1.2.3
+///        │
+///        ├─ skipped 1.2.3? ──────────▶ stay quiet, stage nothing
+///        ├─ prompted 1.2.3 < 24 h ago ▶ stay quiet (staging still allowed)
+///        └─ otherwise ───────────────▶ open the window, stamp the prompt
+///
+/// Storage reuses `AppConfig.deferredUpdateVersion` / `deferredUpdateUntil`:
+/// the version last prompted and the moment the next automatic prompt for it
+/// is allowed.
 enum UpdatePromptPolicy {
-    static let reminderInterval: TimeInterval = 24 * 60 * 60
+    /// An automatic prompt for one version repeats at most this often.
+    /// Same as the checker's cadence: a 24 h prompt gate over a 20 h check
+    /// gate lands the next check just short of the gate and skips a day.
+    static let promptInterval: TimeInterval = UpdateChecker.checkInterval
 
-    static func shouldPresent(
+    static func shouldPrompt(
         version: String,
         skippedVersion: String?,
-        deferredVersion: String?,
-        deferredUntil: Date,
+        promptedVersion: String?,
+        promptedUntil: Date,
         now: Date = Date()
     ) -> Bool {
-        guard skippedVersion != version else { return false }
-        guard deferredVersion == version else { return true }
-        return now >= deferredUntil
+        if skippedVersion == version {
+            return false
+        }
+        if promptedVersion != version {
+            return true
+        }
+        return now >= promptedUntil
     }
 
-    /// Skip and an unexpired reminder suppress the entire automatic path for
-    /// that exact release: prompt, background stage, adoption, and quit-time
-    /// install. Manual checks and an explicit Install always remain available.
-    static func allowsAutomaticAction(
-        version: String,
-        skippedVersion: String?,
-        deferredVersion: String?,
-        deferredUntil: Date,
-        now: Date = Date()
+    /// Background staging, launch adoption, and quit-time install proceed for
+    /// every release except a skipped one. Closing the window is not a
+    /// decision about the bytes.
+    static func allowsAutomaticInstall(
+        version: String, skippedVersion: String?
     ) -> Bool {
-        shouldPresent(
-            version: version,
-            skippedVersion: skippedVersion,
-            deferredVersion: deferredVersion,
-            deferredUntil: deferredUntil,
-            now: now)
+        skippedVersion != version
     }
 
-    /// Explicit install intent overrides a prior Skip/Later choice for this
-    /// release only. Keeping the mutation rule here lets every install surface
-    /// (window, Settings, and status menu) share identical behavior.
-    static func clearSuppression(
-        for version: String,
-        skippedVersion: inout String?,
-        deferredVersion: inout String?,
-        deferredUntil: inout Date
-    ) {
-        if skippedVersion == version {
-            skippedVersion = nil
-        }
-        if deferredVersion == version {
-            deferredVersion = nil
-            deferredUntil = .distantPast
-        }
+    // MARK: Persistence — every mutation of the machine-local prompt state
+    // lives here. The disposable-copy E2E shares the production defaults
+    // domain, so a local feed must never write real Skip decisions.
+
+    static func markPrompted(_ version: String, now: Date = Date()) {
+        guard UpdateChecker.persistentStateAllowed else { return }
+        let config = AppConfig.shared
+        config.deferredUpdateVersion = version
+        config.deferredUpdateUntil = now.addingTimeInterval(promptInterval)
     }
 
-    /// "Remind Me Later" replaces a previous Skip choice for this release.
-    /// Otherwise Skip would win forever in `shouldPresent`, contradicting the
-    /// new reminder deadline the user just selected.
-    static func setReminder(
-        for version: String,
-        skippedVersion: inout String?,
-        deferredVersion: inout String?,
-        deferredUntil: inout Date,
-        now: Date = Date()
-    ) {
-        if skippedVersion == version {
-            skippedVersion = nil
-        }
-        deferredVersion = version
-        deferredUntil = now.addingTimeInterval(reminderInterval)
+    static func skip(_ version: String) {
+        guard UpdateChecker.persistentStateAllowed else { return }
+        AppConfig.shared.skippedUpdateVersion = version
+    }
+
+    /// An explicit install of a skipped release un-skips it, so the menubar
+    /// and quit-time paths agree with what the user just asked for.
+    static func clearSkip(of version: String) {
+        guard UpdateChecker.persistentStateAllowed,
+              AppConfig.shared.skippedUpdateVersion == version
+        else { return }
+        AppConfig.shared.skippedUpdateVersion = nil
     }
 }
 
-enum UpdateWindowPresentation: Equatable {
-    case manual
-    case automatic
-
-    var defersOnClose: Bool { self == .automatic }
-
-    static func resolved(
-        current: Self,
-        incoming: Self,
-        windowIsVisible: Bool
-    ) -> Self {
-        // An automatic check may refresh the content of a changelog the user
-        // already opened, but it must not reinterpret that same window's close
-        // as Remind Me Later and discard staged work.
-        if windowIsVisible, current == .manual, incoming == .automatic {
-            return .manual
-        }
-        return incoming
-    }
-}
-
-/// One reusable window for actionable updates discovered automatically or by
-/// a manual check. Automatic presentation deliberately does not activate the
-/// app or steal keyboard focus from the user's current app.
+/// One reusable window for a newer release, opened by a daily check, a
+/// manual check, the menubar, or Settings. A daily check surfaces it without
+/// activating the app; every explicit path brings it to the front.
 final class UpdateWindowController: NSWindowController, NSWindowDelegate {
     static let shared = UpdateWindowController()
 
+    static let contentSize = NSSize(width: 640, height: 580)
+    private static let minimumSize = NSSize(width: 560, height: 480)
+
     private let model = UpdateWindowModel()
     private var holdsActivation = false
-    private var closingProgrammatically = false
-    private var presentation: UpdateWindowPresentation = .manual
 
     private init() {
         let root = UpdateWindowView(model: model)
         let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.title = "Velora Update"
-        window.setContentSize(NSSize(width: 760, height: 600))
-        window.minSize = NSSize(width: 680, height: 520)
+        // Same chrome as the main and Settings windows: hidden title, traffic
+        // lights over the canvas, so the updater is not a third design.
+        MainWindowController.applyShellChrome(to: window, title: "Velora Update")
+        window.setContentSize(Self.contentSize)
+        window.contentMinSize = Self.minimumSize
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.collectionBehavior.insert(.moveToActiveSpace)
@@ -126,7 +100,7 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
         super.init(window: window)
         window.delegate = self
-        model.onDismiss = { [weak self] in self?.dismissWindow() }
+        model.onDismiss = { [weak self] in self?.close() }
     }
 
     @available(*, unavailable)
@@ -136,49 +110,40 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
 
     /// Manual checks and explicit menu/Settings actions activate the window.
     func show(_ release: UpdateChecker.Release) {
-        show(release, presentation: .manual)
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard present(release) else { return }
+        MainWindowController.presentShell(self, holding: &holdsActivation)
     }
 
-    /// Daily checks respect Skip/Later and surface the window without stealing
-    /// focus. The user can click it when convenient.
+    /// A daily check surfaces the window at most once a day per version and
+    /// never for a skipped one, without stealing keyboard focus.
     func showAutomatically(_ release: UpdateChecker.Release) {
+        dispatchPrecondition(condition: .onQueue(.main))
         let config = AppConfig.shared
-        guard UpdatePromptPolicy.shouldPresent(
+        guard UpdatePromptPolicy.shouldPrompt(
             version: release.version,
             skippedVersion: config.skippedUpdateVersion,
-            deferredVersion: config.deferredUpdateVersion,
-            deferredUntil: config.deferredUpdateUntil)
+            promptedVersion: config.deferredUpdateVersion,
+            promptedUntil: config.deferredUpdateUntil)
         else { return }
-        show(release, presentation: .automatic)
+        guard present(release) else { return }
+        UpdatePromptPolicy.markPrompted(release.version)
+        window?.orderFrontRegardless()
     }
 
-    private func show(
-        _ release: UpdateChecker.Release,
-        presentation: UpdateWindowPresentation
-    ) {
-        dispatchPrecondition(condition: .onQueue(.main))
+    /// Loads the release into the window and holds regular activation while
+    /// it is open. False when the release is not newer than the running app.
+    private func present(_ release: UpdateChecker.Release) -> Bool {
         guard Self.shouldPresent(
             releaseVersion: release.version,
             currentVersion: VeloraAppInfo.shortVersion)
-        else { return }
-        let resolvedPresentation = UpdateWindowPresentation.resolved(
-            current: self.presentation,
-            incoming: presentation,
-            windowIsVisible: window?.isVisible == true)
-        self.presentation = resolvedPresentation
+        else { return false }
         model.present(release)
         if !holdsActivation {
             holdsActivation = true
             AppActivation.acquireRegular()
         }
-        closingProgrammatically = false
-        if presentation == .manual {
-            NSApp.activate(ignoringOtherApps: true)
-            showWindow(nil)
-            window?.makeKeyAndOrderFront(nil)
-        } else if resolvedPresentation == .automatic {
-            window?.orderFrontRegardless()
-        }
+        return true
     }
 
     static func shouldPresent(
@@ -188,30 +153,13 @@ final class UpdateWindowController: NSWindowController, NSWindowDelegate {
         UpdateChecker.isNewer(releaseVersion, than: currentVersion)
     }
 
-    private func dismissWindow() {
-        closingProgrammatically = true
-        close()
-    }
-
+    /// Closing the window decides nothing: a staged update stays staged and
+    /// the daily prompt returns tomorrow unless the user skipped the version.
     func windowWillClose(_ notification: Notification) {
-        if Self.shouldDeferOnClose(
-            presentation: presentation,
-            closingProgrammatically: closingProgrammatically) {
-            model.deferAfterWindowClose()
-        }
-        closingProgrammatically = false
-        presentation = .manual
         if holdsActivation {
             holdsActivation = false
             AppActivation.releaseRegular()
         }
-    }
-
-    static func shouldDeferOnClose(
-        presentation: UpdateWindowPresentation,
-        closingProgrammatically: Bool
-    ) -> Bool {
-        !closingProgrammatically && presentation.defersOnClose
     }
 }
 
@@ -221,59 +169,33 @@ final class UpdateWindowModel: ObservableObject {
         let disabled: Bool
     }
 
-    @Published private(set) var release: UpdateChecker.Release?
-    @Published private(set) var installerState = UpdateInstaller.shared.state
-    @Published var installsAutomatically = AppConfig.shared.autoInstallUpdates {
-        didSet {
-            guard !syncingPreferences,
-                  installsAutomatically != AppConfig.shared.autoInstallUpdates
-            else { return }
-            AppConfig.shared.autoInstallUpdates = installsAutomatically
-            NotificationCenter.default.post(
-                name: .veloraUpdatePreferencesChanged, object: nil)
-        }
+    /// Fixed installer facts for the headless snapshot renderer, which has no
+    /// live installer to observe.
+    struct Preview {
+        let installerState: UpdateInstaller.State
+        let installsWhenReady: Bool
+        let installBlocker: String?
     }
+
+    @Published private(set) var release: UpdateChecker.Release?
+    @Published private(set) var installerState: UpdateInstaller.State
+    @Published private(set) var installsWhenReady: Bool
 
     var onDismiss: (() -> Void)?
 
+    private let preview: Preview?
     private var installerObserver: NSObjectProtocol?
-    private var preferencesObserver: NSObjectProtocol?
-    private var syncingPreferences = false
-    @Published private(set) var userRequestedInstall = false
-    private let installBlockerOverride: String?
-    private let usesInstallBlockerOverride: Bool
 
-    init(installBlockerOverride: String? = nil, usesInstallBlockerOverride: Bool = false) {
-        self.installBlockerOverride = installBlockerOverride
-        self.usesInstallBlockerOverride = usesInstallBlockerOverride
+    init(preview: Preview? = nil) {
+        self.preview = preview
+        installerState = preview?.installerState ?? UpdateInstaller.shared.state
+        installsWhenReady = preview?.installsWhenReady
+            ?? UpdateInstaller.shared.installsWhenReady
+        guard preview == nil else { return }
         installerObserver = NotificationCenter.default.addObserver(
             forName: .veloraUpdateStateChanged, object: nil, queue: .main
         ) { [weak self] _ in
-            guard let self else { return }
-            self.installerState = UpdateInstaller.shared.state
-            if case .failed = self.installerState {
-                self.userRequestedInstall = false
-            } else if case .idle = self.installerState {
-                self.userRequestedInstall = false
-            } else if let version = self.release?.version {
-                self.userRequestedInstall = Self.installIntentApplies(
-                    to: version,
-                    installerState: self.installerState,
-                    explicitInstallRequested:
-                        UpdateInstaller.shared.explicitInstallRequested)
-            } else {
-                self.userRequestedInstall = false
-            }
-        }
-        preferencesObserver = NotificationCenter.default.addObserver(
-            forName: .veloraUpdatePreferencesChanged, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard let self else { return }
-            let current = AppConfig.shared.autoInstallUpdates
-            guard self.installsAutomatically != current else { return }
-            self.syncingPreferences = true
-            self.installsAutomatically = current
-            self.syncingPreferences = false
+            self?.refresh()
         }
     }
 
@@ -281,46 +203,33 @@ final class UpdateWindowModel: ObservableObject {
         if let installerObserver {
             NotificationCenter.default.removeObserver(installerObserver)
         }
-        if let preferencesObserver {
-            NotificationCenter.default.removeObserver(preferencesObserver)
-        }
     }
 
     func present(_ release: UpdateChecker.Release) {
         self.release = release
-        installerState = UpdateInstaller.shared.state
-        userRequestedInstall = Self.installIntentApplies(
-            to: release.version,
-            installerState: installerState,
-            explicitInstallRequested:
-                UpdateInstaller.shared.explicitInstallRequested)
-        syncAutomaticPreference()
+        refresh()
     }
 
-    /// Headless visual regression harness only; production state always comes
-    /// from UpdateInstaller notifications.
-    func configureSnapshot(
-        installerState: UpdateInstaller.State,
-        userRequestedInstall: Bool
-    ) {
-        self.installerState = installerState
-        self.userRequestedInstall = userRequestedInstall
+    /// Mirrors the installer. The window has no state of its own about the
+    /// install: one flag on the installer serves the window, Settings, and
+    /// the menubar alike.
+    private func refresh() {
+        guard preview == nil else { return }
+        let installer = UpdateInstaller.shared
+        installerState = installer.state
+        installsWhenReady = Self.installsWhenReady(
+            installer.installsWhenReady, state: installer.state, releaseVersion: release?.version)
     }
 
-    static func installIntentApplies(
-        to releaseVersion: String,
-        installerState: UpdateInstaller.State,
-        explicitInstallRequested: Bool
+    /// The installer's one intent flag, narrowed to the release this window
+    /// shows: a pending install of 1.2.3 must not disable Install and Skip
+    /// for 1.2.4. An installing state has no version and always counts.
+    static func installsWhenReady(
+        _ installsWhenReady: Bool, state: UpdateInstaller.State, releaseVersion: String?
     ) -> Bool {
-        guard explicitInstallRequested else { return false }
-        switch installerState {
-        case .downloading(let version, _), .verifying(let version), .ready(let version):
-            return version == releaseVersion
-        case .installing:
-            return true
-        case .idle, .failed:
-            return false
-        }
+        guard installsWhenReady else { return false }
+        guard let active = state.version else { return true }
+        return active == releaseVersion
     }
 
     var currentVersion: String { VeloraAppInfo.shortVersion }
@@ -330,8 +239,8 @@ final class UpdateWindowModel: ObservableObject {
         return UpdateChecker.isNewer(release.version, than: currentVersion)
     }
 
-    var installBlocker: String? {
-        if usesInstallBlockerOverride { return installBlockerOverride }
+    private var installBlocker: String? {
+        if let preview { return preview.installBlocker }
         return UpdateInstaller.installBlocker()
     }
 
@@ -352,16 +261,20 @@ final class UpdateWindowModel: ObservableObject {
         return installBlocker
     }
 
-    var canDefer: Bool {
-        guard let release, isUpdateAvailable, !userRequestedInstall else {
-            return false
-        }
+    /// Skip is offered until the user commits to an install.
+    var canSkip: Bool {
+        guard isUpdateAvailable, !installsWhenReady else { return false }
+        if case .installing = installerState { return false }
+        return true
+    }
+
+    /// A committed install can be withdrawn until the swap helper spawns.
+    var canCancelInstall: Bool {
+        guard installsWhenReady else { return false }
         switch installerState {
-        case .idle, .ready, .failed:
+        case .downloading, .verifying, .ready:
             return true
-        case .downloading(let version, _), .verifying(let version):
-            return version == release.version
-        case .installing:
+        case .idle, .installing, .failed:
             return false
         }
     }
@@ -372,7 +285,7 @@ final class UpdateWindowModel: ObservableObject {
             isUpdateAvailable: isUpdateAvailable,
             canInstallInPlace: canInstallInPlace,
             installerState: installerState,
-            userRequestedInstall: userRequestedInstall)
+            installsWhenReady: installsWhenReady)
     }
 
     static func primaryAction(
@@ -380,33 +293,38 @@ final class UpdateWindowModel: ObservableObject {
         isUpdateAvailable: Bool,
         canInstallInPlace: Bool,
         installerState: UpdateInstaller.State,
-        userRequestedInstall: Bool
+        installsWhenReady: Bool
     ) -> PrimaryAction {
         guard isUpdateAvailable else {
             return PrimaryAction(title: "Done", disabled: false)
         }
         guard canInstallInPlace else {
-            return PrimaryAction(title: "Open Releases Page", disabled: false)
+            return PrimaryAction(title: UpdateCopy.releasesPageTitle, disabled: false)
         }
         switch installerState {
         case .idle:
-            return PrimaryAction(title: "Install Update", disabled: false)
+            return PrimaryAction(title: UpdateCopy.installTitle, disabled: false)
+        case .ready(let activeVersion) where activeVersion != releaseVersion:
+            // Another release is staged; this one is a fresh install.
+            return PrimaryAction(title: UpdateCopy.installTitle, disabled: false)
         case .ready:
-            return userRequestedInstall
-                ? PrimaryAction(title: "Waiting to Install…", disabled: true)
-                : PrimaryAction(title: "Install Update", disabled: false)
+            if installsWhenReady {
+                return PrimaryAction(title: UpdateCopy.waitingTitle, disabled: true)
+            }
+            return PrimaryAction(title: UpdateCopy.restartTitle, disabled: false)
         case .downloading(let activeVersion, _), .verifying(let activeVersion):
             guard activeVersion == releaseVersion else {
                 return PrimaryAction(
                     title: "Finishing Velora \(activeVersion)…", disabled: true)
             }
-            return userRequestedInstall
-                ? PrimaryAction(title: "Installing…", disabled: true)
-                : PrimaryAction(title: "Install Update", disabled: false)
+            if installsWhenReady {
+                return PrimaryAction(title: UpdateCopy.installingTitle, disabled: true)
+            }
+            return PrimaryAction(title: UpdateCopy.installTitle, disabled: false)
         case .installing:
-            return PrimaryAction(title: "Installing…", disabled: true)
+            return PrimaryAction(title: UpdateCopy.installingTitle, disabled: true)
         case .failed:
-            return PrimaryAction(title: "Try Again", disabled: false)
+            return PrimaryAction(title: UpdateCopy.tryAgainTitle, disabled: false)
         }
     }
 
@@ -421,229 +339,205 @@ final class UpdateWindowModel: ObservableObject {
             return
         }
         UpdateInstaller.shared.beginAndInstall(release)
-        switch UpdateInstaller.shared.state {
-        case .downloading(let version, _), .verifying(let version), .ready(let version):
-            userRequestedInstall = version == release.version
-        case .installing:
-            userRequestedInstall = true
-        case .idle, .failed:
-            userRequestedInstall = false
-        }
+        refresh()
     }
 
-    func cancelDownload() {
-        UpdateInstaller.shared.cancelDownload()
-        userRequestedInstall = false
-    }
-
-    func cancelPendingInstall() {
+    func cancelInstall() {
         UpdateInstaller.shared.cancelPendingInstall()
-        userRequestedInstall = false
+        refresh()
     }
 
+    /// Skip hides this exact version from daily prompts and stops any
+    /// background work on it. The next release prompts again.
     func skip() {
-        guard let release, canDefer else { return }
-        let config = AppConfig.shared
-        config.skippedUpdateVersion = release.version
-        if config.deferredUpdateVersion == release.version {
-            config.deferredUpdateVersion = nil
-            config.deferredUpdateUntil = .distantPast
-        }
-        UpdateInstaller.shared.suppressAutomaticAttempt(for: release.version)
+        guard let release, canSkip else { return }
+        UpdatePromptPolicy.skip(release.version)
+        UpdateInstaller.shared.abandon(version: release.version)
         onDismiss?()
     }
 
-    func remindLater() {
-        guard let release, canDefer else { return }
-        deferPrompt(for: release.version)
+    func dismiss() {
         onDismiss?()
-    }
-
-    func deferAfterWindowClose() {
-        guard let release, isUpdateAvailable, !userRequestedInstall else { return }
-        deferPrompt(for: release.version)
     }
 
     func openReleasePage() {
         guard let release else { return }
         NSWorkspace.shared.open(release.page)
     }
-
-    private func deferPrompt(for version: String) {
-        let config = AppConfig.shared
-        var skippedVersion = config.skippedUpdateVersion
-        var deferredVersion = config.deferredUpdateVersion
-        var deferredUntil = config.deferredUpdateUntil
-        UpdatePromptPolicy.setReminder(
-            for: version,
-            skippedVersion: &skippedVersion,
-            deferredVersion: &deferredVersion,
-            deferredUntil: &deferredUntil)
-        if skippedVersion != config.skippedUpdateVersion {
-            config.skippedUpdateVersion = skippedVersion
-        }
-        config.deferredUpdateVersion = deferredVersion
-        config.deferredUpdateUntil = deferredUntil
-        UpdateInstaller.shared.suppressAutomaticAttempt(for: version)
-    }
-
-    private func syncAutomaticPreference() {
-        let current = AppConfig.shared.autoInstallUpdates
-        guard installsAutomatically != current else { return }
-        syncingPreferences = true
-        installsAutomatically = current
-        syncingPreferences = false
-    }
 }
 
 /// Internal so the headless snapshot harness renders the production surface.
+///
+///     ┌────────────────────────────────────────────┐
+///     │ ●●●                                        │
+///     │  [icon]  Velora 1.2.3 is available.        │  serif headline
+///     │          You have 1.2.2 · Released 8 Sep   │
+///     │  WHAT'S NEW                View on GitHub  │
+///     │  ┌──────────────────────────────────────┐  │
+///     │  │ release notes (scrolls)              │  │  card
+///     │  └──────────────────────────────────────┘  │
+///     │  ▸ status caption / progress               │
+///     │  [Skip This Version]     [Not Now] [Install]│  capsules
+///     └────────────────────────────────────────────┘
 struct UpdateWindowView: View {
     @ObservedObject var model: UpdateWindowModel
 
+    /// Clears the traffic lights, which sit over the canvas under
+    /// `.fullSizeContentView`.
+    private static let headerTop: CGFloat = 44
+    private static let iconSide: CGFloat = 64
+    private static let sectionLabelSize: CGFloat = 11.5
+
     var body: some View {
-        Group {
+        ZStack {
+            VeloraPanel.canvas
+            WindowGlow()
             if let release = model.release {
                 content(for: release)
             } else {
                 ProgressView()
             }
         }
-        .frame(minWidth: 680, minHeight: 520)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 560, minHeight: 480)
     }
 
     private func content(for release: UpdateChecker.Release) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: VeloraSpacing.l) {
-                Image(nsImage: VeloraAppInfo.icon)
-                    .resizable()
-                    .interpolation(.high)
-                    .frame(width: 72, height: 72)
-                    .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
+        VStack(alignment: .leading, spacing: VeloraSpacing.l) {
+            header(for: release)
+            notes(for: release)
+            footer
+        }
+        .padding(.horizontal, VeloraSpacing.xl + VeloraSpacing.xs)
+        .padding(.top, Self.headerTop)
+        .padding(.bottom, VeloraSpacing.xl)
+    }
 
-                VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                    Text("A new version of Velora is available")
-                        .font(.title2.weight(.semibold))
-                    Text("Velora \(release.version) is available — you have \(model.currentVersion).")
-                        .font(.body)
-                        .foregroundStyle(.secondary)
-                    if let publishedAt = release.publishedAt {
-                        Text("Released \(publishedAt.formatted(date: .long, time: .omitted))")
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+    private func header(for release: UpdateChecker.Release) -> some View {
+        HStack(alignment: .top, spacing: VeloraSpacing.l) {
+            Image(nsImage: VeloraAppInfo.icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: Self.iconSide, height: Self.iconSide)
+                .shadow(color: .black.opacity(0.18), radius: 7, y: 3)
+
+            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                SerifHeadline("Velora \(release.version) is available")
+                Text(Self.subtitle(current: model.currentVersion, publishedAt: release.publishedAt))
+                    .font(.body)
+                    .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, VeloraSpacing.xl)
-            .padding(.top, VeloraSpacing.xl)
-            .padding(.bottom, VeloraSpacing.l)
-
-            VStack(alignment: .leading, spacing: VeloraSpacing.s) {
-                HStack {
-                    Text("Release Notes")
-                        .font(.headline)
-                    Spacer()
-                    Button("View on GitHub") { model.openReleasePage() }
-                        .buttonStyle(.link)
-                }
-
-                ScrollView {
-                    ReleaseNotesContentView(notes: release.notes)
-                        .padding(VeloraSpacing.m)
-                }
-                .background(VeloraPanel.card)
-                .clipShape(RoundedRectangle(cornerRadius: VeloraRadius.tile))
-                .overlay {
-                    RoundedRectangle(cornerRadius: VeloraRadius.tile)
-                        .strokeBorder(Color(nsColor: .separatorColor))
-                }
-            }
-            .padding(.horizontal, VeloraSpacing.xl)
-            .frame(maxHeight: .infinity)
-
-            Divider()
-                .padding(.top, VeloraSpacing.l)
-
-            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-                installerStatus
-
-                Toggle(
-                    "Automatically download and install updates in the future",
-                    isOn: $model.installsAutomatically)
-
-                HStack(spacing: VeloraSpacing.m) {
-                    if model.canDefer {
-                        Button("Skip This Version") { model.skip() }
-                    } else if case .downloading = model.installerState {
-                        Button("Cancel Download") { model.cancelDownload() }
-                    } else if model.userRequestedInstall {
-                        switch model.installerState {
-                        case .verifying, .ready:
-                            Button("Cancel Install") { model.cancelPendingInstall() }
-                        case .idle, .downloading, .installing, .failed:
-                            EmptyView()
-                        }
-                    }
-                    Spacer()
-                    if model.canDefer {
-                        Button("Remind Me Later") { model.remindLater() }
-                    }
-                    Button(model.primaryAction.title) { model.install() }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
-                        .disabled(model.primaryAction.disabled)
-                }
-            }
-            .padding(.horizontal, VeloraSpacing.xl)
-            .padding(.vertical, VeloraSpacing.l)
         }
     }
 
+    /// "You have 1.2.2 · Released 8 September 2026"; the date drops out when
+    /// the feed carried none.
+    static func subtitle(current: String, publishedAt: Date?) -> String {
+        guard let publishedAt else { return "You have \(current)" }
+        return "You have \(current) · Released \(publishedAt.formatted(date: .long, time: .omitted))"
+    }
+
+    private func notes(for release: UpdateChecker.Release) -> some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+            HStack {
+                Text("What’s new")
+                    .textCase(.uppercase)
+                    .font(.system(size: Self.sectionLabelSize, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("View on GitHub") { model.openReleasePage() }
+                    .buttonStyle(.link)
+                    .font(.system(size: 12))
+            }
+            .padding(.horizontal, VeloraSpacing.xs)
+
+            ScrollView {
+                ReleaseNotesContentView(notes: release.notes)
+                    .padding(VeloraSpacing.l)
+            }
+            .background(
+                RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
+                    .fill(VeloraPanel.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
+                    .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
+        }
+        .frame(maxHeight: .infinity)
+    }
+
+    private var footer: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+            installerStatus
+
+            HStack(spacing: VeloraSpacing.s) {
+                if model.canSkip {
+                    Button(UpdateCopy.skipTitle) { model.skip() }
+                        .buttonStyle(.capsule)
+                } else if model.canCancelInstall {
+                    Button(UpdateCopy.cancelInstallTitle) { model.cancelInstall() }
+                        .buttonStyle(.capsule)
+                }
+                Spacer()
+                if model.isUpdateAvailable {
+                    Button(model.installsWhenReady ? "Close" : UpdateCopy.notNowTitle) {
+                        model.dismiss()
+                    }
+                    .buttonStyle(.capsule)
+                    .keyboardShortcut(.cancelAction)
+                }
+                Button(model.primaryAction.title) { model.install() }
+                    .buttonStyle(.primaryCapsule)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(model.primaryAction.disabled)
+            }
+        }
+    }
+
+    /// One caption line from the shared vocabulary; downloads add a bar and
+    /// blockers turn the line into a warning.
     @ViewBuilder
     private var installerStatus: some View {
         switch model.installerState {
         case .idle:
             if let reason = model.installUnavailableReason {
-                Label(reason, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(VeloraStatus.warning)
+                warning(reason)
             }
-        case .downloading(let version, let progress):
+        case .downloading(_, let progress):
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 ProgressView(value: progress)
-                Text("Downloading Velora \(version) — \(Int(progress * 100))%")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                caption(UpdateCopy.caption(
+                    for: model.installerState, installsWhenReady: model.installsWhenReady))
             }
-        case .verifying(let version):
+        case .verifying, .installing:
             HStack(spacing: VeloraSpacing.s) {
                 ProgressView().controlSize(.small)
-                Text("Verifying Velora \(version)…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                caption(UpdateCopy.caption(
+                    for: model.installerState, installsWhenReady: model.installsWhenReady))
             }
-        case .ready(let version):
-            Label(model.userRequestedInstall
-                  ? "Velora \(version) is ready and will restart when current work finishes."
-                  : "Velora \(version) is downloaded, verified, and ready to install.",
-                  systemImage: "checkmark.circle.fill")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        case .installing:
-            HStack(spacing: VeloraSpacing.s) {
-                ProgressView().controlSize(.small)
-                Text("Installing and restarting Velora…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        case .ready:
+            Label {
+                caption(UpdateCopy.caption(
+                    for: model.installerState, installsWhenReady: model.installsWhenReady))
+            } icon: {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(VeloraBrand.accent)
             }
         case .failed(let reason):
-            Label(reason, systemImage: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundStyle(VeloraStatus.warning)
-                .textSelection(.enabled)
+            warning(reason)
         }
     }
 
+    private func caption(_ text: String?) -> some View {
+        Text(text ?? "")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private func warning(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(.caption)
+            .foregroundStyle(VeloraStatus.warning)
+            .textSelection(.enabled)
+    }
 }
 
 /// Shared by the dedicated update window and Settings' inline changelog.
