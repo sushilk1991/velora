@@ -383,7 +383,7 @@ struct OnboardingView: View {
             HStack(spacing: VeloraSpacing.s) {
                 ForEach(OnboardingModel.Step.allCases, id: \.rawValue) { step in
                     Circle()
-                        .fill(step == model.step ? VeloraBrand.violet.color : Color.secondary.opacity(0.3))
+                        .fill(step == model.step ? VeloraBrand.sky.color : Color.secondary.opacity(0.3))
                         .frame(width: 6, height: 6)
                 }
             }
@@ -418,7 +418,7 @@ private struct ModelSetupCard: View {
         VStack(spacing: VeloraSpacing.l) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.system(size: 46))
-                .foregroundStyle(VeloraBrand.violet.color)
+                .foregroundStyle(VeloraBrand.sky.color)
 
             VStack(spacing: VeloraSpacing.s) {
                 Text(state.status ?? "Preparing the model downloads…")
@@ -466,7 +466,7 @@ struct PermissionCard: View {
         HStack(spacing: VeloraSpacing.m) {
             ZStack {
                 Circle()
-                    .fill(VeloraBrand.violet.color.opacity(granted ? 0.0 : 0.15))
+                    .fill(VeloraBrand.sky.color.opacity(granted ? 0.0 : 0.15))
                     .frame(width: 44, height: 44)
                 if granted {
                     Image(systemName: "checkmark.circle.fill")
@@ -477,7 +477,7 @@ struct PermissionCard: View {
                 } else {
                     Image(systemName: symbol)
                         .font(.system(size: 22))
-                        .foregroundStyle(VeloraBrand.violet.color)
+                        .foregroundStyle(VeloraBrand.sky.color)
                 }
             }
             .animation(VeloraMotion.quick, value: granted)

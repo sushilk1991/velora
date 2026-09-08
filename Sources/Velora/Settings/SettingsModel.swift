@@ -297,6 +297,7 @@ final class SettingsModel: ObservableObject {
         soundVolume = config.soundVolume
         hudPosition = config.hudPosition
         hudAlwaysVisible = config.hudAlwaysVisible
+        hudVisible = config.hudVisible
         appearance = config.appearance
         language = config.language
         autoPunctuation = config.autoPunctuation
@@ -341,6 +342,9 @@ final class SettingsModel: ObservableObject {
             }
             if self.hudAlwaysVisible != self.config.hudAlwaysVisible {
                 self.hudAlwaysVisible = self.config.hudAlwaysVisible
+            }
+            if self.hudVisible != self.config.hudVisible {
+                self.hudVisible = self.config.hudVisible
             }
             if self.inputDeviceUID != self.config.inputDeviceUID {
                 self.inputDeviceUID = self.config.inputDeviceUID
@@ -421,6 +425,7 @@ final class SettingsModel: ObservableObject {
         soundVolume = imported.general.soundVolume
         hudPosition = imported.hud.position
         hudAlwaysVisible = imported.hud.alwaysVisible
+        hudVisible = imported.hud.visible
 
         hotkey = imported.shortcuts.dictation
         editHotkey = imported.shortcuts.editSelection
@@ -548,6 +553,16 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, !syncingHUDPrefs,
                   hudAlwaysVisible != oldValue else { return }
             config.hudAlwaysVisible = hudAlwaysVisible
+            NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+        }
+    }
+
+    /// "Show pill" (General › Pill, menubar checkbox, "Close Pill" on the HUD).
+    @Published var hudVisible: Bool {
+        didSet {
+            guard !applyingImportedSettings, !syncingHUDPrefs,
+                  hudVisible != oldValue else { return }
+            config.hudVisible = hudVisible
             NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
         }
     }

@@ -175,7 +175,7 @@ struct HUDView: View {
         // A HUD is a control surface, not ambient content. Keep one stable,
         // dark contrast contract regardless of the app underneath it.
         Capsule().fill(Color.black.opacity(reduceTransparency ? 0.96 : 0.72))
-        Capsule().fill(VeloraBrand.indigo.color.opacity(0.16))
+        Capsule().fill(VeloraBrand.skyDeep.color.opacity(0.16))
         Capsule().fill(Color.white.opacity(hovering ? 0.07 : 0))
     }
 
@@ -194,9 +194,9 @@ struct HUDView: View {
             Capsule().strokeBorder(
                 AngularGradient(
                     gradient: Gradient(colors: [
-                        VeloraBrand.indigo.color,
-                        VeloraBrand.violet.color,
-                        VeloraBrand.indigo.color,
+                        VeloraBrand.skyDeep.color,
+                        VeloraBrand.sky.color,
+                        VeloraBrand.skyDeep.color,
                     ]),
                     center: .center,
                     angle: angle),
@@ -623,7 +623,7 @@ struct HUDView: View {
         return HStack(spacing: VeloraSpacing.s) {
             Image(systemName: "character.book.closed.fill")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(VeloraBrand.violet.color)
+                .foregroundStyle(VeloraBrand.sky.color)
                 .symbolEffect(.bounce, value: isLearned)
             Text(pair.wrong)
                 .font(.system(size: 12, weight: .medium))
@@ -662,7 +662,7 @@ struct HUDView: View {
         return HStack(spacing: VeloraSpacing.s) {
             Image(systemName: parts.symbol.isEmpty ? "checkmark.circle.fill" : parts.symbol)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(VeloraBrand.violet.color)
+                .foregroundStyle(VeloraBrand.sky.color)
                 .symbolEffect(.bounce, value: isNotice)
             Text(parts.message)
                 .font(.system(size: 12, weight: .medium))

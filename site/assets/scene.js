@@ -168,9 +168,9 @@ function mount(host) {
     uPointer: { value: 0 },
     uPixelRatio: { value: 1 },
     uPointSize: { value: spec.pointSize },
-    uColorA: { value: new THREE.Color("#7c6bd6") },
-    uColorB: { value: new THREE.Color("#d67c5c") },
-    uColorDim: { value: new THREE.Color("#8a86a8") },
+    uColorA: { value: new THREE.Color("#4dacf6") },
+    uColorB: { value: new THREE.Color("#0f74c5") },
+    uColorDim: { value: new THREE.Color("#8f8a86") },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -185,9 +185,9 @@ function mount(host) {
   scene.add(points);
 
   const syncColors = () => {
-    uniforms.uColorA.value.copy(cssColor("--accent", "#7c6bd6"));
-    uniforms.uColorB.value.copy(cssColor("--accent-2", "#d67c5c"));
-    uniforms.uColorDim.value.copy(cssColor("--ink-faint", "#8a86a8"));
+    uniforms.uColorA.value.copy(cssColor("--accent", "#4dacf6"));
+    uniforms.uColorB.value.copy(cssColor("--accent-press", "#0f74c5"));
+    uniforms.uColorDim.value.copy(cssColor("--ink-faint", "#8f8a86"));
   };
   syncColors();
 

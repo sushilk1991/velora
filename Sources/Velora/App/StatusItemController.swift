@@ -11,18 +11,17 @@ protocol StatusItemControllerDelegate: AnyObject {
     func statusItemStartMeeting()
     func statusItemStopMeeting()
     func statusItemDiscardMeeting()
-    func statusItemOpenMeetings()
+    /// Opens the main window on Home.
+    func statusItemOpenMain()
     func statusItemOpenSettings()
-    func statusItemOpenHistory()
-    func statusItemOpenSetupAssistant()
     func statusItemCheckPermissions()
     func statusItemCheckForUpdates()
 }
 
 /// The menubar presence (design brief §3): template SF Symbol that swaps per
-/// state, and a minimal menu — Start Dictation, last three transcriptions
-/// (click copies), Settings…, Setup Assistant…, Check Permissions… (degraded
-/// only), Quit.
+/// state, and a minimal menu — Start Dictation, Start Meeting Notes…, Open
+/// Velora, Reformat Last as, Transcribe Audio File…, Show Pill, Settings…,
+/// Check for Updates…, Check Permissions… (degraded only), Quit.
 final class StatusItemController: NSObject, NSMenuDelegate {
     enum IconState {
         case idle, recording, transcribing, error
@@ -155,6 +154,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     // MARK: - Menu (rebuilt on every open)
 
     func menuNeedsUpdate(_ menu: NSMenu) {
+        buildMenu(into: menu)
+        refreshPermissionCache()
+    }
+
+    /// Everything `menuNeedsUpdate` adds, minus the TCC refresh — the
+    /// selftest calls this directly to pin the item list without probing
+    /// permissions from a headless shell.
+    func buildMenu(into menu: NSMenu) {
         menu.removeAllItems()
 
         if let meeting = meetingRecordingTitle {
@@ -203,31 +210,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             setupMenuItem = item
         }
 
-        // Recent transcripts live on the HUD pill's right-click menu — the
-        // menubar stays a compact control surface (design round 2026-07).
-        // When the pill is disabled, the menubar remains their only quick
-        // access, so they come back here.
-        if !AppConfig.shared.hudAlwaysVisible {
-            let usable = history.recent(limit: 10)
-                .filter { !$0.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .prefix(3)
-            if !usable.isEmpty {
-                let header = NSMenuItem(
-                    title: "Recent Transcriptions", action: nil, keyEquivalent: "")
-                header.isEnabled = false
-                menu.addItem(header)
-                for record in usable {
-                    let item = NSMenuItem(
-                        title: Self.truncate(record.final, to: 40),
-                        action: #selector(copyRecent(_:)), keyEquivalent: "")
-                    item.target = self
-                    item.representedObject = record.final
-                    item.toolTip = "Click to copy"
-                    item.indentationLevel = 1
-                    menu.addItem(item)
-                }
-            }
-        }
+        menu.addItem(.separator())
+
+        // The one window. ⌘O is display-only: the menubar menu has no key
+        // equivalent routing of its own, the main menu carries the real one.
+        let open = NSMenuItem(title: "Open Velora", action: #selector(openMain), keyEquivalent: "o")
+        open.target = self
+        menu.addItem(open)
 
         let recents = history.recent(limit: 1)
 
@@ -289,32 +278,19 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        addUpdateItems(to: menu)
-
-        let historyItem = NSMenuItem(
-            title: "History…", action: #selector(openHistory), keyEquivalent: "")
-        historyItem.target = self
-        historyItem.image = NSImage(
-            systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)
-        menu.addItem(historyItem)
-
-        let meetingsItem = NSMenuItem(
-            title: "Meetings…", action: #selector(openMeetings), keyEquivalent: "")
-        meetingsItem.target = self
-        meetingsItem.image = NSImage(
-            systemSymbolName: "person.2.wave.2.fill", accessibilityDescription: nil)
-        menu.addItem(meetingsItem)
+        // "Show Pill" mirrors General › Pill and the pill's own "Close Pill";
+        // the prefs notification is what actually shows/hides the panel.
+        let showPill = NSMenuItem(
+            title: "Show Pill", action: #selector(toggleHUDVisible), keyEquivalent: "")
+        showPill.target = self
+        showPill.state = AppConfig.shared.hudVisible ? .on : .off
+        menu.addItem(showPill)
 
         let settings = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settings.target = self
         menu.addItem(settings)
 
-        let assistant = NSMenuItem(
-            title: "Setup Assistant…", action: #selector(openSetupAssistant), keyEquivalent: "")
-        assistant.target = self
-        assistant.image = NSImage(
-            systemSymbolName: "sparkles", accessibilityDescription: nil)
-        menu.addItem(assistant)
+        addUpdateItems(to: menu)
 
         let checkForUpdates = NSMenuItem(
             title: "Check for Updates…",
@@ -337,8 +313,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit Velora", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-
-        refreshPermissionCache()
     }
 
     /// Preserve the old "notice a permission revoked while Velora is
@@ -460,22 +434,18 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func discardMeeting() { delegate?.statusItemDiscardMeeting() }
 
-    @objc private func copyRecent(_ sender: NSMenuItem) {
-        guard let text = sender.representedObject as? String else { return }
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-    }
-
     @objc private func openSettings() {
         delegate?.statusItemOpenSettings()
     }
 
-    @objc private func openHistory() {
-        delegate?.statusItemOpenHistory()
+    @objc private func openMain() {
+        delegate?.statusItemOpenMain()
     }
 
-    @objc private func openMeetings() { delegate?.statusItemOpenMeetings() }
+    @objc private func toggleHUDVisible() {
+        AppConfig.shared.hudVisible.toggle()
+        NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
+    }
 
     @objc private func openUpdatePage(_ sender: NSMenuItem) {
         guard let page = sender.representedObject as? URL else { return }
@@ -489,10 +459,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func installStagedUpdate() {
         UpdateInstaller.shared.installAndRelaunch()
-    }
-
-    @objc private func openSetupAssistant() {
-        delegate?.statusItemOpenSetupAssistant()
     }
 
     @objc private func checkForUpdates() {

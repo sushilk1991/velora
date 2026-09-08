@@ -99,7 +99,7 @@ final class LocalAgentAccessRevocationObserver {
 
 /// Composition root: builds every module, wires delegates, and owns app
 /// lifecycle (engine supervision, onboarding on first launch, teardown).
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let terminationWatchdogBase: TimeInterval = 8
     private static let meetingWatchdogExtension: TimeInterval = 52
 
@@ -120,7 +120,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var transcriber: FileTranscriber!
     private var controlServer: LocalControlServer?
     private var statusController: StatusItemController!
+    /// One SettingsModel behind both windows: Home's toggles and the
+    /// Settings forms must agree without a notification round-trip.
+    private var settingsModel: SettingsModel?
+    private var mainController: MainWindowController?
     private var settingsController: SettingsWindowController?
+    private var aboutController: AboutWindowController?
     private var meetingNotesController: MeetingNotesWindowController?
     private var onboardingController: OnboardingWindowController?
     private var hotkeyObserver: NSObjectProtocol?
@@ -573,8 +578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             recents: { [weak self] in self?.history.recent(limit: 10) ?? [] },
             toggleDictation: { [weak self] in self?.dictation.toggleFromMenu() },
             stopMeeting: { [weak self] in self?.meetingCoordinator.stopRecording() },
-            openHistory: { [weak self] in self?.showSettings(selecting: .history) },
-            openSettings: { [weak self] in self?.showSettings() })
+            openMain: { [weak self] in self?.showMain(selecting: .home) })
         hudPrefsObserver = NotificationCenter.default.addObserver(
             forName: .veloraHUDPrefsChanged, object: nil, queue: .main
         ) { [weak self] _ in self?.hud.applyPreferences() }
@@ -860,18 +864,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         onboardingController?.show(startingAt: step)
     }
 
+    private func sharedSettingsModel() -> SettingsModel {
+        if let settingsModel { return settingsModel }
+        let model = SettingsModel(
+            supervisor: supervisor, dictionary: dictionary, dictionarySync: dictionarySync)
+        settingsModel = model
+        return model
+    }
+
+    /// The one "Velora" window (Home, History, Stats, Meetings, Dictionary,
+    /// Modes). Deep links from the menubar/HUD pick the pane.
+    private func showMain(selecting pane: MainPane? = nil) {
+        if mainController == nil {
+            mainController = MainWindowController(
+                model: sharedSettingsModel(),
+                supervisor: supervisor,
+                history: history,
+                meetings: meetings,
+                meetingCoordinator: meetingCoordinator,
+                meetingProcessor: meetingProcessor,
+                actions: MainWindowActions(
+                    toggleDictation: { [weak self] in self?.dictation.toggleFromMenu() },
+                    startMeeting: { [weak self] in self?.meetingCoordinator.startManual() },
+                    openSettings: { [weak self] in self?.showSettings() },
+                    openMeetingNotes: { [weak self] id in self?.showMeetingNotes(meetingID: id) }))
+        }
+        mainController?.show(selecting: pane)
+    }
+
     private func showSettings(selecting tab: SettingsTab? = nil) {
         if settingsController == nil {
             settingsController = SettingsWindowController(
-                supervisor: supervisor,
-                history: history,
-                dictionary: dictionary,
-                dictionarySync: dictionarySync,
-                meetings: meetings,
+                model: sharedSettingsModel(),
                 meetingCoordinator: meetingCoordinator,
-                meetingProcessor: meetingProcessor)
+                openSetupAssistant: { [weak self] in
+                    guard let self else { return }
+                    self.showOnboarding(startingAt: self.firstMissingPermissionStep)
+                })
         }
         settingsController?.show(selecting: tab)
+    }
+
+    private func showAbout() {
+        if aboutController == nil {
+            aboutController = AboutWindowController(model: sharedSettingsModel())
+        }
+        aboutController?.show()
     }
 
     private func showMeetingNotes(meetingID: String) {
@@ -889,11 +927,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     @objc func menuOpenAbout() {
-        showSettings(selecting: .about)
+        showAbout()
     }
 
-    @objc func menuToggleSidebar() {
-        settingsController?.toggleSidebar()
+    @objc func menuOpenMain() {
+        showMain(selecting: .home)
+    }
+
+    @objc func menuOpenSetupAssistant() {
+        showOnboarding(startingAt: firstMissingPermissionStep)
     }
 
     @objc func menuOpenWebsite() {
@@ -918,15 +960,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     private func open(_ url: URL?) {
         if let url { NSWorkspace.shared.open(url) }
-    }
-
-    /// Retitles Hide/Show Sidebar to the state it would produce and disables
-    /// it while no Settings window is open (the only window with a sidebar).
-    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        guard menuItem.action == #selector(menuToggleSidebar) else { return true }
-        menuItem.title = AppConfig.shared.settingsSidebarCollapsed
-            ? "Show Sidebar" : "Hide Sidebar"
-        return settingsController?.window?.isVisible ?? false
     }
 
     /// The onboarding step to reopen at: the first missing permission, or
@@ -1025,14 +1058,8 @@ extension AppDelegate: StatusItemControllerDelegate {
         showSettings()
     }
 
-    func statusItemOpenHistory() {
-        showSettings(selecting: .history)
-    }
-
-    func statusItemOpenMeetings() { showSettings(selecting: .meetings) }
-
-    func statusItemOpenSetupAssistant() {
-        showOnboarding(startingAt: firstMissingPermissionStep)
+    func statusItemOpenMain() {
+        showMain(selecting: .home)
     }
 
     func statusItemCheckForUpdates() {

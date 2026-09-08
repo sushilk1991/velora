@@ -17,9 +17,11 @@ value that is not here, add the token first, then use it.
 
 ## 1. The brand mark
 
-A serif italic **V** with a coral full stop, on a deep indigo→violet plate.
-The V is the wordmark's own letter (Instrument Serif); the full stop is the
-point of the product: the sentence is finished, and it was finished here.
+A serif italic **V** with an apricot full stop, on a sky plate (deep sky at
+the top-left running to sky at the bottom-right, with a soft lighter-sky
+bloom low-left). The V is the wordmark's own letter (Instrument Serif); the
+full stop is the point of the product: the sentence is finished, and it was
+finished here.
 
 - Source of truth: `scripts/make-icon.py`. It regenerates every asset from
   one vector description. Never hand-edit a PNG; edit the script and re-run:
@@ -42,33 +44,50 @@ point of the product: the sentence is finished, and it was finished here.
 
 ### Palette
 
+Brand v2 (2026-09): warm ink and paper surfaces, one sky accent, apricot
+reserved for the headline's full stop and "learned" moments.
+
 | Token | Hex | Where |
 |---|---|---|
-| Plate top | `#1b1745` | icon gradient start |
-| Plate mid | `#3a1f96` | icon gradient middle |
-| Plate bottom | `#6d2bd9` | icon gradient end |
-| UI violet | `#8c45f5` `VeloraBrand.violet` | HUD accent, links, onboarding; lifted from the plate so it passes contrast on dark cards |
-| UI indigo | `#42389e` `VeloraBrand.indigo` | HUD accent gradient start |
-| Coral | `#ff8f66` | the full stop, `VeloraBrand.coral`, site `--accent-2` |
-| Bloom edge | `#d94fa0` | icon lower-left bloom only |
+| Plate origin | `#0b5ea0` `VeloraBrand.skyPlate` | icon gradient start (top-left) |
+| Sky-deep | `#0f74c5` `VeloraBrand.skyDeep` | icon gradient middle; the accent on light surfaces |
+| Sky | `#4dacf6` `VeloraBrand.sky` | icon gradient end; the accent on dark surfaces |
+| Sky link | `#71bfff` `VeloraBrand.skyLink` | links on dark surfaces |
+| Apricot | `#e78a45` `VeloraBrand.apricot` | the full stop; warm accent on dark, site `--accent-2` |
+| Apricot-deep | `#c06325` `VeloraBrand.apricotDeep` | warm accent on light |
+| Ink window / card / raised | `#161311` / `#201d1b` / `#2c2927` | `VeloraPanel.canvas` / `.card` / `.raised` in dark |
+| Paper window / card / sunk | `#faf8f5` / `#ffffff` / `#f3f1ee` | `VeloraPanel.canvas` / `.card` / `.raised` in light |
 
-On the site the same hues live as oklch tokens: `--accent` (violet, hue
-292) and `--accent-2` (coral, hue 30–40). The app takes system semantic
-colours for everything that is not brand: `VeloraStatus.success`, `.warning`,
-`.danger` map to the system green/orange/red and are the only status colours.
+Dynamic pairs pick the right side per appearance: `VeloraBrand.accent`
+(sky / sky-deep), `VeloraBrand.warm` (apricot / apricot-deep),
+`VeloraBrand.link`. Glass sidebar fill is white 7 % on dark / 55 % on light
+(`VeloraPanel.sidebar`, border `.sidebarLine`, top highlight
+`.sidebarHighlight`); the selected row is white 14 % / ink 9 %
+(`.sidebarSelection`); card borders and dividers use `.hairline` (white 10 %
+/ ink 10 %). A primary button is sky with ink text on dark, sky-deep with
+white text on light (`VeloraPanel.onAccent`). The HUD keeps its warm-dark
+material fill; only its accent hue changed. Apricot is never a status
+colour. The app takes system semantic colours for everything that is not
+brand: `VeloraStatus.success`, `.warning`, `.danger` map to the system
+green/orange/red and are the only status colours.
 
 ## 2. Type
 
-- **Display:** Instrument Serif, regular and italic, self-hosted in
+- **Display (site):** Instrument Serif, regular and italic, self-hosted in
   `site/assets/*.woff2`. Used for headlines, the hero demo text and the
   wordmark. The italic is the "voice" — it carries the second, emotional
   line of a headline (`It reads like you wrote it.`).
+- **Display (app):** the system serif (New York) via `design: .serif`,
+  regular weight, 30 pt (34 pt hero), through `SerifHeadline`. It draws the
+  closing full stop in `VeloraBrand.warm`; pass the sentence without it. The
+  app never bundles a webfont.
 - **Body:** the system sans everywhere (SF on Apple platforms). Never load a
   second webfont.
 - **Mono:** system monospace for shortcuts, timers, ledgers, and anything
   measured (`0 B audio`).
-- App text sizes: 13 pt semibold for card titles, 12 pt for rows, `.caption`
-  for helper text, 22 pt rounded bold with monospaced digits for stat values.
+- App text sizes: 22 pt bold for pane titles, 13 pt semibold for card
+  titles, 13 pt for rows, 11 pt secondary for sub-captions, `.caption` for
+  helper text, 26 pt bold with monospaced digits for stat values.
   Do not introduce a new size without a token in `SettingsDesign.swift`.
 
 ## 3. Spacing, radius, elevation
@@ -78,9 +97,13 @@ App (`HUDStyle.swift`, `SettingsDesign.swift`):
 | Token | Value |
 |---|---|
 | `VeloraSpacing.xs / s / m / l / xl` | 4 / 8 / 12 / 16 / 20 pt |
-| `VeloraRadius.control / tile / card` | 6 / 8 / 12 pt |
+| `VeloraRadius.control / tile / row / card` | 6 / 8 / 9 / 12 pt |
+| `VeloraRadius.sidebar / capsule / window` | 14 / 14 / 18 pt (window is cosmetic; AppKit owns the corners) |
 | `HUDGeometry.height` | 56 pt pill |
 | Card | `VeloraPanel.card` fill, hairline `separatorColor` at 0.8, shadow black 5 % radius 2 y 1 |
+| Group card | `VeloraPanel.card` fill, `VeloraPanel.hairline` border, no shadow |
+| Sidebar | inset 8 pt, glass over `VeloraPanel.sidebar`, rows 32 pt |
+| Window glow | `WindowGlow`: sky radial top-left (16 % dark / 18 % light), apricot bottom-right (10 % / 14 %) |
 
 Site (`styles.css :root`): `--r-xs … --r-xl` (0.5 → 2.25 rem), shadows
 `--shadow-sm/md/lg/accent`, shell 76 rem, gutter `clamp(1.25rem, 4.5vw, 3rem)`.
@@ -91,7 +114,10 @@ Rules:
   A 12 pt card with 16 pt padding holds 8 pt tiles, not 12 pt ones.
 - Solid backgrounds in the settings window. Materials render blank in the
   snapshot pipeline; `VeloraPanel.canvas` and `.card` are the only grounds.
-- Feature bands on the site are always the deep violet `--feature`, in both
+  `FloatingSidebar` is the one exception: it draws its translucent fill
+  first and adds `glassEffect` on macOS 26 only, so the snapshot still shows
+  the sidebar.
+- Feature bands on the site are always the deep sky `--feature`, in both
   themes. They do not flip with the theme.
 
 ## 4. Motion
@@ -177,10 +203,19 @@ The pill by the cursor is the product's face. Rules:
 
 ## 7. Settings
 
-- Sidebar of `IconTile`s; every pane is a stack of `SettingsCard`s on
-  `VeloraPanel.canvas`. A feature card starts with `CardHeader` (symbol,
-  colour, title, subtitle, master toggle) and separates groups with
-  `CardDivider`.
+- The sidebar is a `FloatingSidebar` of monochrome `SidebarRow`s
+  (Finder/Notes style: symbol in `VeloraBrand.accent` when selected,
+  `.secondary` otherwise; no coloured tiles). `WindowGlow` sits behind the
+  whole window.
+- Every pane opens with a `PaneHeader` (22 pt bold title, trailing
+  controls) and stacks `GroupCard`s on `VeloraPanel.canvas`: an uppercase
+  section header, `GroupRow`s (13 pt label, 11 pt sub-caption, trailing
+  control) separated by `GroupDivider`, an optional footer. `SettingsCard`
+  with `CardHeader` (symbol, colour, title, subtitle, master toggle) and
+  `CardDivider` remains for panes not yet moved over.
+- Buttons outside Forms use `.buttonStyle(.capsule)` (glass, 28 pt) or
+  `.primaryCapsule` (accent fill). One primary per pane.
+- A pane's one sentence of welcome or celebration is a `SerifHeadline`.
 - One SF Symbol per concept, fixed (sidebar symbols in `SettingsTab.symbol`,
   feature cards in the Shortcuts pane, menu items in
   `StatusItemController.swift`):
@@ -205,8 +240,9 @@ The pill by the cursor is the product's face. Rules:
 
   If a concept already has a symbol, reuse it; a new symbol needs a row here.
 - Shortcuts render through `KeycapsLabel`, never as plain text.
-- Metrics use `StatTile` (hero) or `CardMetricRow` (inline). No ad hoc
-  `HStack(Text, Spacer, Text)`.
+- Metrics use `StatTile` (hero: 12 pt label over a 26 pt bold tabular value,
+  `emphasis: .accent` for the one number that matters) or `CardMetricRow`
+  (inline). No ad hoc `HStack(Text, Spacer, Text)`.
 - A card that can be turned off dims to 50 % and disables its rows; it does
   not hide them.
 

@@ -1,8 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// Headless UI snapshots: `Velora --snapshot <dir>` renders the HUD states and
-/// every Settings pane to PNGs without needing Screen Recording permission —
+/// Headless UI snapshots: `Velora --snapshot <dir>` renders the HUD states,
+/// every main-window pane and every Settings tab to PNGs without needing Screen Recording permission —
 /// the CLI-era answer to "open the screenshot before calling it done".
 /// Windows are created but never ordered onto the screen; rendering goes
 /// through `NSView.cacheDisplay`, so nothing flashes in front of the user.
@@ -24,7 +24,7 @@ enum SnapshotRenderer {
             renderHUDStates(into: dir)
             renderSidebarRows(into: dir)
             renderUpdateWindow(into: dir)
-            renderSettingsPanes(into: dir)
+            renderShellWindows(into: dir)
             renderMeetingNotes(into: dir) { exit(0) }
         }
         app.run()
@@ -240,26 +240,25 @@ enum SnapshotRenderer {
     private static func renderSidebarRows(into dir: URL) {
         let selection = SettingsWindowSelection()
         selection.tab = .dictation  // mid-list, so one selected row is visible
-        let rows = VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-            ForEach(Array(SettingsTab.sidebarGroups.enumerated()), id: \.offset) { _, group in
-                VStack(alignment: .leading, spacing: 1) {
-                    ForEach(group) { tab in
-                        SettingsSidebarRow(tab: tab, selection: selection)
-                    }
-                }
+        let rows = VStack(alignment: .leading, spacing: 2) {
+            ForEach(SettingsTab.allCases) { tab in
+                SettingsSidebarRow(tab: tab, selection: selection)
             }
         }
         .padding(VeloraSpacing.m)
         .frame(width: 215)
         .background(VeloraPanel.canvas)
         let view = NSHostingView(rootView: rows)
-        snapshot(view, size: NSSize(width: 215, height: 480), name: "settings-sidebar-rows", dir: dir)
+        snapshot(view, size: NSSize(width: 215, height: 240), name: "settings-sidebar-rows", dir: dir)
     }
 
-    // MARK: - Settings
+    // MARK: - Main + Settings windows
 
+    /// Renders the main window once per `MainPane` (`main-<pane>.png`) and
+    /// the Settings window once per `SettingsTab` (`settings-<tab>.png`),
+    /// both in production-sized windows with the shell's own chrome.
     @MainActor
-    private static func renderSettingsPanes(into dir: URL) {
+    private static func renderShellWindows(into dir: URL) {
         let history = HistoryStore()
         let dictionary = DictionaryRepository()
         let sync = ICloudDictionarySync(repository: dictionary)
@@ -273,44 +272,36 @@ enum SnapshotRenderer {
             supervisor: nil, dictionary: dictionary, dictionarySync: sync)
         model.updateCheckStatus =
             "Velora \(VeloraAppInfo.shortVersion) is up to date."
-        NSLog("Velora: snapshot prefs — config.alwaysVisible=%d model.alwaysVisible=%d position=%@",
+        NSLog("Velora: snapshot prefs — config.alwaysVisible=%d model.alwaysVisible=%d visible=%d",
               AppConfig.shared.hudAlwaysVisible ? 1 : 0,
               model.hudAlwaysVisible ? 1 : 0,
-              model.hudPosition.rawValue)
-        let selection = SettingsWindowSelection()
-        let root = SettingsRootView(
-            model: model, selection: selection, supervisor: nil,
+              model.hudVisible ? 1 : 0)
+
+        // Home's tiles load on appear; the nested runloop below never drains
+        // the background reload, so let the first load run inline here.
+        IntelligenceViewModel.loadsFirstReloadInline = true
+        let mainSelection = MainWindowSelection()
+        let mainRoot = MainRootView(
+            model: model, selection: mainSelection, supervisor: nil,
             history: history, meetings: meetings,
-            meetingCoordinator: coordinator, meetingProcessor: processor)
+            meetingCoordinator: coordinator, meetingProcessor: processor,
+            actions: MainWindowActions(
+                toggleDictation: {}, startMeeting: {}, openSettings: {},
+                openMeetingNotes: { _ in }))
+        let mainWindow = shellWindow(root: mainRoot, size: NSSize(width: 1180, height: 760))
+        for pane in MainPane.allCases {
+            mainSelection.pane = pane
+            writeShell(mainWindow, name: "main-\(pane.rawValue)", into: dir)
+        }
 
-        let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-        // Mirror the production shell (SettingsWindowController) — a default
-        // window would hide layout regressions the custom chrome can introduce
-        // (review finding; `.fullSizeContentView` died exactly here). One
-        // deliberate exception: `titlebarAppearsTransparent` stays OFF —
-        // it switches the window to backdrop-material compositing, which
-        // offscreen cacheDisplay renders as an all-white detail column
-        // (bisected). The flag only affects the titlebar strip, which these
-        // contentView snapshots exclude anyway.
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.titleVisibility = .visible
-        window.backgroundColor = VeloraPanel.canvasColor
-        window.setContentSize(NSSize(width: 820, height: 620))
-
-        // Deterministic panes regardless of the user's persisted sidebar
-        // state; the flag round-trips through AppConfig (selection persists
-        // it), so the user's own value is restored at the end.
-        let userCollapsed = selection.sidebarCollapsed
-        selection.sidebarCollapsed = false
-
+        let settingsSelection = SettingsWindowSelection()
+        let settingsRoot = SettingsRootView(
+            model: model, selection: settingsSelection,
+            meetingCoordinator: coordinator, openSetupAssistant: {})
+        let settingsWindow = shellWindow(root: settingsRoot, size: NSSize(width: 780, height: 560))
         for tab in SettingsTab.allCases {
-            selection.tab = tab
-            // Give SwiftUI a few runloop turns to swap the detail pane and run
-            // its async onAppear loads before drawing.
-            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.8))
-            guard let content = window.contentView else { continue }
-            content.layoutSubtreeIfNeeded()
-            write(view: content, to: dir.appendingPathComponent("settings-\(tab.rawValue).png"))
+            settingsSelection.tab = tab
+            writeShell(settingsWindow, name: "settings-\(tab.rawValue)", into: dir)
         }
 
         // Full-height card panes, seeded so the charts render with real
@@ -322,16 +313,33 @@ enum SnapshotRenderer {
         snapshot(
             shortcutsView, size: NSSize(width: 660, height: 1050),
             name: "settings-shortcuts-tall", dir: dir)
+    }
 
-        // The collapsed icon rail, once.
-        selection.tab = .general
-        selection.sidebarCollapsed = true
+    /// A window mirroring the production shell (`applyShellChrome`) — a
+    /// default window would hide layout regressions the custom chrome can
+    /// introduce. `.fullSizeContentView` is on so the traffic-light clearance
+    /// at the top of the sidebar is exercised. One deliberate exception:
+    /// `titlebarAppearsTransparent` stays OFF — it switches the window to
+    /// backdrop-material compositing, which offscreen cacheDisplay renders as
+    /// an all-white detail column (bisected).
+    @MainActor
+    private static func shellWindow<Root: View>(root: Root, size: NSSize) -> NSWindow {
+        let window = NSWindow(contentViewController: NSHostingController(rootView: root))
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
+        window.titleVisibility = .hidden
+        window.backgroundColor = VeloraPanel.canvasColor
+        window.setContentSize(size)
+        return window
+    }
+
+    /// Gives SwiftUI a few runloop turns to swap the detail pane and run its
+    /// async onAppear loads before drawing the content view.
+    @MainActor
+    private static func writeShell(_ window: NSWindow, name: String, into dir: URL) {
         RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.8))
-        if let content = window.contentView {
-            content.layoutSubtreeIfNeeded()
-            write(view: content, to: dir.appendingPathComponent("settings-general-collapsed.png"))
-        }
-        selection.sidebarCollapsed = userCollapsed
+        guard let content = window.contentView else { return }
+        content.layoutSubtreeIfNeeded()
+        write(view: content, to: dir.appendingPathComponent("\(name).png"))
     }
 
     /// Stats dashboard over a deterministic 12-week fixture history — proves
@@ -389,7 +397,7 @@ enum SnapshotRenderer {
         // every row) instead of trusting `.onAppear`'s async reload to finish
         // inside the snapshot's runloop budget.
         let vm = IntelligenceViewModel(history: store)
-        vm.insights = store.insights()
+        vm.reloadNow()
 
         let view = NSHostingView(
             rootView: IntelligenceSettingsView(model: model, viewModel: vm))

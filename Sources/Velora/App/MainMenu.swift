@@ -54,6 +54,9 @@ enum MainMenu {
         main.addItem(submenuItem(appMenu))
 
         let fileMenu = NSMenu(title: "File")
+        // ⌘O — the real key equivalent behind the menubar's display-only one.
+        fileMenu.addItem(item(
+            "Open Velora", #selector(AppDelegate.menuOpenMain), target: target, key: "o"))
         fileMenu.addItem(item("Close Window", #selector(NSWindow.performClose(_:)), key: "w"))
         main.addItem(submenuItem(fileMenu))
 
@@ -70,14 +73,6 @@ enum MainMenu {
         editMenu.addItem(item("Select All", #selector(NSText.selectAll(_:)), key: "a"))
         main.addItem(submenuItem(editMenu))
 
-        // View — the sidebar toggle's menu counterpart (HIG sidebar rule);
-        // AppDelegate retitles it Hide/Show via menu validation.
-        let viewMenu = NSMenu(title: "View")
-        viewMenu.addItem(item(
-            "Hide Sidebar", #selector(AppDelegate.menuToggleSidebar), target: target,
-            key: "s", modifiers: [.command, .control]))
-        main.addItem(submenuItem(viewMenu))
-
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m"))
         windowMenu.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
@@ -92,6 +87,11 @@ enum MainMenu {
         helpMenu.addItem(item("Report an Issue…", #selector(AppDelegate.menuReportIssue), target: target))
         helpMenu.addItem(.separator())
         helpMenu.addItem(item("Email Support…", #selector(AppDelegate.menuEmailSupport), target: target))
+        helpMenu.addItem(.separator())
+        // Setup lives here and in Settings › Advanced › Tools now that the
+        // menubar menu no longer carries it.
+        helpMenu.addItem(item(
+            "Setup Assistant…", #selector(AppDelegate.menuOpenSetupAssistant), target: target))
         main.addItem(submenuItem(helpMenu))
 
         NSApp.mainMenu = main

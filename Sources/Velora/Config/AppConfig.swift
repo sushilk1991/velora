@@ -205,6 +205,7 @@ final class AppConfig {
         static let hudCustomOriginY = "velora.hudCustomOriginY"
         static let hudCustomEdge = "velora.hudCustomEdge"
         static let hudAlwaysVisible = "velora.hudAlwaysVisible"
+        static let hudVisible = "velora.hudVisible"
         static let settingsSidebarCollapsed = "velora.settingsSidebarCollapsed"
         static let appearance = "velora.appearance"
         static let language = "velora.language"
@@ -263,6 +264,7 @@ final class AppConfig {
                 // never fight another dictation HUD for the same pixels.
                 Key.hudPosition: HUDPosition.bottomRight.rawValue,
                 Key.hudAlwaysVisible: true,
+                Key.hudVisible: true,
                 Key.appearance: "system",
                 Key.language: "auto",
                 Key.autoPunctuation: true,
@@ -416,6 +418,7 @@ final class AppConfig {
         document.settings.hud.customEdge = HUDEdge(
             rawValue: defaults.string(forKey: Key.hudCustomEdge) ?? "") ?? .center
         document.settings.hud.alwaysVisible = defaults.bool(forKey: Key.hudAlwaysVisible)
+        document.settings.hud.visible = defaults.bool(forKey: Key.hudVisible)
 
         let language = defaults.string(forKey: Key.language) ?? "auto"
         document.settings.dictation.language = !language.isEmpty
@@ -874,6 +877,14 @@ final class AppConfig {
     var hudAlwaysVisible: Bool {
         get { readSetting(\.hud.alwaysVisible) }
         set { updateSettings { $0.hud.alwaysVisible = newValue } }
+    }
+
+    /// "Show pill": false after "Close Pill" (HUD context menu) or the
+    /// General › Pill toggle. While false no HUD state orders the panel on
+    /// screen; dictation itself keeps working.
+    var hudVisible: Bool {
+        get { readSetting(\.hud.visible) }
+        set { updateSettings { $0.hud.visible = newValue } }
     }
 
     /// Settings sidebar collapsed to the icon-only rail (default: expanded).

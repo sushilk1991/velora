@@ -499,7 +499,7 @@ private struct DictionarySettingsRow: View {
 
     private var sourceColor: Color {
         switch row.source {
-        case .added: return VeloraBrand.violet.color
+        case .added: return VeloraBrand.sky.color
         case .learned: return .blue
         case .automatic: return .secondary
         }

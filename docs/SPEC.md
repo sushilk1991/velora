@@ -53,10 +53,10 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
   fallback. A clipboard write made by the user during delivery always wins.
 
 ### History & Voice Intelligence
-- Local SQLite history: timestamp, app, raw/final transcript, duration, mode, STT/cleanup latency, cleanup outcome, archived audio reference, and optional edit-quality observation. Menubar shows last 3; the History tab supports search, copy, paste-again, playback, and reprocessing.
+- Local SQLite history: timestamp, app, raw/final transcript, duration, mode, STT/cleanup latency, cleanup outcome, archived audio reference, and optional edit-quality observation. The pill's right-click menu shows the last 3; the History pane of the main window supports search, copy, paste-again, playback, and reprocessing.
 - Intelligence windows: today / 7 days / 30 days / all time, with words, dictations, speaking time, estimated typing time saved, current/longest streak, 30-day activity, app and mode breakdowns, STT/cleanup latency, and cleanup rate.
 - Zero-edit rate includes only sessions the Accessibility observer could judge. The UI must show observation coverage separately; unknown legacy/unobservable rows are never counted as successful.
-- Estimated time saved uses a user-configurable typing speed (default 40 WPM) and measured speaking duration, frozen when recording stops.
+- Estimated time saved uses a typing-speed assumption (default 40 WPM; `typingWPM` in `settings.json` is honoured but has no UI since the 0.23 redesign) and measured speaking duration, frozen when recording stops.
 - Share cards are aggregate-only by construction: fixed labels, selected period, and numeric totals. Transcript, app, mode, contact, calendar, and path strings have no renderer input.
 
 ### Private Meeting Memory
@@ -75,8 +75,8 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 - MCP is a stdio adapter over the same broker capabilities and policy, not a privileged second API.
 
 ### Settings & onboarding (world-class bar, per design brief)
-- Settings: General / Dictation / Dictionary / Model / Modes / History / Intelligence / Meetings / Shortcuts / About tabs, grouped forms, 580pt content width.
-- Persist typed portable app preferences in an owner-only, versioned `~/.velora/settings.json`. General provides export/import with whole-file validation, overwrite confirmation, atomic apply/rollback, and live runtime refresh. Keep the hardware-selected cleanup model and machine/security state outside that document; never import permissions, device identifiers, onboarding state, Calendar/local-agent grants, history, recordings, dictionary entries, or custom modes as settings.
+- One main window (Home / History / Stats / Meetings / Dictionary / Modes panes behind a floating glass sidebar) plus a ⌘, Settings window with General / Dictation / Shortcuts / Models / Advanced tabs as grouped forms. Closing the window keeps the pill and the menubar item; "Show Pill" (menubar) and "Close Pill" (pill menu) toggle the pill.
+- Persist typed portable app preferences in an owner-only, versioned `~/.velora/settings.json`. Settings › Advanced provides export/import with whole-file validation, overwrite confirmation, atomic apply/rollback, and live runtime refresh. Keep the hardware-selected cleanup model and machine/security state outside that document; never import permissions, device identifiers, onboarding state, Calendar/local-agent grants, history, recordings, dictionary entries, or custom modes as settings.
 - Onboarding: 5-step premium flow (welcome → mic permission → accessibility permission with live-polling grant detection → hotkey → try-it playground). Finish gated on one successful dictation.
 - Permissions degrade gracefully: degraded state shows menubar error icon + "Check Permissions…".
 

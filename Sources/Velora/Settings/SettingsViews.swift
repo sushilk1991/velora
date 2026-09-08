@@ -1,10 +1,11 @@
 import SwiftUI
 
-/// Settings sections, shown in a System Settings-style sidebar (the toolbar
-/// tab strip overflowed into a "»" chevron once the app grew past eight tabs).
-/// Grouped forms, one accent color, sidebar icons in the colored-tile idiom.
+/// The ⌘, Settings window's rail, System Settings-style: five coloured-tile
+/// rows, in this order. Everything that is content rather than preference
+/// (History, Stats, Meetings, Dictionary, Modes) lives in the main window's
+/// `MainPane`; About is its own small window.
 enum SettingsTab: String, CaseIterable, Identifiable {
-    case general, dictation, dictionary, model, modes, history, intelligence, meetings, shortcuts, about
+    case general, dictation, shortcuts, models, advanced
 
     var id: String { rawValue }
 
@@ -12,14 +13,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "General"
         case .dictation: return "Dictation"
-        case .dictionary: return "Dictionary"
-        case .model: return "Models"
-        case .modes: return "Modes"
-        case .history: return "History"
-        case .intelligence: return "Stats"
-        case .meetings: return "Meetings"
         case .shortcuts: return "Shortcuts"
-        case .about: return "About"
+        case .models: return "Models"
+        case .advanced: return "Advanced"
         }
     }
 
@@ -27,14 +23,9 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return "gearshape.fill"
         case .dictation: return "mic.fill"
-        case .dictionary: return "character.book.closed.fill"
-        case .model: return "cpu.fill"
-        case .modes: return "slider.horizontal.3"
-        case .history: return "clock.arrow.circlepath"
-        case .intelligence: return "chart.bar.fill"
-        case .meetings: return "person.2.wave.2.fill"
         case .shortcuts: return "keyboard.fill"
-        case .about: return "info.circle.fill"
+        case .models: return "cpu.fill"
+        case .advanced: return "slider.horizontal.3"
         }
     }
 
@@ -44,99 +35,10 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .general: return .gray
         case .dictation: return .red
-        case .dictionary: return .brown
-        case .model: return .purple
-        case .modes: return .indigo
-        case .history: return .blue
-        case .intelligence: return .green
-        case .meetings: return .teal
-        case .shortcuts: return .orange
-        case .about: return VeloraBrand.violet.color
+        case .shortcuts: return .blue
+        case .models: return .purple
+        case .advanced: return Color(nsColor: .darkGray)
         }
-    }
-
-    /// Sidebar layout: unlabeled groups separated by whitespace, the System
-    /// Settings idiom — setup, dictation behavior, your activity, about.
-    static let sidebarGroups: [[SettingsTab]] = [
-        [.general, .shortcuts],
-        [.dictation, .modes, .dictionary, .model],
-        [.history, .meetings, .intelligence],
-        [.about],
-    ]
-
-    /// What the sidebar search matches besides the pane title: the labels of
-    /// the controls that actually live in the pane, so "volume" finds General
-    /// and "speakers" finds Meetings the way System Settings search would.
-    var searchKeywords: [String] {
-        switch self {
-        case .general:
-            return [
-                "launch at login", "appearance", "theme", "dark", "light",
-                "pill", "hud", "position", "sounds", "volume",
-                "updates", "install", "version", "cli", "agents", "advanced",
-                "export", "import", "transfer", "settings file", "json", "backup",
-            ]
-        case .dictation:
-            return [
-                "microphone", "mic", "input device", "airpods",
-                "language", "punctuation", "smart cleanup", "terminal",
-                "voice commands", "scratch that", "new line", "recordings",
-                "audio", "transliterate", "english letters", "hinglish",
-            ]
-        case .dictionary:
-            return [
-                "vocabulary", "words", "replacements", "learn from edits",
-                "discover", "icloud", "sync", "spelling", "jargon", "names",
-            ]
-        case .model:
-            return [
-                "speech", "whisper", "parakeet", "qwen", "cleanup",
-                "download", "storage", "remove", "stt", "llm", "streaming",
-            ]
-        case .modes:
-            return ["apps", "prompt", "rules", "context", "code", "email", "notes"]
-        case .history:
-            return [
-                "transcripts", "recordings", "replay", "retention",
-                "delete", "search", "insert again", "copy",
-            ]
-        case .intelligence:
-            return ["statistics", "usage", "streak", "daily activity", "words", "charts"]
-        case .meetings:
-            return [
-                "record", "speakers", "diarization", "summary", "action items",
-                "decisions", "calendar", "calls", "transcript",
-            ]
-        case .shortcuts:
-            return [
-                "hotkey", "keyboard", "key combo", "hold to talk", "toggle",
-                "voice edit", "proofread", "action mode", "stream typing",
-                "selection", "escape", "cancel",
-            ]
-        case .about:
-            return [
-                "version", "updates", "check for updates", "website", "github", "star",
-                "support", "email", "license", "issue", "acknowledgments", "credits",
-            ]
-        }
-    }
-
-    /// True when every whitespace-separated token of `query` occurs in the
-    /// pane's title or keywords (case-insensitive). An empty query matches
-    /// everything — the sidebar shows the full list.
-    func matches(query: String) -> Bool {
-        let tokens = query.lowercased().split(whereSeparator: \.isWhitespace)
-        guard !tokens.isEmpty else { return true }
-        let haystack = ([title] + searchKeywords).joined(separator: " ").lowercased()
-        return tokens.allSatisfy { haystack.contains($0) }
-    }
-
-    /// `sidebarGroups` with non-matching panes removed and emptied groups
-    /// dropped, preserving group order — what a filtering sidebar renders.
-    static func filteredGroups(query: String) -> [[SettingsTab]] {
-        sidebarGroups
-            .map { $0.filter { $0.matches(query: query) } }
-            .filter { !$0.isEmpty }
     }
 }
 
@@ -228,152 +130,54 @@ struct SettingsSearchBox: View {
     }
 }
 
+
 // MARK: - General
 
+/// General: appearance, the pill, and the update check — the settings a
+/// first-day user reaches for. Everything operational moved to Advanced.
 struct GeneralSettingsView: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
         Form {
-            Section {
-                Toggle("Launch Velora at login", isOn: $model.launchAtLogin)
+            Section("Appearance") {
                 Picker("Appearance", selection: $model.appearance) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
                     Text("Dark").tag("dark")
                 }
+                .pickerStyle(.segmented)
+                Toggle("Launch Velora at login", isOn: $model.launchAtLogin)
+                Toggle("Play sounds", isOn: $model.soundsEnabled)
             }
             Section {
-                Toggle(isOn: $model.hudAlwaysVisible) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Show the pill when idle")
-                        Text("Click the pill to start dictating. Right-click it for recent transcripts and quick actions. Turn this off to hide the HUD until dictation is active.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Picker("Position", selection: $model.hudPosition) {
-                    ForEach(HUDPosition.presets) { preset in
-                        Text(preset.displayName).tag(preset)
-                    }
-                    if model.hudPosition == .custom {
-                        Text(HUDPosition.custom.displayName).tag(HUDPosition.custom)
-                    }
-                }
+                Toggle("Show pill", isOn: $model.hudVisible)
+                Toggle("Keep pill on screen when idle", isOn: $model.hudAlwaysVisible)
+                    .disabled(!model.hudVisible)
             } header: {
-                Text("Dictation pill")
+                Text("Pill")
             } footer: {
-                SettingsFooter("Drag the pill anywhere on screen to set your own position.")
-            }
-            Section("Sounds") {
-                Toggle("Play sound effects", isOn: $model.soundsEnabled)
-                HStack {
-                    Text("Volume")
-                    Slider(value: $model.soundVolume, in: 0...100)
-                        .disabled(!model.soundsEnabled)
-                    Text("\(Int(model.soundVolume))")
-                        .font(.body.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, alignment: .trailing)
-                }
-            }
-            Section {
-                Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
-                if model.localAgentAccess {
-                    agentIntegrationRow(
-                        title: "Command-line tool",
-                        detail: model.cliInstallPath
-                            ?? "Puts a “velora” command on your PATH.",
-                        buttonTitle: model.cliInstallPath == nil ? "Install" : "Reinstall"
-                    ) { model.installCLITool() }
-                    agentIntegrationRow(
-                        title: "Agent skill",
-                        detail: model.agentSkillInstalled
-                            ? "Installed — Claude Code knows what it can ask Velora."
-                            : "Teaches local agents (Claude Code) where to look and what they can ask.",
-                        buttonTitle: model.agentSkillInstalled ? "Reinstall" : "Install"
-                    ) { model.installAgentSkill() }
-                    if let error = model.agentIntegrationError {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(VeloraStatus.warning)
-                    }
-                }
-            } header: {
-                Text("Advanced")
-            } footer: {
-                SettingsFooter("Lets command-line tools running as your user read dictation history and stats. Everything stays on this Mac — no network server is opened.")
-            }
-            Section {
-                HStack {
-                    Button("Export Settings…") { model.exportSettings() }
-                    Button("Import Settings…") { model.importSettings() }
-                    Spacer()
-                    if let result = model.settingsTransferResult {
-                        if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
-                            Label(result, systemImage: "exclamationmark.triangle.fill")
-                                .font(.caption)
-                                .foregroundStyle(VeloraStatus.warning)
-                        } else {
-                            Label(result, systemImage: "checkmark.circle.fill")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                LabeledContent("Config file") {
-                    Text("~/.velora/settings.json")
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
-            } header: {
-                Text("Settings transfer")
-            } footer: {
-                SettingsFooter("Exports portable preferences, shortcuts, the speech model, and advanced engine settings as JSON. History, recordings, dictionary, custom modes, the hardware-selected cleanup model, macOS permissions, microphone choice, Calendar access, and local-agent access stay on this Mac.")
+                SettingsFooter("Right-click the pill to close it. Bring it back from the menubar.")
             }
             Section {
                 Toggle("Check for updates automatically", isOn: $model.updateChecks)
-                Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
-                    .disabled(!model.updateChecks)
-                updateStatusRow
-                Button("View Release History…") { model.openReleaseHistory() }
+                LabeledContent("Velora \(VeloraAppInfo.shortVersion)") {
+                    UpdateActionRow(model: model)
+                }
             } header: {
                 Text("Updates")
             } footer: {
-                SettingsFooter("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations. Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace Velora.")
+                SettingsFooter("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations.")
             }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .onAppear { model.refreshAgentIntegration() }
-    }
-
-    private var updateStatusRow: some View {
-        UpdateActionRow(model: model)
-    }
-
-    /// Title + status caption on the left, install action on the right.
-    private func agentIntegrationRow(
-        title: String, detail: String, buttonTitle: String, action: @escaping () -> Void
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            Spacer()
-            Button(buttonTitle, action: action)
-        }
     }
 }
 
 /// Update controls mirroring the updater's state: check → download progress →
 /// verify → restart. Failures show the reason and fall back to the releases
-/// page. Shared by Settings → General → Updates and the About pane.
+/// page. Shared by Settings → General → Updates and the About window.
 struct UpdateActionRow: View {
     @ObservedObject var model: SettingsModel
     /// The idle-state button title ("Check Now" in the Updates section,
@@ -452,6 +256,8 @@ struct UpdateActionRow: View {
 
 // MARK: - Dictation
 
+/// Dictation: input (mic, language, how the shortcut behaves), writing
+/// behaviour, and recordings. Terminal cleanup moved to Advanced › Terminals.
 struct DictationSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var archiveSize: String = "…"
@@ -464,6 +270,8 @@ struct DictationSettingsView: View {
         ("fr", "French"), ("pt", "Portuguese"), ("de", "German"),
         ("it", "Italian"), ("ja", "Japanese"),
     ]
+
+    private static let daysPerMonth = 30
 
     var body: some View {
         Form {
@@ -481,53 +289,55 @@ struct DictationSettingsView: View {
                         Text("Chosen microphone (not connected)").tag(String?.some(uid))
                     }
                 }
-            } footer: {
-                SettingsFooter("Velora records from this microphone even when macOS switches its default input (for example when AirPods connect). System default follows macOS.")
-            }
-            Section {
                 Picker("Language", selection: $model.language) {
                     ForEach(Self.languages, id: \.0) { code, name in
                         Text(name).tag(code)
                     }
                 }
+                // The shortcut itself is recorded under Shortcuts; here only
+                // how a press behaves.
+                LabeledContent("Start dictation") {
+                    HStack(spacing: VeloraSpacing.m) {
+                        KeycapsLabel(hotkey: model.hotkey)
+                        Picker("Behaviour", selection: $model.hotkeyMode) {
+                            Text("Hold").tag(HotkeyMode.hold)
+                            Text("Toggle").tag(HotkeyMode.toggle)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                    }
+                }
+            } header: {
+                Text("Input")
+            } footer: {
+                SettingsFooter("Velora keeps recording from this microphone even when macOS switches its default input (for example when AirPods connect).")
+            }
+            Section("Writing") {
                 Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
-                Toggle(isOn: $model.romanizeOutput) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Write output in English letters")
-                        Text("Transliterate non-English speech to the Latin alphabet — e.g. Hindi becomes Hinglish (\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947} \u{2192} \u{201C}namaste\u{201D}). Keeps the words, not a translation.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Toggle(isOn: $model.smartTerminal) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Smart cleanup in terminals")
-                        Text("Long prose dictated into a terminal (AI chats) gets cleaned up; short commands are inserted exactly as heard.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
                 Toggle(isOn: $model.voiceCommands) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Voice commands")
-                        Text("Say \u{201C}scratch that\u{201D} to undo the last dictation, or \u{201C}new line\u{201D} to press Return.")
+                        Text("\u{201C}Scratch that\u{201D} undoes, \u{201C}new line\u{201D} presses Return.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: $model.romanizeOutput) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Write other languages in English letters")
+                        Text("\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947} becomes \u{201C}namaste\u{201D}. The words stay yours.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
             Section {
-                Toggle(isOn: $model.saveAudio) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Keep audio recordings")
-                        Text("Replay or re-transcribe past dictations, and recover one interrupted by a crash or restart. Recordings stay on this Mac and are deleted after \(Int(model.audioRetentionDays / 30)) months.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                LabeledContent("Storage used", value: archiveSize)
+                Toggle("Keep audio recordings", isOn: $model.saveAudio)
             } header: {
                 Text("Recordings")
+            } footer: {
+                SettingsFooter(recordingsFooter)
             }
         }
         .formStyle(.grouped)
@@ -542,6 +352,13 @@ struct DictationSettingsView: View {
         }
     }
 
+    /// "1.2 GB on disk · kept for 180 days. Your voice never leaves this Mac."
+    private var recordingsFooter: String {
+        let days = Int(model.audioRetentionDays)
+        let retention = "kept for \(days) days"
+        return "\(archiveSize) on disk · \(retention). Your voice never leaves this Mac."
+    }
+
     /// Sums the archived-clip directory size off the main thread.
     private static func archiveSizeDescription() async -> String {
         let path = AppConfig.audioDirectory.path
@@ -549,25 +366,39 @@ struct DictationSettingsView: View {
             let fm = FileManager.default
             guard fm.fileExists(atPath: path),
                   let files = fm.enumerator(atPath: path)
-            else { return "Empty" }
+            else { return "Nothing" }
             var total: Int64 = 0
             while let file = files.nextObject() as? String {
                 let attrs = try? fm.attributesOfItem(atPath: path + "/" + file)
                 total += (attrs?[.size] as? Int64) ?? 0
             }
-            return total == 0 ? "Empty"
+            return total == 0 ? "Nothing"
                 : ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
         }.value
     }
 }
 
-// MARK: - Model
+// MARK: - Models
 
+/// Models: the two models in use, each with a "Change…" that unfolds the
+/// choices in place, and the storage they occupy.
+///
+///     ON THIS MAC
+///     Speech to text                                   [Change…]
+///       whisper-large-v3-turbo · On-device · 1.6 GB
+///       ○ parakeet-tdt-0.6b-v3 … (only while unfolded)
+///     Cleanup                                          [Change…]
+///       Qwen 2.5 3B · Recommended for this Mac · 1.9 GB
 struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = "…"
+    @State private var unusedSize: String = "…"
     @State private var cachedModels: [ModelStorage.CachedModel] = []
-    @State private var pendingDelete: ModelStorage.CachedModel?
+    @State private var confirmRemoveUnused = false
+    @State private var changing: Slot?
+
+    /// Which "Change…" is unfolded (at most one at a time).
+    private enum Slot { case speech, cleanup }
 
     /// One row in the picker / catalog. Prefers the engine's advertised models
     /// (so newly-shipped models appear without an app update); falls back to the
@@ -579,7 +410,7 @@ struct ModelSettingsView: View {
         let size: String
     }
 
-    private var choices: [Choice] {
+    private var speechChoices: [Choice] {
         let engine = model.sttEngineModels
         if !engine.isEmpty {
             return engine.map {
@@ -593,34 +424,106 @@ struct ModelSettingsView: View {
     }
 
     /// Cleanup models the engine advertises (smallest first).
-    private var cleanupChoices: [EngineModel] { model.cleanupEngineModels }
+    private var cleanupChoices: [Choice] {
+        model.cleanupEngineModels.map {
+            Choice(
+                id: $0.id, name: $0.displayName,
+                detail: $0.id == model.recommendedCleanupModel ? "Recommended for this Mac" : "On-device",
+                size: $0.size)
+        }
+    }
 
     /// The set of currently-active model ids (never offered for deletion).
     private var activeModelIDs: Set<String> {
         [model.sttModel, model.cleanupModel].filter { !$0.isEmpty }.reduce(into: Set()) { $0.insert($1) }
     }
 
+    private var unusedModels: [ModelStorage.CachedModel] {
+        cachedModels.filter { !activeModelIDs.contains($0.id) }
+    }
+
     var body: some View {
         Form {
             Section {
-                Picker("Speech model", selection: $model.sttModel) {
-                    ForEach(choices) { choice in
-                        Text(choice.name).tag(choice.id)
-                    }
-                }
+                slotRow(
+                    title: "Speech to text", slot: .speech, choices: speechChoices,
+                    selection: $model.sttModel)
                 if !cleanupChoices.isEmpty {
-                    Picker("Cleanup model", selection: cleanupBinding) {
-                        ForEach(cleanupChoices) { m in
-                            Text(cleanupLabel(m)).tag(m.id)
+                    slotRow(
+                        title: "Cleanup", slot: .cleanup, choices: cleanupChoices,
+                        selection: cleanupBinding)
+                }
+            } header: {
+                Text("On this Mac")
+            } footer: {
+                SettingsFooter("Models download once and run on this Mac. Nothing is sent anywhere.")
+            }
+            Section("Storage") {
+                LabeledContent("On disk") {
+                    HStack(spacing: VeloraSpacing.m) {
+                        Text(storageUsed)
+                            .foregroundStyle(.secondary)
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([ModelStorage.hubURL])
                         }
                     }
                 }
-            } footer: {
-                SettingsFooter(cleanupFooter)
+                LabeledContent("Unused downloads") {
+                    HStack(spacing: VeloraSpacing.m) {
+                        Text(unusedSize)
+                            .foregroundStyle(.secondary)
+                        Button("Remove…") { confirmRemoveUnused = true }
+                            .disabled(unusedModels.isEmpty)
+                    }
+                }
             }
-            Section("Available speech models") {
-                ForEach(choices) { choice in
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .task { await refreshStorage() }
+        .onAppear { model.requestStatus() }
+        .alert("Remove unused models?", isPresented: $confirmRemoveUnused) {
+            Button("Remove", role: .destructive) {
+                Task { await removeUnused() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Frees \(unusedSize) from the on-device model cache. Velora re-downloads a model automatically if you select it again.")
+        }
+    }
+
+    // MARK: Slot rows
+
+    /// Title, the active model's caption, and "Change…"; while unfolded,
+    /// every choice as a selectable row beneath.
+    @ViewBuilder
+    private func slotRow(
+        title: String, slot: Slot, choices: [Choice], selection: Binding<String>
+    ) -> some View {
+        let active = choices.first { $0.id == selection.wrappedValue }
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(caption(for: active, fallback: selection.wrappedValue))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(changing == slot ? "Done" : "Change…") {
+                changing = changing == slot ? nil : slot
+            }
+        }
+        if changing == slot {
+            ForEach(choices) { choice in
+                Button {
+                    selection.wrappedValue = choice.id
+                } label: {
                     HStack(alignment: .firstTextBaseline) {
+                        Image(systemName: choice.id == selection.wrappedValue
+                              ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(choice.id == selection.wrappedValue
+                                             ? AnyShapeStyle(VeloraBrand.accent)
+                                             : AnyShapeStyle(.tertiary))
                         VStack(alignment: .leading, spacing: 2) {
                             Text(choice.name)
                             Text(choice.detail)
@@ -632,91 +535,29 @@ struct ModelSettingsView: View {
                             Text(choice.size)
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
-                                .frame(width: 72, alignment: .trailing)
                         }
                     }
-                    .padding(.vertical, VeloraSpacing.xs)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .padding(.leading, VeloraSpacing.l)
             }
-            storageSection
-        }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        .task { await refreshStorage() }
-        .onAppear { model.requestStatus() }
-        .alert(item: $pendingDelete) { target in
-            Alert(
-                title: Text("Remove “\(shortName(target.id))”?"),
-                message: Text("Frees \(target.sizeLabel) from the on-device model cache. Velora re-downloads it automatically if you select it again."),
-                primaryButton: .destructive(Text("Remove")) {
-                    Task { await ModelStorage.delete(target); await refreshStorage() }
-                },
-                secondaryButton: .cancel())
         }
     }
 
-    // MARK: Cleanup model picker
+    /// "whisper-large-v3-turbo · On-device · 1.6 GB".
+    private func caption(for choice: Choice?, fallback id: String) -> String {
+        guard let choice else { return id.isEmpty ? "Not chosen" : shortName(id) }
+        return [choice.name, choice.detail, choice.size]
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+    }
 
     private var cleanupBinding: Binding<String> {
         Binding(get: { model.cleanupModel }, set: { model.setCleanupModel($0) })
     }
 
-    private func cleanupLabel(_ m: EngineModel) -> String {
-        m.id == model.recommendedCleanupModel ? "\(m.displayName)  ·  Recommended" : m.displayName
-    }
-
-    private var cleanupFooter: String {
-        let base = "Models download on first use and run entirely on this Mac."
-        guard !model.recommendedCleanupModel.isEmpty,
-              let rec = cleanupChoices.first(where: { $0.id == model.recommendedCleanupModel })
-        else { return base }
-        return base + " “\(rec.displayName)” is recommended for your Mac's memory."
-    }
-
-    // MARK: Storage section
-
-    @ViewBuilder
-    private var storageSection: some View {
-        Section {
-            LabeledContent("Total on disk", value: storageUsed)
-            ForEach(cachedModels) { m in
-                HStack(alignment: .firstTextBaseline, spacing: VeloraSpacing.s) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(shortName(m.id))
-                        if activeModelIDs.contains(m.id) {
-                            Text("In use")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(VeloraBrand.violet.color)
-                        }
-                    }
-                    Spacer()
-                    Text(m.sizeLabel)
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                    if activeModelIDs.contains(m.id) {
-                        Image(systemName: "lock.fill")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                            .frame(width: 22)
-                    } else {
-                        Button {
-                            pendingDelete = m
-                        } label: {
-                            Image(systemName: "trash")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Remove this cached model to reclaim space")
-                        .frame(width: 22)
-                    }
-                }
-                .padding(.vertical, 1)
-            }
-        } header: {
-            Text("Model storage")
-        } footer: {
-            SettingsFooter("Reclaim space by removing models you no longer use. The two in-use models can't be removed.")
-        }
-    }
+    // MARK: Storage
 
     private func shortName(_ id: String) -> String {
         id.split(separator: "/").last.map(String.init) ?? id
@@ -725,10 +566,168 @@ struct ModelSettingsView: View {
     private func refreshStorage() async {
         let scanned = await ModelStorage.scan()
         cachedModels = scanned
-        let total = scanned.reduce(Int64(0)) { $0 + $1.bytes }
-        storageUsed = scanned.isEmpty
-            ? "No models downloaded"
-            : ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+        storageUsed = Self.sizeLabel(scanned, empty: "No models downloaded")
+        unusedSize = Self.sizeLabel(unusedModels, empty: "None")
+    }
+
+    private static func sizeLabel(_ models: [ModelStorage.CachedModel], empty: String) -> String {
+        let total = models.reduce(Int64(0)) { $0 + $1.bytes }
+        if total == 0 { return empty }
+        return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+    }
+
+    private func removeUnused() async {
+        for cached in unusedModels {
+            _ = await ModelStorage.delete(cached)
+        }
+        await refreshStorage()
+    }
+}
+
+// MARK: - Advanced
+
+/// Advanced: meeting preferences, terminal cleanup, the update installer,
+/// and the tools a power user reaches for (settings file, CLI, logs, the
+/// Setup Assistant). Every row here used to live somewhere more prominent.
+struct AdvancedSettingsView: View {
+    @ObservedObject var model: SettingsModel
+    @ObservedObject var coordinator: MeetingCoordinator
+    let openSetupAssistant: () -> Void
+
+    @State private var editingNotesPrompt = false
+
+    var body: some View {
+        Form {
+            Section {
+                MeetingPreferenceRows(model: model, coordinator: coordinator)
+                LabeledContent("Notes prompt") {
+                    HStack(spacing: VeloraSpacing.m) {
+                        Text(model.meetingNotesPrompt.isEmpty ? "Default" : "Custom")
+                            .foregroundStyle(.secondary)
+                        Button("Edit…") { editingNotesPrompt = true }
+                    }
+                }
+            } header: {
+                Text("Meetings")
+            } footer: {
+                SettingsFooter(MeetingPreferenceRows.footer)
+            }
+            Section("Terminals") {
+                Toggle(isOn: $model.smartTerminal) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Smart cleanup in terminals")
+                        Text("Prose is cleaned up. Short commands land exactly as heard.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Section {
+                Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
+                    .disabled(!model.updateChecks)
+                Button("View Release History…") { model.openReleaseHistory() }
+            } header: {
+                Text("Updates")
+            } footer: {
+                SettingsFooter("Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace Velora.")
+            }
+            Section {
+                settingsFileRow
+                Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
+                if model.localAgentAccess {
+                    agentIntegrationRow(
+                        title: "Command-line tool",
+                        detail: model.cliInstallPath
+                            ?? "Puts a “velora” command on your PATH.",
+                        buttonTitle: model.cliInstallPath == nil ? "Install" : "Reinstall"
+                    ) { model.installCLITool() }
+                    agentIntegrationRow(
+                        title: "Agent skill",
+                        detail: model.agentSkillInstalled
+                            ? "Installed — Claude Code knows what it can ask Velora."
+                            : "Teaches local agents (Claude Code) where to look and what they can ask.",
+                        buttonTitle: model.agentSkillInstalled ? "Reinstall" : "Install"
+                    ) { model.installAgentSkill() }
+                    if let error = model.agentIntegrationError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(VeloraStatus.warning)
+                    }
+                }
+                LabeledContent("Engine logs") {
+                    Button("Show in Finder") { Self.revealEngineLog() }
+                }
+                Button("Run Setup Assistant…", action: openSetupAssistant)
+            } header: {
+                Text("Tools")
+            } footer: {
+                SettingsFooter("The settings file carries portable preferences, shortcuts, the speech model, and advanced engine settings. History, recordings, dictionary, custom modes, macOS permissions, microphone choice, Calendar access, and local-agent access stay on this Mac. Local agents run as your user and open no network server.")
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .onAppear { model.refreshAgentIntegration() }
+        .sheet(isPresented: $editingNotesPrompt) {
+            MeetingNotesPromptEditor(model: model)
+        }
+    }
+
+    /// Export/Import plus the last result and the file's path.
+    private var settingsFileRow: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Settings file")
+                Spacer()
+                Button("Export…") { model.exportSettings() }
+                Button("Import…") { model.importSettings() }
+            }
+            HStack(spacing: VeloraSpacing.s) {
+                Text("~/.velora/settings.json")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                Spacer()
+                if let result = model.settingsTransferResult {
+                    if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
+                        Label(result, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(VeloraStatus.warning)
+                    } else {
+                        Label(result, systemImage: "checkmark.circle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Title + status caption on the left, install action on the right.
+    private func agentIntegrationRow(
+        title: String, detail: String, buttonTitle: String, action: @escaping () -> Void
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+            Button(buttonTitle, action: action)
+        }
+    }
+
+    /// Selects the engine log in Finder (falls back to the ~/.velora folder
+    /// before the engine has written one).
+    private static func revealEngineLog() {
+        let log = AppConfig.veloraDirectory.appendingPathComponent("engine.log")
+        if FileManager.default.fileExists(atPath: log.path) {
+            NSWorkspace.shared.activateFileViewerSelecting([log])
+            return
+        }
+        NSWorkspace.shared.activateFileViewerSelecting([AppConfig.veloraDirectory])
     }
 }
 
@@ -756,7 +755,6 @@ struct ShortcutsSettingsView: View {
             .frame(maxWidth: 640)
             .frame(maxWidth: .infinity)
         }
-        .background(VeloraPanel.canvas)
         .onAppear(perform: refreshMusicPermission)
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification
@@ -770,7 +768,7 @@ struct ShortcutsSettingsView: View {
     private var dictationCard: some View {
         SettingsCard {
             CardHeader(
-                symbol: "mic.fill", color: VeloraBrand.violet.color,
+                symbol: "mic.fill", color: VeloraBrand.sky.color,
                 title: "Dictation",
                 subtitle: "Press your shortcut and speak — anywhere you can type. Esc cancels.")
             CardDivider()

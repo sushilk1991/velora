@@ -12,9 +12,11 @@ enum VeloraSpacing {
     static let xl: CGFloat = 20
 }
 
-/// Brand palette sampled from `Resources/branding/velora-mark.svg`:
-/// midnight indigo fading into electric violet behind the white mark, with
-/// a coral full stop. The HUD borrows the hue as a whisper, not a costume.
+/// Brand v2 palette sampled from `Resources/branding/velora-mark.svg`:
+/// a sky-blue plate (deep sky → sky) behind the white serif mark, closed by
+/// an apricot full stop. Sky is the one accent; apricot is reserved for the
+/// headline's full stop and "learned" moments, never for status. The HUD
+/// borrows the hue as a whisper, not a costume.
 enum VeloraBrand {
     /// Raw sRGB components so per-bar colors can be blended by hand
     /// (`Color.mix` needs macOS 15; the deployment target is 14).
@@ -24,21 +26,45 @@ enum VeloraBrand {
         let b: Double
 
         var color: Color { Color(.sRGB, red: r, green: g, blue: b, opacity: 1) }
+
+        /// Same components as an `NSColor`, for appearance-aware colours.
+        var nsColor: NSColor { NSColor(srgbRed: r, green: g, blue: b, alpha: 1) }
     }
 
-    /// Midnight indigo: the mark's plate, lifted to a midtone so it reads
-    /// as UI text on dark cards (the icon's own #3a1f96 falls to 2.1:1).
-    static let indigo = RGB(r: 0.26, g: 0.22, b: 0.62)
-    /// Electric violet, lifted from the plate's #6d2bd9 for the same reason.
-    static let violet = RGB(r: 0.55, g: 0.27, b: 0.96)
-    /// Coral (#ff8f66, the full stop in the mark). Reserved for warm accents.
-    static let coral = RGB(r: 1.0, g: 0.56, b: 0.40)
+    /// Sky-deep (#0f74c5): the plate's midpoint; the accent on light surfaces.
+    static let skyDeep = RGB(r: 15 / 255, g: 116 / 255, b: 197 / 255)
+    /// Sky (#4dacf6): the plate's bright end; the accent on dark surfaces.
+    static let sky = RGB(r: 77 / 255, g: 172 / 255, b: 246 / 255)
+    /// Plate origin (#0b5ea0): only the icon gradient starts here.
+    static let skyPlate = RGB(r: 11 / 255, g: 94 / 255, b: 160 / 255)
+    /// Link colour on dark surfaces (#71bfff), a step lighter than sky.
+    static let skyLink = RGB(r: 113 / 255, g: 191 / 255, b: 255 / 255)
+    /// Apricot (#e78a45, the full stop in the mark) on dark surfaces.
+    static let apricot = RGB(r: 231 / 255, g: 138 / 255, b: 69 / 255)
+    /// Apricot-deep (#c06325): the same accent on light surfaces.
+    static let apricotDeep = RGB(r: 192 / 255, g: 99 / 255, b: 37 / 255)
 
-    /// The brand gradient for icons and accents (top-leading indigo →
-    /// bottom-trailing violet, matching the app icon).
+    /// Picks the dark-appearance colour under `.darkAqua`, the light one
+    /// otherwise, so one token reads correctly on both grounds.
+    private static func dynamic(dark: RGB, light: RGB) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? dark.nsColor : light.nsColor
+        })
+    }
+
+    /// The accent: sky on dark, sky-deep on light.
+    static let accent = dynamic(dark: sky, light: skyDeep)
+    /// The warm accent: apricot on dark, apricot-deep on light.
+    static let warm = dynamic(dark: apricot, light: apricotDeep)
+    /// Text links: a lighter sky on dark, sky-deep on light.
+    static let link = dynamic(dark: skyLink, light: skyDeep)
+
+    /// The icon plate gradient (top-leading #0b5ea0 → #0f74c5 → bottom-
+    /// trailing #4dacf6), matching the app icon.
     static var iconGradient: LinearGradient {
         LinearGradient(
-            colors: [indigo.color, violet.color],
+            colors: [skyPlate.color, skyDeep.color, sky.color],
             startPoint: .topLeading, endPoint: .bottomTrailing)
     }
 
@@ -52,11 +78,11 @@ enum VeloraBrand {
     }
 
     /// Waveform bar color at horizontal fraction `t` (0 = leading edge,
-    /// 1 = trailing edge): indigo→violet, blended 90 % toward white in dark
+    /// 1 = trailing edge): sky-deep→sky, blended 90 % toward white in dark
     /// mode / 75 % toward black in light mode so bars stay high-contrast
     /// with only a subtle brand tint.
     static func barColor(fraction: Double, darkMode: Bool) -> Color {
-        let brand = lerp(indigo, violet, fraction)
+        let brand = lerp(skyDeep, sky, fraction)
         let blended = darkMode
             ? lerp(brand, RGB(r: 1, g: 1, b: 1), 0.90)
             : lerp(brand, RGB(r: 0, g: 0, b: 0), 0.75)

@@ -54,10 +54,35 @@ extension SettingsDocument {
         var customOrigin: NormalizedPoint?
         var customEdge: HUDEdge
         var alwaysVisible: Bool
+        /// "Show pill": false after "Close Pill" — no HUD state orders the
+        /// panel on screen until the user brings it back from Settings or
+        /// the menubar. Dictation keeps working underneath.
+        var visible: Bool
 
         static let defaults = HUD(
             position: .bottomRight, customOrigin: nil,
-            customEdge: .center, alwaysVisible: true)
+            customEdge: .center, alwaysVisible: true, visible: true)
+
+        init(position: HUDPosition, customOrigin: NormalizedPoint?,
+             customEdge: HUDEdge, alwaysVisible: Bool, visible: Bool) {
+            self.position = position
+            self.customOrigin = customOrigin
+            self.customEdge = customEdge
+            self.alwaysVisible = alwaysVisible
+            self.visible = visible
+        }
+
+        // `visible` arrived after 0.22 — settings.json files written by
+        // older builds lack the key and must keep importing as "shown".
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            position = try container.decode(HUDPosition.self, forKey: .position)
+            customOrigin = try container.decodeIfPresent(
+                NormalizedPoint.self, forKey: .customOrigin)
+            customEdge = try container.decode(HUDEdge.self, forKey: .customEdge)
+            alwaysVisible = try container.decode(Bool.self, forKey: .alwaysVisible)
+            visible = try container.decodeIfPresent(Bool.self, forKey: .visible) ?? true
+        }
     }
 
     struct Dictation: Codable, Equatable {

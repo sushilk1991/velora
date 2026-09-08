@@ -54,6 +54,7 @@
   const WORD_LIMIT = 16;
   document.querySelectorAll("[data-split]").forEach((headline) => {
     let index = 0;
+    let lastWord = null;
     const wrap = (node) => {
       const parts = node.textContent.split(/(\s+)/);
       const fragment = document.createDocumentFragment();
@@ -70,19 +71,30 @@
         inner.textContent = part;
         outer.appendChild(inner);
         fragment.appendChild(outer);
+        lastWord = inner;
         index += 1;
       });
       node.replaceWith(fragment);
     };
-    Array.from(headline.childNodes).forEach((child) => {
-      if (child.nodeType === Node.TEXT_NODE) {
-        wrap(child);
-        return;
-      }
-      Array.from(child.childNodes)
-        .filter((grandchild) => grandchild.nodeType === Node.TEXT_NODE)
-        .forEach(wrap);
-    });
+    /* The apricot full stop (<span class="stop">) joins the word before it,
+       so it rises with that word and can never wrap onto its own line. */
+    const split = (node) => {
+      Array.from(node.childNodes).forEach((child) => {
+        if (child.nodeType === Node.TEXT_NODE) {
+          wrap(child);
+          return;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) {
+          return;
+        }
+        if (child.classList.contains("stop") && lastWord) {
+          lastWord.appendChild(child);
+          return;
+        }
+        split(child);
+      });
+    };
+    split(headline);
     if (!headline.closest(".reveal")) headline.classList.add("reveal");
   });
 

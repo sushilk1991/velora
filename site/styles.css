@@ -31,61 +31,65 @@
 :root {
   color-scheme: light dark;
 
-  /* Surfaces ------------------------------------------------------------- */
-  --bg: oklch(97.2% 0.012 85);
-  --bg-raised: oklch(99.4% 0.006 85);
-  --bg-sunk: oklch(94% 0.018 85);
-  --bg-inverse: oklch(19% 0.035 290);
+  /* Surfaces — warm paper; the dark theme swaps in warm ink ------------- */
+  --bg: oklch(98% 0.005 78);
+  --bg-raised: oklch(100% 0 0);
+  --bg-sunk: oklch(96% 0.005 78);
+  --bg-lift: oklch(100% 0 0);
+  --bg-inverse: oklch(19% 0.006 56);
 
   /* Text ----------------------------------------------------------------- */
-  --ink: oklch(20% 0.03 288);
-  --ink-soft: oklch(45% 0.026 288);
-  --ink-faint: oklch(60% 0.022 288);
-  --ink-inverse: oklch(97% 0.012 85);
+  --ink: oklch(19% 0.006 56);
+  --ink-soft: oklch(45% 0.008 56);
+  --ink-faint: oklch(59% 0.008 56);
+  --ink-inverse: oklch(98% 0.005 78);
 
   /* Lines ---------------------------------------------------------------- */
-  --line: oklch(88% 0.016 85);
-  --line-strong: oklch(76% 0.022 85);
+  --line: oklch(90% 0.008 78);
+  --line-strong: oklch(80% 0.012 75);
 
-  /* Accents -------------------------------------------------------------- */
-  --accent: oklch(47% 0.22 292);
-  --accent-press: oklch(40% 0.2 292);
-  --accent-wash: oklch(93% 0.045 292);
-  --accent-2: oklch(60% 0.19 30);
-  --on-accent: oklch(99% 0.008 292);
+  /* Accents — sky carries the brand; apricot is reserved for the headline's
+     full stop and small warm highlights. The light theme uses the deeper
+     sky so it passes contrast on paper. ---------------------------------- */
+  --accent: oklch(55% 0.151 250);
+  --accent-press: oklch(47% 0.13 250);
+  --accent-wash: oklch(94% 0.03 245);
+  --accent-2: oklch(60% 0.139 50);
+  --on-accent: oklch(100% 0 0);
+  --link: oklch(55% 0.151 250);
   --signal: oklch(58% 0.16 52);
   --signal-wash: oklch(94% 0.055 62);
   --good: oklch(50% 0.13 155);
 
-  /* The feature bands stay the same deep violet in both themes. Flipping
+  /* The feature bands stay the same deep sky in both themes. Flipping
      them with the theme turns a dark page white halfway down. */
-  --feature: oklch(27% 0.105 292);
-  --feature-lift: oklch(43% 0.19 293);
-  --on-feature: oklch(96% 0.014 292);
-  --on-feature-2: oklch(80% 0.06 292);
-  --feature-key: oklch(97% 0.012 85);
-  --feature-key-ink: oklch(27% 0.14 292);
+  --feature: oklch(30% 0.09 250);
+  --feature-lift: oklch(48% 0.15 250);
+  --on-feature: oklch(98% 0.005 78);
+  --on-feature-2: oklch(82% 0.03 245);
+  --feature-key: oklch(98% 0.005 78);
+  --feature-key-ink: oklch(30% 0.12 250);
 
   /* Incidentals ---------------------------------------------------------- */
   --grain: 0.5;
   --img-outline: rgba(0, 0, 0, 0.1);
-  --tint: oklch(25% 0.04 288 / 0.06);
-  --tint-inset: oklch(25% 0.04 288 / 0.05);
+  --tint: oklch(25% 0.01 56 / 0.06);
+  --tint-inset: oklch(25% 0.01 56 / 0.05);
 
   --dot-red: oklch(70% 0.16 25);
   --dot-amber: oklch(80% 0.14 85);
   --dot-green: oklch(76% 0.15 145);
 
   /* Depth ---------------------------------------------------------------- */
-  --shadow-sm: 0 1px 2px oklch(25% 0.04 288 / 0.07), 0 2px 6px oklch(25% 0.04 288 / 0.05);
+  --shadow-sm: 0 1px 2px oklch(25% 0.01 56 / 0.07), 0 2px 6px oklch(25% 0.01 56 / 0.05);
   --shadow-md:
-    0 1px 2px oklch(25% 0.04 288 / 0.06), 0 6px 16px oklch(25% 0.04 288 / 0.07),
-    0 18px 40px oklch(25% 0.04 288 / 0.07);
+    0 1px 2px oklch(25% 0.01 56 / 0.06), 0 6px 16px oklch(25% 0.01 56 / 0.07),
+    0 18px 40px oklch(25% 0.01 56 / 0.07);
   --shadow-lg:
-    0 2px 4px oklch(25% 0.04 288 / 0.05), 0 12px 28px oklch(25% 0.04 288 / 0.09),
-    0 40px 80px oklch(25% 0.04 288 / 0.1);
-  --shadow-accent: 0 1px 2px oklch(40% 0.2 292 / 0.3), 0 8px 22px oklch(47% 0.22 292 / 0.26);
-  --shadow-accent-hover: 0 1px 2px oklch(40% 0.2 292 / 0.3), 0 14px 30px oklch(47% 0.22 292 / 0.32);
+    0 2px 4px oklch(25% 0.01 56 / 0.05), 0 12px 28px oklch(25% 0.01 56 / 0.09),
+    0 40px 80px oklch(25% 0.01 56 / 0.1);
+  --shadow-accent: 0 1px 2px oklch(47% 0.13 250 / 0.3), 0 8px 22px oklch(55% 0.151 250 / 0.26);
+  --shadow-accent-hover: 0 1px 2px oklch(47% 0.13 250 / 0.3), 0 14px 30px oklch(55% 0.151 250 / 0.32);
 
   /* Type ----------------------------------------------------------------- */
   --font-display: "Instrument Serif", ui-serif, "New York", "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
@@ -115,24 +119,26 @@
   :root:not([data-theme="light"]) {
   color-scheme: dark;
 
-  --bg: oklch(16.5% 0.022 288);
-  --bg-raised: oklch(21% 0.026 288);
-  --bg-sunk: oklch(13% 0.02 288);
-  --bg-inverse: oklch(95% 0.012 85);
+  --bg: oklch(19% 0.006 56);
+  --bg-raised: oklch(23.3% 0.006 56);
+  --bg-sunk: oklch(17% 0.005 60);
+  --bg-lift: oklch(28.3% 0.006 56);
+  --bg-inverse: oklch(98% 0.005 78);
 
-  --ink: oklch(94.5% 0.012 85);
-  --ink-soft: oklch(74% 0.018 288);
-  --ink-faint: oklch(58% 0.022 288);
-  --ink-inverse: oklch(18% 0.03 288);
+  --ink: oklch(95.6% 0.002 68);
+  --ink-soft: oklch(67% 0.003 60);
+  --ink-faint: oklch(55% 0.003 60);
+  --ink-inverse: oklch(19% 0.006 56);
 
-  --line: oklch(28.5% 0.022 288);
-  --line-strong: oklch(40% 0.03 288);
+  --line: oklch(28.3% 0.006 56);
+  --line-strong: oklch(36.3% 0.008 59);
 
-  --accent: oklch(78% 0.15 292);
-  --accent-press: oklch(86% 0.11 292);
-  --accent-wash: oklch(28% 0.075 292);
-  --accent-2: oklch(78% 0.14 40);
-  --on-accent: oklch(17% 0.04 292);
+  --accent: oklch(72% 0.14 245);
+  --accent-press: oklch(78% 0.12 245);
+  --accent-wash: oklch(30% 0.06 245);
+  --accent-2: oklch(72% 0.141 55);
+  --on-accent: oklch(19% 0.006 56);
+  --link: oklch(78% 0.12 245);
   --signal: oklch(80% 0.15 62);
   --signal-wash: oklch(30% 0.07 52);
   --good: oklch(78% 0.14 158);
@@ -162,24 +168,26 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --bg: oklch(16.5% 0.022 288);
-  --bg-raised: oklch(21% 0.026 288);
-  --bg-sunk: oklch(13% 0.02 288);
-  --bg-inverse: oklch(95% 0.012 85);
+  --bg: oklch(19% 0.006 56);
+  --bg-raised: oklch(23.3% 0.006 56);
+  --bg-sunk: oklch(17% 0.005 60);
+  --bg-lift: oklch(28.3% 0.006 56);
+  --bg-inverse: oklch(98% 0.005 78);
 
-  --ink: oklch(94.5% 0.012 85);
-  --ink-soft: oklch(74% 0.018 288);
-  --ink-faint: oklch(58% 0.022 288);
-  --ink-inverse: oklch(18% 0.03 288);
+  --ink: oklch(95.6% 0.002 68);
+  --ink-soft: oklch(67% 0.003 60);
+  --ink-faint: oklch(55% 0.003 60);
+  --ink-inverse: oklch(19% 0.006 56);
 
-  --line: oklch(28.5% 0.022 288);
-  --line-strong: oklch(40% 0.03 288);
+  --line: oklch(28.3% 0.006 56);
+  --line-strong: oklch(36.3% 0.008 59);
 
-  --accent: oklch(78% 0.15 292);
-  --accent-press: oklch(86% 0.11 292);
-  --accent-wash: oklch(28% 0.075 292);
-  --accent-2: oklch(78% 0.14 40);
-  --on-accent: oklch(17% 0.04 292);
+  --accent: oklch(72% 0.14 245);
+  --accent-press: oklch(78% 0.12 245);
+  --accent-wash: oklch(30% 0.06 245);
+  --accent-2: oklch(72% 0.141 55);
+  --on-accent: oklch(19% 0.006 56);
+  --link: oklch(78% 0.12 245);
   --signal: oklch(80% 0.15 62);
   --signal-wash: oklch(30% 0.07 52);
   --good: oklch(78% 0.14 158);
@@ -630,10 +638,10 @@ p { text-wrap: pretty; }
 .button-onlight {
   background: var(--feature-key);
   color: var(--feature-key-ink);
-  box-shadow: 0 8px 22px oklch(12% 0.05 292 / 0.35);
+  box-shadow: 0 8px 22px oklch(12% 0.04 250 / 0.35);
 }
 
-.button-onlight:hover { translate: 0 -2px; box-shadow: 0 14px 30px oklch(12% 0.05 292 / 0.42); }
+.button-onlight:hover { translate: 0 -2px; box-shadow: 0 14px 30px oklch(12% 0.04 250 / 0.42); }
 
 .button-ghost {
   border-color: color-mix(in oklch, currentColor 32%, transparent);
@@ -647,7 +655,7 @@ p { text-wrap: pretty; }
   align-items: center;
   gap: 0.4rem;
   min-height: 2.75rem;
-  color: var(--accent);
+  color: var(--link);
   font-weight: 620;
   text-decoration: none;
 }
@@ -718,18 +726,10 @@ h1 em {
   font-weight: 400;
 }
 
-/* The italic line carries the voice→text identity: violet flowing into a
-   warm coral. Kept behind @supports so the plain accent colour is the
-   fallback, never invisible text. */
-@supports (-webkit-background-clip: text) or (background-clip: text) {
-  h1 em {
-    background: linear-gradient(96deg, var(--accent) 12%, var(--accent-2) 88%);
-    -webkit-background-clip: text;
-    background-clip: text;
-    -webkit-text-fill-color: transparent;
-    color: var(--accent);
-  }
-}
+/* The headline's full stop is the brand mark's apricot dot: the sentence
+   is finished, and it was finished here. Nothing else in the headline is
+   warm. */
+h1 .stop { color: var(--accent-2); }
 
 .hero-lede {
   max-width: 46ch;
@@ -1164,7 +1164,7 @@ html:not(.js) .theme-toggle { display: none; }
 .demo-switcher button:active { scale: 0.96; }
 
 .demo-switcher button.is-active {
-  background: var(--bg-raised);
+  background: var(--bg-lift);
   color: var(--ink);
   box-shadow: var(--shadow-sm);
 }
@@ -1272,7 +1272,7 @@ html:not(.js) .theme-toggle { display: none; }
   transition: background-color 260ms var(--ease-soft);
 }
 
-.steps li:hover { background: var(--bg-raised); }
+.steps li:hover { background: var(--bg-lift); }
 
 .steps li p {
   max-width: 34ch;
@@ -1643,9 +1643,9 @@ html:not(.js) .theme-toggle { display: none; }
 }
 
 .tile-meeting:hover { border-color: transparent; }
-.tile-meeting .tile-kicker { color: oklch(82% 0.12 292); }
+.tile-meeting .tile-kicker { color: oklch(82% 0.1 245); }
 /* The band ignores the page theme, so its link must too. */
-.tile-meeting .text-link { color: oklch(85% 0.1 292); }
+.tile-meeting .text-link { color: oklch(85% 0.09 245); }
 .tile-meeting p:not(.tile-kicker) { color: var(--on-feature-2); }
 .tile-meeting .tile-copy { display: grid; gap: 0.45rem; }
 .tile-meeting .tile-copy h3 { max-width: 16ch; }
@@ -1656,9 +1656,9 @@ html:not(.js) .theme-toggle { display: none; }
   align-items: center;
   gap: 0.75rem;
   padding: 0.6rem 0.7rem;
-  border: 1px solid oklch(80% 0.09 292 / 0.28);
+  border: 1px solid oklch(80% 0.08 245 / 0.28);
   border-radius: 999px;
-  background: oklch(17% 0.06 292 / 0.55);
+  background: oklch(17% 0.05 250 / 0.55);
 }
 
 .record-ring {
@@ -1685,10 +1685,10 @@ html:not(.js) .theme-toggle { display: none; }
 
 .meeting-name { display: grid; min-width: 0; }
 .meeting-name b { overflow: hidden; font-size: 0.78rem; text-overflow: ellipsis; white-space: nowrap; }
-.meeting-name small { color: oklch(74% 0.05 292); font-size: 0.62rem; }
+.meeting-name small { color: oklch(74% 0.04 245); font-size: 0.62rem; }
 
 .meeting-time {
-  color: oklch(78% 0.05 292);
+  color: oklch(78% 0.04 245);
   font-family: var(--font-mono);
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
@@ -1700,7 +1700,7 @@ html:not(.js) .theme-toggle { display: none; }
   height: 1.85rem;
   place-items: center;
   border-radius: 50%;
-  background: oklch(96% 0.02 292 / 0.12);
+  background: oklch(96% 0.01 245 / 0.12);
   color: oklch(72% 0.2 28);
   font-size: 0.5rem;
 }
@@ -1727,7 +1727,7 @@ html:not(.js) .theme-toggle { display: none; }
   background:
     radial-gradient(circle at 70% 22%, var(--signal), transparent 45%),
     linear-gradient(150deg, var(--accent), color-mix(in oklch, var(--accent) 40%, var(--bg-inverse)));
-  color: oklch(98% 0.01 292);
+  color: oklch(98% 0.005 78);
   font-family: var(--font-display);
   font-size: 1.25rem;
   font-style: italic;
@@ -2214,8 +2214,8 @@ html:not(.js) .theme-toggle { display: none; }
   text-align: center;
 }
 
-.closing .eyebrow { color: oklch(82% 0.12 292); }
-.closing .eyebrow-dot { box-shadow: 0 0 0 0.28rem oklch(82% 0.12 292 / 0.18); }
+.closing .eyebrow { color: oklch(82% 0.1 245); }
+.closing .eyebrow-dot { box-shadow: 0 0 0 0.28rem oklch(82% 0.1 245 / 0.18); }
 
 .closing h2 {
   max-width: 12ch;
@@ -2876,7 +2876,7 @@ html:not(.js) .theme-toggle { display: none; }
   padding: 0.12rem 0.4rem;
   border-radius: 0.35rem;
   background: var(--accent-2);
-  color: oklch(99% 0.01 60);
+  color: var(--bg);
   font-size: 0.58rem;
   letter-spacing: 0.1em;
   vertical-align: 0.08em;
@@ -3014,7 +3014,7 @@ html:not(.js) .theme-toggle { display: none; }
 
   [data-spotlight] > *:hover::after { opacity: 1; }
   [data-spotlight] > * > * { position: relative; z-index: 1; }
-  .tile-meeting { --spot: oklch(80% 0.1 292 / 0.22); }
+  .tile-meeting { --spot: oklch(80% 0.09 245 / 0.22); }
 }
 
 /* --------------------------------------------------------------------------

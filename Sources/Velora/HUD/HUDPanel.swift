@@ -27,8 +27,8 @@ final class HUDPanel: NSObject {
         var recents: () -> [DictationRecord]
         var toggleDictation: () -> Void
         var stopMeeting: () -> Void
-        var openHistory: () -> Void
-        var openSettings: () -> Void
+        /// Opens the main window on Home.
+        var openMain: () -> Void
     }
 
     let model = HUDModel()
@@ -42,6 +42,8 @@ final class HUDPanel: NSObject {
     var menuHooks: MenuHooks?
 
     private let panel: NSPanel
+    /// Selftest hook: whether the panel is ordered on screen right now.
+    var isOnScreen: Bool { panel.isVisible }
     private var hideWorkItem: DispatchWorkItem?
     private var screenObserver: NSObjectProtocol?
     /// Cursor tracking for `ignoresMouseEvents` (see init): event monitors for
@@ -412,6 +414,16 @@ final class HUDPanel: NSObject {
     /// the capsule mid-recording would jump it to a spot that matches no
     /// preset (the panel itself can't be safely moved while visible).
     func applyPreferences() {
+        // "Close Pill" is honoured immediately, session or not: the user
+        // asked for the surface to go away, so the mid-session deferral
+        // below (which protects placement, not visibility) does not apply.
+        guard AppConfig.shared.hudVisible else {
+            hideWorkItem?.cancel()
+            hideWorkItem = nil
+            stopMouseSync()
+            panel.orderOut(nil)
+            return
+        }
         guard model.state.isAvailable || !panel.isVisible else {
             needsPrefsReapply = true
             return
@@ -419,8 +431,21 @@ final class HUDPanel: NSObject {
         needsPrefsReapply = false
         model.edge = HUDEdge.edge(
             for: AppConfig.shared.hudPosition, custom: AppConfig.shared.hudCustomEdge)
+
+        // The pill was closed mid-session (listening, meeting, a prompt…) and
+        // "Show Pill" just came back on: re-run the current state so the
+        // session's capsule re-orders front instead of staying invisible
+        // until the next state change.
+        if !model.state.isHidden, model.state != .standby, !panel.isVisible {
+            transition(to: model.state)
+            return
+        }
         if AppConfig.shared.hudAlwaysVisible {
             if model.state.isHidden {
+                transition(to: .standby)
+            } else if model.state == .standby, !panel.isVisible {
+                // The pill was closed while idle and "Show pill" just came
+                // back on: a standby→standby transition re-orders it front.
                 transition(to: .standby)
             } else if model.state == .standby {
                 position()
@@ -441,7 +466,14 @@ final class HUDPanel: NSObject {
         hideWorkItem?.cancel()
         hideWorkItem = nil
 
-        if !target.isHidden {
+        // The one place the panel is shown. With "Show pill" off the state
+        // machine still runs (dictation, sounds, meeting flows all depend on
+        // it) but nothing ever orders the panel front:
+        //
+        //     state → transition ─┬─ hudVisible ── position + orderFront
+        //                         └─ closed ───── orderOut, no mouse sync
+        let pillClosed = !AppConfig.shared.hudVisible
+        if !target.isHidden, !pillClosed {
             let promptShouldFollowMainDisplay: Bool = {
                 guard AppConfig.shared.hudPosition != .custom,
                       model.state.isAvailable else { return false }
@@ -456,7 +488,11 @@ final class HUDPanel: NSObject {
 
         model.state = target
 
-        if target.isHidden {
+        if pillClosed {
+            // An invisible panel must never be interactive either.
+            stopMouseSync()
+            panel.orderOut(nil)
+        } else if target.isHidden {
             // Keep the panel on screen long enough for the exit animation.
             let item = DispatchWorkItem { [weak self] in
                 self?.stopMouseSync()
@@ -561,7 +597,8 @@ final class HUDPanel: NSObject {
 
     // MARK: - Context menu
 
-    private func buildContextMenu() -> NSMenu {
+    /// Internal (not private) so the selftest can pin the menu's contents.
+    func buildContextMenu() -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
 
@@ -615,29 +652,6 @@ final class HUDPanel: NSObject {
 
         menu.addItem(.separator())
 
-        let position = NSMenuItem(title: "Position", action: nil, keyEquivalent: "")
-        let positionMenu = NSMenu()
-        let current = AppConfig.shared.hudPosition
-        for preset in HUDPosition.presets {
-            let item = NSMenuItem(
-                title: preset.displayName, action: #selector(selectPosition(_:)),
-                keyEquivalent: "")
-            item.target = self
-            item.representedObject = preset.rawValue
-            item.state = current == preset ? .on : .off
-            positionMenu.addItem(item)
-        }
-        if current == .custom {
-            positionMenu.addItem(.separator())
-            let custom = NSMenuItem(
-                title: HUDPosition.custom.displayName, action: nil, keyEquivalent: "")
-            custom.isEnabled = false
-            custom.state = .on
-            positionMenu.addItem(custom)
-        }
-        position.submenu = positionMenu
-        menu.addItem(position)
-
         // Microphone choice, mirroring Settings → Dictation (user ask: pick
         // the mic straight from the pill, e.g. keep the MacBook mic while
         // AirPods are connected).
@@ -669,23 +683,18 @@ final class HUDPanel: NSObject {
         mic.submenu = micMenu
         menu.addItem(mic)
 
-        let keep = NSMenuItem(
-            title: "Keep on Screen When Idle", action: #selector(toggleAlwaysVisible),
-            keyEquivalent: "")
-        keep.target = self
-        keep.state = AppConfig.shared.hudAlwaysVisible ? .on : .off
-        menu.addItem(keep)
-
         menu.addItem(.separator())
 
-        let history = NSMenuItem(
-            title: "History…", action: #selector(openHistoryAction), keyEquivalent: "")
-        history.target = self
-        menu.addItem(history)
-        let settings = NSMenuItem(
-            title: "Settings…", action: #selector(openSettingsAction), keyEquivalent: "")
-        settings.target = self
-        menu.addItem(settings)
+        // Placement has no menu any more: dragging the pill is the one way
+        // to move it (the drop persists `hudPosition = .custom`).
+        let open = NSMenuItem(
+            title: "Open Velora", action: #selector(openMainAction), keyEquivalent: "")
+        open.target = self
+        menu.addItem(open)
+        let close = NSMenuItem(
+            title: "Close Pill", action: #selector(closePill), keyEquivalent: "")
+        close.target = self
+        menu.addItem(close)
 
         menu.addItem(.separator())
         // An escape hatch that works even if the menubar icon is hidden or
@@ -726,18 +735,15 @@ final class HUDPanel: NSObject {
         pasteboard.setString(box.record.final, forType: .string)
     }
 
-    @objc private func openHistoryAction() {
-        menuHooks?.openHistory()
+    @objc private func openMainAction() {
+        menuHooks?.openMain()
     }
 
-    @objc private func openSettingsAction() {
-        menuHooks?.openSettings()
-    }
-
-    @objc private func selectPosition(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let preset = HUDPosition(rawValue: raw) else { return }
-        AppConfig.shared.hudPosition = preset
+    /// "Close Pill": flips "Show pill" off. The prefs notification reaches
+    /// `applyPreferences`, which orders the panel out; the menubar's "Show
+    /// Pill" checkbox and Settings › General bring it back.
+    @objc private func closePill() {
+        AppConfig.shared.hudVisible = false
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
     }
 
@@ -748,10 +754,6 @@ final class HUDPanel: NSObject {
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
     }
 
-    @objc private func toggleAlwaysVisible() {
-        AppConfig.shared.hudAlwaysVisible.toggle()
-        NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
-    }
 }
 
 /// Memoizes the HUD's interactive hit rect, recomputing only when its key

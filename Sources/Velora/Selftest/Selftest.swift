@@ -140,6 +140,7 @@ enum Selftest {
         testMeetingEndWatch()
         testMinutesSavedDefinition()
         testShareCardPrivacy()
+        testJournalAndStatsPresentation()
         testControlProtocol()
         testControlRouter()
         testLocalAgentAccessRevocationSignal()
@@ -148,7 +149,9 @@ enum Selftest {
         testLocalControlSocket()
         testHUDGeometry()
         testHUDPerformance()
-        testSettingsSidebar()
+        testShellNavigation()
+        testPillVisibilitySetting()
+        testShellMenus()
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
         testAudioCaptureRequiresPCM()
@@ -4545,6 +4548,130 @@ enum Selftest {
                "the rendered share card has exportable image data")
     }
 
+    // MARK: - History journal + Stats presentation
+
+    /// Pure maths behind the journal headings and the Stats pane: range
+    /// windows against a fixed reference date, day labels, the "words in
+    /// <range>" headline, and top-app shares.
+    private static func testJournalAndStatsPresentation() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/London")!
+        // Tuesday 8 September 2026, 14:30 local.
+        let now = calendar.date(from: DateComponents(
+            year: 2026, month: 9, day: 8, hour: 14, minute: 30))!
+        func day(_ offset: Int, hour: Int = 9) -> Date {
+            let base = calendar.date(byAdding: .day, value: -offset, to: now)!
+            return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: base)!
+        }
+
+        // Range windows: local midnight `dayCount - 1` days back, matching
+        // the store's SQL `daysBack` 0 / 6 / 29 / nil.
+        expect(StatsRange.today.start(now: now, calendar: calendar) == calendar.startOfDay(for: now),
+               "today's window starts at local midnight")
+        expect(StatsRange.sevenDays.start(now: now, calendar: calendar) == day(6, hour: 0),
+               "7-day window starts 6 days back at midnight")
+        expect(StatsRange.thirtyDays.start(now: now, calendar: calendar) == day(29, hour: 0),
+               "30-day window starts 29 days back at midnight")
+        expect(StatsRange.allTime.start(now: now, calendar: calendar) == nil,
+               "all time has no window start")
+        let sevenStart = StatsRange.sevenDays.start(now: now, calendar: calendar)!
+        expect(day(6, hour: 0) >= sevenStart && day(7, hour: 23) < sevenStart,
+               "the 7-day window is inclusive of its first day and excludes the day before")
+
+        // Journal day labels.
+        expect(HistoryJournal.dayLabel(for: day(0, hour: 1), now: now, calendar: calendar) == "Today",
+               "same local day → Today")
+        expect(HistoryJournal.dayLabel(for: day(1, hour: 23), now: now, calendar: calendar) == "Yesterday",
+               "previous local day → Yesterday")
+        let older = HistoryJournal.dayLabel(for: day(2), now: now, calendar: calendar)
+        expect(older != "Today" && older != "Yesterday" && older.contains("6"),
+               "older days read as weekday + date, got \(older)")
+        expect(HistoryJournal.dayKey(for: day(0, hour: 1), calendar: calendar)
+                == HistoryJournal.dayKey(for: day(0, hour: 23), calendar: calendar),
+               "records on one local day share a bucket")
+        expect(HistoryJournal.dayMeta(count: 26, words: 2_217, durationMs: 14 * 60_000)
+                == "26 dictations · 2,217 words · 14 min",
+               "day meta joins count, words and duration")
+        expect(HistoryJournal.dayMeta(count: 1, words: 1, durationMs: 0) == "1 dictation · 1 word",
+               "day meta singularises and drops a zero duration")
+
+        // Entry meta and typography hints.
+        var record = dictation(daysAgo: 0, words: 33, durationMs: 15_800, mode: "Default")
+        expect(HistoryJournal.entryMeta(record) == "Default · 33 words · 15.8 s",
+               "entry meta without latency, got \(HistoryJournal.entryMeta(record))")
+        record.finalizationMs = 900
+        expect(HistoryJournal.entryMeta(record).hasSuffix("· ready in 900 ms"),
+               "entry meta appends the recorded latency")
+        expect(HistoryJournal.isCodeMode("Code/Terminal") && HistoryJournal.isCodeMode("terminal")
+                && !HistoryJournal.isCodeMode("Email"),
+               "terminal/code modes get the mono face")
+        expect(HistoryJournal.footer(monthCount: 1_204, retentionDays: 180)
+                == "1,204 this month · audio kept for 6 months",
+               "footer phrases retention in whole months")
+        expect(HistoryJournal.footer(monthCount: 3, retentionDays: 0) == "3 this month",
+               "footer drops the retention clause when clips aren't kept")
+
+        // Headline wording per range.
+        expect(StatsHeadline.words(14_860, range: .thirtyDays) == "14,860 words in the last 30 days",
+               "30-day headline")
+        expect(StatsHeadline.words(1, range: .today) == "1 word today", "today headline singular")
+        expect(StatsHeadline.words(320, range: .sevenDays) == "320 words this week", "7-day headline")
+        expect(StatsHeadline.words(0, range: .allTime) == "0 words all time", "all-time headline")
+        expect(StatsHeadline.speaking(spokenMs: 161 * 60_000, minutesSaved: 109)
+                == "2 h 41 m of speaking, about 1 h 49 m faster than typing.",
+               "speaking sub-line with the saving")
+        expect(StatsHeadline.speaking(spokenMs: 45_000, minutesSaved: 0) == "45 s of speaking.",
+               "speaking sub-line without a saving")
+
+        // Top-app shares: percentages are of the whole range, so the shown
+        // four never sum past 100 and equal 100 when they are the whole.
+        let even = (1...4).map { HistoryStore.BreakdownSlice(name: "App \($0)", count: 1, words: 250) }
+        expect(StatsTopApps.shares(even).map(\.percent) == [25, 25, 25, 25],
+               "four equal apps split 100 evenly")
+        let five = [
+            HistoryStore.BreakdownSlice(name: "Slack", count: 1, words: 500),
+            HistoryStore.BreakdownSlice(name: "Notes", count: 1, words: 300),
+            HistoryStore.BreakdownSlice(name: "Mail", count: 1, words: 100),
+            HistoryStore.BreakdownSlice(name: "Safari", count: 1, words: 60),
+            HistoryStore.BreakdownSlice(name: "Terminal", count: 1, words: 40),
+        ]
+        let shares = StatsTopApps.shares(five)
+        expect(shares.count == 4 && shares.first?.name == "Slack" && shares.first?.percent == 50,
+               "top apps are the four biggest, ranked")
+        expect(shares.map(\.percent).reduce(0, +) == 96,
+               "shown percentages leave room for the apps below the cut")
+        expect(StatsTopApps.shares([]).isEmpty, "no words → no shares")
+
+        // Range detail: hour buckets and nearest-rank latency percentiles.
+        let rows = (0..<20).map { i -> DictationRecord in
+            var r = dictation(daysAgo: 0, words: 10, app: i % 2 == 0 ? "Slack" : "Notes")
+            r.finalizationMs = (i + 1) * 100
+            return r
+        }
+        let detail = StatsRangeDetail.build(records: rows, calendar: calendar)
+        expect(detail.readyMedianMs == 1_000 && detail.readySlowestMs == 1_900,
+               "median and slowest-5% are nearest-rank, got \(String(describing: detail.readyMedianMs)) / \(String(describing: detail.readySlowestMs))")
+        expect(detail.hourlyWords.reduce(0, +) == 200 && detail.apps.count == 2,
+               "hour buckets hold every word and apps are split")
+        expect(StatsRangeDetail.percentile([], 0.5) == nil, "no samples → no percentile")
+
+        // Chart series shape per range.
+        let insights = HistoryStore.Insights()
+        expect(StatsSeries.bars(range: .today, insights: insights, hourlyWords: detail.hourlyWords,
+                                now: now, calendar: calendar).count == 24,
+               "today charts 24 hours")
+        expect(StatsSeries.bars(range: .sevenDays, insights: insights, hourlyWords: [],
+                                now: now, calendar: calendar).count == 7,
+               "7 days charts 7 days")
+        expect(StatsSeries.bars(range: .allTime, insights: insights, hourlyWords: [],
+                                now: now, calendar: calendar).count == 12,
+               "all time charts 12 weeks")
+        let empty = StatsSeries.bars(range: .thirtyDays, insights: insights, hourlyWords: [],
+                                     now: now, calendar: calendar)
+        expect(StatsSeries.bestCaption(bars: empty, range: .thirtyDays) == nil,
+               "no words → no best-day caption")
+    }
+
     // MARK: - Private meeting memory
 
     private static func testMeetingStore() {
@@ -7207,43 +7334,110 @@ enum Selftest {
         }
     }
 
-    // MARK: - Settings sidebar
+    // MARK: - Shell navigation
 
-    private static func testSettingsSidebar() {
-        let listed = SettingsTab.sidebarGroups.flatMap { $0 }
+    private static func testShellNavigation() {
         expect(
-            listed.count == SettingsTab.allCases.count && Set(listed).count == listed.count
-                && Set(listed) == Set(SettingsTab.allCases),
-            "every settings pane appears in the sidebar exactly once")
+            MainPane.allCases == [.home, .history, .stats, .meetings, .dictionary, .modes],
+            "the main window sidebar runs Home, History, Stats, Meetings, Dictionary, Modes")
         expect(
-            listed.first == .general && listed.last == .about,
-            "the sidebar starts at General and ends at About")
+            SettingsTab.allCases == [.general, .dictation, .shortcuts, .models, .advanced],
+            "the Settings rail runs General, Dictation, Shortcuts, Models, Advanced")
+        expect(
+            Set(MainPane.allCases.map(\.symbol)).count == MainPane.allCases.count
+                && Set(SettingsTab.allCases.map(\.symbol)).count == SettingsTab.allCases.count,
+            "every sidebar row has its own symbol")
+        expect(
+            MainWindowSelection().current == .home && SettingsWindowSelection().current == .general,
+            "fresh windows open on Home and General")
+    }
 
-        // Sidebar search: title + control-label keywords, all tokens must hit.
-        expect(
-            SettingsTab.filteredGroups(query: "") == SettingsTab.sidebarGroups,
-            "an empty query shows the full sidebar")
-        expect(
-            SettingsTab.general.matches(query: "volume")
-                && SettingsTab.general.matches(query: "PILL"),
-            "General is findable by its control labels, case-insensitively")
-        expect(
-            SettingsTab.meetings.matches(query: "speakers")
-                && SettingsTab.shortcuts.matches(query: "hold to talk"),
-            "panes are findable by what their controls do")
-        expect(
-            SettingsTab.general.matches(query: "sound volume"),
-            "multi-token queries AND together")
-        expect(
-            !SettingsTab.modes.matches(query: "volume"),
-            "keywords are per-pane, not global")
-        expect(
-            SettingsTab.filteredGroups(query: "qzxv").isEmpty,
-            "a garbage query filters everything out (sidebar shows No matches)")
-        let updates = SettingsTab.filteredGroups(query: "updates").flatMap { $0 }
-        expect(
-            updates.contains(.general) && updates.contains(.about),
-            "\"updates\" finds both homes of the update controls")
+    // MARK: - Pill visibility
+
+    /// `hudVisible` ("Show pill") defaults on, survives the portable settings
+    /// file both ways, and documents written before the key decode as on.
+    private static func testPillVisibilitySetting() {
+        expect(SettingsDocument.defaults.settings.hud.visible, "the pill is shown by default")
+
+        var document = SettingsDocument.defaults
+        document.settings.hud.visible = false
+        do {
+            let data = try SettingsDocumentCodec.encode(document)
+            let decoded = try SettingsDocumentCodec.decode(data)
+            expect(!decoded.settings.hud.visible, "a closed pill round-trips through the settings file")
+            expect(try AppConfig.portableSettings(from: data).hud.visible == false,
+                   "a closed pill survives the portable export/import path")
+
+            var root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+            var settings = root["settings"] as? [String: Any] ?? [:]
+            var hud = settings["hud"] as? [String: Any] ?? [:]
+            hud.removeValue(forKey: "visible")
+            settings["hud"] = hud
+            root["settings"] = settings
+            let legacy = try JSONSerialization.data(withJSONObject: root)
+            expect(try SettingsDocumentCodec.decode(legacy).settings.hud.visible,
+                   "a settings file written before Show pill decodes as shown")
+        } catch {
+            expect(false, "pill visibility round-trip threw \(error)")
+        }
+    }
+
+    // MARK: - Menubar + pill menus
+
+    /// The menubar and the pill's right-click menu after the one-window
+    /// restructure: "Open Velora" and "Show Pill" replace the per-pane
+    /// entries; the pill closes from its own menu and no longer repositions.
+    private static func testShellMenus() {
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-menu-selftest-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+        let history = HistoryStore(
+            url: fixtureRoot.appendingPathComponent("history.sqlite3"),
+            removeArchivedClip: { _ in })
+
+        let statusMenu = NSMenu()
+        // Held in locals: the menu items' targets are weak, so a temporary
+        // controller would be gone before the assertions read the items.
+        let statusController = StatusItemController(history: history)
+        statusController.buildMenu(into: statusMenu)
+        let statusTitles = statusMenu.items.map(\.title)
+        expect(statusTitles.contains("Open Velora"), "the menubar opens the main window")
+        expect(statusTitles.contains("Show Pill"), "the menubar toggles the pill")
+        expect(statusTitles.contains("Settings…"), "the menubar keeps Settings…")
+        expect(!statusTitles.contains("Recent Transcriptions"),
+               "recent transcriptions left the menubar (they live on the pill and in History)")
+        expect(!statusTitles.contains("History…") && !statusTitles.contains("Meetings…")
+                && !statusTitles.contains("Setup Assistant…"),
+               "per-pane entries left the menubar")
+        let showPill = statusMenu.items.first { $0.title == "Show Pill" }
+        expect(showPill?.state == (AppConfig.shared.hudVisible ? .on : .off),
+               "Show Pill reflects the stored setting")
+
+        let pillPanel = HUDPanel()
+        let pillMenu = pillPanel.buildContextMenu()
+        let pillTitles = pillMenu.items.map(\.title)
+        expect(pillTitles.contains("Close Pill"), "the pill closes from its own menu")
+        expect(pillTitles.contains("Open Velora"), "the pill opens the main window")
+        expect(!pillTitles.contains("Position") && !pillTitles.contains("Keep on Screen When Idle")
+                && !pillTitles.contains("History…") && !pillTitles.contains("Settings…"),
+               "position, idle and per-pane entries left the pill menu")
+
+        // The guarantee behind "Close Pill": no state change orders the
+        // panel front while closed, and "Show Pill" mid-session restores it.
+        let savedVisible = AppConfig.shared.hudVisible
+        defer { AppConfig.shared.hudVisible = savedVisible }
+        AppConfig.shared.hudVisible = false
+        pillPanel.transition(to: .listening)
+        expect(!pillPanel.isOnScreen, "a closed pill stays hidden while listening")
+        pillPanel.transition(to: .hidden(.cancel))
+        pillPanel.transition(to: .standby)
+        expect(!pillPanel.isOnScreen, "a closed pill stays hidden in standby")
+        pillPanel.transition(to: .listening)
+        AppConfig.shared.hudVisible = true
+        pillPanel.applyPreferences()
+        expect(pillPanel.isOnScreen, "Show Pill restores a session that was closed mid-way")
+        pillPanel.transition(to: .hidden(.cancel))
     }
 
     // MARK: - Microphone selection

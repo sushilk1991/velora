@@ -27,75 +27,9 @@ struct MeetingsSettingsView: View {
     private var selected: MeetingRecord? { selectedRecord }
 
     var body: some View {
-        // One grouped form for both halves — the pre-0.9 layout stacked a
-        // fixed-height Form above a hand-built panel, which clipped the last
-        // settings row mid-text and gave the pane two competing designs.
+        // The preference rows live in Settings › Advanced › Meetings
+        // (`MeetingPreferenceRows`); this pane is the meeting memory only.
         Form {
-            Section {
-                Toggle("Suggest recording when a call is detected", isOn: $model.meetingSuggestions)
-                Toggle("Use Calendar for meeting suggestions", isOn: $model.meetingCalendar)
-                    .onChange(of: model.meetingCalendar) { _, enabled in
-                        if enabled && coordinator.calendarAuthorization != .fullAccess {
-                            coordinator.requestCalendarAccess { granted in
-                                if !granted { model.meetingCalendar = false }
-                            }
-                        }
-                    }
-                Picker("Keep meeting audio", selection: $model.meetingAudioRetentionDays) {
-                    Text("7 days").tag(7)
-                    Text("30 days").tag(30)
-                    Text("90 days").tag(90)
-                    Text("1 year").tag(365)
-                }
-                .onChange(of: model.meetingAudioRetentionDays) { _, _ in
-                    coordinator.pruneAudio()
-                }
-                Toggle(isOn: $model.meetingDiarization) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Improve remote speech detection")
-                        Text("Skips long silences while keeping the transcript honestly labeled Me and Them. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            } footer: {
-                SettingsFooter("Detection checks local call-app and microphone state and, with Accessibility enabled, recognized meeting addresses and titles in browser windows. Meeting addresses become a temporary private identity and are never logged or saved. Every recording still needs Start Meeting Notes. Native-app calls can stop when their own microphone closes; uncertain browser endings ask first. Transcripts and notes stay until you delete them; this setting removes only audio.")
-            }
-
-            Section("Notes style") {
-                VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                    ZStack(alignment: .topLeading) {
-                        if model.meetingNotesPrompt.isEmpty {
-                            Text(MeetingNotesPrompt.builtinGuidance)
-                                .font(.callout)
-                                .foregroundStyle(.tertiary)
-                                .padding(.top, 8)
-                                .padding(.leading, 5)
-                                .allowsHitTesting(false)
-                        }
-                        TextEditor(text: $model.meetingNotesPrompt)
-                            .font(.callout)
-                            .frame(minHeight: 72, maxHeight: 160)
-                            .scrollContentBackground(.hidden)
-                    }
-                    HStack(alignment: .top) {
-                        Text("Shapes how notes read — tone, focus, structure. Notes always come back as a summary, decisions, and action items, generated on this Mac.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        if model.meetingNotesPrompt.isEmpty {
-                            Button("Customize") {
-                                model.meetingNotesPrompt = MeetingNotesPrompt.builtinGuidance
-                            }
-                            .controlSize(.small)
-                        } else {
-                            Button("Use Default") { model.meetingNotesPrompt = "" }
-                                .controlSize(.small)
-                        }
-                    }
-                }
-            }
-
             Section("Meeting memory") {
                 // State + primary action live in a ROW, not the section
                 // header — rows are guaranteed clickable, and header text
@@ -626,5 +560,104 @@ struct MeetingsSettingsView: View {
         processor.cancelAndForget(meetingID: record.id)
         store.delete(meetingID: record.id)
         reload()
+    }
+}
+
+// MARK: - Preferences (Settings › Advanced › Meetings)
+
+/// The meeting preference rows, hosted inside the Advanced form's MEETINGS
+/// section. Calendar access is requested on the spot when the toggle turns
+/// on; retention changes prune audio immediately.
+struct MeetingPreferenceRows: View {
+    @ObservedObject var model: SettingsModel
+    @ObservedObject var coordinator: MeetingCoordinator
+
+    static let footer = "Detection checks local call-app and microphone state and, with Accessibility enabled, recognized meeting addresses and titles in browser windows. Meeting addresses become a temporary private identity and are never logged or saved. Every recording still needs Start Meeting Notes. Transcripts and notes stay until you delete them; the retention setting removes only audio."
+
+    var body: some View {
+        Toggle("Suggest recording when a call is detected", isOn: $model.meetingSuggestions)
+        Toggle("Name meetings from Calendar", isOn: $model.meetingCalendar)
+            .onChange(of: model.meetingCalendar) { _, enabled in
+                if enabled && coordinator.calendarAuthorization != .fullAccess {
+                    coordinator.requestCalendarAccess { granted in
+                        if !granted { model.meetingCalendar = false }
+                    }
+                }
+            }
+        Picker("Keep meeting audio", selection: $model.meetingAudioRetentionDays) {
+            Text("7 days").tag(7)
+            Text("30 days").tag(30)
+            Text("90 days").tag(90)
+            Text("1 year").tag(365)
+        }
+        .onChange(of: model.meetingAudioRetentionDays) { _, _ in
+            coordinator.pruneAudio()
+        }
+        Toggle(isOn: $model.meetingDiarization) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Improve remote speech detection")
+                Text("Skips long silences while keeping the transcript honestly labeled Me and Them. Runs on this Mac; downloads two small voice models (~46 MB) on the first meeting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// The notes-prompt editor sheet ("Edit…" next to Notes prompt). An empty
+/// prompt means the built-in guidance, shown as the placeholder.
+///
+///     ┌ Notes prompt ─────────────────────┐
+///     │ ┌───────────────────────────────┐ │
+///     │ │ Create faithful meeting notes…│ │
+///     │ └───────────────────────────────┘ │
+///     │ caption           [Use Default] [Done] │
+///     └───────────────────────────────────┘
+struct MeetingNotesPromptEditor: View {
+    @ObservedObject var model: SettingsModel
+    @Environment(\.dismiss) private var dismiss
+
+    private static let size = CGSize(width: 520, height: 320)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+            Text("Notes prompt")
+                .font(.headline)
+            ZStack(alignment: .topLeading) {
+                if model.meetingNotesPrompt.isEmpty {
+                    Text(MeetingNotesPrompt.builtinGuidance)
+                        .font(.callout)
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 8)
+                        .padding(.leading, 5)
+                        .allowsHitTesting(false)
+                }
+                TextEditor(text: $model.meetingNotesPrompt)
+                    .font(.callout)
+                    .scrollContentBackground(.hidden)
+            }
+            .background(RoundedRectangle(cornerRadius: VeloraRadius.tile).fill(VeloraPanel.card))
+            .overlay(RoundedRectangle(cornerRadius: VeloraRadius.tile).strokeBorder(Color(.separatorColor)))
+            HStack(alignment: .top) {
+                Text("Shapes how notes read — tone, focus, structure. Notes always come back as a summary, decisions, and action items, generated on this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if model.meetingNotesPrompt.isEmpty {
+                    Button("Customize") {
+                        model.meetingNotesPrompt = MeetingNotesPrompt.builtinGuidance
+                    }
+                } else {
+                    Button("Use Default") { model.meetingNotesPrompt = "" }
+                }
+                Button("Done") {
+                    model.flushMeetingNotesPrompt()
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(VeloraSpacing.xl)
+        .frame(width: Self.size.width, height: Self.size.height)
     }
 }
