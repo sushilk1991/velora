@@ -1126,9 +1126,11 @@ async def test_queue_overflow_aborts_session(engine, monkeypatch):
     eng, sock = engine
     monkeypatch.setattr(server_mod, "QUEUE_MAX_FRAMES", 3)
     monkeypatch.setattr(server_mod, "MAX_DROPPED_FRAMES", 5)
+    feed_started = threading.Event()
     release = threading.Event()
 
     def stuck_feed(chunk):  # simulate STT far below realtime
+        feed_started.set()
         release.wait(10)
         return None
 
@@ -1136,7 +1138,12 @@ async def test_queue_overflow_aborts_session(engine, monkeypatch):
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({"cmd": "start", "session": "s-of", "context": {}})
-    for _ in range(12):  # capacity (3) + in-flight (1) + drops past threshold
+    # Pin one frame in flight before the burst. The socket reader consumes
+    # every buffered frame without yielding, so without this wait the worker
+    # may not have dequeued anything yet and the accepted count is one lower.
+    await client.send_audio(AUDIO)
+    assert await asyncio.to_thread(feed_started.wait, 2)
+    for _ in range(11):  # capacity (3) + drops past threshold
         await client.send_audio(AUDIO)
 
     evt = await client.recv(timeout=5)
