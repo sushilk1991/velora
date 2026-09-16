@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf8f5" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#161311" media="(prefers-color-scheme: dark)">
-  <meta name="description" content="Private voice typing for Mac. Hold a key, talk like you talk, and clean text lands in any app. Speech recognition and cleanup run on your Mac — free, open source, no account.">
+  <meta name="description" content="Free, open-source voice typing for Mac. Hold a key, say the messy version, and clean text lands in any app. On-device, so after setup it works in airplane mode.">
   <meta property="og:title" content="Velora — private voice typing for Mac">
-  <meta property="og:description" content="Talk like you talk. It reads like you wrote it. Free, open source, and nothing you say leaves your Mac.">
+  <meta property="og:description" content="Say the messy version. It types the clean one. Free, open source, and after the one-time setup, dictation works in airplane mode.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://sushilk1991.github.io/velora/">
   <meta property="og:image" content="https://sushilk1991.github.io/velora/assets/og.png">
@@ -39,7 +39,7 @@
       "@context": "https://schema.org",
       "@type": "SoftwareApplication",
       "name": "Velora",
-      "description": "Private voice typing for Mac. Hold a key, talk, and clean text lands in any app. Speech recognition and cleanup run on your Mac.",
+      "description": "Private voice typing for Mac. Hold a key, say the messy version, and clean text lands in any app. Speech recognition and cleanup run on your Mac.",
       "applicationCategory": "UtilitiesApplication",
       "operatingSystem": "macOS 14 or later",
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -98,11 +98,12 @@
       <div class="hero-scene" data-voice-scene="hero" aria-hidden="true"></div>
       <div class="hero-copy">
         <p class="eyebrow reveal" style="--reveal-order: 0"><span class="eyebrow-dot" aria-hidden="true"></span> Private voice typing for Mac</p>
-        <h1 class="reveal" style="--reveal-order: 1" data-split>Talk like you talk.<br><em>It reads like you wrote it<span class="stop">.</span></em></h1>
+        <h1 class="reveal" style="--reveal-order: 1" data-split>Say the messy version.<br><em>It types the clean one<span class="stop">.</span></em></h1>
         <p class="hero-lede reveal" style="--reveal-order: 2">
-          Hold a key and speak: ums, pauses, changed minds and all. Velora turns it
-          into clean, formatted text in whatever app you’re in. Every word is
-          recognised and cleaned up on your Mac, so nothing you say is sent anywhere.
+          Hold a key and talk the way you actually talk: ums, pauses, “wait, no,
+          Thursday.” Velora turns it into clean text in whatever app you’re in. The
+          models that hear you and tidy you up live on your Mac, so after the
+          one-time setup, dictation works in airplane mode.
         </p>
         <div class="hero-actions reveal" style="--reveal-order: 3">
           <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
@@ -112,7 +113,7 @@
         </div>
         <ul class="hero-facts reveal" style="--reveal-order: 4" aria-label="Velora facts">
           <li>Free &amp; open source</li>
-          <li>No account. No cloud.</li>
+          <li>No account. No Velora server.</li>
           <li>Apple Silicon · macOS 14+</li>
         </ul>
       </div>
@@ -126,7 +127,7 @@
           </div>
 
           <div class="demo-stage" data-demo-stage>
-            <p class="demo-caption" data-demo-caption>Filler out. Self-correction applied. Your meaning intact.</p>
+            <p class="demo-caption" data-demo-caption>The um is gone. The “actually” got applied. Meaning untouched.</p>
 
             <div class="demo-body">
               <div class="demo-nojs">
@@ -163,18 +164,19 @@
 
     <aside class="wire" aria-label="Network activity during dictation">
       <div class="wire-inner">
-        <span class="wire-label">While you dictate, this leaves your Mac</span>
+        <span class="wire-label">What leaves your Mac while you dictate</span>
         <span class="wire-readout">
           <span><b>0 B</b> audio</span>
           <span><b>0 B</b> transcript</span>
           <span><b>no</b> account</span>
           <span><b>no</b> telemetry</span>
         </span>
+        <span class="wire-note">There’s no toggle for this. There’s nothing on the other end.</span>
       </div>
     </aside>
 
     <div class="apps" aria-label="Velora works in every Mac app">
-      <p class="apps-label">Works wherever your cursor is</p>
+      <p class="apps-label">Works wherever your cursor is blinking.</p>
       <div class="apps-track" data-marquee tabindex="0" role="group" aria-label="Apps Velora works in. The list scrolls; focus or hover to pause it.">
         <ul class="apps-list">
           <li>Mail</li><li>Slack</li><li>Notes</li><li>VS Code</li><li>Chrome</li><li>Messages</li><li>Notion</li><li>Terminal</li><li>Obsidian</li><li>Gmail</li><li>WhatsApp</li><li>Xcode</li><li>Pages</li><li>Linear</li><li>Cursor</li><li>Safari</li><li>Discord</li><li>Figma</li>
@@ -188,10 +190,10 @@
     <section class="section workflow" id="how-it-works" data-index="01">
       <div class="section-head reveal">
         <p class="eyebrow">The mechanic</p>
-        <h2 data-split>One key. Nothing to learn.</h2>
+        <h2 data-split>One key. Zero commands to memorise.</h2>
         <p class="section-lede">
-          You never say “new line” or “comma.” You hold a key, you talk, you let go.
-          Everything between those two moments happens on your machine.
+          You never say “comma” or “new line.” You hold a key, you talk, you let go.
+          Everything between those two moments happens on your Mac.
         </p>
       </div>
 
@@ -199,7 +201,7 @@
         <li class="reveal" style="--reveal-order: 0">
           <span class="step-index" aria-hidden="true">01</span>
           <h3>Hold</h3>
-          <p>Right Option by default, or any key you like. A small pill appears by your cursor and never steals focus from what you’re typing into. It stays when you close the Velora window; hide it from its right-click menu or the menubar.</p>
+          <p>Right Option by default, or any key you want. A small pill shows up near your cursor and never steals focus from what you’re typing into. Close the Velora window and the pill stays; hide it from its right-click menu or the menubar.</p>
           <span class="step-art step-art-key" aria-hidden="true"><b>⌥</b></span>
         </li>
         <li class="reveal" style="--reveal-order: 1">
@@ -211,7 +213,7 @@
         <li class="reveal" style="--reveal-order: 2">
           <span class="step-index" aria-hidden="true">03</span>
           <h3>Release</h3>
-          <p>Cleanup runs locally and the text lands at your cursor. It stays on the clipboard too, so nothing is lost if an app refuses the paste.</p>
+          <p>Cleanup runs on your Mac and the text lands at your cursor. It’s on your clipboard too, so if an app refuses the paste, ⌘V finishes the job.</p>
           <span class="step-art step-art-field" aria-hidden="true"><em data-typed="lands right here">lands right here</em><b></b></span>
         </li>
       </ol>
@@ -222,10 +224,11 @@
         <p class="eyebrow">Destination-aware</p>
         <h2 data-split>The app you’re in decides the format.</h2>
         <p class="section-lede">
-          Velora reads which app is in front (and in Safari, Chrome or Firefox, which
-          site) and switches its rules. Slack gets a message. Gmail gets paragraphs.
-          Notion gets a note. Your terminal gets the command back verbatim, with no
-          trailing period to break it.
+          You don’t talk to your group chat the way you email your landlord, and
+          Velora knows the difference. It checks which app is in front (and in
+          Safari, Chrome or Firefox, which site) and switches its rules. Slack gets a
+          message. Gmail gets paragraphs. Notion gets a note. Your terminal gets the
+          command back exactly as you said it, with no trailing full stop to break it.
         </p>
       </div>
 
@@ -234,7 +237,7 @@
           <header><h3>Message</h3><span class="mode-app">Slack · Messages · WhatsApp</span></header>
           <p class="mode-said">“are we still on for thursday i can move things around if not”</p>
           <p class="mode-got">Are we still on for Thursday? I can move things around if not</p>
-          <p class="mode-rule">Terse. No invented greeting. A short line keeps its missing full stop.</p>
+          <p class="mode-rule">Terse. No invented “Hey!” A short line keeps its missing full stop.</p>
         </article>
 
         <article class="mode reveal" style="--reveal-order: 1">
@@ -255,7 +258,7 @@
           <header><h3>Code</h3><span class="mode-app">VS Code · Cursor · Terminal</span></header>
           <p class="mode-said">“git commit dash m fix the retry backoff”</p>
           <p class="mode-got"><code>git commit -m "fix the retry backoff"</code></p>
-          <p class="mode-rule">Verbatim. Nothing capitalised, no trailing period — a period breaks a shell command.</p>
+          <p class="mode-rule">Verbatim. Nothing capitalised, no trailing period, because a period breaks a shell command.</p>
         </article>
       </div>
     </section>
@@ -285,8 +288,8 @@
         <article class="tile tile-wide tile-action reveal" id="actions" style="--reveal-order: 1">
           <div class="tile-copy">
             <p class="tile-kicker">Action Mode</p>
-            <h3>Say what you want done. Keep working.</h3>
-            <p>Hold ⌃⇧A and say “message Priya on Slack that I’m running late.” Velora plans the steps on your Mac and carries them out in the app you’re in: a few at a time, reading what the window actually says, stopping rather than guessing. Install the open-source Cua Driver and it can drive another app in a background window while you stay in yours. Say “draft” and it leaves the message written but unsent.</p>
+            <h3>Say the errand. Keep doing your thing.</h3>
+            <p>Hold ⌃⇧A and say “message Priya on Slack that I’m running late.” Velora plans the steps on your Mac and carries them out in the app you’re in: a few at a time, reading what the window actually says, stopping instead of guessing. Install the open-source Cua Driver and it can drive another app in a background window while you stay in yours. Say “draft” and it writes the message but doesn’t send it.</p>
             <a class="text-link" href="features/action-mode.html">How Action Mode works <span class="link-glyph" aria-hidden="true">→</span></a>
           </div>
           <div class="action-demo" aria-hidden="true">
@@ -304,7 +307,7 @@
         <article class="tile tile-proof reveal" id="proofread" style="--reveal-order: 2">
           <p class="tile-kicker"><span class="kicker-new">New</span> Proofread</p>
           <h3>Fix the typos. Keep your voice.</h3>
-          <p>Select any text, press ⌃⇧G. Spelling, punctuation and grammar are fixed in place; your phrasing and the names in your dictionary are left alone. No microphone involved.</p>
+          <p>Select any text, press ⌃⇧G. Spelling, punctuation and grammar get fixed in place; your phrasing and the names in your dictionary are left alone. No microphone involved.</p>
           <a class="text-link" href="features/proofread.html">How Proofread works <span class="link-glyph" aria-hidden="true">→</span></a>
           <div class="proof-demo" aria-hidden="true">
             <p class="proof-text"><span class="proof-fix" data-was="Its">It’s</span> <span class="proof-fix" data-was="defintely">definitely</span> worth a look <span class="proof-fix" data-was="befor">before</span> Friday, <span class="proof-keep">Sushil</span> said.</p>
@@ -328,7 +331,7 @@
           <div class="tile-copy">
             <p class="tile-kicker">Meeting notes</p>
             <h3>Records the room. Never the screen.</h3>
-            <p>After you confirm — every time — Velora captures microphone and computer audio, keeps a visible recording indicator running, and writes a transcript and notes you can search locally. It captures audio only.</p>
+            <p>After you confirm, every time, Velora captures microphone and computer audio, keeps a visible recording indicator running, and writes a transcript and notes you can search on your Mac. Audio only.</p>
             <a class="text-link" href="features/meetings.html">How meeting notes work <span class="link-glyph" aria-hidden="true">→</span></a>
           </div>
           <div class="meeting-hud" aria-hidden="true">
@@ -342,7 +345,7 @@
         <article class="tile tile-music reveal" style="--reveal-order: 5">
           <p class="tile-kicker">AirPods, unharmed</p>
           <h3>Your music pauses itself.</h3>
-          <p>For direct dictation, Velora pauses supported music players and resumes only what it paused. Browser video is excluded from automatic pause and resume. Meeting capture leaves call audio running.</p>
+          <p>For direct dictation, Velora pauses supported music players and resumes only what it paused, so your AirPods don’t drop into crunchy call-quality audio mid-song. Browser video is excluded from automatic pause and resume. Meeting capture leaves call audio running.</p>
           <div class="media-demo" aria-hidden="true">
             <span class="album-art">V</span>
             <span class="media-copy"><b>Now playing</b><small>Paused for dictation</small><span class="media-progress"><i></i></span></span>
@@ -353,28 +356,28 @@
         <article class="tile tile-history reveal" style="--reveal-order: 6">
           <p class="tile-kicker">History</p>
           <h3>Nothing is thrown away.</h3>
-          <p>Every dictation keeps its raw transcript next to the cleaned result, searchable in the History pane, on your Mac. If cleanup got it wrong, the original is one click away.</p>
+          <p>Every dictation keeps its raw transcript next to the cleaned version, searchable in History, on your Mac. If cleanup got it wrong, the original is one click away.</p>
           <a class="text-link" href="features/history.html">How history works <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
 
         <article class="tile tile-lang reveal" style="--reveal-order: 7">
           <p class="tile-kicker">Languages</p>
           <h3><span class="big-number" data-count="99">99</span> languages, one model.</h3>
-          <p>The default speech model is Whisper large-v3-turbo — multilingual, including Hindi and Indian English. Set a language or let Velora detect it.</p>
+          <p>The default speech model is Whisper large-v3-turbo: multilingual, including Hindi and Indian English. Set a language or let Velora detect it.</p>
           <a class="text-link" href="features/languages.html">Languages &amp; models <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
 
         <article class="tile tile-dict reveal" style="--reveal-order: 8">
           <p class="tile-kicker">Personal dictionary</p>
           <h3>It learns your nouns.</h3>
-          <p>Names, products and jargon it heard wrong once get learned from your corrections and from words that keep coming up. Sync is optional and uses your own iCloud Drive.</p>
+          <p>Names, products and jargon it got wrong once are learned from your corrections and from words that keep showing up. Sync is optional and uses your own iCloud Drive.</p>
           <a class="text-link" href="features/dictionary.html">How the dictionary works <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
 
         <article class="tile tile-stats reveal" style="--reveal-order: 9">
           <p class="tile-kicker">Stats</p>
           <h3>See what you saved.</h3>
-          <p>Words dictated, speaking time, a 12-week streak heatmap and the apps you talk into most, computed on your Mac and shared only if you choose to.</p>
+          <p>Words dictated, speaking time, a 12-week streak heatmap and the apps you talk into most. Computed on your Mac, shared only if you export a card.</p>
           <div class="stats-demo" aria-hidden="true">
             <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
           </div>
@@ -387,8 +390,8 @@
         <p class="eyebrow">Everything, indexed</p>
         <h2 data-split>Every feature has its own page.</h2>
         <p class="section-lede">
-          No mystery-meat marketing. Each capability gets a full page: how it works,
-          the exact shortcuts, and the honest boundaries of what it will not do.
+          No mystery-meat marketing. Each feature gets a page with the exact
+          shortcut, what it does, and the fine print on what it won’t.
         </p>
       </div>
 
@@ -396,7 +399,7 @@
         <a class="findex" href="features/dictation.html">
           <span class="findex-num" aria-hidden="true">01</span>
           <h3>Hold-to-talk dictation</h3>
-          <p>Hold Right Option, talk, release. Clean text lands at your cursor in any Mac app.</p>
+          <p>Hold Right Option, talk, let go. Clean text lands at your cursor in any Mac app.</p>
           <span class="findex-arrow" aria-hidden="true">→</span>
         </a>
         <a class="findex" href="features/stream-typing.html">
@@ -408,7 +411,7 @@
         <a class="findex" href="features/action-mode.html">
           <span class="findex-num" aria-hidden="true">03</span>
           <h3>Action Mode</h3>
-          <p>⌃⇧A turns a spoken sentence into real steps in real apps — planned and run on your Mac.</p>
+          <p>⌃⇧A turns a spoken sentence into real steps in real apps, planned and run on your Mac.</p>
           <span class="findex-arrow" aria-hidden="true">→</span>
         </a>
         <a class="findex" href="features/proofread.html">
@@ -420,7 +423,7 @@
         <a class="findex" href="features/voice-edit.html">
           <span class="findex-num" aria-hidden="true">05</span>
           <h3>Voice Edit</h3>
-          <p>Select text, say the change, get it rewritten in place — with ⌘Z as the exit.</p>
+          <p>Select text, say the change, get it rewritten in place, with ⌘Z as the exit.</p>
           <span class="findex-arrow" aria-hidden="true">→</span>
         </a>
         <a class="findex" href="features/meetings.html">
@@ -438,7 +441,7 @@
         <a class="findex" href="features/dictionary.html">
           <span class="findex-num" aria-hidden="true">08</span>
           <h3>Personal dictionary</h3>
-          <p>Your names, products and jargon — learned from your corrections, synced only if you ask.</p>
+          <p>Your names, products and jargon, learned from your corrections, synced only if you ask.</p>
           <span class="findex-arrow" aria-hidden="true">→</span>
         </a>
         <a class="findex" href="features/history.html">
@@ -456,7 +459,7 @@
         <a class="findex" href="features/files.html">
           <span class="findex-num" aria-hidden="true">11</span>
           <h3>File transcription</h3>
-          <p>Drop audio or video on Velora — MP3, WAV, MOV, MP4 — and get a local transcript.</p>
+          <p>Open audio or video with Velora (MP3, WAV, MOV, MP4) and get a local transcript.</p>
           <span class="findex-arrow" aria-hidden="true">→</span>
         </a>
         <a class="findex" href="features/privacy.html">
@@ -472,11 +475,13 @@
       <div class="privacy-grid">
         <div class="privacy-copy reveal">
           <p class="eyebrow">Private by architecture</p>
-          <h2 data-split>Your audio has nowhere to go.</h2>
+          <h2 data-split>Your voice has nowhere to go.</h2>
           <p class="section-lede">
-            Most dictation tools promise privacy in a document you have to trust. Velora’s
-            speech recognition and cleanup have nowhere to send your audio, because the
-            models are sitting on your disk. The source is on GitHub if you would rather check.
+            Most dictation apps promise privacy in a document you have to trust. Velora’s
+            speech model and cleanup model are files on your disk, so there is no Velora
+            server for your audio to travel to. Turn on airplane mode after setup and
+            dictation keeps working, because the whole thing runs on your Mac. Three
+            things do use the network, and the ledger names them.
           </p>
           <a class="text-link" href="features/privacy.html">
             Read the privacy model <span class="link-glyph" aria-hidden="true">→</span>
@@ -497,6 +502,10 @@
             <dd>stay on the Mac</dd>
           </div>
           <div class="ledger-row is-local">
+            <dt>Screen context (window titles, text near your cursor)</dt>
+            <dd>stays on the Mac</dd>
+          </div>
+          <div class="ledger-row is-local">
             <dt>Accounts, telemetry, ads</dt>
             <dd>do not exist</dd>
           </div>
@@ -506,7 +515,7 @@
           </div>
           <div class="ledger-row is-net">
             <dt>Update checks</dt>
-            <dd>optional, can be turned off</dd>
+            <dd>GitHub, optional, can be turned off</dd>
           </div>
           <div class="ledger-row is-net">
             <dt>Dictionary sync</dt>
@@ -522,14 +531,14 @@
         <h2 data-split>Same job. Very different deals.</h2>
         <p class="section-lede">
           Dictation tools differ on three things: where your audio goes, what the
-          polish costs, and whether you can check. Here is the whole picture,
+          polish costs, and whether you can check. The table below covers all of it,
           including what the others do better.
         </p>
       </div>
 
       <div class="vs-scroll reveal">
         <table class="vs-table">
-          <caption>Checked August 2026 · full detail on the comparison pages</caption>
+          <caption>Checked September 2026 · full detail on the comparison pages</caption>
           <thead>
             <tr>
               <th scope="col"><span class="visually-hidden">Criterion</span></th>
@@ -565,7 +574,7 @@
               <th scope="row">AI cleanup of what you said</th>
               <td class="vs-velora"><span class="vs-mark vs-yes" aria-hidden="true">✓</span>Local LLM, included free</td>
               <td>In the cloud</td>
-              <td>Advanced models are Pro; cloud models bill your own API key</td>
+              <td>Whisper models free; other AI models are Pro or your own API key</td>
               <td><span class="vs-mark vs-no" aria-hidden="true">✗</span>None — raw transcription</td>
             </tr>
             <tr>
@@ -593,7 +602,7 @@
               <th scope="row">Platforms</th>
               <td class="vs-velora">Mac (Apple Silicon)</td>
               <td>Mac, Windows, iPhone, Android</td>
-              <td>Mac, Windows, iPhone</td>
+              <td>Mac, Windows, iPhone, Android</td>
               <td>Every Apple device</td>
             </tr>
           </tbody>
@@ -601,7 +610,7 @@
       </div>
       <p class="vs-foot reveal">
         The cloud quote is from Wispr Flow’s own data-controls page. Prices and claims
-        checked August 2026; corrections welcome —
+        checked September 2026; corrections welcome —
         <a href="https://github.com/sushilk1991/velora/issues">open an issue</a>.
       </p>
 
@@ -613,12 +622,12 @@
         </a>
         <a class="vs-card reveal" style="--reveal-order: 1" href="compare/superwhisper.html">
           <h3>Velora vs Superwhisper</h3>
-          <p>The closest competitor — also local-capable. The differences are the licence, the cleanup, and the price.</p>
+          <p>The closest competitor, and also local-capable. The differences are the licence, the cleanup, and the price.</p>
           <span class="text-link">Read the comparison <span class="link-glyph" aria-hidden="true">→</span></span>
         </a>
         <a class="vs-card reveal" style="--reveal-order: 2" href="compare/index.html">
           <h3>The whole field</h3>
-          <p>Wispr Flow, Superwhisper, Apple Dictation, and open-source FluidVoice — one honest matrix.</p>
+          <p>Wispr Flow, Superwhisper, Apple Dictation, and open-source FluidVoice, one honest matrix.</p>
           <span class="text-link">See every tool <span class="link-glyph" aria-hidden="true">→</span></span>
         </a>
       </div>
@@ -671,8 +680,8 @@
           <p class="section-lede">
             Download the signed, notarised app or install it with Homebrew. On first launch
             Velora asks for microphone, input-monitoring and accessibility permissions,
-            then downloads the models it needs — once. After that, dictation works
-            with the Wi-Fi off.
+            then downloads the models it needs, once. After that, dictation works
+            in airplane mode.
           </p>
           <div class="hero-actions">
             <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
@@ -707,11 +716,11 @@
       <div class="faq-list">
         <details class="reveal">
           <summary>Does Velora ever touch the network?</summary>
-          <div><p>Models download once during setup, and optional update checks contact GitHub. During dictation, speech recognition and cleanup run locally — your audio and transcript are not uploaded. Update checks can be turned off.</p></div>
+          <div><p>Three times, and never with your voice. The model download happens once, during setup. Optional update checks ask GitHub for the latest release and can be turned off in Settings. Optional dictionary sync, off by default, goes through your own iCloud Drive and carries confirmed terms only. During dictation, speech recognition and cleanup run on your Mac; your audio and transcript are not uploaded.</p></div>
         </details>
         <details class="reveal">
           <summary>Does it work offline?</summary>
-          <div><p>Yes. Once the models are downloaded, dictation, Stream Typing, Voice Edit, Proofread and meeting notes all work with no connection at all.</p></div>
+          <div><p>Yes. Once the models are downloaded, dictation, Stream Typing, Voice Edit, Proofread and meeting notes all work with no connection at all. Airplane mode is a fine way to check.</p></div>
         </details>
         <details class="reveal">
           <summary>What Mac do I need?</summary>
@@ -719,11 +728,15 @@
         </details>
         <details class="reveal">
           <summary>Is it really free?</summary>
-          <div><p>Yes. It is MIT-licensed and open source, with no account, no subscription, and no paid tier. There is nothing to upsell you because there is no server to pay for.</p></div>
+          <div><p>Yes. It’s MIT-licensed and open source, with no account, no subscription and no paid tier. There is nothing to upsell you to because there is no server to pay for.</p></div>
         </details>
         <details class="reveal">
           <summary>Which apps does it work in?</summary>
-          <div><p>Any Mac app with a text field: Velora pastes at your cursor, so Mail, Slack, Notes, VS Code, browsers and terminals all work. If an app refuses the paste, the text is on your clipboard.</p></div>
+          <div><p>Any Mac app with a text field. Velora pastes at your cursor, so Mail, Slack, Notes, VS Code, browsers and terminals all work. If an app refuses the paste, the text is on your clipboard.</p></div>
+        </details>
+        <details class="reveal">
+          <summary>Why not just use Apple’s built-in dictation?</summary>
+          <div><p>Apple Dictation types what it hears. Velora also cleans it up: filler out, “wait, no” applied, formatted for the app you’re in, your names spelled the way you spell them. And it keeps the raw transcript in History in case the cleanup gets clever.</p></div>
         </details>
         <details class="reveal">
           <summary>Is the iPhone app in the App Store?</summary>
@@ -749,7 +762,7 @@
             <span class="star-mark" aria-hidden="true">★</span> Star on GitHub
           </a>
         </div>
-        <p class="closing-note">Already using Velora? A star is how the next Mac user finds it.</p>
+        <p class="closing-note">Already using Velora? A star on GitHub is the entire marketing budget.</p>
       </div>
     </section>
   </main>

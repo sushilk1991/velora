@@ -12,8 +12,14 @@ Structure:
 - `features/*.html` — one page per capability, each ending in a "fine print"
   section that states the feature's honest boundaries.
 - `compare/*.html` — the full comparison matrix plus Wispr Flow and
-  Superwhisper deep dives. Claims are dated (checked August 2026) and sourced;
-  update them when competitors change pricing or architecture.
+  Superwhisper deep dives. Claims are dated (checked September 2026) and
+  sourced; update them when competitors change pricing or architecture.
+- `404.html` — the not-found page GitHub Pages serves at any missing path, so
+  every reference in it is absolute under `/velora/`.
+- `features/index.html` — forwards `/features/` to the landing page's feature
+  index; `noindex`, with its canonical on the landing page.
+- `robots.txt` and `sitemap.xml` — the sitemap lists every canonical page and
+  the site test keeps it in step with the pages' canonical URLs.
 - `assets/scene.js` — the three.js particle scene. Decorative only: pages
   render completely without WebGL or JavaScript, and the scene renders a
   single static frame under `prefers-reduced-motion`. It listens for the

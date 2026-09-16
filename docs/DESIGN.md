@@ -154,8 +154,17 @@ Velora is *plain but not blunt, confident but not salesy*. The reader is a
 person who types for a living and does not trust "AI" claims.
 
 - Lead with the outcome in the reader's words (the Bar Test: could you say it
-  to a friend?). "Talk like you talk. It reads like you wrote it."
-- One idea per sentence. Cut "seamlessly", "powerful", "leverage", "AI-powered".
+  to a friend?). "Say the messy version. It types the clean one."
+- One idea per sentence. Cut "seamlessly", "powerful", "leverage", "AI-powered",
+  emoji, exclamation marks in body copy, and borrowed slang ("no cap", "vibes").
+- Humour is recognition, not slang: the joke is how people actually speak
+  ("wait, no, Thursday"), one per section, never at the reader's expense.
+  Humour is off in permissions, errors, the 404 page, security and privacy
+  claims, accessibility strings, the iPhone alpha warning, fine print,
+  comparison cells and prices.
+- Privacy sentences are literal. Wherever "never" or "nothing" sits near the
+  network, the same surface names the three network paths: the model download,
+  optional GitHub update checks, optional iCloud dictionary sync.
 - State the boundary next to the promise. Every feature page ends with
   "The fine print". A claim that cannot be traced to code does not ship.
 - British "-ise" spelling on the site (recognised, capitalised); the app

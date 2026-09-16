@@ -13,10 +13,20 @@ import json
 from pathlib import Path
 import re
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SITE = ROOT / "site"
+SITE_URL = "https://sushilk1991.github.io/velora/"
+# GitHub Pages serves this project under /velora/, so the 404 page (served at
+# any missing path) can only reference assets by that absolute prefix.
+SITE_PATH_PREFIX = "/velora/"
+# Directory indexes that only forward to a page which already exists. They are
+# excluded from the sitemap and carry the target's canonical, not their own.
+REDIRECTS = {"features/index.html": "../#features"}
+# The three network paths every privacy surface must name, by the same label.
+NETWORK_PATHS = ("model download", "update check", "dictionary sync")
 
 
 class SiteParser(HTMLParser):
@@ -286,6 +296,37 @@ def main() -> None:
     assert "Terminals show the draft in Velora, then insert it when you finish" in html, (
         "Stream Typing must describe the honest terminal behavior"
     )
+    # Model downloads, update checks, and dictionary sync are real network
+    # paths, so an unqualified "no cloud" promise would be false.
+    assert "no account. no cloud." not in public_source, (
+        "the hero facts must not promise 'no cloud' while three network paths exist"
+    )
+    assert "between you and github pages" not in public_source, (
+        "the site must not make claims about GitHub Pages' own visitor logs"
+    )
+    privacy_html = (SITE / "features/privacy.html").read_text(encoding="utf-8").lower()
+    faq_html = html[html.index('id="faq"') :].lower()
+    for surface_name, surface in (("the landing ledger", html.lower()), ("the privacy page", privacy_html), ("the FAQ", faq_html)):
+        for network_path in NETWORK_PATHS:
+            assert network_path in surface, f"{surface_name} must name the network path: {network_path}"
+    for surface_name, surface in (("the landing ledger", html.lower()), ("the privacy page", privacy_html)):
+        assert "screen context" in surface, (
+            f"{surface_name} must disclose that window titles and nearby text are read"
+        )
+    action_mode = (SITE / "features/action-mode.html").read_text(encoding="utf-8").lower()
+    assert "screenshot" in action_mode and "text recognition" in action_mode, (
+        "Action Mode must disclose the Cua Driver screenshot and on-device text recognition"
+    )
+    meetings = (SITE / "features/meetings.html").read_text(encoding="utf-8").lower()
+    assert "speaker separation" in meetings and "download" in meetings, (
+        "meeting notes must disclose the speaker-separation model download"
+    )
+    assert "built-in dictation" in html.lower(), (
+        "the FAQ must answer the Apple Dictation alternative"
+    )
+    assert "entire marketing budget" in html, (
+        "the closing note keeps the GitHub-star line"
+    )
 
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     ios_readme = (ROOT / "ios/README.md").read_text(encoding="utf-8")
@@ -337,6 +378,7 @@ def main() -> None:
     # --- feature and comparison subpages -------------------------------------
     subpages = sorted([*SITE.glob("features/*.html"), *SITE.glob("compare/*.html")])
     assert len(subpages) >= 14, "the feature and comparison pages must exist"
+    sitemap_urls = {SITE_URL}
     for page in subpages:
         sub_html = page.read_text(encoding="utf-8")
         sub = SiteParser()
@@ -344,6 +386,22 @@ def main() -> None:
         rel = page.relative_to(SITE).as_posix()
 
         assert sub.h1_count == 1, f"{rel}: every page must have exactly one h1"
+        if rel in REDIRECTS:
+            target = REDIRECTS[rel]
+            assert f'http-equiv="refresh" content="0; url={target}"' in sub_html, (
+                f"{rel}: the directory index must forward to {target}"
+            )
+            assert '<meta name="robots" content="noindex">' in sub_html, (
+                f"{rel}: a forwarding page must not be indexed"
+            )
+            assert sub.canonical_hrefs == [SITE_URL], (
+                f"{rel}: a forwarding page must point its canonical at the landing page"
+            )
+            assert f'href="{target}"' in sub_html, (
+                f"{rel}: the forwarding page must keep a visible link for visitors without meta refresh"
+            )
+            continue
+        sitemap_urls.add(f"{SITE_URL}{rel}")
         assert not sub.remote_executables, (
             f"{rel}: scripts and styles must remain self-hosted: "
             + ", ".join(sub.remote_executables)
@@ -373,6 +431,59 @@ def main() -> None:
         assert sub_html.count("https://github.com/sushilk1991/velora/releases/latest") >= 1, (
             f"{rel}: every page must keep a download path"
         )
+
+    # --- the custom 404 page ---------------------------------------------------
+    not_found_html = (SITE / "404.html").read_text(encoding="utf-8")
+    not_found = SiteParser()
+    not_found.feed(not_found_html)
+    assert not_found.h1_count == 1, "404.html: the page must have exactly one h1"
+    assert not_found.canonical_hrefs == [f"{SITE_URL}404.html"], (
+        "404.html: the page must declare its own canonical URL"
+    )
+    assert '<meta name="robots" content="noindex">' in not_found_html, (
+        "404.html: the error page must not be indexed"
+    )
+    assert not not_found.remote_executables, "404.html: scripts and styles must remain self-hosted"
+    # GitHub Pages serves the 404 body at whatever path was requested, so a
+    # relative "styles.css" would resolve under the missing directory.
+    relative_refs = sorted(
+        ref for ref in not_found.local_assets if ref and not ref.startswith(SITE_PATH_PREFIX)
+    )
+    assert not relative_refs, "404.html: references must be absolute under /velora/: " + ", ".join(relative_refs)
+    missing_404 = sorted(
+        ref
+        for ref in not_found.local_assets
+        if ref and not ref.endswith("/") and not (SITE / ref.removeprefix(SITE_PATH_PREFIX)).is_file()
+    )
+    assert not missing_404, "404.html: missing local assets: " + ", ".join(missing_404)
+    for destination in ("/velora/", "/velora/#features", "/velora/features/privacy.html", "/velora/compare/index.html"):
+        assert destination in not_found.hrefs, f"404.html: the page must link back to {destination}"
+    assert "https://github.com/sushilk1991/velora/releases/latest" in not_found.hrefs, (
+        "404.html: the page must keep a download path"
+    )
+    assert "https://github.com/sushilk1991/velora/issues" in not_found.hrefs, (
+        "404.html: a broken link on the site must be reportable"
+    )
+    assert 'classList.add("js")' in not_found_html and not_found_html.index(
+        'classList.add("js")'
+    ) < not_found_html.index('rel="stylesheet"'), (
+        "404.html: the stored theme must be applied before the stylesheet"
+    )
+
+    # --- crawlers: robots.txt and sitemap.xml ----------------------------------
+    robots = (SITE / "robots.txt").read_text(encoding="utf-8")
+    assert f"Sitemap: {SITE_URL}sitemap.xml" in robots, "robots.txt must point at the sitemap"
+    assert "Disallow: /\n" not in robots and not robots.rstrip().endswith("Disallow: /"), (
+        "robots.txt must not block the whole site"
+    )
+    sitemap = ElementTree.fromstring((SITE / "sitemap.xml").read_text(encoding="utf-8"))
+    namespace = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    listed = {element.text for element in sitemap.findall("sm:url/sm:loc", namespace)}
+    assert listed == sitemap_urls, (
+        "sitemap.xml must list every canonical page and nothing else; "
+        + "missing: " + ", ".join(sorted(sitemap_urls - listed))
+        + "; extra: " + ", ".join(sorted(listed - sitemap_urls))
+    )
 
     print(
         f"site checks OK — {len(parser.local_assets)} local references, "

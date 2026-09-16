@@ -1216,6 +1216,8 @@ html:not(.js) .theme-toggle { display: none; }
 
 .wire-readout b { color: var(--good); font-variant-numeric: tabular-nums; font-weight: 640; }
 
+.wire-note { color: var(--ink-faint); }
+
 /* --------------------------------------------------------------------------
    Sections
    -------------------------------------------------------------------------- */

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://sushilk1991.github.io/velora/sitemap.xml
