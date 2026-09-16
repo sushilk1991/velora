@@ -195,8 +195,8 @@ Destructive verbs: **Delete** (a record), **Remove** (from a list),
 **Forget** (a learned term). Never "Clear" for data.
 
 Privacy line, verbatim: **Your voice never leaves this Mac.** Scope it to
-audio and transcripts; the optional iCloud dictionary sync means "everything"
-would be false.
+audio and transcripts; iCloud dictionary sync (whenever iCloud Drive is
+signed in) means "everything" would be false.
 
 ## 6. The HUD
 
