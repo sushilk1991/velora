@@ -103,7 +103,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before changing the wire proto
 
 ## Tests
 
-- `make test` must pass. Engine tests use the fake STT backend and do not download models.
+- `make test` must pass. Engine tests use the fake STT backend and do not download models. The `Pull request checks` workflow (`.github/workflows/ci.yml`) runs the same target on a macOS runner for every pull request against `main`; it deploys nothing.
 - Use the scenario checklist in [docs/TESTING.md](docs/TESTING.md) to select the required hardware and permission gates.
 - New engine behavior needs tests: formatting/gating logic in `test_formatting.py`, protocol changes in `test_framing.py` / `test_server.py`, cleanup guards in `test_divergence.py`.
 - Deterministic Mac behavior belongs in the embedded Swift self-test. Permission-gated capture, hotkey, and insertion paths still require the signed `.app` and must be described in the PR.
