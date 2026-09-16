@@ -291,6 +291,8 @@ def test_subprocess_timeout_is_sanitized_and_does_not_leave_output(tmp_path):
     clip = audio_root / "PRIVATE-FILE-CANARY-6bb2.flac"
     clip.write_bytes(b"audio")
     manifest = _make_manifest_file(tmp_path, _manifest(clip.name))
+    cli = tmp_path / "velora"
+    cli.write_bytes(b"synthetic executable")
     transcript = "TIMEOUT-TRANSCRIPT-CANARY-b17a"
 
     def timeout_runner(command, **_kwargs):
@@ -304,6 +306,7 @@ def test_subprocess_timeout_is_sanitized_and_does_not_leave_output(tmp_path):
             repeats=1,
             timeout_s=3,
             status_provider=_models,
+            cli_path=cli,
             command_runner=timeout_runner,
             clock=_clock(0),
         )
