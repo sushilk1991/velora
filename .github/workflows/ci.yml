@@ -1,0 +1,27 @@
+name: Pull request checks
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Install uv when absent
+        run: |
+          if ! command -v uv >/dev/null 2>&1; then
+            brew install uv
+          fi
+      - name: Run project tests
+        run: make test
