@@ -877,7 +877,12 @@ async def test_cleanup_restart_keeps_loop_independent_exit_backstop(engine, monk
     eng._cleanup_restart_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await eng._cleanup_restart_task
-    await asyncio.sleep(0.04)
+    # The backstop is a daemon thread, so wait for it to finish rather than
+    # sleeping a fixed interval that thread scheduling can overrun.
+    timer = eng._cleanup_restart_timer
+    assert timer is not None
+    await asyncio.to_thread(timer.join, 5)
+    assert not timer.is_alive()
 
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
 
