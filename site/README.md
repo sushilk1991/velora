@@ -19,7 +19,10 @@ Structure:
 - `features/index.html` — forwards `/features/` to the landing page's feature
   index; `noindex`, with its canonical on the landing page.
 - `robots.txt` and `sitemap.xml` — the sitemap lists every canonical page and
-  the site test keeps it in step with the pages' canonical URLs.
+  the site test keeps it in step with the pages' canonical URLs. Crawlers read
+  robots.txt only from the host root, so under the `/velora/` project path the
+  file is documentation; the sitemap has to be submitted to search engines
+  directly.
 - `assets/scene.js` — the three.js particle scene. Decorative only: pages
   render completely without WebGL or JavaScript, and the scene renders a
   single static frame under `prefers-reduced-motion`. It listens for the

@@ -309,6 +309,11 @@ def main() -> None:
     for surface_name, surface in (("the landing ledger", html.lower()), ("the privacy page", privacy_html), ("the FAQ", faq_html)):
         for network_path in NETWORK_PATHS:
             assert network_path in surface, f"{surface_name} must name the network path: {network_path}"
+    dictionary_html = (SITE / "features/dictionary.html").read_text(encoding="utf-8").lower()
+    for surface_name, surface in (("the dictionary page", dictionary_html), ("the privacy page", privacy_html), ("the FAQ", faq_html)):
+        assert "off by default" not in surface.replace("local automation is off by default", "") and "if you enable" not in surface, (
+            f"{surface_name} must not call dictionary sync opt-in; the app has no sync switch"
+        )
     for surface_name, surface in (("the landing ledger", html.lower()), ("the privacy page", privacy_html)):
         assert "screen context" in surface, (
             f"{surface_name} must disclose that window titles and nearby text are read"

@@ -370,7 +370,7 @@
         <article class="tile tile-dict reveal" style="--reveal-order: 8">
           <p class="tile-kicker">Personal dictionary</p>
           <h3>It learns your nouns.</h3>
-          <p>Names, products and jargon it got wrong once are learned from your corrections and from words that keep showing up. Sync is optional and uses your own iCloud Drive.</p>
+          <p>Names, products and jargon it got wrong once are learned from your corrections and from words that keep showing up. Sync runs through your own iCloud Drive whenever it is signed in, never through a Velora server.</p>
           <a class="text-link" href="features/dictionary.html">How the dictionary works <span class="link-glyph" aria-hidden="true">→</span></a>
         </article>
 
@@ -510,16 +510,16 @@
             <dd>do not exist</dd>
           </div>
           <div class="ledger-row is-net">
-            <dt>Model download, first run</dt>
+            <dt>Model download, first run (and first use of speaker separation)</dt>
             <dd>uses the network once</dd>
           </div>
           <div class="ledger-row is-net">
-            <dt>Update checks</dt>
+            <dt>Update checks &amp; installs</dt>
             <dd>GitHub, optional, can be turned off</dd>
           </div>
           <div class="ledger-row is-net">
             <dt>Dictionary sync</dt>
-            <dd>optional, your iCloud Drive</dd>
+            <dd>your iCloud Drive, whenever it is signed in</dd>
           </div>
         </dl>
       </div>
@@ -716,7 +716,7 @@
       <div class="faq-list">
         <details class="reveal">
           <summary>Does Velora ever touch the network?</summary>
-          <div><p>Three times, and never with your voice. The model download happens once, during setup. Optional update checks ask GitHub for the latest release and can be turned off in Settings. Optional dictionary sync, off by default, goes through your own iCloud Drive and carries confirmed terms only. During dictation, speech recognition and cleanup run on your Mac; your audio and transcript are not uploaded.</p></div>
+          <div><p>Three ways, and never with your voice. The model download happens once, during setup, from Hugging Face, plus a 46 MB speaker-separation download from GitHub the first time you use meeting notes. Optional update checks ask GitHub for the latest release, and optional automatic installs download the new build from GitHub; both can be turned off in Settings. Dictionary sync goes through your own iCloud Drive whenever it is signed in and carries confirmed terms only; there is no Velora server. During dictation, speech recognition and cleanup run on your Mac; your audio and transcript are not uploaded.</p></div>
         </details>
         <details class="reveal">
           <summary>Does it work offline?</summary>

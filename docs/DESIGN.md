@@ -163,8 +163,10 @@ person who types for a living and does not trust "AI" claims.
   claims, accessibility strings, the iPhone alpha warning, fine print,
   comparison cells and prices.
 - Privacy sentences are literal. Wherever "never" or "nothing" sits near the
-  network, the same surface names the three network paths: the model download,
-  optional GitHub update checks, optional iCloud dictionary sync.
+  network, the same surface names the three network paths: the model downloads
+  (first run, and first use of speaker separation), optional GitHub update
+  checks and installs, iCloud dictionary sync whenever iCloud Drive is signed
+  in. Sync has no switch in the app; do not call it optional or off by default.
 - State the boundary next to the promise. Every feature page ends with
   "The fine print". A claim that cannot be traced to code does not ship.
 - British "-ise" spelling on the site (recognised, capitalised); the app
