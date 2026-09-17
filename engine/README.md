@@ -106,14 +106,20 @@ both speech and writing model setup.
 One dictation:
 
 ```
-→ {"cmd":"start","session":"uuid","context":{"bundle_id":"...","app_name":"...","mode":null}}
+→ {"cmd":"start","session":"uuid","context":{"bundle_id":"...","app_name":"...","mode":null,"entities":[]}}
 → AUDIO frames (~100ms chunks, streamed live; STT runs during recording)
-→ {"cmd":"stop","session":"uuid"}
+→ {"cmd":"stop","session":"uuid","entities":[{"type":"glossary","value":"authCheck.ts"}]}
 ← {"event":"partial","session":"...","text":"..."}                        (0..n, during recording)
 ← {"event":"transcript","session":"...","raw":"...","ms":<stop→transcript ms>}
 ← {"event":"final","session":"...","text":"...","raw":"...","mode":"Note",
    "cleanup_ms":..,"cleanup_wall_ms":..,"cleanup_applied":true,"total_ms":..}
 ```
+
+The optional stop-time glossary contains only already-completed local screen
+spelling candidates. The app never waits for capture, and sends no screenshots
+or window prose. `formatting.py` bounds and validates terms again before Qwen;
+legacy `nearby`/title prose is ignored. Context is session-memory-only. Missing
+permissions or unavailable OCR leave dictation working without these hints.
 
 Other commands: `cancel` (discards the session → `cancelled`), `ping` → `pong`,
 `status` → `status` (state + model registry), `reload_config` →

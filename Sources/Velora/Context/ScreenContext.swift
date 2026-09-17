@@ -1,6 +1,8 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import ScreenCaptureKit
+import Vision
 
 /// A named thing pulled from the current screen context — the file you're
 /// editing, the person/channel you're messaging, the page you're on. Fed to
@@ -145,13 +147,9 @@ enum StreamPreviewTargetPolicy {
     }
 }
 
-/// Extracts lightweight entities from the frontmost app using the macOS
-/// Accessibility API (already-granted permission — no Screen Recording, no
-/// screenshot). Reads only the focused window's title, so it stays cheap
-/// (<~5 ms) and privacy-preserving: no body text, no keystrokes.
-///
-/// This is the AX half of the "hybrid" context engine; a small on-device VLM
-/// screen-read is layered on later for Electron apps whose AX trees are thin.
+/// Owns bounded Accessibility reads. Dictation builds an ephemeral spelling
+/// glossary, with local Apple Vision fallback for sparse active windows.
+/// Action and insertion callers retain their separate AX-only contracts.
 enum ScreenContext {
     struct AXIdentityGuard {
         private var buckets: [CFHashCode: [AXUIElement]] = [:]
@@ -1111,25 +1109,238 @@ enum ScreenContext {
         return Array(result.prefix(maxEntities))
     }
 
-    /// Rich context = title entities PLUS short text near the text cursor read
-    /// from the Accessibility tree (the "Message <Name>" header on LinkedIn, a
-    /// field label, the recipient chip). This is what lets the cleanup LLM spell
-    /// a name it never heard clearly. Heavier than `entities` (walks a bounded
-    /// slice of the AX tree), so callers run it OFF the hot path (a background
-    /// queue at session start, ready by the time recording stops).
-    static func richEntities(for app: NSRunningApplication?, category: ModeCategory?) -> [ContextEntity] {
-        var result = entities(for: app, category: category, deepURL: true)
-        guard let app, app.processIdentifier > 0 else { return result }
-        let nearby = nearbyText(pid: app.processIdentifier)
-        // Cap total nearby chars so the prompt stays lean and private.
-        var budget = 600
-        for text in nearby {
-            guard budget > 0 else { break }
-            let clipped = String(text.prefix(min(text.count, budget, 80)))
-            result.append(ContextEntity(type: "nearby", value: clipped))
-            budget -= clipped.count
+    /// Pin only window identity at start; all AX, screenshot, and OCR work runs
+    /// inside the returned reader, off the recording/finalization path.
+    static func glossaryReader(
+        for app: NSRunningApplication?, category: ModeCategory?,
+        allowed: @escaping () -> Bool
+    ) -> (@escaping () -> Bool) -> [ContextEntity] {
+        guard let app, let target = glossaryWindow(app.processIdentifier) else { return { _ in [] } }
+        return { isCurrent in
+            autoreleasepool {
+                gatherGlossary(app: app, target: target, category: category,
+                               allowed: { allowed() && isCurrent() })
+            }
         }
-        return result
+    }
+
+    private static let glossaryAXSeconds: TimeInterval = 0.6
+    private static let glossaryOCRSeconds: TimeInterval = 1.5
+    private static let glossaryNodes = 128
+    private static let glossaryDepth = 16
+    private static let glossaryChildren = 32
+    private static let glossaryTextLimit = 8_000
+    private static let glossaryCursorRadius = 300
+    private static let glossaryImageSide = 2_560
+    private static let glossaryOCRConfidence: Float = 0.5
+    private static let glossaryAncestors = 3
+    private static let excludesDesktopWindows = true
+
+    /// Immutable WindowServer identity prevents same-app window switches from
+    /// mixing context. Geometry changes invalidate rather than recapture.
+    private struct GlossaryWindow: Equatable {
+        let id: CGWindowID
+        let frame: CGRect
+    }
+
+    private static func glossaryWindow(_ pid: pid_t) -> GlossaryWindow? {
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let rows = CGWindowListCopyWindowInfo(
+                [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+              ) as? [[String: Any]],
+              let row = rows.first(where: {
+                  ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
+                      && ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+              }),
+              let id = row[kCGWindowNumber as String] as? NSNumber,
+              let bounds = row[kCGWindowBounds as String] as? [String: Any],
+              let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+              validWindowFrame(frame) else { return nil }
+        return GlossaryWindow(id: id.uint32Value, frame: frame)
+    }
+
+    private static func glossarySecure(_ element: AXUIElement) -> Bool {
+        axString(element, kAXSubroleAttribute) == kAXSecureTextFieldSubrole as String
+            || axString(element, kAXRoleAttribute) == "AXSecureTextField"
+            || axBool(element, "AXProtectedContent") == true
+    }
+
+    /// AX -> bounded terms -> local socket. Screenshot -> Vision -> bounded
+    /// terms. Pixels and source strings never enter a result or a log.
+    private static func gatherGlossary(
+        app: NSRunningApplication, target: GlossaryWindow, category: ModeCategory?,
+        allowed: @escaping () -> Bool
+    ) -> [ContextEntity] {
+        guard allowed(), AXIsProcessTrusted(), !SecureInput.isActive else { return [] }
+        let application = AXUIElementCreateApplication(app.processIdentifier)
+        let window = axElement(application, kAXFocusedWindowAttribute)
+        let focused = axElement(application, kAXFocusedUIElementAttribute)
+        let deadline = Date().addingTimeInterval(glossaryAXSeconds)
+        let valid = {
+            guard allowed(), AXIsProcessTrusted(), !SecureInput.isActive,
+                  glossaryWindow(app.processIdentifier) == target else { return false }
+            if let current = axElement(application, kAXFocusedUIElementAttribute),
+               glossarySecure(current) { return false }
+            if let window {
+                guard let current = axElement(application, kAXFocusedWindowAttribute),
+                      CFEqual(current, window),
+                      let frame = axFrame(window), windowFramesMatch(frame, target.frame)
+                else { return false }
+            }
+            return true
+        }
+        guard valid() else { return [] }
+        var named: [ContextEntity] = []
+        return ContextGlossary.capture(valid: valid, named: { named }, read: { source in
+            switch source {
+            case .nearby:
+                // Cursor text has spelling priority. Existing title/URL signals
+                // still supply explicit tags and browser mode, off the hot path.
+                let nearby = focused.map {
+                    glossaryNearby($0, window: window, bounds: target.frame, deadline: deadline)
+                } ?? []
+                guard valid() else { return [] }
+                named = entities(for: app, category: category, deepURL: true)
+                return nearby
+            case .window:
+                guard let window else { return [] }
+                var out = named.map(\.value)
+                var budget = glossaryNodes
+                collectGlossaryText(window, bounds: target.frame, into: &out,
+                                    budget: &budget, depth: 0, deadline: deadline)
+                return out
+            case .ocr:
+                return glossaryOCR(target, valid: valid)
+            }
+        })
+    }
+
+    /// Selected-range reads avoid materializing a whole document. Nearby static
+    /// labels cover editors that expose no parameterized text-range API.
+    private static func glossaryNearby(
+        _ focused: AXUIElement, window: AXUIElement?, bounds: CGRect, deadline: Date
+    ) -> [String] {
+        guard !glossarySecure(focused) else { return [] }
+        var out: [String] = []
+        if let selected = axRange(focused, kAXSelectedTextRangeAttribute),
+           let visible = axRange(focused, kAXVisibleCharacterRangeAttribute),
+           selected.location >= 0, visible.location >= 0,
+           visible.length >= 0, visible.location <= Int.max - visible.length {
+            let start = max(visible.location, selected.location - glossaryCursorRadius)
+            let end = min(visible.location + visible.length,
+                          selected.location.addingReportingOverflow(glossaryCursorRadius).partialValue)
+            if end > start, let text = axStringForRange(focused, CFRange(location: start, length: end - start)) {
+                out.append(text)
+            }
+        }
+        for attribute in [kAXPlaceholderValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
+            guard Date() < deadline else { break }
+            if let text = axString(focused, attribute) { out.append(text) }
+        }
+        var container = focused
+        for _ in 0..<glossaryAncestors {
+            guard Date() < deadline, let parent = axElement(container, kAXParentAttribute),
+                  axString(parent, kAXRoleAttribute) != kAXApplicationRole as String
+            else { break }
+            container = parent
+            if let window, CFEqual(container, window) { break }
+        }
+        var budget = glossaryChildren
+        collectGlossaryText(container, bounds: bounds, into: &out,
+                            budget: &budget, depth: 0, deadline: deadline)
+        return out
+    }
+
+    /// Bound every traversal and skip secure subtrees before reading their text.
+    private static func collectGlossaryText(
+        _ element: AXUIElement, bounds: CGRect, into out: inout [String],
+        budget: inout Int, depth: Int, deadline: Date
+    ) {
+        guard budget > 0, depth <= glossaryDepth, Date() < deadline,
+              out.reduce(0, { $0 + $1.count }) < glossaryTextLimit else { return }
+        budget -= 1
+        guard !glossarySecure(element), axBool(element, "AXHidden") != true else { return }
+        // Intersect ancestor frames so clipped scroll content cannot become
+        // visible spelling data merely because it lies inside the outer window.
+        let frame = axFrame(element)
+        let visibleBounds = frame.flatMap { validWindowFrame($0) ? bounds.intersection($0) : nil } ?? bounds
+        guard !visibleBounds.isEmpty else { return }
+        let role = axString(element, kAXRoleAttribute)
+        if role == kAXStaticTextRole as String || role == "AXHeading" {
+            if let frame, frame.intersects(bounds),
+               let text = axString(element, kAXValueAttribute) ?? axString(element, kAXTitleAttribute),
+               text.unicodeScalars.count <= glossaryTextLimit { out.append(text) }
+        }
+        for child in (axChildren(element) ?? []).prefix(glossaryChildren) {
+            collectGlossaryText(child, bounds: visibleBounds, into: &out,
+                                budget: &budget, depth: depth + 1, deadline: deadline)
+        }
+    }
+
+    /// A private completion cell drops late text; it never retains an image.
+    private final class GlossaryOCRResult {
+        private let lock = NSLock()
+        private let ready = DispatchSemaphore(value: 0)
+        private var text: [String] = []
+        private var closed = false
+
+        func finish(_ text: [String]) {
+            lock.lock()
+            if !closed { self.text = text }
+            lock.unlock()
+            ready.signal()
+        }
+
+        func take() -> [String] {
+            _ = ready.wait(timeout: .now() + glossaryOCRSeconds)
+            lock.lock()
+            defer { lock.unlock() }
+            closed = true
+            let result = text
+            text = []
+            return result
+        }
+    }
+
+    /// Screen Recording is optional and never requested during dictation. Use
+    /// one exact-window frame, recognize locally, then release it in this scope.
+    private static func glossaryOCR(
+        _ target: GlossaryWindow, valid: @escaping () -> Bool
+    ) -> [String] {
+        guard CGPreflightScreenCaptureAccess(), valid() else { return [] }
+        let result = GlossaryOCRResult()
+        let deadline = Date().addingTimeInterval(glossaryOCRSeconds)
+        SCShareableContent.getExcludingDesktopWindows(excludesDesktopWindows, onScreenWindowsOnly: true) { content, _ in
+            guard Date() < deadline, valid(),
+                  let window = content?.windows.first(where: { $0.windowID == target.id })
+            else { result.finish([]); return }
+            let filter = SCContentFilter(desktopIndependentWindow: window)
+            let config = SCStreamConfiguration()
+            let scale = min(2, CGFloat(glossaryImageSide) / max(target.frame.width, target.frame.height))
+            config.width = max(1, Int(target.frame.width * scale))
+            config.height = max(1, Int(target.frame.height * scale))
+            config.showsCursor = false
+            config.ignoreShadowsSingleWindow = true
+            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, _ in
+                autoreleasepool {
+                    guard Date() < deadline, valid(), let image else { result.finish([]); return }
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.usesLanguageCorrection = false
+                    let handler = VNImageRequestHandler(cgImage: image, options: [:])
+                    guard (try? handler.perform([request])) != nil,
+                          Date() < deadline, valid() else { result.finish([]); return }
+                    let text = (request.results ?? []).prefix(glossaryNodes).compactMap { observation -> String? in
+                        guard let candidate = observation.topCandidates(1).first,
+                              candidate.confidence >= glossaryOCRConfidence,
+                              candidate.string.count <= glossaryTextLimit else { return nil }
+                        return candidate.string
+                    }
+                    result.finish(text)
+                }
+            }
+        }
+        return result.take()
     }
 
     /// The raw title of an app's focused window, unparsed. Action Mode sends it
@@ -1960,61 +2171,6 @@ enum ScreenContext {
               let focused = focusedElement(of: app)
         else { return false }
         return CFEqual(focused, target.element)
-    }
-
-    // MARK: - Nearby-text read (rich context)
-
-    /// Short text strings near the focused element: the field's own
-    /// placeholder/title/description, then a bounded sweep of static text under
-    /// a few ancestor levels (headers, labels, the person you're replying to).
-    private static func nearbyText(pid: pid_t) -> [String] {
-        let appElement = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appElement, 0.3)
-        guard let focused = axElement(appElement, kAXFocusedUIElementAttribute) else { return [] }
-
-        var out: [String] = []
-        // The focused field's own hints often name the recipient
-        // ("Message Priya Sharma", "Reply to …", "To:").
-        for attr in [kAXPlaceholderValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
-            if let s = axString(focused, attr) { out.append(s) }
-        }
-        // Climb a few levels to a container, then sweep its static text.
-        var container = focused
-        for _ in 0..<3 {
-            guard let parent = axElement(container, kAXParentAttribute) else { break }
-            container = parent
-        }
-        var budget = 30  // max elements visited (hard bound on cost)
-        collectStaticText(container, into: &out, budget: &budget, depth: 0)
-
-        // Dedup, keep short human-readable strings, cap count.
-        var seen = Set<String>()
-        return out.compactMap { raw -> String? in
-            let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard s.count >= 2, s.count <= 80, !seen.contains(s) else { return nil }
-            seen.insert(s)
-            return s
-        }.prefix(12).map { $0 }
-    }
-
-    /// Depth- and count-bounded sweep collecting `AXStaticText`/`AXHeading`
-    /// values (and a few titles) from an element's subtree.
-    private static func collectStaticText(
-        _ element: AXUIElement, into out: inout [String], budget: inout Int, depth: Int
-    ) {
-        guard budget > 0, depth <= 5 else { return }
-        budget -= 1
-        let role = axString(element, kAXRoleAttribute) ?? ""
-        if role == kAXStaticTextRole || role == "AXHeading" {
-            if let v = axString(element, kAXValueAttribute) ?? axString(element, kAXTitleAttribute) {
-                out.append(v)
-            }
-        }
-        guard let children = axChildren(element) else { return }
-        for child in children.prefix(12) {
-            if budget <= 0 { break }
-            collectStaticText(child, into: &out, budget: &budget, depth: depth + 1)
-        }
     }
 
     // MARK: - AX helpers

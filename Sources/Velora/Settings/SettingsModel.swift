@@ -302,6 +302,7 @@ final class SettingsModel: ObservableObject {
         autoPunctuation = config.autoPunctuation
         romanizeOutput = config.romanizeOutput
         learnFromEdits = config.learnFromEdits
+        screenContextEnabled = config.screenContextEnabled
         voiceCommands = config.voiceCommands
         vocabMining = config.vocabMining
         smartTerminal = config.smartTerminal
@@ -613,6 +614,14 @@ final class SettingsModel: ObservableObject {
             guard !applyingImportedSettings, romanizeOutput != oldValue else { return }
             config.romanizeOutput = romanizeOutput
             supervisor?.send(["cmd": "reload_config"])
+        }
+    }
+
+    /// This privacy choice stays on this Mac and is not changed by import.
+    @Published var screenContextEnabled: Bool {
+        didSet {
+            guard screenContextEnabled != oldValue else { return }
+            config.screenContextEnabled = screenContextEnabled
         }
     }
 

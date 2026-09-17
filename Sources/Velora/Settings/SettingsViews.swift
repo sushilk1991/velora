@@ -326,6 +326,19 @@ struct DictationSettingsView: View {
                     }
                 }
             }
+            // Keep the privacy control beside writing behavior, without adding
+            // an onboarding gate or prompting for screen access while recording.
+            Section {
+                Toggle("Use screen context for spelling", isOn: $model.screenContextEnabled)
+                Button("Allow Local Screen Text Recognition…") {
+                    Permissions.requestScreenText()
+                }
+                .disabled(!model.screenContextEnabled)
+            } header: {
+                Text("Screen context")
+            } footer: {
+                SettingsFooter("Reads names and technical terms near the cursor, then the active window if needed. With Screen Recording permission, Apple Vision reads sparse windows locally. Screenshots are discarded after recognition; OCR text and spelling hints are not saved. Dictation never waits for screen context. Off disables all dictation screen reads.")
+            }
             Section {
                 Toggle("Keep audio recordings", isOn: $model.saveAudio)
             } header: {

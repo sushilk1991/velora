@@ -215,12 +215,18 @@ struct OnboardingView: View {
     // MARK: - Steps
 
     private var welcomeStep: some View {
-        stepLayout(title: "Welcome to Velora") {
+        stepLayout(title: "You talk. Velora types.") {
             Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 96))
+                .font(.system(size: 64))
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text("Hold a key, speak, release — polished text appears wherever you're typing. Entirely on this Mac.")
+            Text("Hold a key, say your thing, release. Once setup finishes, dictation and screen context work in airplane mode.")
                 .font(.title3)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(width: 440)
+            // Privacy stays literal; network exceptions belong beside the claim.
+            Text("No Velora dictation server. Audio, screenshots, OCR text and spelling hints are processed on this MacBook, never sent to us. Screen context is not saved.\n\nSetup, model downloads and GitHub updates use the internet. Personal Dictionary can sync through your iCloud Drive.")
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
