@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#faf8f5" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#161311" media="(prefers-color-scheme: dark)">
-  <meta name="description" content="Velora’s privacy is not a policy — it’s a missing network call. What runs locally, what touches the network and when, and how to verify all of it.">
+  <meta name="description" content="Velora’s privacy isn’t a policy, it’s a missing network call. What runs on your Mac, what ever touches the network and when, and how to check all of it yourself.">
   <meta property="og:title" content="The privacy model — Velora">
-  <meta property="og:description" content="Velora’s privacy is not a policy — it’s a missing network call. What runs locally, what touches the network and when, and how to verify all of it.">
+  <meta property="og:description" content="Velora’s privacy isn’t a policy, it’s a missing network call. What runs on your Mac, what ever touches the network and when, and how to check all of it yourself.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://sushilk1991.github.io/velora/features/privacy.html">
   <meta property="og:image" content="https://sushilk1991.github.io/velora/assets/og.png">
@@ -84,7 +84,7 @@
         </nav>
         <p class="eyebrow reveal" style="--reveal-order: 1"><span class="eyebrow-dot" aria-hidden="true"></span> Private by architecture</p>
         <h1 class="reveal" style="--reveal-order: 2">Not a policy.<br><em>A missing network call<span class="stop">.</span></em></h1>
-        <p class="hero-lede reveal" style="--reveal-order: 3">Most dictation tools promise privacy in a document you have to trust. Velora’s speech recognition and cleanup have nowhere to send your audio, because the models sit on your disk — and the source is on GitHub if you’d rather check than trust.</p>
+        <p class="hero-lede reveal" style="--reveal-order: 3">Most dictation tools promise privacy in a document you have to trust. Velora’s speech recognition and cleanup have nowhere to send your audio, because the models sit on your disk. Turn on airplane mode after setup and dictation keeps working. The source is on GitHub if you’d rather check than trust.</p>
         <div class="hero-actions reveal" style="--reveal-order: 4">
           <a class="button button-primary" href="https://github.com/sushilk1991/velora/releases/latest">
             Download for Mac <span class="button-glyph" aria-hidden="true">↓</span>
@@ -103,19 +103,20 @@
         <div class="ledger-row is-local"><dt>Your voice</dt><dd>stays on the Mac</dd></div>
         <div class="ledger-row is-local"><dt>Transcripts &amp; history</dt><dd>stay on the Mac</dd></div>
         <div class="ledger-row is-local"><dt>Meeting audio &amp; notes</dt><dd>stay on the Mac</dd></div>
-        <div class="ledger-row is-local"><dt>Voice Edit selections</dt><dd>stay on the Mac</dd></div>
-        <div class="ledger-row is-local"><dt>Action Mode plans &amp; receipts</dt><dd>stay on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Screen context (window titles, text near your cursor)</dt><dd>stays on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Voice Edit &amp; Proofread selections</dt><dd>stay on the Mac</dd></div>
+        <div class="ledger-row is-local"><dt>Action Mode plans, receipts &amp; window screenshots</dt><dd>stay on the Mac</dd></div>
         <div class="ledger-row is-local"><dt>Accounts, telemetry, ads</dt><dd>do not exist</dd></div>
-        <div class="ledger-row is-net"><dt>Model download, first run</dt><dd>uses the network once</dd></div>
-        <div class="ledger-row is-net"><dt>Update checks</dt><dd>optional, can be turned off</dd></div>
-        <div class="ledger-row is-net"><dt>Dictionary sync</dt><dd>optional, your iCloud Drive</dd></div>
+        <div class="ledger-row is-net"><dt>Model download, first run (and first use of speaker separation)</dt><dd>uses the network once each</dd></div>
+        <div class="ledger-row is-net"><dt>Update checks &amp; installs</dt><dd>GitHub, optional, can be turned off</dd></div>
+        <div class="ledger-row is-net"><dt>Dictionary sync</dt><dd>your iCloud Drive, whenever it is signed in</dd></div>
       </dl>
     </section>
 
     <section class="section">
       <div class="section-head reveal">
         <p class="eyebrow">Why this holds</p>
-        <h2>Four structural guarantees.</h2>
+        <h2>Five structural guarantees.</h2>
       </div>
       <div class="detail-grid">
         <article class="detail reveal" style="--reveal-order: 0">
@@ -126,17 +127,22 @@
         <article class="detail reveal" style="--reveal-order: 1">
           <p class="detail-kicker">Verifiable</p>
           <h3>The source is the proof</h3>
-          <p>Velora is MIT-licensed and developed in the open. “Local-only” is a claim you can grep, build, and watch on a network monitor — not a marketing page.</p>
+          <p>Velora is MIT-licensed and developed in the open. “Local-only” is a claim you can grep, build and watch on a network monitor, not a marketing page.</p>
         </article>
         <article class="detail reveal" style="--reveal-order: 2">
           <p class="detail-kicker">Consent surfaces</p>
           <h3>Recording is always visible</h3>
-          <p>Meeting capture requires a confirmation every time and keeps a recording indicator on screen. Audio only — the screen is never captured.</p>
+          <p>Meeting capture requires a confirmation every time and keeps a recording indicator on screen. Audio only; the screen is never captured.</p>
         </article>
         <article class="detail reveal" style="--reveal-order: 3">
           <p class="detail-kicker">Closed doors</p>
           <h3>No open ports</h3>
-          <p>Local automation is off by default and speaks only over an owner-checked Unix socket — no HTTP listener, no URL scheme that types into your apps, no network port at all.</p>
+          <p>Local automation is off by default and speaks only over an owner-checked Unix socket. No HTTP listener, no URL scheme that types into your apps, no network port at all.</p>
+        </article>
+        <article class="detail reveal" style="--reveal-order: 4">
+          <p class="detail-kicker">Screen context</p>
+          <h3>Names come from the window in front of you</h3>
+          <p>To spell names right, Velora reads the front window’s title and a few short strings near your text cursor (a chat header, a file name, a recipient chip), plus the site address in your browser. That text goes to the engine on your Mac over a local socket, nudges the speech model toward the right spelling, and goes nowhere else.</p>
         </article>
       </div>
     </section>
@@ -145,9 +151,10 @@
       <div class="truth reveal">
         <h2>The fine print</h2>
         <ul>
-          <li>The first-run model download and optional update checks are real network events — they fetch models and release notes, and send nothing about you.</li>
-          <li>Dictionary sync, if you enable it, uses your iCloud Drive under Apple’s terms — confirmed terms only, never audio or transcripts.</li>
+          <li>The model downloads and optional update checks are real network events: they fetch speech models from Hugging Face on first run, speaker-separation models from GitHub the first time you use meeting notes, and release information and update builds from GitHub, and send nothing about you.</li>
+          <li>Dictionary sync runs whenever iCloud Drive is signed in and uses your iCloud Drive under Apple’s terms: confirmed terms only, never audio or transcripts. Without iCloud Drive, the dictionary stays on this Mac.</li>
           <li>Privacy claims here describe Velora’s boundary. What other apps on your Mac do with text you paste into them is theirs.</li>
+          <li>This website is static, with no analytics, cookies or third-party scripts.</li>
         </ul>
       </div>
     </section>

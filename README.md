@@ -125,8 +125,9 @@ input-monitoring, and accessibility permissions to the app identity.
   recording indicator.
 - Model downloads and app updates use the internet. Update checks can be
   disabled.
-- Personal Dictionary sync is optional and uses your iCloud Drive; it syncs
-  confirmed terms, not audio or transcripts.
+- Personal Dictionary sync uses your iCloud Drive whenever it is signed in;
+  it syncs confirmed terms, not audio or transcripts, and has no Velora
+  server.
 - Local automation is off by default and does not open a network port.
 
 ## Development and tests

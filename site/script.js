@@ -143,7 +143,7 @@
     {
       app: "Messages",
       mode: "Message mode",
-      caption: "Filler dropped. Self-correction applied. Meaning untouched.",
+      caption: "The um is gone. The “actually” got applied. Meaning untouched.",
       hold: 5.4,
       tokens: [
         ["cut", "tell "],
@@ -158,7 +158,7 @@
     {
       app: "Notes",
       mode: "Note mode",
-      caption: "Spoken ordinals became a list. You never said “bullet.”",
+      caption: "You said “first, second, third.” You got a list. You never said “bullet.”",
       hold: 9.1,
       raw: "first pull the logs then second check the retry counter and third file the ticket",
       lines: ["Pull the logs", "Check the retry counter", "File the ticket"],
@@ -167,7 +167,7 @@
     {
       app: "Mail",
       mode: "Email mode",
-      caption: "A topic shift became a paragraph. No sign-off invented.",
+      caption: "New topic, new paragraph. No “Best regards” you didn’t say.",
       hold: 12.6,
       raw: "thanks for sending that over i read it last night separately we should talk about the pricing page before friday",
       lines: [

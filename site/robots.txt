@@ -1,0 +1,7 @@
+# Crawlers read robots.txt only from the host root, so under the /velora/
+# project path this file is documentation; submit sitemap.xml to search
+# engines directly.
+User-agent: *
+Allow: /
+
+Sitemap: https://sushilk1991.github.io/velora/sitemap.xml
