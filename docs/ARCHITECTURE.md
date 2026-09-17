@@ -462,8 +462,8 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 
 | Permission | Needed for | When requested |
 |---|---|---|
-| Microphone | capture | onboarding step 2 (NSMicrophoneUsageDescription in bundle Info.plist) |
-| Accessibility | CGEventTap hotkeys + ⌘V posting + AX context | onboarding step 3, live-polled |
+| Microphone | capture | onboarding step 3 (NSMicrophoneUsageDescription in bundle Info.plist) |
+| Accessibility | CGEventTap hotkeys + ⌘V posting + AX context | onboarding step 5, live-polled |
 | Input Monitoring | reliable global hotkey event delivery | onboarding alongside Accessibility |
 | Screen Recording (optional) | local Apple Vision fallback for dictation spelling | explicit Screen Text Recognition button in Settings > Dictation |
 | System Audio Recording | remote meeting track via an audio-only Core Audio process tap | first explicitly confirmed meeting recording |

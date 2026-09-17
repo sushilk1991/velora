@@ -262,7 +262,7 @@ def test_prefill_candidates_cover_smart_terminal_without_dynamic_context(config)
     dynamic_system, second_user = candidates[1]
     assert formatting.SMART_TERMINAL_PROMPT in stable_system
     assert "Formatting strength: FULL" in stable_system
-    assert "volatile terminal contents" not in stable_system
+    assert "VolatileName" not in stable_system
     assert "Screen context —" in dynamic_system
     assert first_user != second_user
 
