@@ -66,22 +66,45 @@ Raw synthetic evidence remains under `.build/context-eval.jsonl` and
 `.build/context-socket.jsonl`. No real screen text or microphone recording was
 used for these saved artifacts.
 
+## Signed-app retry on 2026-09-17
+
+Implementation committed as `a76d729`. `./scripts/make-app.sh release none`
+passed, including Developer ID signing and strict bundle verification. Evidence:
+`.build/context-package-retry.log`. The earlier signing failure did not recur;
+no keychain changes or ad-hoc signing were used.
+
+The signed release selftest with `VELORA_LIVE_CONTEXT_SELFTEST=1` and
+`VELORA_CONTEXT_CORPUS` failed 2 of 2,276 checks: near-cursor AX extraction and
+OCR-only extraction. Both permission checks passed. Evidence:
+`.build/context-signed-selftest.log`.
+
+A second signed run used temporary fixture-only diagnostics in a debug build.
+It failed the same two checks. Before each read, the fixture reported:
+
+```text
+active=false front=true key=false secure=false ownWindows=0
+focusedStatus=-25208 windowStatus=-25208
+termCount=0
+```
+
+The fixture had no on-screen WindowServer window, so capture could not pin a
+target. The cause of the missing fixture window remains unverified. The empty
+secure-field and window-switch results do not prove those behaviors when the
+fixture itself is unavailable. Evidence: `.build/context-signed-diagnostic.log`
+and `.build/context-diagnostic-build.log`. Diagnostic source edits were removed;
+the current debug app bundle still contains them and must be rebuilt before
+further validation. No screen text was logged.
+
+The source build-number stamp was restored; `VERSION` is unchanged.
+
 ## Remaining gates
 
-- Signed packaging: `./scripts/make-app.sh release none` compiled successfully
-  but codesigning bundled `uv` failed with `errSecInternalComponent`.
-  `security find-identity` lists the configured Developer ID identity
-  `2A29C6049D25A393166E25FA99819FD8EBF74997`; the signing failure's cause is not
-  established. No ad-hoc signing fallback was attempted.
-- Real AX, OCR-only window, secure-field and same-app window-switch checks are
-  implemented behind `VELORA_LIVE_CONTEXT_SELFTEST=1`. Run from the signed
-  `build/Velora.app/Contents/MacOS/Velora --selftest`; both Accessibility and
-  Screen Recording must already be granted. These checks are not yet verified.
-- Live audio, performance gate, and iOS results need final review. `make test-ios`
-  could not resolve `iPhone 17 Pro, OS=latest` because the newest installed
-  runtime has a different phone model. An equivalent test run explicitly using
-  the existing iPhone 17 Pro / iOS 26.5 simulator was started.
-- The packaging script stamped `Resources/Info.plist`'s build number. Restore
-  that incidental source change after final packaging; `VERSION` is unchanged.
-- No-mistakes has not started. Firstmate runs that phase after the feature is
-  committed and reported complete.
+- Repair or replace the live fixture, then verify near-cursor AX, OCR-only,
+  secure-field, and same-app window-switch behavior from the signed bundle.
+  Stopped after the second failure under the worker retry limit.
+- Live audio remains unverified. The prior performance run exited 0 with 2,264
+  checks (`.build/context-perf.log`). The prior iPhone 17 Pro / iOS 26.5 run
+  exited 0 (`.build/context-ios-pinned.log`); `make test-ios` itself could not
+  resolve that phone with `OS=latest`. Neither was rerun in this session.
+- No-mistakes has not started. The implementation is committed, but live-context
+  validation is blocked.
