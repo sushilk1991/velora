@@ -141,14 +141,50 @@ Evidence: `.build/context-realization-selftest.log`,
 `.build/context-realization-build.log`. Stopped at the retry limit. No production
 capture code changed, and no-mistakes remains unstarted.
 
-## Remaining gates
+## Separate-process attempt on 2026-09-17
 
-- Repair or replace the live fixture, then verify near-cursor AX, OCR-only,
-  secure-field, and same-app window-switch behavior from the signed bundle.
-  Stopped after the second failure under the worker retry limit.
+The live gate now launches a new TextEdit instance with a temporary file
+containing `Priya Sharma PostgreSQL`, waits for both that PID to be frontmost
+and its AX focused element to exist, then invokes the production glossary
+reader asynchronously. Cleanup terminates only the launched instance and
+removes the temporary directory, including failure paths. The self-process
+canvas, secure-field, and window-switch cases were removed.
+
+Release packaging and Developer ID verification passed. The single authorized
+separate-process run failed 1 of 2,271 checks: the glossary did not contain all
+three expected terms. Accessibility and Screen Recording checks passed;
+TextEdit launched, reached frontmost/focused readiness, and capture completed
+within the test budget. This rules out the earlier fixture-readiness failure
+but does not establish why extraction failed. No screen text was logged.
+
+Evidence: `.build/context-textedit-package.log`,
+`.build/context-textedit-selftest.log`, and
+`.build/context-textedit-selftest.exit` (1).
+
+Live glossary extraction remains **unverified**, not waived as passing. Further
+diagnosis requires stage/validity metadata from the TextEdit read to separate AX
+range availability, window-identity rejection, extraction, and OCR fallback.
+No further live attempts were made under firstmate's one-attempt instruction.
+
+### Coverage boundary
+
+- The live gate exercises granted-permission preconditions, a separate native
+  application's AX readiness, and the real glossary reader. Its term-extraction
+  assertion currently fails.
+- The synthetic Swift tests cover near-cursor/window/OCR stage selection,
+  bounded extraction, injected privacy refusal/window invalidation, and
+  nonblocking session lifetime. They do not prove macOS secure-field detection
+  or actual window-switch invalidation.
+- OCR-only recognition, secure-field suppression, and same-app window-switch
+  invalidation have no passing live evidence. Their policy coverage remains
+  synthetic; the paired model corpus likewise injects its screen-source text.
+
+## Remaining validation
+
+- Firstmate explicitly directed no-mistakes to proceed after this bounded
+  attempt regardless of its outcome. The live extraction failure and coverage
+  gaps remain recorded above; no production capture change was made to hide it.
 - Live audio remains unverified. The prior performance run exited 0 with 2,264
   checks (`.build/context-perf.log`). The prior iPhone 17 Pro / iOS 26.5 run
   exited 0 (`.build/context-ios-pinned.log`); `make test-ios` itself could not
   resolve that phone with `OS=latest`. Neither was rerun in this session.
-- No-mistakes has not started. The implementation is committed, but live-context
-  validation is blocked.

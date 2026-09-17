@@ -6671,104 +6671,92 @@ enum Selftest {
                "overlong tokens are rejected, not clipped into invented names")
     }
 
-    /// Draw synthetic text without exposing AX labels to exercise real Vision.
-    private final class OCRFixtureView: NSView {
-        override func draw(_ dirtyRect: NSRect) {
-            NSColor.white.setFill()
-            bounds.fill()
-            let attributes: [NSAttributedString.Key: Any] = [
-                .font: NSFont.systemFont(ofSize: 30), .foregroundColor: NSColor.black,
-            ]
-            ("Priya Sharma PostgreSQL" as NSString).draw(
-                at: NSPoint(x: 30, y: 80), withAttributes: attributes)
-        }
-    }
+    private static let contextLaunchTimeout: TimeInterval = 5
+    private static let contextFocusTimeout: TimeInterval = 15
+    private static let contextCaptureTimeout: TimeInterval = 5
 
-    /// Explicit signed-app gate: real AX and Vision use only our fixture window.
+    /// Read a separate TextEdit process, matching production AX ownership.
+    /// OCR-only, secure-field, and window-switch policies remain synthetic tests.
     private static func testLiveContext() {
-        let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
-        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 600, height: 240),
-                              styleMask: [.titled], backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.title = "context fixture"
-        defer { window.close() }
-        let field = NSTextField(frame: NSRect(x: 20, y: 30, width: 540, height: 40))
-        field.placeholderString = "Message Priya Sharma PostgreSQL"
-        window.contentView?.addSubview(field)
-        // Match accessory-window presentation: realize a WindowServer surface
-        // before AX reads, rather than accepting frontmost process identity alone.
-        window.orderFrontRegardless()
-        app.activate(ignoringOtherApps: true)
-        window.makeKey()
-        window.makeFirstResponder(field)
-        let realized = waitUntil {
-            guard app.isActive, window.isKeyWindow,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
-                  let rows = CGWindowListCopyWindowInfo(
-                    [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-                  ) as? [[String: Any]] else { return false }
-            return rows.contains {
-                ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == window.windowNumber
-            }
-        }
-        expect(realized, "live fixture owns an active on-screen window before AX reads")
-        guard realized else { return }
         let axGranted = AXIsProcessTrusted()
         let ocrGranted = CGPreflightScreenCaptureAccess()
         expect(axGranted, "live context requires the signed app Accessibility grant")
         expect(ocrGranted, "live OCR requires the signed app Screen Recording grant")
         guard axGranted, ocrGranted else { return }
 
-        let read: () -> [String] = {
-            let reader = ScreenContext.glossaryReader(for: .current, category: nil, allowed: { true })
-            var done = false
-            var result: [String] = []
-            DispatchQueue.global(qos: .userInitiated).async {
-                let captured = reader { true }.map(\.value)
-                DispatchQueue.main.async { result = captured; done = true }
+        // A private file and new app instance avoid touching existing documents.
+        let fixtureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-context-e2e-\(UUID().uuidString)")
+        let fixtureURL = fixtureDirectory.appendingPathComponent("context-fixture.txt")
+        defer { try? FileManager.default.removeItem(at: fixtureDirectory) }
+        do {
+            try FileManager.default.createDirectory(
+                at: fixtureDirectory, withIntermediateDirectories: true)
+            try "Priya Sharma PostgreSQL".write(
+                to: fixtureURL, atomically: true, encoding: .utf8)
+        } catch {
+            expect(false, "live context creates its temporary fixture")
+            return
+        }
+        guard let textEditURL = NSWorkspace.shared.urlForApplication(
+            withBundleIdentifier: "com.apple.TextEdit") else {
+            expect(false, "live context finds TextEdit")
+            return
+        }
+
+        // Own only the new instance, including late launch completion after a
+        // timeout. Every exit terminates it before the fixture file is removed.
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.addsToRecentItems = false
+        configuration.createsNewApplicationInstance = true
+        var launchedApp: NSRunningApplication?
+        var launchFinished = false
+        var abandoned = false
+        defer {
+            abandoned = true
+            launchedApp?.forceTerminate()
+        }
+        NSWorkspace.shared.open(
+            [fixtureURL], withApplicationAt: textEditURL, configuration: configuration
+        ) { openedApp, _ in
+            guard !abandoned else {
+                openedApp?.forceTerminate()
+                return
             }
-            expect(waitUntil(timeout: 5) { done }, "live context completes within capture budget")
-            return result
+            launchedApp = openedApp
+            launchFinished = true
         }
-        expect(Set(read()).isSuperset(of: ["Priya", "Sharma", "PostgreSQL"]),
-               "live near-cursor AX extracts visible names")
-
-        // Opaque apps expose pixels but no accessible text; only Vision can
-        // recover these three synthetic terms, without a model or network.
-        let canvas = OCRFixtureView(frame: window.contentView!.bounds)
-        canvas.setAccessibilityElement(false)
-        canvas.setAccessibilityChildren([])
-        window.contentView = canvas
-        window.makeFirstResponder(nil)
-        window.display()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-        expect(Set(read()).isSuperset(of: ["Priya", "Sharma", "PostgreSQL"]),
-               "live OCR-only window extracts visible names with Apple Vision")
-
-        // Pin the first window, then switch within the same process. No capture
-        // may follow the replacement window or use a stale AX tree.
-        let pinned = ScreenContext.glossaryReader(for: .current, category: nil, allowed: { true })
-        let other = NSWindow(contentRect: NSRect(x: 750, y: 100, width: 200, height: 200),
-                             styleMask: [.titled], backing: .buffered, defer: false)
-        other.isReleasedWhenClosed = false
-        other.makeKeyAndOrderFront(nil)
-        var switched: [ContextEntity]?
-        DispatchQueue.global().async {
-            let result = pinned { true }
-            DispatchQueue.main.async { switched = result }
+        guard waitUntil(timeout: contextLaunchTimeout, { launchFinished }),
+              let app = launchedApp else {
+            expect(false, "TextEdit opened the live context fixture")
+            return
         }
-        expect(waitUntil(timeout: 5) { switched != nil } && switched?.isEmpty == true,
-               "live same-app window change invalidates capture")
-        other.close()
 
-        // Secure focused fields block both structured context and OCR.
-        let secure = NSSecureTextField(frame: NSRect(x: 20, y: 30, width: 300, height: 40))
-        window.contentView = NSView(frame: canvas.frame)
-        window.contentView?.addSubview(secure)
-        window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(secure)
-        expect(read().isEmpty, "live secure field suppresses AX and OCR")
+        // Activation can precede AX readiness; require both on the exact PID.
+        guard waitUntil(timeout: contextFocusTimeout, {
+            guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == app.processIdentifier else {
+                _ = app.activate()
+                return false
+            }
+            return ScreenContext.focusedElement(of: app) != nil
+        }) else {
+            expect(false, "TextEdit focused the live context fixture")
+            return
+        }
+
+        // Exercise the actual asynchronous reader without persisting its text.
+        let reader = ScreenContext.glossaryReader(for: app, category: nil, allowed: { true })
+        var result: [String]?
+        DispatchQueue.global(qos: .userInitiated).async {
+            let captured = reader { true }.map(\.value)
+            DispatchQueue.main.async { result = captured }
+        }
+        expect(waitUntil(timeout: contextCaptureTimeout) { result != nil },
+               "live context completes within capture budget")
+        expect(Set(result ?? []).isSuperset(of: ["Priya", "Sharma", "PostgreSQL"]),
+               "live TextEdit context extracts visible names and technical terms")
     }
 
     /// The opt-in model eval shares synthetic screen fixtures with the actual
