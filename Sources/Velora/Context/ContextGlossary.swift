@@ -14,6 +14,8 @@ enum ContextGlossary {
     private static let trailingPunctuation = CharacterSet(charactersIn: ".'-_")
     private static let contractionTails = ["n't", "'ll", "'ve", "'re", "'d"]
     private static let inflectionTails = ["ed", "d", "ing"]
+    private static let pluralTails = ["s", "es"]
+    private static let yTails = [("ies", "y"), ("ied", "y")]
     private static let identifierSeparators: Set<Character> = [".", "_", "+"]
     private static let ignoredWords = Set(
         ("a an the i we you he she they it this that to from reply message "
@@ -167,11 +169,10 @@ enum ContextGlossary {
 
     /// The list holds base words only, so a token is ordinary wording when
     /// every part of it is. Splitting keeps the hyphen from being evidence
-    /// ("sign-in" is sign + in), and the suffix retries keep a plural, a
+    /// ("sign-in" is sign + in), and the stem retries keep a plural, a
     /// contraction or an inflection from being evidence ("uses" is use + s,
-    /// "doesn't" is does, "deployed" is deploy). There is deliberately no
-    /// "-es" rule: it would strip "redis" to "red" and reject a term this
-    /// feature exists to spell.
+    /// "doesn't" is does, "deployed" is deploy, "queries" is query,
+    /// "committed" is commit). There is deliberately no "-er" rule.
     private static func isOrdinaryWord(_ term: String, in words: Set<String>) -> Bool {
         var lowered = term.lowercased()
         // "doesn't" splits to doesn + t, so the tail comes off before the split.
@@ -181,12 +182,30 @@ enum ContextGlossary {
         let parts = lowered.split(whereSeparator: { $0 == "-" || $0 == "'" })
         guard !parts.isEmpty else { return false }
         return parts.allSatisfy { part in
-            let part = String(part)
-            if words.contains(part) { return true }
-            return (["s"] + inflectionTails).contains { tail in
-                part.hasSuffix(tail) && words.contains(String(part.dropLast(tail.count)))
+            stems(of: String(part)).contains { words.contains($0) }
+        }
+    }
+
+    /// Every base form an inflected part could have come from, the part itself
+    /// first. Only the caller's word list decides which one is real.
+    ///
+    ///   fixes     -> fixe, fix          (s, es)
+    ///   queries   -> query              (ies -> y)
+    ///   verified  -> verifi, verifie, verify  (ed, d, ied -> y)
+    ///   committed -> committ, commit    (ed, then the doubled consonant)
+    private static func stems(of part: String) -> [String] {
+        var out = [part]
+        for tail in pluralTails + inflectionTails where part.hasSuffix(tail) {
+            let stem = String(part.dropLast(tail.count))
+            out.append(stem)
+            if inflectionTails.contains(tail), let last = stem.last, stem.dropLast().last == last {
+                out.append(String(stem.dropLast()))
             }
         }
+        for (tail, base) in yTails where part.hasSuffix(tail) {
+            out.append(String(part.dropLast(tail.count)) + base)
+        }
+        return out
     }
 }
 

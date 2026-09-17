@@ -268,10 +268,16 @@ can be decided without a desktop, is covered in the standard suite by
   apostrophe) is stripped before the split, and an `ed`, `d` or `ing`
   inflection is resolved through its stem, so `doesn't`, `deployed` and
   `updated` read as prose and no longer fill the sparseness quota.
+  An `es` plural, an `ies`/`ied` form (resolved through `y`) and a doubled
+  final consonant before `ed`/`ing` are likewise resolved through their stem,
+  so `fixes`, `queries`, `verified` and `committed` read as prose. There is
+  no `er` rule.
   Accepted trade: a real term whose stem is an ordinary word (`systemd` ->
-  `system`) now reads as ordinary and is missed. A missed term degrades
-  quietly; a false term is injected as an authoritative spelling and
-  suppresses the remaining reading stages. There is no exception list for it.
+  `system`, `classes` -> `class`, `aliases` -> `alias`) now reads as ordinary
+  and is missed; `docker` and `minify` are themselves web2 entries, so
+  `docker` and `minified` are rejected too. A missed term degrades quietly; a
+  false term is injected as an authoritative spelling and suppresses the
+  remaining reading stages. There is no exception list for it.
 - The `e81c35d5` live proof above is for the reader as it stood at that head.
   The later window-stage change (`4758824`, the window reader no longer seeds
   its output with title/URL values) is covered by `testGlossaryStages` in the

@@ -6706,6 +6706,14 @@ enum Selftest {
         expect(capture(["kubectl nginx redis pytest numpy"], [], []) ==
                ["kubectl", "nginx", "redis", "pytest", "numpy"],
                "stem stripping keeps accepting lowercase technical terms")
+        for prose in ["I committed the fixes and verified the queries",
+                      "planning the patches and branches for the libraries"] {
+            expect(capture([prose], [], ["Priya Sharma PostgreSQL"]) ==
+                   ["Priya", "Sharma", "PostgreSQL"],
+                   "es, ies and doubled-consonant inflections are prose, not terms")
+            expect(reads == [.nearby, .window, .ocr],
+                   "inflected prose never suppresses the window and OCR stages")
+        }
         expect(capture(["Priya\u{2019}s desk", "O\u{2019}Brien"], [], []) ==
                ["Priya's", "O'Brien"],
                "a smart-quote possessive or name ships in the ASCII form the engine accepts")
