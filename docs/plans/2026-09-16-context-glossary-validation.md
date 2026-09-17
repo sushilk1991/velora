@@ -179,6 +179,47 @@ No further live attempts were made under firstmate's one-attempt instruction.
   invalidation have no passing live evidence. Their policy coverage remains
   synthetic; the paired model corpus likewise injects its screen-source text.
 
+## Validity diagnosis and fix on 2026-09-18
+
+The doc above asked for "stage/validity metadata from the TextEdit read to
+separate AX range availability, window-identity rejection, extraction, and OCR
+fallback". That metadata now exists, and reading the predicate it was meant to
+inspect found a defect that explains an all-stages-empty capture on a window
+that is plainly readable:
+
+- `valid()` required `glossaryWindow(pid) == target`, and `GlossaryWindow`
+  used a synthesized `==` over `CGRect`. That is exact float equality on
+  re-read WindowServer bounds, so any sub-point geometry change during capture
+  reads as a window switch.
+- It then required `windowFramesMatch(axFrame(window), target.frame)` — an
+  **Accessibility** frame compared against a **WindowServer** frame at one
+  point of tolerance. Those are two different measurements of the window; the
+  comparison was never part of window identity.
+- Either predicate returning false returns `[]` for every stage, including
+  OCR, and is indistinguishable from "the screen had no terms on it".
+
+Fix: identity is the `CGWindowID` plus the pinned AX focused-window object
+(`CFEqual`). Geometry is capture data, re-read per stage so the clipping bounds
+track a window the user moved instead of clipping its own text away. Both frame
+comparisons are gone. The policy is now `ScreenContext.glossaryRefusal`, a pure
+function over the facts a reader read, covered by `testGlossaryWindowIdentity`
+in the **standard** `--selftest` suite — including the regression that a moved
+or resized window is still the same window.
+
+Instrumentation: `ScreenContext.glossaryDiagnostics` (set by the live gate, or
+by `VELORA_CONTEXT_DIAGNOSTICS=1`) logs the pin refusal, each stage's source
+string count, OCR grant state, the final term count, and which
+`GlossaryRefusal` case rejected a stage. Counts and reasons only — no screen
+text, no titles, no images.
+
+**Live extraction is still unproven.** This session could not run the signed
+live gate: the machine's GUI session was at the login window
+(`NSWorkspace.frontmostApplication` was `loginwindow`, and no layer-0 window
+existed for any process), so no app can be frontmost and `glossaryWindow`
+cannot pin a target by construction. The fix above is a diagnosis from the code
+and is not a claim that the gate now passes. The next run with a real logged-in
+session should record which `GlossaryRefusal` case, if any, still appears.
+
 ## Remaining validation
 
 - Firstmate explicitly directed no-mistakes to proceed after this bounded

@@ -79,7 +79,8 @@ Control flow for one dictation:
 ```
 app → engine  {"cmd":"start","session":"uuid","context":{"bundle_id":"com.tinyspeck.slackmacgap",
                "app_name":"Slack","mode":null,             # mode:null = auto-resolve
-               "entities":[]}}                           # no synchronous screen read
+               "entities":[{"type":"file","value":"authCheck.ts"},   # cheap window title/URL
+                           {"type":"person","value":"Priya"},{"type":"site","value":"gmail"}]}}
 app → engine  AUDIO frames (streamed live during recording, ~100ms chunks)
 app → engine  {"cmd":"stop","session":"uuid",             # only already-ready context
                "entities":[{"type":"glossary","value":"authCheck.ts"}]}
@@ -368,7 +369,9 @@ The UI fetches meeting metadata in pages and loads a full transcript only for th
 
 **Context Glossary.** One asynchronous capture starts with dictation, pinned to the active process/window. Accessibility text near the cursor has priority; fewer than three useful terms triggers active-window AX fallback, then local Apple Vision OCR if still sparse and Screen Recording is granted. The Context layer owns AX, exact-window ScreenCaptureKit capture, and Vision; screenshots never enter Python and are released after recognition. No vision model is loaded. A deterministic extractor ranks/deduplicates at most 24 spelling candidates, 40 characters each, 600 total. Existing validated file/person/channel and site signals retain explicit tagging and final browser-mode refinement. The cleanup prompt receives only bounded untrusted spelling data, never window prose or instructions.
 
-Stop consumes only a completed glossary; it never waits. Stop, cancel, errors, preference revocation, and new sessions invalidate late readers. Secure input, denied AX permission, and changed frontmost windows fail closed. External listening and Action recording remain excluded. Context is neither logged nor stored in history/dictionary state or shared model-prefix caches. Settings > Dictation > Use screen context for spelling disables capture; the optional Screen Recording grant is requested only through its adjacent Settings button. Details and paired validation: `docs/plans/2026-09-16-context-glossary-design.md`.
+`start` still carries the cheap focused-window title/URL entities it always did (~5 ms, capped at 0.25 s): the engine biases Whisper toward the on-screen names before a word is spoken, and a browser session resolves to its site mode while Stream Typing is live. The stop-time glossary adds spelling candidates; it does not replace those signals, which keep a reserved share of the term budget.
+
+Stop consumes only a completed glossary; it never waits. Stop, cancel, errors, preference revocation, and new sessions invalidate late readers. Secure input, denied AX permission, a different WindowServer window, and a changed focused window fail closed; a window the user merely moved or resized does not. External listening and Action recording remain excluded. Context is neither logged nor stored in history/dictionary state or shared model-prefix caches. Settings > Dictation > Read on-screen text for spelling disables the glossary reads; mode resolution and @-tags keep working. The optional Screen Recording grant is requested only through its adjacent Settings button. `VELORA_CONTEXT_DIAGNOSTICS=1` emits stage and refusal metadata (counts and reasons, never screen text). Details and paired validation: `docs/plans/2026-09-16-context-glossary-design.md`.
 
 **Audio archive + reprocess.** When `save_audio` is on (default), each session's
 raw PCM is written to `~/.velora/audio/<session>.flac` (FLAC via libsndfile,

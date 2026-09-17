@@ -1163,6 +1163,21 @@ def test_glossary_payload_is_bounded(config):
     assert all("instructions" not in term and "system" not in term for term in payload)
 
 
+def test_glossary_keeps_accented_and_indic_names(config):
+    # macOS hands the app NFD text, and Python's \w matches no combining mark,
+    # so names the extractor had already found were dropped at this boundary.
+    import json
+    import unicodedata
+    entities = [
+        {"type": "glossary", "value": unicodedata.normalize("NFD", "Jos\u00e9")},
+        {"type": "glossary", "value": unicodedata.normalize("NFD", "R\u00e9sum\u00e9.docx")},
+        {"type": "glossary", "value": "\u092a\u094d\u0930\u093f\u092f\u093e"},
+    ]
+    gate = run_gate(LONG, config, entities=entities)
+    payload = json.loads(gate.system_prompt.split("Spelling data: ", 1)[1])
+    assert payload == ["Jos\u00e9", "R\u00e9sum\u00e9.docx", "\u092a\u094d\u0930\u093f\u092f\u093e"]
+
+
 def test_run_gate_tolerates_malformed_entities(config):
     ents = ["not a dict", {"type": "person", "value": "Priya"}, 42]
     g = run_gate("this is a long enough message to be cleaned up by the model now please",

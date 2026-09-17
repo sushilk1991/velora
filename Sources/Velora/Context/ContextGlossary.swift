@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// Immutable spelling candidates; readers remain behind the Context layer.
@@ -11,6 +12,8 @@ enum ContextGlossary {
     private static let maxSourceCharacters = 8_000
     private static let maxSourceStrings = 128
     private static let tokenPattern = #"[\p{L}\p{N}][\p{L}\p{M}\p{N}._+'-]*"#
+    private static let trailingPunctuation = CharacterSet(charactersIn: ".'-_")
+    private static let identifierSeparators: Set<Character> = [".", "_", "+"]
     private static let ignoredWords = Set(
         ("a an the i we you he she they it this that to from reply message "
          + "send subject title open close save cancel file edit view window help "
@@ -42,7 +45,7 @@ enum ContextGlossary {
             }
             var remaining = maxSourceCharacters
             for text in strings.prefix(maxSourceStrings) {
-                guard remaining > 0 else { break }
+                guard remaining > 0, result.count < maxTerms else { break }
                 // Reject oversized strings rather than manufacture a clipped token.
                 remaining -= text.unicodeScalars.count
                 guard text.unicodeScalars.count <= maxSourceCharacters,
@@ -69,6 +72,17 @@ enum ContextGlossary {
             else { return false }
             return candidates(in: entity.value).joined(separator: " ") == entity.value
         }
+        // Validated signals outrank bulk tokens, so they take their budget from
+        // the lowest-ranked glossary terms. Otherwise a text-rich screen (a
+        // quoted Gmail thread) fills all 24 slots and the site signal that picks
+        // the mode, and the file/person/channel signals that resolve @-tags,
+        // are silently dropped.
+        let signalCharacters = signals.reduce(0) { $0 + $1.value.count }
+        while !signals.isEmpty, !result.isEmpty,
+              result.count + signals.count > maxTerms
+                || characters + signalCharacters > maxCharacters {
+            characters -= result.removeLast().value.count
+        }
         for signal in signals {
             guard result.count < maxTerms,
                   characters + signal.value.count <= maxCharacters else { continue }
@@ -78,21 +92,55 @@ enum ContextGlossary {
         return valid() ? result : []
     }
 
-    /// Shape filtering keeps names/identifiers (Priya, authCheck.ts), not prose.
+    /// Shape filtering keeps names/identifiers (Priya, authCheck.ts, kubectl),
+    /// not prose. Trailing punctuation is part of the sentence, not the term:
+    /// an OCR line break leaves "auto-" and a list leaves "Redis,".
     private static func candidates(in text: String) -> [String] {
         guard let regex = try? NSRegularExpression(pattern: tokenPattern) else { return [] }
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
             .compactMap { match in
-                let term = ns.substring(with: match.range).trimmingCharacters(in: CharacterSet(charactersIn: ".'"))
+                let term = ns.substring(with: match.range)
+                    .trimmingCharacters(in: trailingPunctuation)
                 guard (2...maxTermCharacters).contains(term.unicodeScalars.count),
                       !ignoredWords.contains(term.lowercased()),
                       term.unicodeScalars.contains(where: { CharacterSet.letters.contains($0) }),
-                      term.contains(where: { $0.isUppercase || $0.isNumber })
-                        || term.contains(where: { "._+-".contains($0) })
+                      isTerm(term)
                 else { return nil }
                 return term
             }
+    }
+
+    /// Evidence that a token names something rather than continues a sentence.
+    /// A bare hyphen is not evidence: "Follow-up", "sign-in" and "drop-down"
+    /// are ordinary wording, and accepting them filled the sparseness quota so
+    /// the active-window and OCR stages never ran.
+    ///
+    ///   Priya, PostgreSQL, v2   -> a capital or a digit
+    ///   authCheck.ts, snake_case, c++ -> an identifier separator
+    ///   प्रिया, 田中, สมชาย        -> a script with no capital to offer
+    ///   kubectl, nginx, pytest  -> a lowercase word no dictionary knows
+    private static func isTerm(_ term: String) -> Bool {
+        if term.contains(where: { $0.isUppercase || $0.isNumber }) { return true }
+        if term.contains(where: { identifierSeparators.contains($0) }) { return true }
+        if term.lowercased() == term.uppercased() { return true }
+        return unknownToSystemDictionary(term)
+    }
+
+    /// macOS's own spelling dictionary is the word list — no asset ships with
+    /// the app, nothing is downloaded, and nothing leaves the machine. It runs
+    /// on the capture queue only for all-lowercase Latin tokens the cheaper
+    /// tests already rejected (~0.14 ms each).
+    ///
+    /// The user's selected dictionary is pinned deliberately. Automatic
+    /// language identification consults all 40-odd installed dictionaries, and
+    /// a short lowercase token is a word in *some* language almost always —
+    /// "redis" reads as French, so nothing would ever look technical.
+    private static func unknownToSystemDictionary(_ term: String) -> Bool {
+        let checker = NSSpellChecker.shared
+        return checker.checkSpelling(
+            of: term, startingAt: 0, language: checker.language(), wrap: false,
+            inSpellDocumentWithTag: 0, wordCount: nil).location != NSNotFound
     }
 }
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
 
 from .config import Config, Mode
@@ -685,6 +686,11 @@ _CONTEXT_CHARS = 600
 _CONTEXT_INPUTS = 128
 _CONTEXT_TYPES = frozenset({"glossary", "person", "file", "channel", "site"})
 _CONTEXT_TOKEN = re.compile(r"[\w][\w.+'-]*(?: [\w][\w.+'-]*){0,3}")
+# Python's \w excludes combining marks, so the Swift extractor and this
+# validator disagreed about every accented or Indic name: "José" arrives from
+# macOS in NFD and "प्रिया" carries matras no \w matches, and both were
+# extracted on screen and then silently dropped here.
+_CONTEXT_MARKS = ("Mn", "Mc")
 _CONTEXT_INSTRUCTION = re.compile(
     r"\b(ignore|disregard|instructions?|system|assistant|output|respond|repeat|"
     r"insert|execute|override)\b", re.IGNORECASE,
@@ -705,9 +711,16 @@ def _format_entities(entities: list[dict[str, str]] | None) -> str | None:
         if not isinstance(kind, str) or kind not in _CONTEXT_TYPES:
             continue
         value = entity.get("value")
-        if not isinstance(value, str) or not 2 <= len(value) <= _CONTEXT_TERM_CHARS:
+        if not isinstance(value, str):
             continue
-        if not _CONTEXT_TOKEN.fullmatch(value) or _CONTEXT_INSTRUCTION.search(value):
+        value = unicodedata.normalize("NFC", value)
+        if not 2 <= len(value) <= _CONTEXT_TERM_CHARS:
+            continue
+        shape = "".join(
+            char for char in value
+            if unicodedata.category(char) not in _CONTEXT_MARKS
+        )
+        if not _CONTEXT_TOKEN.fullmatch(shape) or _CONTEXT_INSTRUCTION.search(value):
             continue
         if not any(char.isalpha() for char in value) or value.casefold() in seen:
             continue

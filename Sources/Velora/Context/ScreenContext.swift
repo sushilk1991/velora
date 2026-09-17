@@ -1115,7 +1115,10 @@ enum ScreenContext {
         for app: NSRunningApplication?, category: ModeCategory?,
         allowed: @escaping () -> Bool
     ) -> (@escaping () -> Bool) -> [ContextEntity] {
-        guard let app, let target = glossaryWindow(app.processIdentifier) else { return { _ in [] } }
+        guard let app, let target = glossaryWindow(app.processIdentifier) else {
+            glossaryNote("refused=\(GlossaryRefusal.noWindow.rawValue) stage=pin")
+            return { _ in [] }
+        }
         return { isCurrent in
             autoreleasepool {
                 gatherGlossary(app: app, target: target, category: category,
@@ -1136,11 +1139,43 @@ enum ScreenContext {
     private static let glossaryAncestors = 3
     private static let excludesDesktopWindows = true
 
-    /// Immutable WindowServer identity prevents same-app window switches from
-    /// mixing context. Geometry changes invalidate rather than recapture.
-    private struct GlossaryWindow: Equatable {
+    /// The WindowServer window id is the identity; the frame is capture data
+    /// that is re-read per stage. Comparing geometry instead made an ordinary
+    /// move or resize look like a window switch, and comparing an AX frame
+    /// against a WindowServer frame compared two different measurements.
+    struct GlossaryWindow {
         let id: CGWindowID
         let frame: CGRect
+    }
+
+    /// Why a stage refused, for the live gate only. Never carries screen text,
+    /// pixels, a window title, or a bundle identifier.
+    enum GlossaryRefusal: String {
+        case revoked, noWindow, windowChanged, secureField, focusChanged
+    }
+
+    /// The identity policy, separated from the AX and WindowServer reads that
+    /// feed it: a single false here returns [] for every stage, so it is worth
+    /// testing without a real screen.
+    static func glossaryRefusal(
+        current: GlossaryWindow?, pinned: GlossaryWindow,
+        focusedWindowMatches: Bool, secureField: Bool
+    ) -> GlossaryRefusal? {
+        guard let current else { return .noWindow }
+        guard current.id == pinned.id else { return .windowChanged }
+        guard !secureField else { return .secureField }
+        guard focusedWindowMatches else { return .focusChanged }
+        return nil
+    }
+
+    /// Opt-in stage/validity metadata, enabled by the live gate and by
+    /// `VELORA_CONTEXT_DIAGNOSTICS=1`. Diagnostics only: counts and reasons.
+    static var glossaryDiagnostics =
+        ProcessInfo.processInfo.environment["VELORA_CONTEXT_DIAGNOSTICS"] == "1"
+
+    private static func glossaryNote(_ message: String) {
+        guard glossaryDiagnostics else { return }
+        NSLog("Velora: glossary %@", message)
     }
 
     private static func glossaryWindow(_ pid: pid_t) -> GlossaryWindow? {
@@ -1176,43 +1211,61 @@ enum ScreenContext {
         let window = axElement(application, kAXFocusedWindowAttribute)
         let focused = axElement(application, kAXFocusedUIElementAttribute)
         let deadline = Date().addingTimeInterval(glossaryAXSeconds)
-        let valid = {
-            guard allowed(), AXIsProcessTrusted(), !SecureInput.isActive,
-                  glossaryWindow(app.processIdentifier) == target else { return false }
-            if let current = axElement(application, kAXFocusedUIElementAttribute),
-               glossarySecure(current) { return false }
-            if let window {
-                guard let current = axElement(application, kAXFocusedWindowAttribute),
-                      CFEqual(current, window),
-                      let frame = axFrame(window), windowFramesMatch(frame, target.frame)
-                else { return false }
+        let valid = { () -> Bool in
+            // Revocation is judged before any read: stop and cancel must
+            // prevent new reads, not merely discard their output.
+            guard allowed(), AXIsProcessTrusted(), !SecureInput.isActive else {
+                glossaryNote("refused=\(GlossaryRefusal.revoked.rawValue)")
+                return false
             }
-            return true
+            let refusal = glossaryRefusal(
+                current: glossaryWindow(app.processIdentifier), pinned: target,
+                focusedWindowMatches: window.map { pinned in
+                    axElement(application, kAXFocusedWindowAttribute)
+                        .map { CFEqual($0, pinned) } ?? false
+                } ?? true,
+                secureField: axElement(application, kAXFocusedUIElementAttribute)
+                    .map(glossarySecure) ?? false)
+            if let refusal { glossaryNote("refused=\(refusal.rawValue)") }
+            return refusal == nil
         }
         guard valid() else { return [] }
         var named: [ContextEntity] = []
-        return ContextGlossary.capture(valid: valid, named: { named }, read: { source in
+        let terms = ContextGlossary.capture(valid: valid, named: { named }, read: { source in
+            // Geometry is re-read per stage: a window the user nudged mid-
+            // capture is still their window, and stale bounds would clip its
+            // own text out of the result.
+            let live = glossaryWindow(app.processIdentifier) ?? target
             switch source {
             case .nearby:
                 // Cursor text has spelling priority. Existing title/URL signals
                 // still supply explicit tags and browser mode, off the hot path.
                 let nearby = focused.map {
-                    glossaryNearby($0, window: window, bounds: target.frame, deadline: deadline)
+                    glossaryNearby($0, window: window, bounds: live.frame, deadline: deadline)
                 } ?? []
                 guard valid() else { return [] }
                 named = entities(for: app, category: category, deepURL: true)
+                glossaryNote("stage=nearby strings=\(nearby.count)")
                 return nearby
             case .window:
-                guard let window else { return [] }
+                guard let window else {
+                    glossaryNote("stage=window strings=0")
+                    return []
+                }
                 var out = named.map(\.value)
                 var budget = glossaryNodes
-                collectGlossaryText(window, bounds: target.frame, into: &out,
+                collectGlossaryText(window, bounds: live.frame, into: &out,
                                     budget: &budget, depth: 0, deadline: deadline)
+                glossaryNote("stage=window strings=\(out.count)")
                 return out
             case .ocr:
-                return glossaryOCR(target, valid: valid)
+                let text = glossaryOCR(live, valid: valid)
+                glossaryNote("stage=ocr strings=\(text.count)")
+                return text
             }
         })
+        glossaryNote("captured terms=\(terms.count)")
+        return terms
     }
 
     /// Selected-range reads avoid materializing a whole document. Nearby static
@@ -1307,7 +1360,11 @@ enum ScreenContext {
     private static func glossaryOCR(
         _ target: GlossaryWindow, valid: @escaping () -> Bool
     ) -> [String] {
-        guard CGPreflightScreenCaptureAccess(), valid() else { return [] }
+        guard CGPreflightScreenCaptureAccess() else {
+            glossaryNote("stage=ocr granted=false")
+            return []
+        }
+        guard valid() else { return [] }
         let result = GlossaryOCRResult()
         let deadline = Date().addingTimeInterval(glossaryOCRSeconds)
         SCShareableContent.getExcludingDesktopWindows(excludesDesktopWindows, onScreenWindowsOnly: true) { content, _ in

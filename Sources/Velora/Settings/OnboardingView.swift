@@ -23,7 +23,7 @@ struct OnboardingSetupState: Equatable {
 /// try-it completion.
 final class OnboardingModel: ObservableObject {
     enum Step: Int, CaseIterable {
-        case welcome, microphone, inputMonitoring, accessibility, hotkey, tryIt
+        case welcome, privacy, microphone, inputMonitoring, accessibility, hotkey, tryIt
     }
 
     @Published var step: Step = .welcome
@@ -162,9 +162,9 @@ private enum OnboardingLayout {
     static let sideMargin: CGFloat = 24
 }
 
-/// Six-step onboarding flow (design brief §4.2): welcome → microphone →
-/// input monitoring → accessibility → hotkey → try it. 640×520, dot page
-/// indicator, push transitions, Skip paths on every step after welcome.
+/// Seven-step onboarding flow (design brief §4.2): welcome → privacy →
+/// microphone → input monitoring → accessibility → hotkey → try it. 640×520,
+/// dot page indicator, push transitions, Skip on every step after welcome.
 struct OnboardingView: View {
     @ObservedObject var model: OnboardingModel
 
@@ -173,6 +173,7 @@ struct OnboardingView: View {
             ZStack {
                 switch model.step {
                 case .welcome: welcomeStep.transition(.push(from: .trailing))
+                case .privacy: privacyStep.transition(.push(from: .trailing))
                 case .microphone: microphoneStep.transition(.push(from: .trailing))
                 case .inputMonitoring: inputMonitoringStep.transition(.push(from: .trailing))
                 case .accessibility: accessibilityStep.transition(.push(from: .trailing))
@@ -217,21 +218,46 @@ struct OnboardingView: View {
     private var welcomeStep: some View {
         stepLayout(title: "You talk. Velora types.") {
             Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 64))
+                .font(.system(size: 72))
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text("Hold a key, say your thing, release. Once setup finishes, dictation and screen context work in airplane mode.")
+            Text("Hold a key, say the thing, let go. The words show up wherever your cursor already is — email, Slack, a terminal, that half-written message from Tuesday.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            // Privacy stays literal; network exceptions belong beside the claim.
-            Text("No Velora dictation server. Audio, screenshots, OCR text and spelling hints are processed on this MacBook, never sent to us. Screen context is not saved.\n\nSetup, model downloads and GitHub updates use the internet. Personal Dictionary can sync through your iCloud Drive.")
+            Text("A few short steps and you'll be talking to your Mac. Two minutes, tops.")
                 .font(.callout)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Get Started") { model.advance() }
+            Button("Let's go") { model.advance() }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+        }
+    }
+
+    /// The privacy claims are required copy, so they get room of their own
+    /// rather than a fine-print block crowding the welcome step. Network
+    /// exceptions stay next to the claim — a promise with a hidden asterisk
+    /// is worse than no promise.
+    private var privacyStep: some View {
+        stepLayout(title: "Nobody's listening but you") {
+            Image(systemName: "airplane")
+                .font(.system(size: 60))
+                .foregroundStyle(VeloraBrand.iconGradient)
+            Text("There is no Velora dictation server. None. Your audio, your screenshots and the text Velora reads off your screen stay on this MacBook and are never sent to us. Nothing it reads off your screen is kept.")
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(width: 440)
+            Text("Switch on airplane mode and dictation still works. The internet only shows up for setup, model downloads and app updates — plus Personal Dictionary, if you want it riding along in iCloud.")
+                .font(.callout)
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+                .frame(width: 440)
+        } button: {
+            Button("Good. Continue") { model.advance() }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
         }
@@ -239,11 +265,11 @@ struct OnboardingView: View {
 
     private var microphoneStep: some View {
         permissionStep(
-            title: "Velora needs to hear you",
+            title: "Velora needs ears",
             card: PermissionCard(
                 symbol: "mic.fill",
                 title: "Microphone",
-                explanation: "Velora transcribes your speech on-device. Audio is processed locally and never leaves this Mac.",
+                explanation: "Obvious, but we'll say it anyway: no mic, no dictation. Your voice becomes text right here on this Mac and goes nowhere else.",
                 granted: model.microphoneGranted,
                 buttonTitle: model.microphoneDenied ? "Open Settings" : "Allow Access",
                 action: {
@@ -258,11 +284,11 @@ struct OnboardingView: View {
 
     private var inputMonitoringStep: some View {
         permissionStep(
-            title: "Let Velora hear your hotkey",
+            title: "And a way to hear the hotkey",
             card: PermissionCard(
                 symbol: "keyboard.fill",
                 title: "Input Monitoring",
-                explanation: "Your dictation key works anywhere only if Velora may watch for key presses. Without this the hotkey stays silent — even though everything else looks fine.",
+                explanation: "Your dictation key only works everywhere if Velora is allowed to watch for it. Skip this and the key simply does nothing — while everything else looks perfectly fine. Rude, we know.",
                 granted: model.inputMonitoringGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestInputMonitoring() }),
@@ -278,11 +304,11 @@ struct OnboardingView: View {
 
     private var accessibilityStep: some View {
         permissionStep(
-            title: "Let Velora type for you",
+            title: "And thumbs, sort of",
             card: PermissionCard(
                 symbol: "accessibility",
                 title: "Accessibility",
-                explanation: "Velora pastes the finished text into the app you're using — that requires the Accessibility permission.",
+                explanation: "This is how the finished text lands in whatever app you're in. Without it Velora can hear you perfectly and still has no way to type a single word.",
                 granted: model.accessibilityGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestAccessibility() }),
@@ -305,7 +331,7 @@ struct OnboardingView: View {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 11))
-                    Text("Already see Velora in the list but it still won't turn on? Select it, remove it with the “−” button, then add Velora back. An older build was signed differently, so macOS kept a stale entry.")
+                    Text("Velora already in the list but the switch won't stick? Select it, hit the “−” button, then add Velora back. An older build was signed differently and macOS is holding a grudge.")
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -322,8 +348,8 @@ struct OnboardingView: View {
     }
 
     private var hotkeyStep: some View {
-        stepLayout(title: "Your dictation key") {
-            Text("Hold it and talk — release to insert. A quick tap locks recording on; tap again to finish.")
+        stepLayout(title: "Pick your key") {
+            Text("Hold it, talk, let go — the text appears. In a hurry? Tap it once to lock recording on, then tap again when you're done.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -342,9 +368,9 @@ struct OnboardingView: View {
 
     private var tryItStep: some View {
         let setup = model.setupState
-        return stepLayout(title: setup.canTryIt ? "Try it" : "Getting Velora ready") {
+        return stepLayout(title: setup.canTryIt ? "Okay, your turn" : "Almost there") {
             if setup.canTryIt {
-                Text("Click into the text field, hold \(model.hotkey.displayName), and speak.")
+                Text("Click the box, hold \(model.hotkey.displayName), and say literally anything.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -355,7 +381,7 @@ struct OnboardingView: View {
                 // Fixed-height slot so the success label never shifts the layout.
                 Group {
                     if model.dictationSucceeded {
-                        Label("That's it — you're ready.", systemImage: "checkmark.circle.fill")
+                        Label("Nailed it. You're ready.", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(VeloraStatus.success)
                             .font(.callout.weight(.medium))
                             .transition(.opacity)
@@ -427,7 +453,7 @@ private struct ModelSetupCard: View {
                 .foregroundStyle(VeloraBrand.sky.color)
 
             VStack(spacing: VeloraSpacing.s) {
-                Text(state.status ?? "Preparing the model downloads…")
+                Text(state.status ?? "Warming up the downloads…")
                     .font(.system(size: 15, weight: .semibold))
                     .multilineTextAlignment(.center)
 
@@ -443,7 +469,7 @@ private struct ModelSetupCard: View {
                 .frame(width: 360)
             }
 
-            Text("Velora downloads the speech and writing models once and keeps them on this Mac. You can skip for now; setup continues in the background.")
+            Text("Velora grabs the speech and writing models once, then keeps them on this Mac forever. Feel free to skip ahead — this carries on in the background.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

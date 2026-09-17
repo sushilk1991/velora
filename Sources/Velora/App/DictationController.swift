@@ -2087,14 +2087,32 @@ final class DictationController: NSObject {
             ? nil
             : (targetAppOverride ?? liveExternalApp ?? contextTracker.frontmost)
 
-        // Screen reads run once in the background; start carries app identity
-        // only so a slow AX target cannot delay microphone capture.
-        let enriched = external
+        // The heavy screen read runs once in the background, but `start` still
+        // carries the cheap focused-window title/URL entities: the engine biases
+        // Whisper toward the names on screen before a word is spoken, resolves a
+        // browser session to its site mode while Stream Typing is live, and the
+        // HUD chip needs the site to say "Chat" instead of "Browser".
+        var enriched = external
             ? AppContext(bundleID: nil, appName: "Local agent")
             : AppContext(
                 bundleID: targetApp?.bundleIdentifier,
                 appName: targetApp?.localizedName)
+        if !external {
+            enriched.entities = Self.recordingEntities(policy: contextPolicy) {
+                ScreenContext.entities(
+                    for: targetApp,
+                    category: ModeCategory.category(
+                        forBundleID: enriched.bundleID))
+            }
+        }
         sessionContext = enriched
+        if !enriched.entities.isEmpty {
+            // Log only types/count — never the values (subject lines, names,
+            // page titles are private and would persist in the unified log).
+            NSLog("Velora: screen context — %ld entities [%@]",
+                  enriched.entities.count,
+                  enriched.entities.map { $0.type }.joined(separator: ", "))
+        }
         hud.model.beginSession(context: HUDSessionContext(
             appIcon: targetApp?.icon,
             modeName: hudLabel ?? explicitMode

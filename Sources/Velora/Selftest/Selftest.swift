@@ -113,6 +113,7 @@ enum Selftest {
         testModeCategories()
         testScreenContextSites()
         testContextGlossary()
+        testGlossaryWindowIdentity()
         testContextLifetime()
         testGlossaryCorpus()
         if ProcessInfo.processInfo.environment["VELORA_LIVE_CONTEXT_SELFTEST"] == "1" {
@@ -6669,6 +6670,69 @@ enum Selftest {
                "glossary has hard term and character budgets")
         expect(capture([String(repeating: "A", count: 41)], [], []).isEmpty,
                "overlong tokens are rejected, not clipped into invented names")
+
+        // The acceptance rule, in both directions. Rejecting lowercase jargon
+        // loses exactly the terms the feature exists for; accepting hyphenated
+        // wording fills the sparseness quota so the later stages never run.
+        expect(capture(["kubectl and nginx", "pytest with redis"], [], []) ==
+               ["kubectl", "nginx", "pytest", "redis"],
+               "all-lowercase technical terms are spelling candidates")
+        expect(capture(["प्रिया शर्मा"], [], []) == ["प्रिया", "शर्मा"],
+               "a script with no capitals still yields the names on screen")
+        expect(capture(["sign-in drop-down e-mail"], ["Kubernetes PostgreSQL Redis"], []) ==
+               ["Kubernetes", "PostgreSQL", "Redis"],
+               "hyphenated wording is prose, not a technical term")
+        expect(reads == [.nearby, .window],
+               "cursor prose no longer suppresses the active-window fallback")
+        expect(capture(["auto- kubectl"], [], []) == ["kubectl"],
+               "a line-wrapped fragment is trimmed to its word, not shipped")
+
+        // Validated signals pick the browser mode and resolve spoken @-tags;
+        // bulk screen tokens must not be able to crowd them out of the budget.
+        let crowded = ContextGlossary.capture(
+            valid: { true },
+            named: { [ContextEntity(type: "site", value: "gmail"),
+                      ContextEntity(type: "file", value: "authCheck.ts")] },
+            read: { source in source == .nearby ? (0..<200).map { "Symbol\($0)" } : [] })
+        expect(crowded.count == 24
+                && crowded.contains { $0.type == "site" && $0.value == "gmail" }
+                && crowded.contains { $0.type == "file" && $0.value == "authCheck.ts" },
+               "a text-rich screen cannot starve the site and tagging signals")
+    }
+
+    /// The predicate that returned [] for every stage in the live gate. A
+    /// WindowServer window id is identity; its frame is not. Comparing frames
+    /// meant a window the user nudged — or an AX frame measured differently
+    /// from the WindowServer frame it was checked against — discarded the whole
+    /// capture and looked exactly like a screen with no text on it.
+    private static func testGlossaryWindowIdentity() {
+        let pinned = ScreenContext.GlossaryWindow(
+            id: 42, frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        let moved = ScreenContext.GlossaryWindow(
+            id: 42, frame: CGRect(x: 137.5, y: 22, width: 640, height: 480))
+        let other = ScreenContext.GlossaryWindow(id: 43, frame: pinned.frame)
+        let refusal = { (current: ScreenContext.GlossaryWindow?, focused: Bool, secure: Bool) in
+            ScreenContext.glossaryRefusal(
+                current: current, pinned: pinned,
+                focusedWindowMatches: focused, secureField: secure)
+        }
+        expect(refusal(pinned, true, false) == nil,
+               "an unchanged window keeps the capture")
+        expect(refusal(moved, true, false) == nil,
+               "moving or resizing the dictation window is not a window switch")
+        expect(refusal(other, true, false) == .windowChanged,
+               "a different window discards the capture")
+        expect(refusal(nil, true, false) == .noWindow,
+               "an app with no on-screen window cannot be captured")
+        expect(refusal(pinned, true, true) == .secureField,
+               "a secure field discards the capture")
+        expect(refusal(pinned, false, false) == .focusChanged,
+               "a different focused window discards the capture")
+
+        // The production entry point itself fails closed without a lease.
+        let reader = ScreenContext.glossaryReader(
+            for: NSRunningApplication.current, category: nil, allowed: { false })
+        expect(reader({ true }).isEmpty, "a revoked lease reads nothing")
     }
 
     private static let contextLaunchTimeout: TimeInterval = 5
@@ -6678,6 +6742,9 @@ enum Selftest {
     /// Read a separate TextEdit process, matching production AX ownership.
     /// OCR-only, secure-field, and window-switch policies remain synthetic tests.
     private static func testLiveContext() {
+        // Stage and refusal metadata is the whole point of a live run that
+        // fails: without it an empty glossary and a refused one look the same.
+        ScreenContext.glossaryDiagnostics = true
         let axGranted = AXIsProcessTrusted()
         let ocrGranted = CGPreflightScreenCaptureAccess()
         expect(axGranted, "live context requires the signed app Accessibility grant")
