@@ -212,16 +212,59 @@ string count, OCR grant state, the final term count, and which
 `GlossaryRefusal` case rejected a stage. Counts and reasons only — no screen
 text, no titles, no images.
 
-**Live extraction is still unproven.** This session could not run the signed
-live gate: the machine's GUI session was at the login window
-(`NSWorkspace.frontmostApplication` was `loginwindow`, and no layer-0 window
-existed for any process), so no app can be frontmost and `glossaryWindow`
-cannot pin a target by construction. The fix above is a diagnosis from the code
-and is not a claim that the gate now passes. The next run with a real logged-in
-session should record which `GlossaryRefusal` case, if any, still appears.
+**Live extraction is proven at `e81c35d5`.** The signed live gate ran on an
+unlocked session at head
+`e81c35d55ef8f51b635212583b55bf2f9b72ad20` and exited 0 across 2,284 checks:
+
+```
+caffeinate -di env VELORA_LIVE_CONTEXT_SELFTEST=1 VELORA_CONTEXT_DIAGNOSTICS=1 \
+  VELORA_CONTEXT_CORPUS=".../context_glossary.json" \
+  .build/context-live-fixed/build/Velora.app/Contents/MacOS/Velora --selftest
+```
+
+What it read: a **separate** TextEdit process, not the test process, with
+Accessibility and Screen Recording granted. What it extracted: the near-cursor
+AX stage returned 2 source strings and the extractor produced 4 terms, the
+on-screen names and technical term the fixture placed there. No
+`GlossaryRefusal` case rejected a stage after the pin; the only refusal logged
+was `refused=noWindow stage=pin` from the deliberate no-window probe. Logs:
+`.build/context-fixed-package.log` (build) and `.build/context-fixed-live.log`
+(run), with the result recorded in `.build/context-live-proof.json`.
+
+**Still unproven live**, and unchanged by that run:
+
+- **Image-recognition-only capture.** No live app was driven that renders its
+  text to a canvas, so the Vision OCR stage has only ever run against the
+  fixture corpus.
+- **Suppression inside a password field.** `secureField` refusal is covered as
+  a pure policy decision by `testGlossaryWindowIdentity`; no live secure text
+  field has been focused mid-capture.
+- **Switching windows mid-dictation.** `windowChanged` and `focusChanged` are
+  likewise covered as policy only; no live capture has been raced against a
+  real window switch.
+
+The live gate needs an **unlocked graphical session with Accessibility
+granted** — at the login window no app is frontmost and `glossaryWindow` cannot
+pin a target by construction. That is why it stays behind
+`VELORA_LIVE_CONTEXT_SELFTEST=1` and is deliberately **not** part of the
+default `make test` run: making the standard gate depend on an unlocked desktop
+would break it on every headless and CI machine. Window identity, the part that
+can be decided without a desktop, is covered in the standard suite by
+`testGlossaryWindowIdentity`.
 
 ## Remaining validation
 
+- **Word-list precision (follow-up, not a staging bug).** All-lowercase Latin
+  tokens are accepted as terms when `/usr/share/dict/words` does not know them.
+  That list is web2 — English base forms only. It therefore misses ordinary
+  non-English words, so on a Spanish or German screen plain prose can be
+  labelled as technical terms; and it misses modern inflections and
+  derivations, so tokens like `emails`, `apps`, `merging` or `config` can be
+  accepted too. Both are precision problems in labelling, not staging defects:
+  the terms are still real on-screen strings, the budgets still bound them, and
+  the behaviour is no worse than the previous rule. A hyphenated or possessive
+  token is already decomposed to its parts, and a plural is already resolved
+  through its singular, which removes the largest share of the inflection gap.
 - Firstmate explicitly directed no-mistakes to proceed after this bounded
   attempt regardless of its outcome. The live extraction failure and coverage
   gaps remain recorded above; no production capture change was made to hide it.

@@ -1,4 +1,3 @@
-import AppKit
 import Foundation
 
 /// Immutable spelling candidates; readers remain behind the Context layer.
@@ -22,6 +21,8 @@ enum ContextGlossary {
             .split(separator: " ").map(String.init))
     private static let instructionPattern =
         #"(?i)\b(ignore|disregard|instructions?|system|assistant|output|respond|repeat|insert|execute|override)\b|<\||\|>|https?://"#
+    private static let signalTypes: Set<String> = ["site", "person", "file", "channel"]
+    private static let systemWordListPath = "/usr/share/dict/words"
 
     /// Stage order is the rank: cursor -> active window -> OCR. Nothing downstream
     /// receives the source strings; every term must occur literally in a reader.
@@ -32,17 +33,9 @@ enum ContextGlossary {
         var result: [ContextEntity] = []
         var seen = Set<String>()
         var characters = 0
-        var namedSignals: [ContextEntity] = []
-        for source in [Source.nearby, .window, .ocr] {
-            guard valid() else { return [] }
-            var strings = read(source)
-            guard valid() else { return [] }
-            // Named title/file/person signals rank behind the cursor and ahead
-            // of broad window text. Site metadata remains available for mode.
-            if source == .nearby {
-                namedSignals = Array(named().prefix(maxTerms))
-                strings.append(contentsOf: namedSignals.map(\.value))
-            }
+        // Extraction is shared by the readers and the named signals so that a
+        // term means the same thing wherever it was read.
+        let extract = { (strings: [String]) in
             var remaining = maxSourceCharacters
             for text in strings.prefix(maxSourceStrings) {
                 guard remaining > 0, result.count < maxTerms else { break }
@@ -60,17 +53,35 @@ enum ContextGlossary {
                     result.append(ContextEntity(type: "glossary", value: term))
                 }
             }
+        }
+        // Only what a reader actually read decides whether the screen was
+        // sparse. A window title is metadata the OS hands over for free, so
+        // counting it would let "Q3 Roadmap Review - Google Docs" stand in for
+        // three read terms and skip the OCR stage that is the only one able to
+        // read a canvas-rendered document.
+        for source in [Source.nearby, .window, .ocr] {
+            guard valid() else { return [] }
+            let strings = read(source)
+            guard valid() else { return [] }
+            extract(strings)
             if result.count >= sparseTermCount { break }
         }
+        // Named title/file/person signals rank behind everything a reader
+        // produced. Site metadata remains available for mode.
+        let namedSignals = Array(named().prefix(maxTerms))
+        extract(namedSignals.map(\.value))
         // Preserve existing site-mode and explicit tagging signals, but never a
-        // title/subject sentence. These values are also untrusted spelling data.
+        // title/subject sentence. These values are also untrusted spelling data,
+        // so they are bounded and screened, not reshaped: a channel really is
+        // named "#general" and a person really is "Priya Sharma (DM)", and the
+        // engine re-validates every value at the socket boundary.
         let signals = namedSignals.filter { entity in
-            if entity.type == "site" { return entity.value.count <= maxTermCharacters }
-            guard ["person", "file", "channel"].contains(entity.type),
-                  entity.value.count <= maxTermCharacters,
-                  entity.value.range(of: instructionPattern, options: .regularExpression) == nil
-            else { return false }
-            return candidates(in: entity.value).joined(separator: " ") == entity.value
+            signalTypes.contains(entity.type)
+                && entity.value.count <= maxTermCharacters
+                && entity.value.range(of: instructionPattern, options: .regularExpression) == nil
+                && !entity.value.unicodeScalars.contains(where: {
+                    CharacterSet.controlCharacters.contains($0)
+                })
         }
         // Validated signals outrank bulk tokens, so they take their budget from
         // the lowest-ranked glossary terms. Otherwise a text-rich screen (a
@@ -119,28 +130,52 @@ enum ContextGlossary {
     ///   Priya, PostgreSQL, v2   -> a capital or a digit
     ///   authCheck.ts, snake_case, c++ -> an identifier separator
     ///   प्रिया, 田中, สมชาย        -> a script with no capital to offer
-    ///   kubectl, nginx, pytest  -> a lowercase word no dictionary knows
+    ///   kubectl, nginx, pytest  -> a lowercase word the system list lacks
     private static func isTerm(_ term: String) -> Bool {
         if term.contains(where: { $0.isUppercase || $0.isNumber }) { return true }
         if term.contains(where: { identifierSeparators.contains($0) }) { return true }
         if term.lowercased() == term.uppercased() { return true }
-        return unknownToSystemDictionary(term)
+        // Without a list there is no evidence either way, so an all-lowercase
+        // Latin token falls back to the shape rule: not a term.
+        guard let systemWords else { return false }
+        return !isOrdinaryWord(term, in: systemWords)
     }
 
-    /// macOS's own spelling dictionary is the word list — no asset ships with
-    /// the app, nothing is downloaded, and nothing leaves the machine. It runs
-    /// on the capture queue only for all-lowercase Latin tokens the cheaper
-    /// tests already rejected (~0.14 ms each).
+    /// `/usr/share/dict/words` ships with macOS, is read-only, and is byte
+    /// identical on every machine, so the same screen yields the same terms
+    /// everywhere. The spelling checker's dictionary is the user's own and
+    /// mutable: whoever taught macOS "kubectl" would have this feature's exact
+    /// jargon rejected, and the selftest assertion would depend on their
+    /// learned words and chosen language.
     ///
-    /// The user's selected dictionary is pinned deliberately. Automatic
-    /// language identification consults all 40-odd installed dictionaries, and
-    /// a short lowercase token is a word in *some* language almost always —
-    /// "redis" reads as French, so nothing would ever look technical.
-    private static func unknownToSystemDictionary(_ term: String) -> Bool {
-        let checker = NSSpellChecker.shared
-        return checker.checkSpelling(
-            of: term, startingAt: 0, language: checker.language(), wrap: false,
-            inSpellDocumentWithTag: 0, wordCount: nil).location != NSNotFound
+    /// Nil when the file is missing or unreadable; acceptance degrades to the
+    /// shape rule rather than the capture failing.
+    static var systemWords: Set<String>? = loadSystemWords(at: systemWordListPath)
+
+    static func loadSystemWords(at path: String) -> Set<String>? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+        var words = Set<String>()
+        for line in text.split(separator: "\n") {
+            words.insert(line.lowercased())
+        }
+        return words.isEmpty ? nil : words
+    }
+
+    /// The list holds base words only, so a token is ordinary wording when
+    /// every part of it is. Splitting keeps the hyphen from being evidence
+    /// ("sign-in" is sign + in), and the trailing-s retry keeps a plural from
+    /// being evidence ("uses" is use + s). There is deliberately no "-es" rule:
+    /// it would strip "redis" to "red" and reject a term this feature exists
+    /// to spell.
+    private static func isOrdinaryWord(_ term: String, in words: Set<String>) -> Bool {
+        let parts = term.lowercased().split(whereSeparator: { $0 == "-" || $0 == "'" })
+        guard !parts.isEmpty else { return false }
+        return parts.allSatisfy { part in
+            words.contains(String(part))
+                || (part.hasSuffix("s") && words.contains(String(part.dropLast())))
+        }
     }
 }
 
