@@ -254,20 +254,33 @@ can be decided without a desktop, is covered in the standard suite by
 
 ## Remaining validation
 
-- **Word-list precision (follow-up, not a staging bug).** All-lowercase Latin
-  tokens are accepted as terms when `/usr/share/dict/words` does not know them.
-  That list is web2 — English base forms only. It therefore misses ordinary
-  non-English words, so on a Spanish or German screen plain prose can be
-  labelled as technical terms; and it misses modern inflections and
-  derivations, so tokens like `emails`, `apps`, `merging` or `config` can be
-  accepted too. Both are precision problems in labelling, not staging defects:
-  the terms are still real on-screen strings, the budgets still bound them, and
-  the behaviour is no worse than the previous rule. A hyphenated or possessive
-  token is already decomposed to its parts, and a plural is already resolved
-  through its singular, which removes the largest share of the inflection gap.
-- Firstmate explicitly directed no-mistakes to proceed after this bounded
-  attempt regardless of its outcome. The live extraction failure and coverage
-  gaps remain recorded above; no production capture change was made to hide it.
+- **Word-list precision.** All-lowercase Latin tokens are accepted as terms
+  when `/usr/share/dict/words` does not know them. That list is web2 — English
+  base forms only. It therefore misses ordinary non-English words, so on a
+  Spanish or German screen plain prose can be labelled as technical terms; and
+  it misses modern derivations, so tokens like `config` can be accepted too.
+  An accepted lowercase token is reader output and counts toward the
+  sparseness threshold, so every false acceptance also risks suppressing the
+  window and OCR stages; the terms are still real on-screen strings and the
+  budgets still bound them. A hyphenated or possessive
+  token is decomposed to its parts, a plural is resolved through its singular,
+  a contraction tail (`n't`, `'ll`, `'ve`, `'re`, `'d`, straight or curly
+  apostrophe) is stripped before the split, and an `ed`, `d` or `ing`
+  inflection is resolved through its stem, so `doesn't`, `deployed` and
+  `updated` read as prose and no longer fill the sparseness quota.
+  Accepted trade: a real term whose stem is an ordinary word (`systemd` ->
+  `system`) now reads as ordinary and is missed. A missed term degrades
+  quietly; a false term is injected as an authoritative spelling and
+  suppresses the remaining reading stages. There is no exception list for it.
+- The `e81c35d5` live proof above is for the reader as it stood at that head.
+  The later window-stage change (`4758824`, the window reader no longer seeds
+  its output with title/URL values) is covered by `testGlossaryStages` in the
+  standard `--selftest` suite, not by a re-run of the live gate.
+- Authorized validation scope for the retry pipeline: non-GUI repository checks
+  only (`make test`). No supplemental OCR-only live fixture, and no watch or
+  wait for an unlocked session. The signed native TextEdit proof satisfies the
+  live requirement; OCR-only, secure-field and window-switch stay the named
+  limits listed above and are not default-gate dependencies.
 - Live audio remains unverified. The prior performance run exited 0 with 2,264
   checks (`.build/context-perf.log`). The prior iPhone 17 Pro / iOS 26.5 run
   exited 0 (`.build/context-ios-pinned.log`); `make test-ios` itself could not

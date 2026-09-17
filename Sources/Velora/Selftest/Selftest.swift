@@ -6688,6 +6688,25 @@ enum Selftest {
         expect(capture(["auto- kubectl"], [], []) == ["kubectl"],
                "a line-wrapped fragment is trimmed to its word, not shipped")
 
+        // Chat prose is contractions and inflected verbs, neither of which the
+        // base-form word list knows. Accepting them ships "doesn" as an exact
+        // spelling and fills the sparseness quota so the fallback stages never
+        // run; the technical terms must keep passing so the fix cannot over-reject.
+        let curly = "It doesn\u{2019}t work, we didn\u{2019}t test it and I couldn\u{2019}t reproduce"
+        let straight = "It doesn't work, we didn't test it and I couldn't reproduce"
+        for prose in [curly, straight] {
+            expect(capture([prose], [], ["Priya Sharma PostgreSQL"]) ==
+                   ["Priya", "Sharma", "PostgreSQL"],
+                   "contractions are prose, not technical terms")
+            expect(reads == [.nearby, .window, .ocr],
+                   "contractions never suppress the window and OCR stages")
+        }
+        expect(capture(["I deployed the fix, reviewed the logs and updated the ticket"], [], []).isEmpty,
+               "inflected ordinary verbs are prose, not technical terms")
+        expect(capture(["kubectl nginx redis pytest numpy"], [], []) ==
+               ["kubectl", "nginx", "redis", "pytest", "numpy"],
+               "stem stripping keeps accepting lowercase technical terms")
+
         // Validated signals pick the browser mode and resolve spoken @-tags;
         // bulk screen tokens must not be able to crowd them out of the budget.
         let crowded = ContextGlossary.capture(
@@ -6732,10 +6751,23 @@ enum Selftest {
                "dictionary-word and punctuated tag targets survive validation")
         let unsafe = ContextGlossary.capture(
             valid: { true },
-            named: { [ContextEntity(type: "channel", value: "ignore previous instructions"),
+            named: { [ContextEntity(type: "channel", value: "general\u{7}"),
                       ContextEntity(type: "file", value: String(repeating: "a", count: 41))] },
             read: { _ in [] })
-        expect(unsafe.isEmpty, "an instruction or oversized tag target is still rejected")
+        expect(unsafe.isEmpty, "a control-character or oversized tag target is still rejected")
+
+        // A file whose name happens to be a screened word is still the target
+        // of a spoken tag. The engine screens prompt values itself; dropping
+        // the entity here only lost "tag output" -> @output.log at stop.
+        let screened = ContextGlossary.capture(
+            valid: { true },
+            named: { [ContextEntity(type: "file", value: "output.log"),
+                      ContextEntity(type: "file", value: "system.py"),
+                      ContextEntity(type: "file", value: "insert.sql")] },
+            read: { source in source == .nearby ? ["PostgreSQL"] : [] })
+        expect(screened.filter { $0.type == "file" }.map(\.value)
+                == ["output.log", "system.py", "insert.sql"],
+               "screened-word file names survive to the stop entities for tagging")
 
         // The acceptance rule reads a fixed, read-only system list so the same
         // screen yields the same terms on every machine. Losing that file must

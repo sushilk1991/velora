@@ -10,8 +10,10 @@ enum ContextGlossary {
     private static let maxCharacters = 600
     private static let maxSourceCharacters = 8_000
     private static let maxSourceStrings = 128
-    private static let tokenPattern = #"[\p{L}\p{N}][\p{L}\p{M}\p{N}._+'-]*"#
-    private static let trailingPunctuation = CharacterSet(charactersIn: ".'-_")
+    private static let tokenPattern = #"[\p{L}\p{N}][\p{L}\p{M}\p{N}._+'\u2019-]*"#
+    private static let trailingPunctuation = CharacterSet(charactersIn: ".'\u{2019}-_")
+    private static let contractionTails = ["n't", "'ll", "'ve", "'re", "'d"]
+    private static let inflectionTails = ["ed", "d", "ing"]
     private static let identifierSeparators: Set<Character> = [".", "_", "+"]
     private static let ignoredWords = Set(
         ("a an the i we you he she they it this that to from reply message "
@@ -78,7 +80,6 @@ enum ContextGlossary {
         let signals = namedSignals.filter { entity in
             signalTypes.contains(entity.type)
                 && entity.value.count <= maxTermCharacters
-                && entity.value.range(of: instructionPattern, options: .regularExpression) == nil
                 && !entity.value.unicodeScalars.contains(where: {
                     CharacterSet.controlCharacters.contains($0)
                 })
@@ -165,16 +166,25 @@ enum ContextGlossary {
 
     /// The list holds base words only, so a token is ordinary wording when
     /// every part of it is. Splitting keeps the hyphen from being evidence
-    /// ("sign-in" is sign + in), and the trailing-s retry keeps a plural from
-    /// being evidence ("uses" is use + s). There is deliberately no "-es" rule:
-    /// it would strip "redis" to "red" and reject a term this feature exists
-    /// to spell.
+    /// ("sign-in" is sign + in), and the suffix retries keep a plural, a
+    /// contraction or an inflection from being evidence ("uses" is use + s,
+    /// "doesn't" is does, "deployed" is deploy). There is deliberately no
+    /// "-es" rule: it would strip "redis" to "red" and reject a term this
+    /// feature exists to spell.
     private static func isOrdinaryWord(_ term: String, in words: Set<String>) -> Bool {
-        let parts = term.lowercased().split(whereSeparator: { $0 == "-" || $0 == "'" })
+        var lowered = term.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        // "doesn't" splits to doesn + t, so the tail comes off before the split.
+        if let tail = contractionTails.first(where: { lowered.hasSuffix($0) }) {
+            lowered = String(lowered.dropLast(tail.count))
+        }
+        let parts = lowered.split(whereSeparator: { $0 == "-" || $0 == "'" })
         guard !parts.isEmpty else { return false }
         return parts.allSatisfy { part in
-            words.contains(String(part))
-                || (part.hasSuffix("s") && words.contains(String(part.dropLast())))
+            let part = String(part)
+            if words.contains(part) { return true }
+            return (["s"] + inflectionTails).contains { tail in
+                part.hasSuffix(tail) && words.contains(String(part.dropLast(tail.count)))
+            }
         }
     }
 }
