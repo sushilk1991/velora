@@ -11,7 +11,7 @@ enum ContextGlossary {
     private static let maxSourceCharacters = 8_000
     private static let maxSourceStrings = 128
     private static let tokenPattern = #"[\p{L}\p{N}][\p{L}\p{M}\p{N}._+'\u2019-]*"#
-    private static let trailingPunctuation = CharacterSet(charactersIn: ".'\u{2019}-_")
+    private static let trailingPunctuation = CharacterSet(charactersIn: ".'-_")
     private static let contractionTails = ["n't", "'ll", "'ve", "'re", "'d"]
     private static let inflectionTails = ["ed", "d", "ing"]
     private static let identifierSeparators: Set<Character> = [".", "_", "+"]
@@ -113,6 +113,7 @@ enum ContextGlossary {
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length))
             .compactMap { match in
                 let term = ns.substring(with: match.range)
+                    .replacingOccurrences(of: "\u{2019}", with: "'")
                     .trimmingCharacters(in: trailingPunctuation)
                 guard (2...maxTermCharacters).contains(term.unicodeScalars.count),
                       !ignoredWords.contains(term.lowercased()),
@@ -172,7 +173,7 @@ enum ContextGlossary {
     /// "-es" rule: it would strip "redis" to "red" and reject a term this
     /// feature exists to spell.
     private static func isOrdinaryWord(_ term: String, in words: Set<String>) -> Bool {
-        var lowered = term.lowercased().replacingOccurrences(of: "\u{2019}", with: "'")
+        var lowered = term.lowercased()
         // "doesn't" splits to doesn + t, so the tail comes off before the split.
         if let tail = contractionTails.first(where: { lowered.hasSuffix($0) }) {
             lowered = String(lowered.dropLast(tail.count))

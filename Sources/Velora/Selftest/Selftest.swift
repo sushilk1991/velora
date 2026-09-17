@@ -6706,6 +6706,11 @@ enum Selftest {
         expect(capture(["kubectl nginx redis pytest numpy"], [], []) ==
                ["kubectl", "nginx", "redis", "pytest", "numpy"],
                "stem stripping keeps accepting lowercase technical terms")
+        expect(capture(["Priya\u{2019}s desk", "O\u{2019}Brien"], [], []) ==
+               ["Priya's", "O'Brien"],
+               "a smart-quote possessive or name ships in the ASCII form the engine accepts")
+        expect(capture(["Priya's desk", "O'Brien"], [], []) == ["Priya's", "O'Brien"],
+               "an ASCII possessive or name ships unchanged")
 
         // Validated signals pick the browser mode and resolve spoken @-tags;
         // bulk screen tokens must not be able to crowd them out of the budget.
