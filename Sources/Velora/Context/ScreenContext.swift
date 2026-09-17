@@ -1230,39 +1230,51 @@ enum ScreenContext {
             return refusal == nil
         }
         guard valid() else { return [] }
-        var named: [ContextEntity] = []
-        let terms = ContextGlossary.capture(valid: valid, named: { named }, read: { source in
-            // Geometry is re-read per stage: a window the user nudged mid-
-            // capture is still their window, and stale bounds would clip its
-            // own text out of the result.
-            let live = glossaryWindow(app.processIdentifier) ?? target
+        // Geometry is re-read per stage: a window the user nudged mid-capture
+        // is still their window, and stale bounds would clip its own text out
+        // of the result.
+        let live = { glossaryWindow(app.processIdentifier) ?? target }
+        return glossaryStages(
+            valid: valid,
+            named: { entities(for: app, category: category, deepURL: true) },
+            nearby: {
+                focused.map {
+                    glossaryNearby($0, window: window, bounds: live().frame, deadline: deadline)
+                } ?? []
+            },
+            window: {
+                guard let window else { return [] }
+                var out: [String] = []
+                var budget = glossaryNodes
+                collectGlossaryText(window, bounds: live().frame, into: &out,
+                                    budget: &budget, depth: 0, deadline: deadline)
+                return out
+            },
+            ocr: { glossaryOCR(live(), valid: valid) })
+    }
+
+    /// A stage contributes exactly what its reader read. Cursor text has
+    /// spelling priority; the title and URL signals that supply explicit tags
+    /// and browser mode are merged after stage selection, so a window title
+    /// cannot stand in for text on screen and satisfy the sparseness threshold
+    /// on behalf of a document nothing has read yet.
+    static func glossaryStages(
+        valid: () -> Bool, named: () -> [ContextEntity],
+        nearby: () -> [String], window: () -> [String], ocr: () -> [String]
+    ) -> [ContextEntity] {
+        var names: [ContextEntity] = []
+        let terms = ContextGlossary.capture(valid: valid, named: { names }, read: { source in
+            let text: [String]
             switch source {
             case .nearby:
-                // Cursor text has spelling priority. Existing title/URL signals
-                // still supply explicit tags and browser mode, off the hot path.
-                let nearby = focused.map {
-                    glossaryNearby($0, window: window, bounds: live.frame, deadline: deadline)
-                } ?? []
+                text = nearby()
                 guard valid() else { return [] }
-                named = entities(for: app, category: category, deepURL: true)
-                glossaryNote("stage=nearby strings=\(nearby.count)")
-                return nearby
-            case .window:
-                guard let window else {
-                    glossaryNote("stage=window strings=0")
-                    return []
-                }
-                var out = named.map(\.value)
-                var budget = glossaryNodes
-                collectGlossaryText(window, bounds: live.frame, into: &out,
-                                    budget: &budget, depth: 0, deadline: deadline)
-                glossaryNote("stage=window strings=\(out.count)")
-                return out
-            case .ocr:
-                let text = glossaryOCR(live, valid: valid)
-                glossaryNote("stage=ocr strings=\(text.count)")
-                return text
+                names = named()
+            case .window: text = window()
+            case .ocr: text = ocr()
             }
+            glossaryNote("stage=\(source) strings=\(text.count)")
+            return text
         })
         glossaryNote("captured terms=\(terms.count)")
         return terms

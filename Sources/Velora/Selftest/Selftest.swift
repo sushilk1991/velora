@@ -114,6 +114,7 @@ enum Selftest {
         testScreenContextSites()
         testContextGlossary()
         testGlossaryWindowIdentity()
+        testGlossaryStages()
         testContextLifetime()
         testGlossaryCorpus()
         if ProcessInfo.processInfo.environment["VELORA_LIVE_CONTEXT_SELFTEST"] == "1" {
@@ -6748,6 +6749,44 @@ enum Selftest {
         expect(capture(["प्रिया शर्मा"], [], []) == ["प्रिया", "शर्मा"],
                "without the word list, an uncased script is still accepted")
         ContextGlossary.systemWords = words
+    }
+
+    /// The producer's own staging, with only the readers faked. Title and URL
+    /// metadata once re-entered as window-stage reader output, so a canvas
+    /// document's title satisfied the sparseness threshold and suppressed the
+    /// OCR stage that was the only one able to read the document.
+    private static func testGlossaryStages() {
+        var read: [String] = []
+        let canvas = ScreenContext.glossaryStages(
+            valid: { true },
+            named: { [ContextEntity(type: "site", value: "gdocs"),
+                      ContextEntity(type: "page", value: "Q3 Roadmap Review")] },
+            nearby: { read.append("nearby"); return [] },
+            window: { read.append("window"); return [] },
+            ocr: { read.append("ocr"); return ["Priya Sharma PostgreSQL"] })
+        expect(read == ["nearby", "window", "ocr"],
+               "a window title never counts as window text the reader read")
+        expect(canvas.contains { $0.value == "PostgreSQL" }
+                && canvas.contains { $0.type == "site" && $0.value == "gdocs" },
+               "a canvas document reaches OCR and still keeps its site signal")
+
+        read = []
+        let cursor = ScreenContext.glossaryStages(
+            valid: { true }, named: { [] },
+            nearby: { read.append("nearby"); return ["Priya Sharma PostgreSQL"] },
+            window: { read.append("window"); return [] },
+            ocr: { read.append("ocr"); return [] })
+        expect(read == ["nearby"] && cursor.count == 3,
+               "sufficient near-cursor text stops the producer at the first stage")
+
+        read = []
+        let revoked = ScreenContext.glossaryStages(
+            valid: { read.isEmpty }, named: { [] },
+            nearby: { read.append("nearby"); return ["Priya Sharma"] },
+            window: { read.append("window"); return [] },
+            ocr: { read.append("ocr"); return [] })
+        expect(revoked.isEmpty && read == ["nearby"],
+               "a lease revoked mid-stage discards the capture before naming")
     }
 
     /// The predicate that returned [] for every stage in the live gate. A
