@@ -6706,6 +6706,8 @@ enum Selftest {
         expect(capture(["kubectl nginx redis pytest numpy"], [], []) ==
                ["kubectl", "nginx", "redis", "pytest", "numpy"],
                "stem stripping keeps accepting lowercase technical terms")
+        expect(capture(["docker minified"], [], []).isEmpty,
+               "a spelling the system word list already knows gets no glossary hint")
         for prose in ["I committed the fixes and verified the queries",
                       "planning the patches and branches for the libraries"] {
             expect(capture([prose], [], ["Priya Sharma PostgreSQL"]) ==

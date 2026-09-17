@@ -273,11 +273,21 @@ can be decided without a desktop, is covered in the standard suite by
   so `fixes`, `queries`, `verified` and `committed` read as prose. There is
   no `er` rule.
   Accepted trade: a real term whose stem is an ordinary word (`systemd` ->
-  `system`, `classes` -> `class`, `aliases` -> `alias`) now reads as ordinary
-  and is missed; `docker` and `minify` are themselves web2 entries, so
-  `docker` and `minified` are rejected too. A missed term degrades quietly; a
-  false term is injected as an authoritative spelling and suppresses the
-  remaining reading stages. There is no exception list for it.
+  `system`, `classes` -> `class`, `aliases` -> `alias`) reads as ordinary
+  and is missed. A missed term degrades quietly; a false term is injected as
+  an authoritative spelling and suppresses the remaining reading stages.
+  There is no exception list for it.
+  Decision (inbox 018): `docker` and `minified` are rejected, and stay
+  rejected. Evidence: `/usr/share/dict/words` holds `docker` at line 56443
+  and `minify` at line 116641, and `minified` reaches `minify` through
+  `ied` -> `y`. `docker` was rejected by direct membership from the moment
+  the word list replaced the spelling checker; no `er` rule was ever
+  involved, and none is added. The product decision is to omit glossary
+  hints for spellings the dictionary already knows rather than maintain
+  exceptions for them; dictionary membership is the verified fact here, not
+  a measurement of how the speech model spells those words. `newer`,
+  `slower` and `larger` remain accepted as bounded false positives because
+  further stemming is out of scope for this run.
 - The `e81c35d5` live proof above is for the reader as it stood at that head.
   The later window-stage change (`4758824`, the window reader no longer seeds
   its output with title/URL values) is covered by `testGlossaryStages` in the
