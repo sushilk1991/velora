@@ -91,11 +91,55 @@ The fixture had no on-screen WindowServer window, so capture could not pin a
 target. The cause of the missing fixture window remains unverified. The empty
 secure-field and window-switch results do not prove those behaviors when the
 fixture itself is unavailable. Evidence: `.build/context-signed-diagnostic.log`
-and `.build/context-diagnostic-build.log`. Diagnostic source edits were removed;
-the current debug app bundle still contains them and must be rebuilt before
-further validation. No screen text was logged.
+and `.build/context-diagnostic-build.log`. Diagnostic source edits were removed.
+No screen text was logged. The debug bundle was subsequently rebuilt without
+those diagnostics before the comparison below.
 
 The source build-number stamp was restored; `VERSION` is unchanged.
+
+## Base-versus-branch comparison on 2026-09-17
+
+The clean `origin/main` baseline (`d790b97`) was built and Developer ID signed
+in `.build/context-base` using `./scripts/make-app.sh release none`. Both
+baseline and branch ran with the same `VELORA_LIVE_CONTEXT_SELFTEST=1` and
+`VELORA_CONTEXT_CORPUS` environment settings.
+
+| Revision | Result | Live-context coverage |
+|---|---|---|
+| Baseline `d790b97` | Exit 0; 2,233 checks | None: both environment flags are ignored |
+| Branch `b3a6cb8` | Exit 1; 2/2,276 fail | AX and OCR extraction fail |
+
+The fixture and both flags were introduced by `a76d729`; they do not exist on
+`origin/main`. The earlier 2,264-check performance run used
+`VELORA_PERF_SELFTEST=1`, not the live-context flag. Neither passing run proves
+a previously working live fixture. This comparison cannot classify the new
+fixture failure as an environmental change or a feature regression.
+
+Logs: `.build/context-base-package.log`,
+`.build/context-base-comparison.log`, and
+`.build/context-branch-comparison.log`. Exit codes are in adjacent `.exit`
+files. The branch debug rebuild is `.build/context-clean-debug-build.log`.
+
+A separate observer queried WindowServer for each test PID without reading
+window titles or content. The baseline had zero windows throughout. The branch
+transitioned from zero to one, then two, then zero. Thus its earlier in-process
+zero count did not establish a persistent absence of WindowServer surfaces.
+Evidence: `.build/context-base-windows.log` and
+`.build/context-branch-windows.log`; observer source:
+`.build/context-window-observer.swift`.
+
+The fixture now orders its window with `orderFrontRegardless`, matching the
+existing accessory-app presentation sequence, and waits for active/key state
+plus its exact on-screen window ID before reading AX. That readiness assertion
+still failed in the next signed debug run (1/2,268 checks); the external
+observer saw one window during the run. The guard prevents empty captures from
+masquerading as secure-field or window-switch successes. It does not fix or
+prove the fixture's activation or AX behavior.
+
+Evidence: `.build/context-realization-selftest.log`,
+`.build/context-realization-windows.log`, and
+`.build/context-realization-build.log`. Stopped at the retry limit. No production
+capture code changed, and no-mistakes remains unstarted.
 
 ## Remaining gates
 

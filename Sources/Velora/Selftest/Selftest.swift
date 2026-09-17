@@ -6696,10 +6696,24 @@ enum Selftest {
         let field = NSTextField(frame: NSRect(x: 20, y: 30, width: 540, height: 40))
         field.placeholderString = "Message Priya Sharma PostgreSQL"
         window.contentView?.addSubview(field)
-        window.makeKeyAndOrderFront(nil)
+        // Match accessory-window presentation: realize a WindowServer surface
+        // before AX reads, rather than accepting frontmost process identity alone.
+        window.orderFrontRegardless()
         app.activate(ignoringOtherApps: true)
+        window.makeKey()
         window.makeFirstResponder(field)
-        _ = waitUntil { NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier }
+        let realized = waitUntil {
+            guard app.isActive, window.isKeyWindow,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+                  let rows = CGWindowListCopyWindowInfo(
+                    [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+                  ) as? [[String: Any]] else { return false }
+            return rows.contains {
+                ($0[kCGWindowNumber as String] as? NSNumber)?.intValue == window.windowNumber
+            }
+        }
+        expect(realized, "live fixture owns an active on-screen window before AX reads")
+        guard realized else { return }
         let axGranted = AXIsProcessTrusted()
         let ocrGranted = CGPreflightScreenCaptureAccess()
         expect(axGranted, "live context requires the signed app Accessibility grant")
