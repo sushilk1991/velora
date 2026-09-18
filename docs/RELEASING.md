@@ -49,8 +49,8 @@ VERSION bump ─▶ signed app ─▶ notarized DMG ─▶ GitHub release ─▶
    CONTRIBUTING.md when the round touched them.
 
 2. **Release notes.** Write `docs/releases/vX.Y.Z.md` for the version you are
-   *about to create* (see the bump table in CLAUDE.md: patch by default,
-   `minor`/`major` for bigger rounds). First line must be `# Velora X.Y.Z` —
+   *about to create* (bump levels are in `scripts/bump-version.sh`: patch by
+   default, `minor`/`major` for bigger rounds). First line must be `# Velora X.Y.Z` —
    the file becomes the GitHub release body verbatim, and users read it in
    the in-app updater. Keep it in the established voice: one-sentence
    headline, then short user-facing bullets. No internals.
