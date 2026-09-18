@@ -2,7 +2,7 @@
 
 Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, speak, release — polished text appears in whatever app you're using. All inference (speech-to-text and LLM cleanup) runs on-device via MLX on Apple Silicon. No audio or text ever leaves the machine.
 
-**Positioning:** the open-source answer to Superwhisper and Wispr Flow, with Wispr Flow's feel (invisible, fast, smart) and Superwhisper's customizability (modes, prompts, vocabulary) — minus the cloud, the subscription, and the trust problem. Wispr Flow transcribes in the cloud; Velora never makes a network request after models are downloaded.
+**Positioning:** the open-source answer to Superwhisper and Wispr Flow, with Wispr Flow's feel (invisible, fast, smart) and Superwhisper's customizability (modes, prompts, vocabulary) — minus the cloud, the subscription, and the trust problem. Dictation and screen context work offline after local setup. Setup/model downloads, GitHub updates, and Personal Dictionary iCloud sync are separate network paths.
 
 ## Product principles
 
@@ -99,7 +99,7 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 
 ## Non-goals
 - No cloud inference of any kind. No accounts, telemetry, or analytics.
-- No screen-content context (screenshots/OCR) — trust-destroying; explicit opt-in someday at most.
+- No cloud screen understanding or vision model. Optional dictation screen context uses bounded Accessibility text and local Apple Vision OCR for spelling only; screenshots and extracted context are never saved. Settings can disable every dictation screen-text read.
 - No silent or autonomous meeting recording. Detection never implies consent.
 - No claimed individual-speaker diarization from the remote/system track; `Me` and `Them` are audio-channel labels only.
 - No remotely reachable agent API and no direct third-party access to the privileged engine socket.

@@ -1,0 +1,3 @@
+# Match CI's suite as the baseline before live-scenario validation.
+commands:
+  test: 'make test'

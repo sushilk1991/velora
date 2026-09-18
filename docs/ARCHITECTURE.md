@@ -79,10 +79,11 @@ Control flow for one dictation:
 ```
 app → engine  {"cmd":"start","session":"uuid","context":{"bundle_id":"com.tinyspeck.slackmacgap",
                "app_name":"Slack","mode":null,             # mode:null = auto-resolve
-               "entities":[{"type":"file","value":"authCheck.ts"},   # screen context (AX)
+               "entities":[{"type":"file","value":"authCheck.ts"},   # cheap window title/URL
                            {"type":"person","value":"Priya"},{"type":"site","value":"gmail"}]}}
 app → engine  AUDIO frames (streamed live during recording, ~100ms chunks)
-app → engine  {"cmd":"stop","session":"uuid"}             # user released hotkey
+app → engine  {"cmd":"stop","session":"uuid",             # only already-ready context
+               "entities":[{"type":"glossary","value":"authCheck.ts"}]}
 engine → app  {"event":"partial","session":"...","text":"..."}       # protocol-compatible telemetry; not rendered
 engine → app  {"event":"transcript","session":"...","raw":"...","ms":412}
 engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode":"chat",
@@ -366,7 +367,11 @@ Capture preserves provenance instead of inventing diarization:
 
 The UI fetches meeting metadata in pages and loads a full transcript only for the selected meeting. Users can search, retry processing, play/export local tracks, or delete a meeting and its audio.
 
-**Smart context (hybrid).** At session start the app reads the frontmost app's focused-window title via the Accessibility API (already-granted; no Screen Recording, ~5ms, capped at 0.25s) and extracts `entities` — current file (editors), person/channel (chat), subject (mail), site (browser: Gmail/Docs/Notion/Linear…). The engine (`formatting.py`) uses them to: (1) feed exact names/spellings into the cleanup prompt; (2) turn spoken **@-tags** into tokens ("tag authCheck" → `@authCheck.ts`, "mention Priya" → `@Priya`, conservative to avoid tagging ordinary prose); (3) refine a browser's mode by site. A small on-device VLM screen-read for thin-AX Electron editors is the planned second half of the hybrid.
+**Context Glossary.** One asynchronous capture starts with dictation, pinned to the active process/window. Accessibility text near the cursor has priority; fewer than three useful terms triggers active-window AX fallback, then local Apple Vision OCR if still sparse and Screen Recording is granted. The Context layer owns AX, exact-window ScreenCaptureKit capture, and Vision; screenshots never enter Python and are released after recognition. No vision model is loaded. A deterministic extractor ranks/deduplicates at most 24 spelling candidates, 40 characters each, 600 total. Existing validated file/person/channel and site signals retain explicit tagging and final browser-mode refinement. The cleanup prompt receives only bounded untrusted spelling data, never window prose or instructions.
+
+`start` still carries the cheap focused-window title/URL entities it always did (~5 ms, capped at 0.25 s): the engine biases Whisper toward the on-screen names before a word is spoken, and a browser session resolves to its site mode while Stream Typing is live. The stop-time glossary adds spelling candidates; it does not replace those signals, which keep a reserved share of the term budget.
+
+Stop consumes only a completed glossary; it never waits. Stop, cancel, errors, preference revocation, and new sessions invalidate late readers. Secure input, denied AX permission, a different WindowServer window, and a changed focused window fail closed; a window the user merely moved or resized does not. External listening and Action recording remain excluded. Context is neither logged nor stored in history/dictionary state or shared model-prefix caches. Settings > Dictation > Read on-screen text for spelling disables the glossary reads; mode resolution and @-tags keep working. The optional Screen Recording grant is requested only through its adjacent Settings button. `VELORA_CONTEXT_DIAGNOSTICS=1` emits stage and refusal metadata (counts and reasons, never screen text). Details and paired validation: `docs/plans/2026-09-16-context-glossary-design.md`.
 
 **Audio archive + reprocess.** When `save_audio` is on (default), each session's
 raw PCM is written to `~/.velora/audio/<session>.flac` (FLAC via libsndfile,
@@ -426,7 +431,7 @@ Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|f
 | `App/` | main, AppDelegate, activation policy, engine supervisor |
 | `Capture/` | Direct AVCapture microphone source, 16kHz mono Float32 conversion, RMS levels for HUD |
 | `Hotkey/` | CGEventTap (hold + double-tap detection), Esc-cancel monitor, secure-input detection (`IsSecureEventInputEnabled`) |
-| `Context/` | NSWorkspace frontmost app tracking, AX focused-element probe (secure field check) |
+| `Context/` | NSWorkspace frontmost app tracking, AX focused-element probe (secure field check), Context Glossary readers (near-cursor/window AX text, exact-window capture + Apple Vision OCR, term extraction) |
 | `HUD/` | NSPanel host + SwiftUI capsule (state machine per design brief), Canvas waveform |
 | `Insert/` | persist final transcript on pasteboard → temporary boundary-adjusted ⌘V → restore final transcript; CGEvent unicode typing fallback; per-app overrides |
 | `EngineClient/` | socket client, framing, request/event routing |
@@ -457,9 +462,10 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 
 | Permission | Needed for | When requested |
 |---|---|---|
-| Microphone | capture | onboarding step 2 (NSMicrophoneUsageDescription in bundle Info.plist) |
-| Accessibility | CGEventTap hotkeys + ⌘V posting + AX context | onboarding step 3, live-polled |
+| Microphone | capture | onboarding step 3 (NSMicrophoneUsageDescription in bundle Info.plist) |
+| Accessibility | CGEventTap hotkeys + ⌘V posting + AX context | onboarding step 5, live-polled |
 | Input Monitoring | reliable global hotkey event delivery | onboarding alongside Accessibility |
+| Screen Recording (optional) | local Apple Vision fallback for dictation spelling | explicit Screen Text Recognition button in Settings > Dictation |
 | System Audio Recording | remote meeting track via an audio-only Core Audio process tap | first explicitly confirmed meeting recording |
 | Calendar Full Access (optional) | match nearby events to call-app candidates | only when the Calendar meeting toggle is enabled |
 

@@ -69,6 +69,13 @@ enum Permissions {
         _ = AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
 
+    /// Optional local OCR permission, requested only by the Settings button.
+    /// Denial does not enter anyMissing or prevent ordinary dictation.
+    static func requestScreenText() {
+        _ = CGRequestScreenCaptureAccess()
+        openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+    }
+
     // MARK: - System Settings deep links
 
     static func openAccessibilitySettings() {

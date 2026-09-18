@@ -248,6 +248,7 @@ final class DictationController: NSObject {
     private let supervisor: EngineSupervisor
     private let dictionary: DictionaryRepository
     private var externalInsertionObserver: NSObjectProtocol?
+    private var contextPreferenceObserver: NSObjectProtocol?
 
     /// Action Mode stays uninitialized until an action actually starts. Plain
     /// dictation may consult actionsStorage to enforce input exclusion without
@@ -414,13 +415,8 @@ final class DictationController: NSObject {
     /// undo is only offered into the SAME app, shortly after.
     private var lastInsertion: (bundleID: String?, at: Date)?
     private static let undoWindow: TimeInterval = 180
-    /// Rich screen-context entities (title + nearby AX text) gathered in the
-    /// background while the user speaks, attached to the `stop` command so the
-    /// LLM cleanup can spell on-screen names right — with zero hot-path cost.
-    private var richEntities: [ContextEntity] = []
-    /// Increments per session so a slow background gather from a prior session
-    /// can't clobber the current one.
-    private var contextGatherGeneration = 0
+    /// One-shot context is consumed at stop without waiting for AX or Vision.
+    private let glossarySession = ContextGlossarySession()
     private let contextQueue = DispatchQueue(label: "com.velora.context", qos: .userInitiated)
     /// Learning loop: what we last inserted, so a later edit can be diffed into
     /// a learned correction. `session` keys the history row's quality
@@ -479,6 +475,13 @@ final class DictationController: NSObject {
         self.dictionary = dictionary
         super.init()
         ModeApplicationIndex.shared.reload()
+        // Revoking context also discards a completed snapshot before stop.
+        contextPreferenceObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard !AppConfig.shared.screenContextEnabled else { return }
+            self?.glossarySession.cancel()
+        }
         externalInsertionObserver = NotificationCenter.default.addObserver(
             forName: .veloraExternalTextInsertion, object: nil, queue: .main
         ) { [weak self] _ in
@@ -506,6 +509,10 @@ final class DictationController: NSObject {
     }
 
     deinit {
+        glossarySession.cancel()
+        if let contextPreferenceObserver {
+            NotificationCenter.default.removeObserver(contextPreferenceObserver)
+        }
         if let externalInsertionObserver {
             NotificationCenter.default.removeObserver(externalInsertionObserver)
         }
@@ -2080,10 +2087,11 @@ final class DictationController: NSObject {
             ? nil
             : (targetAppOverride ?? liveExternalApp ?? contextTracker.frontmost)
 
-        // Enrich the app context with on-screen entities (current file, the
-        // person/channel you're messaging, …) via the Accessibility API, so the
-        // engine can spell them right and, later, tag them. Cheap AX title read;
-        // never blocks capture.
+        // The heavy screen read runs once in the background, but `start` still
+        // carries the cheap focused-window title/URL entities: the engine biases
+        // Whisper toward the names on screen before a word is spoken, resolves a
+        // browser session to its site mode while Stream Typing is live, and the
+        // HUD chip needs the site to say "Chat" instead of "Browser".
         var enriched = external
             ? AppContext(bundleID: nil, appName: "Local agent")
             : AppContext(
@@ -2137,24 +2145,15 @@ final class DictationController: NSObject {
         phase = .starting(locked: locked)
         supervisor.send(startCommand)
 
-        // Background pass: read richer nearby AX text (the person you're
-        // replying to, field labels) while the user speaks. It's heavier than
-        // the title read, so it runs off the main thread and is attached to the
-        // `stop` command — ready by the time the user finishes talking, adding
-        // nothing to the release→insert latency.
-        richEntities = []
-        if !external, Self.gathersRichRecordingEntities(policy: contextPolicy) {
-            contextGatherGeneration += 1
-            let generation = contextGatherGeneration
-            let gatherApp = targetApp
-            let gatherCategory = ModeCategory.category(forBundleID: enriched.bundleID)
-            contextQueue.async { [weak self] in
-                let rich = ScreenContext.richEntities(for: gatherApp, category: gatherCategory)
-                DispatchQueue.main.async {
-                    guard let self, self.contextGatherGeneration == generation else { return }
-                    self.richEntities = rich
-                }
-            }
+        // App/window identity is pinned now; only the Context layer reads AX
+        // or pixels. External listening and Actions retain their exclusions.
+        glossarySession.cancel()
+        if !external, AppConfig.shared.screenContextEnabled,
+           Self.gathersRichRecordingEntities(policy: contextPolicy) {
+            glossarySession.start(ScreenContext.glossaryReader(
+                for: targetApp,
+                category: ModeCategory.category(forBundleID: enriched.bundleID),
+                allowed: { AppConfig.shared.screenContextEnabled }))
         }
 
         // No HUD transition while capture spins up: a hidden HUD stays hidden
@@ -2209,12 +2208,11 @@ final class DictationController: NSObject {
         }
         recordingDurationMs = elapsedRecordingMs
         sounds.play(.stop)
-        // Attach the background-gathered rich context (if it finished) so the
-        // engine's cleanup sees the on-screen names. Falls back to the basic
-        // title entities already sent with `start`.
+        // Take completed spelling data exactly once; finalization never waits.
         var stopCmd: [String: Any] = ["cmd": "stop", "session": sessionID]
-        if !richEntities.isEmpty {
-            stopCmd["entities"] = richEntities.map { $0.payload }
+        let glossary = glossarySession.take()
+        if AppConfig.shared.screenContextEnabled, !glossary.isEmpty {
+            stopCmd["entities"] = glossary.map { $0.payload }
         }
         let stoppedSession = sessionID
         hud.transition(to: .transcribing)
@@ -2282,6 +2280,8 @@ final class DictationController: NSObject {
 
     /// Esc or explicit cancel: stop everything, insert nothing.
     func cancel() {
+        // Invalidate late screen reads even when another operation owns Escape.
+        glossarySession.cancel()
         if let pending = pendingEdit {
             pending.selection.discardMutableIdentity()
             supervisor.send(["cmd": "edit_cancel", "id": pending.id])
@@ -2334,6 +2334,8 @@ final class DictationController: NSObject {
     private func showError(
         _ message: String, retryIntent explicitRetryIntent: ErrorRetryIntent? = nil
     ) {
+        // Context has no recovery/history lifetime after a recording failure.
+        glossarySession.cancel()
         clearSublimeCapture()
         cancelStreamDraft()
         let failedSession = sessionID
@@ -2451,6 +2453,8 @@ final class DictationController: NSObject {
                       session, sessionID, cancelledSessionID ?? "none", consumedSessionID ?? "none")
                 return
             }
+            // Engine auto-stop can finish without the ordinary stop callback.
+            glossarySession.cancel()
             let effectiveRaw = raw.isEmpty ? (rawTranscript ?? text) : raw
             if LateFinalPolicy.preserveDuringEdit(
                 finalSession: session,
