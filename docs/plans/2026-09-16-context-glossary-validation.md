@@ -310,11 +310,17 @@ Residual paths that are still outside the per-message gate:
   `skipped=budget` rather than misreported as empty.
 - The application, focused-window and focused-element reads that precede the
   budget's start, and the messages inside `valid()` before the first stage.
+- The per-stage geometry re-read: `live().frame` issues one
+  `CGWindowListCopyWindowInfo` call before each stage's gated sweep begins.
+  It is a WindowServer call, not an AX message, and is outside
+  `GlossaryMessages`.
 - In an app that hits the 0.25 s messaging timeout on consecutive reads no AX
   stage can read anything, reservation or not.
 - The nearby sweep is cut at its 0.10 s issue window in any app whose sweep
-  needs longer, then tagged `budget=exhausted`. The cursor text is read first
-  and is not affected; the truncated part is the neighbouring-label sweep.
+  needs longer, then tagged `budget=exhausted`. The cursor text has priority
+  (its secure-field, range and string-for-range messages are issued first)
+  but shares the cutoff, so it is skipped or truncated when those messages
+  cannot complete before it; the neighbouring-label sweep is cut after it.
 
 **Diagnostics** (`VELORA_CONTEXT_DIAGNOSTICS=1`, counts and milliseconds
 only): each stage logs `stage=<source> strings=N ms=T`; a stage whose read
@@ -326,9 +332,11 @@ value on an exhausted stage is clipped by the deadline and is not a complete
 stage cost. `testGlossaryBudget` (standard `--selftest`) drives the real
 nearby sweep over a fake AX tree in which every message costs a fixed
 synthetic delay (fractions of `axTimeout`, not measured app timings) on a fake
-clock, and covers: no message starts after the nearby cutoff and the sweep
-returns within one in-flight message of it; the window keeps its reserved
-round after a stalled multi-message sweep; the total is never extended and a
+clock, and covers: for every message position of the fake editor's complete
+trace, exactly the messages that fit start before the nearby cutoff and the
+sweep returns within one in-flight message of it; the window keeps its
+reserved round after a stalled multi-message sweep; a completed sweep reads
+both the cursor text and the neighbouring label; the total is never extended and a
 late window stage is skipped with OCR still running; exhausted versus empty
 completed reads; and the named read running after every stage. With the
 earlier per-helper checks in place the same test failed: further messages

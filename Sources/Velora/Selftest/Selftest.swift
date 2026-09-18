@@ -6915,22 +6915,35 @@ enum Selftest {
         let oneAXRound = ScreenContext.glossaryWindowReserve
         let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
 
-        // A stalled app answers each message slowly but within its timeout.
-        // Every message between two of the sweep's own checks is separately
-        // timed, so the sweep must consult the cutoff before each one.
-        for delay in [oneAXRound / 50, oneAXRound / 4] {
+        // The complete trace of the fake editor under no deadline: how many
+        // separately timed messages a full sweep issues, and what a completed
+        // read of the cursor text and the neighbouring label yields.
+        let (complete, wholeEditor) = fakeEditor(start: start, delay: 0)
+        let completeText = ScreenContext.glossaryNearby(
+            wholeEditor, window: nil, bounds: bounds,
+            via: ScreenContext.GlossaryMessages(deadline: .distantFuture, ax: complete.ax))
+        let sweepMessages = complete.starts.count
+        expect(completeText.contains("Priya Sharma") && completeText.contains("PostgreSQL")
+                && sweepMessages > 1,
+               "a completed nearby sweep reads the cursor text and the neighbouring label")
+
+        // Land the cutoff before every message position of that trace. Delays
+        // are synthetic test inputs inside the messaging timeout, not measured
+        // app timings: with k messages fitting before the cutoff, message k+1
+        // is the one each gate must refuse to issue.
+        let span = budget.nearby.timeIntervalSince(start)
+        for fitting in 1...sweepMessages {
+            let delay = span / Double(fitting) * 1.01
             let (fake, focused) = fakeEditor(start: start, delay: delay)
-            let text = ScreenContext.glossaryNearby(
+            _ = ScreenContext.glossaryNearby(
                 focused, window: nil, bounds: bounds,
                 via: ScreenContext.GlossaryMessages(deadline: budget.nearby, ax: fake.ax))
-            expect(fake.starts.count > 1 && fake.starts.allSatisfy { $0 < budget.nearby },
-                   "no AX message starts after the nearby cutoff (delay \(delay))")
+            expect(fake.starts.count == fitting && fake.starts.allSatisfy { $0 < budget.nearby },
+                   "exactly the messages that fit start before the nearby cutoff (\(fitting) fit)")
             expect(fake.now <= budget.nearby.addingTimeInterval(delay),
-                   "the nearby sweep returns within one in-flight message of its cutoff (delay \(delay))")
+                   "the nearby sweep returns within one in-flight message of its cutoff (\(fitting) fit)")
             expect(budget.window.timeIntervalSince(fake.now) >= oneAXRound,
-                   "the window keeps its reserved round after a multi-message nearby sweep (delay \(delay))")
-            expect(delay > oneAXRound / 10 || text.contains("Priya Sharma"),
-                   "the cursor text is still read before the cutoff (delay \(delay))")
+                   "the window keeps its reserved round after the cut-off nearby sweep (\(fitting) fit)")
         }
         expect(abs(budget.window.timeIntervalSince(start) - 0.6) < 0.001,
                "the AX total stays at the accepted 0.6 s")
