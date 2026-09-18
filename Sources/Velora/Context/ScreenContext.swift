@@ -1159,6 +1159,32 @@ enum ScreenContext {
         }
     }
 
+    struct GlossaryAX {
+        var now: () -> Date = Date.init
+        var string: (AXUIElement, String) -> String? = { axString($0, $1) }
+        var bool: (AXUIElement, String) -> Bool? = { axBool($0, $1) }
+        var element: (AXUIElement, String) -> AXUIElement? = { axElement($0, $1) }
+        var children: (AXUIElement) -> [AXUIElement]? = { axChildren($0) }
+        var point: (AXUIElement) -> CGPoint? = { axPoint($0) }
+        var size: (AXUIElement) -> CGSize? = { axSize($0) }
+        var range: (AXUIElement, String) -> CFRange? = { axRange($0, $1) }
+        var stringForRange: (AXUIElement, CFRange) -> String? = { axStringForRange($0, $1) }
+    }
+
+    struct GlossaryMessages {
+        let deadline: Date
+        let ax: GlossaryAX
+
+        var open: Bool { ax.now() < deadline }
+
+        func send<T>(_ message: (GlossaryAX) -> T?) -> T? {
+            guard open else { return nil }
+            return message(ax)
+        }
+    }
+
+    private static let glossaryUnbudgeted = GlossaryMessages(deadline: .distantFuture, ax: GlossaryAX())
+
     /// Why a stage refused, for the live gate only. Never carries screen text,
     /// pixels, a window title, or a bundle identifier.
     enum GlossaryRefusal: String {
@@ -1212,10 +1238,13 @@ enum ScreenContext {
         return GlossaryWindow(id: id.uint32Value, frame: frame)
     }
 
-    private static func glossarySecure(_ element: AXUIElement) -> Bool {
-        axString(element, kAXSubroleAttribute) == kAXSecureTextFieldSubrole as String
-            || axString(element, kAXRoleAttribute) == "AXSecureTextField"
-            || axBool(element, "AXProtectedContent") == true
+    private static func glossarySecure(_ element: AXUIElement, via m: GlossaryMessages) -> Bool? {
+        guard m.open else { return nil }
+        if m.ax.string(element, kAXSubroleAttribute) == kAXSecureTextFieldSubrole as String { return true }
+        guard m.open else { return nil }
+        if m.ax.string(element, kAXRoleAttribute) == "AXSecureTextField" { return true }
+        guard m.open else { return nil }
+        return m.ax.bool(element, "AXProtectedContent") == true
     }
 
     /// AX -> bounded terms -> local socket. Screenshot -> Vision -> bounded
@@ -1243,7 +1272,7 @@ enum ScreenContext {
                         .map { CFEqual($0, pinned) } ?? false
                 } ?? true,
                 secureField: axElement(application, kAXFocusedUIElementAttribute)
-                    .map(glossarySecure) ?? false)
+                    .map { glossarySecure($0, via: glossaryUnbudgeted) == true } ?? false)
             if let refusal { glossaryNote("refused=\(refusal.rawValue)") }
             return refusal == nil
         }
@@ -1258,15 +1287,16 @@ enum ScreenContext {
             named: { entities(for: app, category: category, deepURL: true) },
             nearby: { deadline in
                 focused.map {
-                    glossaryNearby($0, window: window, bounds: live().frame, deadline: deadline)
+                    glossaryNearby($0, window: window, bounds: live().frame,
+                                   via: GlossaryMessages(deadline: deadline, ax: GlossaryAX()))
                 } ?? []
             },
             window: { deadline in
                 guard let window else { return [] }
                 var out: [String] = []
                 var nodes = glossaryNodes
-                collectGlossaryText(window, bounds: live().frame, into: &out,
-                                    budget: &nodes, depth: 0, deadline: deadline)
+                collectGlossaryText(window, bounds: live().frame, into: &out, budget: &nodes, depth: 0,
+                                    via: GlossaryMessages(deadline: deadline, ax: GlossaryAX()))
                 return out
             },
             ocr: { glossaryOCR(live(), valid: valid) })
@@ -1319,64 +1349,67 @@ enum ScreenContext {
 
     /// Selected-range reads avoid materializing a whole document. Nearby static
     /// labels cover editors that expose no parameterized text-range API.
-    private static func glossaryNearby(
-        _ focused: AXUIElement, window: AXUIElement?, bounds: CGRect, deadline: Date
+    static func glossaryNearby(
+        _ focused: AXUIElement, window: AXUIElement?, bounds: CGRect, via m: GlossaryMessages
     ) -> [String] {
-        guard !glossarySecure(focused) else { return [] }
+        guard glossarySecure(focused, via: m) == false else { return [] }
         var out: [String] = []
-        if let selected = axRange(focused, kAXSelectedTextRangeAttribute),
-           let visible = axRange(focused, kAXVisibleCharacterRangeAttribute),
+        if let selected = m.send({ $0.range(focused, kAXSelectedTextRangeAttribute) }),
+           let visible = m.send({ $0.range(focused, kAXVisibleCharacterRangeAttribute) }),
            selected.location >= 0, visible.location >= 0,
            visible.length >= 0, visible.location <= Int.max - visible.length {
             let start = max(visible.location, selected.location - glossaryCursorRadius)
             let end = min(visible.location + visible.length,
                           selected.location.addingReportingOverflow(glossaryCursorRadius).partialValue)
-            if end > start, let text = axStringForRange(focused, CFRange(location: start, length: end - start)) {
+            if end > start,
+               let text = m.send({ $0.stringForRange(focused, CFRange(location: start, length: end - start)) }) {
                 out.append(text)
             }
         }
         for attribute in [kAXPlaceholderValueAttribute, kAXTitleAttribute, kAXDescriptionAttribute] {
-            guard Date() < deadline else { break }
-            if let text = axString(focused, attribute) { out.append(text) }
+            if let text = m.send({ $0.string(focused, attribute) }) { out.append(text) }
         }
         var container = focused
         for _ in 0..<glossaryAncestors {
-            guard Date() < deadline, let parent = axElement(container, kAXParentAttribute),
-                  axString(parent, kAXRoleAttribute) != kAXApplicationRole as String
+            guard let parent = m.send({ $0.element(container, kAXParentAttribute) }), m.open,
+                  m.ax.string(parent, kAXRoleAttribute) != kAXApplicationRole as String
             else { break }
             container = parent
             if let window, CFEqual(container, window) { break }
         }
         var budget = glossaryChildren
-        collectGlossaryText(container, bounds: bounds, into: &out,
-                            budget: &budget, depth: 0, deadline: deadline)
+        collectGlossaryText(container, bounds: bounds, into: &out, budget: &budget, depth: 0, via: m)
         return out
     }
 
     /// Bound every traversal and skip secure subtrees before reading their text.
     private static func collectGlossaryText(
         _ element: AXUIElement, bounds: CGRect, into out: inout [String],
-        budget: inout Int, depth: Int, deadline: Date
+        budget: inout Int, depth: Int, via m: GlossaryMessages
     ) {
-        guard budget > 0, depth <= glossaryDepth, Date() < deadline,
+        guard budget > 0, depth <= glossaryDepth, m.open,
               out.reduce(0, { $0 + $1.count }) < glossaryTextLimit else { return }
         budget -= 1
-        guard !glossarySecure(element), axBool(element, "AXHidden") != true else { return }
+        guard glossarySecure(element, via: m) == false,
+              m.send({ $0.bool(element, "AXHidden") }) != true, m.open else { return }
         // Intersect ancestor frames so clipped scroll content cannot become
         // visible spelling data merely because it lies inside the outer window.
-        let frame = axFrame(element)
+        let point = m.send { $0.point(element) }
+        let size = m.send { $0.size(element) }
+        let frame = point.flatMap { origin in size.map { CGRect(origin: origin, size: $0) } }
         let visibleBounds = frame.flatMap { validWindowFrame($0) ? bounds.intersection($0) : nil } ?? bounds
-        guard !visibleBounds.isEmpty, Date() < deadline else { return }
-        let role = axString(element, kAXRoleAttribute)
+        guard !visibleBounds.isEmpty, m.open else { return }
+        let role = m.ax.string(element, kAXRoleAttribute)
         if role == kAXStaticTextRole as String || role == "AXHeading" {
             if let frame, frame.intersects(bounds),
-               let text = axString(element, kAXValueAttribute) ?? axString(element, kAXTitleAttribute),
+               let text = m.send({ $0.string(element, kAXValueAttribute) })
+                   ?? m.send({ $0.string(element, kAXTitleAttribute) }),
                text.unicodeScalars.count <= glossaryTextLimit { out.append(text) }
         }
-        guard Date() < deadline else { return }
-        for child in (axChildren(element) ?? []).prefix(glossaryChildren) {
+        guard let children = m.send({ $0.children(element) }) else { return }
+        for child in children.prefix(glossaryChildren) {
             collectGlossaryText(child, bounds: visibleBounds, into: &out,
-                                budget: &budget, depth: depth + 1, deadline: deadline)
+                                budget: &budget, depth: depth + 1, via: m)
         }
     }
 
@@ -2311,28 +2344,36 @@ enum ScreenContext {
     }
 
     private static func axFrame(_ element: AXUIElement) -> CGRect? {
-        AXUIElementSetMessagingTimeout(element, axTimeout)
-        var positionRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-                element, kAXPositionAttribute as CFString, &positionRef) == .success,
-              AXUIElementCopyAttributeValue(
-                element, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let positionRef, let sizeRef,
-              CFGetTypeID(positionRef) == AXValueGetTypeID(),
-              CFGetTypeID(sizeRef) == AXValueGetTypeID()
-        else { return nil }
-        let positionValue = positionRef as! AXValue
-        let sizeValue = sizeRef as! AXValue
-        guard AXValueGetType(positionValue) == .cgPoint,
-              AXValueGetType(sizeValue) == .cgSize else { return nil }
-        var point = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(positionValue, .cgPoint, &point),
-              AXValueGetValue(sizeValue, .cgSize, &size),
-              point.x.isFinite, point.y.isFinite,
-              size.width.isFinite, size.height.isFinite else { return nil }
+        guard let point = axPoint(element), let size = axSize(element) else { return nil }
         return CGRect(origin: point, size: size)
+    }
+
+    private static func axPoint(_ element: AXUIElement) -> CGPoint? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, kAXPositionAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXValueGetTypeID() else { return nil }
+        let value = ref as! AXValue  // type id checked above
+        var point = CGPoint.zero
+        guard AXValueGetType(value) == .cgPoint,
+              AXValueGetValue(value, .cgPoint, &point),
+              point.x.isFinite, point.y.isFinite else { return nil }
+        return point
+    }
+
+    private static func axSize(_ element: AXUIElement) -> CGSize? {
+        AXUIElementSetMessagingTimeout(element, axTimeout)
+        var ref: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, kAXSizeAttribute as CFString, &ref) == .success,
+              let ref, CFGetTypeID(ref) == AXValueGetTypeID() else { return nil }
+        let value = ref as! AXValue  // type id checked above
+        var size = CGSize.zero
+        guard AXValueGetType(value) == .cgSize,
+              AXValueGetValue(value, .cgSize, &size),
+              size.width.isFinite, size.height.isFinite else { return nil }
+        return size
     }
 
     /// URL-valued attributes arrive as CFURL (`AXURL`) or as String

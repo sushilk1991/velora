@@ -6841,10 +6841,97 @@ enum Selftest {
     /// 0.6 s deadline once served the nearby sweep, the title/URL read and the
     /// window sweep together, so a slow nearby sweep opened the window stage
     /// with nothing left and its empty result read as a window with no text.
+    /// A fake AX tree in which every message costs a fixed synthetic delay on
+    /// a fake clock. The delays are fractions of the messaging timeout, not
+    /// measured app timings; the point is the sequence of message starts.
+    private final class FakeGlossaryAX {
+        private(set) var now: Date
+        let delay: TimeInterval
+        private(set) var starts: [Date] = []
+        var strings: [pid_t: [String: String]] = [:]
+        var parents: [pid_t: AXUIElement] = [:]
+        var children: [pid_t: [AXUIElement]] = [:]
+        var ranges: [pid_t: [String: CFRange]] = [:]
+        var texts: [pid_t: String] = [:]
+
+        init(start: Date, delay: TimeInterval) {
+            now = start
+            self.delay = delay
+        }
+
+        static func node(_ id: pid_t) -> AXUIElement { AXUIElementCreateApplication(id) }
+
+        private static func id(_ element: AXUIElement) -> pid_t {
+            var pid: pid_t = 0
+            AXUIElementGetPid(element, &pid)
+            return pid
+        }
+
+        private func message<T>(_ value: T?) -> T? {
+            starts.append(now)
+            now = now.addingTimeInterval(delay)
+            return value
+        }
+
+        var ax: ScreenContext.GlossaryAX {
+            ScreenContext.GlossaryAX(
+                now: { self.now },
+                string: { element, attribute in self.message(self.strings[Self.id(element)]?[attribute]) },
+                bool: { _, _ in self.message(false) },
+                element: { element, attribute in
+                    self.message(attribute == kAXParentAttribute ? self.parents[Self.id(element)] : nil)
+                },
+                children: { element in self.message(self.children[Self.id(element)] ?? []) },
+                point: { _ in self.message(CGPoint(x: 10, y: 10)) },
+                size: { _ in self.message(CGSize(width: 100, height: 20)) },
+                range: { element, attribute in self.message(self.ranges[Self.id(element)]?[attribute]) },
+                stringForRange: { element, _ in self.message(self.texts[Self.id(element)]) })
+        }
+    }
+
+    /// A text area inside a group beside one static label: the shape of an
+    /// ordinary editor. Every read of it is a separately timed AX message.
+    private static func fakeEditor(start: Date, delay: TimeInterval) -> (FakeGlossaryAX, AXUIElement) {
+        let fake = FakeGlossaryAX(start: start, delay: delay)
+        let focused = FakeGlossaryAX.node(101)
+        let container = FakeGlossaryAX.node(102)
+        let label = FakeGlossaryAX.node(103)
+        fake.parents[101] = container
+        fake.children[102] = [focused, label]
+        fake.strings[101] = [kAXRoleAttribute: kAXTextAreaRole as String]
+        fake.strings[102] = [kAXRoleAttribute: kAXGroupRole as String]
+        fake.strings[103] = [kAXRoleAttribute: kAXStaticTextRole as String, kAXValueAttribute: "PostgreSQL"]
+        fake.ranges[101] = [
+            kAXSelectedTextRangeAttribute: CFRange(location: 5, length: 0),
+            kAXVisibleCharacterRangeAttribute: CFRange(location: 0, length: 12),
+        ]
+        fake.texts[101] = "Priya Sharma"
+        return (fake, focused)
+    }
+
     private static func testGlossaryBudget() {
         let start = Date(timeIntervalSinceReferenceDate: 1_000)
         let budget = ScreenContext.GlossaryBudget(start: start)
         let oneAXRound = ScreenContext.glossaryWindowReserve
+        let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
+
+        // A stalled app answers each message slowly but within its timeout.
+        // Every message between two of the sweep's own checks is separately
+        // timed, so the sweep must consult the cutoff before each one.
+        for delay in [oneAXRound / 50, oneAXRound / 4] {
+            let (fake, focused) = fakeEditor(start: start, delay: delay)
+            let text = ScreenContext.glossaryNearby(
+                focused, window: nil, bounds: bounds,
+                via: ScreenContext.GlossaryMessages(deadline: budget.nearby, ax: fake.ax))
+            expect(fake.starts.count > 1 && fake.starts.allSatisfy { $0 < budget.nearby },
+                   "no AX message starts after the nearby cutoff (delay \(delay))")
+            expect(fake.now <= budget.nearby.addingTimeInterval(delay),
+                   "the nearby sweep returns within one in-flight message of its cutoff (delay \(delay))")
+            expect(budget.window.timeIntervalSince(fake.now) >= oneAXRound,
+                   "the window keeps its reserved round after a multi-message nearby sweep (delay \(delay))")
+            expect(delay > oneAXRound / 10 || text.contains("Priya Sharma"),
+                   "the cursor text is still read before the cutoff (delay \(delay))")
+        }
         expect(abs(budget.window.timeIntervalSince(start) - 0.6) < 0.001,
                "the AX total stays at the accepted 0.6 s")
         expect(budget.nearby < budget.window
@@ -6858,25 +6945,27 @@ enum Selftest {
         var read: [String] = []
 
         var remaining: TimeInterval = 0
+        let (stalled, focused) = fakeEditor(start: start, delay: oneAXRound / 50)
         let slowNearby = ScreenContext.glossaryStages(
-            budget: budget, now: { now }, valid: { true }, named: { [] },
+            budget: budget, now: { stalled.now }, valid: { true }, named: { [] },
             nearby: { deadline in
                 read.append("nearby")
-                now = deadline.addingTimeInterval(oneAXRound)
-                return []
+                return ScreenContext.glossaryNearby(
+                    focused, window: nil, bounds: bounds,
+                    via: ScreenContext.GlossaryMessages(deadline: deadline, ax: stalled.ax))
             },
             window: { deadline in
                 read.append("window")
-                remaining = deadline.timeIntervalSince(now)
+                remaining = deadline.timeIntervalSince(stalled.now)
                 return ["Priya Sharma PostgreSQL"]
             },
             ocr: { read.append("ocr"); return [] })
         expect(read == ["nearby", "window"] && slowNearby.count == 3
                 && remaining >= oneAXRound,
-               "a nearby sweep that overruns by one in-flight AX round leaves the window its reservation")
-        expect(notes.contains { $0.hasPrefix("stage=nearby strings=0") && $0.hasSuffix("budget=exhausted") }
+               "a stalled multi-message nearby sweep still leaves the window its reservation")
+        expect(notes.contains { $0.hasPrefix("stage=nearby strings=") && $0.hasSuffix("budget=exhausted") }
                 && notes.contains { $0.hasPrefix("stage=window strings=1") && !$0.contains("budget=") },
-               "the overrunning nearby sweep is marked exhausted and the completed window read is not")
+               "the cut-off nearby sweep is marked exhausted and the completed window read is not")
 
         notes = []
         read = []
