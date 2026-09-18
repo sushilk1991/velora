@@ -115,6 +115,7 @@ enum Selftest {
         testContextGlossary()
         testGlossaryWindowIdentity()
         testGlossaryStages()
+        testGlossaryBudget()
         testContextLifetime()
         testGlossaryCorpus()
         if ProcessInfo.processInfo.environment["VELORA_LIVE_CONTEXT_SELFTEST"] == "1" {
@@ -6808,8 +6809,8 @@ enum Selftest {
             valid: { true },
             named: { [ContextEntity(type: "site", value: "gdocs"),
                       ContextEntity(type: "page", value: "Q3 Roadmap Review")] },
-            nearby: { read.append("nearby"); return [] },
-            window: { read.append("window"); return [] },
+            nearby: { _ in read.append("nearby"); return [] },
+            window: { _ in read.append("window"); return [] },
             ocr: { read.append("ocr"); return ["Priya Sharma PostgreSQL"] })
         expect(read == ["nearby", "window", "ocr"],
                "a window title never counts as window text the reader read")
@@ -6820,8 +6821,8 @@ enum Selftest {
         read = []
         let cursor = ScreenContext.glossaryStages(
             valid: { true }, named: { [] },
-            nearby: { read.append("nearby"); return ["Priya Sharma PostgreSQL"] },
-            window: { read.append("window"); return [] },
+            nearby: { _ in read.append("nearby"); return ["Priya Sharma PostgreSQL"] },
+            window: { _ in read.append("window"); return [] },
             ocr: { read.append("ocr"); return [] })
         expect(read == ["nearby"] && cursor.count == 3,
                "sufficient near-cursor text stops the producer at the first stage")
@@ -6829,20 +6830,100 @@ enum Selftest {
         read = []
         let revoked = ScreenContext.glossaryStages(
             valid: { read.isEmpty }, named: { [] },
-            nearby: { read.append("nearby"); return ["Priya Sharma"] },
-            window: { read.append("window"); return [] },
+            nearby: { _ in read.append("nearby"); return ["Priya Sharma"] },
+            window: { _ in read.append("window"); return [] },
             ocr: { read.append("ocr"); return [] })
         expect(revoked.isEmpty && read == ["nearby"],
                "a lease revoked mid-stage discards the capture before naming")
+    }
 
+    /// The AX budget as the producer schedules it, driven by a fake clock. One
+    /// 0.6 s deadline once served the nearby sweep, the title/URL read and the
+    /// window sweep together, so a slow nearby sweep opened the window stage
+    /// with nothing left and its empty result read as a window with no text.
+    private static func testGlossaryBudget() {
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let budget = ScreenContext.GlossaryBudget(start: start)
+        let oneAXRound = ScreenContext.glossaryWindowReserve
+        expect(abs(budget.window.timeIntervalSince(start) - 0.6) < 0.001,
+               "the AX total stays at the accepted 0.6 s")
+        expect(budget.nearby < budget.window
+                && budget.window.timeIntervalSince(budget.nearby) >= 2 * oneAXRound,
+               "the nearby cutoff leaves the window one reserved AX round plus one in flight")
+
+        var notes: [String] = []
+        ScreenContext.glossaryNoteSink = { notes.append($0) }
+        defer { ScreenContext.glossaryNoteSink = nil }
+        var now = start
+        var read: [String] = []
+
+        var remaining: TimeInterval = 0
+        let slowNearby = ScreenContext.glossaryStages(
+            budget: budget, now: { now }, valid: { true }, named: { [] },
+            nearby: { deadline in
+                read.append("nearby")
+                now = deadline.addingTimeInterval(oneAXRound)
+                return []
+            },
+            window: { deadline in
+                read.append("window")
+                remaining = deadline.timeIntervalSince(now)
+                return ["Priya Sharma PostgreSQL"]
+            },
+            ocr: { read.append("ocr"); return [] })
+        expect(read == ["nearby", "window"] && slowNearby.count == 3
+                && remaining >= oneAXRound,
+               "a nearby sweep that overruns by one in-flight AX round leaves the window its reservation")
+        expect(notes.contains { $0.hasPrefix("stage=nearby strings=0") && $0.hasSuffix("budget=exhausted") }
+                && notes.contains { $0.hasPrefix("stage=window strings=1") && !$0.contains("budget=") },
+               "the overrunning nearby sweep is marked exhausted and the completed window read is not")
+
+        notes = []
         read = []
+        now = start
         let starved = ScreenContext.glossaryStages(
-            valid: { true }, named: { [] },
-            nearby: { read.append("nearby"); return [] },
-            window: { read.append("window"); return nil },
+            budget: budget, now: { now }, valid: { true }, named: { [] },
+            nearby: { _ in
+                read.append("nearby")
+                now = budget.window.addingTimeInterval(0.01)
+                return []
+            },
+            window: { _ in read.append("window"); return ["Priya Sharma PostgreSQL"] },
             ocr: { read.append("ocr"); return ["Priya Sharma PostgreSQL"] })
-        expect(read == ["nearby", "window", "ocr"] && starved.count == 3,
-               "a window stage skipped for budget still falls through to OCR")
+        expect(read == ["nearby", "ocr"] && starved.count == 3
+                && notes.contains("stage=window skipped=budget"),
+               "the total is never extended: a window stage opening after it is skipped, logged as skipped, and OCR still runs")
+
+        notes = []
+        now = start
+        _ = ScreenContext.glossaryStages(
+            budget: budget, now: { now }, valid: { true }, named: { [] },
+            nearby: { _ in [] },
+            window: { deadline in now = deadline; return [] },
+            ocr: { [] })
+        expect(notes.contains { $0.hasPrefix("stage=window strings=0") && $0.hasSuffix("budget=exhausted") },
+               "a window sweep cut off by its deadline is not reported as an empty completed read")
+
+        notes = []
+        now = start
+        _ = ScreenContext.glossaryStages(
+            budget: budget, now: { now }, valid: { true }, named: { [] },
+            nearby: { _ in [] }, window: { _ in [] }, ocr: { [] })
+        expect(notes.contains { $0.hasPrefix("stage=window strings=0") && !$0.contains("budget=") },
+               "an empty completed window read carries no exhaustion flag")
+
+        notes = []
+        read = []
+        now = start
+        _ = ScreenContext.glossaryStages(
+            budget: budget, now: { now }, valid: { true },
+            named: { read.append("named"); return [ContextEntity(type: "site", value: "gdocs")] },
+            nearby: { _ in read.append("nearby"); return [] },
+            window: { _ in read.append("window"); return [] },
+            ocr: { read.append("ocr"); return [] })
+        expect(read == ["nearby", "window", "ocr", "named"]
+                && notes.contains { $0.hasPrefix("named entities=1 ms=") },
+               "the title/URL read runs after every reader stage, outside the window reservation")
     }
 
     /// The predicate that returned [] for every stage in the live gate. A

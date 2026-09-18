@@ -252,48 +252,79 @@ would break it on every headless and CI machine. Window identity, the part that
 can be decided without a desktop, is covered in the standard suite by
 `testGlossaryWindowIdentity`.
 
-## Stage budget measurement blocked on 2026-09-18
+## Stage budget reservation on 2026-09-18 (provisional, constant-derived)
 
 Review finding `window-fallback-shares-exhausted-ax-deadline`: the near-cursor
-sweep, the intervening title/deep-URL read (`entities(for:deepURL:)`, its own
-0.2-0.3 s AX messaging timeouts) and the window sweep all consume the single
-`glossaryAXSeconds` (0.6 s) deadline created before the first stage. In a
-slow-AX app the window stage can therefore open with no budget and return `[]`
-before reading its root node, and that looked identical to a window with no
-text. Owner decision 027 authorizes a measured split of the existing total, not
-a larger total, and forbids guessing the ratio.
+sweep, the intervening title/deep-URL read (`entities(for:deepURL:)`) and the
+window sweep all consumed the single `glossaryAXSeconds` (0.6 s) deadline
+created before the first stage. In a slow-AX app the window stage opened with
+no budget and returned `[]` before reading its root node, and that looked
+identical to a window with no text. Decision 027 asked for a measured split;
+decision 028 supersedes it and authorizes a constant-derived reservation now,
+with measured tuning as a separate follow-up.
 
-**Measurement blocked.** A probe at the time of the fix round read
-`CGSSessionScreenIsLocked = 1`, frontmost `com.apple.loginwindow`, and
-`AXIsProcessTrusted() == false` for the review process. With no frontmost app
-`glossaryWindow` cannot pin a target, and without Accessibility trust no AX
-read of TextEdit or of the running Electron app (Orca) is possible. Waiting or
-watching for an unlock is out of scope, so no stage timings exist yet and none
-are recorded here. Nothing in the budget was changed.
+**Reservation.** `ScreenContext.GlossaryBudget` splits the unchanged 0.6 s
+total into two deadlines from one start:
 
-**What changed so the measurement can be taken.** `glossaryStages` now logs
-each stage with its wall time (`stage=nearby strings=N ms=T`,
-`stage=window ...`, `stage=ocr ...`), the title/deep-URL read separately
-(`named entities=N ms=T`), and a window stage that opened after the shared
-deadline expired as `stage=window skipped=budget` instead of a false
-`strings=0`. Counts and milliseconds only; no text, title or pixel data. A
-budget-skipped window stage still falls through to OCR
-(`testGlossaryStages`, standard `--selftest`).
+```
+axTimeout             = 0.25 s   per-element AX messaging timeout every helper sets
+glossaryWindowReserve = axTimeout = 0.25 s   one AX messaging round for the window
+in-flight allowance   = axTimeout = 0.25 s   the one call a sweep may have issued
+                                              just before noticing its deadline
+nearby cutoff         = 0.6 - 0.25 - 0.25 = 0.10 s after start
+window deadline       = 0.6 s after start (the total; never extended)
+```
 
-**To measure**, on an unlocked session with the signed app granted
-Accessibility, run the existing live gate several times against TextEdit and,
-for a slow-AX sample, repeat with an Electron app frontmost:
+The nearby stage is handed the cutoff, the window stage the total.
+`collectGlossaryText` now re-checks its deadline before the role/value reads
+and again before descending into children, so a sweep that notices its deadline
+has at most one attribute group in flight (bounded by `axTimeout`). A window
+stage that opens after the total is skipped, logged as `stage=window
+skipped=budget`, and OCR still runs. The title/deep-URL read, which has its
+own timeouts and was between the two stages only as a carry-over from when it
+seeded the window stage's text (`4758824`), now runs after every reader stage,
+so it cannot consume the window reservation; `ContextGlossary.capture` already
+merged it after stage selection.
+
+This split is **provisional**: it guarantees a window attempt, it does not
+optimise either stage. It has no measured basis. Limits it does not cover:
+
+- The two identity/permission checks (`valid()`) that run between the stages
+  and the reads before the nearby sweep (secure-field, cursor range, cursor
+  text) are not deadline-gated; each is a handful of AX reads bounded by
+  `axTimeout`. In an app that answers within the reservation they cost
+  milliseconds; in an app that hits the 0.25 s messaging timeout on
+  consecutive reads no AX stage can read anything, reservation or not.
+- 0.10 s of issue time may truncate the nearby sweep in a slow app. The
+  cursor text is read first and is not affected; the truncated part is the
+  neighbouring-label sweep.
+
+**Diagnostics** (`VELORA_CONTEXT_DIAGNOSTICS=1`, counts and milliseconds
+only): each stage logs `stage=<source> strings=N ms=T`; a stage whose read
+finished at or after its deadline appends `budget=exhausted`, covering both a
+root guard that failed before the first read (`strings=0 ... budget=exhausted`)
+and a sweep cut off after N strings. A stage opening after the total logs
+`skipped=budget`. The title/URL read logs `named entities=N ms=T`. An `ms`
+value on an exhausted stage is clipped by the deadline and is not a complete
+stage cost. `testGlossaryBudget` (standard `--selftest`) drives the producer
+with a fake clock and covers: a nearby sweep overrunning by one in-flight round
+still leaves the window its reservation; the total is never extended and a
+late window stage is skipped with OCR still running; exhausted versus empty
+completed reads; and the named read running after every stage.
+
+**Tuning follow-up.** On an unlocked session with the signed app granted
+Accessibility, run the live gate against TextEdit and, for a slow-AX sample,
+with an Electron app frontmost, and read the per-stage `ms` and `named` costs:
 
 ```
 caffeinate -di env VELORA_LIVE_CONTEXT_SELFTEST=1 VELORA_CONTEXT_DIAGNOSTICS=1 \
   build/Velora.app/Contents/MacOS/Velora --selftest 2>&1 | grep 'Velora: glossary'
 ```
 
-Record per-stage `ms` and the `named` cost across the samples, then choose the
-nearby slice from those numbers with the remainder reserved for the window
-stage inside the unchanged 0.6 s total. The named read sits between the two
-stages only as a carry-over from when it seeded the window stage's text
-(`4758824`); the split must either bound it or move it after the window stage.
+A probe during the fix round read `CGSSessionScreenIsLocked = 1`, frontmost
+`com.apple.loginwindow`, and `AXIsProcessTrusted() == false`, so no timings
+exist yet. Disregard `ms` values on lines carrying `budget=exhausted` when
+tuning; they are clipped.
 
 ## Remaining validation
 

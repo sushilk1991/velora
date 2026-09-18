@@ -1128,6 +1128,7 @@ enum ScreenContext {
     }
 
     private static let glossaryAXSeconds: TimeInterval = 0.6
+    static let glossaryWindowReserve = TimeInterval(axTimeout)
     private static let glossaryOCRSeconds: TimeInterval = 1.5
     private static let glossaryNodes = 128
     private static let glossaryDepth = 16
@@ -1146,6 +1147,16 @@ enum ScreenContext {
     struct GlossaryWindow {
         let id: CGWindowID
         let frame: CGRect
+    }
+
+    struct GlossaryBudget {
+        let nearby: Date
+        let window: Date
+
+        init(start: Date) {
+            window = start.addingTimeInterval(glossaryAXSeconds)
+            nearby = window.addingTimeInterval(-glossaryWindowReserve - TimeInterval(axTimeout))
+        }
     }
 
     /// Why a stage refused, for the live gate only. Never carries screen text,
@@ -1173,13 +1184,16 @@ enum ScreenContext {
     static var glossaryDiagnostics =
         ProcessInfo.processInfo.environment["VELORA_CONTEXT_DIAGNOSTICS"] == "1"
 
+    static var glossaryNoteSink: ((String) -> Void)?
+
     private static func glossaryNote(_ message: String) {
+        glossaryNoteSink?(message)
         guard glossaryDiagnostics else { return }
         NSLog("Velora: glossary %@", message)
     }
 
-    private static func elapsedMs(since start: Date) -> Int {
-        Int(Date().timeIntervalSince(start) * 1_000)
+    private static func elapsedMs(from start: Date, to end: Date) -> Int {
+        Int(end.timeIntervalSince(start) * 1_000)
     }
 
     private static func glossaryWindow(_ pid: pid_t) -> GlossaryWindow? {
@@ -1214,7 +1228,7 @@ enum ScreenContext {
         let application = AXUIElementCreateApplication(app.processIdentifier)
         let window = axElement(application, kAXFocusedWindowAttribute)
         let focused = axElement(application, kAXFocusedUIElementAttribute)
-        let deadline = Date().addingTimeInterval(glossaryAXSeconds)
+        let budget = GlossaryBudget(start: Date())
         let valid = { () -> Bool in
             // Revocation is judged before any read: stop and cancel must
             // prevent new reads, not merely discard their output.
@@ -1239,20 +1253,20 @@ enum ScreenContext {
         // of the result.
         let live = { glossaryWindow(app.processIdentifier) ?? target }
         return glossaryStages(
+            budget: budget,
             valid: valid,
             named: { entities(for: app, category: category, deepURL: true) },
-            nearby: {
+            nearby: { deadline in
                 focused.map {
                     glossaryNearby($0, window: window, bounds: live().frame, deadline: deadline)
                 } ?? []
             },
-            window: {
+            window: { deadline in
                 guard let window else { return [] }
-                guard Date() < deadline else { return nil }
                 var out: [String] = []
-                var budget = glossaryNodes
+                var nodes = glossaryNodes
                 collectGlossaryText(window, bounds: live().frame, into: &out,
-                                    budget: &budget, depth: 0, deadline: deadline)
+                                    budget: &nodes, depth: 0, deadline: deadline)
                 return out
             },
             ocr: { glossaryOCR(live(), valid: valid) })
@@ -1264,29 +1278,39 @@ enum ScreenContext {
     /// cannot stand in for text on screen and satisfy the sparseness threshold
     /// on behalf of a document nothing has read yet.
     static func glossaryStages(
+        budget: GlossaryBudget = GlossaryBudget(start: Date()), now: () -> Date = Date.init,
         valid: () -> Bool, named: () -> [ContextEntity],
-        nearby: () -> [String], window: () -> [String]?, ocr: () -> [String]
+        nearby: (Date) -> [String], window: (Date) -> [String], ocr: () -> [String]
     ) -> [ContextEntity] {
-        var names: [ContextEntity] = []
-        let terms = ContextGlossary.capture(valid: valid, named: { names }, read: { source in
-            let started = Date()
+        let timedNames = { () -> [ContextEntity] in
+            let started = now()
+            let names = named()
+            glossaryNote("named entities=\(names.count) ms=\(elapsedMs(from: started, to: now()))")
+            return names
+        }
+        let terms = ContextGlossary.capture(valid: valid, named: timedNames, read: { source in
+            let started = now()
             let text: [String]
+            let deadline: Date?
             switch source {
-            case .nearby: text = nearby()
+            case .nearby:
+                deadline = budget.nearby
+                text = nearby(budget.nearby)
             case .window:
-                guard let read = window() else {
+                guard started < budget.window else {
                     glossaryNote("stage=window skipped=budget")
                     return []
                 }
-                text = read
-            case .ocr: text = ocr()
+                deadline = budget.window
+                text = window(budget.window)
+            case .ocr:
+                deadline = nil
+                text = ocr()
             }
-            glossaryNote("stage=\(source) strings=\(text.count) ms=\(elapsedMs(since: started))")
-            guard source == .nearby else { return text }
-            guard valid() else { return [] }
-            let namedStarted = Date()
-            names = named()
-            glossaryNote("named entities=\(names.count) ms=\(elapsedMs(since: namedStarted))")
+            let finished = now()
+            var note = "stage=\(source) strings=\(text.count) ms=\(elapsedMs(from: started, to: finished))"
+            if let deadline, finished >= deadline { note += " budget=exhausted" }
+            glossaryNote(note)
             return text
         })
         glossaryNote("captured terms=\(terms.count)")
@@ -1342,13 +1366,14 @@ enum ScreenContext {
         // visible spelling data merely because it lies inside the outer window.
         let frame = axFrame(element)
         let visibleBounds = frame.flatMap { validWindowFrame($0) ? bounds.intersection($0) : nil } ?? bounds
-        guard !visibleBounds.isEmpty else { return }
+        guard !visibleBounds.isEmpty, Date() < deadline else { return }
         let role = axString(element, kAXRoleAttribute)
         if role == kAXStaticTextRole as String || role == "AXHeading" {
             if let frame, frame.intersects(bounds),
                let text = axString(element, kAXValueAttribute) ?? axString(element, kAXTitleAttribute),
                text.unicodeScalars.count <= glossaryTextLimit { out.append(text) }
         }
+        guard Date() < deadline else { return }
         for child in (axChildren(element) ?? []).prefix(glossaryChildren) {
             collectGlossaryText(child, bounds: visibleBounds, into: &out,
                                 budget: &budget, depth: depth + 1, deadline: deadline)
