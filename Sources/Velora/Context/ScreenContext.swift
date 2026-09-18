@@ -1178,6 +1178,10 @@ enum ScreenContext {
         NSLog("Velora: glossary %@", message)
     }
 
+    private static func elapsedMs(since start: Date) -> Int {
+        Int(Date().timeIntervalSince(start) * 1_000)
+    }
+
     private static func glossaryWindow(_ pid: pid_t) -> GlossaryWindow? {
         guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
               let rows = CGWindowListCopyWindowInfo(
@@ -1244,6 +1248,7 @@ enum ScreenContext {
             },
             window: {
                 guard let window else { return [] }
+                guard Date() < deadline else { return nil }
                 var out: [String] = []
                 var budget = glossaryNodes
                 collectGlossaryText(window, bounds: live().frame, into: &out,
@@ -1260,20 +1265,28 @@ enum ScreenContext {
     /// on behalf of a document nothing has read yet.
     static func glossaryStages(
         valid: () -> Bool, named: () -> [ContextEntity],
-        nearby: () -> [String], window: () -> [String], ocr: () -> [String]
+        nearby: () -> [String], window: () -> [String]?, ocr: () -> [String]
     ) -> [ContextEntity] {
         var names: [ContextEntity] = []
         let terms = ContextGlossary.capture(valid: valid, named: { names }, read: { source in
+            let started = Date()
             let text: [String]
             switch source {
-            case .nearby:
-                text = nearby()
-                guard valid() else { return [] }
-                names = named()
-            case .window: text = window()
+            case .nearby: text = nearby()
+            case .window:
+                guard let read = window() else {
+                    glossaryNote("stage=window skipped=budget")
+                    return []
+                }
+                text = read
             case .ocr: text = ocr()
             }
-            glossaryNote("stage=\(source) strings=\(text.count)")
+            glossaryNote("stage=\(source) strings=\(text.count) ms=\(elapsedMs(since: started))")
+            guard source == .nearby else { return text }
+            guard valid() else { return [] }
+            let namedStarted = Date()
+            names = named()
+            glossaryNote("named entities=\(names.count) ms=\(elapsedMs(since: namedStarted))")
             return text
         })
         glossaryNote("captured terms=\(terms.count)")

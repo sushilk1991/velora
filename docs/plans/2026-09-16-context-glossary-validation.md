@@ -252,6 +252,49 @@ would break it on every headless and CI machine. Window identity, the part that
 can be decided without a desktop, is covered in the standard suite by
 `testGlossaryWindowIdentity`.
 
+## Stage budget measurement blocked on 2026-09-18
+
+Review finding `window-fallback-shares-exhausted-ax-deadline`: the near-cursor
+sweep, the intervening title/deep-URL read (`entities(for:deepURL:)`, its own
+0.2-0.3 s AX messaging timeouts) and the window sweep all consume the single
+`glossaryAXSeconds` (0.6 s) deadline created before the first stage. In a
+slow-AX app the window stage can therefore open with no budget and return `[]`
+before reading its root node, and that looked identical to a window with no
+text. Owner decision 027 authorizes a measured split of the existing total, not
+a larger total, and forbids guessing the ratio.
+
+**Measurement blocked.** A probe at the time of the fix round read
+`CGSSessionScreenIsLocked = 1`, frontmost `com.apple.loginwindow`, and
+`AXIsProcessTrusted() == false` for the review process. With no frontmost app
+`glossaryWindow` cannot pin a target, and without Accessibility trust no AX
+read of TextEdit or of the running Electron app (Orca) is possible. Waiting or
+watching for an unlock is out of scope, so no stage timings exist yet and none
+are recorded here. Nothing in the budget was changed.
+
+**What changed so the measurement can be taken.** `glossaryStages` now logs
+each stage with its wall time (`stage=nearby strings=N ms=T`,
+`stage=window ...`, `stage=ocr ...`), the title/deep-URL read separately
+(`named entities=N ms=T`), and a window stage that opened after the shared
+deadline expired as `stage=window skipped=budget` instead of a false
+`strings=0`. Counts and milliseconds only; no text, title or pixel data. A
+budget-skipped window stage still falls through to OCR
+(`testGlossaryStages`, standard `--selftest`).
+
+**To measure**, on an unlocked session with the signed app granted
+Accessibility, run the existing live gate several times against TextEdit and,
+for a slow-AX sample, repeat with an Electron app frontmost:
+
+```
+caffeinate -di env VELORA_LIVE_CONTEXT_SELFTEST=1 VELORA_CONTEXT_DIAGNOSTICS=1 \
+  build/Velora.app/Contents/MacOS/Velora --selftest 2>&1 | grep 'Velora: glossary'
+```
+
+Record per-stage `ms` and the `named` cost across the samples, then choose the
+nearby slice from those numbers with the remainder reserved for the window
+stage inside the unchanged 0.6 s total. The named read sits between the two
+stages only as a carry-over from when it seeded the window stage's text
+(`4758824`); the split must either bound it or move it after the window stage.
+
 ## Remaining validation
 
 - **Word-list precision.** All-lowercase Latin tokens are accepted as terms

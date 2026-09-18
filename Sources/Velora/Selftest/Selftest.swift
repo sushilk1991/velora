@@ -6834,6 +6834,15 @@ enum Selftest {
             ocr: { read.append("ocr"); return [] })
         expect(revoked.isEmpty && read == ["nearby"],
                "a lease revoked mid-stage discards the capture before naming")
+
+        read = []
+        let starved = ScreenContext.glossaryStages(
+            valid: { true }, named: { [] },
+            nearby: { read.append("nearby"); return [] },
+            window: { read.append("window"); return nil },
+            ocr: { read.append("ocr"); return ["Priya Sharma PostgreSQL"] })
+        expect(read == ["nearby", "window", "ocr"] && starved.count == 3,
+               "a window stage skipped for budget still falls through to OCR")
     }
 
     /// The predicate that returned [] for every stage in the live gate. A
