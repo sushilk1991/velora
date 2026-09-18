@@ -431,7 +431,7 @@ Mode files: `~/.velora/modes/*.json` — `{name, prompt, formatting: off|light|f
 | `App/` | main, AppDelegate, activation policy, engine supervisor |
 | `Capture/` | Direct AVCapture microphone source, 16kHz mono Float32 conversion, RMS levels for HUD |
 | `Hotkey/` | CGEventTap (hold + double-tap detection), Esc-cancel monitor, secure-input detection (`IsSecureEventInputEnabled`) |
-| `Context/` | NSWorkspace frontmost app tracking, AX focused-element probe (secure field check) |
+| `Context/` | NSWorkspace frontmost app tracking, AX focused-element probe (secure field check), Context Glossary readers (near-cursor/window AX text, exact-window capture + Apple Vision OCR, term extraction) |
 | `HUD/` | NSPanel host + SwiftUI capsule (state machine per design brief), Canvas waveform |
 | `Insert/` | persist final transcript on pasteboard → temporary boundary-adjusted ⌘V → restore final transcript; CGEvent unicode typing fallback; per-app overrides |
 | `EngineClient/` | socket client, framing, request/event routing |

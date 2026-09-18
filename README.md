@@ -123,6 +123,10 @@ input-monitoring, and accessibility permissions to the app identity.
 - Velora has no account, telemetry, advertising, or cloud transcription.
 - Meeting recording always requires confirmation and shows a persistent
   recording indicator.
+- Spelling hints come from text already on screen: Accessibility text near
+  the cursor, then the active window, then local Apple Vision text recognition
+  if you grant optional Screen Recording. Screenshots and hints are never
+  saved, and Settings > Dictation can turn the reads off.
 - Model downloads and app updates use the internet. Update checks can be
   disabled.
 - Personal Dictionary sync uses your iCloud Drive whenever it is signed in;
