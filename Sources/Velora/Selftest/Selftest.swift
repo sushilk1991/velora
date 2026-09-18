@@ -6912,29 +6912,34 @@ enum Selftest {
     private static func testGlossaryBudget() {
         let start = Date(timeIntervalSinceReferenceDate: 1_000)
         let budget = ScreenContext.GlossaryBudget(start: start)
-        let oneAXRound = ScreenContext.glossaryWindowReserve
+        let messageTimeout = ScreenContext.glossaryWindowReserve
+        let totalSeconds: TimeInterval = 0.6
+        let nearbySeconds: TimeInterval = 0.35
+        let tolerance: TimeInterval = 0.001
+        let cutoffOverrunRatio = 1.01
         let bounds = CGRect(x: 0, y: 0, width: 800, height: 600)
 
-        // The complete trace of the fake editor under no deadline: how many
-        // separately timed messages a full sweep issues, and what a completed
-        // read of the cursor text and the neighbouring label yields.
+        // A fast complete trace under the production deadline verifies both
+        // the message count and preservation of cursor and neighbouring text.
         let (complete, wholeEditor) = fakeEditor(start: start, delay: 0)
         let completeText = ScreenContext.glossaryNearby(
             wholeEditor, window: nil, bounds: bounds,
-            via: ScreenContext.GlossaryMessages(deadline: .distantFuture, ax: complete.ax))
+            via: ScreenContext.GlossaryMessages(deadline: budget.nearby, ax: complete.ax))
         let sweepMessages = complete.starts.count
         expect(completeText.contains("Priya Sharma") && completeText.contains("PostgreSQL")
                 && sweepMessages > 1,
                "a completed nearby sweep reads the cursor text and the neighbouring label")
 
-        // Land the cutoff before every message position of that trace. Delays
-        // are synthetic test inputs inside the messaging timeout, not measured
-        // app timings: with k messages fitting before the cutoff, message k+1
-        // is the one each gate must refuse to issue.
+        // Land the cutoff before each subsequent message without exceeding
+        // the timeout. A later start makes the earliest cutoff reachable even
+        // when the nearby span exceeds one message timeout. These are test
+        // inputs, not measured app timings: start -> k reads -> cutoff -> stop.
         let span = budget.nearby.timeIntervalSince(start)
+        let activeSpan = min(span, messageTimeout / cutoffOverrunRatio)
+        let firstRead = budget.nearby.addingTimeInterval(-activeSpan)
         for fitting in 1...sweepMessages {
-            let delay = span / Double(fitting) * 1.01
-            let (fake, focused) = fakeEditor(start: start, delay: delay)
+            let delay = activeSpan / Double(fitting) * cutoffOverrunRatio
+            let (fake, focused) = fakeEditor(start: firstRead, delay: delay)
             _ = ScreenContext.glossaryNearby(
                 focused, window: nil, bounds: bounds,
                 via: ScreenContext.GlossaryMessages(deadline: budget.nearby, ax: fake.ax))
@@ -6942,14 +6947,13 @@ enum Selftest {
                    "exactly the messages that fit start before the nearby cutoff (\(fitting) fit)")
             expect(fake.now <= budget.nearby.addingTimeInterval(delay),
                    "the nearby sweep returns within one in-flight message of its cutoff (\(fitting) fit)")
-            expect(budget.window.timeIntervalSince(fake.now) >= oneAXRound,
-                   "the window keeps its reserved round after the cut-off nearby sweep (\(fitting) fit)")
+            expect(fake.now <= budget.window,
+                   "the gated nearby messages stay within the shared total (\(fitting) fit)")
         }
-        expect(abs(budget.window.timeIntervalSince(start) - 0.6) < 0.001,
+        expect(abs(budget.window.timeIntervalSince(start) - totalSeconds) < tolerance,
                "the AX total stays at the accepted 0.6 s")
-        expect(budget.nearby < budget.window
-                && budget.window.timeIntervalSince(budget.nearby) >= 2 * oneAXRound,
-               "the nearby cutoff leaves the window one reserved AX round plus one in flight")
+        expect(abs(span - nearbySeconds) < tolerance,
+               "the first-priority nearby source has a 0.35 s cutoff")
 
         var notes: [String] = []
         ScreenContext.glossaryNoteSink = { notes.append($0) }
@@ -6957,8 +6961,10 @@ enum Selftest {
         var now = start
         var read: [String] = []
 
+        // An in-flight nearby read can leave less than one timeout for the
+        // window. The fallback must still use that remainder, not require a floor.
         var remaining: TimeInterval = 0
-        let (stalled, focused) = fakeEditor(start: start, delay: oneAXRound / 50)
+        let (stalled, focused) = fakeEditor(start: start, delay: messageTimeout)
         let slowNearby = ScreenContext.glossaryStages(
             budget: budget, now: { stalled.now }, valid: { true }, named: { [] },
             nearby: { deadline in
@@ -6974,8 +6980,8 @@ enum Selftest {
             },
             ocr: { read.append("ocr"); return [] })
         expect(read == ["nearby", "window"] && slowNearby.count == 3
-                && remaining >= oneAXRound,
-               "a stalled multi-message nearby sweep still leaves the window its reservation")
+                && remaining > 0 && remaining < messageTimeout,
+               "the window uses a sub-timeout remainder after an in-flight nearby read")
         expect(notes.contains { $0.hasPrefix("stage=nearby strings=") && $0.hasSuffix("budget=exhausted") }
                 && notes.contains { $0.hasPrefix("stage=window strings=1") && !$0.contains("budget=") },
                "the cut-off nearby sweep is marked exhausted and the completed window read is not")
@@ -7025,7 +7031,7 @@ enum Selftest {
             ocr: { read.append("ocr"); return [] })
         expect(read == ["nearby", "window", "ocr", "named"]
                 && notes.contains { $0.hasPrefix("named entities=1 ms=") },
-               "the title/URL read runs after every reader stage, outside the window reservation")
+               "the title/URL read runs after every reader stage")
     }
 
     /// The predicate that returned [] for every stage in the live gate. A

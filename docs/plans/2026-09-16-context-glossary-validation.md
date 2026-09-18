@@ -252,31 +252,28 @@ would break it on every headless and CI machine. Window identity, the part that
 can be decided without a desktop, is covered in the standard suite by
 `testGlossaryWindowIdentity`.
 
-## Stage budget reservation on 2026-09-18 (provisional, constant-derived)
+## Best-effort stage budget on 2026-09-18 (provisional)
 
 Review finding `window-fallback-shares-exhausted-ax-deadline`: the near-cursor
 sweep, the intervening title/deep-URL read (`entities(for:deepURL:)`) and the
-window sweep all consumed the single `glossaryAXSeconds` (0.6 s) deadline
-created before the first stage. In a slow-AX app the window stage opened with
-no budget and returned `[]` before reading its root node, and that looked
-identical to a window with no text. Decision 027 asked for a measured split;
-decision 028 supersedes it and authorizes a constant-derived reservation now,
-with measured tuning as a separate follow-up.
+window sweep all consumed the single `glossaryAXSeconds` (0.6 s) deadline.
+When the earlier work exhausted it, the window stage returned `[]` before
+reading its root node, indistinguishable from a window with no text.
 
-**Reservation.** `ScreenContext.GlossaryBudget` splits the unchanged 0.6 s
-total into two deadlines from one start:
+Decision 032 gives the first-priority nearby source a 0.35 s cutoff. The
+window fallback receives whatever remains of the unchanged 0.6 s total.
+This is a priority choice, not measured tuning. The nominal remainder after
+nearby reaches its cutoff is about 0.25 s. An in-flight read can reduce that
+remainder below 0.25 s or to near zero; an earlier completion can leave more.
+
+`ScreenContext.GlossaryBudget` sets two deadlines from one start:
 
 ```
-axTimeout             = 0.25 s   per-element AX messaging timeout every helper sets
-glossaryWindowReserve = axTimeout = 0.25 s   one AX messaging round for the window
-in-flight allowance   = axTimeout = 0.25 s   the one call a sweep may have issued
-                                              just before noticing its deadline
-nearby cutoff         = 0.6 - 0.25 - 0.25 = 0.10 s after start
-window deadline       = 0.6 s after start (the total; never extended)
+axTimeout             = 0.25 s   timeout per AX message
+glossaryWindowReserve = axTimeout = 0.25 s   scheduling offset, not a time floor
+nearby cutoff         = 0.6 - 0.25 = 0.35 s after start
+window deadline       = 0.6 s after start (never extended)
 ```
-
-The nearby stage is handed the cutoff, the window stage the total. Decision
-029 keeps these constants; the ratio is settled, not tuned.
 
 **Per-message bound.** `axTimeout` caps one AX message, not one helper call:
 a secure-field check is three messages (subrole, role, protected content), a
@@ -287,26 +284,25 @@ helper or per node: every message in `glossaryNearby`, `glossarySecure` and
 `collectGlossaryText` is preceded by a check of the fake-able clock against the
 stage deadline (`GlossaryMessages.open`, or `send`, which performs that check
 and returns nil instead of issuing the message). A nil from a gated secure
-check stops the node before any text read. The largest block that can start before the cutoff and finish after
-it is one message, bounded by `axTimeout`; that is what the in-flight allowance
-covers, and why the window still opens with `glossaryWindowReserve` remaining
-when the nearby stage is the only consumer between start and the window read.
-The title/deep-URL read, which has its own timeouts and was between the two
-stages only as a carry-over from when it seeded the window stage's text
-(`4758824`), runs after every reader stage, so it cannot consume the
-reservation; `ContextGlossary.capture` already merged it after stage selection.
+check stops the node before any text read. The check prevents the next
+message; it does not interrupt one already in flight. That message can finish
+up to `axTimeout` after the nearby cutoff. This overrun is why the nominal
+window remainder is not a floor. No deadline-aware IPC timeout is added.
 
-This split is **provisional**: it guarantees a window attempt under the bound
-above, it does not optimise either stage, and it has no measured basis.
-Residual paths that are still outside the per-message gate:
+The title/deep-URL read runs after every reader stage, so it cannot consume
+the window's remaining time. If the total has expired when the window stage
+opens, the stage is logged as `skipped=budget`, not empty, and capture falls
+through to OCR when permission and validity checks allow it.
+
+The split remains provisional and unmeasured. Residual paths outside the
+per-message gate can further reduce the remaining time:
 
 - The two identity/permission checks (`valid()`) that run between the nearby
   and window reads: each is one `CGWindowListCopyWindowInfo` plus up to five
   AX messages (focused window, focused element, three secure-field reads), all
   ungated, each AX message bounded by `axTimeout`. They are kept deliberately,
   because a revoked lease or a window switch must stop the capture before the
-  next read. In an app that answers within the reservation they cost
-  milliseconds; if they stall, the window stage opens late and is logged
+  next read. Their cost can leave the window stage late; it is then logged
   `skipped=budget` rather than misreported as empty.
 - The application, focused-window and focused-element reads that precede the
   budget's start, and the messages inside `valid()` before the first stage.
@@ -314,13 +310,10 @@ Residual paths that are still outside the per-message gate:
   `CGWindowListCopyWindowInfo` call before each stage's gated sweep begins.
   It is a WindowServer call, not an AX message, and is outside
   `GlossaryMessages`.
-- In an app that hits the 0.25 s messaging timeout on consecutive reads no AX
-  stage can read anything, reservation or not.
-- The nearby sweep is cut at its 0.10 s issue window in any app whose sweep
-  needs longer, then tagged `budget=exhausted`. The cursor text has priority
-  (its secure-field, range and string-for-range messages are issued first)
-  but shares the cutoff, so it is skipped or truncated when those messages
-  cannot complete before it; the neighbouring-label sweep is cut after it.
+- The nearby sweep stops issuing messages at its 0.35 s cutoff in any app
+  whose sweep needs longer, then logs `budget=exhausted`. Cursor text has
+  priority but shares the cutoff. A cursor read can be skipped if its message
+  has not started by then; results from a message already in flight are kept.
 
 **Diagnostics** (`VELORA_CONTEXT_DIAGNOSTICS=1`, counts and milliseconds
 only): each stage logs `stage=<source> strings=N ms=T`; a stage whose read
@@ -330,20 +323,16 @@ and a sweep cut off after N strings. A stage opening after the total logs
 `skipped=budget`. The title/URL read logs `named entities=N ms=T`. An `ms`
 value on an exhausted stage is clipped by the deadline and is not a complete
 stage cost. `testGlossaryBudget` (standard `--selftest`) drives the real
-nearby sweep over a fake AX tree in which every message costs a fixed
-synthetic delay (fractions of `axTimeout`, not measured app timings) on a fake
-clock, and covers: for every message position of the fake editor's complete
-trace, exactly the messages that fit start before the nearby cutoff and the
-sweep returns within one in-flight message of it; the window keeps its
-reserved round after a stalled multi-message sweep; a completed sweep reads
-both the cursor text and the neighbouring label; the total is never extended and a
-late window stage is skipped with OCR still running; exhausted versus empty
-completed reads; and the named read running after every stage. With the
-earlier per-helper checks in place the same test failed: further messages
-started after the cutoff and, at a 62.5 ms per-message delay, consumed the
-window's reserved round.
+nearby sweep over a fake AX tree with synthetic delays inside `axTimeout`.
+It exercises each message cutoff and verifies that the window uses even a
+sub-timeout remainder after an in-flight nearby read. A fast completed read
+retains cursor text and neighbouring labels under the production deadline.
+Existing regressions cover skipped-window OCR fall-through, exhausted versus
+empty completed reads, and the named read running after every reader stage.
+These fake-clock cases are behavioral tests, not app timing measurements.
 
-**Tuning follow-up.** On an unlocked session with the signed app granted
+**Follow-up.** Stronger window-time bounds require a different mechanism and
+are deferred alongside measured tuning. On an unlocked session with the signed app granted
 Accessibility, run the live gate against TextEdit and, for a slow-AX sample,
 with an Electron app frontmost, and read the per-stage `ms` and `named` costs:
 

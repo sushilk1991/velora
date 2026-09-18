@@ -1155,7 +1155,7 @@ enum ScreenContext {
 
         init(start: Date) {
             window = start.addingTimeInterval(glossaryAXSeconds)
-            nearby = window.addingTimeInterval(-glossaryWindowReserve - TimeInterval(axTimeout))
+            nearby = window.addingTimeInterval(-glossaryWindowReserve)
         }
     }
 
