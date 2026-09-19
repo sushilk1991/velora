@@ -14,10 +14,14 @@ automated by `scripts/publish-release.sh`.
 ## The pipeline
 
 ```
-VERSION bump ─▶ signed app ─▶ notarized DMG ─▶ GitHub release ─▶ Homebrew tap
-   make-app.sh      │        make-dmg.sh          └── publish-release.sh ──┘
-                    └─ verify-dmg.sh (run again by publish-release.sh)
+VERSION bump + notes ─▶ PR merged to main ─▶ signed app ─▶ notarized DMG ─▶ GitHub release ─▶ Homebrew tap
+  bump-version.sh                  make-app.sh    │      make-dmg.sh        └──── publish-release.sh ────┘
+                                                  └─ verify-dmg.sh (run again by publish-release.sh)
 ```
+
+The release round is committed and reviewed first; the DMG is built from
+merged `main` afterwards, so the shipped bytes correspond to what is actually
+on `main`.
 
 ## Prerequisites (once per machine)
 
@@ -48,31 +52,52 @@ VERSION bump ─▶ signed app ─▶ notarized DMG ─▶ GitHub release ─▶
 1. **Green tests.** `make test` — plus the manual permission-gated checks in
    CONTRIBUTING.md when the round touched them.
 
-2. **Release notes.** Write `docs/releases/vX.Y.Z.md` for the version you are
-   *about to create* (see the bump table in CLAUDE.md: patch by default,
-   `minor`/`major` for bigger rounds). First line must be `# Velora X.Y.Z` —
-   the file becomes the GitHub release body verbatim, and users read it in
-   the in-app updater. Keep it in the established voice: one-sentence
-   headline, then short user-facing bullets. No internals.
-
-3. **Build the DMG** (this performs the version bump):
+2. **Bump VERSION and write the notes** on a branch:
 
    ```sh
+   ./scripts/bump-version.sh [patch|minor|major]   # writes VERSION, prints X.Y.Z
+   ```
+
+   Bump levels are in `scripts/bump-version.sh`: patch by default,
+   `minor`/`major` for bigger rounds. Then write `docs/releases/vX.Y.Z.md` for
+   that version. First line must be `# Velora X.Y.Z` — the file becomes the
+   GitHub release body verbatim, and users read it in the in-app updater. Keep
+   it in the established voice: one-sentence headline, then short user-facing
+   bullets. No internals.
+
+3. **Commit the release round and get it onto `main`** through a reviewed PR:
+
+   ```sh
+   git add VERSION docs/releases/vX.Y.Z.md
+   git commit -m "Release Velora X.Y.Z"
+   git push -u origin <branch>
+   gh pr create --base main
+   ```
+
+   Merge once checks pass. `publish-release.sh` refuses to run until VERSION is
+   committed and matches `origin/main`.
+
+4. **Build the DMG from merged `main`** (no bump: the version was decided in
+   step 2):
+
+   ```sh
+   git checkout main && git pull --ff-only
    export VELORA_PROVISIONING_PROFILE="<Direct profile path>"
-   ./scripts/make-dmg.sh release [patch|minor|major]
+   ./scripts/make-dmg.sh release none
+   git checkout -- Resources/Info.plist
    ```
 
    Output: `build/Velora-X.Y.Z.dmg` — signed, notarized, stapled, and already
    passed `verify-dmg.sh`. The script refuses to overwrite an existing DMG:
    **a version never ships twice** — if the artifact is wrong, bump again.
 
-4. **Commit the release round** (VERSION bump + notes) and push:
-
-   ```sh
-   git add VERSION docs/releases/vX.Y.Z.md
-   git commit -m "release: prepare Velora X.Y.Z"
-   git push origin main
-   ```
+   `make-app.sh` stamps `Resources/Info.plist` at build time with VERSION and
+   a `CFBundleVersion` of `git rev-list --count HEAD`. The stamp left in the
+   working tree is a build artifact: the committed plist is not authoritative
+   and always lags by a commit, because the count is taken after the release
+   commit lands. The final `git checkout` restores it so the tree is left
+   clean rather than committing a stale count. The DMG carries the correct
+   values regardless of what is committed.
 
 5. **Publish everywhere:**
 
