@@ -32,7 +32,7 @@ or updates change:
 | Computer-audio permission denied | Velora explains that no screen is captured, continues as mic-only when possible, and keeps Stop visible |
 | Microphone fails during a meeting | Recording stops visibly and already-captured audio remains recoverable |
 | Microphone, input-monitoring, or accessibility denied | The app gives the correct recovery action and does not claim to be listening or inserted |
-| Screen Recording not granted, or `Read on-screen text for spelling` off | Dictation finishes without spelling hints from OCR, no permission prompt appears while recording, and mode resolution plus spoken @ tags still work |
+| Screen Recording not granted | Accessibility screen-text reads still run; OCR is skipped, no permission prompt appears while recording, and mode resolution plus spoken @ tags still work |
 | Password/secure field | No text is inserted, and no action plan runs |
 | Voice action against a real app (`velora action "…" --execute`) | The current app stays in front while the plan runs against the exact background process and window; a plan that cannot confirm that target stops without typing |
 | Voice action with the screen locked | The plan fails with "the screen is locked" and opens nothing |

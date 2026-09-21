@@ -125,8 +125,10 @@ input-monitoring, and accessibility permissions to the app identity.
   recording indicator.
 - Spelling hints come from text already on screen: Accessibility text near
   the cursor, then the active window, then local Apple Vision text recognition
-  if you grant optional Screen Recording. Screenshots and hints are never
-  saved, and Settings > Dictation can turn the reads off.
+  if you grant optional Screen Recording. The reads happen by default and have
+  no in-app off switch; revoking Accessibility stops the screen-text reads,
+  while revoking Screen Recording drops only the text recognition.
+  Screenshots and hints are never saved.
 - Model downloads and app updates use the internet. Update checks can be
   disabled.
 - Personal Dictionary sync uses your iCloud Drive whenever it is signed in;

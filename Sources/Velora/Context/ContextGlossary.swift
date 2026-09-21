@@ -260,7 +260,7 @@ final class ContextGlossarySession {
         return ready
     }
 
-    /// Cancellation and setting revocation discard both ready and late results.
+    /// Cancellation discards both ready and late results.
     func cancel() {
         _ = take()
     }

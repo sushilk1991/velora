@@ -1109,24 +1109,52 @@ enum ScreenContext {
         return Array(result.prefix(maxEntities))
     }
 
-    /// Pin only window identity at start; all AX, screenshot, and OCR work runs
-    /// inside the returned reader, off the recording/finalization path.
+    /// Pin an available window immediately; a newly activated app can precede
+    /// its WindowServer row. Retry that same app off the recording/stop path.
     static func glossaryReader(
-        for app: NSRunningApplication?, category: ModeCategory?,
-        allowed: @escaping () -> Bool
+        for app: NSRunningApplication?, category: ModeCategory?
     ) -> (@escaping () -> Bool) -> [ContextEntity] {
-        guard let app, let target = glossaryWindow(app.processIdentifier) else {
-            glossaryNote("refused=\(GlossaryRefusal.noWindow.rawValue) stage=pin")
+        guard let app else {
+            NSLog("Velora: glossary refused=noWindow stage=pin reason=noTarget")
             return { _ in [] }
         }
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier
+                == app.processIdentifier else {
+            NSLog("Velora: glossary refused=focusChanged stage=pin")
+            return { _ in [] }
+        }
+        let initialWindow = glossaryWindow(app.processIdentifier)
         return { isCurrent in
             autoreleasepool {
-                gatherGlossary(app: app, target: target, category: category,
-                               allowed: { allowed() && isCurrent() })
+                // Ready window -> pinned identity; missing row -> bounded poll.
+                // Stop, secure input, or leaving the app ends the wait immediately.
+                let started = ProcessInfo.processInfo.systemUptime
+                let pinned = pinGlossaryWindow(valid: {
+                    isCurrent() && AXIsProcessTrusted() && !SecureInput.isActive
+                        && NSWorkspace.shared.frontmostApplication?.processIdentifier
+                            == app.processIdentifier
+                }, read: { initialWindow ?? glossaryWindow(app.processIdentifier) })
+                let waitedMs = Int((ProcessInfo.processInfo.systemUptime - started) * 1_000)
+                switch pinned {
+                case .failure(let refusal):
+                    // A refusal is observable even without verbose diagnostics;
+                    // it must not masquerade as a successful text-free screen.
+                    NSLog("Velora: glossary refused=%@ stage=pin waited_ms=%d",
+                          refusal.rawValue, waitedMs)
+                    return []
+                case .success(let target):
+                    glossaryNote("pinned wait_ms=\(waitedMs)")
+                    return gatherGlossary(app: app, target: target, category: category,
+                                          allowed: isCurrent)
+                }
             }
         }
     }
 
+    // WindowServer lag measured up to 638 ms after activation. Poll for one
+    // second, returning on the first valid row rather than imposing that delay.
+    private static let glossaryPinSeconds: TimeInterval = 1
+    private static let glossaryPinPoll: TimeInterval = 0.01
     private static let glossaryAXSeconds: TimeInterval = 0.6
     static let glossaryWindowReserve = TimeInterval(axTimeout)
     private static let glossaryOCRSeconds: TimeInterval = 1.5
@@ -1185,10 +1213,30 @@ enum ScreenContext {
 
     private static let glossaryUnbudgeted = GlossaryMessages(deadline: .distantFuture, ax: GlossaryAX())
 
-    /// Why a stage refused, for the live gate only. Never carries screen text,
+    /// Why a stage refused. Never carries screen text,
     /// pixels, a window title, or a bundle identifier.
-    enum GlossaryRefusal: String {
+    enum GlossaryRefusal: String, Error {
         case revoked, noWindow, windowChanged, secureField, focusChanged
+    }
+
+    /// Keep pinning separate from capture so delayed WindowServer visibility
+    /// can be tested without reading another app or changing the capture policy.
+    static func pinGlossaryWindow(
+        valid: () -> Bool, read: () -> GlossaryWindow?,
+        now: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
+        pause: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    ) -> Result<GlossaryWindow, GlossaryRefusal> {
+        let deadline = now() + glossaryPinSeconds
+        while valid() {
+            if let window = read() {
+                guard valid() else { return .failure(.revoked) }
+                return .success(window)
+            }
+            let remaining = deadline - now()
+            guard remaining > 0 else { return .failure(.noWindow) }
+            pause(min(glossaryPinPoll, remaining))
+        }
+        return .failure(.revoked)
     }
 
     /// The identity policy, separated from the AX and WindowServer reads that
