@@ -1490,29 +1490,6 @@ enum Selftest {
                    && local.cachedReleaseAssetSize == 12_345,
                    "the machine-local changelog and DMG metadata survive relaunch")
 
-            // Screen context stays enabled even when an existing install has
-            // the removed opt-out saved; OS permissions still govern reads.
-            let contextSuite = suite + ".context"
-            let contextDefaults = UserDefaults(suiteName: contextSuite)!
-            defer { contextDefaults.removePersistentDomain(forName: contextSuite) }
-            let contextConfig = AppConfig(
-                defaults: contextDefaults,
-                settingsFileURL: directory.appendingPathComponent("context-settings.json"),
-                engineConfigURL: directory.appendingPathComponent("context-config.json"),
-                registerDefaults: false)
-            expect(contextConfig.screenContextEnabled, "screen context is always enabled")
-            let legacyScreenContextKey = "velora.screenContext"
-            contextDefaults.set(false, forKey: legacyScreenContextKey)
-            expect(contextConfig.screenContextEnabled,
-                   "the removed screen context opt-out cannot disable reads")
-            let reloadedContext = AppConfig(
-                defaults: contextDefaults,
-                settingsFileURL: directory.appendingPathComponent("context-settings.json"),
-                engineConfigURL: directory.appendingPathComponent("context-config.json"),
-                registerDefaults: false)
-            expect(reloadedContext.screenContextEnabled,
-                   "the removed screen context opt-out is ignored after relaunch")
-
             let wireDirectory = directory.appendingPathComponent("wire-version-migration")
             let wireSettings = wireDirectory.appendingPathComponent("settings.json")
             let wireEngine = wireDirectory.appendingPathComponent("config.json")
@@ -7069,8 +7046,8 @@ enum Selftest {
 
         // The production entry point itself fails closed without a lease.
         let reader = ScreenContext.glossaryReader(
-            for: NSRunningApplication.current, category: nil, allowed: { false })
-        expect(reader({ true }).isEmpty, "a revoked lease reads nothing")
+            for: NSRunningApplication.current, category: nil)
+        expect(reader({ false }).isEmpty, "a revoked lease reads nothing")
     }
 
     private static let contextLaunchTimeout: TimeInterval = 5
@@ -7152,7 +7129,7 @@ enum Selftest {
         }
 
         // Exercise the actual asynchronous reader without persisting its text.
-        let reader = ScreenContext.glossaryReader(for: app, category: nil, allowed: { true })
+        let reader = ScreenContext.glossaryReader(for: app, category: nil)
         var result: [String]?
         DispatchQueue.global(qos: .userInitiated).async {
             let captured = reader { true }.map(\.value)

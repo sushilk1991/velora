@@ -1112,8 +1112,7 @@ enum ScreenContext {
     /// Pin only window identity at start; all AX, screenshot, and OCR work runs
     /// inside the returned reader, off the recording/finalization path.
     static func glossaryReader(
-        for app: NSRunningApplication?, category: ModeCategory?,
-        allowed: @escaping () -> Bool
+        for app: NSRunningApplication?, category: ModeCategory?
     ) -> (@escaping () -> Bool) -> [ContextEntity] {
         guard let app, let target = glossaryWindow(app.processIdentifier) else {
             glossaryNote("refused=\(GlossaryRefusal.noWindow.rawValue) stage=pin")
@@ -1122,7 +1121,7 @@ enum ScreenContext {
         return { isCurrent in
             autoreleasepool {
                 gatherGlossary(app: app, target: target, category: category,
-                               allowed: { allowed() && isCurrent() })
+                               allowed: isCurrent)
             }
         }
     }

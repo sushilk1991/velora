@@ -2137,12 +2137,10 @@ final class DictationController: NSObject {
         // App/window identity is pinned now; only the Context layer reads AX
         // or pixels. External listening and Actions retain their exclusions.
         glossarySession.cancel()
-        if !external, AppConfig.shared.screenContextEnabled,
-           Self.gathersRichRecordingEntities(policy: contextPolicy) {
+        if !external, Self.gathersRichRecordingEntities(policy: contextPolicy) {
             glossarySession.start(ScreenContext.glossaryReader(
                 for: targetApp,
-                category: ModeCategory.category(forBundleID: enriched.bundleID),
-                allowed: { AppConfig.shared.screenContextEnabled }))
+                category: ModeCategory.category(forBundleID: enriched.bundleID)))
         }
 
         // No HUD transition while capture spins up: a hidden HUD stays hidden
@@ -2200,7 +2198,7 @@ final class DictationController: NSObject {
         // Take completed spelling data exactly once; finalization never waits.
         var stopCmd: [String: Any] = ["cmd": "stop", "session": sessionID]
         let glossary = glossarySession.take()
-        if AppConfig.shared.screenContextEnabled, !glossary.isEmpty {
+        if !glossary.isEmpty {
             stopCmd["entities"] = glossary.map { $0.payload }
         }
         let stoppedSession = sessionID

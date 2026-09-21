@@ -981,10 +981,6 @@ final class AppConfig {
         }
     }
 
-    /// Screen context is part of dictation; ignore the removed opt-out.
-    /// Accessibility and Screen Recording permissions still gate their reads.
-    var screenContextEnabled: Bool { true }
-
     var portableEngineSettings: SettingsDocument.Engine {
         readSetting(\.engine)
     }
