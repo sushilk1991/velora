@@ -220,7 +220,6 @@ final class AppConfig {
         static let typingFallbackApps = "velora.typingFallbackApps"
         static let typingWPM = "velora.typingWPM"
         static let localAgentAccess = "velora.localAgentAccess"
-        static let screenContext = "velora.screenContext"
         static let meetingSuggestions = "velora.meetingSuggestions"
         static let meetingCalendar = "velora.meetingCalendar"
         static let meetingAudioRetentionDays = "velora.meetingAudioRetentionDays"
@@ -982,11 +981,9 @@ final class AppConfig {
         }
     }
 
-    /// Machine-local screen privacy preference; never imported as a grant.
-    var screenContextEnabled: Bool {
-        get { defaults.object(forKey: Key.screenContext) as? Bool ?? true }
-        set { defaults.set(newValue, forKey: Key.screenContext) }
-    }
+    /// Screen context is part of dictation; ignore the removed opt-out.
+    /// Accessibility and Screen Recording permissions still gate their reads.
+    var screenContextEnabled: Bool { true }
 
     var portableEngineSettings: SettingsDocument.Engine {
         readSetting(\.engine)

@@ -1490,8 +1490,8 @@ enum Selftest {
                    && local.cachedReleaseAssetSize == 12_345,
                    "the machine-local changelog and DMG metadata survive relaunch")
 
-            // Screen context is machine-local: disable survives relaunch and
-            // portable settings cannot enable it on another Mac.
+            // Screen context stays enabled even when an existing install has
+            // the removed opt-out saved; OS permissions still govern reads.
             let contextSuite = suite + ".context"
             let contextDefaults = UserDefaults(suiteName: contextSuite)!
             defer { contextDefaults.removePersistentDomain(forName: contextSuite) }
@@ -1500,14 +1500,18 @@ enum Selftest {
                 settingsFileURL: directory.appendingPathComponent("context-settings.json"),
                 engineConfigURL: directory.appendingPathComponent("context-config.json"),
                 registerDefaults: false)
-            expect(contextConfig.screenContextEnabled, "screen context defaults on")
-            contextConfig.screenContextEnabled = false
+            expect(contextConfig.screenContextEnabled, "screen context is always enabled")
+            let legacyScreenContextKey = "velora.screenContext"
+            contextDefaults.set(false, forKey: legacyScreenContextKey)
+            expect(contextConfig.screenContextEnabled,
+                   "the removed screen context opt-out cannot disable reads")
             let reloadedContext = AppConfig(
                 defaults: contextDefaults,
                 settingsFileURL: directory.appendingPathComponent("context-settings.json"),
                 engineConfigURL: directory.appendingPathComponent("context-config.json"),
                 registerDefaults: false)
-            expect(!reloadedContext.screenContextEnabled, "screen context opt-out survives relaunch")
+            expect(reloadedContext.screenContextEnabled,
+                   "the removed screen context opt-out is ignored after relaunch")
 
             let wireDirectory = directory.appendingPathComponent("wire-version-migration")
             let wireSettings = wireDirectory.appendingPathComponent("settings.json")

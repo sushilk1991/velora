@@ -248,7 +248,6 @@ final class DictationController: NSObject {
     private let supervisor: EngineSupervisor
     private let dictionary: DictionaryRepository
     private var externalInsertionObserver: NSObjectProtocol?
-    private var contextPreferenceObserver: NSObjectProtocol?
 
     /// Action Mode stays uninitialized until an action actually starts. Plain
     /// dictation may consult actionsStorage to enforce input exclusion without
@@ -475,13 +474,6 @@ final class DictationController: NSObject {
         self.dictionary = dictionary
         super.init()
         ModeApplicationIndex.shared.reload()
-        // Revoking context also discards a completed snapshot before stop.
-        contextPreferenceObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            guard !AppConfig.shared.screenContextEnabled else { return }
-            self?.glossarySession.cancel()
-        }
         externalInsertionObserver = NotificationCenter.default.addObserver(
             forName: .veloraExternalTextInsertion, object: nil, queue: .main
         ) { [weak self] _ in
@@ -510,9 +502,6 @@ final class DictationController: NSObject {
 
     deinit {
         glossarySession.cancel()
-        if let contextPreferenceObserver {
-            NotificationCenter.default.removeObserver(contextPreferenceObserver)
-        }
         if let externalInsertionObserver {
             NotificationCenter.default.removeObserver(externalInsertionObserver)
         }
