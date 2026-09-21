@@ -326,8 +326,8 @@ struct DictationSettingsView: View {
                     }
                 }
             }
-            // Keep the privacy control beside writing behavior, without adding
-            // an onboarding gate or prompting for screen access while recording.
+            // Keep the screen access grant beside writing behavior, without
+            // adding an onboarding gate or prompting for it while recording.
             Section {
                 Button("Allow Local Screen Text Recognition…") {
                     Permissions.requestScreenText()

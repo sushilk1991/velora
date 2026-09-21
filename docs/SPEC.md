@@ -99,7 +99,7 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 
 ## Non-goals
 - No cloud inference of any kind. No accounts, telemetry, or analytics.
-- No cloud screen understanding or vision model. Optional dictation screen context uses bounded Accessibility text and local Apple Vision OCR for spelling only; screenshots and extracted context are never saved.
+- No cloud screen understanding or vision model. Dictation screen context uses bounded Accessibility text and local Apple Vision OCR for spelling only; screenshots and extracted context are never saved. Only the Screen Recording grant behind the OCR fallback is optional.
 - No silent or autonomous meeting recording. Detection never implies consent.
 - No claimed individual-speaker diarization from the remote/system track; `Me` and `Them` are audio-channel labels only.
 - No remotely reachable agent API and no direct third-party access to the privileged engine socket.

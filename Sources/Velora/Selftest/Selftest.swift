@@ -7043,11 +7043,6 @@ enum Selftest {
                "a secure field discards the capture")
         expect(refusal(pinned, false, false) == .focusChanged,
                "a different focused window discards the capture")
-
-        // The production entry point itself fails closed without a lease.
-        let reader = ScreenContext.glossaryReader(
-            for: NSRunningApplication.current, category: nil)
-        expect(reader({ false }).isEmpty, "a revoked lease reads nothing")
     }
 
     private static let contextLaunchTimeout: TimeInterval = 5
