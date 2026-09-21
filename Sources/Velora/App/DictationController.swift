@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import CryptoKit
 import Foundation
 
 /// Notification posted after text is successfully inserted (onboarding's
@@ -2134,8 +2135,8 @@ final class DictationController: NSObject {
         phase = .starting(locked: locked)
         supervisor.send(startCommand)
 
-        // App/window identity is pinned now; only the Context layer reads AX
-        // or pixels. External listening and Actions retain their exclusions.
+        // Keep ready window identity; Context retries a newly activated app's
+        // missing window off this path. External listening and Actions stay excluded.
         glossarySession.cancel()
         if !external, Self.gathersRichRecordingEntities(policy: contextPolicy) {
             glossarySession.start(ScreenContext.glossaryReader(
@@ -2211,6 +2212,18 @@ final class DictationController: NSObject {
                   self.phase == .transcribing,
                   self.cancelledSessionID != stoppedSession else { return }
             NSLog("Velora: engine stop session=%@", stoppedSession)
+
+            // Correlate captured terms with the engine's model-bound prompt
+            // without logging the words. The delimiter matches server.py.
+            if ScreenContext.glossaryDiagnostics {
+                let fingerprintSeparator = "\u{001F}"
+                let values = glossary.map(\.value).sorted().joined(separator: fingerprintSeparator)
+                let digest = SHA256.hash(data: Data(values.utf8))
+                    .map { String(format: "%02x", $0) }.joined()
+                NSLog("Velora: glossary delivery session=%@ terms=%d sha256=%@",
+                      stoppedSession, glossary.count, digest)
+            }
+
             self.supervisor.send(stopCmd)
             self.stopEnqueuedSession = stoppedSession
             self.armTranscribeTimeout()

@@ -17,6 +17,7 @@ import argparse
 import asyncio
 import contextlib
 import ctypes
+import hashlib
 import json
 import logging
 import os
@@ -2242,6 +2243,20 @@ class Engine:
         cleanup_ready = (
             await self._ensure_cleanup_loaded() if gate.use_llm else False)
         if gate.use_llm and self.cleanup is not None and cleanup_ready:
+            # Match the app's delivery fingerprint at the actual model boundary.
+            # Counts and hashes prove fixture delivery without saving screen text.
+            if os.environ.get("VELORA_CONTEXT_DIAGNOSTICS") == "1":
+                fingerprint_separator = "\x1f"
+                values = sorted(
+                    entity["value"] for entity in entities or []
+                    if isinstance(entity.get("value"), str)
+                )
+                digest = hashlib.sha256(fingerprint_separator.join(values).encode()).hexdigest()
+                prompt = gate.system_prompt or STATIC_SYSTEM_PROMPT
+                log.info(
+                    "screen context model delivery terms=%d prompt_terms=%d sha256=%s",
+                    len(values), sum(value in prompt for value in values), digest,
+                )
             prefix_candidates = formatting.build_prefill_prompt_candidates(
                 self.config,
                 bundle_id=bundle_id,

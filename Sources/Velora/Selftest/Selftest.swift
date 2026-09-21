@@ -114,6 +114,7 @@ enum Selftest {
         testScreenContextSites()
         testContextGlossary()
         testGlossaryWindowIdentity()
+        testGlossaryWindowReadiness()
         testGlossaryStages()
         testGlossaryBudget()
         testContextLifetime()
@@ -7047,6 +7048,70 @@ enum Selftest {
 
     private static let contextLaunchTimeout: TimeInterval = 5
     private static let contextFocusTimeout: TimeInterval = 15
+    /// Activation can precede WindowServer visibility. Wait for that same
+    /// target, with a bounded budget, and stop polling as soon as it is ready.
+    private static func testGlossaryWindowReadiness() {
+        let window = ScreenContext.GlossaryWindow(
+            id: 42, frame: CGRect(x: 0, y: 0, width: 800, height: 600))
+        let readinessDelay: TimeInterval = 0.65
+        let pinBudget: TimeInterval = 1
+        let clockTolerance: TimeInterval = 0.000_001
+        var elapsed: TimeInterval = 0
+        var reads = 0
+
+        // Focus -> no row -> same window visible: capture must survive the
+        // observed activation lag rather than treating it as an empty screen.
+        let delayed = ScreenContext.pinGlossaryWindow(
+            valid: { true },
+            read: {
+                reads += 1
+                return elapsed >= readinessDelay ? window : nil
+            }, now: { elapsed }, pause: { elapsed += $0 })
+        if case .success(let pinned) = delayed {
+            expect(pinned.id == window.id, "a delayed window pins the original target")
+        } else {
+            expect(false, "a window appearing within the pin budget is captured")
+        }
+        expect(elapsed >= readinessDelay && elapsed < pinBudget && reads > 1,
+               "pinning polls until readiness and returns before the full budget")
+
+        // Ready windows incur no polling delay; permanent absence has a hard
+        // deadline and an explicit refusal rather than a successful empty read.
+        elapsed = 0
+        let ready = ScreenContext.pinGlossaryWindow(
+            valid: { true }, read: { window }, now: { elapsed },
+            pause: { elapsed += $0 })
+        if case .success(let pinned) = ready {
+            expect(pinned.id == window.id && elapsed == 0, "a ready window pins immediately")
+        } else {
+            expect(false, "a ready window is not refused")
+        }
+        let absent = ScreenContext.pinGlossaryWindow(
+            valid: { true }, read: { nil }, now: { elapsed },
+            pause: { elapsed += $0 })
+        if case .failure(.noWindow) = absent {
+            expect(abs(elapsed - pinBudget) < clockTolerance,
+                   "a missing window is refused at the bounded pin deadline")
+        } else {
+            expect(false, "a pin timeout is a refusal")
+        }
+
+        // Cancelling or changing the frontmost target revokes the lease. A
+        // later window must never restart polling for that abandoned capture.
+        elapsed = 0
+        reads = 0
+        var current = true
+        let revoked = ScreenContext.pinGlossaryWindow(
+            valid: { current }, read: { reads += 1; return nil },
+            now: { elapsed }, pause: { elapsed += $0; current = false })
+        if case .failure(.revoked) = revoked {
+            expect(reads == 1 && elapsed < pinBudget,
+                   "revocation stops pinning before another window query")
+        } else {
+            expect(false, "a revoked pending pin cannot become a capture")
+        }
+    }
+
     private static let contextCaptureTimeout: TimeInterval = 5
 
     /// Read a separate TextEdit process, matching production AX ownership.
