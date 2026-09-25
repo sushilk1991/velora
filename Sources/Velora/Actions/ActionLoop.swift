@@ -51,7 +51,7 @@ private struct ActionCompletionEvidence {
                 invalidateProof()
                 hadEffect = true
                 hadOtherEffect = true
-                if kind != .openURL, kind != .presentUI,
+                if kind != .openURL,
                    let target, target.pid != nil, target.windowID != nil {
                     effectTarget = target
                 }

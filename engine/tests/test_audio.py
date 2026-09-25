@@ -114,25 +114,6 @@ def test_audio_store_write_failure_does_not_break_dictation(tmp_path):
     assert list(audio_dir.glob(".*.tmp")) == []
 
 
-def test_archive_failure_preserves_active_spool(tmp_path):
-    class BrokenSoundFile:
-        @staticmethod
-        def write(path, *_args, **_kwargs):
-            Path(path).write_bytes(b"partial")
-            raise OSError("disk unavailable")
-
-    store = AudioStore(tmp_path / "audio")
-    store._sf = BrokenSoundFile()
-    store.ext = "flac"
-    spool = store.begin_active("write-failure")
-    assert spool is not None
-    assert spool.append(AUDIO)
-
-    assert store.finalize_active(spool) is None
-    assert spool.path.is_file()
-    assert spool.path.stat().st_size == AUDIO.size * 2
-
-
 def test_audio_store_prune_missing_directory_is_noop(tmp_path):
     store = AudioStore(tmp_path / "missing")
     assert store.prune(retention_days=180, max_bytes=1024) == 0

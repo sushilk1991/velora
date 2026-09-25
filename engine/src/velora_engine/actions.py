@@ -323,7 +323,6 @@ VERBS = (
 # Steps that put characters or keystrokes into another app. Each one requires a
 # preceding focus checkpoint in the same plan.
 INPUT_VERBS = ("type_text", "replace_text", "search_text", "paste_text", "key")
-FOCUS_VERBS = ("wait_frontmost", "verify_context")
 # Verbs that advance the GOAL. A first turn built solely from the others has
 # accomplished nothing the user asked for, and `done: true` on it was reported
 # as success (audited, 2026-08-04).
@@ -1392,18 +1391,6 @@ def turn_requires_target_verifier(parsed: dict, session: "ActionSession") -> boo
         for step in parsed.get("steps", []))
 
 
-def turn_requires_ui_presentation(
-        parsed: dict, session: "ActionSession") -> bool:
-    snapshot = session.current_ui_snapshot
-    return (snapshot.get("source") == _UI_SOURCE_CUA
-            and command_allows_bundle_modality(
-                session.transcript, str(snapshot.get("bundle_id") or ""))
-            and command_names_only_app(
-                session.transcript, str(snapshot.get("app_name") or ""),
-                session.state.app_names)
-            and turn_requires_target_verifier(parsed, session))
-
-
 _PRESENTATION_INTENT_PREFIXES = (
     ("open",), ("show",), ("display",), ("launch",),
     ("navigate", "to"), ("go", "to"), ("switch", "to"),
@@ -1426,9 +1413,6 @@ _BROWSER_ADDRESS_RE = re.compile(
     r"(?:https?://|www\.|\b[a-z0-9-]+\.[a-z]{2,24}(?:\b|[/#?])"
     r"|\bdot\s+[a-z]{2,24}\b)",
     re.IGNORECASE)
-_TERMINAL_PRESENTATION_VERBS = {
-    "open_app", "wait_frontmost", "verify_context", "pause",
-}
 
 
 def command_allows_bundle_modality(command: str, bundle_id: str) -> bool:
@@ -1600,39 +1584,6 @@ def command_app_spans(command: str, app_name: str) -> list[tuple[int, int]]:
     ]
 
 
-def turn_requires_terminal_presentation(
-        parsed: dict, session: "ActionSession") -> bool:
-    """Mint the final foreground handoff only for an explicit UI request."""
-    snapshot = session.current_ui_snapshot
-    sends = session.sends
-    if sends is None:
-        raw = parsed.get("sends")
-        sends = raw if isinstance(raw, bool) else True
-    steps = parsed.get("steps") or []
-    verbs = [
-        str(step.get("do") or "").strip().lower()
-        if isinstance(step, dict) else ""
-        for step in steps
-    ]
-    window_id = snapshot.get("window_id")
-    return (
-        parsed.get("done") is True
-        and session.turns_used > 0
-        and sends is False
-        and session.state.require_ui_target_verification
-        and all(verb in _TERMINAL_PRESENTATION_VERBS for verb in verbs)
-        and snapshot.get("source") == _UI_SOURCE_CUA
-        and bool(snapshot.get("id"))
-        and bool(snapshot.get("bundle_id"))
-        and isinstance(window_id, int)
-        and not isinstance(window_id, bool)
-        and is_explicit_ui_presentation(
-            session.transcript, str(snapshot.get("app_name") or ""),
-            candidate_apps=session.state.app_names,
-            bundle_id=str(snapshot.get("bundle_id") or ""))
-    )
-
-
 def needs_app_presentation(session: "ActionSession") -> bool:
     """Whether exact presentation itself now completes the command."""
     snapshot = session.current_ui_snapshot
@@ -1652,25 +1603,6 @@ def needs_app_presentation(session: "ActionSession") -> bool:
             candidate_apps=session.state.app_names,
             bundle_id=str(snapshot.get("bundle_id") or ""))
     )
-
-
-def attach_ui_presentation(parsed: dict, snapshot: dict, token: str) -> dict:
-    """Replace deferred content with one engine-minted foreground handoff."""
-    snapshot_id = str(snapshot.get("id") or "")
-    bundle_id = str(snapshot.get("bundle_id") or "")
-    window_id = snapshot.get("window_id")
-    if (snapshot.get("source") != _UI_SOURCE_CUA or not snapshot_id
-            or not bundle_id or not isinstance(window_id, int)
-            or isinstance(window_id, bool)):
-        raise PlanError("present_ui: incomplete routed window identity")
-    out = {key: parsed[key] for key in ("goal", "sends") if key in parsed}
-    out["steps"] = [{
-        "do": "present_ui", "snapshot": snapshot_id,
-        "bundle_id": bundle_id, "window_id": window_id,
-        "attestation": token,
-    }]
-    out["done"] = False
-    return out
 
 
 _SELF_EVIDENT_COLLECTION_NAVIGATION_VERBS = {
@@ -1814,10 +1746,6 @@ def attach_verified_goal(parsed: dict, verdict: dict,
     ]
     out["done"] = True
     return out
-
-
-def build_repair_prompt(context: ActionContext) -> str:
-    return build_action_prompt(context) + "\n" + REPAIR_NOTE
 
 
 def turn_repair_note(reason: str) -> str:
@@ -2391,19 +2319,6 @@ def _validate_verify_state(step: dict,
         raise PlanError("verify_state: selected state is not currently observed")
     return normalized
 
-def turn_has_state_postcondition(parsed: dict,
-                                 session: "ActionSession") -> bool:
-    """A target-local state receipt never proves the whole spoken command."""
-    del parsed, session
-    return False
-
-
-def turn_has_exact_cua_text(parsed: dict,
-                            session: "ActionSession") -> bool:
-    """Exact Cua typing proves insertion, not arbitrary task completion."""
-    del parsed, session
-    return False
-
 
 def _validate_present_ui(step: dict, state: "SessionState | None",
                          declared_sends: object) -> dict:
@@ -2496,7 +2411,6 @@ class SessionState:
     ui_native_capabilities: tuple[tuple[str, str], ...] = ()
     spoken_command: str = ""
     allowed_ui_attestation: str | None = None
-    allow_ui_presentation: bool = False
     require_ui_target_verification: bool = False
 
 
@@ -2873,7 +2787,6 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
         state.current_app = current_app
         if used_ui_attestation:
             state.allowed_ui_attestation = None
-            state.allow_ui_presentation = False
 
     goal = plan.get("goal")
     sends = plan.get("sends")
@@ -2885,11 +2798,6 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
         "sends": True if not isinstance(sends, bool) else sends,
         "steps": steps,
     }
-
-
-def plan_from_reply(raw: str) -> dict:
-    """parse + validate in one call (what the server uses per attempt)."""
-    return validate_plan(parse_plan(raw))
 
 
 # ---------------------------------------------------------------- the loop
@@ -3150,7 +3058,6 @@ class ActionSession:
             if item.get("source") == _UI_SOURCE_APP_NATIVE
             and item.get("do") == "media_control")
         self.state.allowed_ui_attestation = None
-        self.state.allow_ui_presentation = False
         if observed_app:
             # The server calls this before asking for the next reply, so this
             # is the boundary where runtime-observed identity enters the

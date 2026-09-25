@@ -40,26 +40,6 @@ def encode_json(obj: dict[str, Any]) -> bytes:
     return encode_frame(FRAME_JSON, payload)
 
 
-def decode_frames(buf: bytes) -> tuple[list[tuple[int, bytes]], bytes]:
-    """Decode as many complete frames as possible from `buf`.
-
-    Returns (frames, remainder). Raises ProtocolError on an invalid length.
-    """
-    frames: list[tuple[int, bytes]] = []
-    off = 0
-    while len(buf) - off >= 4:
-        (length,) = _HEADER.unpack_from(buf, off)
-        if length < 1 or length > MAX_FRAME_LEN:
-            raise ProtocolError(f"invalid frame length {length}")
-        if len(buf) - off - 4 < length:
-            break
-        frame_type = buf[off + 4]
-        payload = bytes(buf[off + 5 : off + 4 + length])
-        frames.append((frame_type, payload))
-        off += 4 + length
-    return frames, buf[off:]
-
-
 async def read_frame(reader: asyncio.StreamReader) -> tuple[int, bytes]:
     """Read one frame from an asyncio stream.
 

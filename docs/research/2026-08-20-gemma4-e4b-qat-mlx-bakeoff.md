@@ -165,7 +165,8 @@ Action comparison:
 
 ```sh
 cd engine
-uv run python scripts/benchmark_gemma4_action_2026_08_20.py
+git show 5c91c7d:engine/scripts/benchmark_gemma4_action_2026_08_20.py > /tmp/benchmark_gemma4_action_2026_08_20.py
+uv run python /tmp/benchmark_gemma4_action_2026_08_20.py
 ```
 
 The Action script pins both repositories and verifies their weight hashes

@@ -138,16 +138,6 @@ def test_parse_strips_code_fences_and_preamble():
     assert actions.parse_plan(raw)["sends"] is True
 
 
-def test_parse_rejects_non_json():
-    with pytest.raises(actions.PlanError):
-        actions.parse_plan("I cannot help with that.")
-
-
-def test_parse_rejects_json_array():
-    with pytest.raises(actions.PlanError):
-        actions.parse_plan("[{\"do\": \"open_app\", \"app\": \"Slack\"}]")
-
-
 # ---------------- validation ----------------
 
 def test_valid_plan_round_trips():
@@ -292,13 +282,25 @@ def test_bare_keys_are_an_explicit_navigation_capability():
             ]))
 
 
-def test_safe_modified_key_chords_match_the_swift_mirror():
-    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
+def _swift_source(file):
+    """A Velora Swift source the engine mirrors. An installed engine ships
+    without the Swift tree, so the mirror tests skip there."""
+    swift = Path(__file__).resolve().parents[2] / "Sources/Velora" / file
     if not swift.exists():
         pytest.skip("swift sources not available (installed engine)")
-    marker = "// safe_modified_key_chords: "
-    line = next(ln for ln in swift.read_text().splitlines() if marker in ln)
-    mirrored = set(line.split(marker, 1)[1].split())
+    return swift.read_text()
+
+
+def _swift_marker(file, marker):
+    """The text after `marker` on its mirror line, e.g. the words after
+    `// keys: ` in ActionKey.swift."""
+    line = next(ln for ln in _swift_source(file).splitlines() if marker in ln)
+    return line.split(marker, 1)[1]
+
+
+def test_safe_modified_key_chords_match_the_swift_mirror():
+    mirrored = set(_swift_marker(
+        "Actions/ActionPlan.swift", "// safe_modified_key_chords: ").split())
     engine = {
         "+".join([*sorted(mods), key])
         for key, mods in actions.SAFE_MODIFIED_KEY_CHORDS
@@ -406,23 +408,6 @@ def test_a_send_must_be_verified_after_the_text_it_commits():
             {"do": "type_text", "text": "Himesh"},
             {"do": "key", "key": "return"},
         ]))
-
-
-def test_a_verified_send_is_accepted():
-    out = actions.validate_plan(plan(steps=[
-        {"do": "open_app", "app": "Slack"},
-        {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "key", "key": "k", "mods": ["cmd"]},
-        {"do": "type_text", "text": "Himesh"},
-        {"do": "pause", "ms": 600},
-        {"do": "verify_context", "expect": ["Himesh"]},
-        {"do": "key", "key": "return"},
-        {"do": "verify_context", "expect": ["Himesh"]},
-        {"do": "type_text", "text": "running late"},
-        {"do": "verify_context", "expect": ["Himesh"]},
-        {"do": "key", "key": "return"},
-    ]))
-    assert len(out["steps"]) == 11
 
 
 def test_modified_keys_are_not_treated_as_sends():
@@ -642,13 +627,7 @@ def test_key_names_match_the_swift_mirror():
     """The executor maps these names to CGKeyCodes. A name the engine allows but
     Swift cannot map is a plan that dies mid-flight, so the two lists are one
     contract."""
-    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionKey.swift"
-    if not swift.exists():
-        pytest.skip("swift sources not available (installed engine)")
-    source = swift.read_text()
-    marker = "// keys: "
-    line = next(ln for ln in source.splitlines() if marker in ln)
-    mirrored = set(line.split(marker, 1)[1].split())
+    mirrored = set(_swift_marker("Actions/ActionKey.swift", "// keys: ").split())
     assert mirrored == set(actions.KEY_NAMES), (
         f"engine-only: {set(actions.KEY_NAMES) - mirrored}, "
         f"swift-only: {mirrored - set(actions.KEY_NAMES)}")
@@ -887,38 +866,6 @@ async def test_action_start_returns_the_first_turn(engine):
     assert "open_app" in prompt
 
 
-async def test_partial_cua_draft_never_presents(engine):
-    eng, sock = engine
-    eng.cleanup = FakePlanner(
-        turn([
-            {"do": "wait_frontmost", "app": "Slack"},
-            {"do": "type_text", "text": "Sunny is available"},
-        ], goal="draft for Hemesh", sends=False, done=True),
-        json.dumps({"safe": False, "reason": "background UI is incomplete"}),
-    )
-    raw = _structured_send_ui("Hemesh")
-    raw.update({
-        "complete": False, "source": "cua", "window_id": 44,
-        "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
-    })
-    client = await connect(sock)
-    await client.recv_event("ready")
-    await send_start(
-        client,
-        transcript="Draft a message for Hemesh on Slack",
-        context={
-            "frontmost_app": "Slack",
-            "frontmost_bundle": "com.tinyspeck.slackmacgap",
-            "ui_snapshot": raw,
-        },
-    )
-
-    evt = await client.recv_event("action_failed")
-    assert "present_ui" not in evt["error"]
-    assert "background UI is incomplete" in evt["error"]
-    assert len(eng.cleanup.calls) == 2
-
-
 async def test_native_send_text_waits_for_readback(engine):
     eng, sock = engine
     eng.cleanup = FakePlanner(
@@ -973,7 +920,6 @@ async def test_native_send_text_waits_for_readback(engine):
     assert [step["do"] for step in event["steps"]] == [
         "wait_frontmost", "verify_context", "verify_ui", "type_text",
     ]
-    assert all(step["do"] != "present_ui" for step in event["steps"])
     assert len(eng.cleanup.calls) == 3
 
 
@@ -1255,33 +1201,6 @@ async def test_partial_ui_target_refusal_skips_inline_repair(engine):
     assert len(eng.cleanup.calls) == 2
 
 
-async def test_partial_ui_reviewer_cannot_authorize_mutation(engine):
-    partial = _structured_ui(active="Shivangi Gupta")
-    partial["complete"] = False
-    controller = turn([
-        {"do": "wait_frontmost", "app": "WhatsApp"},
-        {"do": "press_ui", "snapshot": "snap-1", "index": 28,
-         "role": "AXButton", "label": "Shivangi Gupta"},
-    ], goal="open Shivangi Gupta on WhatsApp", sends=False)
-    eng, sock = engine
-    eng.cleanup = FakePlanner(controller, controller)
-    client = await connect(sock)
-    await client.recv_event("ready")
-    await send_start(
-        client,
-        transcript="open Shivangi Gupta on WhatsApp",
-        context={"frontmost_app": "WhatsApp",
-                 "frontmost_bundle": "net.whatsapp.WhatsApp",
-                 "running_apps": ["WhatsApp"],
-                 "ui_snapshot": partial},
-    )
-
-    event = await client.recv_event("action_failed")
-
-    assert event["code"] == "plan_invalid"
-    assert len(eng.cleanup.calls) >= 2
-
-
 async def test_media_control_is_locally_bound_to_current_ui(engine):
     controller = turn([
         {"do": "wait_frontmost", "app": "Music"},
@@ -1312,7 +1231,16 @@ async def test_media_control_is_locally_bound_to_current_ui(engine):
     assert len(eng.cleanup.calls) == 1
 
 
-async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(engine):
+@pytest.mark.parametrize(("review", "reason"), [
+    ({"safe": False,
+      "reason": "the cited active header opens details, not the chat"},
+     "opens details"),
+    # A reply with no "safe" key (here the controller's plan echoed back)
+    # is a refusal, never an approval.
+    (None, "not proven navigation"),
+])
+async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(
+        engine, review, reason):
     partial = _structured_ui(active="Shivangi Gupta")
     partial["complete"] = False
     controller = turn([
@@ -1320,10 +1248,7 @@ async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(engin
         {"do": "press_ui", "snapshot": "snap-1", "index": 28,
          "role": "AXButton", "label": "Shivangi Gupta"},
     ], goal="open Shivangi Gupta on WhatsApp", sends=False)
-    refusal = json.dumps({
-        "safe": False,
-        "reason": "the cited active header opens details, not the chat",
-    })
+    refusal = controller if review is None else json.dumps(review)
     eng, sock = engine
     eng.cleanup = FakePlanner(controller, refusal, controller, refusal)
     client = await connect(sock)
@@ -1341,7 +1266,7 @@ async def test_partial_ui_reviewer_refuses_wrong_command_mentioned_control(engin
 
     assert event["code"] == "plan_invalid"
     assert "UI action reviewer refused" in event["error"]
-    assert "opens details" in event["error"]
+    assert reason in event["error"]
     assert len(eng.cleanup.calls) == 4
 
 
@@ -1964,17 +1889,6 @@ async def test_action_rejected_turn_keeps_the_session_alive(engine):
     assert evt["steps"], "the session survived the rejected turn"
 
 
-async def test_action_start_rejects_an_unsafe_batch_from_the_model(engine):
-    eng, sock = engine
-    bad = turn([{"do": "open_url", "url": "file:///etc/passwd"}], goal="g", sends=False)
-    eng.cleanup = FakePlanner(bad, bad)
-    client = await connect(sock)
-    await client.recv_event("ready")
-    await send_start(client)
-    evt = await client.recv_event("action_failed")
-    assert evt["code"] == "plan_invalid"
-
-
 async def test_action_start_surfaces_unsupported(engine):
     eng, sock = engine
     eng.cleanup = FakePlanner(json.dumps({"unsupported": "no Photoshop installed"}))
@@ -2093,21 +2007,6 @@ async def test_action_observe_unknown_id(engine):
     await send_observe(client, id="nope")
     evt = await client.recv_event("action_failed")
     assert evt["code"] == "no_session"
-
-
-async def test_action_end_drops_the_session(engine):
-    eng, sock = engine
-    eng.cleanup = FakePlanner(turn(FIRST_BATCH, goal="g", sends=False))
-    client = await connect(sock)
-    await client.recv_event("ready")
-    await send_start(client)
-    await client.recv_event("action_turn")
-    await client.send_json({"cmd": "action_end", "id": "a1"})
-    for _ in range(20):
-        if eng.cleanup.action_memory_releases == 1:
-            break
-        await asyncio.sleep(0.01)
-    assert eng.cleanup.action_memory_releases == 1
 
 
 async def test_action_end_hygiene_never_blocks_control_dispatch(engine):
@@ -2573,6 +2472,8 @@ def test_parse_turn_rejects_prose_and_arrays():
         actions.parse_turn("I would open Slack first.")
     with pytest.raises(actions.PlanError):
         actions.parse_turn(json.dumps([{"do": "open_app", "app": "Slack"}]))
+    with pytest.raises(actions.PlanError, match="neither steps nor done"):
+        actions.parse_turn("{}")
 
 
 def test_observation_barrier_keeps_missing_press_capability_rejected():
@@ -2650,11 +2551,6 @@ def press_plan(label, prefix=None):
     return plan(sends=False, steps=steps + [{"do": "press_element", "label": label}])
 
 
-def test_press_element_is_a_known_verb():
-    out = actions.validate_plan(press_plan("Shivangi Singh"))
-    assert out["steps"][-1] == {"do": "press_element", "label": "Shivangi Singh"}
-
-
 def test_press_element_requires_a_prior_focus_checkpoint():
     """AXPress lands on whatever app is frontmost; without a checkpoint it could
     press a row in an app the plan never established."""
@@ -2688,7 +2584,7 @@ def test_press_element_allows_navigation_labels():
     for label in ("Shivangi Singh", "Sort ascending", "Himesh Singh, direct message",
                   "Sign of the Times - Harry Styles"):
         out = actions.validate_plan(press_plan(label))
-        assert out["steps"][-1]["do"] == "press_element"
+        assert out["steps"][-1] == {"do": "press_element", "label": label}
 
 
 def test_press_element_invalidates_focus():
@@ -2704,13 +2600,8 @@ def test_press_element_invalidates_focus():
 
 def test_safe_bare_keys_match_the_swift_mirror():
     """Both validators expose the same complete bare-key capability set."""
-    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
-    if not swift.exists():
-        pytest.skip("swift sources not available (installed engine)")
-    source = swift.read_text()
-    marker = "// safe_bare_keys: "
-    line = next(ln for ln in source.splitlines() if marker in ln)
-    mirrored = set(line.split(marker, 1)[1].split())
+    mirrored = set(_swift_marker(
+        "Actions/ActionPlan.swift", "// safe_bare_keys: ").split())
     assert mirrored == set(actions.SAFE_BARE_KEYS), (
         f"engine-only: {set(actions.SAFE_BARE_KEYS) - mirrored}, "
         f"swift-only: {mirrored - set(actions.SAFE_BARE_KEYS)}")
@@ -2719,13 +2610,8 @@ def test_safe_bare_keys_match_the_swift_mirror():
 def test_press_denylist_matches_the_swift_mirror():
     """Same contract test as the key names: both validators must refuse the
     same committing labels or the engine would propose what the app rejects."""
-    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
-    if not swift.exists():
-        pytest.skip("swift sources not available (installed engine)")
-    source = swift.read_text()
-    marker = "// press_denylist: "
-    line = next(ln for ln in source.splitlines() if marker in ln)
-    mirrored = set(line.split(marker, 1)[1].split())
+    mirrored = set(_swift_marker(
+        "Actions/ActionPlan.swift", "// press_denylist: ").split())
     assert mirrored == set(actions.PRESS_DENY_WORDS), (
         f"engine-only: {set(actions.PRESS_DENY_WORDS) - mirrored}, "
         f"swift-only: {mirrored - set(actions.PRESS_DENY_WORDS)}")
@@ -2798,65 +2684,49 @@ def test_session_verify_in_a_later_turn_clears_the_carried_text():
     assert out["steps"][-1]["key"] == "return"
 
 
-def test_session_rejects_app_name_as_verify_term_across_turns():
-    """The target app named in turn N remains too generic to authorize a
-    Return in turn N+1; a new batch must not erase that identity."""
+def _session_knowing(app, source):
+    """A session that learned `app` as its identity one way: its own target
+    in an earlier turn, the initial or an observed frontmost app, or a
+    running app."""
+    if source == "initial":
+        return session(context=ctx(frontmost_app=app))
+    if source == "running":
+        return session(context=ctx(running_apps=[app, "Sublime Text"]))
     sess = session()
-    accept(sess, [
-        {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "type_text", "text": "hello there"},
-    ], goal="g", sends=True)
-    with pytest.raises(actions.PlanError, match="expect"):
+    if source == "target":
         accept(sess, [
-            {"do": "verify_context", "expect": ["Slack"]},
-            {"do": "key", "key": "return"},
-        ])
-
-
-def test_session_rejects_initial_frontmost_app_as_verify_term():
-    """An already-frontmost app name proves only which app is open, not the
-    conversation or document that a Return would affect."""
-    sess = session(context=ctx(
-        frontmost_app="Slack",
-        frontmost_bundle="com.tinyspeck.slackmacgap",
-        frontmost_window="general (Channel) - Slack",
-    ))
-    with pytest.raises(actions.PlanError, match="expect"):
-        accept(sess, [
-            {"do": "verify_context", "expect": ["Slack"]},
+            {"do": "wait_frontmost", "app": app},
             {"do": "type_text", "text": "hello there"},
-            {"do": "verify_context", "expect": ["Slack"]},
+        ], goal="g", sends=True)
+        return sess
+    accept(sess, [{"do": "pause", "ms": 10}], goal="g", sends=True)
+    sess.observation_message(observation(frontmost_app=app))
+    return sess
+
+
+@pytest.mark.parametrize(("source", "app", "term"), [
+    ("target", "Slack", "Slack"),
+    ("initial", "Slack", "Slack"),
+    ("observed", "Slack", "Slack"),
+    ("initial", "Google Chrome", "Chrome"),
+    ("initial", "Slack Beta", "Slack"),
+    ("initial", "Visual Studio Code", "Code"),
+    ("target", "Google Chrome", "Chrome"),
+    ("observed", "Google Chrome", "Chrome"),
+    ("running", "Google Chrome", "Chrome"),
+])
+def test_session_rejects_app_identity_as_verify_term(source, app, term):
+    """An app's name or alias proves only which app is open, not the
+    conversation or document a Return would affect. The identity holds in
+    later turns, so a new batch cannot erase it."""
+    sess = _session_knowing(app, source)
+    with pytest.raises(actions.PlanError, match="expect"):
+        accept(sess, [
+            {"do": "verify_context", "expect": [term]},
+            {"do": "type_text", "text": "hello there"},
+            {"do": "verify_context", "expect": [term]},
             {"do": "key", "key": "return"},
         ], goal="g", sends=True)
-
-
-def test_session_rejects_observed_frontmost_app_as_verify_term():
-    """The actual app reported between turns is also session identity, even
-    when no open_app or wait_frontmost step named it."""
-    sess = session()
-    accept(sess, [{"do": "pause", "ms": 10}], goal="g", sends=True)
-    sess.observation_message(observation(frontmost_app="Slack"))
-    with pytest.raises(actions.PlanError, match="expect"):
-        accept(sess, [
-            {"do": "verify_context", "expect": ["Slack"]},
-            {"do": "type_text", "text": "hello there"},
-            {"do": "verify_context", "expect": ["Slack"]},
-            {"do": "key", "key": "return"},
-        ])
-
-
-@pytest.mark.parametrize(("app", "alias"), [
-    ("Google Chrome", "Chrome"),
-    ("Slack Beta", "Slack"),
-    ("Visual Studio Code", "Code"),
-])
-def test_session_rejects_initial_frontmost_app_alias(app, alias):
-    sess = session(context=ctx(frontmost_app=app))
-    with pytest.raises(actions.PlanError, match="expect"):
-        accept(sess, [
-            {"do": "verify_context", "expect": [alias]},
-            {"do": "type_text", "text": "hello there"},
-        ], goal="g", sends=False)
 
 
 @pytest.mark.parametrize(("app", "specific_term"), [
@@ -2872,39 +2742,6 @@ def test_app_name_filter_preserves_longer_specific_terms(app, specific_term):
         {"do": "type_text", "text": "hello there"},
     ], goal="g", sends=False)
     assert out["steps"][0]["expect"] == [specific_term]
-
-
-def test_session_rejects_target_app_alias_across_turns():
-    sess = session()
-    accept(sess, [
-        {"do": "wait_frontmost", "app": "Google Chrome"},
-        {"do": "type_text", "text": "hello there"},
-    ], goal="g", sends=True)
-    with pytest.raises(actions.PlanError, match="expect"):
-        accept(sess, [
-            {"do": "verify_context", "expect": ["Chrome"]},
-            {"do": "key", "key": "return"},
-        ])
-
-
-def test_session_rejects_observed_frontmost_app_alias():
-    sess = session()
-    accept(sess, [{"do": "pause", "ms": 10}], goal="g", sends=False)
-    sess.observation_message(observation(frontmost_app="Google Chrome"))
-    with pytest.raises(actions.PlanError, match="expect"):
-        accept(sess, [
-            {"do": "verify_context", "expect": ["Chrome"]},
-            {"do": "type_text", "text": "hello there"},
-        ])
-
-
-def test_session_rejects_running_app_alias_as_verify_term():
-    sess = session(context=ctx(running_apps=["Google Chrome", "Sublime Text"]))
-    with pytest.raises(actions.PlanError, match="expect"):
-        accept(sess, [
-            {"do": "verify_context", "expect": ["Chrome"]},
-            {"do": "type_text", "text": "hello there"},
-        ], goal="g", sends=False)
 
 
 def test_return_with_pending_text_requires_exact_ui_attestation_in_every_app():
@@ -3527,8 +3364,7 @@ def test_model_projection_omits_inert_leaves_but_preserves_their_ancestors():
 
 
 def test_snapshot_limit_matches_swift_and_engine_truncation_fails_closed():
-    swift = (Path(__file__).resolve().parents[2]
-             / "Sources/Velora/Context/ScreenContext.swift").read_text()
+    swift = _swift_source("Context/ScreenContext.swift")
     capture_limit = re.search(
         r"func actionUISnapshot\([\s\S]*?nodeBudget: Int = (\d+)",
         swift,
@@ -3545,19 +3381,6 @@ def test_snapshot_limit_matches_swift_and_engine_truncation_fails_closed():
     })
     assert len(snapshot["elements"]) == actions._MAX_UI_ELEMENTS
     assert snapshot["complete"] is False
-
-
-def test_swift_capture_reaches_deep_electron_composers():
-    swift = (Path(__file__).resolve().parents[2]
-             / "Sources/Velora/Context/ScreenContext.swift").read_text()
-    budget = re.search(r"actionTreeDepthBudget\s*=\s*(\d+)", swift)
-    default = re.search(
-        r"func actionUISnapshot\([\s\S]*?depthBudget: Int = "
-        r"actionTreeDepthBudget",
-        swift)
-    assert budget is not None and default is not None
-    assert int(budget.group(1)) >= 30, (
-        "live Slack exposes its target-bound composer at AX depth 23")
 
 
 def test_only_executable_ax_capabilities_reach_the_model():
@@ -3962,13 +3785,9 @@ def test_ui_verifiers_bind_exact_evidence_to_their_current_call():
 
 
 def test_collection_evidence_policy_matches_the_swift_mirror():
-    swift = (Path(__file__).resolve().parents[2]
-             / "Sources/Velora/Actions/ActionUIObservation.swift")
-    source = swift.read_text()
-    marker = "// collection_evidence_policy: "
-    line = next(item for item in source.splitlines() if marker in item)
-    values = dict(part.split("=", 1)
-                  for part in line.split(marker, 1)[1].split())
+    values = dict(part.split("=", 1) for part in _swift_marker(
+        "Actions/ActionUIObservation.swift",
+        "// collection_evidence_policy: ").split())
     assert int(values["minimumPeers"]) == actions.COLLECTION_MINIMUM_PEERS
     assert int(values["ancestorLevels"]) == actions.COLLECTION_ANCESTOR_LEVELS
     assert float(values["frameTolerance"]) == actions.COLLECTION_FRAME_TOLERANCE
@@ -4123,67 +3942,6 @@ def test_explicit_cua_navigation_presents_exact_window():
         polite.sends = False
         assert actions.needs_app_presentation(polite), command
 
-    session = actions.ActionSession(
-        "open the Shivangi Gupta chat on WhatsApp", context,
-        require_target_verifier=True)
-    session.turns_used = 1
-    parsed = actions.parse_turn(turn([
-        {"do": "wait_frontmost", "app": "WhatsApp"},
-    ], sends=False, done=True))
-
-    assert actions.turn_requires_terminal_presentation(parsed, session)
-
-    session.state.allowed_ui_attestation = "token-1"
-    session.state.allow_ui_presentation = True
-    attached = actions.attach_ui_presentation(
-        parsed, session.current_ui_snapshot, "token-1")
-    assert attached["done"] is False
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        session.accept_reply(json.dumps(attached))
-
-    wrong_intent = actions.ActionSession(
-        "check the Shivangi Gupta chat on WhatsApp", context,
-        require_target_verifier=True)
-    wrong_intent.turns_used = 1
-    assert not actions.turn_requires_terminal_presentation(parsed, wrong_intent)
-
-    ambiguous = actions.ActionSession(
-        "Open Slack integration settings in Notes",
-        actions.ActionContext.from_dict({
-            "running_apps": ["Slack", "Orca"],
-            "known_apps": ["Slack", "Notes", "Orca"],
-            "ui_snapshot": dict(
-                raw, app_name="Slack",
-                bundle_id="com.tinyspeck.slackmacgap"),
-        }),
-        require_target_verifier=True)
-    ambiguous.turns_used = 1
-    assert not actions.turn_requires_terminal_presentation(parsed, ambiguous)
-
-    web_target = actions.ActionSession(
-        "Open Slack on the web",
-        actions.ActionContext.from_dict({
-            "running_apps": ["Slack", "Orca"],
-            "known_apps": ["Slack", "Safari", "Google Chrome", "Orca"],
-            "ui_snapshot": dict(
-                raw, app_name="Slack",
-                bundle_id="com.tinyspeck.slackmacgap"),
-        }),
-        require_target_verifier=True)
-    web_target.turns_used = 1
-    assert not actions.turn_requires_terminal_presentation(parsed, web_target)
-    url_target = actions.ActionSession(
-        "Open https://slack.com",
-        web_target.context, require_target_verifier=True)
-    url_target.turns_used = 1
-    assert not actions.turn_requires_terminal_presentation(parsed, url_target)
-    spoken_url_target = actions.ActionSession(
-        "Open Slack dot com",
-        web_target.context, require_target_verifier=True)
-    spoken_url_target.turns_used = 1
-    assert not actions.turn_requires_terminal_presentation(
-        parsed, spoken_url_target)
-
 
 def test_production_session_refuses_message_content_before_target_attestation():
     context = actions.ActionContext.from_dict({
@@ -4275,11 +4033,8 @@ def test_recipient_mirror():
     for transcript, bundle_id, expected in cases:
         assert actions.is_recipient_content(transcript, bundle_id) is expected
 
-    swift = (Path(__file__).resolve().parents[2]
-             / "Sources/Velora/Actions/ActionPlan.swift").read_text()
-    marker = "// recipient_intent: "
-    line = next(item for item in swift.splitlines() if marker in item)
-    content, compose_context = line.split(marker, 1)[1].split(" | ")
+    content, compose_context = _swift_marker(
+        "Actions/ActionPlan.swift", "// recipient_intent: ").split(" | ")
     compose, context = compose_context.split(" + ")
     assert set(content.split()) == actions._COMMUNICATION_CONTENT_WORDS
     assert set(compose.split()) == actions._COMPOSE_WORDS
@@ -4315,112 +4070,27 @@ def test_partial_target_proof():
         actions.parse_goal_verdict(verdict, snapshot, "open Hemesh on Slack")
 
 
-def test_present_ui_attestation():
-    raw = _structured_send_ui("Hemesh")
-    raw.update({
-        "complete": False, "source": "cua", "window_id": 44,
-        "app_name": "Slack", "bundle_id": "com.tinyspeck.slackmacgap",
-    })
-    snapshot = actions.normalize_ui_snapshot(raw)
-    context = actions.ActionContext.from_dict({"ui_snapshot": raw})
-    session = actions.ActionSession(
-        "Draft a message for Hemesh on Slack", context,
-        require_target_verifier=True)
-    parsed = actions.parse_turn(turn([
-        {"do": "wait_frontmost", "app": "Slack"},
-        {"do": "type_text", "text": "Sunny is available"},
-    ], goal="draft for Hemesh", sends=False, done=True))
-
-    assert actions.turn_requires_ui_presentation(parsed, session)
-
-    for web_command in (
-            "Draft a message for Hemesh on Slack on the web",
-            "Draft a Slack message for Hemesh in browser"):
-        web_session = actions.ActionSession(
-            web_command, context, require_target_verifier=True)
-        assert not actions.turn_requires_ui_presentation(parsed, web_session)
-
-    for bundle_id in ("com.apple.Notes",):
-        local_raw = dict(raw, bundle_id=bundle_id)
-        local_session = actions.ActionSession(
-            "Draft a message for Hemesh on Slack",
-            actions.ActionContext.from_dict({"ui_snapshot": local_raw}),
-            require_target_verifier=True)
-        assert not actions.turn_requires_ui_presentation(parsed, local_session)
-
-    unknown_raw = dict(raw, bundle_id="com.example.unknown")
-    unknown_session = actions.ActionSession(
-        "Draft a message for Hemesh on Slack",
-        actions.ActionContext.from_dict({"ui_snapshot": unknown_raw}),
-        require_target_verifier=True)
-    assert actions.turn_requires_ui_presentation(parsed, unknown_session)
-
-    wrong_app_raw = dict(
-        raw, app_name="WhatsApp", bundle_id="net.whatsapp.WhatsApp")
-    wrong_app = actions.ActionSession(
-        "Draft a message for Hemesh on Slack",
-        actions.ActionContext.from_dict({"ui_snapshot": wrong_app_raw}),
-        require_target_verifier=True)
-    assert not actions.turn_requires_ui_presentation(parsed, wrong_app)
-
-    attached = actions.attach_ui_presentation(parsed, snapshot, "token-1")
-    assert attached["done"] is False
-    assert [step["do"] for step in attached["steps"]] == ["present_ui"]
-    session.state.allowed_ui_attestation = "token-1"
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        session.accept_reply(json.dumps(attached))
-
-    web_state = actions.ActionSession(
-        "Draft a message for Hemesh on Slack on the web", context,
-        require_target_verifier=True)
-    web_state.state.allowed_ui_attestation = "token-1"
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        web_state.accept_reply(json.dumps(attached))
-
-    forged = actions.ActionSession(
-        "Draft a message for Hemesh on Slack", context,
-        require_target_verifier=True)
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        forged.accept_reply(json.dumps(attached))
-
-
 def test_present_ui_draft_gate():
-    command = "Draft a message for Hemesh on Slack"
-
-    def state(bundle_id, *, requires_proof=True):
-        return actions.SessionState(
-            ui_snapshot_id="snap-1", ui_snapshot_source="cua",
-            ui_snapshot_app_name="Slack",
-            ui_snapshot_bundle_id=bundle_id, ui_snapshot_window_id=44,
-            spoken_command=command, allowed_ui_attestation="token-1",
-            require_ui_target_verification=requires_proof)
-
-    def plan(bundle_id, *, sends=False):
-        return {
-            "goal": "draft for Hemesh", "sends": sends,
-            "steps": [{
-                "do": "present_ui", "snapshot": "snap-1",
-                "bundle_id": bundle_id, "window_id": 44,
-                "attestation": "token-1",
-            }],
-        }
-
+    """present_ui is refused outright, even for a fully attested routed
+    window: only a direct click on the result card may foreground it."""
     slack = "com.tinyspeck.slackmacgap"
+    state = actions.SessionState(
+        ui_snapshot_id="snap-1", ui_snapshot_source="cua",
+        ui_snapshot_app_name="Slack",
+        ui_snapshot_bundle_id=slack, ui_snapshot_window_id=44,
+        spoken_command="Draft a message for Hemesh on Slack",
+        allowed_ui_attestation="token-1",
+        require_ui_target_verification=True)
+    plan = {
+        "goal": "draft for Hemesh", "sends": False,
+        "steps": [{
+            "do": "present_ui", "snapshot": "snap-1",
+            "bundle_id": slack, "window_id": 44,
+            "attestation": "token-1",
+        }],
+    }
     with pytest.raises(actions.PlanError, match="result-card click"):
-        actions.validate_plan(plan(slack), state=state(slack))
-
-    for bundle_id in ("com.apple.Notes", "com.example.unknown"):
-        with pytest.raises(actions.PlanError, match="result-card click"):
-            actions.validate_plan(plan(bundle_id), state=state(bundle_id))
-
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        actions.validate_plan(plan(slack), state=state(slack, requires_proof=False))
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        actions.validate_plan(plan(slack, sends=True), state=state(slack))
-    missing_sends = plan(slack)
-    missing_sends.pop("sends")
-    with pytest.raises(actions.PlanError, match="result-card click"):
-        actions.validate_plan(missing_sends, state=state(slack))
+        actions.validate_plan(plan, state=state)
 
 
 def test_complete_cua_target_verdict_stays_background():
@@ -4573,10 +4243,7 @@ def test_later_turns_keep_the_documented_bare_done_reply():
 def test_press_denylist_substrings_match_the_swift_mirror():
     """Same contract as the word list: both validators must refuse the same
     non-Latin committing labels."""
-    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
-    if not swift.exists():
-        pytest.skip("swift sources not available (installed engine)")
-    source = swift.read_text()
+    source = _swift_source("Actions/ActionPlan.swift")
     # Start after the `= [` so the `[String]` in the declaration's own type
     # annotation is not mistaken for the array's opening bracket.
     start = source.index("static let pressDenySubstrings")
@@ -4788,17 +4455,13 @@ def test_url_fence_is_inert_without_a_session_pool():
 
 
 def test_url_machinery_matches_the_swift_mirror():
-    swift = Path(__file__).resolve().parents[2] / "Sources/Velora/Actions/ActionPlan.swift"
-    if not swift.exists():
-        pytest.skip("swift sources not available (installed engine)")
-    source = swift.read_text()
-    marker = "// url_machinery: "
-    line = next(ln for ln in source.splitlines() if marker in ln)
-    mirrored = set(line.split(marker, 1)[1].split())
+    mirrored = set(_swift_marker(
+        "Actions/ActionPlan.swift", "// url_machinery: ").split())
     assert mirrored == set(actions.URL_MACHINERY_TOKENS), (
         f"engine-only: {set(actions.URL_MACHINERY_TOKENS) - mirrored}, "
         f"swift-only: {mirrored - set(actions.URL_MACHINERY_TOKENS)}")
-    min_chars = re.search(r"urlTokenMinCharacters = (\d+)", source)
+    min_chars = re.search(r"urlTokenMinCharacters = (\d+)",
+                          _swift_source("Actions/ActionPlan.swift"))
     assert min_chars and int(min_chars.group(1)) == actions.URL_TOKEN_MIN_CHARS
 
 
@@ -5289,81 +4952,6 @@ def test_native_text_requires_a_fresh_observation_before_done():
     assert session.direct_goal_check_pending is True
 
 
-def test_composite_command_cannot_use_partial_native_proof():
-    context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
-    })
-    command = "write hello, make it bold, and select Pop in Music"
-    session = actions.ActionSession(command, context)
-    typed = {
-        "goal": command, "sends": False, "done": True,
-        "steps": [
-            {"do": "wait_frontmost", "app": "TextEdit"},
-            {"do": "type_text", "text": "hello", "index": 3,
-             "role": "AXTextArea", "label": "Body"},
-        ],
-    }
-
-    assert not actions.turn_has_exact_cua_text(typed, session)
-
-    session.accept_reply(json.dumps({**typed, "done": False}))
-    session.observation_message({
-        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
-        "executed": ["type_text 5 chars"],
-    })
-    proof = {
-        "steps": [{"do": "verify_state", "index": 3,
-                   "role": "AXTextArea", "label": "Body",
-                   "assert": "written_text"}],
-        "done": True,
-    }
-    assert not actions.turn_has_state_postcondition(proof, session)
-
-
-def test_local_native_text_does_not_prove_whole_goal():
-    context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
-    })
-    session = actions.ActionSession("write hello in Probe.txt", context)
-    typed = {
-        "goal": "write hello", "sends": False, "done": True,
-        "steps": [
-            {"do": "wait_frontmost", "app": "TextEdit"},
-            {"do": "type_text", "text": "hello", "index": 3,
-             "role": "AXTextArea", "label": "Body"},
-        ],
-    }
-
-    assert not actions.turn_has_exact_cua_text(typed, session)
-
-
-@pytest.mark.parametrize("command", [
-    "play music and raise volume",
-    "play music, increase the volume",
-    "play music plus raise the volume",
-    "play music while lowering the volume",
-    "write hello; underline it",
-    "find a song, queue it",
-    "write hello and underline it",
-    "find a song and queue it",
-])
-def test_conjunction_requires_whole_goal_proof(command):
-    context = actions.ActionContext.from_dict({
-        "frontmost_app": "TextEdit", "ui_snapshot": _native_text_ui(),
-    })
-    session = actions.ActionSession(command, context)
-    typed = {
-        "goal": command, "sends": False, "done": True,
-        "steps": [
-            {"do": "wait_frontmost", "app": "TextEdit"},
-            {"do": "type_text", "text": "hello", "index": 3,
-             "role": "AXTextArea", "label": "Body"},
-        ],
-    }
-
-    assert not actions.turn_has_exact_cua_text(typed, session)
-
-
 def test_planner_prompt_teaches_exact_native_typing():
     assert '"do":"type_text","text":"<text>","index":12' \
         in actions.PLANNER_RULES
@@ -5720,18 +5308,3 @@ def test_native_media_capability_is_opaque_and_current():
                  "capability": "invented"},
             ],
         }))
-
-    cua = _media_ui()
-    cua["capabilities"] = raw["capabilities"]
-    turn = actions.ActionSession(
-        "pause music in Music",
-        actions.ActionContext.from_dict({"ui_snapshot": cua}),
-    ).accept_reply(json.dumps({
-        "goal": "pause music", "sends": False,
-        "steps": [
-            {"do": "wait_frontmost", "app": "Music"},
-            {"do": "media_control", "state": "pause",
-             "capability": "opaque-pause"},
-        ],
-    }))
-    assert turn["steps"][-1]["capability"] == "opaque-pause"

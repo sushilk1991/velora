@@ -173,22 +173,6 @@ class AudioStore:
             ))
         return recovered
 
-    def finalize_active(self, spool: ActiveAudioSpool) -> str | None:
-        """Atomically archive a normal stop, then remove its active spool."""
-        spool.close()
-        try:
-            pcm16 = np.fromfile(spool.path, dtype="<i2")
-        except OSError:
-            return None
-        if pcm16.size == 0:
-            self._unlink(spool.path)
-            return None
-        pcm = (pcm16.astype(np.float32) / 32768.0).astype(np.float32)
-        saved = self.save(spool.path.name.removesuffix(".pcm16.part"), pcm)
-        if saved:
-            self._unlink(spool.path)
-        return saved
-
     def ack_interrupted(self, session_id: str) -> bool:
         """Remove only the acknowledged session's retained crash spool."""
         return self._unlink(self._active_path(session_id))

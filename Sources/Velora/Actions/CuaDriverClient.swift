@@ -356,14 +356,6 @@ final class CuaSocketTransport: CuaTransport {
         })
     }
 
-    init(socketPathProvider: @escaping () -> String?) {
-        self.socketProvider = {
-            socketPathProvider().map {
-                CuaSocketIdentity(path: $0, ownedPID: nil)
-            }
-        }
-    }
-
     init(socketIdentityProvider: @escaping () -> CuaSocketIdentity?) {
         self.socketProvider = socketIdentityProvider
     }
@@ -939,9 +931,6 @@ enum CuaDriverDaemon {
     private static let controller = CuaDaemonController(runtime: .production)
 
     static var activeSocketPath: String? { controller.activeSocketPath }
-    static var activeSocketIdentity: CuaSocketIdentity? {
-        controller.activeSocketIdentity
-    }
     static var transportSocketIdentity: CuaSocketIdentity? {
         controller.transportSocketIdentity
     }

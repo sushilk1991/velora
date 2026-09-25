@@ -3262,15 +3262,9 @@ class Engine:
                             else:
                                 raise actions.PlanError(
                                     "UI action reviewer refused: " + reason)
-                    has_state_proof = actions.turn_has_state_postcondition(
-                        parsed, session)
-                    has_exact_text_proof = actions.turn_has_exact_cua_text(
-                        parsed, session)
                     needs_goal_review = (
-                        not has_state_proof and not has_exact_text_proof
-                        and (bool(review_refusal_reason)
-                             or actions.turn_requires_goal_verifier(
-                                 parsed, session)))
+                        bool(review_refusal_reason)
+                        or actions.turn_requires_goal_verifier(parsed, session))
                     can_review_refusal = (
                         session.current_ui_snapshot.get("complete") is True
                         and actions.goal_snapshot_can_verify(
@@ -3400,14 +3394,12 @@ class Engine:
                     break
                 except _ActionModelUnavailable as exc:
                     session.state.allowed_ui_attestation = None
-                    session.state.allow_ui_presentation = False
                     last_error = str(exc)
                     model_unavailable_error = last_error
                     if attempt == 0:
                         await wait_for_model_recovery_once()
                 except actions.PlanError as exc:
                     session.state.allowed_ui_attestation = None
-                    session.state.allow_ui_presentation = False
                     # A refused decided turn is not the controller's mistake:
                     # it must neither feed the repair note nor count as a
                     # repeated rejection.

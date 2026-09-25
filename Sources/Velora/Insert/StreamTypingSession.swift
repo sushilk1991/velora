@@ -602,15 +602,6 @@ final class StreamTypingSession {
         completion?(result)
     }
 
-    static func finishResultForFailedDelivery(
-        hadRenderedDraft: Bool,
-        postedUTF16Units: Int,
-        ownershipStillValid: Bool = true
-    ) -> FinishResult {
-        hadRenderedDraft || postedUTF16Units > 0 || !ownershipStillValid
-            ? .ownershipLost : .unavailable
-    }
-
     private func finishResult(
         for abandonment: StreamDraftPlan.Abandonment?
     ) -> FinishResult {
@@ -676,8 +667,6 @@ final class KeystrokeStreamTypingSession: LiveStreamDraftSession {
                 completion: completion)
         }
     }
-
-    var hasRenderedDraft: Bool { plan.rendered != nil }
 
     func update(_ text: String, mode: String?) {
         guard !cancelRequested, !plan.isAbandoned,
@@ -893,7 +882,6 @@ final class KeystrokeStreamTypingSession: LiveStreamDraftSession {
 }
 
 protocol LiveStreamDraftSession: AnyObject {
-    var hasRenderedDraft: Bool { get }
     var finalInsertionTarget: ScreenStreamPreviewTarget? { get }
     func update(_ text: String, mode: String?)
     func finish(
@@ -1004,8 +992,6 @@ final class SublimeStreamTypingSession: LiveStreamDraftSession {
         token = capture.token
         self.inputGeneration = inputGeneration
     }
-
-    var hasRenderedDraft: Bool { plan.rendered != nil }
 
     func update(_ text: String, mode: String?) {
         guard !cancelRequested, !plan.isAbandoned else { return }

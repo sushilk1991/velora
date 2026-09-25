@@ -185,9 +185,12 @@ corroborating what the live probes showed:
   focus that background windows never report).
 - `press_element` runs the same `ActionRuntimePolicy.pressRoles` +
   committing-verb denylist + whole-word `AppMatcher` semantics over the
-  snapshot (`CuaPressPick`), ancestor walk included.
+  snapshot (`CuaPressPick`), ancestor walk included. *Removed 2026-09-25:
+  Cua has been observation-only since 1f9a05c (2026-08-28), so
+  `CuaPressPick` had no caller.*
 - Keys are delivered by NAME through `press_key` (`CuaKeyMap`: enter→
   return, page_up→pageup; forward_delete and worded punctuation refuse).
+  *Removed 2026-09-25 for the same reason: `CuaKeyMap` had no caller.*
   The `ActionHost.pressKey` protocol now carries the plan's key name+mods
   alongside the CGKeyCode for exactly this.
 - Setting: **Settings → Voice actions → "Work in the background"** (shown

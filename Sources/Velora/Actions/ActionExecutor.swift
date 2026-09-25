@@ -112,14 +112,10 @@ protocol ActionHost: AnyObject {
     func beginActionInputSession(command: String)
     /// Drops every retained input capability and any owned automation child.
     func endActionInputSession()
-    /// Records whether this plan may commit user-authored content.
-    func prepareForActionPlan(sends: Bool)
     /// Rechecks that the user has not entered the exact background target.
     func prepareInteraction() -> ActionInteractionState
     /// Launch or switch to an app; returns the name it actually resolved to.
     func openApp(named name: String) -> String?
-    /// Switch to the already-resolved running app without fuzzy re-resolution.
-    func openApp(named name: String, bundleID: String, pid: Int) -> String?
     func openURL(_ url: URL) -> Bool
     /// (localizedName, bundleIdentifier) of the frontmost app.
     func frontmostApp() -> (name: String, bundleID: String)?
@@ -182,9 +178,6 @@ protocol ActionHost: AnyObject {
     func mediaCapabilities() -> [ActionNativeCapability]
     /// Presses an exact Cua capability, then proves the acquired PID's state.
     func mediaControl(_ control: ActionMediaControl) -> ActionMediaControlResult
-    /// Present the engine-attested routed app or window and leave it in front.
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int,
-                   scope: ActionPresentationScope) -> Bool
     /// Exact partial-tree write selected by the engine's current Cua snapshot.
     func typeText(_ text: String, target: ActionTextTarget,
                   expecting bundleID: String?) -> ActionStateReceipt?
@@ -234,11 +227,7 @@ extension ActionHost {
         beginActionInputSession(command: "")
     }
     func endActionInputSession() {}
-    func prepareForActionPlan(sends: Bool) {}
     func prepareInteraction() -> ActionInteractionState { .ready }
-    func openApp(named name: String, bundleID: String, pid: Int) -> String? {
-        nil
-    }
     func uiSnapshot() -> ActionUISnapshot? { nil }
     func pressElement(index: Int, snapshotID: String, label: String,
                       role: String, expecting bundleID: String?) -> Bool {
@@ -266,10 +255,6 @@ extension ActionHost {
         guard let target = actionProcess() else { return .unavailable }
         return NativeMediaAutomation.shared.perform(
             control, target: target, maySend: { true })
-    }
-    func presentUI(snapshotID: String, bundleID: String, windowID: Int,
-                   scope: ActionPresentationScope) -> Bool {
-        false
     }
     func typeText(_ text: String, target: ActionTextTarget,
                   expecting bundleID: String?) -> ActionStateReceipt? { nil }
@@ -313,7 +298,6 @@ enum ActionEffectKind: Equatable {
     case pasteText
     case key
     case pressElement
-    case presentUI
 }
 
 struct ActionRunResult: Equatable {
@@ -812,12 +796,6 @@ final class ActionExecutor {
                      observed: "\(verb) \(text.count) chars: "
                          + "\"\(Self.evidenceText(text, scalarLimit: 90))\"")
 
-            case .presentUI:
-                note("present_ui: result-card click required")
-                return failed(
-                    index, "opening the target requires a result-card click",
-                    recoverable: false)
-
             case .key(let name, let mods, let repeatCount):
                 guard focusStillHeld() else {
                     note("key \(name): focus lost")
@@ -968,7 +946,6 @@ final class ActionExecutor {
         case .verifyContext: return "Checking screen"
         case .verifyUI: return "Confirming recipient"
         case .verifyGoal: return "Confirming completion"
-        case .presentUI: return "Presenting target"
         case .typeText, .pasteText: return "Typing message"
         case .searchText: return "Searching"
         case .key(let name, _, _):
@@ -992,7 +969,7 @@ final class ActionExecutor {
     private static func mutatesUI(_ step: ActionStep) -> Bool {
         switch step {
         case .typeText, .typeTextAt, .searchText, .pasteText, .key,
-             .pressElement, .pressUI, .presentUI, .mediaControl:
+             .pressElement, .pressUI, .mediaControl:
             return true
         default:
             return false

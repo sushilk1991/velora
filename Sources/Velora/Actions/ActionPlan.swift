@@ -1,10 +1,5 @@
 import Foundation
 
-enum ActionPresentationScope: Equatable {
-    case window
-    case app
-}
-
 enum ActionMediaState: String, Equatable {
     case play
     case pause
@@ -78,10 +73,6 @@ enum ActionStep: Equatable {
     /// confirming where text would go does not prove the user's whole task.
     case verifyGoal(snapshotID: String, index: Int, role: String,
                     label: String, target: String)
-    /// Engine-attested transition from exact routed-window evidence to the
-    /// requested app or window in front. The controller never authors it.
-    case presentUI(snapshotID: String, bundleID: String, windowID: Int,
-                   scope: ActionPresentationScope)
     case typeText(String)
     /// Exact native text capability from the current routed-window snapshot.
     /// The runtime compare-and-sets the retained AX element and reads it back.
@@ -111,14 +102,6 @@ enum ActionStep: Equatable {
         switch self {
         case .typeText, .typeTextAt, .searchText, .pasteText, .key:
             return true
-        default: return false
-        }
-    }
-
-    /// Steps that establish which window the following input lands in.
-    var isFocusCheckpoint: Bool {
-        switch self {
-        case .waitFrontmost, .verifyContext, .verifyUI, .verifyGoal: return true
         default: return false
         }
     }
@@ -1756,7 +1739,7 @@ extension ActionPlan {
                 if next.pendingText { next.unverifiedText = true }
                 next.pendingValue = ""
                 clearPendingTarget()
-            case .pressElement, .pressUI, .presentUI:
+            case .pressElement, .pressUI:
                 // Navigation that executed moved the screen out from under
                 // any pending text; its verification no longer describes
                 // where a Return would land.

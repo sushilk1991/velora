@@ -280,7 +280,8 @@ Action comparison (pins and weight hashes enforced in the script):
 
 ```sh
 cd engine
-uv run python scripts/benchmark_light_action_2026_08_21.py
+git show 5c91c7d:engine/scripts/benchmark_light_action_2026_08_21.py > /tmp/benchmark_light_action_2026_08_21.py
+uv run python /tmp/benchmark_light_action_2026_08_21.py
 ```
 
 ## Next gate
