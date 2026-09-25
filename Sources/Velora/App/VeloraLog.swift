@@ -20,7 +20,12 @@ enum VeloraLog {
         return dir.appendingPathComponent("velora-app.log")
     }()
 
+    /// `--selftest` exercises code that logs (meeting failures, capture
+    /// diagnostics); those lines belong on stderr, not in the user's trail.
+    private static let isSelftest = CommandLine.arguments.contains("--selftest")
+
     static func write(_ message: String) {
+        guard !isSelftest else { return }
         queue.async {
             let stamp = Self.timestamp()
             let line = "\(stamp) \(message)\n"

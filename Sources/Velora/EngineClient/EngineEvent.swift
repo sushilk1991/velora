@@ -95,9 +95,11 @@ enum EngineEvent {
     case meetingSegment(id: String?, segment: MeetingSegment)
     case meetingTranscribeProgress(
         id: String?, meetingID: String, speaker: MeetingSpeaker, fraction: Double)
+    /// `silent`: the track held only digital silence (the device delivered
+    /// zeros), so it contributes no lines by design rather than by failure.
     case meetingTranscribed(
         id: String?, meetingID: String, speaker: MeetingSpeaker,
-        durationS: Double, chunks: Int)
+        durationS: Double, chunks: Int, silent: Bool = false)
     case meetingTranscribeFailed(
         id: String?, meetingID: String, speaker: MeetingSpeaker?,
         error: String, code: String?)
@@ -276,7 +278,8 @@ enum EngineEvent {
                 meetingID: object["meeting_id"] as? String ?? "",
                 speaker: MeetingSpeaker(rawValue: object["speaker"] as? String ?? "") ?? .them,
                 durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0,
-                chunks: (object["chunks"] as? NSNumber)?.intValue ?? 0)
+                chunks: (object["chunks"] as? NSNumber)?.intValue ?? 0,
+                silent: object["silent"] as? Bool ?? false)
         case "meeting_transcribe_failed":
             return .meetingTranscribeFailed(
                 id: object["id"] as? String,
@@ -300,7 +303,8 @@ enum EngineEvent {
                 notes: MeetingNotes(
                     summary: object["summary"] as? String ?? "",
                     decisions: object["decisions"] as? [String] ?? [],
-                    actionItems: object["action_items"] as? [String] ?? []))
+                    actionItems: object["action_items"] as? [String] ?? [],
+                    partial: object["partial"] as? Bool ?? false))
         case "meeting_notes_failed":
             return .meetingNotesFailed(
                 id: object["id"] as? String,

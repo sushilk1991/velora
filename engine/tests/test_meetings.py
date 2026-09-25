@@ -80,6 +80,7 @@ async def test_meeting_transcribe_emits_durable_segment_cursor(engine, tmp_path,
     await client.recv_event("meeting_transcribe_progress")
     done = await client.recv_event("meeting_transcribed")
     assert done["meeting_id"] == "meeting-1"
+    assert done["silent"] is False
     assert not eng._transcribing
 
     # Relaunch recovery can ask for chunk 1. The engine decodes metadata but
@@ -449,17 +450,116 @@ async def test_meeting_resume_without_cached_plan_restarts_track(
 
 
 async def test_meeting_transcribe_rejects_invalid_channel(engine, tmp_path):
+    """An argument error names the job: MeetingProcessor only settles work on
+    an id-matched event, so a bare `error` left the track waiting forever."""
     _eng, sock = engine
     clip = tmp_path / "clip.wav"
     _write_wav(clip)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
-        "cmd": "meeting_transcribe", "meeting_id": "m", "speaker": "Alice",
-        "path": str(clip),
+        "cmd": "meeting_transcribe", "id": "bad-channel", "meeting_id": "m",
+        "speaker": "Alice", "path": str(clip),
     })
-    error = await client.recv_event("error")
-    assert "speaker must be 'me' or 'them'" in error["message"]
+    failed = await client.recv_event("meeting_transcribe_failed")
+    assert failed["id"] == "bad-channel"
+    assert failed["meeting_id"] == "m"
+    assert failed["code"] == "invalid_arguments"
+    assert "speaker must be 'me' or 'them'" in failed["error"]
+
+
+async def test_meeting_transcribe_names_unusable_audio(engine, tmp_path, monkeypatch):
+    """The app skips a track only when its file can never be transcribed.
+    Every other failure is transient and retries the whole job, so a
+    rejected or empty file needs its own code."""
+    from velora_engine import server as server_mod
+
+    def rejecting_load(path, *, meeting_root):
+        raise ValueError("unsupported meeting audio format")
+
+    _eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    monkeypatch.setattr(server_mod, "load_meeting_media", rejecting_load)
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "rejected", "meeting_id": "m",
+        "speaker": "them", "path": str(tmp_path / "them.caf"),
+    })
+    rejected = await client.recv_event("meeting_transcribe_failed")
+    assert rejected["code"] == "unsupported_audio"
+
+    # A file that could not be read this time (converter timeout, full
+    # disk, still being written) is retried by the app, never skipped.
+    def unreadable_now(path, *, meeting_root):
+        raise server_mod.TransientMediaError("meeting audio conversion timed out")
+
+    monkeypatch.setattr(server_mod, "load_meeting_media", unreadable_now)
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "transient", "meeting_id": "m",
+        "speaker": "them", "path": str(tmp_path / "them.caf"),
+    })
+    transient = await client.recv_event("meeting_transcribe_failed")
+    assert transient["code"] == "audio_load_failed"
+    assert "timed out" in transient["error"]
+
+    # A blip of audio is valid but holds no speech; it has its own issue.
+    monkeypatch.setattr(
+        server_mod, "load_meeting_media",
+        lambda path, *, meeting_root: np.zeros(SAMPLE_RATE // 10, dtype=np.float32))
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "short", "meeting_id": "m",
+        "speaker": "them", "path": str(tmp_path / "them.caf"),
+    })
+    short = await client.recv_event("meeting_transcribe_failed")
+    assert short["code"] == "too_short"
+
+
+async def test_meeting_notes_invalid_arguments_name_the_job(engine):
+    _eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "blank-notes", "meeting_id": "m",
+        "transcript": "   ",
+    })
+    failed = await client.recv_event("meeting_notes_failed")
+    assert failed["id"] == "blank-notes"
+    assert failed["meeting_id"] == "m"
+    assert failed["code"] == "invalid_arguments"
+    assert "transcript" in failed["error"]
+
+
+# Exact zeros, and ±1 LSB dither: both within one 16-bit step, the line
+# the app's silent-mic alert also draws (MeetingPCMLevel.isSilent).
+@pytest.mark.parametrize("frame_pair", [b"\x00\x00" * 2, b"\x01\x00\xff\xff"])
+async def test_meeting_transcribed_flags_digitally_silent_track(
+    engine, tmp_path, monkeypatch, frame_pair
+):
+    """A microphone that delivers exact zeros (lid-closed built-in mic, a
+    muted interface) used to finish as an ordinary empty track. The app needs
+    the flag to tell the user their side was never heard.
+
+    Whisper hallucinates on digital silence ("Thank you."), so the fake
+    returns text too: a silent track must never reach STT or emit lines."""
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "Thank you.")
+    silent = tmp_path / "me.wav"
+    with wave.open(str(silent), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(SAMPLE_RATE)
+        output.writeframes(frame_pair * SAMPLE_RATE)
+    _eng, sock = engine
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "silent", "meeting_id": "m-silent",
+        "speaker": "me", "path": str(silent), "start_chunk": 0,
+    })
+    events = []
+    while not events or events[-1]["event"] != "meeting_transcribed":
+        events.append(await client.recv())
+    assert "meeting_segment" not in [event["event"] for event in events]
+    assert events[-1]["silent"] is True
 
 
 async def test_meeting_busy_failures_have_stable_codes(engine, tmp_path):
@@ -860,6 +960,348 @@ async def test_meeting_notes_return_strict_structured_output(engine):
     assert ready["summary"] == "The launch was approved."
     assert ready["decisions"] == ["Ship Friday"]
     assert ready["action_items"] == ["Me: run release QA"]
+    assert ready["partial"] is False
+
+
+async def test_meeting_notes_keep_other_chunks_when_one_chunk_fails(engine):
+    """One section that times out even after its bounded retry used to throw
+    away every other section's notes. Keep them and flag the notes partial."""
+    eng, sock = engine
+
+    class OneBadChunkCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[str] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            if kwargs["max_tokens"] == 512:
+                self.calls.append("reduce")
+                return SimpleNamespace(
+                    applied=True,
+                    text=json.dumps({
+                        "summary": "Sections A and C.",
+                        "decisions": [],
+                        "action_items": [],
+                    }),
+                )
+            self.calls.append(raw[:1])
+            if raw.startswith("B"):
+                return SimpleNamespace(
+                    applied=False, text=raw, reason="timeout_hard")
+            return SimpleNamespace(
+                applied=True,
+                text=json.dumps({
+                    "summary": f"Section {raw[:1]}.",
+                    "decisions": [],
+                    "action_items": [],
+                }),
+            )
+
+    cleanup = OneBadChunkCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "partial", "meeting_id": "m-partial",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABC"),
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    assert ready["partial"] is True
+    assert ready["summary"] == "Sections A and C."
+    assert cleanup.calls == ["A", "B", "B", "C", "reduce"]
+    assert not eng._meeting_notes_running
+
+
+def _section_notes(letter: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        applied=True,
+        text=json.dumps({
+            "summary": f"Section {letter}.", "decisions": [], "action_items": [],
+        }),
+    )
+
+
+async def test_meeting_notes_restart_when_the_model_goes_away_after_some_sections(
+    engine,
+):
+    """A model that goes away mid-meeting (its worker died and is
+    recovering) fails every later section too. Notes from the sections
+    before it are a fragment, not the meeting's notes: restart the engine
+    and let the app requeue the whole notes job, as with no sections done."""
+    eng, _sock = engine
+
+    class ModelLostCleanup:
+        loaded = True
+        unhealthy = False
+        recovering = False
+        calls: list[str] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls.append(raw[:1])
+            if raw.startswith("A"):
+                return _section_notes("A")
+            self.recovering = True
+            return SimpleNamespace(applied=False, text=raw, reason="llm_recovering")
+
+    cleanup = ModelLostCleanup()
+    eng.cleanup = cleanup
+    eng._send = AsyncMock()
+    eng._meeting_notes_running = True
+
+    await eng._run_meeting_notes({
+        "id": "lost", "meeting_id": "m-lost",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABC"),
+    })
+
+    sent = [call.args[0]["event"] for call in eng._send.await_args_list]
+    assert cleanup.calls == ["A", "B"]
+    assert eng.shutdown.is_set()
+    assert "meeting_notes_ready" not in sent
+    assert "meeting_notes_failed" not in sent
+    assert not eng._meeting_notes_running
+
+
+async def test_meeting_notes_fail_when_the_model_is_gone_and_cannot_restart(engine):
+    """A model that is not loaded and not recovering cannot be brought
+    back by a restart either. Fail the notes job for Retry Notes instead of
+    shipping the sections before the outage as the meeting's notes."""
+    eng, sock = engine
+
+    class ModelGoneCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[str] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls.append(raw[:1])
+            if raw.startswith("A"):
+                return _section_notes("A")
+            return SimpleNamespace(applied=False, text=raw, reason="llm_not_loaded")
+
+    cleanup = ModelGoneCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "gone", "meeting_id": "m-gone",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABC"),
+    })
+    await client.recv_event("meeting_notes_accepted")
+    failed = await client.recv_event("meeting_notes_failed")
+
+    assert failed["code"] == "generation_failed"
+    assert "llm_not_loaded" in failed["error"]
+    assert cleanup.calls == ["A", "B"]
+    assert not eng.shutdown.is_set()
+
+
+async def test_meeting_notes_keep_recovered_pieces_when_a_later_piece_fails(engine):
+    """A failed section is retried as smaller pieces. A piece that fails
+    after others succeeded must not throw the recovered pieces away."""
+    eng, sock = engine
+
+    class LaterPieceFailsCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[int] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            self.calls.append(len(raw))
+            if len(self.calls) == 2:
+                return _section_notes("one")
+            return SimpleNamespace(applied=False, text=raw, reason="timeout_hard")
+
+    cleanup = LaterPieceFailsCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "pieces", "meeting_id": "m-pieces",
+        "transcript": "x" * 3_999,
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    assert cleanup.calls == [3_999, 2_000, 1_999]
+    assert ready["partial"] is True
+    assert ready["summary"] == "Section one."
+
+
+async def test_meeting_notes_keep_going_after_a_streak_of_section_failures(engine):
+    """A section that times out says nothing about the next one, so a
+    streak of failed sections must not cost the sections after it. The
+    streak only caps the cost: after MEETING_NOTES_MAX_CONSECUTIVE_FAILURES
+    in a row, each section gets one attempt and no split retry."""
+    from velora_engine import server as server_mod
+
+    eng, sock = engine
+
+    class StreakCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[str] = []
+        reduce_input = ""
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            if kwargs["max_tokens"] == server_mod.MEETING_NOTES_REDUCE_MAX_TOKENS:
+                self.calls.append("reduce")
+                self.reduce_input = raw
+                return _section_notes("A and F")
+            self.calls.append(raw[:1])
+            if raw[:1] in "AF":
+                return _section_notes(raw[:1])
+            return SimpleNamespace(applied=False, text=raw, reason="timeout_hard")
+
+    cleanup = StreakCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "streak", "meeting_id": "m-streak",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABCDEF"),
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    assert server_mod.MEETING_NOTES_MAX_CONSECUTIVE_FAILURES == 3
+    # B-D each get a split retry; E, past the streak, gets one attempt.
+    assert cleanup.calls == [
+        "A", "B", "B", "C", "C", "D", "D", "E", "F", "reduce"]
+    assert "Section F." in cleanup.reduce_input
+    assert ready["partial"] is True
+
+
+async def test_meeting_notes_content_failures_keep_the_split_retry(engine):
+    """Only deadline and malformed-output failures count toward the streak.
+    A section the model answered with unusable content costs no timeout, so
+    three of them in a row must not take the split retry from a later
+    section that timed out once."""
+    from velora_engine import server as server_mod
+
+    eng, sock = engine
+
+    class ContentThenTimeoutCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[str] = []
+        reduce_input = ""
+        timed_out = False
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            if kwargs["max_tokens"] == server_mod.MEETING_NOTES_REDUCE_MAX_TOKENS:
+                self.calls.append("reduce")
+                self.reduce_input = raw
+                return _section_notes("A, E and F")
+            self.calls.append(raw[:1])
+            if raw[:1] in "BCD":
+                return SimpleNamespace(applied=False, text=raw, reason="empty_output")
+            if raw[:1] == "E" and not self.timed_out:
+                self.timed_out = True
+                return SimpleNamespace(applied=False, text=raw, reason="timeout_hard")
+            return _section_notes(raw[:1])
+
+    cleanup = ContentThenTimeoutCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "content", "meeting_id": "m-content",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABCDEF"),
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    # B-D fail on content and get no split retry; E still gets one, as
+    # two smaller pieces.
+    assert cleanup.calls == ["A", "B", "C", "D", "E", "E", "E", "F", "reduce"]
+    assert "Section E." in cleanup.reduce_input
+    assert ready["partial"] is True
+
+
+async def test_meeting_notes_streak_counts_timeouts_the_split_recovered(engine):
+    """The streak caps what a slow model costs. A section whose first
+    attempt timed out cost that timeout even when its split retry
+    recovered, so it counts; resetting there gave every section of a slow
+    meeting a timeout plus a split."""
+    from velora_engine import server as server_mod
+
+    eng, sock = engine
+
+    class SlowFirstAttemptCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[str] = []
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            if kwargs["max_tokens"] == server_mod.MEETING_NOTES_REDUCE_MAX_TOKENS:
+                self.calls.append("reduce")
+                return _section_notes("A to C")
+            self.calls.append(raw[:1])
+            # Whole sections time out; the smaller split pieces finish.
+            if len(raw) > server_mod.MEETING_NOTES_RETRY_CHUNK_CHARS:
+                return SimpleNamespace(applied=False, text=raw, reason="timeout_hard")
+            return _section_notes(raw[:1])
+
+    cleanup = SlowFirstAttemptCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "slow", "meeting_id": "m-slow",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABCD"),
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    # A-C each time out and recover as two pieces; D, past the streak,
+    # gets one attempt.
+    assert cleanup.calls == [
+        "A", "A", "A", "B", "B", "B", "C", "C", "C", "D", "reduce"]
+    assert ready["partial"] is True
+
+
+async def test_meeting_notes_output_limit_keeps_every_split_retry(engine):
+    """A detailed custom prompt can push every full section past the map
+    token cap while its halves fit. Hitting that cap costs no timeout, so it
+    must not build the streak: in 0.24.2 every section got its split retry,
+    and the notes must not come out partial."""
+    from velora_engine import server as server_mod
+
+    eng, sock = engine
+
+    class LongAnswerCleanup:
+        loaded = True
+        unhealthy = False
+        calls: list[str] = []
+        reduce_input = ""
+
+        async def cleanup(self, raw, system_prompt, **kwargs):
+            if kwargs["max_tokens"] == server_mod.MEETING_NOTES_REDUCE_MAX_TOKENS:
+                self.calls.append("reduce")
+                self.reduce_input = raw
+                return _section_notes("A to E")
+            self.calls.append(raw[:1])
+            if len(raw) > server_mod.MEETING_NOTES_RETRY_CHUNK_CHARS:
+                return SimpleNamespace(applied=False, text=raw, reason="length")
+            return _section_notes(raw[:1])
+
+    cleanup = LongAnswerCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "long", "meeting_id": "m-long",
+        "transcript": "\n".join(letter * 3_000 for letter in "ABCDE"),
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+
+    assert cleanup.calls == [
+        letter for letter in "ABCDE" for _ in range(3)] + ["reduce"]
+    assert all(f"Section {letter}." in cleanup.reduce_input for letter in "ABCDE")
+    assert ready["partial"] is False
 
 
 async def test_meeting_notes_multi_chunk_reduce_failure_keeps_valid_map_notes(engine):

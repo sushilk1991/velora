@@ -78,6 +78,7 @@ enum Selftest {
     }
 
     static func run() -> Int32 {
+        removeLeakedScratchDomains()
         testEditDistance()
         testMishearingShapes()
         testLearningThresholds()
@@ -141,6 +142,7 @@ enum Selftest {
         testQualityObservationMetrics()
         testMeetingStore()
         testMeetingProcessingPipeline()
+        testMeetingTrackIssues()
         testMeetingFailurePresentation()
         testMeetingCaptureReadiness()
         testMeetingSystemAudioBackendPolicy()
@@ -148,6 +150,7 @@ enum Selftest {
         testMeetingSystemAudioFileWriter()
         testMeetingSystemAudioWarnings()
         testMeetingDetection()
+        testMeetingSuggestionDebounce()
         testMeetingEndWatch()
         testMinutesSavedDefinition()
         testShareCardPrivacy()
@@ -216,10 +219,79 @@ enum Selftest {
             testLiveSystemAudioCapture()
             testLiveMeetingCapture()
         }
+        testSelftestIsolation()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// `--selftest` must leave the machine as it found it: no lines in the
+    /// live ~/.velora/velora-app.log and no scratch preference plists.
+    private static func testSelftestIsolation() {
+        let probe = "selftest isolation probe \(UUID().uuidString)"
+        veloraLog(probe)
+        // The file logger writes asynchronously; give a line time to land.
+        waitUntil(timeout: 0.5) { false }
+        let liveLog = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".velora/velora-app.log")
+        let logText = (try? String(contentsOf: liveLog, encoding: .utf8)) ?? ""
+        expect(!logText.contains(probe),
+               "selftest log lines never reach the live app log")
+
+        let leaked = scratchPreferenceFiles()
+        expect(leaked.isEmpty,
+               "selftest removes its scratch preference domains (\(leaked.count) left)")
+    }
+
+    /// Earlier selftest builds named scratch domains with these exact
+    /// prefixes, one leaked plist in ~/Library/Preferences per run.
+    private static let scratchDomainPrefixes = [
+        "com.sushil.velora.selftest.", "com.velora.selftest.",
+    ]
+
+    private static var preferencesDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences", isDirectory: true)
+    }
+
+    /// A scratch UserDefaults domain named by absolute path, so its plist
+    /// lives in a temporary directory. A named domain lands in
+    /// ~/Library/Preferences, and cfprefsd rewrites an emptied domain's file
+    /// there seconds after removePersistentDomain, even if the test deleted it.
+    ///
+    ///     scratchDomain("legacy") → $TMPDIR/velora-selftest-prefs-<run>/legacy.<uuid>
+    private static func scratchDomain(_ label: String) -> String {
+        try? FileManager.default.createDirectory(
+            at: scratchPreferencesDirectory, withIntermediateDirectories: true)
+        return scratchPreferencesDirectory
+            .appendingPathComponent("\(label).\(UUID().uuidString)").path
+    }
+
+    private static let scratchPreferencesDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("velora-selftest-prefs-\(UUID().uuidString)", isDirectory: true)
+
+    private static func removeScratchDomain(_ name: String) {
+        UserDefaults.standard.removePersistentDomain(forName: name)
+        try? FileManager.default.removeItem(atPath: "\(name).plist")
+    }
+
+    /// Deletes plists leaked by earlier selftest builds. Files only: going
+    /// through cfprefsd would make it write each emptied domain back.
+    private static func removeLeakedScratchDomains() {
+        for file in scratchPreferenceFiles() {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    private static func scratchPreferenceFiles() -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: preferencesDirectory, includingPropertiesForKeys: nil)) ?? []
+        return files.filter { file in
+            let name = file.lastPathComponent
+            return name.hasSuffix(".plist")
+                && scratchDomainPrefixes.contains(where: { name.hasPrefix($0) })
+        }
     }
 
     /// An Accessibility write is not always readable back on the next line.
@@ -1432,16 +1504,16 @@ enum Selftest {
 
         // One-time UserDefaults migration keeps current user choices and adopts
         // the engine-selected cleanup model without touching the real domain.
-        let suite = "com.sushil.velora.selftest.settings.\(UUID().uuidString)"
+        let suite = scratchDomain("settings")
         let legacy = UserDefaults(suiteName: suite)!
-        let transactionSuite = "com.sushil.velora.selftest.settings-transaction.\(UUID().uuidString)"
+        let transactionSuite = scratchDomain("settings-transaction")
         let transactionDefaults = UserDefaults(suiteName: transactionSuite)!
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-settings-migration-\(UUID().uuidString)")
         let engineConfig = directory.appendingPathComponent("config.json")
         defer {
-            legacy.removePersistentDomain(forName: suite)
-            transactionDefaults.removePersistentDomain(forName: transactionSuite)
+            removeScratchDomain(suite)
+            removeScratchDomain(transactionSuite)
             try? FileManager.default.removeItem(at: directory)
         }
         legacy.set("dark", forKey: "velora.appearance")
@@ -1688,17 +1760,16 @@ enum Selftest {
     // MARK: - Bundle identifier migration
 
     private static func testPreferencesDomainMigration() {
-        let suffix = UUID().uuidString
-        let sourceDomain = "com.velora.selftest.legacy.\(suffix)"
-        let destinationDomain = "com.velora.selftest.current.\(suffix)"
-        let coordinatorDomain = "com.velora.selftest.coordinator.\(suffix)"
+        let sourceDomain = scratchDomain("legacy")
+        let destinationDomain = scratchDomain("current")
+        let coordinatorDomain = scratchDomain("coordinator")
         let source = UserDefaults(suiteName: sourceDomain)!
         let destination = UserDefaults(suiteName: destinationDomain)!
         let coordinator = UserDefaults(suiteName: coordinatorDomain)!
         defer {
-            source.removePersistentDomain(forName: sourceDomain)
-            destination.removePersistentDomain(forName: destinationDomain)
-            coordinator.removePersistentDomain(forName: coordinatorDomain)
+            removeScratchDomain(sourceDomain)
+            removeScratchDomain(destinationDomain)
+            removeScratchDomain(coordinatorDomain)
         }
 
         source.set(true, forKey: "velora.onboardingComplete")
@@ -4846,11 +4917,222 @@ enum Selftest {
         if legacySeeded {
             let migratedStore = MeetingStore(
                 url: legacyNotesDB, filesRoot: legacyNotesRoot)
-            expect(migratedStore.recordMetadata(id: legacyID)?.status == .processing
+            expect(migratedStore.recordMetadata(id: legacyID)?.status == .ready
                    && migratedStore.hasPendingNotes(meetingID: legacyID)
-                   && migratedStore.resumable().contains(where: { $0.id == legacyID }),
-                   "legacy notes timeout migrates into one durable automatic retry")
+                   && migratedStore.stalledNotes().contains(where: { $0.id == legacyID })
+                   && !migratedStore.resumable().contains(where: { $0.id == legacyID }),
+                   "legacy notes timeout migrates into the one automatic notes retry")
+            // It takes the same claimed, quiet path as any stalled notes: no
+            // HUD, and the retry is spent in SQLite before it runs.
+            var legacyCommands: [[String: Any]] = []
+            var legacyPresented: [MeetingProcessor.State] = []
+            let legacyProcessor = MeetingProcessor(
+                store: migratedStore, engineIsReady: { true },
+                sendToEngine: { legacyCommands.append($0) })
+            legacyProcessor.onStateChange = { legacyPresented.append($0) }
+            legacyProcessor.handleEngineStateChange(.ready)
+            expect(legacyCommands.last?["cmd"] as? String == "meeting_notes"
+                   && legacyCommands.last?["meeting_id"] as? String == legacyID
+                   && legacyPresented.isEmpty
+                   && !migratedStore.stalledNotes().contains(where: { $0.id == legacyID }),
+                   "a migrated legacy notes failure retries once, claimed and quiet")
+
+            // The app dies mid-retry. The resumed job is still the automatic
+            // one: no HUD, and its notes never open a window.
+            var resumedCommands: [[String: Any]] = []
+            var resumedPresented: [MeetingProcessor.State] = []
+            var resumedOpened: [String] = []
+            let afterCrash = MeetingProcessor(
+                store: migratedStore, engineIsReady: { true },
+                sendToEngine: { resumedCommands.append($0) })
+            afterCrash.onStateChange = { resumedPresented.append($0) }
+            afterCrash.onNotesReady = { resumedOpened.append($0) }
+            afterCrash.handleEngineStateChange(.ready)
+            afterCrash.handle(.meetingNotesReady(
+                id: resumedCommands.last?["id"] as? String ?? "", meetingID: legacyID,
+                notes: MeetingNotes(summary: "Resumed.")))
+            expect(resumedCommands.last?["meeting_id"] as? String == legacyID
+                   && migratedStore.recordMetadata(id: legacyID)?.notes.summary == "Resumed."
+                   && resumedPresented.isEmpty && resumedOpened.isEmpty,
+                   "an automatic notes retry resumed after a crash stays quiet")
         }
+
+        // A database from before the automatic retry holds cancelled notes
+        // jobs as ready + notes pending, exactly like failed ones. The
+        // upgrade cannot tell them apart, so it restarts neither.
+        let prePatchRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "velora-meeting-autoretry-migration-\(UUID().uuidString)",
+                isDirectory: true)
+        let prePatchDB = prePatchRoot.appendingPathComponent("meetings.sqlite3")
+        defer { try? FileManager.default.removeItem(at: prePatchRoot) }
+        try? FileManager.default.createDirectory(
+            at: prePatchRoot, withIntermediateDirectories: true)
+        var prePatchHandle: OpaquePointer?
+        let cancelledBeforeID = UUID().uuidString
+        let prePatchSeeded = sqlite3_open(prePatchDB.path, &prePatchHandle) == SQLITE_OK
+            && sqlite3_exec(prePatchHandle, """
+                CREATE TABLE meetings (
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at REAL NOT NULL,
+                    ended_at REAL NOT NULL, source_app TEXT, calendar_event_id TEXT,
+                    status TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+                    decisions TEXT NOT NULL DEFAULT '', action_items TEXT NOT NULL DEFAULT '',
+                    mic_path TEXT, system_path TEXT, error TEXT,
+                    notes_pending INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE meeting_segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT NOT NULL,
+                    speaker TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+                    start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, text TEXT NOT NULL,
+                    UNIQUE(meeting_id, speaker, chunk_index)
+                );
+                INSERT INTO meetings
+                    (id, title, started_at, ended_at, status, error, notes_pending)
+                VALUES ('\(cancelledBeforeID)', 'Cancelled before upgrade', 1, 2, 'ready',
+                        'Processing cancelled', 1);
+                INSERT INTO meeting_segments
+                    (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
+                VALUES ('\(cancelledBeforeID)', 'them', 0, 0, 1000, 'Cancelled notes.');
+                """, nil, nil, nil) == SQLITE_OK
+        if prePatchHandle != nil { sqlite3_close(prePatchHandle) }
+        expect(prePatchSeeded, "pre-automatic-retry fixture seeds")
+        if prePatchSeeded {
+            let upgraded = MeetingStore(url: prePatchDB, filesRoot: prePatchRoot)
+            var upgradedCommands: [[String: Any]] = []
+            MeetingProcessor(
+                store: upgraded, engineIsReady: { true },
+                sendToEngine: { upgradedCommands.append($0) }
+            ).handleEngineStateChange(.ready)
+            expect(upgradedCommands.isEmpty
+                   && upgraded.recordMetadata(id: cancelledBeforeID)?.status == .ready,
+                   "a notes job cancelled before the upgrade is never retried automatically")
+        }
+
+        // The upgrade is one transaction. A failure after the column is
+        // added must leave the next launch to redo all of it, or the
+        // backfill never runs and a cancelled job restarts on its own.
+        let interruptedRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "velora-meeting-autoretry-interrupted-\(UUID().uuidString)",
+                isDirectory: true)
+        let interruptedDB = interruptedRoot.appendingPathComponent("meetings.sqlite3")
+        defer { try? FileManager.default.removeItem(at: interruptedRoot) }
+        try? FileManager.default.createDirectory(
+            at: interruptedRoot, withIntermediateDirectories: true)
+        var interruptedHandle: OpaquePointer?
+        let interruptedCancelID = UUID().uuidString
+        let interruptedSeeded = sqlite3_open(interruptedDB.path, &interruptedHandle) == SQLITE_OK
+            && sqlite3_exec(interruptedHandle, """
+                CREATE TABLE meetings (
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, started_at REAL NOT NULL,
+                    ended_at REAL NOT NULL, source_app TEXT, calendar_event_id TEXT,
+                    status TEXT NOT NULL, summary TEXT NOT NULL DEFAULT '',
+                    decisions TEXT NOT NULL DEFAULT '', action_items TEXT NOT NULL DEFAULT '',
+                    mic_path TEXT, system_path TEXT, error TEXT,
+                    notes_pending INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE meeting_segments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, meeting_id TEXT NOT NULL,
+                    speaker TEXT NOT NULL, chunk_index INTEGER NOT NULL,
+                    start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, text TEXT NOT NULL,
+                    UNIQUE(meeting_id, speaker, chunk_index)
+                );
+                INSERT INTO meetings
+                    (id, title, started_at, ended_at, status, error, notes_pending)
+                VALUES ('\(interruptedCancelID)', 'Cancelled before upgrade', 1, 2, 'ready',
+                        'Processing cancelled', 1);
+                INSERT INTO meeting_segments
+                    (meeting_id, speaker, chunk_index, start_ms, end_ms, text)
+                VALUES ('\(interruptedCancelID)', 'them', 0, 0, 1000, 'Cancelled notes.');
+                CREATE TRIGGER refuse_upgrade_backfill BEFORE UPDATE ON meetings
+                BEGIN SELECT RAISE(ABORT, 'refused'); END;
+                """, nil, nil, nil) == SQLITE_OK
+        if interruptedHandle != nil { sqlite3_close(interruptedHandle) }
+        expect(interruptedSeeded, "interrupted-upgrade fixture seeds")
+        if interruptedSeeded {
+            var firstLaunch: MeetingStore? = MeetingStore(
+                url: interruptedDB, filesRoot: interruptedRoot)
+            firstLaunch = nil
+            var dropHandle: OpaquePointer?
+            let dropped = sqlite3_open(interruptedDB.path, &dropHandle) == SQLITE_OK
+                && sqlite3_exec(
+                    dropHandle, "DROP TRIGGER refuse_upgrade_backfill;",
+                    nil, nil, nil) == SQLITE_OK
+            if dropHandle != nil { sqlite3_close(dropHandle) }
+            let secondLaunch = MeetingStore(url: interruptedDB, filesRoot: interruptedRoot)
+            var relaunchCommands: [[String: Any]] = []
+            MeetingProcessor(
+                store: secondLaunch, engineIsReady: { true },
+                sendToEngine: { relaunchCommands.append($0) }
+            ).handleEngineStateChange(.ready)
+            expect(firstLaunch == nil && dropped
+                   && secondLaunch.notesAutoRetried(meetingID: interruptedCancelID)
+                   && relaunchCommands.isEmpty,
+                   "an upgrade interrupted after adding its column is redone on the next launch")
+        }
+
+        // The legacy notes-failure rewrite belongs to that one upgrade. Run
+        // on every launch, it caught a Recreate whose notes failed (same
+        // error text) and restarted it on its own.
+        let recreateRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "velora-meeting-recreate-relaunch-\(UUID().uuidString)", isDirectory: true)
+        let recreateDB = recreateRoot.appendingPathComponent("meetings.sqlite3")
+        defer { try? FileManager.default.removeItem(at: recreateRoot) }
+        let recreateID = UUID().uuidString
+        var beforeRelaunch: MeetingStore? = MeetingStore(
+            url: recreateDB, filesRoot: recreateRoot)
+        beforeRelaunch?.insertProcessing(MeetingRecord(
+            id: recreateID, title: "Recreate without notes",
+            startedAt: Date(timeIntervalSince1970: 1_700_006_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_006_060), status: .processing))
+        beforeRelaunch?.appendSegment(MeetingSegment(
+            meetingID: recreateID, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 1_000, text: "Committed transcript."))
+        let recreateStarted = beforeRelaunch?.beginReprocess(meetingID: recreateID) == true
+        beforeRelaunch?.markReprocessFailed(
+            meetingID: recreateID, error: "local notes generation failed (timeout_hard)")
+        beforeRelaunch = nil
+        let afterRelaunch = MeetingStore(url: recreateDB, filesRoot: recreateRoot)
+        var afterRelaunchCommands: [[String: Any]] = []
+        MeetingProcessor(
+            store: afterRelaunch, engineIsReady: { true },
+            sendToEngine: { afterRelaunchCommands.append($0) }
+        ).handleEngineStateChange(.ready)
+        expect(recreateStarted && beforeRelaunch == nil
+               && afterRelaunch.recordMetadata(id: recreateID)?.status == .ready
+               && !afterRelaunch.hasPendingNotes(meetingID: recreateID)
+               && !afterRelaunchCommands.contains {
+                   $0["meeting_id"] as? String == recreateID
+               },
+               "a Recreate whose notes failed is not restarted by a relaunch")
+
+        // An upgrade can find many stalled notes at once; one engine-ready
+        // queues only a few automatic jobs, so they do not hog the engine.
+        let burstRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-autoretry-cap-\(UUID().uuidString)",
+                                    isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: burstRoot) }
+        let burstStore = MeetingStore(
+            url: burstRoot.appendingPathComponent("meetings.sqlite3"), filesRoot: burstRoot)
+        let burstIDs = (0..<4).map { index -> String in
+            let id = UUID().uuidString
+            burstStore.insertProcessing(MeetingRecord(
+                id: id, title: "Stalled \(index)",
+                startedAt: Date(timeIntervalSince1970: 1_700_005_000 + Double(index)),
+                endedAt: Date(timeIntervalSince1970: 1_700_005_060 + Double(index)),
+                status: .processing))
+            burstStore.appendSegment(MeetingSegment(
+                meetingID: id, speaker: .them, chunkIndex: 0,
+                startMs: 0, endMs: 1_000, text: "Stalled notes."))
+            burstStore.markNotesFailed(meetingID: id, error: "local notes generation failed")
+            return id
+        }
+        let burst = MeetingProcessor(
+            store: burstStore, engineIsReady: { true }, sendToEngine: { _ in })
+        burst.handleEngineStateChange(.ready)
+        expect(burstIDs.filter { burst.isPending(meetingID: $0) }.count == 3,
+               "one engine-ready queues at most three automatic notes retries")
     }
 
     private static func testMeetingProcessingPipeline() {
@@ -5279,6 +5561,10 @@ enum Selftest {
                && store.search("Replacement", limit: 10).contains(where: { $0.meetingID == id })
                && store.isReprocessing(meetingID: id),
                "a failed Recreate keeps the committed meeting visible and searchable for Retry")
+        expect(store.recordMetadata(id: id)?.readyErrorMessage(
+                   recreating: store.isReprocessing(meetingID: id))?
+                   .hasPrefix("Recreate did not finish; the previous notes were kept.") == true,
+               "a failed Recreate says so, and that the previous notes were kept")
         commands.removeAll()
         processor.enqueue(meetingID: id)
         expect(commands.first?["speaker"] as? String == "me"
@@ -5415,6 +5701,645 @@ enum Selftest {
         expect(waitingProcessor.state == .idle
                && !waitingProcessor.isPending(meetingID: firstQueuedID),
                "deleting workless processing clears the processor presentation state")
+    }
+
+    /// One bad or silent track costs only its own lines. B63CAC45 lost a
+    /// valid computer-audio track because its all-zero Int16 microphone track
+    /// was rejected and the whole meeting failed with it.
+    private static func testMeetingTrackIssues() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-tracks-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(
+            url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        guard let float32 = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
+              let int16 = AVAudioFormat(
+                commonFormat: .pcmFormatInt16, sampleRate: 48_000, channels: 1,
+                interleaved: true)
+        else {
+            expect(false, "meeting track fixture formats build")
+            return
+        }
+
+        // Writes one track the way capture does: the device's native PCM in
+        // CAF (a USB mic delivers Int16, the built-in mic Float32).
+        func writeTrack(_ relative: String, format: AVAudioFormat, silent: Bool) {
+            let url = root.appendingPathComponent(relative)
+            MeetingStore.ensurePrivateDirectory(url.deletingLastPathComponent())
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 9_600)
+            else { return }
+            buffer.frameLength = 9_600
+            for index in 0..<Int(buffer.frameLength) {
+                let tone = silent ? 0 : sin(Float(index) * 0.04) * 0.1
+                buffer.floatChannelData?[0][index] = tone
+                buffer.int16ChannelData?[0][index] = Int16(tone * 30_000)
+            }
+            autoreleasepool {
+                if let file = try? AVAudioFile(
+                    forWriting: url, settings: format.settings,
+                    commonFormat: format.commonFormat,
+                    interleaved: format.isInterleaved) {
+                    try? file.write(from: buffer)
+                }
+            }
+        }
+
+        let usbID = UUID().uuidString
+        writeTrack("\(usbID)/me.caf", format: int16, silent: true)
+        expect(store.hasUsableAudio(relativePath: "\(usbID)/me.caf"),
+               "a USB microphone's Int16 CAF is a usable meeting track")
+
+        let aacID = UUID().uuidString
+        let aacURL = root.appendingPathComponent("\(aacID)/them.m4a")
+        MeetingStore.ensurePrivateDirectory(aacURL.deletingLastPathComponent())
+        autoreleasepool {
+            if let file = try? AVAudioFile(forWriting: aacURL, settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: 48_000,
+                AVNumberOfChannelsKey: 1,
+            ]), let buffer = AVAudioPCMBuffer(
+                pcmFormat: file.processingFormat, frameCapacity: 96_000) {
+                buffer.frameLength = 96_000
+                for index in 0..<Int(buffer.frameLength) {
+                    buffer.floatChannelData?[0][index] = sin(Float(index) * 0.04) * 0.3
+                }
+                try? file.write(from: buffer)
+            }
+        }
+        expect(((try? AVAudioFile(forReading: aacURL))?.length ?? 0) > 0,
+               "the compressed-track fixture is readable by Core Audio")
+        expect(store.hasUsableAudio(relativePath: "\(aacID)/them.m4a"),
+               "a legacy AAC them.m4a stays usable: the engine's generic loader decodes it")
+
+        // A tap that fails mid-meeting leaves the audio it already wrote.
+        let failedTapID = UUID().uuidString
+        writeTrack("\(failedTapID)/them.caf", format: float32, silent: false)
+        expect(MeetingAudioCapture.keepsSystemTrack(
+                at: root.appendingPathComponent("\(failedTapID)/them.caf")),
+               "computer audio recorded before a mid-meeting tap failure is kept")
+        let headerOnlyURL = root.appendingPathComponent("\(failedTapID)/header.caf")
+        autoreleasepool {
+            _ = try? AVAudioFile(
+                forWriting: headerOnlyURL, settings: float32.settings,
+                commonFormat: float32.commonFormat, interleaved: float32.isInterleaved)
+        }
+        expect(!MeetingAudioCapture.keepsSystemTrack(at: headerOnlyURL)
+               && !MeetingAudioCapture.keepsSystemTrack(at: nil),
+               "a computer-audio file without frames is not kept")
+
+        var commands: [[String: Any]] = []
+        var clock: TimeInterval = 1_000
+        let processor = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) }, now: { clock })
+        func job() -> String { commands.last?["id"] as? String ?? "" }
+        func twoTrackMeeting(_ title: String) -> String {
+            let id = UUID().uuidString
+            writeTrack("\(id)/me.caf", format: int16, silent: true)
+            writeTrack("\(id)/them.caf", format: float32, silent: false)
+            store.insertProcessing(MeetingRecord(
+                id: id, title: title,
+                startedAt: Date(timeIntervalSince1970: 1_700_004_000),
+                endedAt: Date(timeIntervalSince1970: 1_700_004_060),
+                status: .processing, micPath: "\(id)/me.caf",
+                systemPath: "\(id)/them.caf"))
+            return id
+        }
+        func remoteSegment(_ id: String, _ text: String) -> EngineEvent {
+            .meetingSegment(id: job(), segment: MeetingSegment(
+                meetingID: id, speaker: .them, chunkIndex: 0,
+                startMs: 0, endMs: 5_000, text: text))
+        }
+
+        let rejectedID = twoTrackMeeting("Rejected mic track")
+        processor.enqueue(meetingID: rejectedID)
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: rejectedID, speaker: .me,
+            error: "unsupported meeting audio format", code: "unsupported_audio"))
+        expect(commands.last?["cmd"] as? String == "meeting_transcribe"
+               && commands.last?["speaker"] as? String == "them",
+               "a rejected microphone track does not stop the computer-audio track")
+        processor.handle(remoteSegment(rejectedID, "Remote side still transcribed."))
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: rejectedID, speaker: .them, durationS: 5, chunks: 1))
+        expect(commands.last?["cmd"] as? String == "meeting_notes",
+               "one transcribed track is enough to create notes")
+        processor.handle(.meetingNotesReady(
+            id: job(), meetingID: rejectedID, notes: MeetingNotes(summary: "Remote only.")))
+        let rejected = store.recordMetadata(id: rejectedID)
+        expect(rejected?.status == .ready
+               && rejected?.micIssue == .failed("unsupported meeting audio format")
+               && rejected?.systemIssue == nil,
+               "the meeting is ready and names the track that could not be transcribed")
+
+        let silentID = twoTrackMeeting("Lid closed")
+        commands.removeAll()
+        processor.enqueue(meetingID: silentID)
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: silentID, speaker: .me, durationS: 5, chunks: 1,
+            silent: true))
+        processor.handle(remoteSegment(silentID, "Remote words."))
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: silentID, speaker: .them, durationS: 5, chunks: 1))
+        processor.handle(.meetingNotesReady(
+            id: job(), meetingID: silentID,
+            notes: MeetingNotes(summary: "Remote.", partial: true)))
+        let silent = store.recordMetadata(id: silentID)
+        expect(silent?.status == .ready && silent?.micIssue == .silent
+               && silent?.systemIssue == nil,
+               "a silent microphone track is labelled silent instead of failing the meeting")
+        expect(silent?.notes.partial == true,
+               "notes built from only some transcript sections stay marked partial")
+
+        // Resuming a meeting an older build transcribed: its silent mic
+        // track already holds Whisper's "Thank you." lines.
+        let staleID = twoTrackMeeting("Stale silent lines")
+        store.appendSegment(MeetingSegment(
+            meetingID: staleID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 5_000, text: "Thank you."))
+        commands.removeAll()
+        processor.enqueue(meetingID: staleID)
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: staleID, speaker: .me, durationS: 5, chunks: 0,
+            silent: true))
+        processor.handle(remoteSegment(staleID, "Remote words."))
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: staleID, speaker: .them, durationS: 5, chunks: 1))
+        let staleTranscript = commands.last?["transcript"] as? String ?? ""
+        expect(commands.last?["cmd"] as? String == "meeting_notes"
+               && !staleTranscript.contains("Thank you."),
+               "a silent track's earlier lines never reach the notes")
+        processor.handle(.meetingNotesReady(
+            id: job(), meetingID: staleID, notes: MeetingNotes(summary: "Remote.")))
+        expect(store.record(id: staleID)?.segments.map(\.text) == ["Remote words."],
+               "a silent track's earlier lines are dropped from the transcript")
+
+        commands.removeAll()
+        processor.reprocess(meetingID: silentID)
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: silentID, speaker: .me, durationS: 5, chunks: 1,
+            silent: true))
+        processor.handle(remoteSegment(silentID, "Recreated remote words."))
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: silentID, speaker: .them, durationS: 5, chunks: 1))
+        expect(commands.last?["cmd"] as? String == "meeting_notes",
+               "Recreate accepts a captured track that is labelled silent")
+        processor.handle(.meetingNotesReady(
+            id: job(), meetingID: silentID, notes: MeetingNotes(summary: "Recreated.")))
+        expect(store.record(id: silentID)?.segments.map(\.text) == ["Recreated remote words."]
+               && store.recordMetadata(id: silentID)?.status == .ready
+               && store.recordMetadata(id: silentID)?.notes.partial == false
+               && !store.isReprocessing(meetingID: silentID),
+               "Recreate swaps in the remote transcript when the microphone was silent")
+
+        let deadID = twoTrackMeeting("Nothing usable")
+        commands.removeAll()
+        processor.enqueue(meetingID: deadID)
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: deadID, speaker: .me,
+            error: "unsupported meeting audio format", code: "unsupported_audio"))
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: deadID, speaker: .them,
+            error: "no audio in file", code: "unsupported_audio"))
+        let dead = store.recordMetadata(id: deadID)
+        expect(dead?.status == .failed
+               && dead?.error == "unsupported meeting audio format"
+               && commands.last?["cmd"] as? String == "meeting_transcribe",
+               "a meeting fails only when no track yields a transcript, citing the first reason")
+
+        let transientID = twoTrackMeeting("Engine hiccup")
+        commands.removeAll()
+        processor.enqueue(meetingID: transientID)
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: transientID, speaker: .me,
+            error: "transcription failed: metal out of memory", code: "failed"))
+        let transient = store.recordMetadata(id: transientID)
+        expect(transient?.status == .failed && transient?.micIssue == nil
+               && commands.last?["speaker"] as? String == "me",
+               "a transient engine failure fails the job for Retry instead of dropping a side")
+
+        // A file the engine could not read this time (converter timeout,
+        // full disk) is retried a few times, then fails the job. It is
+        // never skipped: the track may hold the whole conversation.
+        let rereadID = twoTrackMeeting("Converter timed out")
+        commands.removeAll()
+        processor.enqueue(meetingID: rereadID)
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: rereadID, speaker: .me,
+            error: "meeting audio conversion timed out", code: "audio_load_failed"))
+        let waiting = store.recordMetadata(id: rereadID)
+        expect(waiting?.status == .processing && waiting?.micIssue == nil
+               && processor.isPending(meetingID: rereadID),
+               "an audio file that could not be read this time waits for a retry")
+        // An engine-ready inside the retry delay (an enqueue or a cancel
+        // alike) must not start it early and spend every retry in seconds.
+        let sentBeforeDelay = commands.count
+        clock += 1
+        processor.handleEngineStateChange(.ready)
+        expect(commands.count == sentBeforeDelay
+               && processor.isPending(meetingID: rereadID)
+               && store.recordMetadata(id: rereadID)?.status == .processing,
+               "an early engine-ready leaves an unreadable-now track waiting out its delay")
+        // Past the 30 s delay, each engine-ready starts the next try.
+        let pastRetryDelay: TimeInterval = 60
+        var rereadAttempts = 1
+        while store.recordMetadata(id: rereadID)?.status == .processing,
+              rereadAttempts < 10 {
+            clock += pastRetryDelay
+            processor.handleEngineStateChange(.ready)
+            processor.handle(.meetingTranscribeFailed(
+                id: job(), meetingID: rereadID, speaker: .me,
+                error: "meeting audio conversion timed out", code: "audio_load_failed"))
+            rereadAttempts += 1
+        }
+        let reread = store.recordMetadata(id: rereadID)
+        expect(reread?.status == .failed && rereadAttempts == 4
+               && reread?.error == "meeting audio conversion timed out"
+               && reread?.micIssue == nil
+               && !commands.contains {
+                   $0["meeting_id"] as? String == rereadID
+                       && $0["speaker"] as? String == "them"
+               },
+               "an unreadable-now track fails the job after three retries and is never skipped")
+
+        // A cancel during the retry delay ends the job for good: the timer
+        // that was waiting for it fires and finds nothing to start.
+        let cancelWaitID = twoTrackMeeting("Cancelled while waiting to reread")
+        processor.enqueue(meetingID: cancelWaitID)
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: cancelWaitID, speaker: .me,
+            error: "meeting audio conversion timed out", code: "audio_load_failed"))
+        // 0.2 s before the 30 s delay ends, an engine-ready reschedules the
+        // wait as a 0.2 s timer, which fires inside this test.
+        clock += 29.8
+        processor.handleEngineStateChange(.ready)
+        processor.cancel(meetingID: cancelWaitID)
+        let sentAtCancel = commands.count
+        clock += pastRetryDelay
+        waitUntil(timeout: 0.6) { false }
+        let cancelledWait = store.recordMetadata(id: cancelWaitID)
+        expect(commands.count == sentAtCancel
+               && !processor.isPending(meetingID: cancelWaitID)
+               && cancelledWait?.status == .failed
+               && cancelledWait?.error == "Processing cancelled",
+               "a cancel during the retry delay stays cancelled after the timer fires")
+
+        // A valid track under 0.2 s holds no speech, like a silent one:
+        // the meeting keeps the other side and Recreate accepts it.
+        let blipID = twoTrackMeeting("Blip of computer audio")
+        commands.removeAll()
+        processor.enqueue(meetingID: blipID)
+        processor.handle(.meetingSegment(id: job(), segment: MeetingSegment(
+            meetingID: blipID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 5_000, text: "Local words.")))
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: blipID, speaker: .me, durationS: 5, chunks: 1))
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: blipID, speaker: .them,
+            error: "audio is too short to transcribe", code: "too_short"))
+        expect(commands.last?["cmd"] as? String == "meeting_notes",
+               "a too-short track does not stop the notes")
+        processor.handle(.meetingNotesReady(
+            id: job(), meetingID: blipID, notes: MeetingNotes(summary: "Local.")))
+        expect(store.recordMetadata(id: blipID)?.status == .ready
+               && store.recordMetadata(id: blipID)?.systemIssue == .tooShort
+               && store.recordMetadata(id: blipID)?.micIssue == nil,
+               "a meeting with a too-short track is ready and names that track")
+        commands.removeAll()
+        processor.reprocess(meetingID: blipID)
+        processor.handle(.meetingSegment(id: job(), segment: MeetingSegment(
+            meetingID: blipID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 5_000, text: "Recreated local words.")))
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: blipID, speaker: .me, durationS: 5, chunks: 1))
+        processor.handle(.meetingTranscribeFailed(
+            id: job(), meetingID: blipID, speaker: .them,
+            error: "audio is too short to transcribe", code: "too_short"))
+        expect(commands.last?["cmd"] as? String == "meeting_notes",
+               "Recreate accepts a captured track that is too short")
+        processor.handle(.meetingNotesReady(
+            id: job(), meetingID: blipID, notes: MeetingNotes(summary: "Recreated.")))
+        expect(store.record(id: blipID)?.segments.map(\.text) == ["Recreated local words."]
+               && store.recordMetadata(id: blipID)?.systemIssue == .tooShort
+               && !store.isReprocessing(meetingID: blipID),
+               "Recreate swaps in the transcript when one track was too short")
+
+        // A file that exists but cannot be read never reaches the engine;
+        // the row must still say that side was not transcribed.
+        let unreadableID = twoTrackMeeting("Unreadable computer audio")
+        try? Data(repeating: 0x5A, count: 8_192).write(
+            to: root.appendingPathComponent("\(unreadableID)/them.caf"))
+        commands.removeAll()
+        processor.enqueue(meetingID: unreadableID)
+        processor.handle(.meetingTranscribed(
+            id: job(), meetingID: unreadableID, speaker: .me, durationS: 5, chunks: 0,
+            silent: true))
+        let unreadable = store.recordMetadata(id: unreadableID)
+        expect(unreadable?.systemIssue == .failed("The audio file could not be read")
+               && unreadable?.error == "The audio file could not be read",
+               "a dropped track is recorded as not transcribed and named in the failure")
+
+        let pendingID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: pendingID, title: "Notes never finished",
+            startedAt: Date(timeIntervalSince1970: 1_700_004_100),
+            endedAt: Date(timeIntervalSince1970: 1_700_004_160),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: pendingID, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 4_000, text: "Waiting for notes."))
+        store.markNotesFailed(
+            meetingID: pendingID, error: "local notes generation failed (timeout_hard)")
+        commands.removeAll()
+        var presented: [MeetingProcessor.State] = []
+        processor.onStateChange = { presented.append($0) }
+        processor.handleEngineStateChange(.ready)
+        expect(commands.count == 1
+               && commands.last?["cmd"] as? String == "meeting_notes"
+               && commands.last?["meeting_id"] as? String == pendingID,
+               "engine ready retries notes for a transcript that never got them")
+        processor.handle(.meetingNotesFailed(
+            id: job(), meetingID: pendingID,
+            error: "local notes generation failed (timeout_hard)", code: "timeout_hard"))
+        processor.onStateChange = nil
+        expect(!presented.contains { state in
+            if case .failed(let failedID, _) = state { return failedID == pendingID }
+            return false
+        }, "an automatic notes retry fails quietly, without a failure HUD")
+        expect(store.recordMetadata(id: pendingID)?.readyErrorMessage(
+                   recreating: store.isReprocessing(meetingID: pendingID))?
+                   .hasPrefix("Notes were not generated.") == true,
+               "failed notes say the notes were not generated, not that Recreate failed")
+        commands.removeAll()
+        processor.handleEngineStateChange(.ready)
+        expect(commands.isEmpty && store.recordMetadata(id: pendingID)?.status == .ready,
+               "the automatic notes retry runs once, never in a loop")
+
+        let relaunched = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) })
+        commands.removeAll()
+        relaunched.handleEngineStateChange(.ready)
+        expect(commands.isEmpty,
+               "the automatic notes retry is spent for good, not once per launch")
+
+        // The automatic retry runs at launch or when the engine comes back.
+        // Its success lands on the row; a notes window nobody asked for
+        // must not pop up.
+        let foundID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: foundID, title: "Notes found later",
+            startedAt: Date(timeIntervalSince1970: 1_700_004_150),
+            endedAt: Date(timeIntervalSince1970: 1_700_004_190),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: foundID, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 4_000, text: "Notes arrive on retry."))
+        store.markNotesFailed(
+            meetingID: foundID, error: "local notes generation failed (timeout_hard)")
+        var opened: [String] = []
+        let quiet = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) })
+        quiet.onNotesReady = { opened.append($0) }
+        commands.removeAll()
+        quiet.handleEngineStateChange(.ready)
+        let foundJob = commands.last?["meeting_id"] as? String == foundID
+        quiet.handle(.meetingNotesReady(
+            id: job(), meetingID: foundID, notes: MeetingNotes(summary: "Found later.")))
+        expect(foundJob
+               && store.recordMetadata(id: foundID)?.notes.summary == "Found later."
+               && !store.canRetryNotes(meetingID: foundID),
+               "a successful automatic notes retry saves the notes on the row")
+        expect(opened.isEmpty,
+               "a successful automatic notes retry never opens the notes window")
+
+        func transcriptOnly(_ title: String, _ text: String) -> String {
+            let id = UUID().uuidString
+            store.insertProcessing(MeetingRecord(
+                id: id, title: title,
+                startedAt: Date(timeIntervalSince1970: 1_700_004_200),
+                endedAt: Date(timeIntervalSince1970: 1_700_004_260),
+                status: .processing))
+            store.appendSegment(MeetingSegment(
+                meetingID: id, speaker: .them, chunkIndex: 0,
+                startMs: 0, endMs: 4_000, text: text))
+            store.markProcessing(meetingID: id, notesPending: true)
+            return id
+        }
+
+        let cancelledID = transcriptOnly("Notes cancelled", "Cancel these notes.")
+        commands.removeAll()
+        relaunched.enqueue(meetingID: cancelledID)
+        relaunched.cancel(meetingID: cancelledID)
+        commands.removeAll()
+        relaunched.handleEngineStateChange(.ready)
+        MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) }
+        ).handleEngineStateChange(.ready)
+        expect(!commands.contains { $0["meeting_id"] as? String == cancelledID },
+               "a cancelled notes job is never restarted automatically")
+
+        // The automatic retry is claimed in SQLite before it is queued. A
+        // claim SQLite refuses must not queue the job: nothing would stop
+        // the same retry on every relaunch.
+        func refuseAutoRetryMarker(_ id: String) -> OpaquePointer? {
+            var handle: OpaquePointer?
+            let installed = sqlite3_open(
+                root.appendingPathComponent("meetings.sqlite3").path, &handle) == SQLITE_OK
+                && sqlite3_exec(handle, """
+                    CREATE TRIGGER selftest_refuse_marker BEFORE UPDATE OF notes_auto_retried
+                    ON meetings WHEN NEW.id = '\(id)'
+                    BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+                    """, nil, nil, nil) == SQLITE_OK
+            expect(installed, "the auto-retry marker write-failure fixture installs")
+            return handle
+        }
+        func dropMarkerTrigger(_ handle: OpaquePointer?) {
+            sqlite3_exec(handle, "DROP TRIGGER IF EXISTS selftest_refuse_marker;", nil, nil, nil)
+            sqlite3_close(handle)
+        }
+        let unclaimedID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: unclaimedID, title: "Claim refused",
+            startedAt: Date(timeIntervalSince1970: 1_700_004_170),
+            endedAt: Date(timeIntervalSince1970: 1_700_004_190),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: unclaimedID, speaker: .them, chunkIndex: 0,
+            startMs: 0, endMs: 4_000, text: "Claim these notes."))
+        store.markNotesFailed(
+            meetingID: unclaimedID, error: "local notes generation failed (timeout_hard)")
+        let claimRefusal = refuseAutoRetryMarker(unclaimedID)
+        let claimer = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) })
+        commands.removeAll()
+        claimer.handleEngineStateChange(.ready)
+        expect(!commands.contains { $0["meeting_id"] as? String == unclaimedID }
+               && !claimer.isPending(meetingID: unclaimedID)
+               && store.recordMetadata(id: unclaimedID)?.status == .ready,
+               "an automatic notes retry SQLite refused to claim is never queued")
+        dropMarkerTrigger(claimRefusal)
+
+        // Cancel writes the failure and spends the automatic retry together.
+        // If SQLite refuses, this run still honours the cancel.
+        let unsavedCancelID = transcriptOnly("Cancel not saved", "Cancel these too.")
+        let cancelRefusal = refuseAutoRetryMarker(unsavedCancelID)
+        let canceller = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) })
+        commands.removeAll()
+        canceller.enqueue(meetingID: unsavedCancelID)
+        let cancelStarted = commands.last?["meeting_id"] as? String == unsavedCancelID
+        canceller.cancel(meetingID: unsavedCancelID)
+        commands.removeAll()
+        canceller.handleEngineStateChange(.ready)
+        expect(cancelStarted
+               && !commands.contains { $0["meeting_id"] as? String == unsavedCancelID }
+               && !canceller.isPending(meetingID: unsavedCancelID),
+               "a cancel SQLite refused to save is not restarted in the same run")
+        dropMarkerTrigger(cancelRefusal)
+
+        // #12: notes that cover only part of the transcript can be retried
+        // by hand, and never match the automatic retry.
+        let partialID = transcriptOnly("Partial notes", "Only part summarized.")
+        store.complete(
+            meetingID: partialID, notes: MeetingNotes(summary: "Part.", partial: true))
+        expect(!store.stalledNotes().contains { $0.id == partialID }
+               && store.canRetryNotes(meetingID: partialID),
+               "partial notes offer Retry Notes but are never retried automatically")
+        commands.removeAll()
+        relaunched.enqueue(meetingID: partialID)
+        expect(commands.last?["cmd"] as? String == "meeting_notes"
+               && commands.last?["meeting_id"] as? String == partialID,
+               "Retry Notes on partial notes regenerates them from the saved transcript")
+        relaunched.handle(.meetingNotesReady(
+            id: job(), meetingID: partialID, notes: MeetingNotes(summary: "Whole.")))
+        expect(store.recordMetadata(id: partialID)?.notes.summary == "Whole."
+               && store.recordMetadata(id: partialID)?.notes.partial == false,
+               "complete notes replace the partial ones")
+
+        let partialFailID = transcriptOnly("Partial notes retry fails", "Only part again.")
+        store.complete(
+            meetingID: partialFailID, notes: MeetingNotes(summary: "Part.", partial: true))
+        commands.removeAll()
+        relaunched.enqueue(meetingID: partialFailID)
+        relaunched.handle(.meetingNotesFailed(
+            id: job(), meetingID: partialFailID,
+            error: "local notes generation failed", code: "generation_failed"))
+        let partialFail = store.recordMetadata(id: partialFailID)
+        expect(partialFail?.notes.summary == "Part."
+               && partialFail?.readyErrorMessage(
+                   recreating: store.isReprocessing(meetingID: partialFailID))?
+                   .hasPrefix("Notes are incomplete.") == true,
+               "a failed Retry Notes on partial notes says the notes are incomplete")
+
+        // #9: SQLite can refuse writes (disk full, a lock held past the busy
+        // timeout). A trigger on a second connection refuses every UPDATE of
+        // this meeting's row: the worst case, where no status can be saved.
+        let unsavedID = transcriptOnly("Notes not saved", "Save these notes.")
+        var injector: OpaquePointer?
+        let injected = sqlite3_open(
+            root.appendingPathComponent("meetings.sqlite3").path, &injector) == SQLITE_OK
+            && sqlite3_exec(injector, """
+                CREATE TRIGGER selftest_refuse_notes BEFORE UPDATE ON meetings
+                WHEN OLD.id = '\(unsavedID)'
+                BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+                """, nil, nil, nil) == SQLITE_OK
+        expect(injected, "the SQLite write-failure fixture installs")
+        func notesCommands(_ id: String) -> Int {
+            commands.filter {
+                $0["cmd"] as? String == "meeting_notes" && $0["meeting_id"] as? String == id
+            }.count
+        }
+        commands.removeAll()
+        relaunched.enqueue(meetingID: unsavedID)
+        relaunched.handle(.meetingNotesReady(
+            id: job(), meetingID: unsavedID, notes: MeetingNotes(summary: "Lost.")))
+        expect(notesCommands(unsavedID) == 1 && relaunched.isPending(meetingID: unsavedID),
+               "notes SQLite refused to save are written again before anything is regenerated")
+        expect(waitUntil { notesCommands(unsavedID) == 2 },
+               "notes that still cannot be saved are generated again")
+        relaunched.handle(.meetingNotesReady(
+            id: job(), meetingID: unsavedID, notes: MeetingNotes(summary: "Lost again.")))
+        expect(waitUntil { !relaunched.isPending(meetingID: unsavedID) }
+               && store.canRetryNotes(meetingID: unsavedID),
+               "notes that cannot be saved at all end the job and leave Retry Notes")
+        commands.removeAll()
+        relaunched.handleEngineStateChange(.ready)
+        expect(notesCommands(unsavedID) == 0 && !relaunched.isPending(meetingID: unsavedID),
+               "a meeting SQLite refused to update is not regenerated on every engine start")
+        sqlite3_exec(injector, "DROP TRIGGER selftest_refuse_notes;", nil, nil, nil)
+        let saver = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) })
+        commands.removeAll()
+        saver.enqueue(meetingID: unsavedID)
+        saver.handle(.meetingNotesReady(
+            id: job(), meetingID: unsavedID, notes: MeetingNotes(summary: "Saved.")))
+        expect(store.recordMetadata(id: unsavedID)?.status == .ready
+               && store.recordMetadata(id: unsavedID)?.notes.summary == "Saved.",
+               "Retry Notes saves once SQLite accepts writes again")
+
+        // A lock that clears within a second: the same notes are saved on
+        // the delayed write, and nothing is generated twice.
+        let lateID = transcriptOnly("Notes saved late", "Save these later.")
+        sqlite3_exec(injector, """
+            CREATE TRIGGER selftest_refuse_late BEFORE UPDATE ON meetings
+            WHEN OLD.id = '\(lateID)'
+            BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;
+            """, nil, nil, nil)
+        commands.removeAll()
+        saver.enqueue(meetingID: lateID)
+        saver.handle(.meetingNotesReady(
+            id: job(), meetingID: lateID, notes: MeetingNotes(summary: "Late.")))
+        sqlite3_exec(injector, "DROP TRIGGER selftest_refuse_late;", nil, nil, nil)
+        expect(waitUntil { store.recordMetadata(id: lateID)?.notes.summary == "Late." }
+               && notesCommands(lateID) == 1
+               && !saver.isPending(meetingID: lateID),
+               "notes refused once are saved on the delayed write without regenerating")
+        sqlite3_close(injector)
+    }
+
+    /// "Not Now" must hold for the whole call. A browser call's key flips
+    /// between its meeting-URL identity and the anonymous episode key as
+    /// Accessibility samples come and go; each flip used to re-prompt.
+    private static func testMeetingSuggestionDebounce() {
+        func candidate(
+            key: String, channel: MeetingChannel, micBacked: Bool = true
+        ) -> MeetingCandidate {
+            MeetingCandidate(
+                key: key, title: "Standup", sourceApp: "Google Meet",
+                channel: channel, calendarEventID: nil, confidence: 90,
+                callConfirmed: true, micBacked: micBacked)
+        }
+        let meetTab = candidate(key: "meet:abc", channel: .browser("com.google.Chrome"))
+        let sameTabNoURL = candidate(
+            key: "episode:chrome", channel: .browser("com.google.Chrome"))
+        let zoomApp = candidate(key: "episode:zoom", channel: .native("Zoom"))
+
+        var debounce = MeetingSuggestionDebounce()
+        expect(debounce.shouldSuggest(meetTab), "a new call is suggested")
+        expect(!debounce.shouldSuggest(meetTab), "the same call is not suggested twice")
+        expect(!debounce.shouldSuggest(sameTabNoURL),
+               "a mic-backed call on the same browser is the same episode when its key flips")
+        expect(!debounce.shouldSuggest(meetTab),
+               "flipping back to the meeting-URL key still does not re-prompt")
+        debounce.observeAbsence()
+        debounce.observeAbsence()
+        expect(!debounce.shouldSuggest(sameTabNoURL),
+               "two missed polls do not end the episode")
+        for _ in 0..<MeetingSuggestionDebounce.absentPollsToRearm {
+            debounce.observeAbsence()
+        }
+        expect(debounce.shouldSuggest(meetTab),
+               "sustained absence ends the episode, so a later call is suggested again")
+        expect(debounce.shouldSuggest(zoomApp),
+               "a call on a different transport is a different episode")
+        debounce.reset()
+        expect(debounce.shouldSuggest(zoomApp), "reset re-arms the same call")
     }
 
     private static func testMeetingEndWatch() {
@@ -5893,9 +6818,27 @@ enum Selftest {
         ])
         if case .meetingNotesReady(_, let meetingID, let notes) = notesEvent {
             expect(meetingID == "m1" && notes.decisions == ["Ship"]
-                   && notes.actionItems == ["Me: test"],
+                   && notes.actionItems == ["Me: test"] && !notes.partial,
                    "structured meeting notes parse without lossy string encoding")
         } else { expect(false, "expected meeting notes event") }
+
+        let partialNotesEvent = EngineEvent.parse([
+            "event": "meeting_notes_ready", "meeting_id": "m1",
+            "summary": "Summary", "partial": true,
+        ])
+        if case .meetingNotesReady(_, _, let notes) = partialNotesEvent {
+            expect(notes.partial,
+                   "notes built from only some transcript sections say so")
+        } else { expect(false, "expected partial meeting notes event") }
+
+        let silentTrackEvent = EngineEvent.parse([
+            "event": "meeting_transcribed", "id": "job", "meeting_id": "m1",
+            "speaker": "me", "duration_s": 60, "chunks": 2, "silent": true,
+        ])
+        if case .meetingTranscribed(_, _, let speaker, _, _, let silent) = silentTrackEvent {
+            expect(speaker == .me && silent,
+                   "a digitally silent meeting track reaches the app flagged silent")
+        } else { expect(false, "expected meeting transcribed event") }
 
         let busyEvent = EngineEvent.parse([
             "event": "meeting_transcribe_failed", "id": "job", "meeting_id": "m1",
@@ -5934,9 +6877,9 @@ enum Selftest {
 
     private static func testMeetingCaptureReadiness() {
         let gate = MeetingCaptureReadiness(requiresSystemAudio: true)
-        expect(!gate.recordMicrophone(frames: 0),
+        expect(!gate.recordMicrophone(frames: 0, peak: 0),
                "an empty microphone callback cannot make meeting capture ready")
-        expect(!gate.recordMicrophone(frames: 256),
+        expect(!gate.recordMicrophone(frames: 256, peak: 0.2),
                "microphone frames alone cannot claim full meeting capture")
         expect(gate.missingTracks == [.systemAudio],
                "startup health reports the exact missing system-audio track")
@@ -5946,7 +6889,7 @@ enum Selftest {
                "meeting readiness fires exactly once")
 
         let fallback = MeetingCaptureReadiness(requiresSystemAudio: true)
-        expect(!fallback.recordMicrophone(frames: 128),
+        expect(!fallback.recordMicrophone(frames: 128, peak: 0.1),
                "full capture waits for computer audio")
         expect(fallback.continueWithoutSystemAudio(),
                "an explicit mic-only fallback becomes ready after microphone proof")
@@ -5958,6 +6901,286 @@ enum Selftest {
                "mic-only capture still cannot start before microphone frames arrive")
         expect(noMic.missingTracks == [.microphone],
                "startup health names a missing microphone track")
+        expect(!noMic.microphoneDeliveredOnlySilence
+               && !noMic.continueWithSilentMicrophone(),
+               "a microphone that delivered nothing still fails startup")
+
+        // Sep 2 and Sep 14 meetings: the mic delivered frames of exact zeros,
+        // passed the frame check, and recorded nothing for the whole call.
+        let zeros = MeetingCaptureReadiness(requiresSystemAudio: false)
+        expect(!zeros.recordMicrophone(frames: 512, peak: 0),
+               "exact-zero microphone frames do not prove the microphone works")
+        expect(zeros.missingTracks == [.microphone]
+               && zeros.microphoneDeliveredOnlySilence,
+               "startup health tells a silent microphone apart from a missing one")
+        expect(zeros.continueWithSilentMicrophone(),
+               "a silent microphone starts degraded so computer audio is still recorded")
+        let late = MeetingCaptureReadiness(requiresSystemAudio: false)
+        _ = late.recordMicrophone(frames: 512, peak: 0)
+        expect(late.recordMicrophone(frames: 512, peak: 0.01),
+               "the first audible microphone frame makes capture ready")
+        _ = zeros.recordMicrophone(frames: 512, peak: 0.01)
+        expect(zeros.heardMicrophoneSound,
+               "sound after a degraded silent start is still recorded, so startup can drop the flag")
+
+        // A mic whose writes fail during a silent startup is broken, not
+        // silent: degrading would start a meeting with a dead local track.
+        let broken = MeetingCaptureReadiness(requiresSystemAudio: false)
+        _ = broken.recordMicrophone(frames: 512, peak: 0)
+        broken.recordMicrophoneFailure("The disk is full")
+        expect(broken.microphoneFailure == "The disk is full"
+               && !broken.microphoneDeliveredOnlySilence
+               && !broken.continueWithSilentMicrophone(),
+               "a microphone failure during a silent startup fails startup instead of degrading")
+        expect(!broken.recordMicrophone(frames: 512, peak: 0.2)
+               && broken.missingTracks == [.microphone],
+               "sound after a microphone failure never makes startup ready")
+
+        // The engine calls a track silent when its peak is within one 16-bit
+        // step (server.py MEETING_SILENT_TRACK_MAX_PEAK). Capture draws the
+        // same line, or a mic delivering ±1 LSB dither would start healthy
+        // here and have its track skipped there.
+        let oneStep: Float = 1.0 / 32_768
+        let dither = MeetingCaptureReadiness(requiresSystemAudio: false)
+        expect(!dither.recordMicrophone(frames: 512, peak: oneStep)
+               && dither.microphoneDeliveredOnlySilence,
+               "a microphone within one 16-bit step of zero is silent, as the engine judges it")
+        expect(dither.recordMicrophone(frames: 512, peak: 2 * oneStep),
+               "anything louder than one 16-bit step is sound")
+        var ditherWatch = MeetingMicrophoneLevelWatch()
+        var ditherEvents: [MeetingMicrophoneLevelWatch.Event] = []
+        for _ in 0..<300 {
+            ditherEvents += ditherWatch.observe(peak: oneStep, frames: 4_800, sampleRate: 48_000)
+        }
+        expect(ditherEvents.contains(.silent(afterSound: false)),
+               "30 s within one 16-bit step of zero raises the silent-microphone alert")
+
+        let rate = 48_000.0
+        let tenth = 4_800
+        var watch = MeetingMicrophoneLevelWatch()
+        var events: [MeetingMicrophoneLevelWatch.Event] = []
+        for _ in 0..<100 {
+            events += watch.observe(peak: 0.3, frames: tenth, sampleRate: rate)
+        }
+        expect(events == [.firstWindow(peak: 0.3)],
+               "the first-10 s microphone peak is reported once for diagnostics")
+        events.removeAll()
+        for _ in 0..<299 {
+            events += watch.observe(peak: 0, frames: tenth, sampleRate: rate)
+        }
+        expect(events.isEmpty, "under 30 s of exact zeros is not yet a silent microphone")
+        events += watch.observe(peak: 0, frames: tenth, sampleRate: rate)
+        expect(events == [.silent(afterSound: true)],
+               "30 s of exact-zero samples after real sound reports a silent microphone")
+        events.removeAll()
+        for _ in 0..<400 {
+            events += watch.observe(peak: 0, frames: tenth, sampleRate: rate)
+        }
+        expect(events.isEmpty, "a continuing silence is reported only once")
+        events += watch.observe(peak: 0.0001, frames: tenth, sampleRate: rate)
+        expect(events == [.recovered], "sound after a reported silence clears the warning")
+        var quietRoom = MeetingMicrophoneLevelWatch()
+        events.removeAll()
+        for _ in 0..<700 {
+            // About -70 dBFS, ten 16-bit steps: quiet, but not silence.
+            events += quietRoom.observe(peak: 0.0003, frames: tenth, sampleRate: rate)
+        }
+        expect(!events.contains(.silent(afterSound: true))
+               && !events.contains(.silent(afterSound: false)),
+               "a quiet room's noise floor is not digital silence")
+
+        // Bluetooth HFP and Krisp can open with seconds of exact zeros. The
+        // startup check flags that mic silent; its first sound must clear it.
+        var lateStart = MeetingMicrophoneLevelWatch()
+        events.removeAll()
+        for _ in 0..<60 {
+            events += lateStart.observe(peak: 0, frames: tenth, sampleRate: rate)
+        }
+        events += lateStart.observe(peak: 0.2, frames: tenth, sampleRate: rate)
+        expect(events == [.firstSound],
+               "the first sound after opening zeros is reported")
+        var deadMic = MeetingMicrophoneLevelWatch()
+        events.removeAll()
+        for _ in 0..<300 {
+            events += deadMic.observe(peak: 0, frames: tenth, sampleRate: rate)
+        }
+        expect(events.contains(.silent(afterSound: false)),
+               "a microphone that never delivered sound is reported as such")
+
+        var alert = MeetingSilenceAlert()
+        expect(alert.update(.neverHeard) == .alert,
+               "a microphone that never delivered sound raises the alarm")
+        expect(alert.update(.neverHeard) == .none,
+               "the 30 s watch repeating the startup flag raises no second alarm")
+        expect(alert.update(.sound) == .clear,
+               "sound clears the flag")
+        expect(alert.update(.afterSound) == .mark,
+               "zeros after real sound only mark the row")
+        expect(alert.update(.sound) == .clear && alert.update(.neverHeard) == .mark,
+               "the alarm sounds at most once per meeting")
+
+        let healthyStart = MeetingCaptureStart(
+            startedAt: Date(), systemAudio: true, micRelativePath: "m/me.caf",
+            systemRelativePath: "m/them.caf", warning: nil)
+        var silentStart = healthyStart
+        silentStart.microphoneSilent = true
+        let micOnlyStart = MeetingCaptureStart(
+            startedAt: Date(), systemAudio: false, micRelativePath: "m/me.caf",
+            systemRelativePath: nil, warning: "Computer audio could not start.")
+        expect(MeetingCoordinator.startSound(for: healthyStart) == .start
+               && MeetingCoordinator.startSound(for: silentStart) == nil
+               && MeetingCoordinator.startSound(for: micOnlyStart) == nil,
+               "only a healthy start plays the start sound")
+
+        if let int16 = AVAudioFormat(
+            commonFormat: .pcmFormatInt16, sampleRate: 48_000, channels: 1,
+            interleaved: true),
+           let buffer = AVAudioPCMBuffer(pcmFormat: int16, frameCapacity: 256),
+           let stereo = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2),
+           let floatBuffer = AVAudioPCMBuffer(pcmFormat: stereo, frameCapacity: 256) {
+            buffer.frameLength = 256
+            floatBuffer.frameLength = 256
+            for index in 0..<256 {
+                buffer.int16ChannelData?[0][index] = 0
+                floatBuffer.floatChannelData?[0][index] = 0
+                floatBuffer.floatChannelData?[1][index] = 0
+            }
+            expect(MeetingPCMLevel.peak(buffer) == 0,
+                   "an all-zero Int16 USB-mic buffer measures exactly zero")
+            buffer.int16ChannelData?[0][200] = -16_384
+            expect(MeetingPCMLevel.peak(buffer) == 0.5,
+                   "Int16 peaks are measured against full scale")
+            floatBuffer.floatChannelData?[1][10] = 0.25
+            expect(MeetingPCMLevel.peak(floatBuffer) == 0.25,
+                   "every channel of a non-interleaved Float32 buffer is measured")
+        } else {
+            expect(false, "PCM level fixtures build")
+        }
+
+        // Every layout MeetingTrackFormat accepts measures against the
+        // engine's line: one 16-bit step (negative, to cover the sign) is
+        // still silence, two steps are sound.
+        func pcmLevel(
+            _ format: AVAudioFormat?, write: (UnsafeMutableRawPointer) -> Void
+        ) -> Float? {
+            guard let format,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4)
+            else { return nil }
+            buffer.frameLength = 4
+            let list = UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList)
+            for audio in list {
+                if let data = audio.mData { memset(data, 0, Int(audio.mDataByteSize)) }
+            }
+            // The last buffer is the last channel of a non-interleaved layout.
+            guard let data = list[list.count - 1].mData else { return nil }
+            write(data)
+            return MeetingPCMLevel.peak(buffer)
+        }
+        func pcmFormat(
+            bytes: UInt32, bits: UInt32, channels: UInt32,
+            flags: AudioFormatFlags = kAudioFormatFlagIsSignedInteger
+        ) -> AVAudioFormat? {
+            var description = AudioStreamBasicDescription(
+                mSampleRate: 48_000, mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: flags | (bytes * 8 == bits ? kAudioFormatFlagIsPacked : 0),
+                mBytesPerPacket: bytes * channels, mFramesPerPacket: 1,
+                mBytesPerFrame: bytes * channels, mChannelsPerFrame: channels,
+                mBitsPerChannel: bits, mReserved: 0)
+            return AVAudioFormat(streamDescription: &description)
+        }
+        /// Writes the low `width` bytes of `pattern` as sample `index`,
+        /// least significant byte first unless `bigEndian`.
+        func storeSample(
+            _ pattern: UInt64, width: Int, at index: Int,
+            in data: UnsafeMutableRawPointer, bigEndian: Bool = false
+        ) {
+            for offset in 0..<width {
+                let shift = 8 * (bigEndian ? width - 1 - offset : offset)
+                data.storeBytes(
+                    of: UInt8(truncatingIfNeeded: pattern >> shift),
+                    toByteOffset: index * width + offset, as: UInt8.self)
+            }
+        }
+        func pattern(_ value: Int32) -> UInt64 { UInt64(bitPattern: Int64(value)) }
+        let bigEndianFloat = kAudioFormatFlagIsFloat | kAudioFormatFlagIsBigEndian
+        let bigEndianInteger = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsBigEndian
+        let layouts: [(String, AVAudioFormat?, (Int32) -> (UnsafeMutableRawPointer) -> Void)] = [
+            ("Int16",
+             AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 48_000,
+                           channels: 1, interleaved: true),
+             { steps in { $0.assumingMemoryBound(to: Int16.self)[2] = Int16(-steps) } }),
+            ("Int32",
+             AVAudioFormat(commonFormat: .pcmFormatInt32, sampleRate: 48_000,
+                           channels: 1, interleaved: true),
+             { steps in { $0.assumingMemoryBound(to: Int32.self)[2] = -steps << 16 } }),
+            ("Float32",
+             AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                           channels: 2, interleaved: false),
+             { steps in { $0.assumingMemoryBound(to: Float.self)[2] = -Float(steps) * oneStep } }),
+            ("Float64",
+             AVAudioFormat(commonFormat: .pcmFormatFloat64, sampleRate: 48_000,
+                           channels: 2, interleaved: false),
+             { steps in {
+                 $0.assumingMemoryBound(to: Double.self)[2] = -Double(steps) * Double(oneStep)
+             } }),
+            // Frame 1, channel 1 of interleaved stereo: sample 3.
+            ("packed 24-bit",
+             pcmFormat(bytes: 3, bits: 24, channels: 2),
+             { steps in { storeSample(pattern(-steps << 8), width: 3, at: 3, in: $0) } }),
+            ("24-bit in 32",
+             pcmFormat(bytes: 4, bits: 24, channels: 1),
+             { steps in { storeSample(pattern(-steps << 8), width: 4, at: 2, in: $0) } }),
+            ("24-bit in 32, aligned high",
+             pcmFormat(bytes: 4, bits: 24, channels: 1,
+                       flags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsAlignedHigh),
+             { steps in { storeSample(pattern(-steps << 16), width: 4, at: 2, in: $0) } }),
+            ("big-endian Int16",
+             pcmFormat(bytes: 2, bits: 16, channels: 1, flags: bigEndianInteger),
+             { steps in {
+                 storeSample(pattern(-steps), width: 2, at: 2, in: $0, bigEndian: true)
+             } }),
+            ("big-endian packed 24-bit",
+             pcmFormat(bytes: 3, bits: 24, channels: 1, flags: bigEndianInteger),
+             { steps in {
+                 storeSample(pattern(-steps << 8), width: 3, at: 2, in: $0, bigEndian: true)
+             } }),
+            ("big-endian Float32",
+             pcmFormat(bytes: 4, bits: 32, channels: 1, flags: bigEndianFloat),
+             { steps in {
+                 storeSample(
+                     UInt64((-Float(steps) * oneStep).bitPattern), width: 4, at: 2,
+                     in: $0, bigEndian: true)
+             } }),
+            ("big-endian Float64",
+             pcmFormat(bytes: 8, bits: 64, channels: 1, flags: bigEndianFloat),
+             { steps in {
+                 storeSample(
+                     (-Double(steps) * Double(oneStep)).bitPattern, width: 8, at: 2,
+                     in: $0, bigEndian: true)
+             } }),
+        ]
+        for (name, format, sample) in layouts {
+            let oneStepPeak = pcmLevel(format, write: sample(1))
+            let twoStepPeak = pcmLevel(format, write: sample(2))
+            expect(oneStepPeak.map(MeetingPCMLevel.isSilent) == true
+                   && twoStepPeak.map(MeetingPCMLevel.isSilent) == false,
+                   "\(name): one 16-bit step is silence and two are sound")
+        }
+        let bigEndianTenth = pcmLevel(
+            pcmFormat(bytes: 8, bits: 64, channels: 1, flags: bigEndianFloat)
+        ) { storeSample(0.1.bitPattern, width: 8, at: 2, in: $0, bigEndian: true) }
+        expect(bigEndianTenth.map { abs($0 - 0.1) < 0.000_001 } == true,
+               "a big-endian Float64 sample is read in its own byte order")
+        // A header without a bit depth gives no scale: any nonzero byte is
+        // sound, never a shift that reads silence.
+        let noDepth = pcmFormat(bytes: 4, bits: 0, channels: 1)
+        let noDepthZeros = pcmLevel(noDepth) { _ in }
+        let noDepthByte = pcmLevel(noDepth) {
+            $0.storeBytes(of: UInt8(1), toByteOffset: 8, as: UInt8.self)
+        }
+        expect(noDepthZeros == 0
+               && noDepthByte.map(MeetingPCMLevel.isSilent) == false,
+               "an integer layout without a bit depth treats any nonzero byte as sound")
     }
 
     private static func testMeetingFailurePresentation() {

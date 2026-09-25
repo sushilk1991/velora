@@ -75,8 +75,7 @@ final class MeetingDetector {
     private var timer: Timer?
     private var generation = 0
     private var pollInFlight = false
-    private var lastCandidateKey: String?
-    private var candidateAbsentPolls = 0
+    private var suggestionDebounce = MeetingSuggestionDebounce()
     private var endWatchActive = false
     private var micProbeFailureLogged = false
     private var lastLoggedMicSet: Set<String>?
@@ -135,8 +134,7 @@ final class MeetingDetector {
     }
 
     func resetSuggestionDebounce() {
-        lastCandidateKey = nil
-        candidateAbsentPolls = 0
+        suggestionDebounce.reset()
     }
 
     private func scheduleTimer() {
@@ -227,7 +225,8 @@ final class MeetingDetector {
         return !expected.micBacked || current.micBacked
     }
 
-    private static func channelsMatch(
+    /// File-scoped so `MeetingSuggestionDebounce` shares the transport rule.
+    fileprivate static func channelsMatch(
         _ expected: MeetingChannel, _ current: MeetingChannel
     ) -> Bool {
         switch (expected, current) {
@@ -241,7 +240,7 @@ final class MeetingDetector {
     private func poll(forceFull: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
         let wantSuggestions = suggestionsEnabled()
-        if !wantSuggestions { lastCandidateKey = nil }
+        if !wantSuggestions { suggestionDebounce.reset() }
         guard wantSuggestions || endWatchActive else { return }
         guard !pollInFlight else { return }
         pollInFlight = true
@@ -298,26 +297,14 @@ final class MeetingDetector {
                     }
                 }
                 guard self.suggestionsEnabled() else {
-                    self.lastCandidateKey = nil
-                    self.candidateAbsentPolls = 0
+                    self.suggestionDebounce.reset()
                     return
                 }
                 guard let candidate else {
-                    // One missing AX/CoreAudio sample must not re-arm a prompt
-                    // the user just declined. Require sustained absence before
-                    // the same provider/call can be suggested as a new episode.
-                    if self.lastCandidateKey != nil {
-                        self.candidateAbsentPolls += 1
-                        if self.candidateAbsentPolls >= 3 {
-                            self.lastCandidateKey = nil
-                            self.candidateAbsentPolls = 0
-                        }
-                    }
+                    self.suggestionDebounce.observeAbsence()
                     return
                 }
-                self.candidateAbsentPolls = 0
-                guard candidate.key != self.lastCandidateKey else { return }
-                self.lastCandidateKey = candidate.key
+                guard self.suggestionDebounce.shouldSuggest(candidate) else { return }
                 self.onCandidate?(candidate)
             }
         }
@@ -948,5 +935,56 @@ final class MeetingDetector {
 
     private static func hasConferenceLink(_ event: EKEvent) -> Bool {
         calendarConference(event) != nil
+    }
+}
+
+/// Decides whether a detected call is a new episode worth suggesting, so
+/// "Not Now" holds for the whole call. A mic-backed call keeps its transport
+/// (channel) even while its key flips between a meeting-URL or Calendar
+/// identity and the anonymous episode key as Accessibility samples come and
+/// go; each flip used to re-prompt. Sustained absence ends the episode.
+///
+///     poll ─► candidate? ── yes ─► shouldSuggest ─► same key or same
+///               │                                   mic-backed channel?
+///               │                                   no → suggest
+///               └─ no ─► observeAbsence ─► 3 in a row → reset
+struct MeetingSuggestionDebounce {
+    /// One missing AX/CoreAudio sample must not re-arm a declined prompt.
+    static let absentPollsToRearm = 3
+
+    private var lastKey: String?
+    /// Transport of the current episode once any of its polls was
+    /// confirmed by the microphone.
+    private var micBackedChannel: MeetingChannel?
+    private var absentPolls = 0
+
+    mutating func shouldSuggest(_ candidate: MeetingCandidate) -> Bool {
+        absentPolls = 0
+        let sameEpisode = candidate.key == lastKey
+            || micBackedChannel.map {
+                MeetingDetector.channelsMatch($0, candidate.channel)
+            } ?? false
+        lastKey = candidate.key
+        if !sameEpisode {
+            micBackedChannel = nil
+        }
+        if candidate.micBacked && micBackedChannel == nil {
+            micBackedChannel = candidate.channel
+        }
+        return !sameEpisode
+    }
+
+    mutating func observeAbsence() {
+        guard lastKey != nil else { return }
+        absentPolls += 1
+        if absentPolls >= Self.absentPollsToRearm {
+            reset()
+        }
+    }
+
+    mutating func reset() {
+        lastKey = nil
+        micBackedChannel = nil
+        absentPolls = 0
     }
 }

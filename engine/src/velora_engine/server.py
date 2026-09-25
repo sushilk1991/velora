@@ -48,7 +48,7 @@ from .cleanup import (
 from .cleanup_process import CleanupProcess
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
-from .media import load_media, load_meeting_media, split_for_batch
+from .media import TransientMediaError, load_media, load_meeting_media, split_for_batch
 from .meeting_notes import chunk_transcript, merge_notes, parse_notes_json
 from .stt import (
     SAMPLE_RATE,
@@ -105,6 +105,22 @@ class _FastReply:
 class SpoolDisposition(Enum):
     preserve = "preserve"
     discard = "discard"
+
+
+class _NotesFailure(Enum):
+    """Why one meeting-notes generation call produced no notes."""
+
+    # This section hit its own deadline: a smaller retry of it can still
+    # succeed, and the timeout counts toward the failure streak.
+    section_timeout = "section_timeout"
+    # This section hit its output limit or returned malformed JSON: a
+    # smaller retry of it can still succeed, and it cost no timeout.
+    section_retryable = "section_retryable"
+    # This section failed for a reason a retry will not change.
+    section = "section"
+    # The notes model itself is gone (absent, not loaded, unhealthy,
+    # recovering): every later section would fail the same way.
+    model = "model"
 
 
 def _memory_pressure_level() -> int:
@@ -179,6 +195,23 @@ MINE_STARTUP_DELAY_S = 60.0
 # semantics change so an upgraded app restarts the track instead of mixing old
 # fragmented labels with the corrected plan.
 MEETING_PLAN_VERSION = 3
+# A track whose loudest sample stays within one 16-bit step is digital
+# silence: the device delivered zeros (lid-closed built-in mic, a muted
+# interface). A quiet room still has a noise floor well above this. The
+# app's silent-mic alert uses the same line (MeetingPCMLevel.isSilent).
+MEETING_SILENT_TRACK_MAX_PEAK = 1.0 / 32768.0
+# The failure code for a track file that can never be transcribed (the
+# loader rejected its format or decode). The app skips only such a track;
+# any other failure is transient and retries the whole job.
+MEETING_UNSUPPORTED_AUDIO = "unsupported_audio"
+# The failure code for a track file that could not be read this time
+# (converter timeout, full disk, file still changing). The app retries it
+# like "busy" and never skips the track.
+MEETING_AUDIO_LOAD_FAILED = "audio_load_failed"
+# The failure code for a valid track shorter than MEETING_MIN_TRACK_S: it
+# holds no speech, so the app records its own "too short" issue.
+MEETING_TRACK_TOO_SHORT = "too_short"
+MEETING_MIN_TRACK_S = 0.2
 
 # Meeting notes are a bounded transformation, but they are materially larger
 # than dictation cleanup. Keep each map context small enough that Qwen3.5-4B
@@ -190,6 +223,24 @@ MEETING_NOTES_CHUNK_CHARS = 4_000
 MEETING_NOTES_RETRY_CHUNK_CHARS = 2_000
 MEETING_NOTES_MAP_MAX_TOKENS = 384
 MEETING_NOTES_REDUCE_MAX_TOKENS = 512
+# A section whose first attempt times out costs that timeout plus its split
+# retry. After this many sections in a row time out on their first attempt,
+# each later section gets one attempt and no split retry, so a slow model
+# cannot hold the notes queue for minutes per section. An output-limit,
+# malformed or content failure costs no timeout and leaves the count alone.
+MEETING_NOTES_MAX_CONSECUTIVE_FAILURES = 3
+# Cleanup reasons that mean the notes model itself is gone, not that one
+# section failed: every later section would fail the same way.
+MEETING_NOTES_MODEL_GONE_REASONS = frozenset({
+    "llm_not_loaded", "llm_unhealthy", "llm_recovering",
+})
+# Cleanup reasons one section can hit on its own (deadline, output length);
+# a smaller retry of that section can still succeed. Only the deadlines
+# count toward MEETING_NOTES_MAX_CONSECUTIVE_FAILURES.
+MEETING_NOTES_SECTION_TIMEOUT_REASONS = frozenset({
+    "timeout", "timeout_hard", "timeout_queue",
+})
+MEETING_NOTES_SECTION_RETRY_REASONS = MEETING_NOTES_SECTION_TIMEOUT_REASONS | {"length"}
 # The server advertises STT readiness before the cleanup worker finishes its
 # background warm-up. Relaunch recovery can therefore submit durable notes a
 # few seconds before Qwen is usable. Wait only for an existing, healthy worker;
@@ -3863,17 +3914,27 @@ class Engine:
         meeting_id = msg.get("meeting_id")
         speaker = msg.get("speaker")
         start_chunk = msg.get("start_chunk", 0)
+
+        async def reject(error: str) -> None:
+            # MeetingProcessor settles a track only on an event carrying its
+            # job id; a bare `error` event would leave that track waiting.
+            await self._send({
+                "event": "meeting_transcribe_failed", "id": msg.get("id"),
+                "meeting_id": meeting_id if isinstance(meeting_id, str) else "",
+                "speaker": speaker, "code": "invalid_arguments", "error": error,
+            })
+
         if not isinstance(path, str) or not path:
-            await self._error("meeting_transcribe: missing 'path'")
+            await reject("meeting_transcribe: missing 'path'")
             return
         if not isinstance(meeting_id, str) or not meeting_id or len(meeting_id) > 128:
-            await self._error("meeting_transcribe: invalid 'meeting_id'")
+            await reject("meeting_transcribe: invalid 'meeting_id'")
             return
         if speaker not in ("me", "them"):
-            await self._error("meeting_transcribe: speaker must be 'me' or 'them'")
+            await reject("meeting_transcribe: speaker must be 'me' or 'them'")
             return
         if not isinstance(start_chunk, int) or isinstance(start_chunk, bool) or start_chunk < 0:
-            await self._error("meeting_transcribe: invalid 'start_chunk'")
+            await reject("meeting_transcribe: invalid 'start_chunk'")
             return
         if (self._reprocessing or self._transcribing
                 or self._meeting_notes_running or self._editing):
@@ -4037,12 +4098,19 @@ class Engine:
                     meeting_root=velora_home() / "meetings",
                 )
                 load_ms = int((time.perf_counter() - load_started) * 1000)
+            except TransientMediaError as exc:
+                log.warning(
+                    "meeting audio could not be read %s/%s: %s",
+                    meeting_id, speaker, exc,
+                )
+                await fail(str(exc), MEETING_AUDIO_LOAD_FAILED)
+                return
             except ValueError as exc:
                 log.warning(
                     "meeting transcription rejected %s/%s: %s",
                     meeting_id, speaker, exc,
                 )
-                await fail(str(exc))
+                await fail(str(exc), MEETING_UNSUPPORTED_AUDIO)
                 return
             if self.shutdown.is_set():
                 await fail("engine shutting down", "engine_shutdown")
@@ -4051,8 +4119,35 @@ class Engine:
                 await fail("cancelled", "cancelled")
                 return
             duration_s = len(pcm) / SAMPLE_RATE
-            if duration_s < 0.2:
-                await fail("no audio in file")
+            if duration_s < MEETING_MIN_TRACK_S:
+                await fail("audio is too short to transcribe", MEETING_TRACK_TOO_SHORT)
+                return
+            # max/min instead of abs(): an hour-long track would otherwise
+            # allocate a second full-size copy just to find its peak.
+            peak = max(float(pcm.max()), -float(pcm.min()))
+            silent = peak <= MEETING_SILENT_TRACK_MAX_PEAK
+            if silent:
+                # Whisper turns digital silence into "Thank you." lines that
+                # would land in the transcript and the notes. A silent track
+                # gets no STT and no segments; the app drops any lines an
+                # older build committed for it.
+                await self._send({
+                    "event": "meeting_transcribe_started", "id": job_id,
+                    "meeting_id": meeting_id, "speaker": speaker,
+                    "duration_s": round(duration_s, 1), "chunks": 0,
+                    "start_chunk": 0, "restarted": False,
+                })
+                await self._send({
+                    "event": "meeting_transcribed", "id": job_id,
+                    "meeting_id": meeting_id, "speaker": speaker,
+                    "duration_s": round(duration_s, 1), "chunks": 0,
+                    "silent": True,
+                })
+                log.info(
+                    "meeting transcription skipped %s/%s: %.0fs digitally "
+                    "silent audio, peak=%.6f load=%dms",
+                    meeting_id, speaker, duration_s, peak, load_ms,
+                )
                 return
             # The remote/system track may carry several people. Audio-only
             # clustering supplies speech regions, but without participant
@@ -4155,13 +4250,14 @@ class Engine:
                 "event": "meeting_transcribed", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
                 "duration_s": round(duration_s, 1), "chunks": len(spans),
+                "silent": silent,
             })
             log.info(
                 "meeting transcription done %s/%s: %.0fs audio, "
                 "%d/%d chunks processed this attempt, %d nonempty this attempt, "
-                "load=%dms plan=%dms decode=%dms wall=%dms",
+                "peak=%.6f silent=%s load=%dms plan=%dms decode=%dms wall=%dms",
                 meeting_id, speaker, duration_s, processed_chunks, len(spans),
-                nonempty_chunks, load_ms, plan_ms, decode_ms,
+                nonempty_chunks, peak, silent, load_ms, plan_ms, decode_ms,
                 int((time.perf_counter() - track_started) * 1000),
             )
         except Exception as exc:  # noqa: BLE001
@@ -4179,11 +4275,20 @@ class Engine:
     async def _cmd_meeting_notes(self, msg: dict[str, Any]) -> None:
         meeting_id = msg.get("meeting_id")
         transcript = msg.get("transcript")
+
+        async def reject(error: str) -> None:
+            # Name the job so the app can settle it (see meeting_transcribe).
+            await self._send({
+                "event": "meeting_notes_failed", "id": msg.get("id"),
+                "meeting_id": meeting_id if isinstance(meeting_id, str) else "",
+                "code": "invalid_arguments", "error": error,
+            })
+
         if not isinstance(meeting_id, str) or not meeting_id or len(meeting_id) > 128:
-            await self._error("meeting_notes: invalid 'meeting_id'")
+            await reject("meeting_notes: invalid 'meeting_id'")
             return
         if not isinstance(transcript, str) or not transcript.strip():
-            await self._error("meeting_notes: missing 'transcript'")
+            await reject("meeting_notes: missing 'transcript'")
             return
         if len(transcript) > 2_000_000:
             await self._send({
@@ -4265,14 +4370,16 @@ class Engine:
 
         async def generate(
             user_text: str, prompt: str, max_tokens: int
-        ) -> tuple[dict[str, Any] | None, str | None, bool]:
+        ) -> tuple[dict[str, Any] | None, str | None, _NotesFailure | None]:
+            # Callers check cancel and shutdown right after every call, so
+            # those returns carry no failure kind.
             while not self._meeting_notes_cancel:
                 if self.shutdown.is_set():
-                    return None, "engine shutting down", False
+                    return None, "engine shutting down", None
                 while self.session is not None or self._starting or self._finalizing:
                     await asyncio.sleep(0.25)
                     if self._meeting_notes_cancel or self.shutdown.is_set():
-                        return None, "cancelled", False
+                        return None, "cancelled", None
                 self._meeting_notes_preempt.clear()
                 # Dictation just released the machine (wait loop above), or a
                 # cleanup child respawned — recompute who gets demoted.
@@ -4283,7 +4390,9 @@ class Engine:
                 )
                 cleanup = self.cleanup or self._cleanup_loading
                 if cleanup is None:
-                    return None, "the local notes model is unavailable", False
+                    return (
+                        None, "the local notes model is unavailable",
+                        _NotesFailure.model)
                 if cleanup is self.cleanup:
                     await self._ensure_cleanup_loaded()
                 while not cleanup.loaded:
@@ -4291,17 +4400,21 @@ class Engine:
                         self._meeting_notes_cancel
                         or self.shutdown.is_set()
                     ):
-                        return None, "cancelled", False
+                        return None, "cancelled", None
                     if cleanup.unhealthy or (
                         asyncio.get_running_loop().time() >= model_ready_deadline
                     ):
-                        return None, "the local notes model is unavailable", False
+                        return (
+                            None, "the local notes model is unavailable",
+                            _NotesFailure.model)
                     if self.session is not None or self._starting or self._finalizing:
                         break
                     await asyncio.sleep(0.1)
                     replacement = self.cleanup or self._cleanup_loading
                     if replacement is None:
-                        return None, "the local notes model is unavailable", False
+                        return (
+                            None, "the local notes model is unavailable",
+                            _NotesFailure.model)
                     cleanup = replacement
                 if self.session is not None or self._starting or self._finalizing:
                     continue
@@ -4313,7 +4426,7 @@ class Engine:
                     cancel_event=self._meeting_notes_preempt,
                 )
                 if self._meeting_notes_cancel or self.shutdown.is_set():
-                    return None, "cancelled", False
+                    return None, "cancelled", None
                 if self._meeting_notes_preempt.is_set():
                     # A dictation interrupted generation. Retry this exact map
                     # chunk once the foreground session has finished.
@@ -4321,29 +4434,39 @@ class Engine:
                     continue
                 if not result.applied:
                     reason = str(getattr(result, "reason", None) or "no output")
-                    retryable = reason in {
-                        "length", "timeout", "timeout_hard", "timeout_queue",
-                    }
+                    if reason in MEETING_NOTES_MODEL_GONE_REASONS:
+                        failure = _NotesFailure.model
+                    elif reason in MEETING_NOTES_SECTION_TIMEOUT_REASONS:
+                        failure = _NotesFailure.section_timeout
+                    elif reason in MEETING_NOTES_SECTION_RETRY_REASONS:
+                        failure = _NotesFailure.section_retryable
+                    else:
+                        failure = _NotesFailure.section
                     return (
                         None,
                         f"local notes generation failed ({reason})",
-                        retryable,
+                        failure,
                     )
                 parsed = parse_notes_json(result.text)
                 if parsed is None:
                     return (
                         None,
                         "the local notes model returned malformed notes",
-                        True,
+                        _NotesFailure.section_retryable,
                     )
-                return parsed, None, False
-            return None, "cancelled", False
+                return parsed, None, None
+            return None, "cancelled", None
 
         self._begin_batch_job(lower_priority=False)
         try:
             chunks = chunk_transcript(
                 transcript, max_chars=MEETING_NOTES_CHUNK_CHARS)
             partials: list[dict[str, Any]] = []
+            # Sections left out of the notes, in whole or in part; any of
+            # them makes the result partial.
+            skipped_chunks = 0
+            consecutive_failures = 0
+            last_chunk_error: str | None = None
             for index, chunk in enumerate(chunks):
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
@@ -4351,8 +4474,22 @@ class Engine:
                 if self._meeting_notes_cancel:
                     await fail("cancelled", "cancelled")
                     return
-                notes, generation_error, retryable = await generate(
+                # Past a streak of sections that timed out, each section
+                # gets one attempt: a slow model must not cost a timeout
+                # plus a split retry for every remaining section.
+                split_retry = (
+                    consecutive_failures < MEETING_NOTES_MAX_CONSECUTIVE_FAILURES)
+                notes, generation_error, failure = await generate(
                     chunk, map_prompt, MEETING_NOTES_MAP_MAX_TOKENS)
+                # The first attempt decides the streak. A timeout counts
+                # even when the split retry below recovers the section: that
+                # timeout was already paid. An output-limit, malformed or
+                # content failure cost one fast attempt and leaves the
+                # streak as it was.
+                if notes is not None:
+                    consecutive_failures = 0
+                elif failure is _NotesFailure.section_timeout:
+                    consecutive_failures += 1
                 if self.shutdown.is_set():
                     await fail("engine shutting down", "engine_shutdown")
                     return
@@ -4360,7 +4497,14 @@ class Engine:
                     await fail("cancelled", "cancelled")
                     return
                 recovered: list[dict[str, Any]] = []
-                if notes is None and retryable:
+                piece_failed = False
+                if (
+                    notes is None
+                    and failure in (
+                        _NotesFailure.section_timeout,
+                        _NotesFailure.section_retryable)
+                    and split_retry
+                ):
                     retry_chunks = chunk_transcript(
                         chunk, max_chars=MEETING_NOTES_RETRY_CHUNK_CHARS)
                     if len(retry_chunks) == 1:
@@ -4373,14 +4517,17 @@ class Engine:
                             index + 1, len(chunks), len(retry_chunks),
                         )
                         for retry_chunk in retry_chunks:
-                            retry_notes, retry_error, _ = await generate(
+                            retry_notes, retry_error, retry_failure = await generate(
                                 retry_chunk,
                                 map_prompt,
                                 MEETING_NOTES_MAP_MAX_TOKENS,
                             )
                             if retry_notes is None:
+                                # Pieces recovered before this one are real
+                                # notes; the section just stays incomplete.
                                 generation_error = retry_error or generation_error
-                                recovered = []
+                                failure = retry_failure
+                                piece_failed = True
                                 break
                             recovered.append(retry_notes)
                 # A cancellation or app shutdown can arrive while a retry is
@@ -4392,34 +4539,55 @@ class Engine:
                 if self._meeting_notes_cancel:
                     await fail("cancelled", "cancelled")
                     return
-                if notes is None and not recovered:
-                    # An unkillable Metal call cannot be repaired inside this
-                    # process. Keep the app's durable notes-only job active and
-                    # restart the sidecar; MeetingProcessor requeues that exact
-                    # transcript on reconnect. Sending meeting_notes_failed
-                    # first would turn the row back to ready+attention and lose
-                    # the automatic resume that the restart is meant to provide.
-                    if self._restart_if_cleanup_unhealthy(
-                        include_recovering=True
-                    ):
-                        log.warning(
-                            "meeting notes retaining %s for engine-restart recovery",
-                            meeting_id,
-                        )
-                        return
-                    error = generation_error or "local notes generation failed"
-                    log.warning("meeting notes failed for %s: %s", meeting_id, error)
-                    await fail(error + "; retry to generate notes", "generation_failed")
-                    return
-                if recovered:
-                    partials.extend(recovered)
-                elif notes is not None:
+                partials.extend(recovered)
+                if notes is not None:
                     partials.append(notes)
+                if notes is None and (not recovered or piece_failed):
+                    error = generation_error or "local notes generation failed"
+                    if failure is _NotesFailure.model:
+                        # The model is gone, so the sections summarized so
+                        # far are a fragment, not the meeting's notes.
+                        # An unkillable Metal call cannot be repaired inside
+                        # this process: keep the app's durable notes-only
+                        # job active and restart the sidecar;
+                        # MeetingProcessor requeues that exact transcript on
+                        # reconnect. Sending meeting_notes_failed first would
+                        # turn the row back to ready+attention and lose the
+                        # automatic resume the restart is meant to provide.
+                        if self._restart_if_cleanup_unhealthy(
+                            include_recovering=True
+                        ):
+                            log.warning(
+                                "meeting notes retaining %s for engine-restart recovery",
+                                meeting_id,
+                            )
+                            return
+                        # Not recovering either: a restart would not bring
+                        # it back. Fail for Retry Notes.
+                        log.warning("meeting notes failed for %s: %s", meeting_id, error)
+                        await fail(error + "; retry to generate notes", "generation_failed")
+                        return
+                    # Only this section failed: it stays (partly)
+                    # unsummarized, every other section's notes are kept,
+                    # and the result is partial.
+                    skipped_chunks += 1
+                    last_chunk_error = error
+                    log.warning(
+                        "meeting notes skipped chunk %d/%d for %s: %s",
+                        index + 1, len(chunks), meeting_id, error,
+                    )
+                    continue
                 await self._send({
                     "event": "meeting_notes_progress", "id": job_id,
                     "meeting_id": meeting_id,
                     "fraction": round((index + 1) / max(1, len(chunks) + 1), 3),
                 })
+            if not partials:
+                # Every section failed: there are no notes to keep.
+                error = last_chunk_error or "local notes generation failed"
+                log.warning("meeting notes failed for %s: %s", meeting_id, error)
+                await fail(error + "; retry to generate notes", "generation_failed")
+                return
             merged = merge_notes(partials)
             if len(partials) > 1:
                 reduced, reduce_error, _ = await generate(
@@ -4451,6 +4619,7 @@ class Engine:
             await self._send({
                 "event": "meeting_notes_ready", "id": job_id,
                 "meeting_id": meeting_id, **merged,
+                "partial": skipped_chunks > 0,
             })
             self._restart_if_cleanup_unhealthy()
         except Exception as exc:  # noqa: BLE001

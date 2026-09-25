@@ -71,10 +71,24 @@ final class MeetingCoordinator: ObservableObject {
     private var terminating = false
 
     @Published private(set) var state: State = .idle {
-        didSet { if state != oldValue { onStateChange?(state) } }
+        didSet {
+            guard state != oldValue else { return }
+            if !state.isRecording {
+                microphoneSilent = false
+                silenceAlert = MeetingSilenceAlert()
+            }
+            onStateChange?(state)
+        }
     }
+    /// True while the current recording's microphone delivers only exact
+    /// zeros: the meeting still records, but "Me" will have no lines.
+    @Published private(set) var microphoneSilent = false
+    private var silenceAlert = MeetingSilenceAlert()
     var onStateChange: ((State) -> Void)?
     var onRecordingEnded: ((RecordingEndOutcome) -> Void)?
+    /// Fires when the recording's microphone goes silent (true) or delivers
+    /// sound again (false), after `state` already shows the recording.
+    var onMicrophoneSilence: ((Bool) -> Void)?
 
     init(
         store: MeetingStore,
@@ -96,6 +110,9 @@ final class MeetingCoordinator: ObservableObject {
         }
         capture.onMicrophoneFailure = { [weak self] message in
             self?.microphoneDidFail(message)
+        }
+        capture.onMicrophoneSilenceChange = { [weak self] change in
+            self?.microphoneSilenceDidChange(change)
         }
     }
 
@@ -233,6 +250,7 @@ final class MeetingCoordinator: ObservableObject {
                 callbacks.forEach { $0() }
             }
             guard let files else {
+                veloraLog("Velora: meeting \(id) recording could not be finalized")
                 self.store.markFailed(
                     meetingID: id, error: "Recording could not be finalized")
                 NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
@@ -249,6 +267,10 @@ final class MeetingCoordinator: ObservableObject {
                 micPath: files.micRelativePath,
                 systemPath: files.systemRelativePath)
             self.store.insertProcessing(record)
+            veloraLog(
+                "Velora: meeting \(id) recording stopped after "
+                + "\(Int(files.endedAt.timeIntervalSince(files.startedAt))) s "
+                + "(computer audio: \(files.systemRelativePath == nil ? "no" : "yes"))")
             NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
             // A manual stop can already be finalizing when Quit arrives. Keep
             // the durable processing row, but let next launch resume it rather
@@ -549,6 +571,7 @@ final class MeetingCoordinator: ObservableObject {
             }
             switch result {
             case .failure(let error):
+                veloraLog("Velora: meeting \(id) capture failed to start: \(error.localizedDescription)")
                 self.pendingMetadata = nil
                 self.pendingMeetingID = nil
                 self.store.delete(meetingID: id)
@@ -570,12 +593,28 @@ final class MeetingCoordinator: ObservableObject {
                     endDetected: false)
                 self.armEndWatch(
                     channel: channel, callConfirmed: callConfirmed, micBacked: micBacked)
-                self.sounds.play(.start)
+                if let cue = Self.startSound(for: start) {
+                    self.sounds.play(cue)
+                }
+                veloraLog(
+                    "Velora: meeting \(id) recording started "
+                    + "(computer audio: \(start.systemAudio ? "yes" : "no"), "
+                    + "microphone silent: \(start.microphoneSilent ? "yes" : "no"))")
                 if let warning = start.warning {
                     veloraLog("Velora: meeting capture degraded: \(warning)")
                 }
+                if start.microphoneSilent {
+                    self.microphoneSilenceDidChange(.neverHeard)
+                }
             }
         }
+    }
+
+    /// A degraded start (no computer audio, a silent microphone) skips the
+    /// start sound, which would tell the user all is well.
+    static func startSound(for start: MeetingCaptureStart) -> SoundPlayer.Cue? {
+        guard start.warning == nil, !start.microphoneSilent else { return nil }
+        return .start
     }
 
     private func discardActiveCapture() {
@@ -609,6 +648,25 @@ final class MeetingCoordinator: ObservableObject {
         veloraLog("Velora: meeting computer audio stopped: \(message)")
     }
 
+    /// Applies `MeetingSilenceAlert`. The capture watch reports again at
+    /// 30 s even when startup already flagged the mic; the policy absorbs it.
+    private func microphoneSilenceDidChange(_ change: MeetingMicrophoneSilence) {
+        guard state.isRecording else { return }
+        switch silenceAlert.update(change) {
+        case .alert:
+            microphoneSilent = true
+            sounds.play(.error)
+            onMicrophoneSilence?(true)
+        case .mark:
+            microphoneSilent = true
+        case .clear:
+            microphoneSilent = false
+            onMicrophoneSilence?(false)
+        case .none:
+            break
+        }
+    }
+
     private func microphoneDidFail(_ message: String) {
         guard state.isRecording else { return }
         // A meeting without a reliable local track should not keep appearing
@@ -632,4 +690,40 @@ final class MeetingCoordinator: ObservableObject {
         VisibleAlert.present(alert) { _ in }
     }
 
+}
+
+/// How one recording surfaces a silent microphone. A mic that never
+/// delivered sound is the wrong device or a closed lid: that raises the
+/// alarm, once per meeting. Zeros after real sound (a hardware mute, a
+/// Bluetooth route change) only mark the row, and recovery makes no sound.
+///
+///     .neverHeard ─► .alert  (first time only, else .mark)
+///     .afterSound ─► .mark
+///     .sound      ─► .clear  (when marked)
+struct MeetingSilenceAlert {
+    enum Action: Equatable {
+        /// Error sound, HUD notice, and the row's silent mark.
+        case alert
+        /// The row's silent mark only.
+        case mark
+        /// Clear the mark, quietly.
+        case clear
+        case none
+    }
+
+    private var silent = false
+    private var alerted = false
+
+    mutating func update(_ change: MeetingMicrophoneSilence) -> Action {
+        if change == .sound {
+            guard silent else { return .none }
+            silent = false
+            return .clear
+        }
+        guard !silent else { return .none }
+        silent = true
+        guard change == .neverHeard, !alerted else { return .mark }
+        alerted = true
+        return .alert
+    }
 }

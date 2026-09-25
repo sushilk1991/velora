@@ -6,6 +6,9 @@ import SwiftUI
 /// when requested. All SQLite work stays off AppKit's main thread.
 final class MeetingNotesWindowModel: ObservableObject {
     @Published private(set) var record: MeetingRecord?
+    /// A Recreate is staged for this meeting; a ready row's error is then
+    /// the Recreate's, not the notes'.
+    @Published private(set) var recreating = false
     @Published private(set) var loading = false
     @Published private(set) var transcript: [MeetingSegment]?
     @Published private(set) var transcriptLoading = false
@@ -42,9 +45,11 @@ final class MeetingNotesWindowModel: ObservableObject {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let fresh = self.store.recordMetadata(id: meetingID)
+            let recreating = self.store.isReprocessing(meetingID: meetingID)
             DispatchQueue.main.async {
                 guard self.metadataToken == token, self.meetingID == meetingID else { return }
                 self.record = fresh
+                self.recreating = recreating
                 self.loading = false
             }
         }
@@ -162,10 +167,8 @@ struct MeetingNotesWindowView: View {
     private func status(_ record: MeetingRecord) -> some View {
         switch record.status {
         case .ready:
-            if let error = record.error {
-                Label(
-                    "Recreate did not finish; the previous notes were kept. \(error)",
-                    systemImage: "exclamationmark.triangle.fill")
+            if let message = record.readyErrorMessage(recreating: model.recreating) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(VeloraStatus.warning)
             }
         case .recording:

@@ -2,6 +2,17 @@ import AppKit
 import EventKit
 import SwiftUI
 
+/// The Meetings pane: a full-width list of meetings that opens one
+/// meeting's notes in place, like a System Settings detail page.
+///
+///     ┌ Meetings ──────────────── [Search…] [Start Meeting Notes…] ┐
+///     │ ● Recording Standup · 12:04 · Mic only   [Finish] [Discard] │  ← only while active
+///     │ Standup            Sep 24, 3:00 PM · 42 min            ›   │
+///     │ Design review      Sep 23, 11:00 AM · 1 hr   Mic Silent ›   │
+///     └─────────────────────────────────────────────────────────────┘
+///                         click a row ▼
+///     │ ‹ All Meetings              [Retry Notes] [More ▾]          │
+///     │ Standup — summary, decisions, action items, transcript      │
 struct MeetingsSettingsView: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
@@ -11,6 +22,7 @@ struct MeetingsSettingsView: View {
     @State private var records: [MeetingRecord] = []
     @State private var query = ""
     @State private var hits: [MeetingSearchHit] = []
+    /// The meeting whose detail page is open; nil shows the list.
     @State private var selectedID: String?
     @State private var selectedRecord: MeetingRecord?
     @State private var selectedHasRecoverableAudio = false
@@ -24,142 +36,126 @@ struct MeetingsSettingsView: View {
     @State private var transcriptLoadToken = UUID()
     @State private var searchLoadToken = UUID()
 
+    /// The header search box, as wide as Dictionary's and History's.
+    private static let searchWidth: CGFloat = 240
+
     private var selected: MeetingRecord? { selectedRecord }
 
     var body: some View {
         // The preference rows live in Settings › Advanced › Meetings
         // (`MeetingPreferenceRows`); this pane is the meeting memory only.
-        Form {
-            Section("Meeting memory") {
-                // State + primary action live in a ROW, not the section
-                // header — rows are guaranteed clickable, and header text
-                // stays plain like every other section title.
+        VStack(spacing: 0) {
+            PaneHeader(title: MainPane.meetings.title) {
+                if !records.isEmpty || isSearching {
+                    SettingsSearchBox(
+                        prompt: "Search meetings", query: $query,
+                        accessibilityLabel: "Search summaries, decisions, actions, and transcripts")
+                        .frame(width: Self.searchWidth)
+                        .onChange(of: query) { _, _ in
+                            // Typing leaves an open meeting for the results.
+                            if selectedID != nil { closeDetail() }
+                            refreshSearch()
+                        }
+                }
+                if coordinator.state == .idle {
+                    Button("Start Meeting Notes…") { coordinator.startManual() }
+                        .buttonStyle(.primaryCapsule)
+                }
+            }
+            .padding(.bottom, VeloraSpacing.m)
+
+            // Capture and processing state sit above the list so Finish and
+            // Discard stay reachable however far the list or notes scroll.
+            if showsStatusRow {
                 HStack {
                     stateLabel
                     Spacer()
-                    if !captureActive { meetingAction }
+                    meetingAction
                 }
+                .padding(.horizontal, VeloraSpacing.m)
+                .padding(.vertical, VeloraSpacing.s)
+                Divider()
+            }
 
-                if !records.isEmpty || isSearching {
-                    // In-card search row: borderless field like the grouped
-                    // idiom, with the same ⨉-clear affordance as
-                    // SettingsSearchBox (a bordered box inside a card row
-                    // would read as a double border).
-                    HStack(spacing: VeloraSpacing.s) {
-                        Image(systemName: "magnifyingglass")
-                            .foregroundStyle(.secondary)
-                            .accessibilityHidden(true)
-                        TextField(
-                            "Search summaries, decisions, actions, and transcript",
-                            text: $query)
-                            .textFieldStyle(.plain)
-                        if !query.isEmpty {
-                            Button {
-                                query = ""
-                            } label: {
-                                Image(systemName: "xmark.circle.fill")
-                                    .foregroundStyle(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("Clear search")
-                        }
-                    }
-                    .onChange(of: query) { _, _ in refreshSearch() }
-                }
-
-                if isSearching {
-                    citedMatches
-                } else if !records.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(records) { record in meetingChip(record) }
-                        }
-                    }
-                }
-
+            Group {
                 if let selected {
-                    meetingDetail(selected)
-                } else {
+                    detailPage(selected)
+                } else if isSearching {
+                    searchResults
+                } else if records.isEmpty {
                     ContentUnavailableView(
                         "No meetings yet", systemImage: "person.2.wave.2",
                         description: Text("Start one manually or let Velora suggest it when a call begins."))
-                        .frame(maxWidth: .infinity)
-                }
-            }
-        }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            // A live capture must never scroll its controls out of reach —
-            // the form scrolls, so Stop/Discard get a pinned bottom bar for
-            // the duration (the row above hides its action to avoid twins).
-            if captureActive {
-                VStack(spacing: 0) {
-                    Divider()
-                    HStack {
-                        stateLabel
-                        Spacer()
-                        meetingAction
+                } else {
+                    List {
+                        ForEach(records) { record in meetingRow(record) }
                     }
-                    .padding(.horizontal, VeloraSpacing.m)
-                    .padding(.vertical, 10)
-                    .background(.bar)
+                    .listStyle(.inset)
+                    .scrollContentBackground(.hidden)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { reload() }
         .onReceive(NotificationCenter.default.publisher(for: .veloraMeetingsChanged)) { _ in reload() }
     }
 
-    /// True while a capture is being prepared or recorded — the states whose
-    /// controls must stay reachable regardless of scroll position.
-    private var captureActive: Bool {
-        switch coordinator.state {
-        case .idle: return false
-        case .suggesting: return false
-        case .preparing, .recording: return true
-        }
+    /// A capture, a suggestion, or background processing is under way.
+    private var showsStatusRow: Bool {
+        guard coordinator.state == .idle else { return true }
+        return processor.state != .idle
     }
 
     private var isSearching: Bool {
         !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
-    private var citedMatches: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-            Text("Cited matches")
-                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(hits) { hit in
-                        Button { select(hit.meetingID) } label: {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(hit.title).font(.caption.weight(.semibold)).lineLimit(1)
+    @ViewBuilder private var searchResults: some View {
+        if hits.isEmpty {
+            ContentUnavailableView.search(text: query)
+        } else {
+            List {
+                ForEach(hits) { hit in
+                    Button { select(hit.meetingID) } label: {
+                        HStack(spacing: VeloraSpacing.m) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(hit.title).lineLimit(1)
                                 Text(hit.startedAt.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption2).foregroundStyle(.secondary)
-                                Text(hit.snippet).font(.caption2).lineLimit(2)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Text(hit.snippet)
+                                    .font(.callout).foregroundStyle(.secondary).lineLimit(2)
                             }
-                            .frame(width: 180, alignment: .leading)
-                            .padding(8)
-                            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: VeloraRadius.tile))
+                            Spacer(minLength: VeloraSpacing.m)
+                            disclosureChevron
                         }
-                        .buttonStyle(.plain)
-                        .help("Open cited local meeting")
+                        .padding(.vertical, 3)
+                        .contentShape(Rectangle())
+                        .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
                     }
+                    .buttonStyle(.plain)
+                    .help("Open cited local meeting")
                 }
             }
+            .listStyle(.inset)
+            .scrollContentBackground(.hidden)
         }
     }
 
-    /// Section-header state line — inherits the grouped-form header style so
-    /// it reads like every other section title in the app.
+    private var disclosureChevron: some View {
+        Image(systemName: "chevron.right")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .accessibilityHidden(true)
+    }
+
+    /// Capture state, or processing progress while no capture is active.
     @ViewBuilder private var stateLabel: some View {
         switch coordinator.state {
         case .idle:
             switch processor.state {
             case .idle:
-                Text("Ready to record")
-                    .foregroundStyle(.secondary)
+                EmptyView()
             case .processing(_, let label, let fraction):
                 VStack(alignment: .leading, spacing: 3) {
                     Text(label)
@@ -178,10 +174,12 @@ struct MeetingsSettingsView: View {
         case .recording(_, let title, let startedAt, let systemAudio, let endDetected):
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let elapsed = max(0, Int(context.date.timeIntervalSince(startedAt)))
+                let sources = systemAudio ? "Mic + system" : "Mic only"
+                let micState = coordinator.microphoneSilent ? " · Mic is silent" : ""
                 Label(
                     endDetected
                         ? "Did \(title) end?"
-                        : "Recording \(title) · \(elapsed / 60):\(String(format: "%02d", elapsed % 60)) · \(systemAudio ? "Mic + system" : "Mic only")",
+                        : "Recording \(title) · \(elapsed / 60):\(String(format: "%02d", elapsed % 60)) · \(sources)\(micState)",
                     systemImage: endDetected ? "questionmark.circle.fill" : "record.circle.fill")
                     .foregroundStyle(endDetected ? VeloraStatus.warning : Color(nsColor: .systemRed))
             }
@@ -191,8 +189,7 @@ struct MeetingsSettingsView: View {
     @ViewBuilder private var meetingAction: some View {
         switch coordinator.state {
         case .idle:
-            Button("Start Meeting Notes…") { coordinator.startManual() }
-                .controlSize(.small)
+            EmptyView()
         case .suggesting:
             Button("Start Meeting Notes") { coordinator.acceptSuggestion() }
                 .buttonStyle(.borderedProminent)
@@ -220,68 +217,139 @@ struct MeetingsSettingsView: View {
         }
     }
 
-    private func meetingChip(_ record: MeetingRecord) -> some View {
+    private func meetingRow(_ record: MeetingRecord) -> some View {
         Button { select(record.id) } label: {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(record.title).font(.caption.weight(.semibold)).lineLimit(1)
-                Text(record.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: VeloraSpacing.m) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(record.title).lineLimit(1)
+                    Text(Self.rowSubtitle(record))
+                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: VeloraSpacing.m)
+                if let badge = Self.rowBadge(record) {
+                    Label(badge.text, systemImage: badge.symbol)
+                        .font(.caption)
+                        .foregroundStyle(badge.warns ? AnyShapeStyle(VeloraStatus.warning) : AnyShapeStyle(.secondary))
+                }
+                disclosureChevron
             }
-            .frame(width: 150, alignment: .leading)
-            .padding(7)
-            .background(
-                selected?.id == record.id ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: VeloraRadius.tile))
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            // Full-width separators; they otherwise start at the badge text.
+            .alignmentGuide(.listRowSeparatorLeading) { _ in 0 }
         }
         .buttonStyle(.plain)
     }
 
-    private func meetingDetail(_ record: MeetingRecord) -> some View {
-        let processing = processor.isPending(meetingID: record.id)
-        return VStack(alignment: .leading, spacing: 8) {
+    /// "Sep 24, 2026 at 3:00 PM · 42 min · Zoom"
+    private static func rowSubtitle(_ record: MeetingRecord) -> String {
+        var parts = [record.startedAt.formatted(date: .abbreviated, time: .shortened)]
+        let minutes = Int(record.endedAt.timeIntervalSince(record.startedAt) / 60)
+        if record.status != .recording && minutes > 0 {
+            parts.append("\(minutes) min")
+        }
+        if let source = record.sourceApp, !source.isEmpty {
+            parts.append(source)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// One status word per row, most urgent first. Ready meetings with
+    /// complete notes from both tracks show none.
+    private static func rowBadge(
+        _ record: MeetingRecord
+    ) -> (text: String, symbol: String, warns: Bool)? {
+        switch record.status {
+        case .recording:
+            return ("Recording", "record.circle", false)
+        case .processing:
+            return ("Processing", "hourglass", false)
+        case .failed:
+            return ("Failed", "exclamationmark.triangle.fill", true)
+        case .ready:
+            break
+        }
+        if case .failed = record.micIssue { return ("Mic Not Transcribed", "mic.slash", true) }
+        if case .failed = record.systemIssue { return ("Audio Not Transcribed", "speaker.slash", true) }
+        if record.micIssue == .silent { return ("Mic Silent", "mic.slash", true) }
+        if record.micIssue == .tooShort { return ("Mic Too Short", "mic.slash", true) }
+        if record.notes.partial { return ("Partial Notes", "exclamationmark.circle", true) }
+        return nil
+    }
+
+    private func detailPage(_ record: MeetingRecord) -> some View {
+        VStack(spacing: 0) {
             HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(record.title).font(.title3.weight(.semibold))
-                    Text(record.startedAt.formatted(date: .long, time: .shortened))
-                        .font(.caption).foregroundStyle(.secondary)
+                Button { closeDetail() } label: {
+                    Label("All Meetings", systemImage: "chevron.left")
                 }
+                .buttonStyle(.borderless)
+                .keyboardShortcut("[", modifiers: .command)
+                .help("Back to all meetings (⌘[)")
                 Spacer()
-                if selectedIsReprocessing {
-                    if selectedCanRecreate && !processing {
-                        Button("Retry Recreate") { processor.enqueue(meetingID: record.id) }
-                    }
-                } else if selectedCanRetryNotes && !processing {
-                    Button("Retry notes") { processor.enqueue(meetingID: record.id) }
-                } else if record.status == .failed && selectedHasRecoverableAudio
-                    && !processing {
-                    Button("Retry") { processor.enqueue(meetingID: record.id) }
-                }
-                if processing {
-                    Button("Cancel processing") {
-                        processor.cancel(meetingID: record.id)
-                    }
-                }
-                Menu("More") {
-                    Button("Copy notes and transcript") { copy(recordID: record.id) }
-                    Button("Export Markdown…") { export(record) }
-                    if record.status == .ready && selectedCanRecreate
-                        && !selectedIsReprocessing && !processing {
-                        Divider()
-                        Button("Recreate transcript and notes…") { reprocess(record) }
-                    }
-                    if let url = store.audioURL(relativePath: record.micPath),
-                       FileManager.default.fileExists(atPath: url.path) {
-                        Button("Play my audio") { NSWorkspace.shared.open(url) }
-                    }
-                    if let url = store.audioURL(relativePath: record.systemPath),
-                       FileManager.default.fileExists(atPath: url.path) {
-                        Button("Play system audio") { NSWorkspace.shared.open(url) }
-                    }
-                    if record.status != .recording {
-                        Divider()
-                        Button("Delete Meeting", role: .destructive) { delete(record) }
-                    }
-                }
+                detailActions(record)
+            }
+            .padding(.horizontal, VeloraSpacing.m)
+            .padding(.vertical, VeloraSpacing.s)
+            Divider()
+            // One scroller for notes and transcript: a nested same-axis
+            // scroller captures wheel events and strands the outer one.
+            ScrollView {
+                meetingDetail(record)
+                    .padding(VeloraSpacing.m)
+            }
+        }
+    }
+
+    @ViewBuilder private func detailActions(_ record: MeetingRecord) -> some View {
+        let processing = processor.isPending(meetingID: record.id)
+        if selectedIsReprocessing {
+            if selectedCanRecreate && !processing {
+                Button("Retry Recreate") { processor.enqueue(meetingID: record.id) }
+            }
+        } else if selectedCanRetryNotes && !processing {
+            Button("Retry Notes") { processor.enqueue(meetingID: record.id) }
+        } else if record.status != .ready && record.status != .recording
+            && selectedHasRecoverableAudio && !processing {
+            // A processing row no job is working on (its failure could not
+            // be saved) needs a way out too.
+            Button("Retry") { processor.enqueue(meetingID: record.id) }
+        }
+        if processing {
+            Button("Cancel Processing") {
+                processor.cancel(meetingID: record.id)
+            }
+        }
+        Menu("More") {
+            Button("Copy Notes and Transcript") { copy(recordID: record.id) }
+            Button("Export Markdown…") { export(record) }
+            if record.status == .ready && selectedCanRecreate
+                && !selectedIsReprocessing && !processing {
+                Divider()
+                Button("Recreate Transcript and Notes…") { reprocess(record) }
+            }
+            if let url = store.audioURL(relativePath: record.micPath),
+               FileManager.default.fileExists(atPath: url.path) {
+                Button("Play My Audio") { NSWorkspace.shared.open(url) }
+            }
+            if let url = store.audioURL(relativePath: record.systemPath),
+               FileManager.default.fileExists(atPath: url.path) {
+                Button("Play System Audio") { NSWorkspace.shared.open(url) }
+            }
+            if record.status != .recording {
+                Divider()
+                Button("Delete Meeting…", role: .destructive) { delete(record) }
+            }
+        }
+        .fixedSize()
+    }
+
+    private func meetingDetail(_ record: MeetingRecord) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(record.title).font(.title3.weight(.semibold))
+                Text(record.startedAt.formatted(date: .long, time: .shortened))
+                    .font(.caption).foregroundStyle(.secondary)
             }
 
             if record.status == .processing {
@@ -295,17 +363,16 @@ struct MeetingsSettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            } else if let error = record.error {
-                Label(selectedCanRetryNotes
-                      ? "Notes were not generated. \(error)"
-                      : "Recreate did not finish; the previous notes were kept. \(error)",
-                      systemImage: "exclamationmark.triangle.fill")
+            } else if let message = record.readyErrorMessage(
+                recreating: selectedIsReprocessing) {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout).foregroundStyle(VeloraStatus.warning)
+            }
+            ForEach(Self.issueMessages(record), id: \.self) { message in
+                Label(message, systemImage: "exclamationmark.circle")
                     .font(.callout).foregroundStyle(VeloraStatus.warning)
             }
 
-            // No inner ScrollView: a same-axis nested scroller inside the
-            // grouped form captures wheel events and strands the outer
-            // scroll. The form itself scrolls the full transcript.
             VStack(alignment: .leading, spacing: 12) {
                 if !record.notes.summary.isEmpty {
                     detailSection("Summary", text: record.notes.summary)
@@ -320,6 +387,37 @@ struct MeetingsSettingsView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Why a ready meeting's transcript or notes are one-sided or partial.
+    /// A skipped track no longer fails the meeting, so it must say so here.
+    private static func issueMessages(_ record: MeetingRecord) -> [String] {
+        var messages: [String] = []
+        switch record.micIssue {
+        case .silent:
+            messages.append("Your microphone recorded only silence, so the transcript has no lines from you. Check the input device before the next call.")
+        case .tooShort:
+            messages.append("Your microphone recorded less than 0.2 seconds of audio, so the transcript has no lines from you.")
+        case .failed(let error):
+            messages.append("Your microphone track could not be transcribed: \(error)")
+        case nil:
+            break
+        }
+        switch record.systemIssue {
+        case .silent:
+            messages.append("Computer audio recorded only silence, so the transcript has no lines from the other side.")
+        case .tooShort:
+            messages.append("Computer audio recorded less than 0.2 seconds of audio, so the transcript has no lines from the other side.")
+        case .failed(let error):
+            messages.append("Computer audio could not be transcribed: \(error)")
+        case nil:
+            break
+        }
+        if record.notes.partial {
+            messages.append("Part of the transcript could not be summarized, so these notes may be incomplete.")
+        }
+        return messages
     }
 
     private func transcriptSection(_ record: MeetingRecord) -> some View {
@@ -385,20 +483,19 @@ struct MeetingsSettingsView: View {
         let store = store
         DispatchQueue.global(qos: .userInitiated).async {
             let fresh = store.recentMetadata(limit: 100)
+            // Reload keeps an open detail page; it never opens one itself.
             let resolvedID = requestedID.flatMap { id in
                 fresh.contains(where: { $0.id == id }) ? id : nil
-            } ?? fresh.first?.id
+            }
             let selected = resolvedID.flatMap { store.recordMetadata(id: $0) }
             let recoverable = selected.map {
-                store.hasUsableAudio(relativePath: $0.micPath)
-                    || store.hasUsableAudio(relativePath: $0.systemPath)
+                store.hasAnyUsableAudio(for: $0)
             } ?? false
             let canRecreate = selected.map {
                 store.hasAllCapturedAudio(for: $0)
             } ?? false
             let canRetryNotes = selected.map {
-                store.hasPendingNotes(meetingID: $0.id)
-                    && store.hasCommittedSegments(meetingID: $0.id)
+                store.canRetryNotes(meetingID: $0.id)
             } ?? false
             let reprocessing = resolvedID.map {
                 store.isReprocessing(meetingID: $0)
@@ -435,15 +532,13 @@ struct MeetingsSettingsView: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let selected = store.recordMetadata(id: id)
             let recoverable = selected.map {
-                store.hasUsableAudio(relativePath: $0.micPath)
-                    || store.hasUsableAudio(relativePath: $0.systemPath)
+                store.hasAnyUsableAudio(for: $0)
             } ?? false
             let canRecreate = selected.map {
                 store.hasAllCapturedAudio(for: $0)
             } ?? false
             let canRetryNotes = selected.map {
-                store.hasPendingNotes(meetingID: $0.id)
-                    && store.hasCommittedSegments(meetingID: $0.id)
+                store.canRetryNotes(meetingID: $0.id)
             } ?? false
             let reprocessing = store.isReprocessing(meetingID: id)
             DispatchQueue.main.async {
@@ -455,6 +550,13 @@ struct MeetingsSettingsView: View {
                 selectedIsReprocessing = reprocessing
             }
         }
+    }
+
+    private func closeDetail() {
+        metadataLoadToken = UUID()
+        selectedID = nil
+        selectedRecord = nil
+        resetTranscript()
     }
 
     private func refreshSearch() {
@@ -572,7 +674,7 @@ struct MeetingPreferenceRows: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
 
-    static let footer = "Detection checks local call-app and microphone state and, with Accessibility enabled, recognized meeting addresses and titles in browser windows. Meeting addresses become a temporary private identity and are never logged or saved. Every recording still needs Start Meeting Notes. Transcripts and notes stay until you delete them; the retention setting removes only audio."
+    static let footer = "Velora detects calls from local call apps, the microphone, and meeting pages in your browser, never saving meeting addresses, and records only after you choose Start Meeting Notes. The retention setting removes only audio; transcripts and notes stay until you delete them."
 
     var body: some View {
         Toggle("Suggest recording when a call is detected", isOn: $model.meetingSuggestions)
@@ -639,7 +741,7 @@ struct MeetingNotesPromptEditor: View {
             .background(RoundedRectangle(cornerRadius: VeloraRadius.tile).fill(VeloraPanel.card))
             .overlay(RoundedRectangle(cornerRadius: VeloraRadius.tile).strokeBorder(Color(.separatorColor)))
             HStack(alignment: .top) {
-                Text("Shapes how notes read — tone, focus, structure. Notes always come back as a summary, decisions, and action items, generated on this Mac.")
+                Text("Shapes the tone, focus, and structure of notes. Notes always come back as a summary, decisions, and action items, generated on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()

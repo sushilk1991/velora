@@ -102,6 +102,8 @@ final class LocalAgentAccessRevocationObserver {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let terminationWatchdogBase: TimeInterval = 8
     private static let meetingWatchdogExtension: TimeInterval = 52
+    /// Long enough to read the silent-microphone notice mid-meeting.
+    private static let meetingSilenceNoticeSeconds: TimeInterval = 4
 
     private let config = AppConfig.shared
     private let supervisor = EngineSupervisor()
@@ -241,6 +243,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         meetingCoordinator.onRecordingEnded = { [weak self] outcome in
             self?.meetingEndOutcome = outcome
+        }
+        meetingCoordinator.onMicrophoneSilence = { [weak self] silent in
+            // A silent mic records a meeting with no "Me" lines. Interrupt
+            // the meeting pill briefly, then give it back unless another
+            // state (dictation, meeting end) took the HUD meanwhile.
+            guard let self, silent, let meetingState = self.meetingOwnedHUDState,
+                  self.hud.model.state == meetingState else { return }
+            let notice = HUDState.notice(
+                symbol: "mic.slash.fill", message: "Mic is silent. Check input")
+            self.meetingHUDDismiss?.cancel()
+            self.meetingOwnedHUDState = notice
+            self.hud.transition(to: notice)
+            let item = DispatchWorkItem { [weak self] in
+                guard let self, self.hud.model.state == notice else { return }
+                self.meetingOwnedHUDState = meetingState
+                self.hud.transition(to: meetingState)
+            }
+            self.meetingHUDDismiss = item
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.meetingSilenceNoticeSeconds, execute: item)
         }
         meetingCoordinator.onStateChange = { [weak self] state in
             guard let self else { return }

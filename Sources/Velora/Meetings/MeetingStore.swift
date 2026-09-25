@@ -66,9 +66,39 @@ struct MeetingNotes: Equatable {
     var summary: String = ""
     var decisions: [String] = []
     var actionItems: [String] = []
+    /// True when the engine had to skip some transcript sections, so these
+    /// notes cover only the rest of the meeting.
+    var partial = false
 
     var isEmpty: Bool {
         summary.isEmpty && decisions.isEmpty && actionItems.isEmpty
+    }
+}
+
+/// The stage a processing job failed or was cancelled in; it picks the row
+/// the failure leaves (see `MeetingStore.markCancelled`).
+enum MeetingJobStage {
+    case transcription
+    case notes
+    case recreate
+}
+
+/// Why one captured track added no lines to the transcript. Stored per
+/// track so a meeting names the missing side instead of failing whole.
+enum MeetingTrackIssue: Equatable {
+    /// The device delivered digital silence (a lid-closed built-in mic, a
+    /// muted interface): the file is valid but holds no sound.
+    case silent
+    /// The file is valid but shorter than the engine's minimum (server.py
+    /// `MEETING_MIN_TRACK_S`, 0.2 s): capture stopped right after it began.
+    case tooShort
+    /// The engine could not transcribe the track; the message says why.
+    case failed(String)
+
+    /// A silent or too-short track holds no speech: it adds no lines, and
+    /// Recreate requires none from it.
+    var holdsNoSpeech: Bool {
+        self == .silent || self == .tooShort
     }
 }
 
@@ -84,9 +114,31 @@ struct MeetingRecord: Identifiable, Equatable {
     var micPath: String?
     var systemPath: String?
     var error: String?
+    var micIssue: MeetingTrackIssue?
+    var systemIssue: MeetingTrackIssue?
     var segments: [MeetingSegment] = []
 
     var durationMs: Int { max(0, Int(endedAt.timeIntervalSince(startedAt) * 1_000)) }
+
+    /// The warning on a ready meeting that carries an error. A ready row
+    /// keeps an error only when a later operation failed; name that one,
+    /// and what the row still holds:
+    ///
+    ///     Recreate failed (its staged job remains) → previous notes kept
+    ///     notes failed after partial notes         → notes incomplete
+    ///     notes failed with none saved             → no notes
+    ///
+    /// `recreating` is `MeetingStore.isReprocessing(meetingID:)`.
+    func readyErrorMessage(recreating: Bool) -> String? {
+        guard status == .ready, let error else { return nil }
+        if !recreating && notes.partial {
+            return "Notes are incomplete. Retry Notes did not finish them. \(error)"
+        }
+        if !recreating && notes.isEmpty {
+            return "Notes were not generated. \(error)"
+        }
+        return "Recreate did not finish; the previous notes were kept. \(error)"
+    }
 
     var formattedTranscript: String {
         segments.sorted {
@@ -123,6 +175,34 @@ struct MeetingSearchHit: Identifiable, Equatable {
     let title: String
     let startedAt: Date
     let snippet: String
+}
+
+/// The track files the engine's meeting loader decodes (engine media.py,
+/// `load_meeting_media`): mono or stereo uncompressed PCM in CAF
+/// (`_MEETING_PCM_SAMPLE_BYTES`), or a legacy `them.m4a`, which it hands to
+/// its generic decoder. Retry, Recreate and the processor all ask
+/// `MeetingStore.hasUsableAudio`, which applies this, so none of them can
+/// offer a track the engine would reject.
+enum MeetingTrackFormat {
+    private static let containerExtension = "caf"
+    private static let legacyExtension = "m4a"
+    private static let channelCounts: ClosedRange<UInt32> = 1...2
+    private static let integerBitDepths: Set<UInt32> = [16, 24, 32]
+    private static let floatBitDepths: Set<UInt32> = [32, 64]
+
+    static func isSupported(_ file: AVAudioFile) -> Bool {
+        let description = file.fileFormat.streamDescription.pointee
+        guard channelCounts.contains(description.mChannelsPerFrame) else { return false }
+        let fileExtension = file.url.pathExtension.lowercased()
+        if fileExtension == legacyExtension {
+            return true
+        }
+        guard fileExtension == containerExtension,
+              description.mFormatID == kAudioFormatLinearPCM else { return false }
+        let isFloat = description.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        let depths = isFloat ? floatBitDepths : integerBitDepths
+        return depths.contains(description.mBitsPerChannel)
+    }
 }
 
 /// Separate owner-only meeting store. Dictation history and meeting memory
@@ -183,7 +263,11 @@ final class MeetingStore {
                 mic_path TEXT,
                 system_path TEXT,
                 error TEXT,
-                notes_pending INTEGER NOT NULL DEFAULT 0
+                notes_pending INTEGER NOT NULL DEFAULT 0,
+                mic_issue TEXT,
+                system_issue TEXT,
+                notes_partial INTEGER NOT NULL DEFAULT 0,
+                notes_auto_retried INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS meeting_segments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -224,19 +308,48 @@ final class MeetingStore {
             db,
             "ALTER TABLE meetings ADD COLUMN notes_pending INTEGER NOT NULL DEFAULT 0;",
             nil, nil, nil)
-        // Recover only the legacy error text emitted by the notes worker. Do
-        // not infer from arbitrary errors: a transcription failure may also
-        // have committed some segments and must resume the remaining audio.
-        sqlite3_exec(db, """
-            UPDATE meetings SET status = 'processing', notes_pending = 1
-            WHERE notes_pending = 0
-              AND summary = '' AND decisions = '' AND action_items = ''
-              AND error LIKE 'local notes generation failed%'
-              AND EXISTS (
-                  SELECT 1 FROM meeting_segments
-                  WHERE meeting_id = meetings.id LIMIT 1
-              );
-            """, nil, nil, nil)
+        // Per-track outcomes, partial notes and the spent automatic notes
+        // retry arrived later still; the same duplicate-column rule applies.
+        for column in [
+            "mic_issue TEXT", "system_issue TEXT",
+            "notes_partial INTEGER NOT NULL DEFAULT 0",
+        ] {
+            sqlite3_exec(db, "ALTER TABLE meetings ADD COLUMN \(column);", nil, nil, nil)
+        }
+        // The automatic notes retry upgrade runs once, as one transaction:
+        //
+        //   add notes_auto_retried   fails as a duplicate column once done
+        //   pending rows -> retried  a cancelled notes job was stored like
+        //                            a failed one; neither is restarted
+        //   legacy notes failures    -> ready + notes pending, so each takes
+        //                            the one claimed, quiet automatic retry
+        //
+        // A failure at any step rolls all of it back and the next launch
+        // redoes it. The legacy rewrite must not run again later: a
+        // Recreate whose notes failed leaves the same error text.
+        _ = transactionOnQueue {
+            sqlite3_exec(
+                db,
+                "ALTER TABLE meetings ADD COLUMN notes_auto_retried INTEGER NOT NULL DEFAULT 0;",
+                nil, nil, nil) == SQLITE_OK
+                && sqlite3_exec(
+                    db,
+                    "UPDATE meetings SET notes_auto_retried = 1 WHERE notes_pending = 1;",
+                    nil, nil, nil) == SQLITE_OK
+                // Only the legacy error text of the notes worker: a
+                // transcription failure may also have committed segments
+                // and must resume the remaining audio instead.
+                && sqlite3_exec(db, """
+                    UPDATE meetings SET status = 'ready', notes_pending = 1
+                    WHERE notes_pending = 0
+                      AND summary = '' AND decisions = '' AND action_items = ''
+                      AND error LIKE 'local notes generation failed%'
+                      AND EXISTS (
+                          SELECT 1 FROM meeting_segments
+                          WHERE meeting_id = meetings.id LIMIT 1
+                      );
+                    """, nil, nil, nil) == SQLITE_OK
+        }
         ftsAvailable = sqlite3_exec(db, """
             CREATE VIRTUAL TABLE IF NOT EXISTS meeting_search USING fts5(
                 meeting_id UNINDEXED, title, transcript, summary, decisions, action_items,
@@ -487,30 +600,42 @@ final class MeetingStore {
         }
     }
 
-    func complete(meetingID: String, notes: MeetingNotes) {
+    /// False when SQLite refused the write (disk full, a lock held past the
+    /// busy timeout); the row then keeps its previous state.
+    @discardableResult
+    func complete(meetingID: String, notes: MeetingNotes) -> Bool {
         queue.sync { [self] in
-            guard db != nil else { return }
+            guard db != nil else { return false }
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, """
                 UPDATE meetings SET status = ?, summary = ?, decisions = ?,
-                    action_items = ?, error = NULL, notes_pending = 0 WHERE id = ?;
-                """, -1, &stmt, nil) == SQLITE_OK else { return }
+                    action_items = ?, error = NULL, notes_pending = 0,
+                    notes_partial = ? WHERE id = ?;
+                """, -1, &stmt, nil) == SQLITE_OK else { return false }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, MeetingStatus.ready.rawValue)
             bindText(stmt, 2, notes.summary)
             bindText(stmt, 3, notes.decisions.joined(separator: "\n"))
             bindText(stmt, 4, notes.actionItems.joined(separator: "\n"))
-            bindText(stmt, 5, meetingID)
-            if sqlite3_step(stmt) == SQLITE_DONE { refreshSearchOnQueue(meetingID: meetingID) }
+            sqlite3_bind_int(stmt, 5, notes.partial ? 1 : 0)
+            bindText(stmt, 6, meetingID)
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                NSLog("Velora: meeting notes save failed: %@", lastError)
+                return false
+            }
+            refreshSearchOnQueue(meetingID: meetingID)
+            return true
         }
     }
 
-    /// Commits the shadow transcript and its notes together. Any failure rolls
-    /// back to the previously completed transcript and notes.
+    /// Commits the shadow transcript, its notes and its track outcomes
+    /// together. Any failure rolls back to the previously completed
+    /// transcript, notes and outcomes.
     func completeReprocess(
         meetingID: String,
         notes: MeetingNotes,
-        requiredSpeakers: [MeetingSpeaker]
+        requiredSpeakers: [MeetingSpeaker],
+        issues: [MeetingSpeaker: MeetingTrackIssue]
     ) -> Bool {
         queue.sync { [self] in
             let committed = transactionOnQueue {
@@ -539,13 +664,18 @@ final class MeetingStore {
                 var update: OpaquePointer?
                 guard sqlite3_prepare_v2(db, """
                     UPDATE meetings SET status = ?, summary = ?, decisions = ?,
-                        action_items = ?, error = NULL, notes_pending = 0 WHERE id = ?;
+                        action_items = ?, error = NULL, notes_pending = 0,
+                        notes_partial = ?, mic_issue = ?, system_issue = ?
+                    WHERE id = ?;
                     """, -1, &update, nil) == SQLITE_OK else { return false }
                 bindText(update, 1, MeetingStatus.ready.rawValue)
                 bindText(update, 2, notes.summary)
                 bindText(update, 3, notes.decisions.joined(separator: "\n"))
                 bindText(update, 4, notes.actionItems.joined(separator: "\n"))
-                bindText(update, 5, meetingID)
+                sqlite3_bind_int(update, 5, notes.partial ? 1 : 0)
+                bindText(update, 6, Self.issueText(issues[.me]))
+                bindText(update, 7, Self.issueText(issues[.them]))
+                bindText(update, 8, meetingID)
                 let updated = sqlite3_step(update) == SQLITE_DONE
                 sqlite3_finalize(update)
                 guard updated else { return false }
@@ -564,10 +694,79 @@ final class MeetingStore {
     /// A failed Recreate must not hide the last committed meeting from search.
     /// Keep its staging cursor for Retry, and restore `ready` only when real
     /// committed content exists; a first-time failure remains `failed`.
-    func markReprocessFailed(meetingID: String, error: String) {
+    @discardableResult
+    func markReprocessFailed(meetingID: String, error: String) -> Bool {
         queue.sync { [self] in
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, """
+            failOnQueue(meetingID: meetingID, stage: .recreate, error: error)
+        }
+    }
+
+    @discardableResult
+    func markFailed(meetingID: String, error: String) -> Bool {
+        queue.sync { [self] in
+            failOnQueue(meetingID: meetingID, stage: .transcription, error: error)
+        }
+    }
+
+    /// Notes are downstream of a durable transcript. A notes-model failure
+    /// must not hide that transcript from meeting memory or make recovery
+    /// depend on retained audio that notes generation never reads.
+    @discardableResult
+    func markNotesFailed(meetingID: String, error: String) -> Bool {
+        queue.sync { [self] in
+            guard failOnQueue(meetingID: meetingID, stage: .notes, error: error) else {
+                return false
+            }
+            refreshSearchOnQueue(meetingID: meetingID)
+            return true
+        }
+    }
+
+    /// Cancel ends the job and spends the automatic notes retry in one
+    /// transaction. Written apart, a half-saved cancel came back as an
+    /// automatic retry or a resumed processing row. False when SQLite
+    /// refused it; the caller must then hold the cancel itself.
+    func markCancelled(meetingID: String, stage: MeetingJobStage, error: String) -> Bool {
+        queue.sync { [self] in
+            let committed = transactionOnQueue {
+                failOnQueue(meetingID: meetingID, stage: stage, error: error)
+                    && executeOnQueue(
+                        "UPDATE meetings SET notes_auto_retried = 1 WHERE id = ?;",
+                        meetingID: meetingID)
+            }
+            if committed && stage == .notes {
+                refreshSearchOnQueue(meetingID: meetingID)
+            }
+            return committed
+        }
+    }
+
+    /// The row a failed job leaves, by stage:
+    ///
+    ///     transcription -> failed, notes not pending
+    ///     notes         -> ready with notes pending (Retry Notes),
+    ///                      or failed when no transcript exists
+    ///     recreate      -> ready while committed content exists (the
+    ///                      staging cursor stays for Retry), else failed
+    private func failOnQueue(
+        meetingID: String, stage: MeetingJobStage, error: String
+    ) -> Bool {
+        let sql: String
+        switch stage {
+        case .transcription:
+            sql = "UPDATE meetings SET status = 'failed', error = ?, notes_pending = 0 WHERE id = ?;"
+        case .notes:
+            sql = """
+                UPDATE meetings SET
+                    status = CASE WHEN EXISTS (
+                        SELECT 1 FROM meeting_segments
+                        WHERE meeting_id = meetings.id LIMIT 1
+                    ) THEN 'ready' ELSE 'failed' END,
+                    error = ?, notes_pending = 1
+                WHERE id = ?;
+                """
+        case .recreate:
+            sql = """
                 UPDATE meetings SET
                     status = CASE
                         WHEN summary != '' OR decisions != '' OR action_items != ''
@@ -577,50 +776,14 @@ final class MeetingStore {
                         THEN 'ready' ELSE 'failed' END,
                     error = ?, notes_pending = 0
                 WHERE id = ?;
-                """, -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, String(error.prefix(1_000)))
-            bindText(stmt, 2, meetingID)
-            sqlite3_step(stmt)
+                """
         }
-    }
-
-    func markFailed(meetingID: String, error: String) {
-        queue.sync { [self] in
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(
-                db, "UPDATE meetings SET status = ?, error = ?, notes_pending = 0 WHERE id = ?;",
-                -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, MeetingStatus.failed.rawValue)
-            bindText(stmt, 2, String(error.prefix(1_000)))
-            bindText(stmt, 3, meetingID)
-            sqlite3_step(stmt)
-        }
-    }
-
-    /// Notes are downstream of a durable transcript. A notes-model failure
-    /// must not hide that transcript from meeting memory or make recovery
-    /// depend on retained audio that notes generation never reads.
-    func markNotesFailed(meetingID: String, error: String) {
-        queue.sync { [self] in
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, """
-                UPDATE meetings SET
-                    status = CASE WHEN EXISTS (
-                        SELECT 1 FROM meeting_segments
-                        WHERE meeting_id = meetings.id LIMIT 1
-                    ) THEN 'ready' ELSE 'failed' END,
-                    error = ?, notes_pending = 1
-                WHERE id = ?;
-                """, -1, &stmt, nil) == SQLITE_OK else { return }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, String(error.prefix(1_000)))
-            bindText(stmt, 2, meetingID)
-            if sqlite3_step(stmt) == SQLITE_DONE {
-                refreshSearchOnQueue(meetingID: meetingID)
-            }
-        }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, String(error.prefix(1_000)))
+        bindText(stmt, 2, meetingID)
+        return sqlite3_step(stmt) == SQLITE_DONE
     }
 
     func markProcessing(meetingID: String, notesPending: Bool = false) {
@@ -634,6 +797,43 @@ final class MeetingStore {
             sqlite3_bind_int(stmt, 2, notesPending ? 1 : 0)
             bindText(stmt, 3, meetingID)
             sqlite3_step(stmt)
+        }
+    }
+
+    /// Records how one track's transcription ended; nil clears an earlier
+    /// issue after a successful Retry.
+    func setTrackIssue(
+        meetingID: String, speaker: MeetingSpeaker, issue: MeetingTrackIssue?
+    ) {
+        let column = speaker.isRemote ? "system_issue" : "mic_issue"
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "UPDATE meetings SET \(column) = ? WHERE id = ?;",
+                -1, &stmt, nil) == SQLITE_OK else { return }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, Self.issueText(issue))
+            bindText(stmt, 2, meetingID)
+            sqlite3_step(stmt)
+        }
+    }
+
+    /// Claims the one automatic notes retry a stalled meeting gets (see
+    /// `stalledNotes`): one conditional UPDATE spends the marker and marks
+    /// the row processing. False when SQLite refused the write or the row
+    /// no longer qualifies; the retry must not be queued then, or nothing
+    /// would stop it on every relaunch. (A cancel spends the marker too;
+    /// see `markCancelled`.)
+    func claimNotesAutoRetry(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            executeOnQueue("""
+                UPDATE meetings SET
+                    status = 'processing', error = NULL,
+                    notes_pending = 1, notes_auto_retried = 1
+                WHERE id = ? AND status = 'ready' AND notes_pending = 1
+                  AND notes_auto_retried = 0;
+                """, meetingID: meetingID)
+                && sqlite3_changes(db) == 1
         }
     }
 
@@ -777,6 +977,42 @@ final class MeetingStore {
         }
     }
 
+    /// True once the meeting's one automatic notes retry is spent. A
+    /// processing notes job with it spent was, in practice, that automatic
+    /// retry, so a crash-resume keeps it quiet. (A user Retry Notes after a
+    /// cancel also matches; it then resumes quietly too.)
+    func notesAutoRetried(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(
+                db, "SELECT notes_auto_retried FROM meetings WHERE id = ? LIMIT 1;",
+                -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, meetingID)
+            return sqlite3_step(stmt) == SQLITE_ROW
+                && sqlite3_column_int(stmt, 0) == 1
+        }
+    }
+
+    /// Retry Notes regenerates notes from the saved transcript: notes that
+    /// never finished, or that cover only part of it.
+    func canRetryNotes(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, """
+                SELECT 1 FROM meetings
+                WHERE id = ? AND (notes_pending = 1 OR notes_partial = 1)
+                  AND EXISTS (
+                      SELECT 1 FROM meeting_segments
+                      WHERE meeting_id = meetings.id LIMIT 1)
+                LIMIT 1;
+                """, -1, &stmt, nil) == SQLITE_OK else { return false }
+            defer { sqlite3_finalize(stmt) }
+            bindText(stmt, 1, meetingID)
+            return sqlite3_step(stmt) == SQLITE_ROW
+        }
+    }
+
     func recoverable() -> [MeetingRecord] {
         queue.sync { [self] in
             recordsOnQueue(
@@ -792,6 +1028,24 @@ final class MeetingStore {
         queue.sync { [self] in
             recordsOnQueue(
                 whereClause: "WHERE status = 'processing'",
+                bindings: [], limit: 100, includeSegments: false)
+        }
+    }
+
+    /// Ready transcripts whose notes failed, were never regenerated, and
+    /// have not had their one automatic retry. They sit outside
+    /// `resumable()` because a failure is user-driven by default.
+    func stalledNotes() -> [MeetingRecord] {
+        queue.sync { [self] in
+            recordsOnQueue(
+                whereClause: """
+                    WHERE status = 'ready' AND notes_pending = 1
+                      AND notes_auto_retried = 0
+                      AND summary = '' AND decisions = '' AND action_items = ''
+                      AND EXISTS (
+                          SELECT 1 FROM meeting_segments
+                          WHERE meeting_id = meetings.id LIMIT 1)
+                    """,
                 bindings: [], limit: 100, includeSegments: false)
         }
     }
@@ -856,19 +1110,27 @@ final class MeetingStore {
 
     /// A prepared CAF header exists even when capture wrote zero frames, and
     /// random/corrupt bytes can also exceed a size threshold. Retry is offered
-    /// only when Core Audio can open the container and observe real frames.
+    /// only when Core Audio can open the container, observe real frames, and
+    /// the engine's loader accepts the format (`MeetingTrackFormat`).
     func hasUsableAudio(relativePath: String?) -> Bool {
         guard let url = audioURL(relativePath: relativePath),
               let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
               size > 4_096,
               let audio = try? AVAudioFile(forReading: url)
         else { return false }
-        return audio.length > 0
+        return audio.length > 0 && MeetingTrackFormat.isSupported(audio)
+    }
+
+    /// Retry needs one track the engine can decode; the other side may be
+    /// missing or unreadable and is then reported as a track issue.
+    func hasAnyUsableAudio(for record: MeetingRecord) -> Bool {
+        [record.micPath, record.systemPath].contains { hasUsableAudio(relativePath: $0) }
     }
 
     /// Recreate must retain every side that was originally captured. A single
     /// readable track is sufficient for a first pass, but not for replacing an
-    /// existing two-sided transcript.
+    /// existing two-sided transcript. A track that recorded only silence is
+    /// still readable, so it does not block Recreate.
     func hasAllCapturedAudio(for record: MeetingRecord) -> Bool {
         let captured = [record.micPath, record.systemPath].compactMap { $0 }
         guard !captured.isEmpty else { return false }
@@ -890,7 +1152,8 @@ final class MeetingStore {
     ) -> [MeetingRecord] {
         let sql = """
             SELECT id, title, started_at, ended_at, source_app, calendar_event_id,
-                   status, summary, decisions, action_items, mic_path, system_path, error
+                   status, summary, decisions, action_items, mic_path, system_path, error,
+                   mic_issue, system_issue, notes_partial
             FROM meetings \(whereClause) ORDER BY started_at DESC LIMIT ?;
             """
         var stmt: OpaquePointer?
@@ -914,10 +1177,13 @@ final class MeetingStore {
                 notes: MeetingNotes(
                     summary: columnText(stmt, 7) ?? "",
                     decisions: Self.lines(columnText(stmt, 8)),
-                    actionItems: Self.lines(columnText(stmt, 9))),
+                    actionItems: Self.lines(columnText(stmt, 9)),
+                    partial: sqlite3_column_int(stmt, 15) == 1),
                 micPath: columnText(stmt, 10),
                 systemPath: columnText(stmt, 11),
                 error: columnText(stmt, 12),
+                micIssue: Self.issue(from: columnText(stmt, 13)),
+                systemIssue: Self.issue(from: columnText(stmt, 14)),
                 segments: includeSegments ? segmentsOnQueue(meetingID: id) : []))
         }
         return output
@@ -1107,6 +1373,32 @@ final class MeetingStore {
         guard !tokens.isEmpty else { return nil }
         return tokens.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }
             .joined(separator: " AND ")
+    }
+
+    // Track issues persist as "silent", "too_short" or "failed:<engine message>".
+    private static let silentIssueText = "silent"
+    private static let tooShortIssueText = "too_short"
+    private static let failedIssuePrefix = "failed:"
+
+    private static func issueText(_ issue: MeetingTrackIssue?) -> String? {
+        switch issue {
+        case nil:
+            return nil
+        case .silent:
+            return silentIssueText
+        case .tooShort:
+            return tooShortIssueText
+        case .failed(let message):
+            return failedIssuePrefix + String(message.prefix(1_000))
+        }
+    }
+
+    private static func issue(from text: String?) -> MeetingTrackIssue? {
+        guard let text else { return nil }
+        if text == silentIssueText { return .silent }
+        if text == tooShortIssueText { return .tooShort }
+        guard text.hasPrefix(failedIssuePrefix) else { return nil }
+        return .failed(String(text.dropFirst(failedIssuePrefix.count)))
     }
 
     private static func lines(_ value: String?) -> [String] {
