@@ -93,7 +93,7 @@ enum PillVisibility: CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .always: return "Always"
-        case .whileDictating: return "While dictating"
+        case .whileDictating: return "While Dictating"
         case .never: return "Never"
         }
     }

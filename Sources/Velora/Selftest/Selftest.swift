@@ -8064,8 +8064,8 @@ enum Selftest {
                "While dictating stores shown and hidden when idle")
         expect(!PillVisibility.never.visible && PillVisibility.never.alwaysVisible(keeping: true),
                "Never hides the pill and keeps the idle choice for when it comes back")
-        expect(PillVisibility.allCases.map(\.title) == ["Always", "While dictating", "Never"],
-               "the picker reads Always, While dictating, Never")
+        expect(PillVisibility.allCases.map(\.title) == ["Always", "While Dictating", "Never"],
+               "the picker's menu items are Title Case: Always, While Dictating, Never")
     }
 
     // MARK: - Menubar + pill menus
