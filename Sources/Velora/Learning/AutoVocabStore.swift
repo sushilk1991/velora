@@ -4,9 +4,8 @@ import Foundation
 /// Manages `~/.velora/auto_learned.json` — the vocabulary the ENGINE's idle
 /// miner extracts from dictation history (smartness-v2 §4). The engine owns the
 /// file and all mining bookkeeping (`checkpoint_id`, candidate counts); the app
-/// only performs the user-facing management actions: list the active terms,
-/// delete one, delete all. Deleted terms are appended to `banned` so the miner
-/// never re-learns them.
+/// only exchanges confirmed terms and bans with `DictionaryRepository`. A term
+/// the user deletes lands in `banned` so the miner never re-learns it.
 ///
 /// Writes are surgical: the JSON is read as a plain dictionary and only the
 /// keys the user's action owns (`terms`, `candidates`, `banned`) are replaced —
@@ -36,17 +35,6 @@ final class AutoVocabStore {
     /// Test/repository hook: point the store at an isolated projection file.
     init(url: URL) {
         self.url = url
-    }
-
-    /// Active auto-learned terms, alphabetized for display. Reads fresh from
-    /// disk on every call so the Settings list reflects the engine's latest
-    /// mining pass; a missing or corrupt file (miner hasn't run yet) is simply
-    /// an empty list. The stored order is never rewritten — only the copy shown
-    /// to the user is sorted, because the engine's order drives its eviction.
-    func terms() -> [String] {
-        guard let root = read() else { return [] }
-        let active = (root["terms"] as? [String]) ?? []
-        return active.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
     }
 
     /// Only promoted terms and explicit bans are portable. Candidates and the
@@ -97,34 +85,6 @@ final class AutoVocabStore {
         }
     }
 
-    /// Deletes one term: removed from the active list AND from the miner's
-    /// pending candidates, then appended to `banned` so it can't come back.
-    func remove(_ term: String) {
-        guard let validated = try? DictionaryValue(term).text else { return }
-        mutate(createIfMissing: false) { root in
-            let key = Self.normalized(validated)
-            var active = (root["terms"] as? [String]) ?? []
-            active.removeAll { Self.normalized($0) == key }
-            root["terms"] = active
-            if var candidates = root["candidates"] as? [String: Any] {
-                candidates = candidates.filter { Self.normalized($0.key) != key }
-                root["candidates"] = candidates
-            }
-            root["banned"] = self.appendingBanned([validated], in: root)
-        }
-    }
-
-    /// "Forget all": every active term moves to `banned` (so the miner can't
-    /// re-learn the lot on its next pass) and the working sets are emptied.
-    func clear() {
-        mutate(createIfMissing: false) { root in
-            let active = (root["terms"] as? [String]) ?? []
-            root["banned"] = self.appendingBanned(active, in: root)
-            root["terms"] = [String]()
-            root["candidates"] = [String: Any]()
-        }
-    }
-
     // MARK: - IO
 
     private func read() -> [String: Any]? {
@@ -170,10 +130,7 @@ final class AutoVocabStore {
     /// includes the fresh read, mutation, and atomic replace, so neither writer
     /// can publish a stale whole-file view over the other.
     @discardableResult
-    private func mutate(
-        createIfMissing: Bool = true,
-        _ body: (inout [String: Any]) -> Void
-    ) -> Bool {
+    private func mutate(_ body: (inout [String: Any]) -> Void) -> Bool {
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
@@ -194,9 +151,6 @@ final class AutoVocabStore {
             return false
         }
         defer { flock(descriptor, LOCK_UN) }
-        guard createIfMissing || FileManager.default.fileExists(atPath: url.path) else {
-            return true
-        }
         var root = read() ?? ["version": 1]
         body(&root)
         return write(root)

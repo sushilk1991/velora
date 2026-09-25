@@ -6,11 +6,10 @@ exact legacy behavior when streaming_cleanup is off."""
 # ruff: noqa: F811
 
 import asyncio
-import sys
-from pathlib import Path
 
 import pytest
 
+from test_cleanup_process import fixture_command
 from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 
 import velora_engine.cleanup_process as cleanup_process_mod
@@ -262,10 +261,7 @@ async def test_real_cleanup_timeout_finalizes_then_recovers_for_next_session(
     eng, sock = engine
     cleanup = CleanupProcess(
         "fake",
-        worker_command=[
-            sys.executable,
-            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
-        ],
+        worker_command=fixture_command(),
         hard_timeout_grace_s=0.05,
         queue_timeout_s=0.2,
         cancel_grace_s=0.1,
@@ -395,10 +391,7 @@ async def test_final_tail_cancel_then_merge_keeps_real_worker_warm(
     eng, sock = engine
     cleanup = CleanupProcess(
         "fake",
-        worker_command=[
-            sys.executable,
-            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
-        ],
+        worker_command=fixture_command(),
         queue_timeout_s=0.2,
         cancel_grace_s=0.2,
     )
@@ -449,10 +442,7 @@ async def test_romanize_fallback_waits_for_real_chunk_cancellation(
     eng.config.data["romanize_output"] = True
     cleanup = CleanupProcess(
         "fake",
-        worker_command=[
-            sys.executable,
-            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
-        ],
+        worker_command=fixture_command(),
         queue_timeout_s=0.2,
         cancel_grace_s=0.2,
     )
@@ -499,10 +489,7 @@ async def test_stitch_mismatch_waits_for_real_chunk_cancellation(
     eng, sock = engine
     cleanup = CleanupProcess(
         "fake",
-        worker_command=[
-            sys.executable,
-            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
-        ],
+        worker_command=fixture_command(),
         queue_timeout_s=0.2,
         cancel_grace_s=0.2,
     )
@@ -839,10 +826,7 @@ async def test_retraction_merge_waits_for_real_worker_cancellation(
     eng, sock = engine
     cleanup = CleanupProcess(
         "fake",
-        worker_command=[
-            sys.executable,
-            str(Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"),
-        ],
+        worker_command=fixture_command(),
         queue_timeout_s=0.2,
         cancel_grace_s=0.2,
     )

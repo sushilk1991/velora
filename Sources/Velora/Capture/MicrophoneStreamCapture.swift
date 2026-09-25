@@ -59,13 +59,7 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
     private var observers: [NSObjectProtocol] = []
     private var failureReported = false
     private var stopping = false
-    private var running = false
     private var generation: UInt64 = 0
-
-    var isRunning: Bool {
-        stateLock.lock(); defer { stateLock.unlock() }
-        return running
-    }
 
     func start(
         persistedUID: String?,
@@ -77,7 +71,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
         generation &+= 1
         let requestedGeneration = generation
         stopping = true
-        running = false
         stateLock.unlock()
 
         lifecycleQueue.async { [weak self] in
@@ -142,9 +135,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
                     return
                 }
                 guard session.isRunning else { throw CaptureError.sessionDidNotStart }
-                self.stateLock.lock()
-                self.running = true
-                self.stateLock.unlock()
                 DispatchQueue.main.async { [weak self] in
                     guard self?.generationIsCurrent(requestedGeneration) == true else { return }
                     completion(.success(()))
@@ -165,7 +155,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
         generation &+= 1
         let stoppedGeneration = generation
         stopping = true
-        running = false
         stateLock.unlock()
         lifecycleQueue.async { [weak self] in
             guard let self else {
@@ -192,9 +181,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
         removeObservers()
         session = nil
         output = nil
-        stateLock.lock()
-        running = false
-        stateLock.unlock()
     }
 
     private func generationIsCurrent(_ value: UInt64) -> Bool {
@@ -216,7 +202,6 @@ final class MicrophoneStreamCapture: NSObject, AVCaptureAudioDataOutputSampleBuf
         let shouldReport = generation == failedGeneration
         if shouldReport {
             stopping = true
-            running = false
             selectedUID = nil
             onBuffer = nil
             onFailure = nil

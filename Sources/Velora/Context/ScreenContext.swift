@@ -1951,14 +1951,6 @@ enum ScreenContext {
         return nil
     }
 
-    /// Characters immediately around the focused selection/caret. Used only at
-    /// insertion time to prevent two dictations (or a dictation and existing
-    /// prose) from being concatenated without a separator.
-    static func selectionBoundary(of app: NSRunningApplication?) -> TextSelectionBoundary? {
-        guard let focused = focusedElement(of: app) else { return nil }
-        return selectionBoundary(of: focused)
-    }
-
     /// Boundary read for an already-snapshotted target. Keeping the AX element
     /// lets the inserter verify that focus did not move to another field in the
     /// same app while the range calls were in flight.

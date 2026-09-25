@@ -704,19 +704,34 @@ def test_empty_speech_decode_keeps_audio_pending(whisper):
     assert backend.take_new_segments() == ["recovered text"]
 
 
+# Prompted decodes that must trigger the prompt-free retry: the model looping
+# on the glossary, and a verbatim echo of the prompt.
+PROMPT_HALLUCINATION = {
+    "text": "Glossary. " * 20,
+    "segments": [
+        {
+            "text": "Glossary. " * 20,
+            "compression_ratio": 10.89,
+            "avg_logprob": -0.1,
+            "no_speech_prob": 0.0,
+        }
+    ],
+}
+PROMPT_ECHO = {
+    "text": "Glossary: project.md.",
+    "segments": [
+        {
+            "text": "Glossary: project.md.",
+            "compression_ratio": 0.5,
+            "avg_logprob": -0.1,
+            "no_speech_prob": 0.0,
+        }
+    ],
+}
+
+
 def test_prompt_hallucination_retries_speech_without_glossary(whisper):
-    hallucination = {
-        "text": "Glossary. " * 20,
-        "segments": [
-            {
-                "text": "Glossary. " * 20,
-                "compression_ratio": 10.89,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper([hallucination, "recovered speech"])
+    backend, fake = whisper([PROMPT_HALLUCINATION, "recovered speech"])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=speechy())
 
@@ -728,18 +743,7 @@ def test_prompt_hallucination_retries_speech_without_glossary(whisper):
 
 
 def test_prompt_echo_stripped_to_empty_retries_speech_without_glossary(whisper):
-    prompt_echo = {
-        "text": "Glossary: project.md.",
-        "segments": [
-            {
-                "text": "Glossary: project.md.",
-                "compression_ratio": 0.5,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper([prompt_echo, "recovered speech"])
+    backend, fake = whisper([PROMPT_ECHO, "recovered speech"])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=speechy())
 
@@ -750,18 +754,7 @@ def test_prompt_echo_stripped_to_empty_retries_speech_without_glossary(whisper):
 
 
 def test_prompt_hallucination_does_not_retry_silence(whisper):
-    hallucination = {
-        "text": "Glossary. " * 20,
-        "segments": [
-            {
-                "text": "Glossary. " * 20,
-                "compression_ratio": 10.89,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper([hallucination, "invented words"])
+    backend, fake = whisper([PROMPT_HALLUCINATION, "invented words"])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=quiet())
 
@@ -790,18 +783,7 @@ def test_non_prompt_empty_decode_on_noise_does_not_invent_words(whisper):
 
 
 def test_prompt_hallucination_on_stationary_noise_does_not_retry(whisper):
-    hallucination = {
-        "text": "Glossary. " * 20,
-        "segments": [
-            {
-                "text": "Glossary. " * 20,
-                "compression_ratio": 10.89,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper([hallucination, "invented words"])
+    backend, fake = whisper([PROMPT_HALLUCINATION, "invented words"])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=loud(0.02))
 
@@ -810,18 +792,7 @@ def test_prompt_hallucination_on_stationary_noise_does_not_retry(whisper):
 
 
 def test_prompt_free_retry_failure_degrades_to_empty_final(whisper):
-    hallucination = {
-        "text": "Glossary. " * 20,
-        "segments": [
-            {
-                "text": "Glossary. " * 20,
-                "compression_ratio": 10.89,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper([hallucination, RuntimeError("retry decode boom")])
+    backend, fake = whisper([PROMPT_HALLUCINATION, RuntimeError("retry decode boom")])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=speechy())
 
@@ -830,18 +801,7 @@ def test_prompt_free_retry_failure_degrades_to_empty_final(whisper):
 
 
 def test_prompt_retry_uses_session_snapshot_when_prompt_changes_mid_decode(whisper):
-    prompt_echo = {
-        "text": "Glossary: project.md.",
-        "segments": [
-            {
-                "text": "Glossary: project.md.",
-                "compression_ratio": 0.5,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper([prompt_echo, "recovered speech"])
+    backend, fake = whisper([PROMPT_ECHO, "recovered speech"])
     backend.initial_prompt = "Glossary: project.md."
 
     def replace_shared_prompt(call_number, _kwargs):
@@ -858,18 +818,7 @@ def test_prompt_retry_uses_session_snapshot_when_prompt_changes_mid_decode(whisp
 
 
 def test_prompt_hallucination_retries_whole_clip_after_segment_commit(whisper):
-    hallucination = {
-        "text": "Glossary. " * 20,
-        "segments": [
-            {
-                "text": "Glossary. " * 20,
-                "compression_ratio": 10.89,
-                "avg_logprob": -0.1,
-                "no_speech_prob": 0.0,
-            }
-        ],
-    }
-    backend, fake = whisper(["early segment", hallucination, "recovered whole clip"])
+    backend, fake = whisper(["early segment", PROMPT_HALLUCINATION, "recovered whole clip"])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, MIN_SEGMENT_S, chunk=speechy())
     feed_seconds(backend, SEGMENT_SILENCE_S, chunk=quiet())

@@ -352,8 +352,6 @@ final class DictionaryRepository: ObservableObject {
         do { try commit(next) } catch { lastError = error.localizedDescription }
     }
 
-    func snapshot() -> DictionaryDocument { document }
-
     /// Explicit account-boundary action: unlike normal remote sync/import,
     /// this replaces local portable state instead of merging it.
     func replace(with replacement: DictionaryDocument) throws {
@@ -420,17 +418,6 @@ final class DictionaryRepository: ObservableObject {
     func applyRemote(_ data: Data) -> Bool {
         do {
             let incoming = try DictionaryDocument.decode(data)
-            try mergeRemote(incoming)
-            return true
-        } catch {
-            lastError = error.localizedDescription
-            return false
-        }
-    }
-
-    @discardableResult
-    func applyRemote(_ incoming: DictionaryDocument) -> Bool {
-        do {
             try mergeRemote(incoming)
             return true
         } catch {

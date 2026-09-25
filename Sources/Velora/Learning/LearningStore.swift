@@ -327,23 +327,6 @@ final class LearningStore {
     /// How many corrections are currently learned (for the Settings UI).
     var count: Int { learned.replacements.count + learned.softReplacements.count }
 
-    /// One learned correction, for display/management in Settings.
-    struct Entry: Identifiable, Equatable {
-        var id: String { wrong }
-        let wrong: String
-        let right: String
-    }
-
-    /// Learned corrections (both tiers merged), alphabetized (reads fresh from
-    /// disk each call so the Settings list reflects edits made by the running
-    /// DictationController).
-    func entries() -> [Entry] {
-        load()
-        return learned.replacements.merging(learned.softReplacements) { hard, _ in hard }
-            .map { Entry(wrong: $0.key, right: $0.value) }
-            .sorted { $0.wrong.localizedCaseInsensitiveCompare($1.wrong) == .orderedAscending }
-    }
-
     /// Forgets a single learned correction (and any pending counts toward it).
     @discardableResult
     func remove(wrong: String) -> Bool {
@@ -387,10 +370,6 @@ final class LearningStore {
         learned.counts = [:]
         learned.vocabulary = standalone
         save()
-    }
-
-    func clear() {
-        clearCorrections()
     }
 
     // MARK: - Import / export (portable personal dictionary)

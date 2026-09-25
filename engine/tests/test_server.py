@@ -6,7 +6,6 @@ import contextlib
 import json
 import os
 import shutil
-import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -14,6 +13,8 @@ from unittest.mock import Mock
 
 import numpy as np
 import pytest
+
+from test_cleanup_process import fixture_command
 
 import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
@@ -374,10 +375,9 @@ async def test_killed_cleanup_child_returns_raw_and_engine_serves_next_dictation
     engine, monkeypatch
 ):
     eng, sock = engine
-    worker = Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"
     cleanup = CleanupProcess(
         "fake",
-        worker_command=[sys.executable, str(worker)],
+        worker_command=fixture_command(),
         hard_timeout_grace_s=0.05,
     )
     await cleanup.load_async("warm prompt")
@@ -434,12 +434,10 @@ async def test_killed_cleanup_child_returns_raw_and_engine_serves_next_dictation
 
 async def test_cleanup_model_swap_reaps_old_worker_before_ack(engine, monkeypatch):
     eng, sock = engine
-    worker = Path(__file__).parent / "fixtures" / "fake_cleanup_worker.py"
-
     def new_cleanup(model_id: str, **kwargs) -> CleanupProcess:
         return CleanupProcess(
             model_id,
-            worker_command=[sys.executable, str(worker)],
+            worker_command=fixture_command(),
             **kwargs,
         )
 
