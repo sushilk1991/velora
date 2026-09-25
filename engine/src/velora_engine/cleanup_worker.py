@@ -24,6 +24,7 @@ from .cleanup_ipc import (
     encode_cleanup_ipc_message,
     unpack_prefix_candidates,
 )
+from .decisions import DECISION_SYSTEM_PROMPT, DECISION_TIMEOUT_MS, Question
 
 log = logging.getLogger("velora.cleanup_worker")
 
@@ -60,7 +61,13 @@ class Worker:
             request_id = message.get("id")
             if not isinstance(request_id, str) or not isinstance(operation, str):
                 continue
-            task = asyncio.create_task(self._run(request_id, operation, message))
+            # Register the cancel event before the task first runs: a cancel
+            # line already buffered behind this request is read by the next
+            # loop pass, before `_run` would get a chance to register it.
+            cancel_event = threading.Event()
+            self._cancel_events[request_id] = cancel_event
+            task = asyncio.create_task(
+                self._run(request_id, operation, message, cancel_event))
             self._tasks[request_id] = task
             task.add_done_callback(lambda _task, key=request_id: self._tasks.pop(key, None))
         # Parent disappeared. Do not let a wedged non-daemon MLX executor keep
@@ -72,9 +79,8 @@ class Worker:
         request_id: str,
         operation: str,
         message: dict[str, Any],
+        cancel_event: threading.Event,
     ) -> None:
-        cancel_event = threading.Event()
-        self._cancel_events[request_id] = cancel_event
         try:
             if operation == "ping":
                 await self._respond(request_id, ok=True)
@@ -118,6 +124,19 @@ class Worker:
                     max_input_tokens=message.get("max_input_tokens"),
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
+                return
+            if operation == "decide":
+                result = await self.engine.decide(
+                    str(message.get("state") or ""),
+                    [Question.from_dict(item)
+                     for item in (message.get("questions") or [])],
+                    system_prompt=str(
+                        message.get("system_prompt") or DECISION_SYSTEM_PROMPT),
+                    timeout_ms=int(message.get("timeout_ms") or DECISION_TIMEOUT_MS),
+                    cancel_event=cancel_event,
+                    max_input_tokens=message.get("max_input_tokens"),
+                )
+                await self._respond(request_id, ok=True, result=result.to_dict())
                 return
             if operation == "prepare_prefix":
                 raw_candidates = message.get("candidates")

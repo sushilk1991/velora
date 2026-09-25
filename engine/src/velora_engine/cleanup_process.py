@@ -34,6 +34,16 @@ from .cleanup_ipc import (
     encode_cleanup_ipc_message,
     pack_prefix_candidates,
 )
+from .decisions import (
+    DECISION_SYSTEM_PROMPT,
+    DECISION_TIMEOUT_MS,
+    STATUS_CANCELLED,
+    STATUS_ERROR,
+    STATUS_TIMEOUT,
+    STATUS_UNAVAILABLE,
+    DecisionResult,
+    Question,
+)
 
 # The worker owns the native-generation watchdog and then must serialize its
 # timeout result over IPC. Give that response a small delivery margin so the
@@ -566,6 +576,125 @@ class CleanupProcess:
             raise
         except Exception as exc:  # noqa: BLE001 - this path is optional
             return PrefixPreparation(False, 0, 0, f"error:{exc}")
+        finally:
+            if cancel_task is not None:
+                cancel_task.cancel()
+            self._operation_lock.release()
+
+    async def decide(
+        self,
+        state: str,
+        questions: list[Question],
+        *,
+        system_prompt: str = DECISION_SYSTEM_PROMPT,
+        timeout_ms: int = DECISION_TIMEOUT_MS,
+        cancel_event: threading.Event | None = None,
+        max_input_tokens: int | None = None,
+    ) -> DecisionResult:
+        """Typed closed-set decisions from the child's loaded model.
+
+        Same bounded request path as :meth:`prepare_prefix`: a decision is
+        always an optimisation, so a busy queue, a dead child, or a missed
+        deadline returns a status the caller falls back on, never an error.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            return DecisionResult(STATUS_CANCELLED)
+        if not self.loaded:
+            reason = "llm_recovering" if self.recovering else "llm_not_loaded"
+            return DecisionResult(STATUS_UNAVAILABLE, reason=reason)
+
+        started = time.perf_counter()
+        admitted_generation = self._generation
+        try:
+            await asyncio.wait_for(
+                self._operation_lock.acquire(),
+                timeout=self._queue_timeout_s,
+            )
+        except TimeoutError:
+            return DecisionResult(STATUS_UNAVAILABLE, reason="timeout_queue")
+
+        # The same fence as `cleanup`: a replacement scheduled while this call
+        # queued has retired the child it was admitted for.
+        if not self.loaded or self._generation != admitted_generation:
+            self._operation_lock.release()
+            reason = "llm_recovering" if self.recovering else "llm_not_loaded"
+            return DecisionResult(STATUS_UNAVAILABLE, reason=reason)
+
+        request_id = uuid.uuid4().hex
+        request_task: asyncio.Task[dict[str, Any]] | None = None
+        cancel_task: asyncio.Task[None] | None = None
+        try:
+            request_task = asyncio.create_task(
+                self._request(
+                    "decide",
+                    request_id=request_id,
+                    state=state,
+                    questions=[question.to_dict() for question in questions],
+                    system_prompt=system_prompt,
+                    timeout_ms=timeout_ms,
+                    max_input_tokens=max_input_tokens,
+                )
+            )
+            if cancel_event is not None:
+                cancel_task = asyncio.create_task(
+                    self._watch_cancel(cancel_event, request_id)
+                )
+            response = await asyncio.wait_for(
+                asyncio.shield(request_task),
+                timeout=(
+                    timeout_ms / 1000.0
+                    + self._hard_timeout_grace_s
+                    + WORKER_RESPONSE_GRACE_S
+                ),
+            )
+            if not response.get("ok"):
+                return DecisionResult(STATUS_ERROR, reason=str(response.get("error")))
+            result = DecisionResult.from_dict(response["result"])
+            if result.reason == "timeout_hard":
+                # The child's own watchdog retired its MLX thread.
+                self._schedule_replacement("child_decision_timeout_hard")
+            return result
+        except TimeoutError:
+            elapsed = int((time.perf_counter() - started) * 1000)
+            log.error("decision exceeded hard wall deadline after %dms", elapsed)
+            if request_task is not None:
+                request_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await request_task
+            self._schedule_replacement("decision_timeout_hard")
+            return DecisionResult(STATUS_TIMEOUT, ms=elapsed, reason="timeout_hard")
+        except asyncio.CancelledError:
+            async def finish_cancellation() -> None:
+                await self._send_cancel(request_id)
+                if request_task is None:
+                    return
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(request_task),
+                        timeout=self._cancel_grace_s,
+                    )
+                except TimeoutError:
+                    request_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await request_task
+                    await self._replace_worker("decision_cancel_unresponsive")
+                except (_WorkerExited, ConnectionError, RuntimeError) as exc:
+                    log.debug("decision cancellation ended with worker failure: %s", exc)
+
+            # As in `cleanup`: a repeated Task.cancel() must not interrupt
+            # the bounded cancel/reap and release the operation lock while
+            # the child is still deciding.
+            completion = asyncio.create_task(finish_cancellation())
+            while not completion.done():
+                try:
+                    await asyncio.shield(completion)
+                except asyncio.CancelledError:
+                    continue
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                completion.result()
+            raise
+        except Exception as exc:  # noqa: BLE001 - decisions are optional
+            return DecisionResult(STATUS_ERROR, reason=str(exc))
         finally:
             if cancel_task is not None:
                 cancel_task.cancel()

@@ -27,6 +27,24 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
+from .decisions import (
+    DECISION_SYSTEM_PROMPT,
+    DECISION_TIMEOUT_MS,
+    OPTION_LABELS,
+    STATUS_CANCELLED,
+    STATUS_CONTEXT_LIMIT,
+    STATUS_ERROR,
+    STATUS_OK,
+    STATUS_TIMEOUT,
+    STATUS_UNAVAILABLE,
+    DecisionError,
+    DecisionResult,
+    Question,
+    answer_from_logprobs,
+    decision_message,
+    validate_questions,
+)
+
 log = logging.getLogger("velora.cleanup")
 
 TIMEOUT_MS = 1500  # base budget, for a short/normal sentence
@@ -37,6 +55,9 @@ HARD_TIMEOUT_GRACE_S = 3.0  # independent TTFT/prefill wedge allowance
 # merely waiting to enter the single thread. Bound that wait separately, then
 # replace the sidecar because its only model worker is unavailable.
 QUEUE_TIMEOUT_S = 1.0
+# A decision question up to this many tokens runs as one forward pass. Its
+# transient logits are tokens x vocabulary (~127 MB at 256 x 248k bf16).
+DECISION_DIRECT_TOKENS = 256
 MS_PER_WORD = 45  # generation grows ~linearly with length past the base
 BASE_WORDS = 25  # words covered by the base budget before scaling kicks in
 RATIO_MAX = 1.6
@@ -473,6 +494,14 @@ class CleanupEngine:
         self._action_prepared_cache: list[
             tuple[type[Any], Any, Any]
         ] | None = None
+        # Token id of each decision option letter, resolved once per loaded
+        # tokenizer (see `_option_label_ids`).
+        self._option_label_ids: list[int] | None = None
+        # (system prompt, tokens, snapshot) of the fixed decision preamble.
+        # It saves every decision ~70 tokens (~80 ms) of prefill. Its KV part
+        # is tiny, but a hybrid model's recurrent state is fixed-size, so it
+        # is released with the rest of an action's memory.
+        self._decision_prefix: tuple[str, list[int], Any] | None = None
         self._lock = threading.Lock()
         # MLX streams are thread-affine: load and generation must all happen
         # on this one dedicated thread.
@@ -514,6 +543,8 @@ class CleanupEngine:
         self._fallback_prepared_cache = None
         self._action_prepared_tokens = []
         self._action_prepared_cache = None
+        self._option_label_ids = None
+        self._decision_prefix = None
         t0 = time.perf_counter()
         # Local path, not repo id: a cached model must load without network.
         self._model, self._tokenizer = load(ensure_downloaded(self.model_id))
@@ -748,6 +779,7 @@ class CleanupEngine:
             active_before = int(mx.get_active_memory())
             self._action_prepared_tokens = []
             self._action_prepared_cache = None
+            self._decision_prefix = None
             mx.clear_cache()
             log.info(
                 "cleanup action memory released active_before_bytes=%d "
@@ -1178,3 +1210,239 @@ class CleanupEngine:
         except Exception as exc:  # noqa: BLE001 — cleanup must never break dictation
             log.exception("cleanup failed")
             return CleanupResult(raw, False, 0, f"error:{exc}")
+
+    # ---- typed decisions: one shared prefill, letters read from logits -----
+
+    def _option_label_ids_locked(self) -> list[int]:
+        """Token id of each option letter under the loaded tokenizer.
+
+        A letter that encodes to more than one token cannot be read from a
+        single next-token distribution, so such a tokenizer refuses to decide
+        rather than silently scoring a prefix of the label.
+        """
+        if self._option_label_ids is None:
+            ids: list[int] = []
+            for label in OPTION_LABELS:
+                encoded = list(self._tokenizer.encode(label))
+                if len(encoded) != 1:
+                    raise DecisionError(
+                        f"option label {label!r} encodes to {len(encoded)} tokens")
+                ids.append(encoded[0])
+            self._option_label_ids = ids
+        return self._option_label_ids
+
+    def _answer_logprobs_locked(
+        self,
+        cache: list[Any],
+        suffix: list[int],
+        label_ids: list[int],
+        cancel_event: threading.Event | None,
+    ) -> list[float]:
+        """Feed ``suffix`` after ``cache`` and read the full-vocabulary
+        log-probability of each label at the first answer position.
+
+        A question suffix is short, so it normally runs as ONE forward pass.
+        A longer one first goes through the cancellable prefill in steps and
+        leaves only its last token for the pass whose logits are read
+        (``generate_step`` computes but never returns the final logits).
+        """
+        import mlx.core as mx
+
+        if len(suffix) > DECISION_DIRECT_TOKENS:
+            cache = self._prefill_into_cache_locked(cache, suffix[:-1], cancel_event)
+            suffix = suffix[-1:]
+        logits = self._model(mx.array(suffix)[None], cache=cache)
+        last = logits[0, -1].astype(mx.float32)
+        picked = (last - mx.logsumexp(last))[mx.array(label_ids)]
+        mx.eval(picked)
+        return [float(value) for value in picked.tolist()]
+
+    def _extend_decision_cache_locked(
+        self,
+        cache: list[Any],
+        tokens: list[int],
+        cancel_event: threading.Event | None,
+    ) -> list[Any]:
+        """Append state tokens: one direct pass when short (``generate_step``
+        adds ~40 ms of per-call overhead), the cancellable stepped prefill
+        when long."""
+        import mlx.core as mx
+
+        if not tokens:
+            return cache
+        if len(tokens) > DECISION_DIRECT_TOKENS:
+            return self._prefill_into_cache_locked(cache, tokens, cancel_event)
+        self._model(mx.array(tokens)[None], cache=cache)
+        mx.eval([item.state for item in cache])
+        return cache
+
+    def _decision_prefix_locked(
+        self,
+        system_prompt: str,
+        cancel_event: threading.Event | None,
+    ) -> tuple[list[int], Any]:
+        """Warm snapshot of the fixed preamble every decision prompt shares.
+
+        Two probe states that differ from their first character isolate
+        exactly the system message plus the ``STATE:`` header (the same
+        trick `_warm` uses for the dictation prefix).
+        """
+        cached = self._decision_prefix
+        if cached is not None and cached[0] == system_prompt:
+            return cached[1], cached[2]
+        probe = Question("probe", "probe", (("a", "a"), ("b", "b")))
+        tokens = _longest_common_tokens([
+            self._prompt_tokens(system_prompt, decision_message(state, probe))
+            for state in ("alpha", "zulu")
+        ])
+        snapshot = _snapshot_prompt_cache(
+            self._prefill_tokens_locked(tokens, cancel_event))
+        self._decision_prefix = (system_prompt, tokens, snapshot)
+        return tokens, snapshot
+
+    def _decide_locked(
+        self,
+        system_prompt: str,
+        state: str,
+        questions: list[Question],
+        deadline: float,
+        cancel_event: threading.Event,
+        max_input_tokens: int | None,
+    ) -> DecisionResult:
+        """Prefill the shared state once, then answer each question from a
+        fresh fork of that snapshot.
+
+            [system][STATE ....][QUESTION 1][assistant header] → p(A..)
+            └──── shared prefix ─┘[QUESTION 2][assistant header] → p(A..)
+
+        Each fork restores the snapshot, so no question sees another's text.
+        The working cache is never installed in a prepared slot: a decision
+        state is one-shot and must not evict the warm dictation prefix.
+        """
+        started = time.perf_counter()
+
+        def elapsed_ms() -> int:
+            return int((time.perf_counter() - started) * 1000)
+
+        label_ids = self._option_label_ids_locked()
+        prompts = [
+            self._prompt_tokens(system_prompt, decision_message(state, question))
+            for question in questions
+        ]
+        longest = max(len(tokens) for tokens in prompts)
+        if max_input_tokens is not None and longest > max_input_tokens:
+            return DecisionResult(STATUS_CONTEXT_LIMIT, ms=elapsed_ms(),
+                                  state_tokens=longest)
+
+        # One question still shares everything but its last token, which the
+        # readout needs as the live input position.
+        shared = (_longest_common_tokens(prompts) if len(prompts) > 1
+                  else prompts[0][:-1])
+        base, base_snapshot = self._decision_prefix_locked(system_prompt, cancel_event)
+        if len(shared) > len(base) and shared[:len(base)] == base:
+            cache, common = _restore_prompt_cache(base_snapshot), len(base)
+        else:
+            cache, common, _hit = self._cache_for_tokens(shared)
+        cache = self._extend_decision_cache_locked(cache, shared[common:], cancel_event)
+        snapshot = _snapshot_prompt_cache(cache)
+
+        answers = {}
+        for question, tokens in zip(questions, prompts):
+            logprobs = self._answer_logprobs_locked(
+                _restore_prompt_cache(snapshot),
+                tokens[len(shared):],
+                label_ids[:len(question.options)],
+                cancel_event,
+            )
+            # Checked after each pass, not only before it: an answer read
+            # after a cancel, or past the deadline, must not be used.
+            if cancel_event.is_set():
+                return DecisionResult(STATUS_CANCELLED, ms=elapsed_ms())
+            if time.perf_counter() > deadline:
+                return DecisionResult(STATUS_TIMEOUT, ms=elapsed_ms())
+            answers[question.key] = answer_from_logprobs(question, logprobs)
+        return DecisionResult(
+            STATUS_OK,
+            answers=answers,
+            ms=elapsed_ms(),
+            prefix_tokens=common,
+            state_tokens=len(shared),
+        )
+
+    def _run_decide(
+        self,
+        system_prompt: str,
+        state: str,
+        questions: list[Question],
+        deadline: float,
+        cancel_event: threading.Event,
+        max_input_tokens: int | None,
+    ) -> DecisionResult:
+        import mlx.core as mx
+
+        try:
+            with self._lock:
+                result = self._decide_locked(
+                    system_prompt, state, questions, deadline, cancel_event,
+                    max_input_tokens)
+        except _PrefixCancelled:
+            mx.clear_cache()
+            return DecisionResult(STATUS_CANCELLED)
+        log.info(
+            "decision %s ms=%d state_tokens=%d prefix_tokens=%d %s",
+            result.status, result.ms, result.state_tokens, result.prefix_tokens,
+            " ".join(f"{key}={answer.choice}:{answer.confidence:.2f}"
+                     for key, answer in result.answers.items()),
+        )
+        return result
+
+    async def decide(
+        self,
+        state: str,
+        questions: list[Question],
+        *,
+        system_prompt: str = DECISION_SYSTEM_PROMPT,
+        timeout_ms: int = DECISION_TIMEOUT_MS,
+        cancel_event: threading.Event | None = None,
+        max_input_tokens: int | None = None,
+    ) -> DecisionResult:
+        """Answer closed-set questions about ``state``. Never raises.
+
+        A decision is always an optimisation over a slower, authoritative
+        path, so every failure is a status the caller falls back on — never
+        an exception that could break an action or a dictation.
+        """
+        try:
+            validate_questions(state, questions)
+        except DecisionError as exc:
+            return DecisionResult(STATUS_ERROR, reason=str(exc))
+        # An already-cancelled decision must not queue MLX work behind the
+        # model lock only to be thrown away.
+        if cancel_event is not None and cancel_event.is_set():
+            return DecisionResult(STATUS_CANCELLED)
+        if self.unhealthy or not self.loaded:
+            return DecisionResult(STATUS_UNAVAILABLE,
+                                  reason="llm_unhealthy" if self.unhealthy
+                                  else "llm_not_loaded")
+
+        worker_cancel = cancel_event if cancel_event is not None else threading.Event()
+        deadline = time.perf_counter() + timeout_ms / 1000.0
+        worker = asyncio.get_running_loop().run_in_executor(
+            self._executor, self._run_decide, system_prompt, state, questions,
+            deadline, worker_cancel, max_input_tokens)
+        try:
+            # The deadline is also checked between questions in the worker;
+            # this outer bound covers a prefill that never yields.
+            return await asyncio.wait_for(
+                worker, timeout=timeout_ms / 1000.0 + HARD_TIMEOUT_GRACE_S)
+        except asyncio.TimeoutError:
+            worker_cancel.set()
+            self.unhealthy = True
+            log.error("decision hard-wedged after %dms", timeout_ms)
+            return DecisionResult(STATUS_TIMEOUT, ms=timeout_ms, reason="timeout_hard")
+        except asyncio.CancelledError:
+            worker_cancel.set()
+            raise
+        except Exception as exc:  # noqa: BLE001 — a decision must never break a flow
+            log.exception("decision failed")
+            return DecisionResult(STATUS_ERROR, reason=str(exc))

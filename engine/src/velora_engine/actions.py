@@ -3086,6 +3086,10 @@ class ActionSession:
         # independent completion verifier instead of spending another
         # controller call to rediscover that the destination is now active.
         self.direct_goal_check_pending = False
+        # Controller generations started so far. The first one pays the
+        # action prompt's cold prefill on whatever turn it lands: a decided
+        # turn 1 never warms that prefix.
+        self.controller_calls = 0
         self._last_rejected_reply = ""
         self._repeated_rejected_replies = 0
 

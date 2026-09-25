@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 import threading
@@ -16,6 +17,14 @@ from velora_engine.cleanup_ipc import (
     unpack_prefix_candidates,
 )
 from velora_engine.cleanup_process import CleanupProcess
+from velora_engine.decisions import (
+    STATUS_CANCELLED,
+    STATUS_OK,
+    STATUS_TIMEOUT,
+    STATUS_UNAVAILABLE,
+    DecisionResult,
+    Question,
+)
 
 
 def fixture_command() -> list[str]:
@@ -825,3 +834,189 @@ async def test_parent_shutdown_during_stall_reaps_worker() -> None:
         pass
     else:
         raise AssertionError("stalled cleanup child survived parent shutdown")
+
+
+DECISION = Question("kind", "What does the command ask for?", (
+    ("open_app", "open an app"), ("other", "something else"),
+))
+
+
+async def test_decide_round_trips_typed_answers() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        result = await cleanup.decide(
+            "command: open slack", [DECISION], max_input_tokens=4_096)
+
+        assert result.status == STATUS_OK
+        assert result.answers["kind"].choice == "open_app"
+        assert result.answers["kind"].label_mass == 0.9
+        assert result.ms == 1
+        assert result.state_tokens == 4_096
+    finally:
+        await cleanup.aclose()
+
+
+async def test_decide_cancellation_preserves_warm_worker() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        original_pid = cleanup.pid
+        cancel = threading.Event()
+        task = asyncio.create_task(
+            cleanup.decide("__cancel__", [DECISION], cancel_event=cancel))
+        await asyncio.sleep(0.05)
+        cancel.set()
+
+        result = await task
+
+        assert result.status == STATUS_CANCELLED
+        assert cleanup.pid == original_pid
+        assert cleanup.loaded is True
+    finally:
+        await cleanup.aclose()
+
+
+async def test_decide_hard_timeout_replaces_worker() -> None:
+    cleanup = CleanupProcess(
+        "fake", worker_command=fixture_command(), hard_timeout_grace_s=0.05)
+    try:
+        await cleanup.load_async("warm prompt")
+        original_pid = cleanup.pid
+
+        result = await cleanup.decide("__hang__", [DECISION], timeout_ms=50)
+
+        assert result.status == STATUS_TIMEOUT
+        assert result.reason == "timeout_hard"
+        await wait_until_loaded(cleanup)
+        assert cleanup.pid != original_pid
+        assert (await cleanup.cleanup("after decide", "system")).text == "AFTER DECIDE"
+    finally:
+        await cleanup.aclose()
+
+
+async def test_decide_without_a_loaded_worker_is_unavailable() -> None:
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        result = await cleanup.decide("command: open slack", [DECISION])
+
+        assert result.status == STATUS_UNAVAILABLE
+        assert result.reason == "llm_not_loaded"
+    finally:
+        await cleanup.aclose()
+
+
+async def test_worker_keeps_a_cancel_read_with_its_request() -> None:
+    """A cancel line buffered right behind its request is read before the
+    request's task first runs. It must still reach that request."""
+    from velora_engine.cleanup_worker import Worker
+
+    seen: list[bool] = []
+
+    class RecordingEngine:
+        async def decide(self, state, questions, *, cancel_event, **_kwargs):
+            seen.append(cancel_event.is_set())
+            return DecisionResult(STATUS_CANCELLED)
+
+    class Sink:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(encode_cleanup_ipc_message({
+        "id": "r1", "op": "decide", "state": "s",
+        "questions": [DECISION.to_dict()]}))
+    reader.feed_data(encode_cleanup_ipc_message({"op": "cancel", "target": "r1"}))
+    worker = Worker("unused", reader, Sink())
+    worker.engine.close()
+    worker.engine = RecordingEngine()
+    serving = asyncio.create_task(worker.serve())
+    try:
+        for _ in range(100):
+            if seen:
+                break
+            await asyncio.sleep(0.01)
+
+        assert seen == [True]
+    finally:
+        serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+
+
+async def test_queued_decision_rechecks_generation_after_lock() -> None:
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        queue_timeout_s=1.0,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        await cleanup._operation_lock.acquire()
+        queued = asyncio.create_task(cleanup.decide("state", [DECISION]))
+        await asyncio.sleep(0.02)
+        cleanup._schedule_replacement("test_generation_fence")
+        cleanup._operation_lock.release()
+
+        result = await queued
+
+        assert result.status == STATUS_UNAVAILABLE
+        assert result.reason in {"llm_recovering", "llm_not_loaded"}
+        await wait_until_loaded(cleanup)
+    finally:
+        if cleanup._operation_lock.locked():
+            cleanup._operation_lock.release()
+        await cleanup.aclose()
+
+
+async def test_repeated_task_cancel_cannot_interrupt_decision_handoff(
+    monkeypatch,
+) -> None:
+    class Writer:
+        def is_closing(self):
+            return False
+
+        def write(self, _data):
+            pass
+
+        async def drain(self):
+            pass
+
+    cleanup = CleanupProcess("fake", cancel_grace_s=0.02)
+    cleanup.loaded = True
+    cleanup._writer = Writer()
+    entered_cancel = asyncio.Event()
+    release_cancel = asyncio.Event()
+    replaced: list[str] = []
+
+    async def slow_cancel(_request_id):
+        entered_cancel.set()
+        await release_cancel.wait()
+
+    async def replace(reason):
+        replaced.append(reason)
+
+    monkeypatch.setattr(cleanup, "_send_cancel", slow_cancel)
+    monkeypatch.setattr(cleanup, "_replace_worker", replace)
+
+    owner = asyncio.create_task(
+        cleanup.decide("state", [DECISION], timeout_ms=10_000))
+    while not cleanup._pending:
+        await asyncio.sleep(0)
+    owner.cancel()
+    await entered_cancel.wait()
+    owner.cancel()
+    await asyncio.sleep(0.01)
+
+    assert owner.done() is False
+    assert cleanup._operation_lock.locked() is True
+
+    release_cancel.set()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+
+    assert cleanup._operation_lock.locked() is False
+    assert replaced == ["decision_cancel_unresponsive"]

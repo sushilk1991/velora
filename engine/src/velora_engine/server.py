@@ -35,8 +35,8 @@ from typing import Any, Callable, TypeVar
 import numpy as np
 
 from . import (
-    __version__, actions, batch_priority, diarization, editing, formatting,
-    models, protocol,
+    __version__, action_fastpath, actions, batch_priority, diarization,
+    editing, formatting, models, protocol,
 )
 from .audio_store import ActiveAudioSpool, AudioStore
 from .cleanup import (
@@ -73,6 +73,33 @@ class _ActionModelUnavailable(Exception):
 
 class _ActionContextTooLarge(Exception):
     """The bounded screen still exceeds Action Mode's local prefill ceiling."""
+
+
+# The attempt number of a decided (System-1) Action turn. It runs before the
+# controller's attempts 0 and 1 and never counts as one of them.
+_FAST_ATTEMPT = -1
+
+# Controller results refused before any worker ran them: the model was
+# loading, being replaced, unhealthy, or the queue wait ran out, or the
+# worker's pipe was already gone (CleanupProcess raises before writing).
+# Such a call warmed no prefix and rejected no reply.
+_NOT_RUN_REASONS = frozenset((
+    "llm_recovering", "llm_not_loaded", "llm_unhealthy", "timeout_queue",
+    "error:cleanup worker is not connected"))
+
+
+@dataclass(frozen=True)
+class _FastReply:
+    """A decided Action turn standing in for the controller's CleanupResult.
+
+    Carries only the fields the turn pipeline reads, so the decided reply is
+    reviewed, verified and validated by exactly the controller's code path.
+    """
+
+    text: str
+    applied: bool = True
+    reason: str = ""
+    input_tokens: int = 0
 
 
 class SpoolDisposition(Enum):
@@ -3081,34 +3108,59 @@ class Engine:
                         completion.reason or "no output")
                     await wait_for_model_recovery_once()
 
-            controller_attempts = range(2) if turn is None else range(0)
+            # System 1: an obvious turn is decided (~0.2 s) instead of
+            # generated (3-10 s). The decided reply takes the same review,
+            # verification and validation below as a controller reply; any
+            # refusal and the controller runs as if it had never been tried.
+            #
+            #   attempts:  [FAST] → 0 → 1 (repair)
+            #               └ refused: no repair note, no rejection count
+            fast_reply = None
+            if turn is None:
+                fast_reply = await self._fast_action_reply(session)
+            controller_attempts = [0, 1] if turn is None else []
+            if fast_reply is not None:
+                controller_attempts.insert(0, _FAST_ATTEMPT)
+            fast_accepted = False
             for attempt in controller_attempts:
                 authoritative_ui_refusal = False
-                # The repair carries the actual rejection: "not valid JSON"
-                # teaches nothing when the JSON was fine and a rule was broken.
-                prompt = (session.system_prompt() if attempt == 0
-                          else session.system_prompt() + "\n"
-                               + actions.turn_repair_note(last_error))
-                result = await self.cleanup.cleanup(
-                    message, prompt,
-                    # The cold-start budget covers the FIRST attempt only; the
-                    # repair rides the now-warm prefix. Without this the worst
-                    # case (2×35s) outran the app's backstop and a healthy
-                    # engine got cancelled mid-answer (review finding).
-                    timeout_ms=(actions.FIRST_TURN_TIMEOUT_MS
-                                if session.turns_used == 0 and attempt == 0
-                                else actions.PLAN_TIMEOUT_MS),
-                    check_ratio=False,
-                    cancel_event=self._action_cancel,
-                    max_tokens=actions.PLAN_MAX_TOKENS,
-                    # Every turn of a session shares the same system prompt;
-                    # two synthetic user messages make their common token
-                    # prefix exactly that prompt, so turn 2+ skips its ~2k
-                    # tokens of prefill (~1.5s per turn on a 4B).
-                    prefix_candidates=[(prompt, "a"), (prompt, "b")],
-                    cache_scope="action",
-                    max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
-                )
+                if attempt == _FAST_ATTEMPT:
+                    result = _FastReply(fast_reply)
+                else:
+                    # The repair carries the actual rejection: "not valid JSON"
+                    # teaches nothing when the JSON was fine and a rule was broken.
+                    prompt = (session.system_prompt()
+                              if attempt == 0 or not last_error
+                              else session.system_prompt() + "\n"
+                                   + actions.turn_repair_note(last_error))
+                    cold_prefix = session.controller_calls == 0
+                    result = await self.cleanup.cleanup(
+                        message, prompt,
+                        # The cold-start budget covers the session's FIRST
+                        # controller call only (turn 2 when turn 1 was
+                        # decided); the repair rides the now-warm prefix.
+                        # Without this the worst case (2×35s) outran the app's
+                        # backstop and a healthy engine got cancelled
+                        # mid-answer (review finding).
+                        timeout_ms=(actions.FIRST_TURN_TIMEOUT_MS
+                                    if cold_prefix
+                                    else actions.PLAN_TIMEOUT_MS),
+                        check_ratio=False,
+                        cancel_event=self._action_cancel,
+                        max_tokens=actions.PLAN_MAX_TOKENS,
+                        # Every turn of a session shares the same system prompt;
+                        # two synthetic user messages make their common token
+                        # prefix exactly that prompt, so turn 2+ skips its ~2k
+                        # tokens of prefill (~1.5s per turn on a 4B).
+                        prefix_candidates=[(prompt, "a"), (prompt, "b")],
+                        cache_scope="action",
+                        max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+                    )
+                    # Count only calls a worker ran. A plain `timeout` still
+                    # counts: its worker prefilled the prompt, and a second
+                    # cold budget would bring back the 2 x 35 s worst case.
+                    if result.reason not in _NOT_RUN_REASONS:
+                        session.controller_calls += 1
                 if self._action_cancel.is_set():
                     self._drop_action_session(msg.get("id"))
                     # action_cancel/action_end may have arrived while the
@@ -3126,8 +3178,12 @@ class Engine:
                             "screen context needs "
                             f"{result.input_tokens} tokens; the safe local limit is "
                             f"{actions.ACTION_MAX_INPUT_TOKENS}")
-                    last_error = f"model unavailable ({result.reason or 'no output'})"
-                    model_unavailable_error = last_error
+                    model_unavailable_error = (
+                        f"model unavailable ({result.reason or 'no output'})")
+                    # A call no worker ran rejected no reply: the next attempt
+                    # gets the plain prompt, not a repair note about nothing.
+                    if result.reason not in _NOT_RUN_REASONS:
+                        last_error = model_unavailable_error
                     if attempt == 0:
                         await wait_for_model_recovery_once()
                     continue
@@ -3340,6 +3396,7 @@ class Engine:
                         reply_text = json.dumps(
                             parsed, ensure_ascii=False, separators=(",", ":"))
                     turn = session.accept_reply(reply_text)
+                    fast_accepted = attempt == _FAST_ATTEMPT
                     break
                 except _ActionModelUnavailable as exc:
                     session.state.allowed_ui_attestation = None
@@ -3351,6 +3408,12 @@ class Engine:
                 except actions.PlanError as exc:
                     session.state.allowed_ui_attestation = None
                     session.state.allow_ui_presentation = False
+                    # A refused decided turn is not the controller's mistake:
+                    # it must neither feed the repair note nor count as a
+                    # repeated rejection.
+                    if attempt == _FAST_ATTEMPT:
+                        log.info("action fast turn fell back: %s", exc)
+                        continue
                     had_plan_error = True
                     last_error = str(exc)
                     repeats = session.note_rejected_reply(result.text)
@@ -3409,9 +3472,9 @@ class Engine:
             if msg.get("id") is not None:
                 evt["id"] = msg.get("id")
             self._restart_if_cleanup_unhealthy()
-            log.info("action turn %d: %d steps sends=%s done=%s ms=%d",
+            log.info("action turn %d: %d steps sends=%s done=%s fast=%s ms=%d",
                      session.turns_used, len(turn["steps"]), session.sends,
-                     turn["done"], ms)
+                     turn["done"], fast_accepted, ms)
             await send_after_planning(evt)
         except _ActionContextTooLarge as exc:
             self._mark_action_terminal(msg.get("id"))
@@ -3433,6 +3496,55 @@ class Engine:
             if not planning_released:
                 self._planning = False
             self._schedule_mining()
+
+    async def _fast_action_reply(
+            self, session: actions.ActionSession) -> str | None:
+        """A decided reply for an obvious Action turn, or None.
+
+        None whenever the turn is not a known shape, the loaded engine cannot
+        decide, or the model is not confident; the controller then runs. Its
+        own failure is also None: an optimisation must never fail an action.
+        """
+        try:
+            return await self._decide_action_reply(session)
+        except Exception:  # noqa: BLE001 — the controller is the fallback
+            log.exception("action fast path failed; controller runs")
+            return None
+
+    async def _decide_action_reply(
+            self, session: actions.ActionSession) -> str | None:
+        decide = getattr(self.cleanup, "decide", None)
+        model_id = getattr(self.cleanup, "model_id", None)
+        if (decide is None or self._action_cancel.is_set()
+                or model_id not in action_fastpath.CALIBRATED_MODEL_IDS):
+            return None
+        proposal = action_fastpath.propose(session)
+        if proposal is None:
+            return None
+
+        result = await decide(
+            proposal.state, list(proposal.questions),
+            cancel_event=self._action_cancel,
+            max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+        )
+        if not result.ok:
+            log.info("action fast path %s unavailable: %s %s",
+                     proposal.shape, result.status, result.reason)
+            return None
+
+        # Log the choices and their confidence, never the state: it holds
+        # the spoken command and screen labels.
+        verdicts = " ".join(
+            f"{key}={answer.choice}:{answer.confidence:.2f}"
+            f"/{answer.label_mass:.2f}"
+            for key, answer in result.answers.items())
+        reply = action_fastpath.reply_for(session, proposal, result.answers)
+        log.info("action fast path %s %s ms=%d %s", proposal.shape,
+                 "proposed" if reply is not None else "declined",
+                 result.ms, verdicts)
+        if reply is None:
+            return None
+        return json.dumps(reply, ensure_ascii=False, separators=(",", ":"))
 
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
         """Re-transcribe a saved audio clip, optionally with a different model,

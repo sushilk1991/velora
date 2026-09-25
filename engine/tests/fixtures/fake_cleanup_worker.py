@@ -77,6 +77,33 @@ async def main(
                 result={"applied": True, "tokens": 12, "ms": 3, "reason": None},
             )
             return
+        if operation == "decide":
+            if message.get("state") == "__hang__":
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                while True:
+                    pass
+            if message.get("state") == "__cancel__":
+                while request_id not in cancelled:
+                    await asyncio.sleep(0.01)
+                await respond(request_id, ok=True,
+                              result={"status": "cancelled", "ms": 12})
+                return
+            # Always the first option, with the question count as ms so the
+            # parent can see what crossed the pipe.
+            answers = {
+                question["key"]: {
+                    "choice": question["options"][0][0],
+                    "probabilities": {question["options"][0][0]: 1.0},
+                    "label_mass": 0.9,
+                }
+                for question in message["questions"]
+            }
+            await respond(request_id, ok=True, result={
+                "status": "ok", "answers": answers,
+                "ms": len(message["questions"]),
+                "state_tokens": message.get("max_input_tokens") or 0,
+            })
+            return
         if operation == "memory":
             await respond(
                 request_id,
