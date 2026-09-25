@@ -772,7 +772,9 @@ private struct ModeEditor: View {
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(name)
-                Text(bundleID)
+                // An app that isn't installed is already titled by its
+                // bundle ID; say why instead of printing the ID twice.
+                Text(url == nil ? "Not installed" : bundleID)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
@@ -873,6 +875,7 @@ private struct ModeEditor: View {
             } label: {
                 Label("Delete", systemImage: "trash")
             }
+            .buttonStyle(.capsule)
             .disabled(!vm.canDelete)
             .help(vm.canDelete
                   ? "Delete this mode"
@@ -880,12 +883,13 @@ private struct ModeEditor: View {
 
             Spacer()
 
+            // The capsule pair every other pane uses outside a Form.
             Button("Save") {
                 vm.save()
                 // Show the normalized lists ("a,,b " → "a, b") after a save.
                 syncListBuffers()
             }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.primaryCapsule)
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(vm.draft.name.trimmingCharacters(in: .whitespaces).isEmpty)
         }

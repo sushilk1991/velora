@@ -148,13 +148,13 @@ enum StatsRange: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// Segmented-control label.
+    /// Segmented-control label, Title Case like a tab (DESIGN.md §5).
     var title: String {
         switch self {
         case .today: return "Today"
-        case .sevenDays: return "7 days"
-        case .thirtyDays: return "30 days"
-        case .allTime: return "All time"
+        case .sevenDays: return "7 Days"
+        case .thirtyDays: return "30 Days"
+        case .allTime: return "All Time"
         }
     }
 

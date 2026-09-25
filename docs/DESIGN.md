@@ -236,9 +236,11 @@ The pill by the cursor is the product's face. Rules:
   window edge (`WindowShell(detailEdges: .formScrolls)`), with the header
   inset `formInset` to line up with the cards.
 - One card style in both windows. `GroupCard` draws a grouped Form section:
-  a 13 pt semibold sentence-case header, a radius-12 card on
-  `VeloraPanel.groupFill` with no border, `GroupRow`s (13 pt label, 11 pt
-  sub-caption, trailing control) separated by `GroupDivider`, and an optional
+  a 13 pt semibold sentence-case header above the card (with an optional
+  trailing link or caption; Stats charts are titled this way too), a
+  radius-12 card on `VeloraPanel.groupFill` with no border, `GroupRow`s
+  (13 pt label, 11 pt sub-caption, trailing control) separated by
+  `GroupDivider` (inset 14 pt at both ends), and an optional
   `SettingsFooter`.
 - Buttons outside Forms use `.buttonStyle(.capsule)` (glass, 28 pt) or
   `.primaryCapsule` (accent fill). One primary per pane.

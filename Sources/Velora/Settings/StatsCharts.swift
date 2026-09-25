@@ -91,14 +91,15 @@ enum StatsAppIcons {
 
 // MARK: - Cards and tiles
 
-/// A chart in a grouped card: the title row with an optional caption, a
-/// hairline, then the chart. Cards in a `fixedSize` row stretch to the
-/// tallest one.
+/// A chart in a grouped card, titled like every other card: the title and
+/// an optional caption sit above it as the `GroupCard` header (Home's
+/// "Last 7 days" chart does the same). Cards in a `fixedSize` row stretch
+/// to the tallest one.
 ///
-///     ┌ Words per day ──────────── Best day Sep 30 · 1,240 words ┐
-///     ├───────────────────────────────────────────────────────────┤
-///     │ chart                                                     │
-///     └───────────────────────────────────────────────────────────┘
+///     Words per day              Best day 30 Sep · 1,240 words
+///     ┌───────────────────────────────────────────────────────┐
+///     │ chart                                                 │
+///     └───────────────────────────────────────────────────────┘
 struct StatsChartCard<Content: View>: View {
     let title: String
     var caption: String?
@@ -107,17 +108,7 @@ struct StatsChartCard<Content: View>: View {
     private static var inset: CGFloat { 14 }
 
     var body: some View {
-        GroupCard {
-            GroupRow(label: title) {
-                if let caption {
-                    Text(caption)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .lineLimit(1)
-                }
-            }
-            GroupDivider()
+        GroupCard(header: title, headerCaption: caption) {
             content
                 .padding(.horizontal, Self.inset)
                 .padding(.vertical, VeloraSpacing.m)

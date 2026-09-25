@@ -10,7 +10,8 @@ enum HotkeyMode: String, Codable, CaseIterable, Identifiable {
     case toggle
 
     var id: String { rawValue }
-    var displayName: String { self == .hold ? "Hold to talk" : "Press to toggle" }
+    /// Segmented-control label, Title Case like a tab (DESIGN.md §5).
+    var displayName: String { self == .hold ? "Hold to Talk" : "Press to Toggle" }
 }
 
 /// Where the HUD capsule sits on screen. `custom` is set when the user drags

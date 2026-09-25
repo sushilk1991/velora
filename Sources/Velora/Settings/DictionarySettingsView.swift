@@ -196,15 +196,17 @@ struct DictionarySettingsView: View {
 
             Group {
                 if model.dictionaryRows.isEmpty {
+                    // The Dictionary symbol (DESIGN.md §7), and a glass
+                    // capsule: the header's Add stays the pane's one primary.
                     ContentUnavailableView {
-                        Label("Teach Velora your words", systemImage: "text.book.closed")
+                        Label("Teach Velora your words", systemImage: "character.book.closed")
                     } description: {
                         Text("Add names, product terms, acronyms, or a phrase Velora often mishears.")
                     } actions: {
                         Button("Add Word") {
                             editor = EditorContext(row: nil, promotesLearned: false)
                         }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.capsule)
                     }
                 } else if filteredRows.isEmpty {
                     ContentUnavailableView.search(text: query)
@@ -302,6 +304,9 @@ struct DictionarySettingsView: View {
         } label: {
             Image(systemName: "ellipsis.circle")
         }
+        // A glass capsule beside Add, like Home's microphone menu.
+        .menuStyle(.button)
+        .buttonStyle(.capsule)
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Dictionary actions")

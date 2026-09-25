@@ -237,19 +237,19 @@ struct HomeView: View {
     private var waysToTalk: some View {
         GroupCard(header: "Ways to talk") {
             wayRow(
-                symbol: "text.cursor", title: "Stream Typing", sub: "Words land as you speak",
+                symbol: "text.cursor", title: "Stream Typing", sub: "Words land as you speak.",
                 hotkey: model.streamTypingHotkey, enabled: $model.streamTypingEnabled)
             GroupDivider()
             wayRow(
-                symbol: "wand.and.stars", title: "Voice Edit", sub: "Select text, say the change",
+                symbol: "wand.and.stars", title: "Voice Edit", sub: "Edit the selection aloud.",
                 hotkey: model.editHotkey, enabled: $model.voiceEdit)
             GroupDivider()
             wayRow(
-                symbol: "text.badge.checkmark", title: "Proofread", sub: "Fix the selection, no mic",
+                symbol: "text.badge.checkmark", title: "Proofread", sub: "Fix the selection, no mic.",
                 hotkey: model.proofreadHotkey, enabled: $model.proofreadEnabled)
             GroupDivider()
             wayRow(
-                symbol: "sparkles", title: "Action Mode", sub: "Say what you want done",
+                symbol: "sparkles", title: "Action Mode", sub: "Say what you want done.",
                 hotkey: model.actionHotkey, enabled: $model.actionsEnabled)
         }
     }
@@ -281,7 +281,7 @@ struct HomeView: View {
     /// edge, then the latest meeting. A lone button in a card read as empty.
     private var meetingsCard: some View {
         GroupCard(header: "Meetings") {
-            GroupRow(label: "Meeting notes", sub: "Records the room, writes notes at the end") {
+            GroupRow(label: "Meeting notes", sub: "Records the room, writes notes at the end.") {
                 Button("Start…", action: actions.startMeeting)
                     .buttonStyle(.capsule)
                     .accessibilityLabel("Start Meeting Notes")

@@ -145,6 +145,9 @@ struct KeycapsLabel: View {
                             .strokeBorder(Color(nsColor: .separatorColor), lineWidth: 1))
             }
         }
+        // Primary even as a Form row's value, which LabeledContent greys:
+        // the same shortcut reads the same in Settings, Home and onboarding.
+        .foregroundStyle(.primary)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(hotkey.displayName)
     }
@@ -522,14 +525,14 @@ struct SerifHeadline: View {
 
 /// The Tahoe grouped card for use outside a `Form`, drawn like a grouped
 /// Form's section so both windows share one card: an optional sentence-case
-/// header above (with an optional trailing link), a radius-12 card on the
-/// `groupFill` holding `GroupRow`s separated by `GroupDivider`s, and an
-/// optional footer below.
+/// header above (with an optional trailing link or caption), a radius-12
+/// card on the `groupFill` holding `GroupRow`s separated by `GroupDivider`s,
+/// and an optional footer below.
 ///
-///     Section               Link   13 pt semibold · 12 pt link
+///     Section               Link   13 pt semibold · 12 pt link or caption
 ///     ┌───────────────────────────┐
 ///     │ Label            [toggle] │  GroupRow
-///     │   ├──────────────────────┤ │  GroupDivider (inset 14)
+///     │   ├────────────────────┤  │  GroupDivider (inset 14 both sides)
 ///     │ Label            [popup]  │
 ///     └───────────────────────────┘
 ///     Footer note.                  caption secondary (SettingsFooter)
@@ -539,17 +542,22 @@ struct GroupCard<Content: View>: View {
 
     private let header: String?
     private let headerLink: HeaderLink?
+    /// Secondary text on the header's trailing edge, in place of a link
+    /// ("Best day 15 Sep · 3,000 words" over a Stats chart).
+    private let headerCaption: String?
     private let footer: String?
     private let content: Content
 
     private static var labelInset: CGFloat { 14 }
 
     init(
-        header: String? = nil, headerLink: HeaderLink? = nil, footer: String? = nil,
+        header: String? = nil, headerLink: HeaderLink? = nil,
+        headerCaption: String? = nil, footer: String? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.header = header
         self.headerLink = headerLink
+        self.headerCaption = headerCaption
         self.footer = footer
         self.content = content()
     }
@@ -566,6 +574,14 @@ struct GroupCard<Content: View>: View {
                             .buttonStyle(.plain)
                             .font(.system(size: 12))
                             .foregroundStyle(VeloraBrand.link)
+                    }
+                    if let headerCaption {
+                        Spacer(minLength: VeloraSpacing.s)
+                        Text(headerCaption)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                            .lineLimit(1)
                     }
                 }
                 .padding(.horizontal, Self.labelInset)
@@ -587,11 +603,12 @@ struct GroupCard<Content: View>: View {
 }
 
 /// Hairline between two `GroupRow`s, inset 14 pt from the leading edge so
-/// it aligns with the row labels.
+/// it aligns with the row labels, and 14 pt from the trailing edge so it
+/// stops short of the card's edge the way a grouped Form's separator does.
 struct GroupDivider: View {
     var body: some View {
         CardDivider()
-            .padding(.leading, 14)
+            .padding(.horizontal, 14)
     }
 }
 
@@ -633,11 +650,15 @@ extension GroupRow where Trailing == EmptyView {
 }
 
 /// 28 pt glass capsule: `primary` at 10 % (16 % pressed), hairline border,
-/// 12 pt label.
+/// 12 pt label. Dims when disabled, like `PrimaryCapsuleButtonStyle` (Modes'
+/// Delete is disabled on a built-in mode).
 struct CapsuleButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     private static var height: CGFloat { 28 }
     private static var fillOpacity: Double { 0.10 }
     private static var pressedOpacity: Double { 0.16 }
+    private static var disabledOpacity: Double { 0.4 }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -651,6 +672,7 @@ struct CapsuleButtonStyle: ButtonStyle {
             .overlay(
                 RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous)
                     .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
+            .opacity(isEnabled ? 1 : Self.disabledOpacity)
             .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous))
     }
 }
