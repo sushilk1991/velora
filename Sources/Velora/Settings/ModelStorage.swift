@@ -11,10 +11,6 @@ enum ModelStorage {
         let id: String  // repo id, e.g. "mlx-community/whisper-large-v3-turbo"
         let directory: URL
         let bytes: Int64
-
-        var sizeLabel: String {
-            ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
-        }
     }
 
     static var hubURL: URL {

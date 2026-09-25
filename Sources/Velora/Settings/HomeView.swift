@@ -1,14 +1,17 @@
 import AppKit
+import Charts
 import SwiftUI
 
-/// The Home pane: a serif welcome, the range picker, four hero tiles, then a
-/// 1.6 : 1 grid — recent dictations on the left, the "Ways to talk" toggles,
-/// the latest meeting and (when fresh) the latest learned term on the right.
+/// The Home pane: a serif welcome, the "Last 7 days" card, then a 1.6 : 1
+/// grid — recent dictations on the left, the "Ways to talk" toggles, the
+/// latest meeting and (when fresh) the latest learned term on the right.
 ///
 ///     Home                               [🎤 MacBook Mic] [Start Dictation ⌥]
-///     Ready when you are.                          [Today | 7 days | 30 days]
+///     Ready when you are.
 ///     Press ⌥ and talk…
-///     ┌ Words ┐ ┌ Dictations ┐ ┌ Speaking time ┐ ┌ Saved vs typing ┐
+///     ┌ Last 7 days ────────────────────────────────── Open Stats ┐
+///     │ 3,120 words   1 h 2 m saved   48 dictations    ▂▅▃▇▂▁█   │
+///     └──────────────────────────────────────────────────────────┘
 ///     ┌ Recent ──────────────────┐ ┌ WAYS TO TALK ────────┐
 ///     │ ▣ Slack   Message · 42 w │ │ ⌨ Stream Typing  [⌃⇧S] ●│
 ///     │   "text…"           2m   │ │ ✦ Voice Edit     [⌥⇧E] ●│
@@ -22,14 +25,17 @@ struct HomeView: View {
     let meetings: MeetingStore
     let actions: MainWindowActions
 
-    @State private var range: StatsRange = .today
     @State private var latestMeeting: MeetingRecord?
     @State private var inputDevices: [AudioInputDevices.Device] = []
     /// Bumped on every reload so the Recent list (which loads on appear)
     /// re-reads the store after dictating elsewhere.
     @State private var reloadToken = UUID()
-    /// The hero tiles' aggregates; reloaded in place, never rebuilt.
-    @StateObject private var stats: IntelligenceViewModel
+    /// The "Last 7 days" card's numbers: one small query, not the Stats
+    /// pane's full insights set (Home reloads on every app activation).
+    @State private var week = HistoryStore.WeekSummary()
+    @State private var weekLoaded = false
+    /// A reload mid-query must not let the older result land.
+    @State private var weekGeneration = 0
 
     /// Body spacing between the headline, the tiles and the grid.
     private static let sectionSpacing: CGFloat = 18
@@ -37,8 +43,11 @@ struct HomeView: View {
     private static let gridColumns = 13
     private static let recentColumnSpan = 8
     private static let recentLimit = 5
-    /// The picker offers the three short windows; "All time" lives in Stats.
-    private static let ranges: [StatsRange] = [.today, .sevenDays, .thirtyDays]
+    /// The week chart's height and bar corner radius.
+    private static let weekChartHeight: CGFloat = 96
+    private static let weekBarRadius: CGFloat = 3
+    /// Earlier days of the week sit a step lighter than today.
+    private static let pastDayOpacity = 0.75
     /// A learned term older than this no longer earns a card.
     private static let learnedFreshness: TimeInterval = 24 * 60 * 60
 
@@ -51,7 +60,6 @@ struct HomeView: View {
         self.history = history
         self.meetings = meetings
         self.actions = actions
-        _stats = StateObject(wrappedValue: IntelligenceViewModel(history: history))
     }
 
     var body: some View {
@@ -62,7 +70,7 @@ struct HomeView: View {
                     HStack(spacing: VeloraSpacing.s) {
                         Text("Start Dictation")
                         Text(model.hotkey.displayLabel)
-                            .font(.system(size: 11, design: .monospaced))
+                            .font(.system(size: 11))
                             .opacity(0.8)
                     }
                 }
@@ -71,7 +79,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: Self.sectionSpacing) {
                     headline
-                    heroTiles
+                    weekCard
                     grid
                 }
                 .padding(.bottom, VeloraSpacing.s)
@@ -119,34 +127,72 @@ struct HomeView: View {
     // MARK: Headline
 
     private var headline: some View {
-        HStack(alignment: .top, spacing: VeloraSpacing.l) {
-            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-                SerifHeadline("Ready when you are", size: .hero)
-                (Text("Press ")
-                    + Text(model.hotkey.displayName).fontWeight(.medium)
-                    + Text(" and talk, anywhere you can type. Your voice never leaves this Mac."))
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: VeloraSpacing.m)
-            Picker("Range", selection: $range) {
-                ForEach(Self.ranges) { range in
-                    Text(range.title).tag(range)
+        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+            SerifHeadline("Ready when you are", size: .hero)
+            (Text("Press ")
+                + Text(model.hotkey.displayName).fontWeight(.medium)
+                + Text(" and talk, anywhere you can type. Your voice never leaves this Mac."))
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: Last 7 days
+
+    /// Three numbers and the last seven days in one card. Ranges and the
+    /// rest of the charts live in Stats, one click away.
+    private var weekCard: some View {
+        let stats = week.week
+        let typingWPM = AppConfig.shared.typingWPM
+        return GroupCard(header: "Last 7 days", headerLink: ("Open Stats", { selection.pane = .stats })) {
+            HStack(alignment: .bottom, spacing: VeloraSpacing.xl) {
+                HStack(alignment: .top, spacing: VeloraSpacing.xl) {
+                    weekMetric(HistoryJournal.grouped(stats.words), "Words")
+                    weekMetric(
+                        StatsFormat.clock(minutes: stats.minutesSaved(typingWPM: typingWPM)),
+                        "Saved vs typing", emphasis: .accent)
+                    weekMetric(HistoryJournal.grouped(stats.count), "Dictations")
                 }
+                .fixedSize()
+                weekChart
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .fixedSize()
+            .padding(14)
         }
     }
 
-    // MARK: Hero tiles
+    private func weekMetric(_ value: String, _ label: String, emphasis: StatEmphasis = .plain) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(.system(size: 26, weight: .bold))
+                .monospacedDigit()
+                .foregroundStyle(emphasis == .accent ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.primary))
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .accessibilityElement(children: .combine)
+    }
 
-    /// The Stats pane's tiles (Words · Dictations · Speaking time · Saved vs
-    /// typing) for the picked window.
-    private var heroTiles: some View {
-        StatsHeadlineTiles(viewModel: stats, range: range)
+    /// Seven day bars under narrow weekday letters, today in full accent.
+    private var weekChart: some View {
+        let bars = HomeWeek.bars(week.daily, now: Date())
+        let today = Calendar.current.startOfDay(for: Date())
+        return StatsChartBox(height: Self.weekChartHeight) {
+            Chart(bars) { bar in
+                BarMark(x: .value("Day", bar.date, unit: .day), y: .value("Words", bar.words))
+                    .foregroundStyle(VeloraBrand.accent.opacity(bar.date == today ? 1 : Self.pastDayOpacity))
+                    .cornerRadius(Self.weekBarRadius)
+            }
+            .chartXAxis {
+                AxisMarks(values: .stride(by: .day)) { _ in
+                    AxisValueLabel(format: .dateTime.weekday(.abbreviated), centered: true)
+                }
+            }
+            .chartYAxis(.hidden)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     // MARK: Grid
@@ -176,8 +222,11 @@ struct HomeView: View {
     /// to sit inside the card and read as a third header style.
     private var recentCard: some View {
         GroupCard(header: "Recent", headerLink: ("Open History", { selection.pane = .history })) {
-            HistoryRecentList(history: history, limit: Self.recentLimit)
-                .id(reloadToken)
+            HistoryRecentList(history: history, limit: Self.recentLimit) { record in
+                HistoryViewModel.requestReveal(record.id)
+                selection.pane = .history
+            }
+            .id(reloadToken)
                 .padding(.horizontal, 14)
                 .padding(.vertical, VeloraSpacing.m)
         }
@@ -188,7 +237,7 @@ struct HomeView: View {
     private var waysToTalk: some View {
         GroupCard(header: "Ways to talk") {
             wayRow(
-                symbol: "keyboard", title: "Stream Typing", sub: "Words land as you speak",
+                symbol: "text.cursor", title: "Stream Typing", sub: "Words land as you speak",
                 hotkey: model.streamTypingHotkey, enabled: $model.streamTypingEnabled)
             GroupDivider()
             wayRow(
@@ -292,10 +341,34 @@ struct HomeView: View {
 
     private func reload() {
         reloadToken = UUID()
-        stats.reload()
+        reloadWeek()
         AudioInputDevices.beginObserving()
         inputDevices = AudioInputDevices.displayList()
         reloadMeeting()
+    }
+
+    /// Off the main thread, except the offscreen snapshot's first load,
+    /// whose nested runloop never drains main-queue blocks.
+    private func reloadWeek() {
+        if !weekLoaded, IntelligenceViewModel.loadsFirstReloadInline {
+            week = history.weekSummary()
+            weekLoaded = true
+            return
+        }
+
+        weekGeneration += 1
+        let generation = weekGeneration
+        let history = history
+        DispatchQueue.global(qos: .userInitiated).async {
+            let summary = history.weekSummary()
+            DispatchQueue.main.async {
+                guard generation == weekGeneration else {
+                    return
+                }
+                week = summary
+                weekLoaded = true
+            }
+        }
     }
 
     private func reloadMeeting() {
@@ -321,5 +394,15 @@ enum HomeFormat {
             "\(minutes) min",
             items == 1 ? "1 action item" : "\(items) action items",
         ].joined(separator: " · ")
+    }
+}
+
+/// The "Last 7 days" card's bars.
+enum HomeWeek {
+    static let days = 7
+
+    /// The last seven calendar days ending today, zero-filled.
+    static func bars(_ daily: [HistoryStore.DaySample], now: Date, calendar: Calendar = .current) -> [StatsBar] {
+        StatsSeries.days(count: days, daily: daily, now: now, calendar: calendar)
     }
 }

@@ -5,7 +5,7 @@ import Foundation
 /// three different ways across surfaces.
 ///
 ///     idle ──▶ "Update to Velora 1.2.3…"        (opens the window)
-///     downloading ──▶ "Downloading Velora 1.2.3 — 42%"
+///     downloading ──▶ "Downloading Velora 1.2.3 (42%)"
 ///     verifying ──▶ "Verifying Velora 1.2.3…"
 ///     ready ──▶ "Restart to Update"  or  "Waiting to Install…" once committed
 ///     installing ──▶ "Installing…"
@@ -39,7 +39,7 @@ enum UpdateCopy {
         case .idle:
             return nil
         case .downloading(let version, let progress):
-            return "Downloading Velora \(version) — \(Int(progress * 100))%"
+            return "Downloading Velora \(version) (\(Int(progress * 100))%)"
         case .verifying(let version):
             return "Verifying Velora \(version)…"
         case .ready(let version):

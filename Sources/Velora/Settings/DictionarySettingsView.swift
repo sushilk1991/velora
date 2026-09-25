@@ -32,6 +32,27 @@ enum DictionarySettingsLogic {
                 || row.source.rawValue.localizedCaseInsensitiveContains(needle)
         }
     }
+
+    /// "Make Permanent" on an auto-learned word: add it as the user's own
+    /// word, then forget the auto copy, which also bans the miner from
+    /// learning it again. Adding first means a failed step never loses the
+    /// word; an identical added word already there is kept as is.
+    static func promoteAutomatic(
+        _ row: DictionaryRow, rows: [DictionaryRow],
+        add: (String) throws -> Void, remove: (DictionaryRow) throws -> Void
+    ) throws {
+        guard row.source == .automatic else {
+            return
+        }
+        let alreadyAdded = rows.contains {
+            $0.source == .added && $0.heardAs == nil
+                && $0.writeAs.caseInsensitiveCompare(row.writeAs) == .orderedSame
+        }
+        if !alreadyAdded {
+            try add(row.writeAs)
+        }
+        try remove(row)
+    }
 }
 
 struct DictionarySyncPresentation: Equatable {
@@ -70,7 +91,7 @@ struct DictionarySyncPresentation: Equatable {
             needsAccountDecision = false
             privacyDetail = "Synced privately through your iCloud Drive. No audio, transcripts, or history are included."
         case .localOnly:
-            title = "Saved on this Mac — iCloud Drive is unavailable"
+            title = "Saved on this Mac. iCloud Drive is unavailable"
             symbol = "icloud.slash"
             isWarning = true
             isWorking = false
@@ -86,7 +107,7 @@ struct DictionarySyncPresentation: Equatable {
             needsAccountDecision = false
             privacyDetail = "Waiting for your iCloud Drive copy. Your local dictionary remains active."
         case .accountChanged:
-            title = "Apple Account changed — choose what to keep"
+            title = "Apple Account changed. Choose what to keep"
             symbol = "person.crop.circle.badge.exclamationmark"
             isWarning = true
             isWorking = false
@@ -130,25 +151,29 @@ struct DictionarySettingsView: View {
         DictionarySettingsLogic.filtered(model.dictionaryRows, query: query)
     }
 
+    /// The header search box, as wide as History's.
+    private static let searchWidth: CGFloat = 240
+
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: VeloraSpacing.s) {
+            // Search, Add and the actions menu sit in the title row, like
+            // every other pane's controls.
+            PaneHeader(title: MainPane.dictionary.title) {
                 SettingsSearchBox(
                     prompt: "Search names and terms", query: $query,
                     accessibilityLabel: "Search personal dictionary")
+                    .frame(width: Self.searchWidth)
                 Button {
                     editor = EditorContext(row: nil, promotesLearned: false)
                 } label: {
                     Label("Add", systemImage: "plus")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.primaryCapsule)
                 .keyboardShortcut("n", modifiers: .command)
                 .help("Add a word or heard-as correction")
                 dictionaryMenu
             }
-            .padding(VeloraSpacing.m)
-
-            Divider()
+            .padding(.bottom, VeloraSpacing.m)
 
             // The toggles that grow this dictionary live with it, not in a
             // different pane (they control what appears in the list below).
@@ -189,7 +214,7 @@ struct DictionarySettingsView: View {
                             DictionarySettingsRow(row: row) {
                                 editor = EditorContext(row: row, promotesLearned: false)
                             } onPromote: {
-                                editor = EditorContext(row: row, promotesLearned: true)
+                                promote(row)
                             } onDelete: {
                                 pendingDelete = row
                             }
@@ -417,6 +442,25 @@ struct DictionarySettingsView: View {
         .background(.bar)
     }
 
+    /// A learned correction opens the editor to confirm its spelling; an
+    /// auto-learned word has nothing to confirm and moves straight to the
+    /// added words.
+    private func promote(_ row: DictionaryRow) {
+        guard row.source == .automatic else {
+            editor = EditorContext(row: row, promotesLearned: true)
+            return
+        }
+        do {
+            try DictionarySettingsLogic.promoteAutomatic(
+                row, rows: model.dictionaryRows,
+                add: { try model.addDictionaryEntry(writeAs: $0, heardAs: nil) },
+                remove: { try model.removeDictionaryEntry($0) })
+            operationError = nil
+        } catch {
+            operationError = error.localizedDescription
+        }
+    }
+
     /// "Remove" for entries the user added, "Forget" for learned ones.
     private func deleteVerb(_ row: DictionaryRow) -> String {
         row.source == .added ? "Remove" : "Forget"
@@ -463,8 +507,8 @@ private struct DictionarySettingsRow: View {
             Menu {
                 if row.source == .added {
                     Button("Edit…", systemImage: "pencil", action: onEdit)
-                } else if row.source == .learned {
-                    Button("Make Permanent…", systemImage: "pin", action: onPromote)
+                } else if let promoteTitle {
+                    Button(promoteTitle, systemImage: "pin", action: onPromote)
                 }
                 Button(row.source == .added ? "Remove" : "Forget", systemImage: "trash", role: .destructive, action: onDelete)
             } label: {
@@ -480,27 +524,38 @@ private struct DictionarySettingsRow: View {
         .padding(.vertical, 5)
         .contextMenu {
             if row.source == .added { Button("Edit…", action: onEdit) }
-            if row.source == .learned { Button("Make Permanent…", action: onPromote) }
+            if let promoteTitle { Button(promoteTitle, action: onPromote) }
             Button(row.source == .added ? "Remove" : "Forget", role: .destructive, action: onDelete)
         }
         .onTapGesture(count: 2) {
             if row.source == .added { onEdit() }
-            if row.source == .learned { onPromote() }
+            if row.source != .added { onPromote() }
+        }
+    }
+
+    /// A learned correction opens the editor ("…"); an auto-learned word
+    /// becomes an added word at once.
+    private var promoteTitle: String? {
+        switch row.source {
+        case .added: return nil
+        case .learned: return "Make Permanent…"
+        case .automatic: return "Make Permanent"
         }
     }
 
     private var sourceSymbol: String {
         switch row.source {
         case .added: return "person.crop.circle.badge.plus"
-        case .learned: return "wand.and.stars"
-        case .automatic: return "sparkles"
+        // Not Voice Edit's wand or Action Mode's sparkles (DESIGN.md §7).
+        case .learned: return "pencil.line"
+        case .automatic: return "text.magnifyingglass"
         }
     }
 
     private var sourceColor: Color {
         switch row.source {
-        case .added: return VeloraBrand.sky.color
-        case .learned: return .blue
+        case .added: return VeloraBrand.accent
+        case .learned: return VeloraBrand.accent
         case .automatic: return .secondary
         }
     }

@@ -54,7 +54,7 @@ extension SettingsDocument {
         var customOrigin: NormalizedPoint?
         var customEdge: HUDEdge
         var alwaysVisible: Bool
-        /// "Show pill": false after "Close Pill" — no HUD state orders the
+        /// "Show pill": false after "Hide Pill" — no HUD state orders the
         /// panel on screen until the user brings it back from Settings or
         /// the menubar. Dictation keeps working underneath.
         var visible: Bool

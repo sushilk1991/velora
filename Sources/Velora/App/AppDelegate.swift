@@ -236,8 +236,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             guard self.meetingCoordinator.foregroundCaptureActive else { return nil }
             return self.meetingCoordinator.state.isRecording
-                ? "Meeting recording is active — stop it before dictating"
-                : "Meeting audio is starting or saving — wait a moment"
+                ? "Stop the meeting first"
+                : "Meeting audio busy. Wait"
         }
         meetingCoordinator.onRecordingEnded = { [weak self] outcome in
             self?.meetingEndOutcome = outcome

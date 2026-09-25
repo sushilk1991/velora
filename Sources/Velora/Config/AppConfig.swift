@@ -54,38 +54,38 @@ struct STTModel: Identifiable, Equatable {
     static let all: [STTModel] = [
         STTModel(
             id: "mlx-community/whisper-large-v3-turbo",
-            displayName: "Whisper Large v3 Turbo",
-            size: "~1.6 GB", speed: "Fast", languages: "Multilingual — Hindi, Indian English, 99 langs"
+            displayName: "Whisper Turbo",
+            size: "1.6 GB", speed: "Fast", languages: "99 languages, including Hindi"
         ),
         STTModel(
             id: "handy-computer/whisper-large-v3-turbo-gguf",
             displayName: "Whisper Turbo Q8 (Experimental)",
-            size: "~0.85 GB", speed: "Faster", languages: "Multilingual — transcribe.cpp"
+            size: "0.85 GB", speed: "Faster", languages: "99 languages, still in testing"
         ),
         STTModel(
             id: "mlx-community/whisper-large-v3-mlx",
-            displayName: "Whisper Large v3 (full)",
-            size: "~3.1 GB", speed: "Slower", languages: "Multilingual — highest accuracy"
+            displayName: "Whisper Large",
+            size: "3.1 GB", speed: "Slower", languages: "99 languages, most accurate"
         ),
         STTModel(
             id: "knownsense/whisper-hindi-apex-mlx",
-            displayName: "Whisper Hindi/Hinglish (Apex)",
-            size: "~1.6 GB", speed: "Fast", languages: "Hindi & Hinglish (Romanized)"
+            displayName: "Whisper Hinglish",
+            size: "1.6 GB", speed: "Fast", languages: "Hindi and Hinglish, in English letters"
         ),
         STTModel(
             id: "mlx-community/parakeet-tdt-0.6b-v3",
-            displayName: "Parakeet TDT 0.6B v3",
-            size: "~2.5 GB", speed: "Fastest (live streaming)", languages: "English + 24 European"
+            displayName: "Parakeet v3",
+            size: "2.5 GB", speed: "Fastest (live streaming)", languages: "English and 24 European languages"
         ),
         STTModel(
             id: "mlx-community/parakeet-tdt-0.6b-v2",
-            displayName: "Parakeet TDT 0.6B v2",
-            size: "~2.3 GB", speed: "Fastest (live streaming)", languages: "English only"
+            displayName: "Parakeet v2",
+            size: "2.3 GB", speed: "Fastest (live streaming)", languages: "English only"
         ),
         STTModel(
             id: "mlx-community/whisper-large-v3-turbo-q4",
-            displayName: "Whisper Turbo (4-bit)",
-            size: "~0.5 GB", speed: "Fast", languages: "Multilingual — smallest, roughest"
+            displayName: "Whisper Turbo Small",
+            size: "0.5 GB", speed: "Fast", languages: "99 languages, smallest"
         ),
     ]
 }
@@ -879,9 +879,9 @@ final class AppConfig {
         set { updateSettings { $0.hud.alwaysVisible = newValue } }
     }
 
-    /// "Show pill": false after "Close Pill" (HUD context menu) or the
-    /// General › Pill toggle. While false no HUD state orders the panel on
-    /// screen; dictation itself keeps working.
+    /// "Show pill": false after "Hide Pill" (HUD context menu) or Never in
+    /// the General › Show pill picker. While false no HUD state orders the
+    /// panel on screen; dictation itself keeps working.
     var hudVisible: Bool {
         get { readSetting(\.hud.visible) }
         set { updateSettings { $0.hud.visible = newValue } }

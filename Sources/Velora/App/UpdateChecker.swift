@@ -173,7 +173,7 @@ final class UpdateChecker {
     ) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let current = Self.currentVersion else {
-            completion(.failed("Development build — updates are checked in packaged builds only"))
+            completion(.failed("Development build. Updates need the packaged app."))
             return
         }
         guard let apiURL = Self.apiURL else {

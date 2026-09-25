@@ -25,7 +25,7 @@ enum SettingsTab: String, CaseIterable, Identifiable {
         case .dictation: return "mic.fill"
         case .shortcuts: return "keyboard.fill"
         case .models: return "cpu.fill"
-        case .advanced: return "slider.horizontal.3"
+        case .advanced: return "gearshape.2.fill"
         }
     }
 
@@ -67,6 +67,8 @@ enum VeloraAppInfo {
 /// Grouped-form section footer in the System Settings idiom: caption-sized,
 /// secondary. Every footer goes through this so panes can't drift apart again
 /// (they used to mix `.callout` and `.caption` and read as two designs).
+/// Leading-aligned: a grouped Form trails its footers by default, which put
+/// the header on the left and the footer on the right of every card.
 struct SettingsFooter: View {
     private let text: String
 
@@ -76,6 +78,8 @@ struct SettingsFooter: View {
         Text(text)
             .font(.caption)
             .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -133,14 +137,15 @@ struct SettingsSearchBox: View {
 
 // MARK: - General
 
-/// General: appearance, the pill, and the update check — the settings a
+/// General: appearance, the pill, and every update setting — the settings a
 /// first-day user reaches for. Everything operational moved to Advanced.
 struct GeneralSettingsView: View {
     @ObservedObject var model: SettingsModel
 
     var body: some View {
         Form {
-            Section("Appearance") {
+            // No header: "Appearance" would repeat the first row's label.
+            Section {
                 Picker("Appearance", selection: $model.appearance) {
                     Text("System").tag("system")
                     Text("Light").tag("light")
@@ -151,27 +156,51 @@ struct GeneralSettingsView: View {
                 Toggle("Play sounds", isOn: $model.soundsEnabled)
             }
             Section {
-                Toggle("Show pill", isOn: $model.hudVisible)
-                Toggle("Keep pill on screen when idle", isOn: $model.hudAlwaysVisible)
-                    .disabled(!model.hudVisible)
+                Picker("Show pill", selection: pillVisibility) {
+                    ForEach(PillVisibility.allCases) { choice in
+                        Text(choice.title).tag(choice)
+                    }
+                }
             } header: {
                 Text("Pill")
             } footer: {
-                SettingsFooter("Right-click the pill to close it. Bring it back from the menubar.")
+                SettingsFooter("To hide the pill, right-click it. Show it again from the menubar.")
             }
             Section {
                 Toggle("Check for updates automatically", isOn: $model.updateChecks)
-                LabeledContent("Velora \(VeloraAppInfo.shortVersion)") {
-                    UpdateActionRow(model: model)
+                Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
+                    .disabled(!model.updateChecks)
+                // One row, one button: "Version 0.24.2" over the last check's
+                // result, with Check Now (or the update) on the right.
+                LabeledContent {
+                    UpdateActionRow(model: model, checkStatusPlacement: .caller)
+                } label: {
+                    Text("Version \(VeloraAppInfo.shortVersion)")
+                    if let status = model.updateCheckStatus {
+                        Text(status)
+                    }
                 }
+                Button("View Release History…") { model.openReleaseHistory() }
             } header: {
                 Text("Updates")
             } footer: {
-                SettingsFooter("Asks GitHub once a day whether a newer release exists. The request carries nothing about you or your dictations.")
+                SettingsFooter("Checks GitHub once a day and sends nothing about you or what you dictate. Before installing an update, Velora checks Apple's signature and notarization.")
             }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
+    }
+
+    /// The one pill picker over `hud.visible` + `hud.alwaysVisible`.
+    private var pillVisibility: Binding<PillVisibility> {
+        Binding(
+            get: {
+                PillVisibility(visible: model.hudVisible, alwaysVisible: model.hudAlwaysVisible)
+            },
+            set: { choice in
+                model.hudAlwaysVisible = choice.alwaysVisible(keeping: model.hudAlwaysVisible)
+                model.hudVisible = choice.visible
+            })
     }
 }
 
@@ -180,10 +209,19 @@ struct GeneralSettingsView: View {
 /// Failures show the reason and keep both Try Again and Check Now within
 /// reach. Shared by Settings › General › Updates and the About window.
 struct UpdateActionRow: View {
+    /// Where the last check's result ("This is the latest version.") shows.
+    enum CheckStatusPlacement {
+        /// Beside the buttons (About).
+        case inline
+        /// The caller shows it, under Settings' "Version X" label.
+        case caller
+    }
+
     @ObservedObject var model: SettingsModel
     /// The idle-state button title ("Check Now" in the Updates section,
     /// "Check for Updates" in About).
     var checkLabel = "Check Now"
+    var checkStatusPlacement: CheckStatusPlacement = .inline
 
     private static let progressWidth: CGFloat = 160
 
@@ -216,9 +254,9 @@ struct UpdateActionRow: View {
                 }
                 Button(checkLabel) { model.checkForUpdatesNow() }
                 caption(stateCaption)
-                caption(model.updateCheckStatus)
+                caption(checkStatus)
             case .idle:
-                Button(checkLabel) { model.checkForUpdatesNow() }
+                // One button: the update once one is known, else Check Now.
                 if let update = model.availableUpdate {
                     if model.canInstallUpdateInPlace {
                         Button(UpdateCopy.updateTitle(update.version)) {
@@ -227,10 +265,16 @@ struct UpdateActionRow: View {
                     } else {
                         Button(UpdateCopy.releasesPageTitle) { model.openReleasesPage() }
                     }
+                } else {
+                    Button(checkLabel) { model.checkForUpdatesNow() }
                 }
-                caption(model.updateCheckStatus)
+                caption(checkStatus)
             }
         }
+    }
+
+    private var checkStatus: String? {
+        checkStatusPlacement == .inline ? model.updateCheckStatus : nil
     }
 
     private var stateCaption: String? {
@@ -265,8 +309,6 @@ struct DictationSettingsView: View {
         ("it", "Italian"), ("ja", "Japanese"),
     ]
 
-    private static let daysPerMonth = 30
-
     var body: some View {
         Form {
             Section {
@@ -288,24 +330,10 @@ struct DictationSettingsView: View {
                         Text(name).tag(code)
                     }
                 }
-                // The shortcut itself is recorded under Shortcuts; here only
-                // how a press behaves.
-                LabeledContent("Start dictation") {
-                    HStack(spacing: VeloraSpacing.m) {
-                        KeycapsLabel(hotkey: model.hotkey)
-                        Picker("Behaviour", selection: $model.hotkeyMode) {
-                            Text("Hold").tag(HotkeyMode.hold)
-                            Text("Toggle").tag(HotkeyMode.toggle)
-                        }
-                        .pickerStyle(.segmented)
-                        .labelsHidden()
-                        .fixedSize()
-                    }
-                }
             } header: {
                 Text("Input")
             } footer: {
-                SettingsFooter("Velora keeps recording from this microphone even when macOS switches its default input (for example when AirPods connect).")
+                SettingsFooter("Velora keeps using this microphone when AirPods or another input connect.")
             }
             Section("Writing") {
                 Toggle("Automatic punctuation", isOn: $model.autoPunctuation)
@@ -335,7 +363,7 @@ struct DictationSettingsView: View {
             } header: {
                 Text("Screen context")
             } footer: {
-                SettingsFooter("Velora reads on-screen text through Accessibility during dictation, with no in-app off switch. It looks for names and technical terms near the cursor, then in the active window if needed. Optional Screen Recording permission enables local Apple Vision OCR for sparse windows; revoking it stops only OCR. Screenshots are discarded after recognition; OCR text and spelling hints are not saved. Password and other secure-input fields are excluded. Dictation never waits for screen context.")
+                SettingsFooter("While you dictate, Velora reads text near the cursor to spell names and terms right, and has no switch to turn this off. Nothing it reads is saved, password fields are skipped, and Screen Recording only adds on-device reading of text in images.")
             }
             Section {
                 Toggle("Keep audio recordings", isOn: $model.saveAudio)
@@ -357,11 +385,11 @@ struct DictationSettingsView: View {
         }
     }
 
-    /// "1.2 GB on disk · kept for 180 days. Your voice never leaves this Mac."
+    /// "1.2 GB on disk, kept for 180 days. Your voice never leaves this Mac."
     private var recordingsFooter: String {
         let days = Int(model.audioRetentionDays)
         let retention = "kept for \(days) days"
-        return "\(archiveSize) on disk · \(retention). Your voice never leaves this Mac."
+        return "\(archiveSize) on disk, \(retention). Your voice never leaves this Mac."
     }
 
     /// Sums the archived-clip directory size off the main thread.
@@ -388,12 +416,12 @@ struct DictationSettingsView: View {
 /// Models: the two models in use, each with a "Change…" that unfolds the
 /// choices in place, and the storage they occupy.
 ///
-///     ON THIS MAC
+///     On this Mac
 ///     Speech to text                                   [Change…]
-///       whisper-large-v3-turbo · On-device · 1.6 GB
-///       ○ parakeet-tdt-0.6b-v3 … (only while unfolded)
+///       Whisper Turbo · 1.6 GB
+///       ○ Parakeet v3 / Fastest. English and 24 … (only while unfolded)
 ///     Cleanup                                          [Change…]
-///       Qwen 2.5 3B · Recommended for this Mac · 1.9 GB
+///       Quality · 4.8 GB
 struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = "…"
@@ -419,8 +447,7 @@ struct ModelSettingsView: View {
         let engine = model.sttEngineModels
         if !engine.isEmpty {
             return engine.map {
-                Choice(id: $0.id, name: $0.displayName,
-                       detail: $0.backend.isEmpty ? "On-device" : $0.backend, size: $0.size)
+                Choice(id: $0.id, name: $0.displayName, detail: $0.description, size: $0.size)
             }
         }
         return STTModel.all.map {
@@ -431,9 +458,10 @@ struct ModelSettingsView: View {
     /// Cleanup models the engine advertises (smallest first).
     private var cleanupChoices: [Choice] {
         model.cleanupEngineModels.map {
-            Choice(
+            let recommended = $0.id == model.recommendedCleanupModel
+            return Choice(
                 id: $0.id, name: $0.displayName,
-                detail: $0.id == model.recommendedCleanupModel ? "Recommended for this Mac" : "On-device",
+                detail: recommended ? "Recommended for this Mac. \($0.description)" : $0.description,
                 size: $0.size)
         }
     }
@@ -461,7 +489,7 @@ struct ModelSettingsView: View {
             } header: {
                 Text("On this Mac")
             } footer: {
-                SettingsFooter("Models download once and run on this Mac. Nothing is sent anywhere.")
+                SettingsFooter("Models download once, then run on this Mac. Your voice never leaves this Mac.")
             }
             Section("Storage") {
                 LabeledContent("On disk") {
@@ -550,10 +578,11 @@ struct ModelSettingsView: View {
         }
     }
 
-    /// "whisper-large-v3-turbo · On-device · 1.6 GB".
+    /// "Whisper Turbo · 1.6 GB". The description shows only on the
+    /// unfolded choices, so the folded row stays one line.
     private func caption(for choice: Choice?, fallback id: String) -> String {
         guard let choice else { return id.isEmpty ? "Not chosen" : shortName(id) }
-        return [choice.name, choice.detail, choice.size]
+        return [choice.name, choice.size]
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
     }
@@ -591,9 +620,9 @@ struct ModelSettingsView: View {
 
 // MARK: - Advanced
 
-/// Advanced: meeting preferences, terminal cleanup, the update installer,
-/// and the tools a power user reaches for (settings file, CLI, logs, the
-/// Setup Assistant). Every row here used to live somewhere more prominent.
+/// Advanced: meeting preferences, terminal cleanup, and the tools a power
+/// user reaches for (settings file, CLI, logs, the Setup Assistant). Every
+/// row here used to live somewhere more prominent. Updates live in General.
 struct AdvancedSettingsView: View {
     @ObservedObject var model: SettingsModel
     @ObservedObject var coordinator: MeetingCoordinator
@@ -628,15 +657,6 @@ struct AdvancedSettingsView: View {
                 }
             }
             Section {
-                Toggle("Download and install updates automatically", isOn: $model.autoInstallUpdates)
-                    .disabled(!model.updateChecks)
-                Button("View Release History…") { model.openReleaseHistory() }
-            } header: {
-                Text("Updates")
-            } footer: {
-                SettingsFooter("Updates download from GitHub only when you choose — or automatically with the toggle on — and are verified against Velora's Developer ID signature and Apple's notarization before they replace Velora.")
-            }
-            Section {
                 settingsFileRow
                 Toggle("Allow local CLI and agents", isOn: $model.localAgentAccess)
                 if model.localAgentAccess {
@@ -649,7 +669,7 @@ struct AdvancedSettingsView: View {
                     agentIntegrationRow(
                         title: "Agent skill",
                         detail: model.agentSkillInstalled
-                            ? "Installed — Claude Code knows what it can ask Velora."
+                            ? "Installed. Claude Code knows what it can ask Velora."
                             : "Teaches local agents (Claude Code) where to look and what they can ask.",
                         buttonTitle: model.agentSkillInstalled ? "Reinstall" : "Install"
                     ) { model.installAgentSkill() }
@@ -666,7 +686,7 @@ struct AdvancedSettingsView: View {
             } header: {
                 Text("Tools")
             } footer: {
-                SettingsFooter("The settings file carries portable preferences, shortcuts, the speech model, and advanced engine settings. History, recordings, dictionary, custom modes, macOS permissions, microphone choice, Calendar access, and local-agent access stay on this Mac. Local agents run as your user and open no network server.")
+                SettingsFooter("Export copies your preferences, shortcuts and speech model. History, recordings, dictionary and permissions stay on this Mac, and local agents open no network port.")
             }
         }
         .formStyle(.grouped)
@@ -738,28 +758,33 @@ struct AdvancedSettingsView: View {
 
 // MARK: - Shortcuts
 
-/// Card-per-feature Shortcuts pane: each voice feature gets one card with a
-/// colored icon tile, its master toggle, and a keycap-styled recorder. The
-/// Music permission row appears only while the user can actually act on it —
-/// a permanently "Allowed" status row is dead weight.
+/// Shortcuts: one grouped section per voice feature, in the Form idiom the
+/// other tabs use. Each section opens with the feature's name and what it
+/// does (its master toggle where it has one), then its shortcut. The Music
+/// permission row appears only while the user can actually act on it: a
+/// permanently "Allowed" status row is dead weight.
+///
+///     ┌──────────────────────────────────────────┐
+///     │ Stream Typing                       (●)  │  toggle + caption
+///     │ Your words appear at the cursor…         │
+///     │ Shortcut                        [⌃][⇧][S]│
+///     └──────────────────────────────────────────┘
+///     Velora swaps in the polished text…          footer
 struct ShortcutsSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var musicPermission: NativeMediaPermission?
     @State private var requestingMusicPermission = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: VeloraSpacing.l) {
-                dictationCard
-                streamTypingCard
-                proofreadCard
-                voiceEditCard
-                voiceActionsCard
-            }
-            .padding(VeloraSpacing.xl)
-            .frame(maxWidth: 640)
-            .frame(maxWidth: .infinity)
+        Form {
+            dictationSection
+            streamTypingSection
+            proofreadSection
+            voiceEditSection
+            actionModeSection
         }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
         .onAppear(perform: refreshMusicPermission)
         .onReceive(NotificationCenter.default.publisher(
             for: NSApplication.didBecomeActiveNotification
@@ -770,158 +795,118 @@ struct ShortcutsSettingsView: View {
 
     // MARK: Dictation
 
-    private var dictationCard: some View {
-        SettingsCard {
-            CardHeader(
-                symbol: "mic.fill", color: VeloraBrand.sky.color,
-                title: "Dictation",
-                subtitle: "Press your shortcut and speak — anywhere you can type. Esc cancels.")
-            CardDivider()
-            shortcutRow(title: "Start dictation", hotkey: $model.hotkey)
-            HStack {
-                Text("When pressed")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Picker("When pressed", selection: $model.hotkeyMode) {
-                    ForEach(HotkeyMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .fixedSize()
+    private var dictationSection: some View {
+        Section {
+            LabeledContent {
+                HotkeyRecorderView(hotkey: $model.hotkey, showsQuickPicks: false)
+            } label: {
+                featureLabel(
+                    "Dictation",
+                    caption: "Press your shortcut and speak, anywhere you can type. Esc cancels.")
             }
+            Picker("When pressed", selection: $model.hotkeyMode) {
+                ForEach(HotkeyMode.allCases) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+        } footer: {
             if model.hotkeyMode == .hold {
-                Text("A quick tap locks recording on; tap again to finish.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                SettingsFooter("A quick tap locks recording on; tap again to finish.")
             }
         }
     }
 
     // MARK: Stream typing
 
-    private var streamTypingCard: some View {
-        SettingsCard {
-            CardHeader(
-                symbol: "keyboard.fill", color: .blue,
-                title: "Stream Typing",
-                subtitle: "See your words appear at the cursor while you speak. The live draft is replaced with the polished final when you finish."
-            ) {
-                Toggle("Stream Typing", isOn: $model.streamTypingEnabled)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
+    private var streamTypingSection: some View {
+        Section {
+            Toggle(isOn: $model.streamTypingEnabled) {
+                featureLabel(
+                    "Stream Typing", caption: "Your words appear at the cursor while you speak.")
             }
             Group {
-                CardDivider()
-                shortcutRow(title: "Type as you speak", hotkey: $model.streamTypingHotkey)
+                shortcutRow(for: "Stream Typing", hotkey: $model.streamTypingHotkey)
                 if model.streamTypingHotkeyConflict {
                     conflictLabel("Stream Typing needs a shortcut of its own.")
                 }
-                Text("If you type or move the cursor mid-stream, Velora stops rewriting and copies the final instead.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
             .disabled(!model.streamTypingEnabled)
-            .opacity(model.streamTypingEnabled ? 1 : 0.5)
+        } footer: {
+            SettingsFooter("Velora swaps in the polished text when you finish. If you type or move the cursor, it stops and copies the final text instead.")
         }
     }
 
     // MARK: Proofread
 
-    private var proofreadCard: some View {
-        SettingsCard {
-            CardHeader(
-                symbol: "text.badge.checkmark", color: .green,
-                title: "Proofread",
-                subtitle: "Fix spelling and grammar in selected text, no microphone needed."
-            ) {
-                Toggle("Proofread", isOn: $model.proofreadEnabled)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
+    private var proofreadSection: some View {
+        Section {
+            Toggle(isOn: $model.proofreadEnabled) {
+                featureLabel(
+                    "Proofread",
+                    caption: "Fix spelling and grammar in selected text, no microphone needed.")
             }
             Group {
-                CardDivider()
-                shortcutRow(title: "Proofread", hotkey: $model.proofreadHotkey)
+                shortcutRow(for: "Proofread", hotkey: $model.proofreadHotkey)
                 if model.proofreadHotkeyConflict {
                     conflictLabel("Proofread needs a shortcut of its own.")
                 }
             }
             .disabled(!model.proofreadEnabled)
-            .opacity(model.proofreadEnabled ? 1 : 0.5)
         }
     }
 
     // MARK: Voice edit
 
-    private var voiceEditCard: some View {
-        SettingsCard {
-            CardHeader(
-                symbol: "wand.and.stars", color: .teal,
-                title: "Voice Edit",
-                subtitle: "Select text anywhere, press the shortcut, and speak an edit — \u{201C}fix the grammar\u{201D}, \u{201C}make this more formal\u{201D}, \u{201C}turn this into bullet points\u{201D}. \u{2318}Z undoes it."
-            ) {
-                Toggle("Voice Edit", isOn: $model.voiceEdit)
-                    .toggleStyle(.switch)
-                    .labelsHidden()
+    private var voiceEditSection: some View {
+        Section {
+            Toggle(isOn: $model.voiceEdit) {
+                featureLabel(
+                    "Voice Edit",
+                    caption: "Select text, press the shortcut, and say the change: \u{201C}make this more formal\u{201D}. \u{2318}Z undoes it.")
             }
             Group {
-                CardDivider()
-                shortcutRow(title: "Voice Edit", hotkey: $model.editHotkey)
+                shortcutRow(for: "Voice Edit", hotkey: $model.editHotkey)
                 if model.editHotkeyConflict {
                     conflictLabel("Dictation and Voice Edit need different shortcuts.")
                 }
             }
             .disabled(!model.voiceEdit)
-            .opacity(model.voiceEdit ? 1 : 0.5)
         }
     }
 
-    // MARK: Voice actions
+    // MARK: Action Mode
 
-    private var voiceActionsCard: some View {
-        SettingsCard {
-            CardHeader(
-                symbol: "sparkles", color: .orange,
-                title: "Action Mode",
-                subtitle: "Hold the shortcut and say what you want done — \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Velora carries it out in the app you’re in, or in another app’s window with the Cua Driver. Say \u{201C}draft\u{201D} to stop before sending."
-            ) {
-                VStack(alignment: .trailing, spacing: 4) {
-                    Toggle("Action Mode", isOn: $model.actionsEnabled)
-                        .toggleStyle(.switch)
-                        .labelsHidden()
-                    ExperimentalBadge()
+    private var actionModeSection: some View {
+        Section {
+            Toggle(isOn: $model.actionsEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: VeloraSpacing.s) {
+                        Text("Action Mode")
+                        ExperimentalBadge()
+                    }
+                    Text("Hold the shortcut and say what to do: \u{201C}message Priya on Slack that I\u{2019}m running late\u{201D}. Say \u{201C}draft\u{201D} to stop before it sends.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             Group {
-                CardDivider()
-                shortcutRow(title: "Action Mode", hotkey: $model.actionHotkey)
+                shortcutRow(for: "Action Mode", hotkey: $model.actionHotkey)
                 if model.actionHotkeyConflict {
                     conflictLabel("Action Mode needs a shortcut of its own.")
                 }
                 if CuaDriver.isInstalled {
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Work in the background")
-                                .font(.system(size: 12))
-                            Text("Velora drives an exact target through Cua while your current app stays in front.")
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        Toggle("Work in the background", isOn: $model.backgroundActions)
-                            .toggleStyle(.switch)
-                            .labelsHidden()
+                    Toggle(isOn: $model.backgroundActions) {
+                        featureLabel(
+                            "Work in the background",
+                            caption: "Velora drives an exact target through Cua while your current app stays in front.")
                     }
                 }
                 musicPermissionRow
-                Text("Action Mode needs Accessibility permission, and runs entirely on this Mac.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
             }
             .disabled(!model.actionsEnabled)
-            .opacity(model.actionsEnabled ? 1 : 0.5)
+        } footer: {
+            SettingsFooter("Action Mode needs Accessibility permission and runs entirely on this Mac.")
         }
     }
 
@@ -934,13 +919,9 @@ struct ShortcutsSettingsView: View {
         let actionable: [NativeMediaPermission?] = [.needsConsent, .denied, .unavailable]
         if actionable.contains(musicPermission) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Music control")
-                        .font(.system(size: 12))
-                    Text("Allow once to play or pause Music without bringing it forward.")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
+                featureLabel(
+                    "Music control",
+                    caption: "Allow once to play or pause Music without bringing it forward.")
                 Spacer()
                 switch musicPermission {
                 case .needsConsent:
@@ -962,14 +943,25 @@ struct ShortcutsSettingsView: View {
 
     // MARK: Shared rows
 
-    private func shortcutRow(title: String, hotkey: Binding<Hotkey>) -> some View {
-        HStack(alignment: .top) {
+    /// A row title over a one-line caption, the Form's toggle-row idiom.
+    private func featureLabel(_ title: String, caption: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.system(size: 12))
+            Text(caption)
+                .font(.caption)
                 .foregroundStyle(.secondary)
-                .padding(.top, 8)
-            Spacer(minLength: VeloraSpacing.l)
+        }
+    }
+
+    /// The row reads "Shortcut" under its feature's title, but VoiceOver
+    /// hears rows out of context: four identical "Shortcut" rows told the
+    /// user nothing, so the spoken label names the feature.
+    private func shortcutRow(for feature: String, hotkey: Binding<Hotkey>) -> some View {
+        LabeledContent {
             HotkeyRecorderView(hotkey: hotkey, showsQuickPicks: false)
+        } label: {
+            Text("Shortcut")
+                .accessibilityLabel("\(feature) shortcut")
         }
     }
 
@@ -1029,14 +1021,13 @@ struct AboutSettingsView: View {
             UpdateActionRow(model: model, checkLabel: "Check for Updates")
                 .padding(.top, VeloraSpacing.xs)
 
+            // Email Support is a text link like the ones below: a prominent
+            // button here outranked the update action and used a second
+            // primary style (the Update window uses `.primaryCapsule`).
             if let supportURL = VeloraLinks.supportEmailURL {
-                Link(destination: supportURL) {
-                    Label("Email Support", systemImage: "envelope.fill")
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .accessibilityHint("Opens a new support email to \(VeloraLinks.supportEmailAddress)")
-                .padding(.top, VeloraSpacing.xs)
+                Link("Email Support", destination: supportURL)
+                    .accessibilityHint("Opens a new support email to \(VeloraLinks.supportEmailAddress)")
+                    .padding(.top, VeloraSpacing.xs)
             }
 
             HStack(spacing: VeloraSpacing.l) {

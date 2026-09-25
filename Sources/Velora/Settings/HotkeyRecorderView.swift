@@ -63,7 +63,7 @@ struct HotkeyRecorderView: View {
             .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         }
         .buttonStyle(.plain)
-        .help("Click, then press a new key combo — a bare modifier like Right Option works too")
+        .help("Click, then press the new shortcut. A single key like Right Option works too.")
         .accessibilityLabel(
             isRecording ? "Recording shortcut; press keys now" : "Change shortcut")
     }

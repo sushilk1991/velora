@@ -3,6 +3,7 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import SQLite3
+import SwiftUI
 import UniformTypeIdentifiers
 
 final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
@@ -151,6 +152,7 @@ enum Selftest {
         testMinutesSavedDefinition()
         testShareCardPrivacy()
         testJournalAndStatsPresentation()
+        testContentPanes()
         testControlProtocol()
         testControlRouter()
         testLocalAgentAccessRevocationSignal()
@@ -162,6 +164,8 @@ enum Selftest {
         testShellNavigation()
         testPillVisibilitySetting()
         testShellMenus()
+        testWindowShellGeometry()
+        testShellCopy()
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
         testAudioCaptureRequiresPCM()
@@ -847,7 +851,7 @@ enum Selftest {
             expect(
                 SettingsModel.statusAfterSuccessfulUpdateCheck(
                     availableUpdate: nil, currentVersion: "0.7.2")
-                    == "Velora 0.7.2 is up to date."
+                    == "This is the latest version."
                     && SettingsModel.statusAfterSuccessfulUpdateCheck(
                         availableUpdate: update, currentVersion: "0.7.2")
                         == "Velora 9.9.9 is available.",
@@ -1082,7 +1086,7 @@ enum Selftest {
                 && UpdateCopy.caption(for: .idle, installsWhenReady: false) == nil
                 && UpdateCopy.caption(
                     for: .downloading(version: "1.2.3", progress: 0.42),
-                    installsWhenReady: false) == "Downloading Velora 1.2.3 — 42%",
+                    installsWhenReady: false) == "Downloading Velora 1.2.3 (42%)",
             "every surface reads installer state through one caption vocabulary")
         expect(
             UpdateWindowView.subtitle(current: "1.2.2", publishedAt: nil) == "You have 1.2.2"
@@ -2223,7 +2227,7 @@ enum Selftest {
     private static func testOnboardingSetup() {
         let downloading = OnboardingSetupState(
             isComplete: false,
-            status: "Downloading the speech model (1.6 GB) — 42%",
+            status: "Downloading the speech model (1.6 GB): 42%",
             fraction: 0.42)
         expect(!downloading.canTryIt, "model download keeps onboarding try-it locked")
         expect(downloading.primaryActionTitle == "Continue in the Background",
@@ -3682,7 +3686,7 @@ enum Selftest {
         expect(DictionarySyncPresentation(.synced).title == "Synced with iCloud",
                "synced status has concise truthful copy")
         expect(DictionarySyncPresentation(.localOnly).title
-               == "Saved on this Mac — iCloud Drive is unavailable",
+               == "Saved on this Mac. iCloud Drive is unavailable",
                "local-only status makes offline safety clear")
         expect(DictionarySyncPresentation(.accountChanged).needsAccountDecision,
                "account-change status exposes an explicit privacy decision")
@@ -4604,13 +4608,8 @@ enum Selftest {
         expect(StatsHeadline.words(14_860, range: .thirtyDays) == "14,860 words in the last 30 days",
                "30-day headline")
         expect(StatsHeadline.words(1, range: .today) == "1 word today", "today headline singular")
-        expect(StatsHeadline.words(320, range: .sevenDays) == "320 words this week", "7-day headline")
+        expect(StatsHeadline.words(320, range: .sevenDays) == "320 words in the last 7 days", "7-day headline")
         expect(StatsHeadline.words(0, range: .allTime) == "0 words all time", "all-time headline")
-        expect(StatsHeadline.speaking(spokenMs: 161 * 60_000, minutesSaved: 109)
-                == "2 h 41 m of speaking, about 1 h 49 m faster than typing.",
-               "speaking sub-line with the saving")
-        expect(StatsHeadline.speaking(spokenMs: 45_000, minutesSaved: 0) == "45 s of speaking.",
-               "speaking sub-line without a saving")
 
         // Top-app shares: percentages are of the whole range, so the shown
         // four never sum past 100 and equal 100 when they are the whole.
@@ -4632,12 +4631,14 @@ enum Selftest {
         expect(StatsTopApps.shares([]).isEmpty, "no words → no shares")
 
         // Range detail: hour buckets and nearest-rank latency percentiles.
-        let rows = (0..<20).map { i -> DictationRecord in
-            var r = dictation(daysAgo: 0, words: 10, app: i % 2 == 0 ? "Slack" : "Notes")
-            r.finalizationMs = (i + 1) * 100
-            return r
-        }
-        let detail = StatsRangeDetail.build(records: rows, calendar: calendar)
+        var summary = HistoryStore.RangeSummary()
+        summary.hours = [HistoryStore.HourSample(hour: 9, count: 20, words: 200, spokenMs: 0)]
+        summary.apps = [
+            HistoryStore.BreakdownSlice(name: "Slack", count: 10, words: 100),
+            HistoryStore.BreakdownSlice(name: "Notes", count: 10, words: 100),
+        ]
+        summary.readyMs = (1...20).map { $0 * 100 }
+        let detail = StatsRangeDetail.make(summary: summary)
         expect(detail.readyMedianMs == 1_000 && detail.readySlowestMs == 1_900,
                "median and slowest-5% are nearest-rank, got \(String(describing: detail.readyMedianMs)) / \(String(describing: detail.readySlowestMs))")
         expect(detail.hourlyWords.reduce(0, +) == 200 && detail.apps.count == 2,
@@ -4646,16 +4647,16 @@ enum Selftest {
 
         // Chart series shape per range.
         let insights = HistoryStore.Insights()
-        expect(StatsSeries.bars(range: .today, insights: insights, hourlyWords: detail.hourlyWords,
+        expect(StatsSeries.bars(range: .today, insights: insights, detail: detail,
                                 now: now, calendar: calendar).count == 24,
                "today charts 24 hours")
-        expect(StatsSeries.bars(range: .sevenDays, insights: insights, hourlyWords: [],
+        expect(StatsSeries.bars(range: .sevenDays, insights: insights, detail: StatsRangeDetail(),
                                 now: now, calendar: calendar).count == 7,
                "7 days charts 7 days")
-        expect(StatsSeries.bars(range: .allTime, insights: insights, hourlyWords: [],
-                                now: now, calendar: calendar).count == 12,
-               "all time charts 12 weeks")
-        let empty = StatsSeries.bars(range: .thirtyDays, insights: insights, hourlyWords: [],
+        expect(StatsSeries.bars(range: .allTime, insights: insights, detail: StatsRangeDetail(),
+                                now: now, calendar: calendar).count == 1,
+               "all time with no history charts the current month")
+        let empty = StatsSeries.bars(range: .thirtyDays, insights: insights, detail: StatsRangeDetail(),
                                      now: now, calendar: calendar)
         expect(StatsSeries.bestCaption(bars: empty, range: .thirtyDays) == nil,
                "no words → no best-day caption")
@@ -8000,6 +8001,14 @@ enum Selftest {
             Set(MainPane.allCases.map(\.symbol)).count == MainPane.allCases.count
                 && Set(SettingsTab.allCases.map(\.symbol)).count == SettingsTab.allCases.count,
             "every sidebar row has its own symbol")
+        // One symbol per concept across both windows (DESIGN.md §7): the
+        // Settings rail must not reuse a main-window pane's glyph, filled or
+        // not (Advanced once borrowed Modes' sliders).
+        let baseSymbol: (String) -> String = { $0.replacingOccurrences(of: ".fill", with: "") }
+        expect(
+            Set(MainPane.allCases.map { baseSymbol($0.symbol) })
+                .isDisjoint(with: SettingsTab.allCases.map { baseSymbol($0.symbol) }),
+            "the Settings rail and the main sidebar share no symbol")
         expect(
             MainWindowSelection().current == .home && SettingsWindowSelection().current == .general,
             "fresh windows open on Home and General")
@@ -8033,6 +8042,30 @@ enum Selftest {
         } catch {
             expect(false, "pill visibility round-trip threw \(error)")
         }
+
+        // Settings shows one "Show pill" picker over the two stored keys, so
+        // files written by older builds keep their meaning:
+        //
+        //     hud.visible  hud.alwaysVisible  →  picker
+        //     false        either                Never
+        //     true         true                  Always
+        //     true         false                 While dictating
+        expect(PillVisibility(visible: false, alwaysVisible: true) == .never
+                && PillVisibility(visible: false, alwaysVisible: false) == .never,
+               "a hidden pill reads as Never whatever the idle setting")
+        expect(PillVisibility(visible: true, alwaysVisible: true) == .always,
+               "a shown pill kept on screen when idle reads as Always")
+        expect(PillVisibility(visible: true, alwaysVisible: false) == .whileDictating,
+               "a shown pill that hides when idle reads as While dictating")
+        expect(PillVisibility.always.visible && PillVisibility.always.alwaysVisible(keeping: false),
+               "Always stores shown and kept on screen")
+        expect(PillVisibility.whileDictating.visible
+                && !PillVisibility.whileDictating.alwaysVisible(keeping: true),
+               "While dictating stores shown and hidden when idle")
+        expect(!PillVisibility.never.visible && PillVisibility.never.alwaysVisible(keeping: true),
+               "Never hides the pill and keeps the idle choice for when it comes back")
+        expect(PillVisibility.allCases.map(\.title) == ["Always", "While dictating", "Never"],
+               "the picker reads Always, While dictating, Never")
     }
 
     // MARK: - Menubar + pill menus
@@ -8066,17 +8099,42 @@ enum Selftest {
         let showPill = statusMenu.items.first { $0.title == "Show Pill" }
         expect(showPill?.state == (AppConfig.shared.hudVisible ? .on : .off),
                "Show Pill reflects the stored setting")
+        expect(statusTitles.first == "Start Dictation",
+               "with no meeting recording, the menubar leads with Start Dictation")
+        expect(!statusTitles.contains { $0.contains("\u{2014}") },
+               "menubar items carry no em dashes")
+        // macOS 26+ decorates standard items itself (Settings… gets `gear`,
+        // Quit `xmark.interface.window`); Velora adds no icons of its own.
+        let appKitDecorated: Set<String> = ["Settings…", "Quit Velora"]
+        expect(statusMenu.items.filter { !appKitDecorated.contains($0.title) }
+                .allSatisfy { $0.image == nil },
+               "Velora puts no icon on a menubar item (two update items used to)")
 
         let pillPanel = HUDPanel()
         let pillMenu = pillPanel.buildContextMenu()
         let pillTitles = pillMenu.items.map(\.title)
-        expect(pillTitles.contains("Close Pill"), "the pill closes from its own menu")
-        expect(pillTitles.contains("Open Velora"), "the pill opens the main window")
+        // One way to make the pill go away ("Hide Pill", the inverse of the
+        // menubar's "Show Pill"); quitting lives in the menubar and app menu.
+        expect(pillTitles == ["Start Dictation", "", "Microphone", "", "Open Velora", "Hide Pill"],
+               "the pill menu runs Start Dictation, Microphone, Open Velora, Hide Pill")
+
+        // Recent transcriptions sit under Microphone when there are any.
+        let recent = DictationRecord(
+            timestamp: Date(), bundleID: nil, appName: nil, raw: "hello",
+            final: "Hello.", mode: nil, durationMs: 900, cleanupMs: nil)
+        pillPanel.menuHooks = HUDPanel.MenuHooks(
+            isRecording: { false }, isMeetingRecording: { false }, recents: { [recent] },
+            toggleDictation: {}, stopMeeting: {}, openMain: {})
+        let recentTitles = pillPanel.buildContextMenu().items.map(\.title)
+        pillPanel.menuHooks = nil
+        expect(recentTitles == ["Start Dictation", "", "Microphone", "Recent Transcriptions", "",
+                                "Open Velora", "Hide Pill"],
+               "recent transcriptions follow Microphone in the pill menu")
         expect(!pillTitles.contains("Position") && !pillTitles.contains("Keep on Screen When Idle")
                 && !pillTitles.contains("History…") && !pillTitles.contains("Settings…"),
                "position, idle and per-pane entries left the pill menu")
 
-        // The guarantee behind "Close Pill": no state change orders the
+        // The guarantee behind "Hide Pill": no state change orders the
         // panel front while closed, and "Show Pill" mid-session restores it.
         let savedVisible = AppConfig.shared.hudVisible
         defer { AppConfig.shared.hudVisible = savedVisible }
@@ -8091,6 +8149,111 @@ enum Selftest {
         pillPanel.applyPreferences()
         expect(pillPanel.isOnScreen, "Show Pill restores a session that was closed mid-way")
         pillPanel.transition(to: .hidden(.cancel))
+    }
+
+    // MARK: - Window shell geometry
+
+    /// The traffic lights sit well inside the glass rail and level with the
+    /// pane title (owner report: they straddled the rail's rounded corner).
+    ///
+    ///     window top
+    ///       ├  8  glass edge (railInset)
+    ///       ├ 19  close button top, >= 8 pt inside the glass
+    ///       ├ 26  close button centre = detailTop + titleHeight / 2
+    ///       └ 52  first rail row (trafficLightClearance)
+    private static func testWindowShellGeometry() {
+        // A real shell window laid out offscreen: the production chrome
+        // (applyShellChrome) around the production WindowShell and
+        // PaneHeader, at the main window's size. The header reports where
+        // SwiftUI actually placed it, so the check follows the live toolbar
+        // safe area rather than the metrics' arithmetic.
+        //
+        //     ┌─────────────────────────────────────────┐
+        //     │ ●●●        Home                         │  close centre ≈ title centre
+        //     │ ┌rail┐                                  │
+        final class FrameBox { var frame = CGRect.zero }
+        let header = FrameBox()
+        let root = WindowShell {
+            Color.clear
+        } detail: {
+            PaneHeader(title: "Home")
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                    header.frame = $0
+                }
+        }
+        let window = NSWindow(contentViewController: NSHostingController(rootView: root))
+        MainWindowController.applyShellChrome(to: window, title: "Selftest")
+        window.setContentSize(NSSize(width: 1180, height: 760))
+        waitUntil(timeout: 2) { header.frame != .zero }
+        // SwiftUI can resize the window while it reports geometry; measure
+        // the titlebar only after the last layout pass.
+        window.layoutIfNeeded()
+        window.contentView?.layoutSubtreeIfNeeded()
+        defer { window.close() }
+
+        guard let close = window.standardWindowButton(.closeButton),
+              let container = close.superview else {
+            expect(false, "the shell window has a close button")
+            return
+        }
+
+        // Window coordinates, flipped so y runs down from the top edge.
+        let height = window.frame.height
+        let frame = container.convert(close.frame, to: nil)
+        let closeTop = height - frame.maxY
+        let closeCentreY = height - frame.midY
+        // Standalone probes measure exactly (19, 19); inside this process the
+        // same window reads (19, 18), cause unknown. 1 pt of slack still
+        // fails the toolbar-less layout, which puts the button at (9, 6).
+        let expectedOrigin: CGFloat = 19
+        let originTolerance: CGFloat = 1
+        expect(abs(frame.minX - expectedOrigin) <= originTolerance
+                && abs(closeTop - expectedOrigin) <= originTolerance,
+               "the close button sits at (19, 19), inside the floating rail's corner (got \(frame.minX), \(closeTop) in a \(window.frame.size) window)")
+
+        let levelTolerance: CGFloat = 2
+        expect(header.frame != .zero && abs(closeCentreY - header.frame.midY) <= levelTolerance,
+               "the traffic lights are level with the pane title (close \(closeCentreY), title \(header.frame.midY))")
+        expect(2 * WindowShellMetrics.railInset + WindowShellMetrics.sidebarTopClearance
+                == WindowShellMetrics.trafficLightClearance,
+               "the first rail row starts at trafficLightClearance, below both rail insets")
+    }
+
+    // MARK: - Shell copy
+
+    /// Model rows use the engine's short name, never its description
+    /// sentence, and shell copy carries no dashes (docs/DESIGN.md §5).
+    private static func testShellCopy() {
+        let named = EngineModel.parse([[
+            "id": "mlx-community/whisper-large-v3-turbo", "name": "Whisper Turbo",
+            "kind": "stt", "backend": "whisper", "size": "1.6 GB",
+            "description": "Fast, and understands 99 languages.",
+        ]])
+        expect(named.first?.displayName == "Whisper Turbo",
+               "a model row shows the engine's short name")
+        let unnamed = EngineModel.parse([[
+            "id": "mlx-community/parakeet-tdt-0.6b-v3", "description": "Fastest.",
+        ]])
+        expect(unnamed.first?.displayName == "Parakeet v3",
+               "an older engine that sends no name falls back to the app's own model name")
+        let unknown = EngineModel.parse([["id": "someone/new-model-v9", "description": "New."]])
+        expect(unknown.first?.displayName == "new-model-v9",
+               "a model the app doesn't know falls back to the repo name, not the description")
+
+        let forbidden = ["\u{2014}", "\u{2013}", "~"]
+        let offline = STTModel.all.flatMap { [$0.displayName, $0.size, $0.languages] }
+        expect(!offline.contains { text in forbidden.contains { text.contains($0) } },
+               "the offline model list carries no dashes or tildes")
+
+        // DESIGN.md §5 writes a side-specific modifier as "Right ⌥".
+        expect(Hotkey.rightOption.displayLabel == "Right ⌥",
+               "a bare Right Option shortcut reads Right ⌥")
+        expect(Hotkey(keyCode: 54, modifiers: CGEventFlags.maskCommand.rawValue,
+                      isModifierOnly: true).displayLabel == "Right ⌘",
+               "a bare Right Command shortcut reads Right ⌘")
+        expect(Hotkey(keyCode: 49, modifiers: CGEventFlags.maskCommand.rawValue,
+                      isModifierOnly: false).conflictWarning?.contains("\u{2014}") == false,
+               "shortcut warnings carry no em dash")
     }
 
     // MARK: - Microphone selection
@@ -9488,7 +9651,7 @@ enum Selftest {
 
     private static func testEmptyFinalFeedback() {
         expect(
-            DictationOutputFailure.message(for: "  \n") == "Couldn't transcribe that — try again",
+            DictationOutputFailure.message(for: "  \n") == "Couldn't transcribe. Try again",
             "an empty final produces actionable feedback")
         expect(
             DictationOutputFailure.message(for: "Recognized text.") == nil,

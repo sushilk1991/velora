@@ -41,6 +41,69 @@ struct Mode: Identifiable, Equatable {
 
     static let formattingOptions = ["off", "light", "full"]
 
+    /// The mode a dictation with no stored mode ran in.
+    static let defaultName = "Default"
+
+    /// The mode's list glyph: quiet and monochrome, one per known name.
+    var symbol: String {
+        switch name.lowercased() {
+        case "message": return "bubble.left"
+        case "email": return "envelope"
+        case "note": return "note.text"
+        case "code": return "chevron.left.forwardslash.chevron.right"
+        case "terminal": return "terminal"
+        case "raw": return "textformat"
+        case "default": return "star"
+        default: return "slider.horizontal.3"
+        }
+    }
+
+    /// Every `*.json` in `directory`, plus each built-in template that has
+    /// no file yet so all six always appear; protected built-ins marked,
+    /// sorted by name. The Modes pane and History's Reprocess menu share it.
+    static func loadAll(from directory: URL) -> [Mode] {
+        var loaded: [Mode] = []
+        if let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+            for url in files where url.pathExtension == "json" {
+                if let mode = decode(url) {
+                    loaded.append(mode)
+                }
+            }
+        }
+
+        let loadedNames = Set(loaded.map { $0.name.lowercased() })
+        for template in builtInTemplates where !loadedNames.contains(template.name.lowercased()) {
+            loaded.append(template)
+        }
+
+        // Mark protected built-ins even if they were loaded from disk.
+        let protectedNames = Set(builtInTemplates.filter { $0.isProtected }.map { $0.name.lowercased() })
+        return loaded
+            .map { mode in
+                var m = mode
+                if protectedNames.contains(m.name.lowercased()) { m.isProtected = true }
+                return m
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private static func decode(_ url: URL) -> Mode? {
+        guard let data = try? Data(contentsOf: url),
+              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        let name = dict["name"] as? String ?? url.deletingPathExtension().lastPathComponent
+        let replacements = (dict["replacements"] as? [String: String] ?? [:])
+            .map { Mode.Replacement(key: $0.key, value: $0.value) }
+            .sorted { $0.key < $1.key }
+        return Mode(
+            name: name,
+            prompt: dict["prompt"] as? String ?? "",
+            formatting: dict["formatting"] as? String ?? "light",
+            apps: dict["apps"] as? [String] ?? [],
+            vocabulary: dict["vocabulary"] as? [String] ?? [],
+            replacements: replacements)
+    }
+
     /// Comma-separated list-field text -> trimmed, non-empty items. The
     /// editor buffers field text locally and parses through this on change.
     static func parseList(_ text: String) -> [String] {
@@ -115,42 +178,177 @@ final class ModesViewModel: ObservableObject {
                                 apps: [], vocabulary: [], replacements: [])
     /// Non-nil when the last `save()` was blocked (e.g. a name collision).
     @Published var saveError: String?
+    /// A selection change held back while the draft has unsaved edits; the
+    /// pane asks Save / Discard Changes / Cancel.
+    @Published var pendingChange: PendingChange?
+
+    enum PendingChange: Equatable {
+        case select(String?)
+        case newMode
+    }
 
     private weak var supervisor: EngineSupervisor?
+    private let directory: URL
+    /// New or duplicated modes that exist only in the list, not on disk.
+    private var unsavedIDs: Set<String> = []
 
-    init(supervisor: EngineSupervisor?) {
+    /// An unsaved draft left behind when the pane closed. The shell rebuilds
+    /// this model on every visit, so the draft waits here, one-shot, for the
+    /// next model on the same directory.
+    private struct ParkedDraft {
+        let directory: URL
+        let selectedID: String?
+        let draft: Mode
+        let unsaved: [Mode]
+    }
+
+    private static var parked: ParkedDraft?
+
+    init(supervisor: EngineSupervisor?, directory: URL = AppConfig.modesDirectory) {
         self.supervisor = supervisor
+        self.directory = directory
         load()
+        restoreParked()
     }
 
     var hasSelection: Bool { selectedID != nil }
+
+    /// The draft differs from the saved mode, or the mode was never saved.
+    /// App lists compare normalised, since the editor normalises on appear.
+    var isDirty: Bool {
+        guard let selectedID else {
+            return false
+        }
+        if unsavedIDs.contains(selectedID) {
+            return true
+        }
+        guard let stored = modes.first(where: { $0.id == selectedID }) else {
+            return false
+        }
+        return Self.comparable(draft) != Self.comparable(stored)
+    }
+
+    /// Built-ins (Default, Raw) can't be deleted; the button disables.
+    var canDelete: Bool {
+        modes.first { $0.id == selectedID }?.isProtected == false
+    }
+
+    private static func comparable(_ mode: Mode) -> Mode {
+        var copy = mode
+        copy.apps = Mode.normalizedApplicationIDs(mode.apps)
+        return copy
+    }
+
+    // MARK: - Guarded navigation
+
+    /// Selects `id`, or holds the change while the draft is dirty.
+    func requestSelect(_ id: String?) {
+        guard id != selectedID else {
+            return
+        }
+        guard !isDirty else {
+            pendingChange = .select(id)
+            return
+        }
+        select(id)
+    }
+
+    /// Adds a mode, or holds the change while the draft is dirty.
+    func requestNewMode() {
+        guard !isDirty else {
+            pendingChange = .newMode
+            return
+        }
+        newMode()
+    }
+
+    /// Saves the draft, then makes the held change. A blocked save keeps
+    /// the draft and drops the change; its alert says why.
+    func saveAndContinue() {
+        guard let change = pendingChange else {
+            return
+        }
+        pendingChange = nil
+        save()
+        guard saveError == nil else {
+            return
+        }
+        apply(change)
+    }
+
+    /// Drops the draft (and an unsaved new mode), then makes the held change.
+    func discardAndContinue() {
+        guard let change = pendingChange else {
+            return
+        }
+        pendingChange = nil
+        discardDraft()
+        apply(change)
+    }
+
+    func cancelPending() {
+        pendingChange = nil
+    }
+
+    private func apply(_ change: PendingChange) {
+        switch change {
+        case .select(let id):
+            select(id)
+        case .newMode:
+            newMode()
+        }
+    }
+
+    private func discardDraft() {
+        guard let selectedID else {
+            return
+        }
+        if unsavedIDs.contains(selectedID) {
+            unsavedIDs.remove(selectedID)
+            modes.removeAll { $0.id == selectedID }
+            return
+        }
+        select(selectedID)
+    }
+
+    /// Keeps a dirty draft for the next visit (called as the pane closes).
+    func park() {
+        guard isDirty else {
+            Self.parked = nil
+            return
+        }
+        Self.parked = ParkedDraft(
+            directory: directory, selectedID: selectedID, draft: draft,
+            unsaved: modes.filter { unsavedIDs.contains($0.id) })
+    }
+
+    private func restoreParked() {
+        guard let parked = Self.parked else {
+            return
+        }
+        Self.parked = nil
+        guard parked.directory == directory else {
+            return
+        }
+
+        for mode in parked.unsaved where !modes.contains(where: { $0.id == mode.id }) {
+            modes.append(mode)
+            unsavedIDs.insert(mode.id)
+        }
+        modes.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        guard let id = parked.selectedID, modes.contains(where: { $0.id == id }) else {
+            return
+        }
+        selectedID = id
+        draft = parked.draft
+    }
 
     // MARK: - Loading
 
     /// Reads every `*.json` from the modes directory, then folds in any built-in
     /// template that has no file yet so all six always appear.
     func load() {
-        let dir = AppConfig.modesDirectory
-        let fm = FileManager.default
-        var loaded: [Mode] = []
-        if let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
-            for url in files where url.pathExtension == "json" {
-                if let mode = Self.decode(url) { loaded.append(mode) }
-            }
-        }
-        let loadedNames = Set(loaded.map { $0.name.lowercased() })
-        for template in Mode.builtInTemplates where !loadedNames.contains(template.name.lowercased()) {
-            loaded.append(template)
-        }
-        // Mark protected built-ins even if they were loaded from disk.
-        let protectedNames = Set(Mode.builtInTemplates.filter { $0.isProtected }.map { $0.name.lowercased() })
-        modes = loaded
-            .map { mode in
-                var m = mode
-                if protectedNames.contains(m.name.lowercased()) { m.isProtected = true }
-                return m
-            }
-            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        modes = Mode.loadAll(from: directory)
 
         if selectedID == nil || !modes.contains(where: { $0.id == selectedID }) {
             select(modes.first?.id)
@@ -171,6 +369,7 @@ final class ModesViewModel: ObservableObject {
         let mode = Mode(name: name, prompt: "", formatting: "light",
                         apps: [], vocabulary: [], replacements: [])
         modes.append(mode)
+        unsavedIDs.insert(name)
         modes.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         select(name)
     }
@@ -181,6 +380,7 @@ final class ModesViewModel: ObservableObject {
         copy.name = uniqueName("\(draft.name) Copy")
         copy.isProtected = false
         modes.append(copy)
+        unsavedIDs.insert(copy.name)
         modes.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         select(copy.name)
     }
@@ -192,6 +392,7 @@ final class ModesViewModel: ObservableObject {
         let name = draft.name
         try? FileManager.default.removeItem(at: fileURL(for: name))
         modes.removeAll { $0.name == name }
+        unsavedIDs.remove(name)
         reloadEngine()
         select(modes.first?.id)
     }
@@ -226,7 +427,7 @@ final class ModesViewModel: ObservableObject {
 
         AppConfig.shared.ensureVeloraDirectory()
         try? FileManager.default.createDirectory(
-            at: AppConfig.modesDirectory, withIntermediateDirectories: true)
+            at: directory, withIntermediateDirectories: true)
 
         let renamed = selectedID != nil && selectedID != draft.name
         let renamedProtected = renamed && original?.isProtected == true
@@ -249,6 +450,9 @@ final class ModesViewModel: ObservableObject {
             modes.append(draft)
         }
         modes.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        if let selectedID {
+            unsavedIDs.remove(selectedID)
+        }
         selectedID = draft.id
         reloadEngine()
     }
@@ -256,7 +460,7 @@ final class ModesViewModel: ObservableObject {
     // MARK: - Persistence
 
     private func fileURL(for name: String) -> URL {
-        AppConfig.modesDirectory.appendingPathComponent("\(Self.slug(name)).json")
+        directory.appendingPathComponent("\(Self.slug(name)).json")
     }
 
     /// A safe, lowercased filename stem for a mode name. Lowercasing matches the
@@ -288,23 +492,6 @@ final class ModesViewModel: ObservableObject {
         guard let data = try? JSONSerialization.data(
             withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return }
         try? data.write(to: fileURL(for: mode.name), options: .atomic)
-    }
-
-    private static func decode(_ url: URL) -> Mode? {
-        guard let data = try? Data(contentsOf: url),
-              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return nil }
-        let name = dict["name"] as? String ?? url.deletingPathExtension().lastPathComponent
-        let replacements = (dict["replacements"] as? [String: String] ?? [:])
-            .map { Mode.Replacement(key: $0.key, value: $0.value) }
-            .sorted { $0.key < $1.key }
-        return Mode(
-            name: name,
-            prompt: dict["prompt"] as? String ?? "",
-            formatting: dict["formatting"] as? String ?? "light",
-            apps: dict["apps"] as? [String] ?? [],
-            vocabulary: dict["vocabulary"] as? [String] ?? [],
-            replacements: replacements)
     }
 
     private func reloadEngine() {
@@ -340,6 +527,19 @@ struct ModesSettingsView: View {
             detail
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .confirmationDialog(
+            "Save changes to “\(vm.draft.name)”?",
+            isPresented: Binding(get: { vm.pendingChange != nil },
+                                 set: { if !$0 { vm.cancelPending() } })
+        ) {
+            Button("Save") { vm.saveAndContinue() }
+            Button("Discard Changes", role: .destructive) { vm.discardAndContinue() }
+            Button("Cancel", role: .cancel) { vm.cancelPending() }
+        } message: {
+            Text("Your edits to this mode aren't saved yet.")
+        }
+        // Leaving the pane rebuilds the model; the draft waits for the return.
+        .onDisappear { vm.park() }
     }
 
     // MARK: Sidebar
@@ -350,11 +550,11 @@ struct ModesSettingsView: View {
         VStack(spacing: 0) {
             List(selection: Binding(
                 get: { vm.selectedID },
-                set: { vm.select($0) }
+                set: { vm.requestSelect($0) }
             )) {
                 ForEach(vm.modes) { mode in
                     HStack(spacing: VeloraSpacing.s) {
-                        Image(systemName: Self.symbol(for: mode))
+                        Image(systemName: mode.symbol)
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                             .frame(width: 18)
@@ -377,7 +577,7 @@ struct ModesSettingsView: View {
 
             Divider()
             HStack(spacing: VeloraSpacing.s) {
-                Button { vm.newMode() } label: { Image(systemName: "plus") }
+                Button { vm.requestNewMode() } label: { Image(systemName: "plus") }
                     .help("New mode")
                 Button { vm.duplicate() } label: { Image(systemName: "plus.square.on.square") }
                     .help("Duplicate")
@@ -388,18 +588,6 @@ struct ModesSettingsView: View {
             .padding(VeloraSpacing.s)
         }
         .frame(width: 180)
-    }
-
-    private static func symbol(for mode: Mode) -> String {
-        switch mode.name.lowercased() {
-        case "message": return "bubble.left"
-        case "email": return "envelope"
-        case "note": return "note.text"
-        case "code": return "chevron.left.forwardslash.chevron.right"
-        case "raw": return "textformat"
-        case "default": return "star"
-        default: return "slider.horizontal.3"
-        }
     }
 
     // MARK: Detail
@@ -429,7 +617,6 @@ struct ModesSettingsView: View {
 
 private struct ModeEditor: View {
     @ObservedObject var vm: ModesViewModel
-    @State private var showProtectedAlert = false
     /// Local text buffers for the comma-separated list fields. Binding the
     /// field straight to the parsed array re-joins it on every keystroke,
     /// which eats the ", " you just typed before the next item can exist.
@@ -682,16 +869,14 @@ private struct ModeEditor: View {
     private var footer: some View {
         HStack(spacing: VeloraSpacing.s) {
             Button(role: .destructive) {
-                if vm.draft.isProtected { showProtectedAlert = true } else { vm.delete() }
+                vm.delete()
             } label: {
                 Label("Delete", systemImage: "trash")
             }
-            .disabled(!vm.hasSelection)
-            .alert("Built-in mode", isPresented: $showProtectedAlert) {
-                Button("OK", role: .cancel) {}
-            } message: {
-                Text("“\(vm.draft.name)” is a built-in mode and can't be deleted. Rename it to create a new mode instead.")
-            }
+            .disabled(!vm.canDelete)
+            .help(vm.canDelete
+                  ? "Delete this mode"
+                  : "Built-in modes can't be deleted. Rename one to make a new mode.")
 
             Spacer()
 

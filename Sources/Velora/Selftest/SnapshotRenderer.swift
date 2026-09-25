@@ -24,6 +24,7 @@ enum SnapshotRenderer {
             renderHUDStates(into: dir)
             renderSidebarRows(into: dir)
             renderUpdateWindow(into: dir)
+            renderOnboarding(into: dir)
             renderShellWindows(into: dir)
             renderMeetingNotes(into: dir) { exit(0) }
         }
@@ -229,6 +230,21 @@ enum SnapshotRenderer {
                 size: 42))
     }
 
+    // MARK: - Onboarding
+
+    /// One `onboarding-<step>.png` per step, at the window's 640×520, so the
+    /// canvas, serif titles and capsule buttons can be checked in both themes.
+    @MainActor
+    private static func renderOnboarding(into dir: URL) {
+        let size = NSSize(width: 640, height: 520)
+        for step in OnboardingModel.Step.allCases {
+            let model = OnboardingModel()
+            model.step = step
+            let view = NSHostingView(rootView: OnboardingView(model: model))
+            snapshot(view, size: size, name: "onboarding-\(step)", dir: dir)
+        }
+    }
+
     // MARK: - Sidebar rows
 
     /// The sidebar's vibrancy (NSVisualEffectView) doesn't survive offscreen
@@ -269,16 +285,18 @@ enum SnapshotRenderer {
             foregroundBusy: { true })
         let model = SettingsModel(
             supervisor: nil, dictionary: dictionary, dictionarySync: sync)
-        model.updateCheckStatus =
-            "Velora \(VeloraAppInfo.shortVersion) is up to date."
-        NSLog("Velora: snapshot prefs — config.alwaysVisible=%d model.alwaysVisible=%d visible=%d",
-              AppConfig.shared.hudAlwaysVisible ? 1 : 0,
-              model.hudAlwaysVisible ? 1 : 0,
-              model.hudVisible ? 1 : 0)
+        // Up to date, whatever this machine's update checker last cached, so
+        // the Updates row always renders Check Now beside its status.
+        model.availableUpdate = nil
+        model.updateCheckStatus = SettingsModel.statusAfterSuccessfulUpdateCheck(
+            availableUpdate: nil, currentVersion: VeloraAppInfo.shortVersion)
 
         // Home's tiles load on appear; the nested runloop below never drains
         // the background reload, so let the first load run inline here.
         IntelligenceViewModel.loadsFirstReloadInline = true
+        // `cacheDisplay` drops Swift Charts axes and marks; draw charts
+        // through ImageRenderer instead (StatsChartBox).
+        StatsSnapshot.rasterizesCharts = true
         let mainSelection = MainWindowSelection()
         let mainRoot = MainRootView(
             model: model, selection: mainSelection, supervisor: nil,
@@ -292,12 +310,18 @@ enum SnapshotRenderer {
             mainSelection.pane = pane
             writeShell(mainWindow, name: "main-\(pane.rawValue)", into: dir)
         }
+        // Stats at the window's minimum size (MainWindowController's
+        // contentMinSize): the tiles fold to 2 × 2 so no caption, and no
+        // "Change…" link, is clipped.
+        mainSelection.pane = .stats
+        mainWindow.setContentSize(NSSize(width: 960, height: 620))
+        writeShell(mainWindow, name: "main-stats-min", into: dir)
 
         let settingsSelection = SettingsWindowSelection()
         let settingsRoot = SettingsRootView(
             model: model, selection: settingsSelection,
             meetingCoordinator: coordinator, openSetupAssistant: {})
-        let settingsWindow = shellWindow(root: settingsRoot, size: NSSize(width: 780, height: 560))
+        let settingsWindow = shellWindow(root: settingsRoot, size: NSSize(width: 780, height: 640))
         for tab in SettingsTab.allCases {
             settingsSelection.tab = tab
             writeShell(settingsWindow, name: "settings-\(tab.rawValue)", into: dir)
@@ -352,6 +376,8 @@ enum SnapshotRenderer {
         let window = NSWindow(contentViewController: NSHostingController(rootView: root))
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
         window.titleVisibility = .hidden
+        window.toolbar = NSToolbar(identifier: "VeloraShellSnapshot")
+        window.toolbarStyle = .unified
         window.backgroundColor = VeloraPanel.canvasColor
         window.setContentSize(size)
         return window
@@ -387,6 +413,9 @@ enum SnapshotRenderer {
             ("Safari", "com.apple.Safari", "Default"),
             ("Terminal", "com.apple.Terminal", "Terminal"),
         ]
+        let calendar = Calendar.current
+        let now = Date()
+        let today = calendar.startOfDay(for: now)
         for daysAgo in 0..<HistoryStore.heatmapDays {
             // Deterministic gaps + a weekly rhythm so the heatmap shows all
             // four intensity buckets and the bar chart varies visibly.
@@ -397,9 +426,14 @@ enum SnapshotRenderer {
                 let app = apps[(daysAgo + slot) % apps.count]
                 let text = Array(repeating: "word", count: words)
                     .joined(separator: " ")
+                // Spread dictations across 8:00 to 19:59 so the weekday by
+                // hour heatmap varies; today's rows clamp to before now.
+                let hour = 8 + (daysAgo * 5 + slot * 3) % 12
+                let day = calendar.date(byAdding: .day, value: -daysAgo, to: today) ?? today
+                let spread = day.addingTimeInterval(TimeInterval(hour * 3_600 + slot * 600))
+                let timestamp = min(spread, now.addingTimeInterval(TimeInterval(-slot * 600)))
                 var record = DictationRecord(
-                    timestamp: Date().addingTimeInterval(
-                        TimeInterval(-daysAgo * 86_400 - slot * 600)),
+                    timestamp: timestamp,
                     bundleID: app.bundle, appName: app.name,
                     raw: text, final: text, mode: app.mode,
                     durationMs: words * 380,
@@ -424,10 +458,13 @@ enum SnapshotRenderer {
         let vm = IntelligenceViewModel(history: store)
         vm.reloadNow()
 
+        // Standalone view, no window: paint the canvas so dark text has a
+        // dark page behind it instead of a transparent PNG.
         let view = NSHostingView(
-            rootView: IntelligenceSettingsView(model: model, viewModel: vm))
+            rootView: IntelligenceSettingsView(model: model, viewModel: vm)
+                .background(VeloraPanel.canvas))
         snapshot(
-            view, size: NSSize(width: 780, height: 1560),
+            view, size: NSSize(width: 960, height: 1560),
             name: "settings-stats-seeded", dir: dir)
         try? FileManager.default.removeItem(at: fixtureRoot)
     }

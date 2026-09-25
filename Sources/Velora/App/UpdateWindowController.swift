@@ -256,7 +256,7 @@ final class UpdateWindowModel: ObservableObject {
     var installUnavailableReason: String? {
         guard isUpdateAvailable else { return nil }
         if release?.asset == nil {
-            return "This release does not include a Velora DMG — install it from the releases page"
+            return "This release has no download. Get it from GitHub."
         }
         return installBlocker
     }
@@ -372,7 +372,7 @@ final class UpdateWindowModel: ObservableObject {
 ///     │ ●●●                                        │
 ///     │  [icon]  Velora 1.2.3 is available.        │  serif headline
 ///     │          You have 1.2.2 · Released 8 Sep   │
-///     │  WHAT'S NEW                View on GitHub  │
+///     │  What's new                View on GitHub  │
 ///     │  ┌──────────────────────────────────────┐  │
 ///     │  │ release notes (scrolls)              │  │  card
 ///     │  └──────────────────────────────────────┘  │
@@ -383,10 +383,14 @@ struct UpdateWindowView: View {
     @ObservedObject var model: UpdateWindowModel
 
     /// Clears the traffic lights, which sit over the canvas under
-    /// `.fullSizeContentView`.
-    private static let headerTop: CGFloat = 44
+    /// `.fullSizeContentView`. Measured from the window top: the view
+    /// ignores the safe area, which the shell's toolbar makes 66 pt tall.
+    /// 76 keeps the header where it sat under the old 32 pt titlebar.
+    private static let headerTop: CGFloat = 76
     private static let iconSide: CGFloat = 64
-    private static let sectionLabelSize: CGFloat = 11.5
+    /// The `GroupCard` header size, so this window's one section header
+    /// reads like every Settings and main-window card header.
+    private static let sectionLabelSize: CGFloat = 13
 
     var body: some View {
         ZStack {
@@ -398,6 +402,7 @@ struct UpdateWindowView: View {
                 ProgressView()
             }
         }
+        .ignoresSafeArea()
         .frame(minWidth: 560, minHeight: 480)
     }
 
@@ -440,9 +445,7 @@ struct UpdateWindowView: View {
         VStack(alignment: .leading, spacing: VeloraSpacing.s) {
             HStack {
                 Text("What’s new")
-                    .textCase(.uppercase)
                     .font(.system(size: Self.sectionLabelSize, weight: .semibold))
-                    .foregroundStyle(.secondary)
                 Spacer()
                 Button("View on GitHub") { model.openReleasePage() }
                     .buttonStyle(.link)

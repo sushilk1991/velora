@@ -748,6 +748,24 @@ final class HistoryStore {
         let day: String
         let count: Int
         let words: Int
+        /// Summed dictation length; feeds the time-saved sparkline.
+        var spokenMs = 0
+    }
+
+    /// One calendar month of activity (`yyyy-MM`, local time).
+    struct MonthSample: Equatable {
+        let month: String
+        let count: Int
+        let words: Int
+        let spokenMs: Int
+    }
+
+    /// Words in one local weekday × hour cell. `weekday` follows
+    /// `Calendar.component(.weekday, …)`: 1 = Sunday … 7 = Saturday.
+    struct WeekdayHourSample: Equatable {
+        let weekday: Int
+        let hour: Int
+        let words: Int
     }
 
     /// One app/mode slice of the last-30-days breakdown.
@@ -755,6 +773,29 @@ final class HistoryStore {
         let name: String
         let count: Int
         let words: Int
+    }
+
+    /// One local wall-clock hour of a range (SQLite `%H`).
+    struct HourSample: Equatable {
+        let hour: Int
+        let count: Int
+        let words: Int
+        let spokenMs: Int
+    }
+
+    /// The Stats pane's per-range detail, aggregated in SQL over every row
+    /// in the window. No scan cap: all time describes the same rows as the
+    /// headline number.
+    struct RangeSummary: Equatable {
+        var hours: [HourSample] = []
+        /// Words per app, most first; a blank name reads "Unknown app".
+        var apps: [BreakdownSlice] = []
+        /// App name → its newest non-empty bundle id (the Where icons).
+        var appBundles: [String: String] = [:]
+        /// Words per stored mode ("" when none), most first.
+        var modes: [BreakdownSlice] = []
+        /// Every stop-to-final wall time in the window, ascending.
+        var readyMs: [Int] = []
     }
 
     /// The Intelligence tab's whole data set. Every query returns aggregates
@@ -775,6 +816,29 @@ final class HistoryStore {
         /// Top apps / modes by words over the last 30 days.
         var apps: [BreakdownSlice] = []
         var modes: [BreakdownSlice] = []
+        /// The equal-length window just before `today` / `week` / `month`,
+        /// for the tiles' deltas:
+        ///
+        ///     previousMonth  days 59…30 │ month  days 29…0
+        ///     previousWeek   days 13…7  │ week   days 6…0
+        ///     yesterday      day 1      │ today  day 0
+        var yesterday = WindowStats()
+        var previousWeek = WindowStats()
+        var previousMonth = WindowStats()
+        /// Every month with activity (ascending; gaps omitted) — the all-time
+        /// words chart.
+        var monthly: [MonthSample] = []
+        /// Oldest active day (`yyyy-MM-dd`); nil for an empty history.
+        var firstDay: String?
+        /// Distinct active days, all time.
+        var activeDayCount = 0
+    }
+
+    /// The Home pane's "Last 7 days" card: the 7-day window and its days.
+    struct WeekSummary: Equatable {
+        var week = WindowStats()
+        /// Active days in the window (ascending; gaps omitted).
+        var daily: [DaySample] = []
     }
 
     /// Calendar span of the Stats heatmap (12 weeks).
@@ -790,6 +854,10 @@ final class HistoryStore {
             result.week = windowStatsOnQueue(daysBack: 6)
             result.month = windowStatsOnQueue(daysBack: 29)
             result.allTime = windowStatsOnQueue(daysBack: nil)
+            result.yesterday = windowStatsOnQueue(daysBack: 1, throughDaysBack: 1)
+            result.previousWeek = windowStatsOnQueue(daysBack: 13, throughDaysBack: 7)
+            result.previousMonth = windowStatsOnQueue(daysBack: 59, throughDaysBack: 30)
+            result.monthly = monthlySeriesOnQueue()
             result.daily = dailySeriesOnQueue(daysBack: 29)
             result.heatmapDaily = dailySeriesOnQueue(daysBack: Self.heatmapDays - 1)
             result.apps = breakdownOnQueue(
@@ -799,13 +867,178 @@ final class HistoryStore {
             let days = activeDaysOnQueue()
             result.currentStreak = Self.streak(days: days)
             result.longestStreak = Self.longestStreak(days: days)
+            result.firstDay = days.last
+            result.activeDayCount = days.count
             return result
         }
     }
 
+    /// Just the 7-day window and its days: Home reloads on every app
+    /// activation, and the full `insights()` set is 12 scans it never shows.
+    func weekSummary() -> WeekSummary {
+        queue.sync { [self] in
+            guard db != nil else { return WeekSummary() }
+            return WeekSummary(
+                week: windowStatsOnQueue(daysBack: 6),
+                daily: dailySeriesOnQueue(daysBack: 6))
+        }
+    }
+
+    /// Words per local weekday × hour over the last `daysBack + 1` calendar
+    /// days (nil = all time). Only non-empty cells are returned.
+    ///
+    ///     SQLite %w: 0 = Sunday … 6 = Saturday  →  weekday 1 … 7
+    func weekdayHourWords(daysBack: Int?) -> [WeekdayHourSample] {
+        queue.sync { [self] in
+            guard db != nil else { return [] }
+            var sql = """
+                SELECT CAST(strftime('%w', ts, 'unixepoch', 'localtime') AS INTEGER),
+                    CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER),
+                    \(Self.wordsExpr)
+                FROM dictations WHERE \(Self.nonEmpty)
+                """
+            if let daysBack {
+                sql += " AND \(Self.localDay) >= date('now', 'localtime', '-\(daysBack) days')"
+            }
+            sql += " GROUP BY 1, 2;"
+            var stmt: OpaquePointer?
+            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+                NSLog("Velora: weekday-hour query failed: %@", lastError)
+                return []
+            }
+            defer { sqlite3_finalize(stmt) }
+            var cells: [WeekdayHourSample] = []
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                cells.append(WeekdayHourSample(
+                    weekday: Int(sqlite3_column_int64(stmt, 0)) + 1,
+                    hour: Int(sqlite3_column_int64(stmt, 1)),
+                    words: Int(sqlite3_column_int64(stmt, 2))))
+            }
+            return cells
+        }
+    }
+
+    /// Hours, apps, modes and ready times for the last `daysBack + 1`
+    /// calendar days (nil = all time), each one GROUP BY over the window.
+    func rangeSummary(daysBack: Int?) -> RangeSummary {
+        queue.sync { [self] in
+            guard db != nil else { return RangeSummary() }
+            let window = daysBack.map { " AND \(Self.localDay) >= date('now', 'localtime', '-\($0) days')" } ?? ""
+            var summary = RangeSummary()
+            summary.hours = hourSamplesOnQueue(window: window)
+            (summary.apps, summary.appBundles) = appSlicesOnQueue(window: window)
+            summary.modes = modeSlicesOnQueue(window: window)
+            summary.readyMs = readyTimesOnQueue(window: window)
+            return summary
+        }
+    }
+
+    /// Per-hour activity inside `window` (a ` AND …` clause). MUST be
+    /// called on `queue`.
+    private func hourSamplesOnQueue(window: String) -> [HourSample] {
+        let sql = """
+            SELECT CAST(strftime('%H', ts, 'unixepoch', 'localtime') AS INTEGER), COUNT(*),
+                \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0)
+            FROM dictations WHERE \(Self.nonEmpty)\(window)
+            GROUP BY 1;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            NSLog("Velora: range hours query failed: %@", lastError)
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+        var samples: [HourSample] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            samples.append(HourSample(
+                hour: Int(sqlite3_column_int64(stmt, 0)),
+                count: Int(sqlite3_column_int64(stmt, 1)),
+                words: Int(sqlite3_column_int64(stmt, 2)),
+                spokenMs: Int(sqlite3_column_int64(stmt, 3))))
+        }
+        return samples
+    }
+
+    /// Words per app inside `window`, plus each app's newest non-empty
+    /// bundle id. SQLite fills the bare `bundle_id` from the row that holds
+    /// the single MAX(), i.e. the newest row that has one. MUST be called
+    /// on `queue`.
+    private func appSlicesOnQueue(window: String) -> ([BreakdownSlice], [String: String]) {
+        let sql = """
+            SELECT COALESCE(NULLIF(app_name, ''), 'Unknown app'), COUNT(*), \(Self.wordsExpr),
+                bundle_id, MAX(CASE WHEN COALESCE(bundle_id, '') != '' THEN ts END)
+            FROM dictations WHERE \(Self.nonEmpty)\(window)
+            GROUP BY 1 ORDER BY 3 DESC, 1 ASC;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            NSLog("Velora: range apps query failed: %@", lastError)
+            return ([], [:])
+        }
+        defer { sqlite3_finalize(stmt) }
+        var slices: [BreakdownSlice] = []
+        var bundles: [String: String] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let name = columnText(stmt, 0) ?? "Unknown app"
+            slices.append(BreakdownSlice(
+                name: name,
+                count: Int(sqlite3_column_int64(stmt, 1)),
+                words: Int(sqlite3_column_int64(stmt, 2))))
+            if sqlite3_column_type(stmt, 4) != SQLITE_NULL, let bundle = columnText(stmt, 3), !bundle.isEmpty {
+                bundles[name] = bundle
+            }
+        }
+        return (slices, bundles)
+    }
+
+    /// Words per stored mode inside `window`. MUST be called on `queue`.
+    private func modeSlicesOnQueue(window: String) -> [BreakdownSlice] {
+        let sql = """
+            SELECT COALESCE(mode, ''), COUNT(*), \(Self.wordsExpr)
+            FROM dictations WHERE \(Self.nonEmpty)\(window)
+            GROUP BY 1 ORDER BY 3 DESC, 1 ASC;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            NSLog("Velora: range modes query failed: %@", lastError)
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+        var slices: [BreakdownSlice] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            slices.append(BreakdownSlice(
+                name: columnText(stmt, 0) ?? "",
+                count: Int(sqlite3_column_int64(stmt, 1)),
+                words: Int(sqlite3_column_int64(stmt, 2))))
+        }
+        return slices
+    }
+
+    /// Stop-to-final times inside `window`, ascending, for the Ready in
+    /// histogram and its percentiles. MUST be called on `queue`.
+    private func readyTimesOnQueue(window: String) -> [Int] {
+        let sql = """
+            SELECT finalization_ms FROM dictations
+            WHERE \(Self.nonEmpty) AND finalization_ms > 0\(window)
+            ORDER BY 1 ASC;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            NSLog("Velora: range ready query failed: %@", lastError)
+            return []
+        }
+        defer { sqlite3_finalize(stmt) }
+        var times: [Int] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            times.append(Int(sqlite3_column_int64(stmt, 0)))
+        }
+        return times
+    }
+
     /// Aggregates one calendar-day window. `daysBack` 0 = today only,
-    /// nil = all time. MUST be called on `queue`.
-    private func windowStatsOnQueue(daysBack: Int?) -> WindowStats {
+    /// nil = all time; `throughDaysBack` ends the window that many days
+    /// before today (nil = today). MUST be called on `queue`.
+    private func windowStatsOnQueue(daysBack: Int?, throughDaysBack: Int? = nil) -> WindowStats {
         var sql = """
             SELECT COUNT(*), \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0),
                 COUNT(stt_ms), COALESCE(SUM(stt_ms), 0),
@@ -821,6 +1054,9 @@ final class HistoryStore {
             """
         if let daysBack {
             sql += " AND \(Self.localDay) >= date('now', 'localtime', '-\(daysBack) days')"
+        }
+        if let throughDaysBack {
+            sql += " AND \(Self.localDay) <= date('now', 'localtime', '-\(throughDaysBack) days')"
         }
         var stats = WindowStats()
         var stmt: OpaquePointer?
@@ -853,7 +1089,7 @@ final class HistoryStore {
     /// called on `queue`.
     private func dailySeriesOnQueue(daysBack: Int) -> [DaySample] {
         let sql = """
-            SELECT \(Self.localDay), COUNT(*), \(Self.wordsExpr)
+            SELECT \(Self.localDay), COUNT(*), \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0)
             FROM dictations
             WHERE \(Self.nonEmpty)
               AND \(Self.localDay) >= date('now', 'localtime', '-\(daysBack) days')
@@ -867,7 +1103,30 @@ final class HistoryStore {
             samples.append(DaySample(
                 day: columnText(stmt, 0) ?? "",
                 count: Int(sqlite3_column_int64(stmt, 1)),
-                words: Int(sqlite3_column_int64(stmt, 2))))
+                words: Int(sqlite3_column_int64(stmt, 2)),
+                spokenMs: Int(sqlite3_column_int64(stmt, 3))))
+        }
+        return samples
+    }
+
+    /// Per-month activity over the whole history. MUST be called on `queue`.
+    private func monthlySeriesOnQueue() -> [MonthSample] {
+        let sql = """
+            SELECT strftime('%Y-%m', ts, 'unixepoch', 'localtime'), COUNT(*),
+                \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0)
+            FROM dictations WHERE \(Self.nonEmpty)
+            GROUP BY 1 ORDER BY 1 ASC;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var samples: [MonthSample] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            samples.append(MonthSample(
+                month: columnText(stmt, 0) ?? "",
+                count: Int(sqlite3_column_int64(stmt, 1)),
+                words: Int(sqlite3_column_int64(stmt, 2)),
+                spokenMs: Int(sqlite3_column_int64(stmt, 3))))
         }
         return samples
     }
@@ -908,25 +1167,7 @@ final class HistoryStore {
         return days
     }
 
-    /// Total row count, honoring the same optional search filter as `page`.
-    func count(search: String?) -> Int {
-        queue.sync { [self] in
-            guard db != nil else { return 0 }
-            let term = Self.likeTerm(search)
-            var sql = "SELECT COUNT(*) FROM dictations"
-            if term != nil {
-                sql += " WHERE " + Self.likeClause
-            }
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
-            defer { sqlite3_finalize(stmt) }
-            if let term { bindText(stmt, 1, term) }
-            guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
-            return Int(sqlite3_column_int64(stmt, 0))
-        }
-    }
-
-    /// Search predicate shared by `page`/`count`. Uses `ESCAPE '\'` so the
+    /// Search predicate for `page`. Uses `ESCAPE '\'` so the
     /// wildcards `likeTerm` escapes are treated literally.
     private static let likeClause =
         "final LIKE ?1 ESCAPE '\\' OR raw LIKE ?1 ESCAPE '\\' OR app_name LIKE ?1 ESCAPE '\\'"

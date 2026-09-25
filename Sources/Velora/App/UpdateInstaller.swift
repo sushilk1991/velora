@@ -131,16 +131,16 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     static func installBlocker() -> String? {
         let bundle = Bundle.main.bundleURL
         guard bundle.pathExtension == "app" else {
-            return "Running outside an app bundle — updates apply to packaged builds only"
+            return "Updates need the packaged app."
         }
         if bundle.path.contains("/AppTranslocation/") {
-            return "Velora is running from a translocated path — drag Velora.app into Applications, relaunch, and update again"
+            return "Move Velora to Applications, reopen it, then update."
         }
         let fm = FileManager.default
         guard fm.isWritableFile(atPath: bundle.path),
               fm.isWritableFile(atPath: bundle.deletingLastPathComponent().path)
         else {
-            return "No permission to replace \(bundle.path) — update manually from the releases page"
+            return "Velora can't replace itself at \(bundle.path). Download the update from GitHub."
         }
         return nil
     }

@@ -32,6 +32,8 @@ final class HistoryViewModel: ObservableObject {
     @Published private(set) var appNames: [String] = []
     /// Dictations since the start of the current calendar month (footer).
     @Published private(set) var monthCount = 0
+    /// Every mode the Modes pane lists, Default first: the Reprocess menu.
+    @Published private(set) var modeNames: [String] = []
 
     private let history: HistoryStore
     private weak var supervisor: EngineSupervisor?
@@ -45,6 +47,10 @@ final class HistoryViewModel: ObservableObject {
     private var playGeneration = 0
     /// Summary scans race the user's edits; only the newest scan may land.
     private var summaryGeneration = 0
+    /// An entry another pane asked to open (Home's Recent rows). The pane
+    /// rebuilds this model on every visit, so the request is static and
+    /// one-shot.
+    private static var pendingReveal: Int64?
 
     private static let pageSize = 50
     /// Most rows the app-name / month-count scan reads (newest first) so a
@@ -56,9 +62,13 @@ final class HistoryViewModel: ObservableObject {
     /// Keystroke debounce before the search re-queries the store.
     private static let searchDebounce: DispatchQueue.SchedulerTimeType.Stride = .milliseconds(150)
 
-    init(history: HistoryStore, supervisor: EngineSupervisor?) {
+    init(
+        history: HistoryStore, supervisor: EngineSupervisor?,
+        modesDirectory: URL = AppConfig.modesDirectory
+    ) {
         self.history = history
         self.supervisor = supervisor
+        modeNames = Self.modeNames(in: modesDirectory)
         reprocessObserver = NotificationCenter.default.addObserver(
             forName: .veloraEngineReprocessed, object: nil, queue: .main
         ) { [weak self] note in
@@ -92,6 +102,33 @@ final class HistoryViewModel: ObservableObject {
     }
 
     // MARK: - Loading
+
+    /// The Modes pane's list (built-ins plus saved files), Default first,
+    /// then alphabetical.
+    private static func modeNames(in directory: URL) -> [String] {
+        let names = Set(Mode.loadAll(from: directory).map(\.name))
+        let rest = names.subtracting([Mode.defaultName]).sorted {
+            $0.localizedStandardCompare($1) == .orderedAscending
+        }
+        return [Mode.defaultName] + rest
+    }
+
+    /// Asks the next History pane to open `id` expanded.
+    static func requestReveal(_ id: Int64) {
+        pendingReveal = id
+    }
+
+    /// Opens the requested entry once, after the pane's first reload (which
+    /// collapses everything). A request for a row no longer loaded lapses.
+    func revealPending() {
+        guard let id = Self.pendingReveal else {
+            return
+        }
+        Self.pendingReveal = nil
+        if records.contains(where: { $0.id == id }) {
+            expandedID = id
+        }
+    }
 
     /// Reloads the first page for the current search term. (Usage stats moved
     /// to the Stats tab — History is purely the transcript list now.)
@@ -371,8 +408,10 @@ enum HistoryJournal {
     private static let codeModeMarkers = ["code", "terminal", "shell"]
 
     /// "Today", "Yesterday", or the weekday date ("Monday 1 September").
+    static let todayLabel = "Today"
+
     static func dayLabel(for date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
-        if calendar.isDate(date, inSameDayAs: now) { return "Today" }
+        if calendar.isDate(date, inSameDayAs: now) { return todayLabel }
         if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
            calendar.isDate(date, inSameDayAs: yesterday) {
             return "Yesterday"
@@ -483,13 +522,11 @@ enum HistoryJournal {
         return f
     }()
 
-    /// Fixed 24-hour "13:21": a 12-hour "12:30 PM" overruns the 56 pt gutter.
-    static let timeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "HH:mm"
-        return f
-    }()
+    /// The journal's time gutter in the reader's hour cycle: "13:21" or
+    /// "1:21 PM".
+    static func time(_ date: Date, locale: Locale = .current, timeZone: TimeZone = .current) -> String {
+        date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, timeZone: timeZone))
+    }
 
     static let relativeFormatter: RelativeDateTimeFormatter = {
         let f = RelativeDateTimeFormatter()
@@ -612,6 +649,7 @@ struct HistorySettingsView: View {
             .onAppear {
                 model.requestStatus()
                 vm.reload()  // fresh rows every time the tab appears
+                vm.revealPending()  // after the reload, which collapses rows
                 vm.refreshSummary()
             }
     }
@@ -677,7 +715,7 @@ struct HistorySettingsView: View {
     private func daySection(_ day: JournalDay) -> some View {
         VStack(alignment: .leading, spacing: Self.entrySpacing) {
             HStack(alignment: .firstTextBaseline, spacing: VeloraSpacing.m) {
-                SerifHeadline(day.label)
+                dayHeading(day.label)
                 Text(day.meta)
                     .font(.system(size: 12))
                     .foregroundStyle(.tertiary)
@@ -698,11 +736,24 @@ struct HistorySettingsView: View {
                     onEdit: { text in vm.saveEdit(record, newText: text) },
                     onReprocess: { stt, mode in vm.reprocess(record, sttModel: stt, mode: mode) },
                     onPlay: { vm.togglePlayback(record) },
-                    onDelete: { vm.delete(record) })
+                    onDelete: { vm.delete(record) },
+                    modeNames: vm.modeNames)
                 .onAppear {
                     if record.id == vm.visibleRecords.last?.id { vm.loadMore() }
                 }
             }
+        }
+    }
+
+    /// Only "Today" is the pane's serif sentence; older days are plain
+    /// section headings, so a long journal isn't a column of headlines.
+    @ViewBuilder
+    private func dayHeading(_ label: String) -> some View {
+        if label == HistoryJournal.todayLabel {
+            SerifHeadline(label)
+        } else {
+            Text(label)
+                .font(.system(size: 15, weight: .semibold))
         }
     }
 
@@ -757,9 +808,9 @@ struct HistorySettingsView: View {
 
 // MARK: - Journal entry
 
-/// One dictation in the journal. Collapsed: a 56 pt time gutter beside the
-/// app line and the final text, with a hover fill so the click-to-expand is
-/// discoverable. Expanded (one at a time): a raised card with the full text,
+/// One dictation in the journal. Collapsed: a 64 pt time gutter beside the
+/// app line and the final text (three lines at most), with a hover fill so
+/// the click-to-expand is discoverable. Expanded (one at a time): a raised card with the full text,
 /// an "As heard" disclosure for the raw transcript, and the action capsules.
 ///
 ///     13:21 │ ▣ Slack  Default · 33 words · 15.8 s
@@ -769,7 +820,7 @@ struct HistorySettingsView: View {
 ///     │ 13:21  ▣ Slack  Default · 33 words · 15.8 s │
 ///     │ Full final text …                          │
 ///     │ ▸ As heard                                 │  toggles the raw text
-///     │ (Copy)(Insert Again)(Edit)(Reprocess ▸)(Play)   (🗑) │
+///     │ (Copy)(Insert Again)(Edit)(Reprocess)(Play)   (🗑) │
 ///     └────────────────────────────────────────────┘
 private struct JournalEntry: View {
     let record: DictationRecord
@@ -786,14 +837,18 @@ private struct JournalEntry: View {
     let onReprocess: (_ sttModel: String?, _ mode: String?) -> Void
     let onPlay: () -> Void
     let onDelete: () -> Void
+    /// Every mode the Modes pane lists (Reprocess › Mode).
+    let modeNames: [String]
 
     @State private var copied = false
     @State private var editing = false
     @State private var editDraft = ""
     @State private var hovering = false
     @State private var showsRaw = false
+    @State private var confirmingDelete = false
 
-    private static let timeColumn: CGFloat = 56
+    /// Wide enough for a 12-hour "12:30 PM".
+    private static let timeColumn: CGFloat = 64
     private static let iconSide: CGFloat = 18
     private static let textSize: CGFloat = 14
     private static let expandedTextSize: CGFloat = 14.5
@@ -811,8 +866,8 @@ private struct JournalEntry: View {
     private static let rawRuleWidth: CGFloat = 2
     private static let copiedFlash: TimeInterval = 1.2
 
-    /// Built-in modes offered in the reprocess menu (mirrors the Modes editor).
-    private static let builtInModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
+    /// Collapsed rows show this many lines; the expanded card shows all.
+    private static let collapsedLines = 3
 
     private var isCode: Bool { HistoryJournal.isCodeMode(record.mode) }
     private var hasTranscript: Bool { HistoryJournal.hasTranscript(record) }
@@ -835,7 +890,7 @@ private struct JournalEntry: View {
             timeLabel
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 appLine
-                transcript(size: Self.textSize, lineLimit: nil)
+                transcript(size: Self.textSize, lineLimit: Self.collapsedLines)
             }
         }
         .padding(.vertical, VeloraSpacing.s)
@@ -874,7 +929,7 @@ private struct JournalEntry: View {
             }
 
             if reprocessFailed {
-                Label("Reprocess failed — try again.", systemImage: "exclamationmark.triangle.fill")
+                Label("Reprocess failed. Try again.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(VeloraStatus.warning)
                     .padding(.leading, Self.timeColumn)
@@ -933,8 +988,9 @@ private struct JournalEntry: View {
     // MARK: Shared pieces
 
     private var timeLabel: some View {
-        Text(HistoryJournal.timeFormatter.string(from: record.timestamp))
-            .font(.system(size: 12, design: .monospaced))
+        Text(HistoryJournal.time(record.timestamp))
+            .font(.system(size: 12))
+            .monospacedDigit()
             .foregroundStyle(.tertiary)
             .frame(width: Self.timeColumn, alignment: .leading)
     }
@@ -955,7 +1011,7 @@ private struct JournalEntry: View {
 
     private func transcript(size: CGFloat, lineLimit: Int?) -> some View {
         let pointSize = isCode ? Self.codeTextSize : size
-        return Text(hasTranscript ? record.final : "No transcript — reprocess the saved audio")
+        return Text(hasTranscript ? record.final : "No transcript. Reprocess the saved audio.")
             .font(.system(size: pointSize, design: isCode ? .monospaced : .default))
             .lineSpacing(pointSize * Self.extraLeadingRatio)
             .foregroundStyle(hasTranscript ? .primary : .secondary)
@@ -992,7 +1048,9 @@ private struct JournalEntry: View {
                     .buttonStyle(.capsule)
             }
             Spacer(minLength: 0)
-            Button(action: onDelete) {
+            Button {
+                confirmingDelete = true
+            } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.secondary)
@@ -1000,6 +1058,13 @@ private struct JournalEntry: View {
             .buttonStyle(.capsule)
             .help("Delete this transcript permanently")
             .accessibilityLabel("Delete")
+            // One click used to delete the transcript and its audio for good.
+            .confirmationDialog("Delete this dictation?", isPresented: $confirmingDelete) {
+                Button("Delete", role: .destructive, action: onDelete)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("The transcript and its saved audio are deleted from this Mac. This can't be undone.")
+            }
         }
     }
 
@@ -1016,7 +1081,7 @@ private struct JournalEntry: View {
                 }
             }
             Section("Mode") {
-                ForEach(Self.builtInModes, id: \.self) { mode in
+                ForEach(modeNames, id: \.self) { mode in
                     Button(mode) { onReprocess(nil, mode) }
                 }
             }
@@ -1025,7 +1090,7 @@ private struct JournalEntry: View {
                 if isReprocessing {
                     ProgressView().controlSize(.mini)
                 }
-                Text("Reprocess ▸")
+                Text("Reprocess")
                     .font(.system(size: 12, weight: .medium))
             }
         }
@@ -1044,7 +1109,7 @@ private struct JournalEntry: View {
         .opacity(hasAudio ? 1 : 0.5)
         .help(hasAudio
               ? "Re-transcribe the saved audio with another model or mode"
-              : "Reprocessing unavailable — no saved audio for this dictation")
+              : "Reprocessing unavailable: no saved audio for this dictation")
     }
 
     // MARK: Edit sheet
@@ -1085,7 +1150,8 @@ private struct JournalEntry: View {
 // MARK: - Home pane: recent list
 
 /// Compact newest-first rows for the Home pane. Reads `history.recent`
-/// (synchronous, tiny) each time it appears.
+/// (synchronous, tiny) each time it appears. A click opens the row in
+/// History.
 ///
 ///     ▣  Slack                              3 min ago
 ///        Default · 33 words · 15.8 s
@@ -1093,10 +1159,16 @@ private struct JournalEntry: View {
 struct HistoryRecentList: View {
     let history: HistoryStore
     let limit: Int
+    let onOpen: (DictationRecord) -> Void
 
     @State private var records: [DictationRecord] = []
+    @State private var hoveredID: Int64?
 
     private static let iconSide: CGFloat = 28
+    /// The hover fill bleeds this far past the row so text stays aligned.
+    private static let rowBleed: CGFloat = 6
+    private static let rowRadius: CGFloat = 8
+    private static let hoverFill = 0.05
 
     var body: some View {
         Group {
@@ -1108,6 +1180,22 @@ struct HistoryRecentList: View {
                 VStack(alignment: .leading, spacing: VeloraSpacing.m) {
                     ForEach(records, id: \.id) { record in
                         row(record)
+                            .padding(Self.rowBleed)
+                            .background(
+                                RoundedRectangle(cornerRadius: Self.rowRadius, style: .continuous)
+                                    .fill(Color.primary.opacity(hoveredID == record.id ? Self.hoverFill : 0)))
+                            .contentShape(Rectangle())
+                            .padding(-Self.rowBleed)
+                            .onHover { inside in
+                                if inside {
+                                    hoveredID = record.id
+                                } else if hoveredID == record.id {
+                                    hoveredID = nil
+                                }
+                            }
+                            .onTapGesture { onOpen(record) }
+                            .accessibilityAddTraits(.isButton)
+                            .accessibilityHint("Opens the dictation in History")
                     }
                 }
             }

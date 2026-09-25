@@ -22,7 +22,7 @@ enum ActionProgress: Equatable {
             let short = String(description.prefix(42))
             return "\(step)/\(total) \(short) · Esc cancels"
         case .retrying:
-            return "Screen changed; trying a new path · Esc cancels"
+            return "Trying another way · Esc cancels"
         }
     }
 }

@@ -22,6 +22,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
+        // Same paper/ink canvas and seamless titlebar as the main window, so
+        // the first window a new user sees matches the app they land in.
+        window.titlebarSeparatorStyle = .none
+        window.backgroundColor = VeloraPanel.canvasColor
         window.center()
 
         super.init(window: window)
@@ -43,13 +47,9 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
             model.step = step
         }
         model.refreshPermissions()
-        if !holdsActivation {
-            holdsActivation = true
-            AppActivation.acquireRegular()
-        }
-        NSApp.activate(ignoringOtherApps: true)
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
+        // Same show sequence as the main, Settings and About windows: an
+        // accessory app can swallow a plain makeKeyAndOrderFront.
+        MainWindowController.presentShell(self, holding: &holdsActivation)
     }
 
     func windowWillClose(_ notification: Notification) {

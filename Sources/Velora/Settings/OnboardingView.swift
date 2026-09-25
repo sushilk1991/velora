@@ -32,7 +32,7 @@ final class OnboardingModel: ObservableObject {
     @Published var inputMonitoringGranted = Permissions.inputMonitoringGranted
     @Published var accessibilityGranted = Permissions.accessibilityGranted
     @Published var dictationSucceeded = false
-    /// First-run setup status ("Downloading the speech model (1.6 GB) — 42%").
+    /// First-run setup status ("Downloading the speech model (1.6 GB): 42%").
     /// The try-it step shows a progress card instead of a dead text field
     /// while models download.
     @Published var setupStatus: String? = EngineSupervisor.lastLoadingStatus
@@ -160,6 +160,8 @@ private enum OnboardingLayout {
     static let titleTop: CGFloat = 32
     static let buttonBottom: CGFloat = 32
     static let sideMargin: CGFloat = 24
+    /// Side of the app icon on the welcome step.
+    static let welcomeIconSide: CGFloat = 96
 }
 
 /// Seven-step onboarding flow (design brief §4.2): welcome → privacy →
@@ -186,6 +188,9 @@ struct OnboardingView: View {
             footer
         }
         .frame(width: 640, height: 520)
+        // Same canvas and corner glow as the main window (WindowShell).
+        .background(WindowGlow().ignoresSafeArea())
+        .background(VeloraPanel.canvas.ignoresSafeArea())
     }
 
     // MARK: - Step scaffold
@@ -198,8 +203,9 @@ struct OnboardingView: View {
         @ViewBuilder button: () -> some View
     ) -> some View {
         VStack(spacing: 0) {
-            Text(title)
-                .font(.title.weight(.semibold))
+            // The shell's serif title voice; SerifHeadline adds the full stop.
+            SerifHeadline(title)
+                .multilineTextAlignment(.center)
                 .padding(.top, OnboardingLayout.titleTop)
 
             VStack(spacing: VeloraSpacing.xl) {
@@ -216,60 +222,60 @@ struct OnboardingView: View {
     // MARK: - Steps
 
     private var welcomeStep: some View {
-        stepLayout(title: "You talk. Velora types.") {
-            Image(systemName: "waveform.circle.fill")
-                .font(.system(size: 72))
-                .foregroundStyle(VeloraBrand.iconGradient)
-            Text("Hold a key, say the thing, let go. The words show up wherever your cursor already is — email, Slack, a terminal, that half-written message from Tuesday.")
+        stepLayout(title: "You talk. Velora types") {
+            // The real app icon, as in About and the update window.
+            Image(nsImage: VeloraAppInfo.icon)
+                .resizable()
+                .interpolation(.high)
+                .frame(width: OnboardingLayout.welcomeIconSide, height: OnboardingLayout.welcomeIconSide)
+            Text("Hold a key, talk, let go. The words appear wherever your cursor is: an email, Slack, a terminal.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            Text("A few short steps and you'll be talking to your Mac. Two minutes, tops.")
+            Text("A few short steps, about two minutes.")
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Let's go") { model.advance() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+            Button("Get Started") { model.advance() }
+                .buttonStyle(.primaryCapsule)
         }
     }
 
     /// The privacy claims are required copy, so they get room of their own
     /// rather than a fine-print block crowding the welcome step. Network
-    /// exceptions stay next to the claim — a promise with a hidden asterisk
+    /// exceptions stay next to the claim: a promise with a hidden asterisk
     /// is worse than no promise.
     private var privacyStep: some View {
-        stepLayout(title: "Nobody's listening but you") {
+        stepLayout(title: "Your voice stays on this Mac") {
             Image(systemName: "airplane")
                 .font(.system(size: 60))
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text("There is no Velora dictation server. None. Your audio, your screenshots and the text Velora reads off your screen stay on this MacBook and are never sent to us. Nothing it reads off your screen is kept.")
+            Text("Velora has no dictation server. Your audio, your screenshots and the text Velora reads on screen stay on this Mac and are never sent to us. Nothing it reads on screen is kept.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            Text("Switch on airplane mode and dictation still works. The internet only shows up for setup, model downloads and app updates — plus Personal Dictionary, if you want it riding along in iCloud.")
+            Text("Dictation works with no internet. Velora goes online only for setup, model downloads, update checks, and syncing your Personal Dictionary through iCloud.")
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Good. Continue") { model.advance() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+            Button("Continue") { model.advance() }
+                .buttonStyle(.primaryCapsule)
         }
     }
 
     private var microphoneStep: some View {
         permissionStep(
-            title: "Velora needs ears",
+            title: "Allow the microphone",
             card: PermissionCard(
                 symbol: "mic.fill",
                 title: "Microphone",
-                explanation: "Obvious, but we'll say it anyway: no mic, no dictation. Your voice becomes text right here on this Mac and goes nowhere else.",
+                explanation: "Velora turns your voice into text on this Mac. The audio goes nowhere else.",
                 granted: model.microphoneGranted,
                 buttonTitle: model.microphoneDenied ? "Open Settings" : "Allow Access",
                 action: {
@@ -284,11 +290,11 @@ struct OnboardingView: View {
 
     private var inputMonitoringStep: some View {
         permissionStep(
-            title: "And a way to hear the hotkey",
+            title: "Allow Input Monitoring",
             card: PermissionCard(
                 symbol: "keyboard.fill",
                 title: "Input Monitoring",
-                explanation: "Your dictation key only works everywhere if Velora is allowed to watch for it. Skip this and the key simply does nothing — while everything else looks perfectly fine. Rude, we know.",
+                explanation: "Lets Velora notice your dictation key in every app. Without it, the key does nothing.",
                 granted: model.inputMonitoringGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestInputMonitoring() }),
@@ -304,11 +310,11 @@ struct OnboardingView: View {
 
     private var accessibilityStep: some View {
         permissionStep(
-            title: "And thumbs, sort of",
+            title: "Allow Accessibility",
             card: PermissionCard(
                 symbol: "accessibility",
                 title: "Accessibility",
-                explanation: "This is how the finished text lands in whatever app you're in. Without it Velora can hear you perfectly and still has no way to type a single word.",
+                explanation: "Lets Velora type the finished text into the app you're in. Without it, Velora hears you but can't type.",
                 granted: model.accessibilityGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestAccessibility() }),
@@ -331,7 +337,7 @@ struct OnboardingView: View {
                 HStack(alignment: .top, spacing: 6) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 11))
-                    Text("Velora already in the list but the switch won't stick? Select it, hit the “−” button, then add Velora back. An older build was signed differently and macOS is holding a grudge.")
+                    Text("Velora already in the list but the switch won't stick? Select it, click “−”, then add Velora back. An older Velora build was signed differently, so macOS needs the entry re-added.")
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
@@ -341,15 +347,14 @@ struct OnboardingView: View {
             }
         } button: {
             Button("Continue") { model.advance() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(.primaryCapsule)
                 .disabled(!continueEnabled)
         }
     }
 
     private var hotkeyStep: some View {
-        stepLayout(title: "Pick your key") {
-            Text("Hold it, talk, let go — the text appears. In a hurry? Tap it once to lock recording on, then tap again when you're done.")
+        stepLayout(title: "Pick your dictation key") {
+            Text("Hold it, talk, let go, and the text appears. Or tap once to start and tap again to stop.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -361,16 +366,15 @@ struct OnboardingView: View {
                 .fixedSize(horizontal: true, vertical: false)
         } button: {
             Button("Continue") { model.advance() }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(.primaryCapsule)
         }
     }
 
     private var tryItStep: some View {
         let setup = model.setupState
-        return stepLayout(title: setup.canTryIt ? "Okay, your turn" : "Almost there") {
+        return stepLayout(title: setup.canTryIt ? "Try it" : "Downloading models") {
             if setup.canTryIt {
-                Text("Click the box, hold \(model.hotkey.displayName), and say literally anything.")
+                Text("Click the box, hold \(model.hotkey.displayName), and say anything.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -381,7 +385,7 @@ struct OnboardingView: View {
                 // Fixed-height slot so the success label never shifts the layout.
                 Group {
                     if model.dictationSucceeded {
-                        Label("Nailed it. You're ready.", systemImage: "checkmark.circle.fill")
+                        Label("You're set up.", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(VeloraStatus.success)
                             .font(.callout.weight(.medium))
                             .transition(.opacity)
@@ -395,13 +399,11 @@ struct OnboardingView: View {
         } button: {
             if setup.canTryIt {
                 Button(setup.primaryActionTitle) { model.onFinish?() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(.primaryCapsule)
                     .disabled(!model.dictationSucceeded)
             } else {
                 Button(setup.primaryActionTitle) { model.onFinish?() }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(.primaryCapsule)
             }
         }
         .animation(VeloraMotion.standard, value: setup.canTryIt)
@@ -453,7 +455,7 @@ private struct ModelSetupCard: View {
                 .foregroundStyle(VeloraBrand.sky.color)
 
             VStack(spacing: VeloraSpacing.s) {
-                Text(state.status ?? "Warming up the downloads…")
+                Text(state.status ?? "Starting the downloads…")
                     .font(.system(size: 15, weight: .semibold))
                     .multilineTextAlignment(.center)
 
@@ -469,7 +471,7 @@ private struct ModelSetupCard: View {
                 .frame(width: 360)
             }
 
-            Text("Velora grabs the speech and writing models once, then keeps them on this Mac forever. Feel free to skip ahead — this carries on in the background.")
+            Text("Velora downloads the speech and writing models once. You can continue; the download keeps going.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -477,10 +479,10 @@ private struct ModelSetupCard: View {
         }
         .padding(VeloraSpacing.xl)
         .frame(width: 480)
-        .background(VeloraPanel.card, in: RoundedRectangle(cornerRadius: VeloraRadius.card))
-        .overlay(
-            RoundedRectangle(cornerRadius: VeloraRadius.card)
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
+        // The one card style (GroupCard): grouped-Form fill, no border.
+        .background(
+            VeloraPanel.groupFill,
+            in: RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous))
     }
 }
 
@@ -530,10 +532,10 @@ struct PermissionCard: View {
         }
         .padding(VeloraSpacing.l)
         .frame(width: 480)
-        .background(VeloraPanel.card, in: RoundedRectangle(cornerRadius: VeloraRadius.card))
-        .overlay(
-            RoundedRectangle(cornerRadius: VeloraRadius.card)
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
+        // The one card style (GroupCard): grouped-Form fill, no border.
+        .background(
+            VeloraPanel.groupFill,
+            in: RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous))
     }
 }
 

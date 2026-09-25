@@ -106,7 +106,8 @@ extension Hotkey {
 // MARK: - Display
 
 extension Hotkey {
-    /// Keycap-style label: "⌘⇧Space", "⌥ right", "F19", "fn".
+    /// Keycap-style label: "⌘⇧Space", "Right ⌥", "F19", "fn" (the side
+    /// comes first, as in "Right Option"; docs/DESIGN.md §5).
     var displayLabel: String {
         if isModifierOnly {
             return Self.modifierOnlyLabel(for: keyCode)
@@ -138,14 +139,14 @@ extension Hotkey {
 
     private static func modifierOnlyLabel(for keyCode: Int64) -> String {
         switch keyCode {
-        case 54: return "⌘ right"
-        case 55: return "⌘ left"
-        case 56: return "⇧ left"
-        case 60: return "⇧ right"
-        case 58: return "⌥ left"
-        case 61: return "⌥ right"
-        case 59: return "⌃ left"
-        case 62: return "⌃ right"
+        case 54: return "Right ⌘"
+        case 55: return "Left ⌘"
+        case 56: return "Left ⇧"
+        case 60: return "Right ⇧"
+        case 58: return "Left ⌥"
+        case 61: return "Right ⌥"
+        case 59: return "Left ⌃"
+        case 62: return "Right ⌃"
         case 63: return "fn"
         default: return "key \(keyCode)"
         }
@@ -267,15 +268,15 @@ extension Hotkey {
         let commandOnly = strict == CGEventFlags.maskCommand.rawValue
         if commandOnly {
             switch keyCode {
-            case 49: return "⌘Space opens Spotlight — pick another combo or remap Spotlight."
+            case 49: return "⌘Space opens Spotlight. Pick another shortcut."
             case 48: return "⌘Tab is the app switcher and can't be overridden reliably."
-            case 12: return "⌘Q quits the frontmost app — a risky choice for push-to-talk."
+            case 12: return "⌘Q quits the front app. Pick another shortcut."
             default: break
             }
         }
         if strict == 0, Self.isTypingKey(keyCode) {
             let name = Self.keyName(for: keyCode)
-            return "Bare \(name) fires every time you type it — consider adding a modifier."
+            return "\(name) alone fires every time you type it. Add a modifier."
         }
         return nil
     }

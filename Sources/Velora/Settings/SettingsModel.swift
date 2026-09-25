@@ -22,15 +22,26 @@ extension Notification.Name {
 /// History reprocess menu.
 struct EngineModel: Identifiable, Equatable {
     let id: String
+    /// Short title from the engine ("Whisper Turbo"); empty from engines
+    /// older than the `name` field.
+    let name: String
     /// "stt" | "cleanup"
     let kind: String
     let backend: String
     let size: String
     let description: String
 
-    /// Short human label — the description if present, else the repo basename.
+    /// Short human label: the engine's name, else the app's own catalog
+    /// name (an older engine copy on disk sends none), else the repo
+    /// basename. Never the description, which is a sentence ("Fast, and
+    /// understands…").
     var displayName: String {
-        if !description.isEmpty { return description }
+        if !name.isEmpty {
+            return name
+        }
+        if let local = STTModel.all.first(where: { $0.id == id }) {
+            return local.displayName
+        }
         return id.split(separator: "/").last.map(String.init) ?? id
     }
 
@@ -45,10 +56,57 @@ struct EngineModel: Identifiable, Equatable {
             else { size = "" }
             return EngineModel(
                 id: id,
+                name: dict["name"] as? String ?? "",
                 kind: dict["kind"] as? String ?? "stt",
                 backend: dict["backend"] as? String ?? "",
                 size: size,
                 description: dict["description"] as? String ?? "")
+        }
+    }
+}
+
+/// The one "Show pill" choice in Settings › General, stored as the two
+/// older keys so existing settings files keep their meaning:
+///
+///     hud.visible  hud.alwaysVisible  →  choice
+///     false        either                Never
+///     true         true                  Always
+///     true         false                 While dictating
+///
+/// Never leaves `alwaysVisible` alone, so the menubar's "Show Pill" brings
+/// the pill back the way it was.
+enum PillVisibility: CaseIterable, Identifiable {
+    case always, whileDictating, never
+
+    init(visible: Bool, alwaysVisible: Bool) {
+        if !visible {
+            self = .never
+        } else if alwaysVisible {
+            self = .always
+        } else {
+            self = .whileDictating
+        }
+    }
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .always: return "Always"
+        case .whileDictating: return "While dictating"
+        case .never: return "Never"
+        }
+    }
+
+    /// The `hud.visible` value this choice stores.
+    var visible: Bool { self != .never }
+
+    /// The `hud.alwaysVisible` value this choice stores; Never keeps `current`.
+    func alwaysVisible(keeping current: Bool) -> Bool {
+        switch self {
+        case .always: return true
+        case .whileDictating: return false
+        case .never: return current
         }
     }
 }
@@ -223,7 +281,7 @@ final class SettingsModel: ObservableObject {
             do {
                 let result = try self.dictionary.importData(Data(contentsOf: url))
                 if result.added == 0 {
-                    self.dictionaryTransferResult = "No new entries — kept \(result.keptExisting) existing"
+                    self.dictionaryTransferResult = "No new entries. Kept \(result.keptExisting) existing"
                 } else if result.keptExisting == 0 {
                     self.dictionaryTransferResult = "Imported \(result.added) entries"
                 } else {
@@ -544,7 +602,7 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    /// "Show pill" (General › Pill, menubar checkbox, "Close Pill" on the HUD).
+    /// "Show pill" (General › Pill, menubar checkbox, "Hide Pill" on the HUD).
     @Published var hudVisible: Bool {
         didSet {
             guard !applyingImportedSettings, !syncingHUDPrefs,
@@ -718,7 +776,7 @@ final class SettingsModel: ObservableObject {
         if let availableUpdate {
             return "Velora \(availableUpdate.version) is available."
         }
-        return "Velora \(currentVersion) is up to date."
+        return "This is the latest version."
     }
 
     func checkForUpdatesNow() {

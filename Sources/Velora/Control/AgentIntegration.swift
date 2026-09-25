@@ -60,7 +60,7 @@ enum AgentIntegration {
             case .noWritableDirectory:
                 return "No writable install directory (tried /opt/homebrew/bin, /usr/local/bin, ~/.local/bin)"
             case .foreignFile(let path):
-                return "A different “velora” already exists at \(path) — remove or rename it first"
+                return "Another “velora” is already at \(path). Remove or rename it first."
             }
         }
     }

@@ -56,6 +56,12 @@ enum VeloraPanel {
     /// Text on an accent-filled control: ink on dark (sky is light), white
     /// on light (sky-deep is dark).
     static let onAccentColor = dynamic(dark: srgb(22, 19, 17), light: .white)
+    /// Grouped section fill, black 2.5 % on light / white 4 % on dark: the
+    /// fill a grouped `Form` draws under its sections (measured on paper and
+    /// ink), so `GroupCard` outside a Form looks like the Form's cards.
+    static let groupFillColor = dynamic(
+        dark: NSColor.white.withAlphaComponent(0.04),
+        light: NSColor.black.withAlphaComponent(0.025))
 
     static let canvas = Color(nsColor: canvasColor)
     static let card = Color(nsColor: cardColor)
@@ -66,6 +72,7 @@ enum VeloraPanel {
     static let sidebarSelection = Color(nsColor: sidebarSelectionColor)
     static let hairline = Color(nsColor: hairlineColor)
     static let onAccent = Color(nsColor: onAccentColor)
+    static let groupFill = Color(nsColor: groupFillColor)
 }
 
 /// Corner radii. Nested surfaces stay concentric (outer = inner + padding).
@@ -77,30 +84,6 @@ enum VeloraRadius {
     static let sidebar: CGFloat = 14  // the floating glass sidebar
     static let capsule: CGFloat = 14  // 28 pt capsule buttons
     static let window: CGFloat = 18   // cosmetic only; AppKit owns the corners
-}
-
-/// One elevated card: rounded 12 pt surface, hairline border, whisper shadow.
-struct SettingsCard<Content: View>: View {
-    private let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-            content
-        }
-        .padding(VeloraSpacing.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                .fill(VeloraPanel.card))
-        .overlay(
-            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                .strokeBorder(Color(nsColor: .separatorColor).opacity(0.8), lineWidth: 1))
-        .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
-    }
 }
 
 /// Colored gradient icon tile — the sidebar's tile idiom, reusable at any size.
@@ -121,42 +104,6 @@ struct IconTile: View {
     }
 }
 
-/// Card header: gradient icon tile + title (+ optional subtitle), with room
-/// for a trailing control (usually the feature's master toggle).
-struct CardHeader<Trailing: View>: View {
-    let symbol: String
-    let color: Color
-    let title: String
-    var subtitle: String?
-    @ViewBuilder var trailing: Trailing
-
-    var body: some View {
-        HStack(alignment: .center, spacing: VeloraSpacing.m) {
-            IconTile(symbol: symbol, color: color, side: 30)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            Spacer(minLength: 0)
-            trailing
-        }
-    }
-}
-
-extension CardHeader where Trailing == EmptyView {
-    init(symbol: String, color: Color, title: String, subtitle: String? = nil) {
-        self.init(
-            symbol: symbol, color: color, title: title, subtitle: subtitle
-        ) { EmptyView() }
-    }
-}
-
 /// How a `StatTile` colours its value.
 enum StatEmphasis {
     case plain
@@ -164,66 +111,9 @@ enum StatEmphasis {
     case accent
 }
 
-/// Hero metric tile: a 12 pt secondary label above a 26 pt bold tabular
-/// value, on a card.
-///
-///     ┌──────────────────┐
-///     │ words            │  12 pt secondary
-///     │ 12,480           │  26 pt bold, monospaced digits
-///     └──────────────────┘
-struct StatTile: View {
-    let value: String
-    let label: String
-    var emphasis: StatEmphasis = .plain
-
-    init(value: String, label: String, emphasis: StatEmphasis = .plain) {
-        self.value = value
-        self.label = label
-        self.emphasis = emphasis
-    }
-
-    /// Pre-v2 signature. The icon tile is gone; `symbol` and `color` are
-    /// accepted so existing call sites compile, and ignored.
-    init(symbol: String, color: Color, value: String, label: String) {
-        self.init(value: value, label: label)
-    }
-
-    private var valueStyle: AnyShapeStyle {
-        switch emphasis {
-        case .plain: return AnyShapeStyle(.primary)
-        case .accent: return AnyShapeStyle(VeloraBrand.accent)
-        }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Text(value)
-                .font(.system(size: 26, weight: .bold))
-                .monospacedDigit()
-                .foregroundStyle(valueStyle)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-        }
-        .padding(VeloraSpacing.l)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                .fill(VeloraPanel.card))
-        .overlay(
-            RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(value) \(label)")
-    }
-}
-
 /// A keyboard shortcut drawn as physical keycaps: one cap per modifier
 /// symbol, one for the key ("⌃⇧A" → [⌃][⇧][A]). Bare-modifier shortcuts
-/// ("⌥ right") render as a single wider cap.
+/// ("Right ⌥") render as a single wider cap.
 struct KeycapsLabel: View {
     let hotkey: Hotkey
 
@@ -260,26 +150,6 @@ struct KeycapsLabel: View {
     }
 }
 
-/// Label/value row inside a card — the card-world sibling of LabeledContent.
-struct CardMetricRow: View {
-    let label: String
-    let value: String
-    var valueColor: Color?
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer(minLength: VeloraSpacing.m)
-            Text(value)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(valueColor ?? .primary)
-        }
-    }
-}
-
 /// Hairline divider tuned for card interiors.
 struct CardDivider: View {
     var body: some View {
@@ -304,13 +174,12 @@ enum WindowShellMetrics {
     static let trafficLightClearance: CGFloat = 52
     /// Gap between the sidebar's outer edge and the detail column.
     static let sidebarGap: CGFloat = 16
-    static let detailTop: CGFloat = 18
+    /// Puts the `PaneHeader` centre (8 + 36 / 2 = 26) level with the
+    /// traffic lights under the shell's unified toolbar.
+    static let detailTop: CGFloat = 8
     static let detailTrailing: CGFloat = 24
     static let detailBottom: CGFloat = 22
     static let detailLeading: CGFloat = 20
-    /// Grouped forms centre themselves at any width; capping them keeps the
-    /// Meetings form hugging the pane title instead of floating mid-window.
-    static let formMaxWidth: CGFloat = 740
     /// Finder/Notes-style rail row (MainSidebar and SettingsSidebar).
     static let rowHeight: CGFloat = 32
     /// 22 pt well for the monochrome symbol and the coloured IconTile.
@@ -321,9 +190,13 @@ enum WindowShellMetrics {
     static let railInset: CGFloat = VeloraSpacing.s
     /// `PaneHeader` height — both shells place this under `detailTop`.
     static let titleHeight: CGFloat = 36
+    /// The inset a grouped `Form` puts around its sections. A Form pane's
+    /// `PaneHeader` moves right by this much so the title lines up with
+    /// the cards (measured: title x 228, cards x 248 before).
+    static let formInset: CGFloat = 20
 
-    /// Room above the first rail row: clearance minus the inner inset
-    /// `FloatingSidebar` already applies.
+    /// Room above the first rail row: clearance minus the outer and inner
+    /// insets `FloatingSidebar` already applies.
     ///
     ///     window top
     ///       ├ outer railInset
@@ -331,7 +204,7 @@ enum WindowShellMetrics {
     ///       ├ sidebarTopClearance  ← this
     ///       └ first row
     static var sidebarTopClearance: CGFloat {
-        trafficLightClearance - railInset
+        trafficLightClearance - 2 * railInset
     }
 
     /// Detail column leading: form inset + gap, minus the rail's outer inset.
@@ -345,15 +218,36 @@ enum WindowShellMetrics {
 /// `PaneHeader` at the top of `detail` so the title baseline is identical
 /// by construction, not by copying padding numbers.
 struct WindowShell<Sidebar: View, Detail: View>: View {
+    /// How the detail column meets the window's trailing and bottom edges.
+    enum DetailEdges {
+        /// Card panes: the shell pads the trailing and bottom edges.
+        case padded
+        /// Grouped-Form panes: the Form scrolls to the window edge and
+        /// brings its own inset. Padding it too clipped the last footer
+        /// 22 pt above the window bottom (owner screenshot).
+        case formScrolls
+    }
+
+    private let detailEdges: DetailEdges
     private let sidebar: Sidebar
     private let detail: Detail
 
     init(
+        detailEdges: DetailEdges = .padded,
         @ViewBuilder sidebar: () -> Sidebar,
         @ViewBuilder detail: () -> Detail
     ) {
+        self.detailEdges = detailEdges
         self.sidebar = sidebar()
         self.detail = detail()
+    }
+
+    private var trailingPadding: CGFloat {
+        detailEdges == .padded ? WindowShellMetrics.detailTrailing : 0
+    }
+
+    private var bottomPadding: CGFloat {
+        detailEdges == .padded ? WindowShellMetrics.detailBottom : 0
     }
 
     var body: some View {
@@ -363,8 +257,8 @@ struct WindowShell<Sidebar: View, Detail: View>: View {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .padding(.top, WindowShellMetrics.detailTop)
-                .padding(.trailing, WindowShellMetrics.detailTrailing)
-                .padding(.bottom, WindowShellMetrics.detailBottom)
+                .padding(.trailing, trailingPadding)
+                .padding(.bottom, bottomPadding)
                 .padding(.leading, WindowShellMetrics.detailColumnLeading)
         }
         .background(WindowGlow())
@@ -626,18 +520,19 @@ struct SerifHeadline: View {
     }
 }
 
-/// The Tahoe grouped card for use outside a `Form`: an optional uppercase
-/// section header above (with an optional trailing link), a radius-12 card
-/// with a hairline border holding `GroupRow`s separated by `GroupDivider`s,
-/// and an optional footer below.
+/// The Tahoe grouped card for use outside a `Form`, drawn like a grouped
+/// Form's section so both windows share one card: an optional sentence-case
+/// header above (with an optional trailing link), a radius-12 card on the
+/// `groupFill` holding `GroupRow`s separated by `GroupDivider`s, and an
+/// optional footer below.
 ///
-///     SECTION               Link   11.5 pt semibold uppercase · 12 pt link
+///     Section               Link   13 pt semibold · 12 pt link
 ///     ┌───────────────────────────┐
 ///     │ Label            [toggle] │  GroupRow
 ///     │   ├──────────────────────┤ │  GroupDivider (inset 14)
 ///     │ Label            [popup]  │
 ///     └───────────────────────────┘
-///     Footer note.                  11 pt tertiary
+///     Footer note.                  caption secondary (SettingsFooter)
 struct GroupCard<Content: View>: View {
     /// A link on the header's trailing edge ("Open History").
     typealias HeaderLink = (title: String, action: () -> Void)
@@ -664,9 +559,7 @@ struct GroupCard<Content: View>: View {
             if let header {
                 HStack(alignment: .firstTextBaseline) {
                     Text(header)
-                        .textCase(.uppercase)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 13, weight: .semibold))
                     if let headerLink {
                         Spacer(minLength: VeloraSpacing.s)
                         Button(headerLink.title, action: headerLink.action)
@@ -683,14 +576,9 @@ struct GroupCard<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                    .fill(VeloraPanel.card))
-            .overlay(
-                RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous)
-                    .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
+                    .fill(VeloraPanel.groupFill))
             if let footer {
-                Text(footer)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.tertiary)
+                SettingsFooter(footer)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Self.labelInset)
             }
@@ -768,10 +656,15 @@ struct CapsuleButtonStyle: ButtonStyle {
 }
 
 /// 28 pt primary capsule: accent fill (sky on dark, sky-deep on light) with
-/// ink / white text, 12 pt semibold.
+/// ink / white text, 12 pt semibold. Dims when disabled, since a custom
+/// style gets no disabled look for free (onboarding's Continue waits on a
+/// permission grant).
 struct PrimaryCapsuleButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     private static var height: CGFloat { 28 }
     private static var pressedOpacity: Double { 0.85 }
+    private static var disabledOpacity: Double { 0.4 }
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -783,6 +676,7 @@ struct PrimaryCapsuleButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous)
                     .fill(VeloraBrand.accent)
                     .opacity(configuration.isPressed ? Self.pressedOpacity : 1))
+            .opacity(isEnabled ? 1 : Self.disabledOpacity)
             .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous))
     }
 }

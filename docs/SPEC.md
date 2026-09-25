@@ -75,7 +75,7 @@ Velora is an open-source, local-first dictation app for macOS. Hold a hotkey, sp
 - MCP is a stdio adapter over the same broker capabilities and policy, not a privileged second API.
 
 ### Settings & onboarding (world-class bar, per design brief)
-- One main window (Home / History / Stats / Meetings / Dictionary / Modes panes behind a floating glass sidebar) plus a ⌘, Settings window with General / Dictation / Shortcuts / Models / Advanced tabs as grouped forms. Closing the window keeps the pill and the menubar item; "Show Pill" (menubar) and "Close Pill" (pill menu) toggle the pill.
+- One main window (Home / History / Stats / Meetings / Dictionary / Modes panes behind a floating glass sidebar) plus a ⌘, Settings window with General / Dictation / Shortcuts / Models / Advanced tabs as grouped forms. Closing the window keeps the pill and the menubar item; "Show Pill" (menubar) and "Hide Pill" (pill menu) toggle the pill.
 - Persist typed portable app preferences in an owner-only, versioned `~/.velora/settings.json`. Settings › Advanced provides export/import with whole-file validation, overwrite confirmation, atomic apply/rollback, and live runtime refresh. Keep the hardware-selected cleanup model and machine/security state outside that document; never import permissions, device identifiers, onboarding state, Calendar/local-agent grants, history, recordings, dictionary entries, or custom modes as settings.
 - Onboarding: 5-step premium flow (welcome → mic permission → accessibility permission with live-polling grant detection → hotkey → try-it playground). Finish gated on one successful dictation.
 - Permissions degrade gracefully: degraded state shows menubar error icon + "Check Permissions…".

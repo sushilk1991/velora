@@ -211,7 +211,7 @@ final class FileTranscriber {
             if completion != nil {
                 completion?(.failure(.engineUnavailable))
             } else {
-                showToast(symbol: "hourglass", message: "Speech engine is starting — try again in a moment")
+                showToast(symbol: "hourglass", message: "Engine starting. Try again soon")
             }
             return
         }

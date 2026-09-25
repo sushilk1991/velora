@@ -55,7 +55,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     var meetingPreparingTitle: String?
     var meetingProcessingLabel: String?
 
-    /// First-run setup status ("Downloading the speech model (1.6 GB) — 42%");
+    /// First-run setup status ("Downloading the speech model (1.6 GB): 42%");
     /// shown as a disabled menu line + button tooltip while models download.
     var setupStatus: String? {
         didSet {
@@ -164,50 +164,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     func buildMenu(into menu: NSMenu) {
         menu.removeAllItems()
 
-        if let meeting = meetingRecordingTitle {
-            let stop = NSMenuItem(
-                title: "Stop \(Self.truncate(meeting, to: 34)) & Create Notes",
-                action: #selector(stopMeeting), keyEquivalent: "")
-            stop.target = self
-            stop.attributedTitle = NSAttributedString(
-                string: stop.title,
-                attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold),
-                             .foregroundColor: NSColor.systemRed])
-            menu.addItem(stop)
-            let discard = NSMenuItem(
-                title: "Discard Meeting Recording…",
-                action: #selector(discardMeeting), keyEquivalent: "")
-            discard.target = self
-            menu.addItem(discard)
+        // Dictation leads (the menu's everyday action) unless a meeting is
+        // recording: then stopping it comes first and dictation is disabled.
+        if meetingRecordingTitle != nil {
+            addMeetingItems(to: menu)
+            addDictationItems(to: menu)
         } else {
-            let record = NSMenuItem(
-                title: meetingPreparingTitle ?? "Start Meeting Notes…",
-                action: #selector(startMeeting), keyEquivalent: "")
-            record.target = self
-            record.isEnabled = meetingPreparingTitle == nil
-                && iconState == .idle
-                && transcriptionProgress == nil
-            menu.addItem(record)
-        }
-
-        let startTitle = iconState == .recording ? "Stop Dictation" : "Start Dictation"
-        let start = NSMenuItem(title: startTitle, action: #selector(toggleDictation), keyEquivalent: "")
-        start.target = self
-        // Consent/preparation does not use the microphone. Only an actual
-        // meeting recording excludes foreground dictation.
-        start.isEnabled = meetingRecordingTitle == nil
-        start.attributedTitle = NSAttributedString(
-            string: startTitle,
-            attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
-        menu.addItem(start)
-
-        // First-run setup: models are downloading — say so instead of letting
-        // a dead "Start Dictation" mystify a brand-new user.
-        if let setupStatus {
-            let item = NSMenuItem(title: setupStatus, action: nil, keyEquivalent: "")
-            item.isEnabled = false
-            menu.addItem(item)
-            setupMenuItem = item
+            addDictationItems(to: menu)
+            addMeetingItems(to: menu)
         }
 
         menu.addItem(.separator())
@@ -257,8 +221,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
 
         if let progress = transcriptionProgress {
+            // Progress as a status line, then the action: "Transcribing… 42%"
+            // over "Cancel Transcription" (was "Transcribing… 42% — Cancel").
+            let status = NSMenuItem(title: progress, action: nil, keyEquivalent: "")
+            status.isEnabled = false
+            menu.addItem(status)
             let item = NSMenuItem(
-                title: "\(progress) — Cancel", action: #selector(cancelTranscription),
+                title: "Cancel Transcription", action: #selector(cancelTranscription),
                 keyEquivalent: "")
             item.target = self
             menu.addItem(item)
@@ -278,7 +247,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         menu.addItem(.separator())
 
-        // "Show Pill" mirrors General › Pill and the pill's own "Close Pill";
+        // "Show Pill" mirrors General › Pill and the pill's own "Hide Pill";
         // the prefs notification is what actually shows/hides the panel.
         let showPill = NSMenuItem(
             title: "Show Pill", action: #selector(toggleHUDVisible), keyEquivalent: "")
@@ -297,9 +266,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             action: #selector(checkForUpdates),
             keyEquivalent: "")
         checkForUpdates.target = self
-        checkForUpdates.image = NSImage(
-            systemSymbolName: "arrow.triangle.2.circlepath",
-            accessibilityDescription: nil)
         menu.addItem(checkForUpdates)
 
         if degradedReason != nil || permissionsMissing {
@@ -313,6 +279,58 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
             title: "Quit Velora", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    /// Stop / Discard while a meeting records, else Start Meeting Notes….
+    private func addMeetingItems(to menu: NSMenu) {
+        if let meeting = meetingRecordingTitle {
+            let stop = NSMenuItem(
+                title: "Stop \(Self.truncate(meeting, to: 34)) & Create Notes",
+                action: #selector(stopMeeting), keyEquivalent: "")
+            stop.target = self
+            stop.attributedTitle = NSAttributedString(
+                string: stop.title,
+                attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold),
+                             .foregroundColor: NSColor.systemRed])
+            menu.addItem(stop)
+            let discard = NSMenuItem(
+                title: "Discard Meeting Recording…",
+                action: #selector(discardMeeting), keyEquivalent: "")
+            discard.target = self
+            menu.addItem(discard)
+        } else {
+            let record = NSMenuItem(
+                title: meetingPreparingTitle ?? "Start Meeting Notes…",
+                action: #selector(startMeeting), keyEquivalent: "")
+            record.target = self
+            record.isEnabled = meetingPreparingTitle == nil
+                && iconState == .idle
+                && transcriptionProgress == nil
+            menu.addItem(record)
+        }
+    }
+
+    /// Start / Stop Dictation, plus the first-run setup line under it.
+    private func addDictationItems(to menu: NSMenu) {
+        let startTitle = iconState == .recording ? "Stop Dictation" : "Start Dictation"
+        let start = NSMenuItem(title: startTitle, action: #selector(toggleDictation), keyEquivalent: "")
+        start.target = self
+        // Consent/preparation does not use the microphone. Only an actual
+        // meeting recording excludes foreground dictation.
+        start.isEnabled = meetingRecordingTitle == nil
+        start.attributedTitle = NSAttributedString(
+            string: startTitle,
+            attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
+        menu.addItem(start)
+
+        // First-run setup: models are downloading — say so instead of letting
+        // a dead "Start Dictation" mystify a brand-new user.
+        if let setupStatus {
+            let item = NSMenuItem(title: setupStatus, action: nil, keyEquivalent: "")
+            item.isEnabled = false
+            menu.addItem(item)
+            setupMenuItem = item
+        }
     }
 
     /// Preserve the old "notice a permission revoked while Velora is
@@ -337,8 +355,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     /// the releases page when in-place installs are impossible (dev builds,
     /// unwritable /Applications, …).
     private func addUpdateItems(to menu: NSMenu) {
-        let symbol = NSImage(
-            systemSymbolName: "arrow.down.circle.fill", accessibilityDescription: nil)
         func add(_ title: String, action: Selector?, represented: Any? = nil,
                  toolTip: String? = nil) {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
@@ -346,7 +362,6 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             item.target = action == nil ? nil : self
             item.representedObject = represented
             item.toolTip = toolTip
-            item.image = symbol
             menu.addItem(item)
         }
         let installer = UpdateInstaller.shared
@@ -367,7 +382,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 // checker discovery to fall back on — still leave the user a
                 // path forward.
                 if case .failed(let reason) = installer.state {
-                    add("Update Failed — \(UpdateCopy.releasesPageTitle)…",
+                    add("Download Update from GitHub…",
                         action: #selector(openUpdatePage),
                         represented: URL(
                             string: "https://github.com/\(UpdateChecker.repoSlug)/releases/latest"),
@@ -380,7 +395,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 add(UpdateCopy.updateTitle(update.version),
                     action: #selector(startUpdate), represented: update, toolTip: failure)
             } else {
-                add("Update Available — \(update.version)…",
+                add("Download Velora \(update.version) from GitHub…",
                     action: #selector(openUpdatePage), represented: update.page,
                     toolTip: failure)
             }

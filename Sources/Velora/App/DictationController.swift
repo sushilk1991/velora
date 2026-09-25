@@ -16,7 +16,7 @@ protocol DictationControllerDelegate: AnyObject {
 enum DictationOutputFailure {
     static func message(for text: String) -> String? {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "Couldn't transcribe that — try again"
+            ? "Couldn't transcribe. Try again"
             : nil
     }
 }
@@ -121,7 +121,7 @@ final class DictationController: NSObject {
 
         var successNotice: (symbol: String, message: String) {
             switch self {
-            case .voiceEdit: return ("pencil.line", "Edited")
+            case .voiceEdit: return ("wand.and.stars", "Edited")
             case .proofread: return ("text.badge.checkmark", "Spelling and grammar fixed")
             }
         }
@@ -731,7 +731,7 @@ final class DictationController: NSObject {
             return
         }
         guard !SecureInput.isActive else {
-            showError("A password field is active — actions are blocked")
+            showError("Password field. Action stopped")
             return
         }
         mediaPlayback.restoreBeforeAction()
@@ -1025,11 +1025,6 @@ final class DictationController: NSObject {
     /// Built-in modes offered in the "Reformat Last as…" menu.
     static let reformatModes = ["Default", "Message", "Email", "Note", "Code", "Raw"]
 
-    /// True when there's a recent dictation with archived audio to re-run.
-    var canReformatLast: Bool {
-        history.recent(limit: 1).first?.audioPath != nil
-    }
-
     /// Re-runs the most recent dictation's cleanup under a different mode and
     /// pastes the result back into the app it came from. Reuses the History
     /// reprocess round-trip — never touches the live dictation hot path, so it
@@ -1062,7 +1057,7 @@ final class DictationController: NSObject {
         guard phase == .idle else { return }
         guard config.voiceEdit else { return }
         guard !SecureInput.isActive else {
-            showEditStartError("Secure input active — editing unavailable")
+            showEditStartError("Secure field. Can't edit")
             return
         }
         guard sublimeApplyID == nil else {
@@ -1112,7 +1107,7 @@ final class DictationController: NSObject {
             protectedLateFinalSessionID = sessionID
         }
         guard !SecureInput.isActive else {
-            showProofreadStartError("Secure input active — proofreading unavailable")
+            showProofreadStartError("Secure field. Can't proofread")
             return
         }
         guard supervisor.isReady else {
@@ -1205,7 +1200,7 @@ final class DictationController: NSObject {
             switch intent {
             case .voiceEdit(let locked):
                 if releasedBeforeStart {
-                    self.showEditStartError("Selection took too long — retry the edit")
+                    self.showEditStartError("Selection timed out. Try again")
                     return
                 }
                 self.startCapturedEdit(selected, app: app, locked: locked)
@@ -1268,7 +1263,7 @@ final class DictationController: NSObject {
                     if case .voiceEdit = captureIntent, releasedBeforeStart {
                         capture.token.discard()
                         self.showEditStartError(
-                            "Sublime Text took too long — retry the edit")
+                            "Sublime Text timed out")
                         return
                     }
                     let element = AXUIElementCreateApplication(
@@ -1327,7 +1322,7 @@ final class DictationController: NSObject {
                         }
                     } else {
                         self.showSelectionStartError(
-                            "Couldn't connect to Sublime Text — try again",
+                            "Can't reach Sublime Text",
                             kind: captureKind)
                     }
                 }
@@ -1421,7 +1416,7 @@ final class DictationController: NSObject {
             selection.discardMutableIdentity()
             phase = .idle
             showError(
-                "Didn't catch an instruction — try again",
+                "No instruction heard",
                 retryIntent: kind.retryIntent)
             return
         }
@@ -1497,7 +1492,7 @@ final class DictationController: NSObject {
             pending.selection.discardMutableIdentity()
             showNotice(
                 symbol: "lock.fill",
-                message: "Secure input active — edit not copied")
+                message: "Secure field. Edit not copied")
             return
         }
         if let token = pending.selection.sublimeToken {
@@ -1540,7 +1535,7 @@ final class DictationController: NSObject {
               pending.selection.canReplace(with: current)
         else {
             NSLog("Velora: edit paste skipped — selection changed")
-            showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
+            showNotice(symbol: "doc.on.clipboard", message: "Selection changed. Edit copied")
             return
         }
         guard inserter.insertViaPasteboard(
@@ -1593,7 +1588,7 @@ final class DictationController: NSObject {
                     + (NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "none")
                     + " baseline=\(baseline.map(String.init) ?? "none")"
                     + " now=\(UserInputActivity.selectionSnapshot()))")
-            showNotice(symbol: "doc.on.clipboard", message: "Selection changed — edit on clipboard")
+            showNotice(symbol: "doc.on.clipboard", message: "Selection changed. Edit copied")
             return
         }
         guard inserter.insertViaPasteboard(
@@ -1625,7 +1620,7 @@ final class DictationController: NSObject {
             NSLog("Velora: Sublime edit skipped — target/selection/input changed")
             showNotice(
                 symbol: "pencil.slash",
-                message: "Selection changed — retry the edit")
+                message: "Selection changed. Try again")
             return
         }
         let applyID = UUID()
@@ -1648,7 +1643,7 @@ final class DictationController: NSObject {
                     NSLog("Velora: Sublime edit skipped — plugin validation failed")
                     self.showNotice(
                         symbol: "pencil.slash",
-                        message: "Selection changed — retry the edit")
+                        message: "Selection changed. Try again")
                 case .unknown:
                     NSLog("Velora: Sublime edit result could not be confirmed")
                     self.showNotice(
@@ -2027,7 +2022,7 @@ final class DictationController: NSObject {
         // Secure input (password fields): refuse with an error HUD.
         guard !SecureInput.isActive else {
             NSLog("Velora: recording refused — secure input active")
-            showError("Secure input active — dictation unavailable")
+            showError("Secure field. Can't dictate")
             return false
         }
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
@@ -2182,7 +2177,7 @@ final class DictationController: NSObject {
                   case .starting = self.phase else { return }
             self.supervisor.send(["cmd": "cancel", "session": requestedSession])
             self.cancelledSessionID = requestedSession
-            self.showError("Microphone did not start — check the selected input")
+            self.showError("Microphone didn't start")
         }
         return true
     }
@@ -2575,7 +2570,7 @@ final class DictationController: NSObject {
                     interruptedRows.removeValue(forKey: id)
                     showNotice(
                         symbol: "waveform.badge.exclamationmark",
-                        message: "Recovered audio saved — transcription needs retry")
+                        message: "Audio saved. Retry in History")
                     break
                 }
                 interruptedRows.removeValue(forKey: id)
@@ -2598,7 +2593,7 @@ final class DictationController: NSObject {
             if let id, interruptedRows.removeValue(forKey: id) != nil {
                 showNotice(
                     symbol: "waveform.badge.exclamationmark",
-                    message: "Recovered audio saved — transcription needs retry")
+                    message: "Audio saved. Retry in History")
                 break
             }
             guard let id, pendingReformat?.id == id else { break }
@@ -2634,15 +2629,15 @@ final class DictationController: NSObject {
             switch code {
             case "busy":
                 showError(
-                    "Velora is busy — try the edit again",
+                    "Busy. Try the edit again",
                     retryIntent: retryIntent)
             case "cleanup_unavailable":
                 showError(
-                    "The writing model is still loading — try again shortly",
+                    "Writing model still loading",
                     retryIntent: retryIntent)
             case "cleanup_timeout":
                 showError(
-                    "The writing model timed out — retry",
+                    "Writing model timed out",
                     retryIntent: retryIntent)
             default:
                 showError(error, retryIntent: retryIntent)
@@ -2676,9 +2671,9 @@ final class DictationController: NSObject {
             break
         case .stopped, .launching, .degraded:
             if pendingEdit != nil {
-                cancelPendingEditForError("Engine crashed — restarting")
+                cancelPendingEditForError("Engine restarting")
             } else {
-                showError("Engine crashed — restarting")
+                showError("Engine restarting")
             }
         }
     }
@@ -2756,7 +2751,7 @@ final class DictationController: NSObject {
                 phase = .idle
                 showNotice(
                     symbol: "exclamationmark.arrow.triangle.2.circlepath",
-                    message: "Finished late — action not run")
+                    message: "Too late. Action skipped")
                 ackFinalAudio(audio, session: session)
                 return
             }
@@ -2786,7 +2781,7 @@ final class DictationController: NSObject {
                 phase = .idle
                 showNotice(
                     symbol: "exclamationmark.arrow.triangle.2.circlepath",
-                    message: "Finished late — command not run")
+                    message: "Too late. Command skipped")
             }
             ackFinalAudio(audio, session: sessionID)
             return
@@ -2810,7 +2805,7 @@ final class DictationController: NSObject {
                     cleanupWallMs: cleanupWallMs,
                     finalizationMs: finalizationMs, audio: audio)
                 phase = .idle
-                showNotice(symbol: "doc.on.clipboard.fill", message: "Finished late — copied")
+                showNotice(symbol: "doc.on.clipboard.fill", message: "Too late. Copied instead")
             }
             return
         }
@@ -2883,13 +2878,13 @@ final class DictationController: NSObject {
             NSLog(
                 "Velora: insertion blocked — accessibility trusted=%@ canPostEvents=%@",
                 trusted ? "yes" : "no", canPost ? "yes" : "no")
-            fallbackMessage = "Permission needed — text copied to clipboard"
+            fallbackMessage = "Needs Accessibility. Copied"
             isPermissionFallback = true
         } else if SecureInput.isActive {
-            fallbackMessage = "Secure field — copied to clipboard"
+            fallbackMessage = "Secure field. Copied"
         } else if let target = context?.bundleID,
                   NSWorkspace.shared.frontmostApplication?.bundleIdentifier != target {
-            fallbackMessage = "Focus changed — copied to clipboard"
+            fallbackMessage = "Focus changed. Copied"
         }
 
         if let fallbackMessage {
@@ -2944,7 +2939,7 @@ final class DictationController: NSObject {
                 self.sounds.play(.error)
                 self.showNotice(
                     symbol: "doc.on.clipboard.fill",
-                    message: "Insertion interrupted — copied")
+                    message: "Interrupted. Copied")
                 return
             }
             self.hud.transition(to: .inserted)
@@ -2987,7 +2982,7 @@ final class DictationController: NSObject {
                     self.phase = .idle
                     self.showNotice(
                         symbol: "exclamationmark.arrow.triangle.2.circlepath",
-                        message: "Draft changed — command not run")
+                        message: "Draft changed. Command skipped")
                     self.schedulePendingRecordingLimitNotice()
                     return
                 }
@@ -3042,7 +3037,7 @@ final class DictationController: NSObject {
                 self.phase = .idle
                 self.showNotice(
                     symbol: "doc.on.clipboard.fill",
-                    message: "Cursor changed — final copied")
+                    message: "Cursor moved. Copied")
             case .applied:
                 self.inserter.resetContinuationContext()
                 self.hud.transition(to: .inserted)
@@ -3076,7 +3071,7 @@ final class DictationController: NSObject {
             phase = .idle
             showNotice(
                 symbol: "exclamationmark.arrow.triangle.2.circlepath",
-                message: "Draft changed — command not run")
+                message: "Draft changed. Command skipped")
             schedulePendingRecordingLimitNotice()
             return
         }
@@ -3682,7 +3677,7 @@ extension DictationController: HotkeyMonitorDelegate {
                         }
                         self.showNotice(
                             symbol: "text.cursor",
-                            message: "Sublime Text took too long — retry Stream")
+                            message: "Sublime Text timed out")
                         return
                     }
                     self.startStreamRecording(

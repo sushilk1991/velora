@@ -70,6 +70,7 @@ struct MainWindowActions {
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let contentSize = NSSize(width: 1180, height: 760)
     private static let minimumSize = NSSize(width: 960, height: 620)
+    private static let shellToolbarID = NSToolbar.Identifier("VeloraShell")
 
     private let selection = MainWindowSelection()
     private var paneObserver: AnyCancellable?
@@ -129,6 +130,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         // A separator would paint a second "titlebar" band and make the
         // traffic lights look offset from the glass rail.
         window.titlebarSeparatorStyle = .none
+        // An empty unified toolbar moves the traffic lights from (9, 9) to
+        // (19, 19): 11 pt inside the glass rail instead of 1 pt from its
+        // rounded corner, and level with the pane title (WindowShellMetrics).
+        window.toolbar = NSToolbar(identifier: shellToolbarID)
+        window.toolbarStyle = .unified
         window.isMovableByWindowBackground = true
         window.backgroundColor = VeloraPanel.canvasColor
         window.title = title
@@ -210,19 +216,14 @@ struct MainRootView: View {
         case .stats:
             StatsPane(model: model, history: history)
         case .meetings:
-            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-                PaneHeader(title: pane.title)
-                MeetingsSettingsView(
-                    model: model, coordinator: meetingCoordinator,
-                    processor: meetingProcessor, store: meetings)
-                    .frame(maxWidth: WindowShellMetrics.formMaxWidth)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            // Draws its own PaneHeader (search, Start Meeting Notes…) and
+            // swaps list and detail in place.
+            MeetingsSettingsView(
+                model: model, coordinator: meetingCoordinator,
+                processor: meetingProcessor, store: meetings)
         case .dictionary:
-            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-                PaneHeader(title: pane.title)
-                DictionarySettingsView(model: model)
-            }
+            // Draws its own PaneHeader: the search and Add state live inside it.
+            DictionarySettingsView(model: model)
         case .modes:
             VStack(alignment: .leading, spacing: VeloraSpacing.m) {
                 PaneHeader(title: pane.title)

@@ -27,6 +27,7 @@ _SINGLE_FILE_REVISIONS = {
 @dataclass(frozen=True)
 class ModelInfo:
     id: str
+    name: str  # short title for the Models pane ("Whisper Turbo")
     kind: str  # "stt" | "cleanup"
     backend: str  # "parakeet" | "whisper" | "transcribe-cpp" | "mlx-lm"
     size: str  # human-readable download size
@@ -36,97 +37,105 @@ class ModelInfo:
 REGISTRY: list[ModelInfo] = [
     ModelInfo(
         id="mlx-community/whisper-large-v3-turbo",
+        name="Whisper Turbo",
         kind="stt",
         backend="whisper",
         size="1.6 GB",
         description=(
-            "Default — fast & multilingual (99 languages incl. Hindi, Indian "
-            "English, Mandarin, Arabic, Spanish, French). Best all-round balance."
+            "Fast, and understands 99 languages, including Hindi, Indian "
+            "English, Mandarin, Arabic, Spanish and French."
         ),
     ),
     ModelInfo(
         id=TRANSCRIBE_CPP_Q8_MODEL,
+        name="Whisper Turbo Q8 (Experimental)",
         kind="stt",
         backend="transcribe-cpp",
         size="0.85 GB",
         description=(
-            "Experimental — faster multilingual Whisper via transcribe.cpp "
-            "(Q8, Hindi and Indian English)."
+            "Faster and smaller than Whisper Turbo, with the same languages. "
+            "Still in testing."
         ),
     ),
     ModelInfo(
         id="mlx-community/whisper-large-v3-mlx",
+        name="Whisper Large",
         kind="stt",
         backend="whisper",
         size="3.1 GB",
         description=(
-            "Highest accuracy. Full Whisper large-v3 — same languages as the "
-            "default but more accurate on hard accents and noise. Slower, larger."
+            "Most accurate with strong accents and background noise. Slower, "
+            "and twice the download."
         ),
     ),
     ModelInfo(
         id="knownsense/whisper-hindi-apex-mlx",
+        name="Whisper Hinglish",
         kind="stt",
         backend="whisper",
         size="1.6 GB",
         description=(
-            "Hindi & Hinglish specialist (Romanized output). Fine-tuned on 700+ "
-            "hours of Hindi/English code-switching — best for heavy Hinglish."
+            "Best when you mix Hindi and English. Writes Hindi in English "
+            "letters."
         ),
     ),
     ModelInfo(
         id="mlx-community/parakeet-tdt-0.6b-v3",
+        name="Parakeet v3",
         kind="stt",
         backend="parakeet",
         size="2.5 GB",
         description=(
-            "Fastest final transcription. English + 24 "
-            "European languages (no Hindi/Mandarin/Arabic)."
+            "Fastest. English and 24 European languages. No Hindi, Mandarin "
+            "or Arabic."
         ),
     ),
     ModelInfo(
         id="mlx-community/parakeet-tdt-0.6b-v2",
+        name="Parakeet v2",
         kind="stt",
         backend="parakeet",
         size="2.3 GB",
-        description="Fastest English-only final transcription. Lowest latency for pure English.",
+        description="Fastest for English. English only.",
     ),
     ModelInfo(
         id="mlx-community/whisper-large-v3-turbo-q4",
+        name="Whisper Turbo Small",
         kind="stt",
         backend="whisper",
         size="0.5 GB",
-        description="Smallest multilingual. 4-bit turbo — least disk/RAM, roughest quality.",
+        description="Smallest download, 99 languages. Less accurate.",
     ),
     # --- cleanup / formatting LLMs, smallest first ---
     ModelInfo(
         id="mlx-community/Qwen3.5-2B-MLX-4bit",
+        name="Compact",
         kind="cleanup",
         backend="mlx-lm",
         size="1.6 GB",
         description=(
-            "Compact — for 8 GB Macs. Qwen3.5-2B (4-bit): lightest RAM/disk, and a "
-            "model generation ahead of the 1.7B it replaces."
+            "For Macs with 8 GB of memory. Uses the least memory and disk."
         ),
     ),
     ModelInfo(
         id="mlx-community/Qwen3.5-4B-MLX-4bit",
+        name="Balanced",
         kind="cleanup",
         backend="mlx-lm",
         size="2.8 GB",
         description=(
-            "Balanced — for 16 GB Macs. Qwen3.5-4B (4-bit): the same model as the "
-            "Quality tier at roughly half the memory."
+            "For Macs with 16 GB of memory. The Quality model in about half "
+            "the memory."
         ),
     ),
     ModelInfo(
         id="mlx-community/Qwen3.5-4B-MLX-8bit",
+        name="Quality",
         kind="cleanup",
         backend="mlx-lm",
         size="4.8 GB",
         description=(
-            "Quality — for 24 GB+ Macs. Qwen3.5-4B (8-bit): highest-precision "
-            "cleanup and best instruction-following."
+            "For Macs with 24 GB of memory or more. The cleanest writing."
         ),
     ),
 ]

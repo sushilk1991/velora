@@ -12,19 +12,18 @@ final class SettingsWindowSelection: ObservableObject {
 }
 
 /// The ⌘, Settings window: the same glass-sidebar chrome as the main window
-/// at 780×560, a System Settings-style rail of coloured tiles (General,
+/// at 780×640, a System Settings-style rail of coloured tiles (General,
 /// Dictation, Shortcuts, Models, Advanced) and one grouped form per tab.
 ///
 ///     ┌────────────────────────────────────┐
-///     │ ●●●                                │
-///     │ ┌────────┐  General                │
-///     │ │ ▣ Gen. │  ┌ APPEARANCE ────────┐ │
+///     │ ┌●●●─────┐  General                │
+///     │ │ ▣ Gen. │  ┌────────────────────┐ │
 ///     │ │ ▣ Dict.│  │ rows               │ │
 ///     │ │ ▣ …    │  └────────────────────┘ │
 ///     │ └────────┘                         │
 ///     └────────────────────────────────────┘
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
-    private static let contentSize = NSSize(width: 780, height: 560)
+    private static let contentSize = NSSize(width: 780, height: 640)
 
     private let model: SettingsModel
     private let selection = SettingsWindowSelection()
@@ -93,12 +92,15 @@ struct SettingsRootView: View {
     let meetingCoordinator: MeetingCoordinator
     let openSetupAssistant: () -> Void
 
+    /// Every tab is a grouped Form, so the Form reaches the window edge and
+    /// the title shifts onto the cards' leading edge.
     var body: some View {
-        WindowShell {
+        WindowShell(detailEdges: .formScrolls) {
             SettingsSidebar(selection: selection)
         } detail: {
             VStack(alignment: .leading, spacing: VeloraSpacing.m) {
                 PaneHeader(title: selection.current.title)
+                    .padding(.leading, WindowShellMetrics.formInset)
                 detail(for: selection.current)
             }
         }

@@ -414,7 +414,7 @@ final class HUDPanel: NSObject {
     /// the capsule mid-recording would jump it to a spot that matches no
     /// preset (the panel itself can't be safely moved while visible).
     func applyPreferences() {
-        // "Close Pill" is honoured immediately, session or not: the user
+        // "Hide Pill" is honoured immediately, session or not: the user
         // asked for the surface to go away, so the mid-session deferral
         // below (which protects placement, not visibility) does not apply.
         guard AppConfig.shared.hudVisible else {
@@ -618,38 +618,22 @@ final class HUDPanel: NSObject {
                 ofSize: NSFont.systemFontSize(for: .regular), weight: .semibold)])
         menu.addItem(toggle)
 
-        // Recent transcriptions live in a single hover submenu, not five inline
-        // rows each carrying their own Copy/Insert child menu. The old layout
-        // both cluttered the top level and thrashed submenus open and closed as
-        // the cursor tracked down the list (user report: "cluttered… glitchy").
-        // Now one "Recent Transcriptions" parent reveals the list on hover and a
-        // click copies the entry straight to the clipboard.
-        let recents = (menuHooks?.recents() ?? []).filter {
-            !$0.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        }
-        if !recents.isEmpty {
-            menu.addItem(.separator())
-            let parent = NSMenuItem(
-                title: "Recent Transcriptions", action: nil, keyEquivalent: "")
-            let recentsMenu = NSMenu()
-            recentsMenu.autoenablesItems = false
-            let hint = NSMenuItem(title: "Click to copy", action: nil, keyEquivalent: "")
-            hint.isEnabled = false
-            recentsMenu.addItem(hint)
-            recentsMenu.addItem(.separator())
-            for record in recents.prefix(8) {
-                let item = NSMenuItem(
-                    title: Self.truncate(record.final, to: 52),
-                    action: #selector(copyRecent(_:)), keyEquivalent: "")
-                item.target = self
-                item.toolTip = record.final
-                item.representedObject = RecordBox(record)
-                recentsMenu.addItem(item)
-            }
-            parent.submenu = recentsMenu
-            menu.addItem(parent)
-        }
-
+        // Final order (owner decision 2026-09-25): one toggle, the input
+        // choices, then the window and the one way to hide the pill.
+        //
+        //     Start Dictation
+        //     ─
+        //     Microphone ▸
+        //     Recent Transcriptions ▸   (only when there are some)
+        //     ─
+        //     Open Velora
+        //     Hide Pill                 (inverse of the menubar's Show Pill)
+        //
+        // Quit is gone: the menubar and the app menu both carry it, and a
+        // second way to make the pill vanish read as a duplicate. The old
+        // "no way to quit from the pill" case stays covered: Open Velora
+        // makes the app .regular (AppActivation, MainMenu.swift), which
+        // brings the app menu and ⌘Q. Do not re-add Quit here.
         menu.addItem(.separator())
 
         // Microphone choice, mirroring Settings → Dictation (user ask: pick
@@ -683,6 +667,37 @@ final class HUDPanel: NSObject {
         mic.submenu = micMenu
         menu.addItem(mic)
 
+        // Recent transcriptions live in a single hover submenu, not five inline
+        // rows each carrying their own Copy/Insert child menu. The old layout
+        // both cluttered the top level and thrashed submenus open and closed as
+        // the cursor tracked down the list (user report: "cluttered… glitchy").
+        // Now one "Recent Transcriptions" parent reveals the list on hover and a
+        // click copies the entry straight to the clipboard.
+        let recents = (menuHooks?.recents() ?? []).filter {
+            !$0.final.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if !recents.isEmpty {
+            let parent = NSMenuItem(
+                title: "Recent Transcriptions", action: nil, keyEquivalent: "")
+            let recentsMenu = NSMenu()
+            recentsMenu.autoenablesItems = false
+            let hint = NSMenuItem(title: "Click to copy", action: nil, keyEquivalent: "")
+            hint.isEnabled = false
+            recentsMenu.addItem(hint)
+            recentsMenu.addItem(.separator())
+            for record in recents.prefix(8) {
+                let item = NSMenuItem(
+                    title: Self.truncate(record.final, to: 52),
+                    action: #selector(copyRecent(_:)), keyEquivalent: "")
+                item.target = self
+                item.toolTip = record.final
+                item.representedObject = RecordBox(record)
+                recentsMenu.addItem(item)
+            }
+            parent.submenu = recentsMenu
+            menu.addItem(parent)
+        }
+
         menu.addItem(.separator())
 
         // Placement has no menu any more: dragging the pill is the one way
@@ -691,19 +706,10 @@ final class HUDPanel: NSObject {
             title: "Open Velora", action: #selector(openMainAction), keyEquivalent: "")
         open.target = self
         menu.addItem(open)
-        let close = NSMenuItem(
-            title: "Close Pill", action: #selector(closePill), keyEquivalent: "")
-        close.target = self
-        menu.addItem(close)
-
-        menu.addItem(.separator())
-        // An escape hatch that works even if the menubar icon is hidden or
-        // wedged (user report: no way to quit from the pill).
-        let quit = NSMenuItem(
-            title: "Quit Velora", action: #selector(NSApplication.terminate(_:)),
-            keyEquivalent: "")
-        quit.target = NSApp
-        menu.addItem(quit)
+        let hide = NSMenuItem(
+            title: "Hide Pill", action: #selector(hidePill), keyEquivalent: "")
+        hide.target = self
+        menu.addItem(hide)
 
         return menu
     }
@@ -739,10 +745,10 @@ final class HUDPanel: NSObject {
         menuHooks?.openMain()
     }
 
-    /// "Close Pill": flips "Show pill" off. The prefs notification reaches
+    /// "Hide Pill": flips "Show pill" off. The prefs notification reaches
     /// `applyPreferences`, which orders the panel out; the menubar's "Show
     /// Pill" checkbox and Settings › General bring it back.
-    @objc private func closePill() {
+    @objc private func hidePill() {
         AppConfig.shared.hudVisible = false
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
     }

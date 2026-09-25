@@ -243,3 +243,29 @@ def test_remove_from_cache_deletes_a_superseded_model_and_reports_bytes(
     assert not repo.exists()
     # Idempotent: a second pass (or a fresh install) reclaims nothing quietly.
     assert models.remove_from_cache(old_id) == 0
+
+
+# Settings › Models shows each entry's name as the row title and its
+# description as the caption, verbatim. A missing name made the app fall back
+# to the whole description sentence ("Default — fast & multilingual (…)") as
+# the title; dashes in that copy read as machine-written.
+_MAX_MODEL_NAME_CHARS = 32
+_DASHES = ("—", "–")
+
+
+def test_every_model_has_a_short_display_name():
+    for info in models.REGISTRY:
+        assert info.name, info.id
+        assert len(info.name) <= _MAX_MODEL_NAME_CHARS, info.id
+
+
+def test_model_copy_has_no_em_or_en_dashes():
+    for info in models.REGISTRY:
+        for text in (info.name, info.description):
+            assert not any(dash in text for dash in _DASHES), (info.id, text)
+
+
+def test_registry_payload_carries_the_display_name():
+    payload = models.registry_payload()
+
+    assert [entry["name"] for entry in payload] == [m.name for m in models.REGISTRY]

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - Share card (aggregate-only by construction)
 
@@ -26,7 +27,7 @@ struct IntelligenceShareCard: Equatable {
     }
 
     static let title = "My Velora dictation stats"
-    static let footer = "Velora — local-first dictation"
+    static let footer = "Velora, local-first dictation"
 
     /// The only variable strings the renderer may draw.
     var metrics: [Metric] {
@@ -105,6 +106,36 @@ enum IntelligenceShareCardRenderer {
         renderer.scale = scale
         return renderer.nsImage
     }
+
+    enum RenderError: Error {
+        case failed
+    }
+
+    /// The card as PNG bytes, for the share sheet.
+    @MainActor
+    static func pngData(for card: IntelligenceShareCard) throws -> Data {
+        guard let image = image(for: card),
+              let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff),
+              let png = bitmap.representation(using: .png, properties: [:])
+        else {
+            throw RenderError.failed
+        }
+        return png
+    }
+}
+
+/// The Share capsule's item. The card renders only when the share sheet
+/// asks for it; building an image on every body pass made each range
+/// switch pay for a render nobody shared.
+struct StatsShareImage: Transferable {
+    let card: IntelligenceShareCard
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .png) { item in
+            try await MainActor.run { try IntelligenceShareCardRenderer.pngData(for: item.card) }
+        }
+    }
 }
 
 // MARK: - Range
@@ -131,7 +162,7 @@ enum StatsRange: String, CaseIterable, Identifiable {
     var headlineSuffix: String {
         switch self {
         case .today: return "today"
-        case .sevenDays: return "this week"
+        case .sevenDays: return "in the last 7 days"
         case .thirtyDays: return "in the last 30 days"
         case .allTime: return "all time"
         }
@@ -174,6 +205,42 @@ enum StatsRange: String, CaseIterable, Identifiable {
         case .allTime: return insights.allTime
         }
     }
+
+    /// The store's `daysBack` for this window (0 / 6 / 29); nil = all time.
+    var daysBack: Int? {
+        dayCount.map { $0 - 1 }
+    }
+
+    /// What a tile's delta is measured against; nil when there is no
+    /// earlier window of the same length (all time).
+    var comparisonLabel: String? {
+        switch self {
+        case .today: return "yesterday"
+        case .sevenDays: return "previous 7 days"
+        case .thirtyDays: return "previous 30 days"
+        case .allTime: return nil
+        }
+    }
+
+    /// The equal-length window just before this one; nil for all time.
+    func previousStats(in insights: HistoryStore.Insights) -> HistoryStore.WindowStats? {
+        switch self {
+        case .today: return insights.yesterday
+        case .sevenDays: return insights.previousWeek
+        case .thirtyDays: return insights.previousMonth
+        case .allTime: return nil
+        }
+    }
+
+    /// "last 30 days", "all time": the tail of a chart caption.
+    var windowPhrase: String {
+        switch self {
+        case .today: return "today"
+        case .sevenDays: return "last 7 days"
+        case .thirtyDays: return "last 30 days"
+        case .allTime: return "all time"
+        }
+    }
 }
 
 // MARK: - Pure stats maths (selftested)
@@ -186,14 +253,39 @@ enum StatsHeadline {
         "\(HistoryJournal.plural(words, "word")) \(range.headlineSuffix)"
     }
 
-    /// "2 h 41 m of speaking, about 1 h 49 m faster than typing." The saving
-    /// clause drops out when nothing was saved; no speech at all reads as
-    /// a quiet placeholder.
-    static func speaking(spokenMs: Int, minutesSaved: Int) -> String {
-        guard spokenMs > 0 else { return "Nothing dictated in this range yet." }
-        let spoken = StatsFormat.clock(ms: spokenMs) + " of speaking"
-        guard minutesSaved > 0 else { return spoken + "." }
-        return spoken + ", about " + StatsFormat.clock(minutes: minutesSaved) + " faster than typing."
+    /// Least speech a pace is quoted from: under a minute, one quick
+    /// sentence would set the number.
+    static let minimumSpokenMs = 60_000
+    /// Below this speaking : typing ratio the "× your typing speed" clause
+    /// says nothing, so the sentence stops at the pace.
+    static let multipleThreshold = 1.1
+
+    /// "You speak at 125 wpm, 3.1× your typing speed" (no full stop,
+    /// `SerifHeadline` draws it). Adds the one fact the tiles don't show;
+    /// nil under a minute of speech.
+    static func pace(words: Int, spokenMs: Int, typingWPM: Int) -> String? {
+        guard spokenMs >= minimumSpokenMs, words > 0 else {
+            return nil
+        }
+
+        let wpm = Double(words) / (Double(spokenMs) / 60_000)
+        let sentence = "You speak at \(Int(wpm.rounded())) wpm"
+        guard typingWPM > 0 else {
+            return sentence
+        }
+
+        let ratio = wpm / Double(typingWPM)
+        guard ratio >= multipleThreshold else {
+            return sentence
+        }
+        return sentence + ", " + multiple(ratio) + " your typing speed"
+    }
+
+    /// "3.1×", or "3×" when the tenths round to a whole number.
+    private static func multiple(_ ratio: Double) -> String {
+        let tenths = Int((ratio * 10).rounded())
+        let digits = tenths % 10 == 0 ? "\(tenths / 10)" : "\(tenths / 10).\(tenths % 10)"
+        return digits + "×"
     }
 }
 
@@ -213,12 +305,20 @@ enum StatsFormat {
         return rest == 0 ? "\(minutes / 60) h" : "\(minutes / 60) h \(rest) m"
     }
 
-    /// "—" when the engine hasn't reported a model, else its display name
-    /// (or the repo basename for ids the engine doesn't describe).
-    static func modelName(id: String, in models: [EngineModel]) -> String {
-        guard !id.isEmpty else { return "—" }
-        if let known = models.first(where: { $0.id == id }) { return known.displayName }
-        return id.split(separator: "/").last.map(String.init) ?? id
+    /// "↑ 9% vs previous 30 days", "↓ 19% vs yesterday", "Same as
+    /// yesterday". Nil for all time or when the earlier window is empty
+    /// (a rise from nothing has no percentage).
+    static func delta(_ current: Int, _ previous: Int, range: StatsRange) -> String? {
+        guard let label = range.comparisonLabel, previous > 0 else {
+            return nil
+        }
+
+        let percent = Int((Double(current - previous) / Double(previous) * 100).rounded())
+        if percent == 0 {
+            return "Same as \(label)"
+        }
+        let arrow = percent > 0 ? "↑" : "↓"
+        return "\(arrow) \(abs(percent))% vs \(label)"
     }
 }
 
@@ -226,67 +326,114 @@ enum StatsFormat {
 struct StatsAppShare: Equatable {
     let name: String
     let words: Int
-    /// Rounded share of ALL words in the range (not of the shown apps), so
-    /// the shown percentages never exceed 100 together.
+    /// Share of ALL words in the range (not of the shown apps), so the
+    /// shown percentages never exceed 100 together.
     let percent: Int
+}
+
+/// Whole percentages that total exactly 100 (largest remainder): floor
+/// every share, then hand the leftover points to the biggest remainders,
+/// earlier entries first on a tie. Integer maths, so no float drift.
+///
+///     335 / 335 / 330  →  33.5 / 33.5 / 33.0  →  34 / 33 / 33
+///     (plain rounding: 34 / 34 / 33 = 101)
+enum StatsPercent {
+    static func allocate(_ parts: [Int]) -> [Int] {
+        let total = parts.reduce(0, +)
+        guard total > 0 else {
+            return parts.map { _ in 0 }
+        }
+
+        var result = parts.map { $0 * 100 / total }
+        let remainders = parts.map { $0 * 100 % total }
+        let leftover = 100 - result.reduce(0, +)
+        let order = parts.indices.sorted { (remainders[$0], $1) > (remainders[$1], $0) }
+        for index in order.prefix(leftover) {
+            result[index] += 1
+        }
+        return result
+    }
 }
 
 enum StatsTopApps {
     static let shown = 4
 
     /// Top `shown` apps by words with their share of the whole range.
+    /// Shares are allocated across every app, then cut, so the shown ones
+    /// never add up past 100.
     static func shares(_ slices: [HistoryStore.BreakdownSlice]) -> [StatsAppShare] {
         let total = slices.reduce(0) { $0 + $1.words }
         guard total > 0 else { return [] }
-        return slices
-            .sorted { $0.words > $1.words }
-            .prefix(shown)
-            .map { slice in
-                StatsAppShare(
-                    name: slice.name, words: slice.words,
-                    percent: Int((Double(slice.words) / Double(total) * 100).rounded()))
-            }
+        let ranked = slices.sorted { $0.words > $1.words }
+        let percents = StatsPercent.allocate(ranked.map(\.words))
+        return zip(ranked, percents).prefix(shown).map { slice, percent in
+            StatsAppShare(name: slice.name, words: slice.words, percent: percent)
+        }
     }
 }
 
-/// What the per-range record scan yields: things the SQL aggregates don't
-/// carry (hour buckets, latency percentiles, apps for windows other than the
-/// store's fixed 30 days).
+/// The selected range's hour buckets, apps, modes and latency, from the
+/// store's uncapped SQL summary (`HistoryStore.rangeSummary`), so every card
+/// describes the same rows as the headline.
 struct StatsRangeDetail: Equatable {
     static let hoursPerDay = 24
     /// Nearest-rank percentile for "slowest 5 %".
     static let slowestPercentile = 0.95
 
     var hourlyWords: [Int] = Array(repeating: 0, count: hoursPerDay)
+    /// Dictations and speaking time per hour: today's tile sparklines.
+    var hourlyCounts: [Int] = Array(repeating: 0, count: hoursPerDay)
+    var hourlySpokenMs: [Int] = Array(repeating: 0, count: hoursPerDay)
     var apps: [HistoryStore.BreakdownSlice] = []
+    /// The newest bundle id seen for each app name: the Where chart's icons.
+    var appBundles: [String: String] = [:]
+    /// Words per mode (display name): the Modes bar.
+    var modes: [HistoryStore.BreakdownSlice] = []
+    /// Every stop-to-final wall time (`finalizationMs`), ascending: the
+    /// Ready in histogram.
+    var readyMs: [Int] = []
     /// Stop-to-final wall time (`finalizationMs`) percentiles.
     var readyMedianMs: Int?
     var readySlowestMs: Int?
-    var scanned = 0
+    /// Words per weekday × hour, from the store's grid query.
+    var weekdayHour: [HistoryStore.WeekdayHourSample] = []
 
-    /// Folds records (any order) into the detail. Empty transcripts are
-    /// skipped to match the store's `nonEmpty` aggregates.
-    static func build(records: [DictationRecord], calendar: Calendar = .current) -> StatsRangeDetail {
+    /// Lays the store's summary into the cards' shapes: 24 hour buckets,
+    /// modes folded to display names ("" and "default" both read
+    /// "Default"), and the latency percentiles.
+    static func make(
+        summary: HistoryStore.RangeSummary, weekdayHour: [HistoryStore.WeekdayHourSample] = []
+    ) -> StatsRangeDetail {
         var detail = StatsRangeDetail()
-        var appWords: [String: (count: Int, words: Int)] = [:]
-        var ready: [Int] = []
-        for record in records where HistoryJournal.hasTranscript(record) {
-            let words = HistoryJournal.wordCount(record.final)
-            let hour = calendar.component(.hour, from: record.timestamp)
-            detail.hourlyWords[min(max(hour, 0), hoursPerDay - 1)] += words
-            let app = record.appName.flatMap { $0.isEmpty ? nil : $0 } ?? "Unknown app"
-            let entry = appWords[app] ?? (0, 0)
-            appWords[app] = (entry.count + 1, entry.words + words)
-            if let ms = record.finalizationMs, ms > 0 { ready.append(ms) }
-            detail.scanned += 1
+        for sample in summary.hours where (0..<hoursPerDay).contains(sample.hour) {
+            detail.hourlyWords[sample.hour] += sample.words
+            detail.hourlyCounts[sample.hour] += sample.count
+            detail.hourlySpokenMs[sample.hour] += sample.spokenMs
         }
-        detail.apps = appWords
-            .map { HistoryStore.BreakdownSlice(name: $0.key, count: $0.value.count, words: $0.value.words) }
-            .sorted { $0.words > $1.words }
-        let sorted = ready.sorted()
-        detail.readyMedianMs = percentile(sorted, 0.5)
-        detail.readySlowestMs = percentile(sorted, slowestPercentile)
+
+        detail.apps = summary.apps
+        detail.appBundles = summary.appBundles
+        var modeWords: [String: (count: Int, words: Int)] = [:]
+        for slice in summary.modes {
+            let name = HistoryJournal.modeName(slice.name)
+            let entry = modeWords[name] ?? (0, 0)
+            modeWords[name] = (entry.count + slice.count, entry.words + slice.words)
+        }
+        detail.modes = slices(modeWords)
+
+        detail.readyMs = summary.readyMs
+        detail.readyMedianMs = percentile(detail.readyMs, 0.5)
+        detail.readySlowestMs = percentile(detail.readyMs, slowestPercentile)
+        detail.weekdayHour = weekdayHour
         return detail
+    }
+
+    /// Tallies as slices, most words first (ties by name, so the order is
+    /// stable across reloads).
+    private static func slices(_ tally: [String: (count: Int, words: Int)]) -> [HistoryStore.BreakdownSlice] {
+        tally
+            .map { HistoryStore.BreakdownSlice(name: $0.key, count: $0.value.count, words: $0.value.words) }
+            .sorted { ($0.words, $1.name) > ($1.words, $0.name) }
     }
 
     /// Nearest-rank percentile of an ascending list; nil when empty.
@@ -297,96 +444,346 @@ struct StatsRangeDetail: Equatable {
     }
 }
 
-/// One bar of the words chart.
-struct StatsBar: Equatable {
+/// One bar of the words chart: an hour, a day or a month.
+struct StatsBar: Equatable, Identifiable {
+    /// Start of the bucket; the chart's x value.
+    let date: Date
     let label: String
     let words: Int
+    var count = 0
+    var spokenMs = 0
+
+    var id: Date { date }
 }
 
 /// Builds the chart series per range: hours today, days for 7 / 30 days,
-/// and the last 12 weeks for all time (a bar per day of a year-long history
-/// would be a hairline, and the store's daily series stops at 84 days).
+/// and months for all time (a bar per day of a year-long history would be
+/// a hairline).
 enum StatsSeries {
-    static let weeksAllTime = HistoryStore.heatmapDays / 7
+    /// Most months the all-time chart draws; older months drop off the left.
+    static let maxMonths = 24
 
     static func bars(
-        range: StatsRange, insights: HistoryStore.Insights, hourlyWords: [Int],
+        range: StatsRange, insights: HistoryStore.Insights, detail: StatsRangeDetail,
         now: Date = Date(), calendar: Calendar = .current
     ) -> [StatsBar] {
         switch range {
         case .today:
-            return hourlyWords.enumerated().map { hour, words in
-                StatsBar(label: hourLabel(hour, calendar: calendar), words: words)
-            }
+            return hourBars(detail: detail, now: now, calendar: calendar)
         case .sevenDays, .thirtyDays:
-            return dayBars(count: range.dayCount ?? 0, daily: insights.daily, now: now, calendar: calendar)
+            return days(count: range.dayCount ?? 0, daily: insights.daily, now: now, calendar: calendar)
         case .allTime:
-            return weekBars(daily: insights.heatmapDaily, now: now, calendar: calendar)
+            return monthBars(monthly: insights.monthly, now: now, calendar: calendar)
         }
     }
 
-    /// The bar drawn in full accent: the current hour today, else the last.
-    static func latestIndex(range: StatsRange, count: Int, now: Date = Date(), calendar: Calendar = .current) -> Int {
-        guard count > 0 else { return 0 }
-        if range == .today { return min(calendar.component(.hour, from: now), count - 1) }
-        return count - 1
+    /// The bucket a range's bars stand for: "Words per <unit>".
+    static func unit(for range: StatsRange) -> String {
+        switch range {
+        case .today: return "hour"
+        case .sevenDays, .thirtyDays: return "day"
+        case .allTime: return "month"
+        }
     }
 
-    /// "Best day Sep 30 · 1,240 words" (hour / week per range); nil when
+    /// The words card title. All time draws at most `maxMonths` bars, so a
+    /// longer history says where the chart starts.
+    ///
+    ///     "Words per day"   "Words per month, last 24 months"
+    static func title(
+        range: StatsRange, insights: HistoryStore.Insights,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> String {
+        let base = "Words per \(unit(for: range))"
+        guard range == .allTime, monthsSinceFirst(monthly: insights.monthly, now: now, calendar: calendar) > maxMonths else {
+            return base
+        }
+        return "\(base), last \(maxMonths) months"
+    }
+
+    /// Mean words per bar, empty bars included (the chart's average rule).
+    static func average(_ bars: [StatsBar]) -> Double {
+        guard !bars.isEmpty else {
+            return 0
+        }
+        return Double(bars.reduce(0) { $0 + $1.words }) / Double(bars.count)
+    }
+
+    /// "Best day Sep 30 · 1,240 words" (hour / month per range); nil when
     /// every bar is empty.
     static func bestCaption(bars: [StatsBar], range: StatsRange) -> String? {
-        guard let best = bars.max(by: { $0.words < $1.words }), best.words > 0 else { return nil }
-        let unit: String
-        switch range {
-        case .today: unit = "hour"
-        case .sevenDays, .thirtyDays: unit = "day"
-        case .allTime: unit = "week"
+        guard let best = bars.max(by: { $0.words < $1.words }), best.words > 0 else {
+            return nil
         }
-        return "Best \(unit) \(best.label) · \(HistoryJournal.plural(best.words, "word"))"
+        return "Best \(unit(for: range)) \(best.label) · \(HistoryJournal.plural(best.words, "word"))"
     }
 
-    /// The last `count` calendar days ending today, zero-filled.
-    private static func dayBars(
+    /// The last `count` calendar days ending today, zero-filled. Home's
+    /// week card draws the same seven.
+    static func days(
         count: Int, daily: [HistoryStore.DaySample], now: Date, calendar: Calendar
     ) -> [StatsBar] {
-        let byDay = Dictionary(daily.map { ($0.day, $0.words) }, uniquingKeysWith: +)
+        let byDay = Dictionary(daily.map { ($0.day, $0) }, uniquingKeysWith: { first, _ in first })
         let today = calendar.startOfDay(for: now)
+        let style = DayKeys.style(.dateTime.month(.abbreviated).day(), calendar)
         return (0..<count).reversed().map { offset in
             let date = calendar.date(byAdding: .day, value: -offset, to: today) ?? today
-            let key = DayKeys.keyFormatter.string(from: date)
-            return StatsBar(label: DayKeys.labelFormatter.string(from: date), words: byDay[key] ?? 0)
+            let sample = byDay[DayKeys.dayKey(date, calendar: calendar)]
+            return StatsBar(
+                date: date, label: date.formatted(style), words: sample?.words ?? 0,
+                count: sample?.count ?? 0, spokenMs: sample?.spokenMs ?? 0)
         }
     }
 
-    /// Twelve 7-day buckets ending today, labelled by each bucket's first day.
+    /// Calendar months from the first active month through this one,
+    /// inclusive; 1 for an empty history (this month alone).
+    private static func monthsSinceFirst(
+        monthly: [HistoryStore.MonthSample], now: Date, calendar: Calendar
+    ) -> Int {
+        let gregorian = DayKeys.gregorian(calendar)
+        guard let thisMonth = gregorian.dateInterval(of: .month, for: now)?.start,
+              let first = monthly.first.flatMap({ DayKeys.date(monthKey: $0.month, calendar: calendar) })
+        else {
+            return 1
+        }
+        let span = gregorian.dateComponents([.month], from: first, to: thisMonth).month ?? 0
+        return max(span, 0) + 1
+    }
+
+    /// Today's wall-clock hours, from the range summary. Each bar starts at
+    /// its own local hour, matching SQLite's `%H` buckets; midnight + n
+    /// hours drifts by one on DST days. An hour the clocks skip (spring
+    /// forward) has no bar.
     ///
-    ///     today-83 … today-77 │ … │ today-6 … today
-    ///        bucket 0         │   │   bucket 11
-    private static func weekBars(
-        daily: [HistoryStore.DaySample], now: Date, calendar: Calendar
-    ) -> [StatsBar] {
+    ///     Europe/London, 29 Mar:  00  02  03 … 23   (23 bars, no 01)
+    private static func hourBars(detail: StatsRangeDetail, now: Date, calendar: Calendar) -> [StatsBar] {
         let today = calendar.startOfDay(for: now)
-        var words = Array(repeating: 0, count: weeksAllTime)
-        for sample in daily {
-            guard let date = DayKeys.keyFormatter.date(from: sample.day),
-                  let daysAgo = calendar.dateComponents([.day], from: calendar.startOfDay(for: date), to: today).day,
-                  daysAgo >= 0
-            else { continue }
-            let bucket = weeksAllTime - 1 - daysAgo / 7
-            guard words.indices.contains(bucket) else { continue }
-            words[bucket] += sample.words
-        }
-        return words.enumerated().map { bucket, total in
-            let daysBack = (weeksAllTime - 1 - bucket) * 7 + 6
-            let start = calendar.date(byAdding: .day, value: -daysBack, to: today) ?? today
-            return StatsBar(label: DayKeys.labelFormatter.string(from: start), words: total)
+        let style = DayKeys.style(.dateTime.hour(), calendar)
+        var starts = Set<Date>()
+        return (0..<StatsRangeDetail.hoursPerDay).compactMap { hour in
+            // A skipped hour resolves to the next one; drop it rather than
+            // draw two bars on one start.
+            guard let date = calendar.date(bySettingHour: hour, minute: 0, second: 0, of: today),
+                  calendar.component(.hour, from: date) == hour,
+                  starts.insert(date).inserted
+            else {
+                return nil
+            }
+            return StatsBar(
+                date: date, label: date.formatted(style), words: detail.hourlyWords[hour],
+                count: detail.hourlyCounts[hour], spokenMs: detail.hourlySpokenMs[hour])
         }
     }
 
-    private static func hourLabel(_ hour: Int, calendar: Calendar) -> String {
-        let today = calendar.startOfDay(for: Date())
-        let date = calendar.date(byAdding: .hour, value: hour, to: today) ?? today
-        return DayKeys.hourFormatter.string(from: date)
+    /// One bar per month from the first active month (at most `maxMonths`
+    /// back) through this month, zero-filled. Month maths runs in the
+    /// Gregorian calendar because the store's `yyyy-MM` keys are Gregorian.
+    ///
+    ///     monthly: 2026-06, 2026-09      now: Sep 2026
+    ///     bars:    Jun  Jul  Aug  Sep    (Jul and Aug empty)
+    private static func monthBars(
+        monthly: [HistoryStore.MonthSample], now: Date, calendar: Calendar
+    ) -> [StatsBar] {
+        let gregorian = DayKeys.gregorian(calendar)
+        guard let thisMonth = gregorian.dateInterval(of: .month, for: now)?.start else {
+            return []
+        }
+
+        let byMonth = Dictionary(monthly.map { ($0.month, $0) }, uniquingKeysWith: { first, _ in first })
+        let count = min(monthsSinceFirst(monthly: monthly, now: now, calendar: calendar), maxMonths)
+        let style = DayKeys.style(.dateTime.month(.abbreviated).year(), calendar)
+        return (0..<count).reversed().map { back in
+            let date = gregorian.date(byAdding: .month, value: -back, to: thisMonth) ?? thisMonth
+            let sample = byMonth[DayKeys.monthKey(date, calendar: calendar)]
+            return StatsBar(
+                date: date, label: date.formatted(style), words: sample?.words ?? 0,
+                count: sample?.count ?? 0, spokenMs: sample?.spokenMs ?? 0)
+        }
+    }
+}
+
+/// The Ready in histogram: stop-to-final times in 1 s bins, everything
+/// from 10 s up in one overflow bin.
+///
+///     0 s  1 s  2 s … 9 s  10 s+
+///     ▇▇   ▅▅   ▂▂    ·    ▁▁
+enum StatsLatency {
+    static let binSeconds = 1
+    static let overflowSeconds = 10
+    static let binCount = overflowSeconds / binSeconds + 1
+    /// Fewer samples than this draw a note instead of a histogram.
+    static let minimumSamples = 5
+
+    struct Bin: Equatable, Identifiable {
+        /// Lower edge in seconds.
+        let start: Int
+        let count: Int
+
+        var isOverflow: Bool { start >= StatsLatency.overflowSeconds }
+        var id: Int { start }
+    }
+
+    static func bins(_ ms: [Int]) -> [Bin] {
+        var counts = Array(repeating: 0, count: binCount)
+        for value in ms {
+            let index = min(max(value, 0) / (binSeconds * 1000), binCount - 1)
+            counts[index] += 1
+        }
+        return counts.enumerated().map { Bin(start: $0.offset * binSeconds, count: $0.element) }
+    }
+}
+
+/// The Modes bar: the top modes by words, the rest folded into "Other".
+enum StatsModes {
+    static let shown = 3
+    static let otherName = "Other"
+
+    /// Shares of ALL words in the range, top `shown` first, then Other.
+    static func shares(_ slices: [HistoryStore.BreakdownSlice]) -> [StatsAppShare] {
+        let total = slices.reduce(0) { $0 + $1.words }
+        guard total > 0 else {
+            return []
+        }
+
+        let ranked = slices.sorted { $0.words > $1.words }
+        var groups = ranked.prefix(shown).map { (name: $0.name, words: $0.words) }
+        let rest = ranked.dropFirst(shown).reduce(0) { $0 + $1.words }
+        if rest > 0 {
+            groups.append((name: otherName, words: rest))
+        }
+        // The bar shows exactly these groups, so they total 100.
+        let percents = StatsPercent.allocate(groups.map(\.words))
+        return zip(groups, percents).map { group, percent in
+            StatsAppShare(name: group.name, words: group.words, percent: percent)
+        }
+    }
+}
+
+/// One day of the "Last 12 weeks" calendar.
+struct StatsCalendarCell: Equatable, Identifiable {
+    let date: Date
+    /// Week column, 0 = the oldest week.
+    let column: Int
+    /// Weekday row, 0 = the locale's first weekday.
+    let row: Int
+    let words: Int
+
+    var id: Date { date }
+}
+
+/// Lays the last `HistoryStore.heatmapDays` days out in weekday rows and
+/// week columns, today in the last cell.
+///
+///          col 0   col 1  …  col 12
+///     Mon          ■          ■
+///     Tue          ■          ■  ← today
+///     Wed   ■      ■
+enum StatsCalendar {
+    static func cells(
+        daily: [HistoryStore.DaySample], now: Date = Date(), calendar: Calendar = .current
+    ) -> [StatsCalendarCell] {
+        let words = Dictionary(daily.map { ($0.day, $0.words) }, uniquingKeysWith: +)
+        let today = calendar.startOfDay(for: now)
+        let dayCount = HistoryStore.heatmapDays
+        guard let first = calendar.date(byAdding: .day, value: -(dayCount - 1), to: today) else {
+            return []
+        }
+
+        let firstRow = StatsWeekdays.row(of: first, calendar: calendar)
+        return (0..<dayCount).compactMap { index in
+            guard let date = calendar.date(byAdding: .day, value: index, to: first) else {
+                return nil
+            }
+            let slot = index + firstRow
+            return StatsCalendarCell(
+                date: date, column: slot / StatsWeekdays.count, row: slot % StatsWeekdays.count,
+                words: words[DayKeys.dayKey(date, calendar: calendar)] ?? 0)
+        }
+    }
+}
+
+/// Weekday rows in the locale's order (Monday first in most of Europe,
+/// Sunday first in the US).
+enum StatsWeekdays {
+    static let count = 7
+
+    /// Weekday numbers (1 = Sunday) in display order.
+    static func order(calendar: Calendar) -> [Int] {
+        (0..<count).map { (calendar.firstWeekday - 1 + $0) % count + 1 }
+    }
+
+    /// 0-based display row of `date`'s weekday.
+    static func row(of date: Date, calendar: Calendar) -> Int {
+        (calendar.component(.weekday, from: date) - calendar.firstWeekday + count) % count
+    }
+
+    /// "Mon".
+    static func symbol(_ weekday: Int, calendar: Calendar) -> String {
+        calendar.shortWeekdaySymbols[(weekday - 1) % count]
+    }
+}
+
+/// The Active days tile: days with a dictation against the days in range.
+enum StatsActivity {
+    struct Days: Equatable {
+        let active: Int
+        let total: Int
+    }
+
+    /// All time runs from the first active day through today, inclusive.
+    static func activeDays(
+        range: StatsRange, insights: HistoryStore.Insights,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> Days {
+        let today = calendar.startOfDay(for: now)
+        switch range {
+        case .today:
+            return Days(active: insights.today.count > 0 ? 1 : 0, total: 1)
+        case .sevenDays, .thirtyDays:
+            let total = range.dayCount ?? 0
+            let start = calendar.date(byAdding: .day, value: -(total - 1), to: today) ?? today
+            // yyyy-MM-dd keys sort in date order.
+            let startKey = DayKeys.dayKey(start, calendar: calendar)
+            return Days(active: insights.daily.filter { $0.day >= startKey }.count, total: total)
+        case .allTime:
+            guard let firstDay = insights.firstDay,
+                  let first = DayKeys.date(dayKey: firstDay, calendar: calendar)
+            else {
+                return Days(active: 0, total: 0)
+            }
+            let span = calendar.dateComponents([.day], from: first, to: today).day ?? 0
+            return Days(active: insights.activeDayCount, total: max(span, 0) + 1)
+        }
+    }
+
+    /// Days the tile's dot strip draws. Today (the Streak tile) shows its
+    /// week; all time shows the last 30 days, since `insights.daily` only
+    /// reaches back `HistoryStore.heatmapDays` and 84 dots don't fit a tile.
+    static let weekStrip = 7
+    static let monthStrip = 30
+
+    /// One flag per day, oldest first, today last: true when that day has
+    /// a dictation.
+    ///
+    ///     7 days:  ● ● ● ● ○ ○ ○    (Sep 2 … Sep 8)
+    static func strip(
+        range: StatsRange, insights: HistoryStore.Insights,
+        now: Date = Date(), calendar: Calendar = .current
+    ) -> [Bool] {
+        let count: Int
+        switch range {
+        case .today, .sevenDays: count = weekStrip
+        case .thirtyDays, .allTime: count = monthStrip
+        }
+
+        let active = Set(insights.daily.filter { $0.count > 0 }.map(\.day))
+        let today = calendar.startOfDay(for: now)
+        return (0..<count).reversed().map { back in
+            guard let date = calendar.date(byAdding: .day, value: -back, to: today) else {
+                return false
+            }
+            return active.contains(DayKeys.dayKey(date, calendar: calendar))
+        }
     }
 }
 
@@ -394,7 +791,8 @@ enum StatsSeries {
 
 /// Backs the Stats pane. Aggregates are full-table SQL scans, so they load
 /// off the main thread; the per-range detail is a bounded newest-first page
-/// scan (hour buckets, latency percentiles, apps) for the same window.
+/// scan (hour buckets, latency, apps, modes) for the same window plus the
+/// store's weekday × hour grid.
 final class IntelligenceViewModel: ObservableObject {
     @Published var insights = HistoryStore.Insights()
     @Published var range: StatsRange = .thirtyDays {
@@ -410,11 +808,6 @@ final class IntelligenceViewModel: ObservableObject {
     private let history: HistoryStore
     /// A range switch mid-scan must not let the older scan land.
     private var generation = 0
-
-    private static let pageSize = 500
-    /// Most rows a detail scan reads (newest first). Beyond this, apps and
-    /// percentiles describe the most recent rows only.
-    static let scanCap = 20_000
 
     init(history: HistoryStore) {
         self.history = history
@@ -434,8 +827,8 @@ final class IntelligenceViewModel: ObservableObject {
     /// Set by the offscreen snapshot renderer, whose nested runloop never
     /// drains main-queue blocks: the first load then runs inline so the
     /// captured frame shows real numbers. The live app always loads in the
-    /// background — `insights()` plus a scan of up to `scanCap` rows is too
-    /// much for the main thread.
+    /// background — `insights()` plus the range summary is too much for the
+    /// main thread.
     static var loadsFirstReloadInline = false
 
     /// Reload both the aggregates and the current range's detail.
@@ -451,7 +844,7 @@ final class IntelligenceViewModel: ObservableObject {
         let range = range
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let fresh = store.insights()
-            let detail = StatsRangeDetail.build(records: Self.scan(store: store, range: range))
+            let detail = Self.loadDetail(store: store, range: range)
             DispatchQueue.main.async {
                 guard let self, self.generation == generation else { return }
                 self.insights = fresh
@@ -467,7 +860,7 @@ final class IntelligenceViewModel: ObservableObject {
     func reloadNow() {
         generation += 1
         insights = history.insights()
-        detail = StatsRangeDetail.build(records: Self.scan(store: history, range: range))
+        detail = Self.loadDetail(store: history, range: range)
         typingWPM = AppConfig.shared.typingWPM
         loaded = true
     }
@@ -478,7 +871,7 @@ final class IntelligenceViewModel: ObservableObject {
         let store = history
         let range = range
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let detail = StatsRangeDetail.build(records: Self.scan(store: store, range: range))
+            let detail = Self.loadDetail(store: store, range: range)
             DispatchQueue.main.async {
                 guard let self, self.generation == generation else { return }
                 self.detail = detail
@@ -486,22 +879,16 @@ final class IntelligenceViewModel: ObservableObject {
         }
     }
 
-    /// Newest-first rows inside `range`, stopping at the window start or
-    /// `scanCap`, whichever comes first.
-    private static func scan(store: HistoryStore, range: StatsRange) -> [DictationRecord] {
-        let start = range.start(now: Date())
-        var rows: [DictationRecord] = []
-        var offset = 0
-        while offset < scanCap {
-            let page = store.page(limit: pageSize, offset: offset, search: nil)
-            for record in page {
-                if let start, record.timestamp < start { return rows }
-                rows.append(record)
-            }
-            offset += page.count
-            if page.count < pageSize { break }
-        }
-        return rows
+    /// Reads the typing speed again after the Time saved popover changed it.
+    func refreshTypingWPM() {
+        typingWPM = AppConfig.shared.typingWPM
+    }
+
+    /// The range's SQL summary plus the weekday × hour grid for the heatmap.
+    private static func loadDetail(store: HistoryStore, range: StatsRange) -> StatsRangeDetail {
+        StatsRangeDetail.make(
+            summary: store.rangeSummary(daysBack: range.daysBack),
+            weekdayHour: store.weekdayHourWords(daysBack: range.daysBack))
     }
 }
 
@@ -511,6 +898,10 @@ final class IntelligenceViewModel: ObservableObject {
 /// capsule. The shell places this beside its `PaneHeader`.
 struct StatsHeaderControls: View {
     @ObservedObject var viewModel: IntelligenceViewModel
+
+    /// The Stats symbol (DESIGN.md §7) stands in for the card in the share
+    /// sheet's preview, so nothing renders until something is shared.
+    private static let previewSymbol = "chart.bar.fill"
 
     var body: some View {
         HStack(spacing: VeloraSpacing.s) {
@@ -522,44 +913,44 @@ struct StatsHeaderControls: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            if let image = Self.renderedCard(viewModel.shareCard) {
-                ShareLink(
-                    item: image,
-                    preview: SharePreview(IntelligenceShareCard.title, image: image)
-                ) {
-                    Text("Share…")
-                }
-                .buttonStyle(.capsule)
-                .help("Aggregate numbers only — never transcripts, app names, or contacts.")
+            ShareLink(
+                item: StatsShareImage(card: viewModel.shareCard),
+                preview: SharePreview(IntelligenceShareCard.title, image: Image(systemName: Self.previewSymbol))
+            ) {
+                Text("Share…")
             }
+            .buttonStyle(.capsule)
+            .help("Aggregate numbers only. Never transcripts, app names, or contacts.")
         }
-    }
-
-    /// Renders the aggregate-only card locally for the selected range.
-    private static func renderedCard(_ card: IntelligenceShareCard) -> Image? {
-        guard let nsImage = IntelligenceShareCardRenderer.image(for: card) else { return nil }
-        return Image(nsImage: nsImage)
     }
 }
 
 // MARK: - Pane
 
-/// The Stats pane: a serif headline for the range, four tiles, the words
-/// chart, and the Performance / Accuracy / Top apps cards. The shell draws
-/// the title and `StatsHeaderControls` above it.
+/// The Stats pane: a serif pace sentence, four tiles with deltas and
+/// sparklines, the words chart, then two rows of Swift Charts cards. The
+/// shell draws the title and `StatsHeaderControls` above it.
 ///
-///     14,860 words in the last 30 days.
-///     2 h 41 m of speaking, about 1 h 49 m faster than typing.
-///     [Words] [Dictations] [Speaking time] [Saved vs typing]
+///     You speak at 125 wpm, 3.1× your typing speed.
+///     [Words ↑9%] [Time saved] [Dictations ↑4%] [Active days 21 of 30]
 ///     ┌ Words per day ──────────── Best day Sep 30 · 1,240 words ┐
-///     │ ▂▃▅▂▇▃▁▅▆▂▃▅▂▇▃▁▅▆▂▃▅▂▇▃▁▅▆▂▃█                            │
 ///     └──────────────────────────────────────────────────────────┘
-///     ┌ Performance ┐ ┌ Accuracy signals ┐ ┌ Top apps ┐
+///     ┌ When you dictate ─────────────┐ ┌ Where ───────┐
+///     ┌ Ready in ──────┐ ┌ Modes ──┐ ┌ Last 12 weeks ┐
 struct IntelligenceSettingsView: View {
     @ObservedObject var model: SettingsModel
     @StateObject private var vm: IntelligenceViewModel
+    @State private var editingTypingSpeed = false
 
     private static let sectionSpacing: CGFloat = 18
+    /// Widths of the narrow cards beside a flexible one.
+    private static let whereWidth: CGFloat = 250
+    private static let modesWidth: CGFloat = 220
+    private static let calendarWidth: CGFloat = 240
+    /// The typing-speed popover's stepper bounds (words per minute).
+    private static let typingRange = 10...200
+    private static let typingStep = 5
+    private static let popoverWidth: CGFloat = 260
 
     init(model: SettingsModel, history: HistoryStore) {
         self.model = model
@@ -583,129 +974,294 @@ struct IntelligenceSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { vm.reload() }
+        .onChange(of: model.typingWPM) { vm.refreshTypingWPM() }
     }
 
     // MARK: Dashboard
 
     private var dashboard: some View {
-        ScrollView {
+        let bars = StatsSeries.bars(range: vm.range, insights: vm.insights, detail: vm.detail)
+        return ScrollView {
             VStack(alignment: .leading, spacing: Self.sectionSpacing) {
-                headline
-                StatsTileRow(stats: vm.stats, typingWPM: vm.typingWPM)
-                wordsCard
+                SerifHeadline(headline)
+                tiles(bars: bars)
+                wordsCard(bars: bars)
+                // Cards in a row stretch to the tallest one.
                 HStack(alignment: .top, spacing: VeloraSpacing.m) {
-                    performanceCard
-                    accuracyCard
-                    topAppsCard
+                    if vm.range != .today {
+                        whenCard
+                        whereCard.frame(width: Self.whereWidth)
+                    } else {
+                        whereCard
+                    }
                 }
+                .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top, spacing: VeloraSpacing.m) {
+                    readyCard
+                    modesCard.frame(width: Self.modesWidth)
+                    calendarCard.frame(width: Self.calendarWidth)
+                }
+                .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.bottom, VeloraSpacing.xl)
         }
     }
 
-    private var headline: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
-            SerifHeadline(StatsHeadline.words(vm.stats.words, range: vm.range))
-            Text(StatsHeadline.speaking(
-                spokenMs: vm.stats.spokenMs,
-                minutesSaved: vm.stats.minutesSaved(typingWPM: vm.typingWPM)))
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
+    /// The pace sentence when there's enough speech to quote one, else
+    /// "14,860 words in the last 30 days".
+    private var headline: String {
+        let stats = vm.stats
+        return StatsHeadline.pace(words: stats.words, spokenMs: stats.spokenMs, typingWPM: vm.typingWPM)
+            ?? StatsHeadline.words(stats.words, range: vm.range)
+    }
+
+    // MARK: Tiles
+
+    /// Words · Time saved (the accent number) · Dictations · Active days,
+    /// each with a delta or context line and a sparkline of the chart's
+    /// buckets (Active days: a dot per day). Today swaps Active days for
+    /// the streak.
+    ///
+    /// Four across while every caption fits on one line; narrower (the
+    /// 960 pt minimum window leaves each tile about 138 pt) a 2 × 2 grid,
+    /// so "at 40 wpm typing · Change…" is never clipped.
+    ///
+    ///     ┌ Words ┐┌ Saved ┐┌ Dict. ┐┌ Days ┐      ┌ Words ─┐┌ Saved ─┐
+    ///     └───────┘└───────┘└───────┘└──────┘  or  ┌ Dict. ─┐┌ Days ──┐
+    private func tiles(bars: [StatsBar]) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: VeloraSpacing.m) {
+                wordsTile(bars: bars)
+                savedTile(bars: bars)
+                dictationsTile(bars: bars)
+                activityTile
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            Grid(horizontalSpacing: VeloraSpacing.m, verticalSpacing: VeloraSpacing.m) {
+                GridRow {
+                    wordsTile(bars: bars)
+                    savedTile(bars: bars)
+                }
+                GridRow {
+                    dictationsTile(bars: bars)
+                    activityTile
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private func wordsTile(bars: [StatsBar]) -> some View {
+        let previous = vm.range.previousStats(in: vm.insights)
+        return StatTile(
+            label: "Words", value: HistoryJournal.grouped(vm.stats.words),
+            trend: .series(bars.map { Double($0.words) })
+        ) {
+            tileCaption(StatsFormat.delta(vm.stats.words, previous?.words ?? 0, range: vm.range) ?? noDelta)
+        }
+    }
+
+    private func savedTile(bars: [StatsBar]) -> some View {
+        let saved = bars.map {
+            Double(HistoryStore.minutesSaved(words: $0.words, spokenMs: $0.spokenMs, typingWPM: vm.typingWPM))
+        }
+        return StatTile(
+            label: "Time saved", value: StatsFormat.clock(minutes: vm.stats.minutesSaved(typingWPM: vm.typingWPM)),
+            emphasis: .accent, trend: .series(saved)
+        ) {
+            typingSpeedCaption
+        }
+    }
+
+    private func dictationsTile(bars: [StatsBar]) -> some View {
+        let previous = vm.range.previousStats(in: vm.insights)
+        return StatTile(
+            label: "Dictations", value: HistoryJournal.grouped(vm.stats.count),
+            trend: .series(bars.map { Double($0.count) })
+        ) {
+            tileCaption(StatsFormat.delta(vm.stats.count, previous?.count ?? 0, range: vm.range) ?? noDelta)
+        }
+    }
+
+    /// Today has no "of N days", so its fourth tile is the streak.
+    @ViewBuilder
+    private var activityTile: some View {
+        let longest = "\(HistoryJournal.plural(vm.insights.longestStreak, "day"))"
+        let strip = StatTileTrend.days(StatsActivity.strip(range: vm.range, insights: vm.insights))
+        if vm.range == .today {
+            StatTile(label: "Streak", value: HistoryJournal.plural(vm.insights.currentStreak, "day"), trend: strip) {
+                tileCaption("Longest \(longest)")
+            }
+        } else {
+            let days = StatsActivity.activeDays(range: vm.range, insights: vm.insights)
+            StatTile(
+                label: "Active days",
+                value: "\(HistoryJournal.grouped(days.active)) of \(HistoryJournal.grouped(days.total))",
+                trend: strip
+            ) {
+                tileCaption("Longest streak \(longest)")
+            }
+        }
+    }
+
+    /// The caption when there's no delta: where all time starts, or that
+    /// the earlier window was empty.
+    private var noDelta: String {
+        guard vm.range == .allTime else {
+            return "Nothing to compare yet"
+        }
+        guard let firstDay = vm.insights.firstDay,
+              let first = DayKeys.date(dayKey: firstDay, calendar: .current)
+        else {
+            return "All time"
+        }
+        return "Since " + first.formatted(.dateTime.day().month(.abbreviated).year())
+    }
+
+    private func tileCaption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 11))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+            .lineLimit(1)
+    }
+
+    /// "at 40 wpm typing · Change…": the popover edits the speed Time saved
+    /// is measured against (Settings has no other control for it).
+    private var typingSpeedCaption: some View {
+        HStack(spacing: 3) {
+            tileCaption("at \(vm.typingWPM) wpm typing ·")
+            // The only typing-speed control: the text truncates first.
+            Button("Change…") { editingTypingSpeed = true }
+                .buttonStyle(.plain)
+                .font(.system(size: 11))
+                .foregroundStyle(VeloraBrand.link)
+                .fixedSize()
+                .layoutPriority(1)
+                .popover(isPresented: $editingTypingSpeed, arrowEdge: .bottom) {
+                    typingSpeedEditor
+                }
+        }
+    }
+
+    private var typingSpeedEditor: some View {
+        VStack(alignment: .leading, spacing: VeloraSpacing.s) {
+            Stepper(value: $model.typingWPM, in: Self.typingRange, step: Self.typingStep) {
+                Text("Typing speed: \(model.typingWPM) wpm")
+                    .monospacedDigit()
+            }
+            Text("Time saved compares your speaking time with typing the same words at this speed.")
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(VeloraSpacing.l)
+        .frame(width: Self.popoverWidth)
     }
 
     // MARK: Words chart
 
-    private var wordsCard: some View {
-        let bars = StatsSeries.bars(range: vm.range, insights: vm.insights, hourlyWords: vm.detail.hourlyWords)
-        return GroupCard {
-            GroupRow(label: vm.range == .today ? "Words per hour" : vm.range == .allTime ? "Words per week" : "Words per day") {
-                if let best = StatsSeries.bestCaption(bars: bars, range: vm.range) {
-                    Text(best)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                        .monospacedDigit()
-                }
-            }
-            GroupDivider()
-            WordsBarChart(bars: bars, latest: StatsSeries.latestIndex(range: vm.range, count: bars.count))
-                .padding(.horizontal, 14)
-                .padding(.vertical, VeloraSpacing.m)
+    private func wordsCard(bars: [StatsBar]) -> some View {
+        StatsChartCard(
+            title: StatsSeries.title(range: vm.range, insights: vm.insights),
+            caption: StatsSeries.bestCaption(bars: bars, range: vm.range)
+        ) {
+            StatsWordsChart(bars: bars, range: vm.range)
         }
     }
 
-    // MARK: Performance
+    // MARK: When and where
 
-    private var performanceCard: some View {
-        GroupCard(header: "Performance") {
-            valueRow("Ready in, median", latency(vm.detail.readyMedianMs))
-            GroupDivider()
-            valueRow("Ready in, slowest 5%", latency(vm.detail.readySlowestMs))
-            GroupDivider()
-            valueRow("Speech model", StatsFormat.modelName(id: model.sttModel, in: model.sttEngineModels))
-            GroupDivider()
-            valueRow("Cleanup model", StatsFormat.modelName(id: model.cleanupModel, in: model.cleanupEngineModels))
-        }
-    }
-
-    // MARK: Accuracy
-
-    /// Only signals the stored rows can back: learned dictionary terms and
-    /// the edit-learning loop's observed edits. Reprocess counts, voice
-    /// command use and languages aren't recorded, so they aren't shown.
-    private var accuracyCard: some View {
-        GroupCard(header: "Accuracy signals") {
-            valueRow("Learned words", HistoryJournal.grouped(learnedTermCount))
-            GroupDivider()
-            valueRow("Edited after insert", editedAfterInsert)
-        }
-    }
-
-    private var learnedTermCount: Int {
-        model.dictionaryRows.filter { $0.source == .learned }.count
-    }
-
-    /// "3 of 41 observed" — the denominator is only the dictations Velora
-    /// could actually watch after inserting.
-    private var editedAfterInsert: String {
-        let observed = vm.stats.qualityObserved
-        guard observed > 0 else { return "No data yet" }
-        return "\(vm.stats.qualityEdited) of \(HistoryJournal.grouped(observed)) observed"
-    }
-
-    // MARK: Top apps
-
-    private var topAppsCard: some View {
-        let shares = StatsTopApps.shares(vm.detail.apps)
-        return GroupCard(header: "Top apps") {
-            if shares.isEmpty {
-                GroupRow(label: "Nothing in this range yet")
+    private var whenCard: some View {
+        StatsChartCard(title: "When you dictate", caption: "Words by hour, \(vm.range.windowPhrase)") {
+            if vm.detail.weekdayHour.isEmpty {
+                StatsEmptyNote(text: Self.emptyRange)
             } else {
-                ForEach(Array(shares.enumerated()), id: \.element.name) { index, share in
-                    if index > 0 { GroupDivider() }
-                    TopAppRow(share: share)
+                StatsHourHeatmap(cells: vm.detail.weekdayHour)
+            }
+        }
+    }
+
+    private var whereCard: some View {
+        let shares = StatsTopApps.shares(vm.detail.apps)
+        return StatsChartCard(title: "Where", caption: shares.isEmpty ? nil : "Share of words") {
+            if shares.isEmpty {
+                StatsEmptyNote(text: Self.emptyRange)
+            } else {
+                StatsTopAppsChart(shares: shares, bundles: vm.detail.appBundles)
+            }
+        }
+    }
+
+    // MARK: Ready in, modes, calendar
+
+    private var readyCard: some View {
+        let ready = vm.detail.readyMs
+        let enough = ready.count >= StatsLatency.minimumSamples
+        return StatsChartCard(title: "Ready in", caption: enough ? readyCaption : nil) {
+            if enough {
+                StatsLatencyChart(
+                    bins: StatsLatency.bins(ready),
+                    medianMs: vm.detail.readyMedianMs ?? 0, slowMs: vm.detail.readySlowestMs ?? 0)
+            } else {
+                StatsEmptyNote(text: "Not enough dictations yet")
+            }
+        }
+    }
+
+    /// "Median 0.9 s · 95% under 2.1 s".
+    private var readyCaption: String {
+        let median = HistoryJournal.latency(ms: vm.detail.readyMedianMs ?? 0)
+        let slow = HistoryJournal.latency(ms: vm.detail.readySlowestMs ?? 0)
+        return "Median \(median) · 95% under \(slow)"
+    }
+
+    /// The mode split, then what cleanup and the edit watcher saw: only
+    /// signals the stored rows back.
+    private var modesCard: some View {
+        let shares = StatsModes.shares(vm.detail.modes)
+        return StatsChartCard(title: "Modes") {
+            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
+                if shares.isEmpty {
+                    StatsEmptyNote(text: Self.emptyRange)
+                } else {
+                    StatsModesChart(shares: shares)
+                }
+                ForEach(qualityNotes, id: \.self) { note in
+                    Text(note)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
     }
 
-    // MARK: Row helpers
+    /// "Cleanup rewrote 120 of 400 dictations", "You edited 3 of 41
+    /// afterwards". Each drops out when its rows carry no data.
+    private var qualityNotes: [String] {
+        let stats = vm.stats
+        var notes: [String] = []
+        if stats.cleanupKnown > 0 {
+            notes.append("Cleanup rewrote \(HistoryJournal.grouped(stats.cleanupChanged)) of "
+                         + HistoryJournal.plural(stats.cleanupKnown, "dictation"))
+        }
+        if stats.qualityObserved > 0 {
+            notes.append("You edited \(HistoryJournal.grouped(stats.qualityEdited)) of "
+                         + "\(HistoryJournal.grouped(stats.qualityObserved)) afterwards")
+        }
+        return notes
+    }
 
-    private func valueRow(_ label: String, _ value: String) -> some View {
-        GroupRow(label: label) {
-            Text(value)
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-                .multilineTextAlignment(.trailing)
-                .lineLimit(2)
+    private var calendarCard: some View {
+        let active = vm.insights.heatmapDaily.count
+        return StatsChartCard(title: "Last 12 weeks", caption: HistoryJournal.plural(active, "active day")) {
+            StatsActivityCalendar(cells: StatsCalendar.cells(daily: vm.insights.heatmapDaily))
         }
     }
 
-    private func latency(_ ms: Int?) -> String {
-        guard let ms else { return "No data yet" }
-        return HistoryJournal.latency(ms: ms)
-    }
+    private static let emptyRange = "Nothing in this range yet"
 
     // MARK: Empty state
 
@@ -723,199 +1279,59 @@ struct IntelligenceSettingsView: View {
     }
 }
 
-// MARK: - Tiles
-
-/// The four hero tiles for one window: Words · Dictations · Speaking time ·
-/// Saved vs typing (the accent number).
-struct StatsTileRow: View {
-    let stats: HistoryStore.WindowStats
-    let typingWPM: Int
-
-    var body: some View {
-        HStack(spacing: VeloraSpacing.m) {
-            StatTile(value: HistoryJournal.grouped(stats.words), label: "Words")
-            StatTile(value: HistoryJournal.grouped(stats.count), label: "Dictations")
-            StatTile(value: StatsFormat.clock(ms: stats.spokenMs), label: "Speaking time")
-            StatTile(
-                value: StatsFormat.clock(minutes: stats.minutesSaved(typingWPM: typingWPM)),
-                label: "Saved vs typing", emphasis: .accent)
-        }
-    }
-}
-
-/// Home pane entry point: the four tiles for `range` over the aggregates of
-/// a view model the pane owns (one model per pane, reloaded in place, so a
-/// re-activation never rebuilds it and re-scans the store).
-struct StatsHeadlineTiles: View {
-    @ObservedObject var viewModel: IntelligenceViewModel
-    let range: StatsRange
-
-    var body: some View {
-        StatsTileRow(stats: range.stats(in: viewModel.insights), typingWPM: viewModel.typingWPM)
-    }
-}
-
-// MARK: - Words chart
-
-/// Bars for the range's buckets, drawn with plain shapes so the offscreen
-/// snapshot renders them: radius 3, accent at 35 % with the latest bucket
-/// in full accent, 168 pt tall, five evenly spaced x labels.
-///
-///     ▂▃▅▂▇▃▁▅▆▂▃▅▂▇▃▁▅▆▂▃▅▂▇▃▁▅▆▂▃█   168 pt
-///     Aug 10    Aug 17    Aug 25    Sep 1    Sep 8
-private struct WordsBarChart: View {
-    let bars: [StatsBar]
-    /// Index of the bar drawn in full accent.
-    let latest: Int
-
-    private static let height: CGFloat = 168
-    private static let radius: CGFloat = 3
-    private static let restingOpacity = 0.35
-    private static let minBarHeight: CGFloat = 2
-    private static let labelCount = 5
-    private static let denseGap: CGFloat = 2
-    private static let sparseGap: CGFloat = 6
-    private static let denseThreshold = 12
-
-    private var gap: CGFloat { bars.count > Self.denseThreshold ? Self.denseGap : Self.sparseGap }
-
-    /// Indices whose labels are drawn: first, last, and three between.
-    private var labelIndices: [Int] {
-        guard bars.count > 1 else { return bars.isEmpty ? [] : [0] }
-        let last = bars.count - 1
-        var indices = (0..<Self.labelCount).map { $0 * last / (Self.labelCount - 1) }
-        indices.removeAll { $0 < 0 || $0 > last }
-        return Array(NSOrderedSet(array: indices)) as? [Int] ?? indices
-    }
-
-    var body: some View {
-        let peak = max(bars.map(\.words).max() ?? 0, 1)
-        VStack(spacing: VeloraSpacing.xs) {
-            HStack(alignment: .bottom, spacing: gap) {
-                ForEach(Array(bars.enumerated()), id: \.offset) { index, bar in
-                    RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
-                        .fill(VeloraBrand.accent.opacity(
-                            index == latest ? 1 : Self.restingOpacity))
-                        .frame(height: max(
-                            Self.minBarHeight, Self.height * CGFloat(bar.words) / CGFloat(peak)))
-                        .frame(maxWidth: .infinity)
-                        .help(bar.words > 0
-                              ? "\(bar.label) — \(HistoryJournal.plural(bar.words, "word"))"
-                              : "\(bar.label) — no dictation")
-                }
-            }
-            .frame(height: Self.height, alignment: .bottom)
-            axisLabels
-        }
-    }
-
-    /// Labels sit under their bar's centre; the first hugs the leading edge
-    /// and the last the trailing edge so nothing spills outside the card.
-    private var axisLabels: some View {
-        GeometryReader { geometry in
-            let count = CGFloat(max(bars.count, 1))
-            let barWidth = (geometry.size.width - gap * (count - 1)) / count
-            ForEach(labelIndices, id: \.self) { index in
-                let centre = CGFloat(index) * (barWidth + gap) + barWidth / 2
-                Text(bars[index].label)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-                    .fixedSize()
-                    .modifier(AxisLabelPlacement(
-                        centre: centre, width: geometry.size.width,
-                        edge: index == 0 ? .leading : index == bars.count - 1 ? .trailing : .centre))
-            }
-        }
-        .frame(height: 14)
-    }
-
-    private struct AxisLabelPlacement: ViewModifier {
-        enum Edge { case leading, centre, trailing }
-        let centre: CGFloat
-        let width: CGFloat
-        let edge: Edge
-
-        func body(content: Content) -> some View {
-            switch edge {
-            case .leading:
-                content.frame(maxWidth: .infinity, alignment: .leading)
-            case .trailing:
-                content.frame(maxWidth: .infinity, alignment: .trailing)
-            case .centre:
-                content.position(x: centre, y: 7)
-            }
-        }
-    }
-}
-
-// MARK: - Top app row
-
-/// App name, its share, and a 5 pt accent bar under both.
-///
-///     Slack                                  42 %
-///     ████████████████░░░░░░░░░░░░░░░░░░░░░░░░░
-private struct TopAppRow: View {
-    let share: StatsAppShare
-
-    private static let barHeight: CGFloat = 5
-    private static let inset: CGFloat = 14
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: VeloraSpacing.xs + 2) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(share.name)
-                    .font(.system(size: 13))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: VeloraSpacing.s)
-                Text("\(share.percent)%")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-            }
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.06))
-                    Capsule()
-                        .fill(VeloraBrand.accent)
-                        .frame(width: max(
-                            Self.barHeight, geometry.size.width * CGFloat(share.percent) / 100))
-                }
-            }
-            .frame(height: Self.barHeight)
-        }
-        .padding(.horizontal, Self.inset)
-        .padding(.vertical, VeloraSpacing.s + 2)
-        .help("\(HistoryJournal.plural(share.words, "word"))")
-    }
-}
-
 // MARK: - Shared day math
 
-/// yyyy-MM-dd keys and friendly labels shared by the chart series.
+/// `yyyy-MM-dd` / `yyyy-MM` keys matching SQLite's, and label styles, in a
+/// given calendar's time zone (the selftest pins Europe/London).
 private enum DayKeys {
-    static let keyFormatter: DateFormatter = {
-        let f = DateFormatter()
-        // POSIX locale: keys must match SQLite's Gregorian ASCII day strings
-        // even when the user's locale uses another calendar or digit set.
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd"
-        f.timeZone = .current
-        return f
-    }()
+    /// Gregorian in `calendar`'s zone: the store's keys are Gregorian
+    /// ASCII whatever calendar the user reads dates in.
+    static func gregorian(_ calendar: Calendar) -> Calendar {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        return gregorian
+    }
 
-    static let labelFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "MMM d"
-        f.timeZone = .current
-        return f
-    }()
+    /// "2026-09-08".
+    static func dayKey(_ date: Date, calendar: Calendar) -> String {
+        let parts = gregorian(calendar).dateComponents([.year, .month, .day], from: date)
+        return [pad(parts.year, 4), pad(parts.month, 2), pad(parts.day, 2)].joined(separator: "-")
+    }
 
-    /// "9 AM" / "14" depending on the locale's hour cycle.
-    static let hourFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.setLocalizedDateFormatFromTemplate("j")
-        f.timeZone = .current
-        return f
-    }()
+    /// "2026-09".
+    static func monthKey(_ date: Date, calendar: Calendar) -> String {
+        let parts = gregorian(calendar).dateComponents([.year, .month], from: date)
+        return [pad(parts.year, 4), pad(parts.month, 2)].joined(separator: "-")
+    }
+
+    /// Local midnight of a "2026-09-08" key.
+    static func date(dayKey: String, calendar: Calendar) -> Date? {
+        let parts = dayKey.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else {
+            return nil
+        }
+        return gregorian(calendar).date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
+    }
+
+    /// Local midnight on the 1st of a "2026-09" key.
+    static func date(monthKey: String, calendar: Calendar) -> Date? {
+        let parts = monthKey.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 2 else {
+            return nil
+        }
+        return gregorian(calendar).date(from: DateComponents(year: parts[0], month: parts[1], day: 1))
+    }
+
+    /// `base` rendered in `calendar`'s zone.
+    static func style(_ base: Date.FormatStyle, _ calendar: Calendar) -> Date.FormatStyle {
+        var style = base
+        style.timeZone = calendar.timeZone
+        return style
+    }
+
+    /// Zero-padded ASCII digits (never locale digits).
+    private static func pad(_ value: Int?, _ width: Int) -> String {
+        let digits = String(value ?? 0)
+        return String(repeating: "0", count: max(0, width - digits.count)) + digits
+    }
 }

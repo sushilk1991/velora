@@ -9,7 +9,7 @@ extension Notification.Name {
     /// A `reprocessed` reply arrived. `object` is the `EngineEvent.reprocessed`.
     static let veloraEngineReprocessed = Notification.Name("VeloraEngineReprocessed")
     /// First-run setup progress changed. `userInfo["status"]` is the display
-    /// string ("Downloading the speech model (1.6 GB) — 42%") and
+    /// string ("Downloading the speech model (1.6 GB): 42%") and
     /// `userInfo["fraction"]` is a typed 0…1 value when measurable. Both are
     /// absent when no phase is active. Drives onboarding and the menubar line.
     static let veloraEngineLoading = Notification.Name("VeloraEngineLoading")
@@ -88,7 +88,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
 
     /// Human-readable first-run setup status ("Downloading the speech model
-    /// (1.6 GB) — 42%"), nil when nothing is loading. Also set app-side for
+    /// (1.6 GB): 42%"), nil when nothing is loading. Also set app-side for
     /// the pre-socket venv bootstrap, then owned by engine `loading` events.
     private(set) var loadingStatus: String? {
         didSet {
@@ -160,7 +160,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         // Prefer the uv shipped in the bundle (self-contained distribution);
         // fall back to a system install for dev/checkout runs.
         guard let uv = ResourceLocator.bundledUV?.path ?? findUV() else {
-            state = .degraded("uv not found — install from https://astral.sh/uv")
+            state = .degraded("uv not found. Install it from https://astral.sh/uv")
             return
         }
 
@@ -250,7 +250,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             state = .launching
             NSLog("Velora: cleanup worker requested immediate engine restart")
         } else {
-            state = .degraded("Engine exited (status \(status)) — restarting in \(Int(delay))s")
+            state = .degraded("Engine stopped (status \(status)). Restarting in \(Int(delay))s")
             NSLog("Velora: engine exited status=%d, restart in %.0fs", status, delay)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -308,7 +308,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             return
         }
         if let normalized {
-            loadingStatus = "\(phase) — \(min(99, Int((normalized * 100).rounded())))%"
+            loadingStatus = "\(phase): \(min(99, Int((normalized * 100).rounded())))%"
         } else {
             loadingStatus = phase
         }

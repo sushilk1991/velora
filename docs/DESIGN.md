@@ -181,8 +181,9 @@ person who types for a living and does not trust "AI" claims.
 | Labels, toggles | Sentence case, no period | `Pause music while dictating` |
 | Helper / subtitle text | Sentence, ends with a period | `Fix spelling and grammar in selected text, no microphone needed.` |
 | Menu items that open a window or ask | trailing `…` (U+2026) | `Transcribe File…` |
-| Shortcuts | glyph notation, no plus signs | `⌃⇧S`, `⌥⇧E`, `Right Option` |
-| Numbers with units | space before GB/MB, none before s | `1.6 GB`, `2.3s` |
+| Shortcuts | glyph notation, no plus signs; a lone modifier names its side | `⌃⇧S`, `⌥⇧E`, `Right ⌥` |
+| Dashes | none in UI copy, model names or descriptions; use a full stop, colon or comma | `Downloading Velora 1.2.3 (42%)` |
+| Numbers with units | space before every unit | `1.6 GB`, `0.9 s`, `2.3 s` |
 
 ### Canonical names
 
@@ -210,23 +211,40 @@ The pill by the cursor is the product's face. Rules:
   single retry chip.
 - The HUD never takes focus and never appears over a secure input field.
 - Copy in the HUD is ≤ 4 words, present tense: `Listening`, `Polishing`,
-  `Pasted at your cursor`, `Proofread text on clipboard`.
+  `Pasted at your cursor`, `Proofread text on clipboard`. Two phrases join
+  with a full stop, never a dash: `Couldn't transcribe. Try again`.
+- Right-click menu, in this order: the dictation toggle, Microphone, Recent
+  Transcriptions (only when history has entries), Open Velora, Hide Pill.
+  Quit lives in the menubar menu only.
+- Settings → General has one "Show pill" picker: Always, While dictating,
+  Never (`PillVisibility`, stored in `hud.visible` + `hud.alwaysVisible`).
 
 ## 7. Settings
 
-- The sidebar is a `FloatingSidebar` of monochrome `SidebarRow`s
-  (Finder/Notes style: symbol in `VeloraBrand.accent` when selected,
-  `.secondary` otherwise; no coloured tiles). `WindowGlow` sits behind the
-  whole window.
+- The main window's sidebar is a `FloatingSidebar` of monochrome
+  `SidebarRow`s (Finder/Notes style: symbol in `VeloraBrand.accent` when
+  selected, `.secondary` otherwise). The Settings rail uses coloured
+  `IconTile`s, as System Settings does, and shares no symbol with the main
+  sidebar. `WindowGlow` sits behind the whole window.
+- Both windows carry an empty unified `NSToolbar` (`applyShellChrome`), so
+  the traffic lights sit inside the floating sidebar's rounded corner and
+  level with the pane title (`WindowShellMetrics.detailTop`,
+  `sidebarTopClearance`). The selftest checks this geometry.
 - Every pane opens with a `PaneHeader` (22 pt bold title, trailing
-  controls) and stacks `GroupCard`s on `VeloraPanel.canvas`: an uppercase
-  section header, `GroupRow`s (13 pt label, 11 pt sub-caption, trailing
-  control) separated by `GroupDivider`, an optional footer. `SettingsCard`
-  with `CardHeader` (symbol, colour, title, subtitle, master toggle) and
-  `CardDivider` remains for panes not yet moved over.
+  controls). Main-window panes stack `GroupCard`s on `VeloraPanel.canvas`;
+  Settings panes (Shortcuts included) are grouped `Form`s that scroll to the
+  window edge (`WindowShell(detailEdges: .formScrolls)`), with the header
+  inset `formInset` to line up with the cards.
+- One card style in both windows. `GroupCard` draws a grouped Form section:
+  a 13 pt semibold sentence-case header, a radius-12 card on
+  `VeloraPanel.groupFill` with no border, `GroupRow`s (13 pt label, 11 pt
+  sub-caption, trailing control) separated by `GroupDivider`, and an optional
+  `SettingsFooter`.
 - Buttons outside Forms use `.buttonStyle(.capsule)` (glass, 28 pt) or
   `.primaryCapsule` (accent fill). One primary per pane.
 - A pane's one sentence of welcome or celebration is a `SerifHeadline`.
+  Onboarding uses the same canvas, `WindowGlow`, `SerifHeadline` step titles
+  and `.primaryCapsule` buttons.
 - One SF Symbol per concept, fixed (sidebar symbols in `SettingsTab.symbol`,
   feature cards in the Shortcuts pane, menu items in
   `StatusItemController.swift`):
@@ -235,8 +253,9 @@ The pill by the cursor is the product's face. Rules:
   |---|---|
   | Menubar item | `waveform` (template) |
   | General | `gearshape.fill` |
+  | Advanced | `gearshape.2.fill` |
   | Dictation | `mic.fill` |
-  | Stream Typing | `keyboard.fill` |
+  | Stream Typing | `text.cursor` |
   | Voice Edit | `wand.and.stars` |
   | Proofread | `text.badge.checkmark` |
   | Action Mode | `sparkles` |
@@ -244,6 +263,9 @@ The pill by the cursor is the product's face. Rules:
   | Dictionary | `character.book.closed.fill` |
   | Models | `cpu.fill` |
   | Modes | `slider.horizontal.3` |
+  | Terminal mode | `terminal` |
+  | Learned word (Dictionary) | `pencil.line` |
+  | Auto-learned word (Dictionary) | `text.magnifyingglass` |
   | History | `clock.arrow.circlepath` |
   | Stats | `chart.bar.fill` |
   | Shortcuts | `keyboard.fill` |
@@ -251,9 +273,10 @@ The pill by the cursor is the product's face. Rules:
 
   If a concept already has a symbol, reuse it; a new symbol needs a row here.
 - Shortcuts render through `KeycapsLabel`, never as plain text.
-- Metrics use `StatTile` (hero: 12 pt label over a 26 pt bold tabular value,
-  `emphasis: .accent` for the one number that matters) or `CardMetricRow`
-  (inline). No ad hoc `HStack(Text, Spacer, Text)`.
+- Metrics use `StatTile` (12 pt secondary label over a 26 pt bold tabular
+  value, an optional caption and a sparkline or day strip, on the
+  `GroupCard` fill; `emphasis: .accent` for the one number that matters).
+  No ad hoc `HStack(Text, Spacer, Text)`.
 - A card that can be turned off dims to 50 % and disables its rows; it does
   not hide them.
 
