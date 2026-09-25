@@ -412,20 +412,6 @@ final class DictionaryRepository: ObservableObject {
         return DictionaryImportResult(added: added, keptExisting: keptExisting)
     }
 
-    /// Decode completely before touching local state. Corrupt/newer cloud data
-    /// cannot replace the last valid local document.
-    @discardableResult
-    func applyRemote(_ data: Data) -> Bool {
-        do {
-            let incoming = try DictionaryDocument.decode(data)
-            try mergeRemote(incoming)
-            return true
-        } catch {
-            lastError = error.localizedDescription
-            return false
-        }
-    }
-
     /// Throwing form used by iCloud sync so transport/decode failures are not
     /// conflated with a valid document that could not be persisted or
     /// projected into the live speech engine.

@@ -21,22 +21,6 @@ enum HotkeyMode: String, Codable, CaseIterable, Identifiable {
 enum HUDPosition: String, Codable, CaseIterable, Identifiable {
     case bottomCenter, bottomLeft, bottomRight, topCenter, topLeft, topRight, custom
     var id: String { rawValue }
-    var displayName: String {
-        switch self {
-        case .bottomCenter: return "Bottom Center"
-        case .bottomLeft: return "Bottom Left"
-        case .bottomRight: return "Bottom Right"
-        case .topCenter: return "Top Center"
-        case .topLeft: return "Top Left"
-        case .topRight: return "Top Right"
-        case .custom: return "Custom (dragged)"
-        }
-    }
-
-    /// Presets offered in menus (custom is drag-only).
-    static let presets: [HUDPosition] = [
-        .bottomLeft, .bottomCenter, .bottomRight, .topLeft, .topCenter, .topRight,
-    ]
 }
 
 /// A speech-to-text model the engine can run. The engine owns downloads;
@@ -207,7 +191,6 @@ final class AppConfig {
         static let hudCustomEdge = "velora.hudCustomEdge"
         static let hudAlwaysVisible = "velora.hudAlwaysVisible"
         static let hudVisible = "velora.hudVisible"
-        static let settingsSidebarCollapsed = "velora.settingsSidebarCollapsed"
         static let appearance = "velora.appearance"
         static let language = "velora.language"
         static let autoPunctuation = "velora.autoPunctuation"
@@ -568,7 +551,6 @@ final class AppConfig {
             forKey: Key.cachedReleaseAssetSize)
         return .init(
             onboardingComplete: defaults.bool(forKey: Key.onboardingComplete),
-            settingsSidebarCollapsed: defaults.bool(forKey: Key.settingsSidebarCollapsed),
             inputDeviceUid: validInputDevice,
             localAgentAccess: defaults.bool(forKey: Key.localAgentAccess),
             meetingCalendar: defaults.bool(forKey: Key.meetingCalendar),
@@ -696,7 +678,6 @@ final class AppConfig {
 
     private func persistLocalSettings(_ local: SettingsDocument.MachineLocalSettings) {
         defaults.set(local.onboardingComplete, forKey: Key.onboardingComplete)
-        defaults.set(local.settingsSidebarCollapsed, forKey: Key.settingsSidebarCollapsed)
         if let uid = local.inputDeviceUid {
             defaults.set(uid, forKey: Key.inputDeviceUID)
         } else {
@@ -888,12 +869,6 @@ final class AppConfig {
         set { updateSettings { $0.hud.visible = newValue } }
     }
 
-    /// Settings sidebar collapsed to the icon-only rail (default: expanded).
-    var settingsSidebarCollapsed: Bool {
-        get { readLocalSetting(\.settingsSidebarCollapsed) }
-        set { updateLocalSettings { $0.settingsSidebarCollapsed = newValue } }
-    }
-
     /// Growth anchor for the dragged (custom) pill position — chosen from
     /// where the pill was dropped so the capsule always grows toward open
     /// screen space instead of cropping at a screen edge.
@@ -922,7 +897,7 @@ final class AppConfig {
 
     /// UID of the microphone to record from; nil = follow the system default.
     /// Kept while the device is unplugged so the choice wins again on
-    /// reconnect (see AudioInputDevices.resolve).
+    /// reconnect (see MicrophoneCaptureDevicePolicy).
     var inputDeviceUID: String? {
         get { readLocalSetting(\.inputDeviceUid) }
         set { updateLocalSettings { $0.inputDeviceUid = newValue } }

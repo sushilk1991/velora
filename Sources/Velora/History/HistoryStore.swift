@@ -547,27 +547,6 @@ final class HistoryStore {
         }
     }
 
-    /// Aggregate usage numbers for the History header (words ≈ space-separated
-    /// tokens of the final text; computed in SQL so a big history never loads
-    /// into memory).
-    struct Stats: Equatable {
-        var totalWords = 0
-        var totalCount = 0
-        var totalSpokenMs = 0
-        var todayWords = 0
-        var todayCount = 0
-        /// Consecutive calendar days (ending today or yesterday) with at
-        /// least one dictation.
-        var streakDays = 0
-
-        /// Minutes saved vs typing the same words at the user's typing speed
-        /// (Settings → Stats; default 40 wpm).
-        func minutesSaved(typingWPM: Int) -> Int {
-            HistoryStore.minutesSaved(
-                words: totalWords, spokenMs: totalSpokenMs, typingWPM: typingWPM)
-        }
-    }
-
     /// Shared time-saved definition: minutes to type `words` at `typingWPM`
     /// minus the minutes actually spent speaking, floored at zero.
     static func minutesSaved(words: Int, spokenMs: Int, typingWPM: Int) -> Int {
@@ -584,44 +563,6 @@ final class HistoryStore {
     private static let wordsExpr =
         "COALESCE(SUM(LENGTH(TRIM(\(flatFinal))) - LENGTH(REPLACE(TRIM(\(flatFinal)), ' ', '')) + 1), 0)"
     private static let nonEmpty = "TRIM(\(flatFinal)) != ''"
-
-    func stats() -> Stats {
-        queue.sync { [self] in
-            guard db != nil else { return Stats() }
-            var s = Stats()
-            var stmt: OpaquePointer?
-            let all = "SELECT COUNT(*), \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0) " +
-                "FROM dictations WHERE \(Self.nonEmpty);"
-            if sqlite3_prepare_v2(db, all, -1, &stmt, nil) == SQLITE_OK,
-               sqlite3_step(stmt) == SQLITE_ROW {
-                s.totalCount = Int(sqlite3_column_int64(stmt, 0))
-                s.totalWords = Int(sqlite3_column_int64(stmt, 1))
-                s.totalSpokenMs = Int(sqlite3_column_int64(stmt, 2))
-            }
-            sqlite3_finalize(stmt); stmt = nil
-
-            let today = "SELECT COUNT(*), \(Self.wordsExpr) FROM dictations " +
-                "WHERE \(Self.nonEmpty) AND date(ts, 'unixepoch', 'localtime') = date('now', 'localtime');"
-            if sqlite3_prepare_v2(db, today, -1, &stmt, nil) == SQLITE_OK,
-               sqlite3_step(stmt) == SQLITE_ROW {
-                s.todayCount = Int(sqlite3_column_int64(stmt, 0))
-                s.todayWords = Int(sqlite3_column_int64(stmt, 1))
-            }
-            sqlite3_finalize(stmt); stmt = nil
-
-            let days = "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') FROM dictations " +
-                "WHERE \(Self.nonEmpty) ORDER BY 1 DESC LIMIT 400;"
-            var dayStrings: [String] = []
-            if sqlite3_prepare_v2(db, days, -1, &stmt, nil) == SQLITE_OK {
-                while sqlite3_step(stmt) == SQLITE_ROW {
-                    if let c = sqlite3_column_text(stmt, 0) { dayStrings.append(String(cString: c)) }
-                }
-            }
-            sqlite3_finalize(stmt)
-            s.streakDays = Self.streak(days: dayStrings)
-            return s
-        }
-    }
 
     /// Counts consecutive days from `days` (yyyy-MM-dd, newest first). The
     /// streak is alive if it includes today OR yesterday (today's first
@@ -692,8 +633,6 @@ final class HistoryStore {
         var spokenMs = 0
         var sttSamples = 0
         var sttTotalMs = 0
-        var cleanupSamples = 0
-        var cleanupTotalMs = 0
         var cleanupWallSamples = 0
         var cleanupWallTotalMs = 0
         var finalizationSamples = 0
@@ -710,22 +649,11 @@ final class HistoryStore {
         var averageSttMs: Int? {
             sttSamples > 0 ? sttTotalMs / sttSamples : nil
         }
-        var averageCleanupMs: Int? {
-            cleanupSamples > 0 ? cleanupTotalMs / cleanupSamples : nil
-        }
         var averageCleanupWallMs: Int? {
             cleanupWallSamples > 0 ? cleanupWallTotalMs / cleanupWallSamples : nil
         }
         var averageFinalizationMs: Int? {
             finalizationSamples > 0 ? finalizationTotalMs / finalizationSamples : nil
-        }
-        /// Share of state-known dictations where cleanup produced the final.
-        var cleanupAppliedRate: Double? {
-            cleanupKnown > 0 ? Double(cleanupApplied) / Double(cleanupKnown) : nil
-        }
-        /// Among cleanup-applied dictations, how often cleanup changed the raw.
-        var cleanupChangedRate: Double? {
-            cleanupApplied > 0 ? Double(cleanupChanged) / Double(cleanupApplied) : nil
         }
         var qualityObserved: Int { qualityUnchanged + qualityEdited }
         /// unchanged / honestly-observed. Nil when nothing was observable —
@@ -1042,7 +970,6 @@ final class HistoryStore {
         var sql = """
             SELECT COUNT(*), \(Self.wordsExpr), COALESCE(SUM(duration_ms), 0),
                 COUNT(stt_ms), COALESCE(SUM(stt_ms), 0),
-                COUNT(cleanup_ms), COALESCE(SUM(cleanup_ms), 0),
                 COUNT(cleanup_wall_ms), COALESCE(SUM(cleanup_wall_ms), 0),
                 COUNT(finalization_ms), COALESCE(SUM(finalization_ms), 0),
                 COUNT(cleanup_applied),
@@ -1071,17 +998,15 @@ final class HistoryStore {
         stats.spokenMs = Int(sqlite3_column_int64(stmt, 2))
         stats.sttSamples = Int(sqlite3_column_int64(stmt, 3))
         stats.sttTotalMs = Int(sqlite3_column_int64(stmt, 4))
-        stats.cleanupSamples = Int(sqlite3_column_int64(stmt, 5))
-        stats.cleanupTotalMs = Int(sqlite3_column_int64(stmt, 6))
-        stats.cleanupWallSamples = Int(sqlite3_column_int64(stmt, 7))
-        stats.cleanupWallTotalMs = Int(sqlite3_column_int64(stmt, 8))
-        stats.finalizationSamples = Int(sqlite3_column_int64(stmt, 9))
-        stats.finalizationTotalMs = Int(sqlite3_column_int64(stmt, 10))
-        stats.cleanupKnown = Int(sqlite3_column_int64(stmt, 11))
-        stats.cleanupApplied = Int(sqlite3_column_int64(stmt, 12))
-        stats.cleanupChanged = Int(sqlite3_column_int64(stmt, 13))
-        stats.qualityUnchanged = Int(sqlite3_column_int64(stmt, 14))
-        stats.qualityEdited = Int(sqlite3_column_int64(stmt, 15))
+        stats.cleanupWallSamples = Int(sqlite3_column_int64(stmt, 5))
+        stats.cleanupWallTotalMs = Int(sqlite3_column_int64(stmt, 6))
+        stats.finalizationSamples = Int(sqlite3_column_int64(stmt, 7))
+        stats.finalizationTotalMs = Int(sqlite3_column_int64(stmt, 8))
+        stats.cleanupKnown = Int(sqlite3_column_int64(stmt, 9))
+        stats.cleanupApplied = Int(sqlite3_column_int64(stmt, 10))
+        stats.cleanupChanged = Int(sqlite3_column_int64(stmt, 11))
+        stats.qualityUnchanged = Int(sqlite3_column_int64(stmt, 12))
+        stats.qualityEdited = Int(sqlite3_column_int64(stmt, 13))
         return stats
     }
 

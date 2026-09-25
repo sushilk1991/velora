@@ -308,14 +308,6 @@ struct DictionaryEntry: Codable, Equatable, Identifiable {
     }
 }
 
-struct DictionaryProjection: Equatable {
-    var vocabulary: [String]
-    var replacements: [String: String]
-    var softReplacements: [String: String]
-    var autoTerms: [String]
-    var autoBanned: [String]
-}
-
 struct DictionaryDocument: Codable, Equatable {
     static let currentSchemaVersion = 1
     static let maximumEntries = 2_000
@@ -368,67 +360,6 @@ struct DictionaryDocument: Codable, Equatable {
             entries: entries + [entry],
             clearGenerations: clearGenerations,
             clearModifiedAt: clearModifiedAt)
-    }
-
-    var effectiveProjection: DictionaryProjection {
-        let active = activeEntries
-        let banned = Set(active.filter { $0.kind == .autoBan }.map {
-            $0.writeAs.lowercased(with: Locale(identifier: "en_US_POSIX"))
-        })
-
-        var replacements: [String: String] = [:]
-        var soft: [String: String] = [:]
-        var vocabulary: [String] = []
-        var seenVocabulary: Set<String> = []
-
-        func appendVocabulary(_ term: String) {
-            let key = term.lowercased(with: Locale(identifier: "en_US_POSIX"))
-            guard seenVocabulary.insert(key).inserted else { return }
-            vocabulary.append(term)
-        }
-
-        let priority: [DictionaryEntryKind: Int] = [
-            .manualReplacement: 0, .manualTerm: 0,
-            .learnedHard: 1, .learnedSoft: 1,
-            .autoTerm: 2, .autoBan: 2,
-        ]
-        for entry in active.sorted(by: {
-            let left = priority[$0.kind] ?? 9
-            let right = priority[$1.kind] ?? 9
-            return left == right ? $0.logicalKey < $1.logicalKey : left < right
-        }) {
-            switch entry.kind {
-            case .manualReplacement, .learnedHard:
-                if let heard = entry.heardAs {
-                    let key = heard.lowercased(with: Locale(identifier: "en_US_POSIX"))
-                    if replacements[key] == nil && soft[key] == nil { replacements[key] = entry.writeAs }
-                }
-                appendVocabulary(entry.writeAs)
-            case .learnedSoft:
-                if let heard = entry.heardAs {
-                    let key = heard.lowercased(with: Locale(identifier: "en_US_POSIX"))
-                    if replacements[key] == nil && soft[key] == nil { soft[key] = entry.writeAs }
-                }
-                appendVocabulary(entry.writeAs)
-            case .manualTerm:
-                appendVocabulary(entry.writeAs)
-            case .autoTerm:
-                let key = entry.writeAs.lowercased(with: Locale(identifier: "en_US_POSIX"))
-                if !banned.contains(key) { appendVocabulary(entry.writeAs) }
-            case .autoBan:
-                break
-            }
-        }
-
-        return DictionaryProjection(
-            vocabulary: vocabulary,
-            replacements: replacements,
-            softReplacements: soft,
-            autoTerms: active.filter { entry in
-                entry.kind == .autoTerm && !banned.contains(
-                    entry.writeAs.lowercased(with: Locale(identifier: "en_US_POSIX")))
-            }.map(\.writeAs),
-            autoBanned: active.filter { $0.kind == .autoBan }.map(\.writeAs))
     }
 
     func merged(with other: DictionaryDocument) -> DictionaryDocument {

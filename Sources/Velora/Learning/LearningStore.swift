@@ -324,9 +324,6 @@ final class LearningStore {
         }
     }
 
-    /// How many corrections are currently learned (for the Settings UI).
-    var count: Int { learned.replacements.count + learned.softReplacements.count }
-
     /// Forgets a single learned correction (and any pending counts toward it).
     @discardableResult
     func remove(wrong: String) -> Bool {
@@ -358,18 +355,6 @@ final class LearningStore {
         return corrections.contains { correction in
             learned.counts["\(correction.wrong.lowercased())\u{2192}\(correction.right)"] != nil
         }
-    }
-
-    /// Forget confirmed/pending corrections while preserving terms the user
-    /// imported or added independently of a correction.
-    func clearCorrections() {
-        load()
-        let standalone = portableSnapshot().standaloneVocabulary
-        learned.replacements = [:]
-        learned.softReplacements = [:]
-        learned.counts = [:]
-        learned.vocabulary = standalone
-        save()
     }
 
     // MARK: - Import / export (portable personal dictionary)
@@ -416,84 +401,6 @@ final class LearningStore {
             return false
         }
         return true
-    }
-
-    @discardableResult
-    func addStandaloneVocabulary(_ rawTerm: String) throws -> Bool {
-        let term = try DictionaryValue(rawTerm).text
-        load()
-        guard !learned.vocabulary.contains(where: {
-            Self.normalized($0) == Self.normalized(term)
-        }) else { return false }
-        learned.vocabulary.append(term)
-        prune()
-        save()
-        return true
-    }
-
-    func removeStandaloneVocabulary(_ rawTerm: String) {
-        guard let term = try? DictionaryValue(rawTerm).text else { return }
-        load()
-        let key = Self.normalized(term)
-        let backed = Set((Array(learned.replacements.values)
-            + Array(learned.softReplacements.values)).map(Self.normalized))
-        guard !backed.contains(key) else { return }
-        learned.vocabulary.removeAll { Self.normalized($0) == key }
-        save()
-    }
-
-    func exportData() -> Data? {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        return try? encoder.encode(portableSnapshot())
-    }
-
-    /// Merges a previously exported dictionary (existing entries win; imported
-    /// real-word wrongs are demoted to the context-gated soft tier no matter
-    /// which tier they were exported from). Returns (corrections, vocabulary)
-    /// counts actually added, or nil for an unreadable file.
-    func importData(_ data: Data) -> (corrections: Int, vocabulary: Int)? {
-        guard let incoming = try? JSONDecoder().decode(PortableSnapshot.self, from: data) else {
-            return nil
-        }
-        // The tolerant decoder accepts ANY JSON object; an empty result means
-        // this wasn't a dictionary file — report that, not "imported 0".
-        guard !incoming.replacements.isEmpty || !incoming.softReplacements.isEmpty
-            || !incoming.standaloneVocabulary.isEmpty
-        else { return nil }
-        load()
-        var corrections = 0
-        let pairs = incoming.replacements.merging(incoming.softReplacements) { hard, _ in hard }
-        for (wrong, right) in pairs {
-            guard let heard = try? DictionaryValue(wrong),
-                  let written = try? DictionaryValue(right) else { continue }
-            let key = heard.normalized
-            guard
-                  learned.replacements[key] == nil, learned.softReplacements[key] == nil,
-                  !Self.stopwords.contains(key)
-            else { continue }
-            if Self.isRealWord(key) {
-                learned.softReplacements[key] = written.text
-            } else {
-                learned.replacements[key] = written.text
-            }
-            if !learned.vocabulary.contains(where: {
-                Self.normalized($0) == written.normalized
-            }) { learned.vocabulary.append(written.text) }
-            corrections += 1
-        }
-        var vocabulary = 0
-        for rawTerm in incoming.standaloneVocabulary {
-            guard let term = try? DictionaryValue(rawTerm),
-                  !learned.vocabulary.contains(where: {
-                      Self.normalized($0) == term.normalized
-                  }) else { continue }
-            learned.vocabulary.append(term.text)
-            vocabulary += 1
-        }
-        prune()
-        save()
-        return (corrections, vocabulary)
     }
 
     private static func validatedPairs(_ pairs: [String: String]) -> [String: String] {

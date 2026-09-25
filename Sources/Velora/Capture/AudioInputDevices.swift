@@ -120,15 +120,6 @@ enum AudioInputDevices {
         current().sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    /// Pure resolver: the device capture should bind to, or nil to follow the
-    /// system default. nil/empty persisted UID → default; a persisted UID not
-    /// in `devices` (temporarily unplugged) also → default, and the caller
-    /// must keep the persisted value untouched so it wins on reconnect.
-    static func resolve(persistedUID: String?, in devices: [Device]) -> AudioDeviceID? {
-        guard let persistedUID, !persistedUID.isEmpty else { return nil }
-        return devices.first(where: { $0.uid == persistedUID })?.id
-    }
-
     /// Installs the hardware device-list listener once (idempotent). Core
     /// Audio delivers on the queue given here — main — so observers of the
     /// notification never need to hop threads themselves.

@@ -68,13 +68,6 @@ enum HUDState: Equatable {
         isHidden || self == .standby
     }
 
-    var isMeetingPrompt: Bool {
-        switch self {
-        case .meetingSuggestion, .meetingEnd: return true
-        default: return false
-        }
-    }
-
     /// These capsules contain SwiftUI buttons. The hosting view must not
     /// intercept their clicks as whole-HUD dictation taps.
     var usesNativeMouseControls: Bool {

@@ -5175,19 +5175,6 @@ def test_media_fallback_cannot_target_other_named_player(fallback):
         }))
 
 
-def test_media_pid_metadata_does_not_weaken_dictation_snapshot():
-    swift = (Path(__file__).resolve().parents[2]
-             / "Sources/Velora/Capture/MediaPlaybackCoordinator.swift").read_text()
-    completeness_guard = re.search(
-        r"guard let isRunningOutput =[\s\S]*?isComplete = false[\s\S]*?continue",
-        swift,
-    )
-
-    assert completeness_guard is not None
-    assert "kAudioProcessPropertyPID" not in completeness_guard.group(0)
-    assert "int32Property" in swift
-
-
 def test_media_control_keeps_runtime_goal_verification():
     context = actions.ActionContext.from_dict({
         "frontmost_app": "Music", "ui_snapshot": _media_ui(),

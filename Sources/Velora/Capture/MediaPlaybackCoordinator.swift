@@ -393,7 +393,32 @@ enum MediaPlaybackSystem {
         return left == right
     }
 
+    // Test seam: internal so Selftest can inject reads.
+    /// Per-process Core Audio reads, split from `snapshot()` so selftest can
+    /// script a process whose properties fail to read.
+    struct ProcessReads {
+        var bundleID: (AudioObjectID) -> String?
+        var isRunningOutput: (AudioObjectID) -> UInt32?
+        var isRunningInput: (AudioObjectID) -> UInt32?
+        var pid: (AudioObjectID) -> Int32?
+
+        static let coreAudio = ProcessReads(
+            bundleID: { stringProperty($0, kAudioProcessPropertyBundleID) },
+            isRunningOutput: { uint32Property($0, kAudioProcessPropertyIsRunningOutput) },
+            isRunningInput: { uint32Property($0, kAudioProcessPropertyIsRunningInput) },
+            pid: { int32Property($0, kAudioProcessPropertyPID) })
+    }
+
     static func snapshot() -> MediaPlaybackCoordinator.Snapshot {
+        snapshot(of: processObjects(), reading: .coreAudio)
+    }
+
+    // Test seam: internal so Selftest can inject reads.
+    /// An unreadable running flag makes the snapshot incomplete, so dictation
+    /// sends no media key. A missing PID is metadata and never does.
+    static func snapshot(
+        of objects: [AudioObjectID], reading reads: ProcessReads
+    ) -> MediaPlaybackCoordinator.Snapshot {
         var processes = Set<AudioObjectID>()
         var playing = Set<AudioObjectID>()
         var allPlaying = Set<AudioObjectID>()
@@ -402,21 +427,18 @@ enum MediaPlaybackSystem {
         var pids: [AudioObjectID: Int] = [:]
         var isComplete = true
         let ownBundleID = Bundle.main.bundleIdentifier ?? "com.sushil.velora"
-        for process in processObjects() {
-            let bundleID = stringProperty(process, kAudioProcessPropertyBundleID)
+        for process in objects {
+            let bundleID = reads.bundleID(process)
             guard let bundleID, bundleID != ownBundleID else { continue }
-            guard let isRunningOutput = uint32Property(
-                      process, kAudioProcessPropertyIsRunningOutput),
-                  let isRunningInput = uint32Property(
-                      process, kAudioProcessPropertyIsRunningInput)
+            guard let isRunningOutput = reads.isRunningOutput(process),
+                  let isRunningInput = reads.isRunningInput(process)
             else {
                 isComplete = false
                 continue
             }
             processes.insert(process)
             bundleIDs[process] = bundleID
-            if let rawPID = int32Property(
-                process, kAudioProcessPropertyPID), rawPID > 0 {
+            if let rawPID = reads.pid(process), rawPID > 0 {
                 pids[process] = Int(rawPID)
             }
             if isRunningInput != 0 { inputProcesses.insert(process) }

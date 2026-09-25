@@ -270,7 +270,6 @@ extension SettingsDocument {
     /// Machine-only preferences kept in UserDefaults, never SettingsDocument.
     struct MachineLocalSettings: Equatable {
         var onboardingComplete: Bool
-        var settingsSidebarCollapsed: Bool
         var inputDeviceUid: String?
         var localAgentAccess: Bool
         var meetingCalendar: Bool
@@ -289,7 +288,6 @@ extension SettingsDocument {
 
         static let defaults = MachineLocalSettings(
             onboardingComplete: false,
-            settingsSidebarCollapsed: false,
             inputDeviceUid: nil,
             localAgentAccess: false,
             meetingCalendar: false,

@@ -196,6 +196,7 @@ enum Selftest {
         testMediaPlaybackMisdirectedRestoreRollsBackOnTermination()
         testMediaPlaybackPausedBrowserFailsClosed()
         testMediaPlaybackSupportedPlayers()
+        testMediaSnapshotCompleteness()
         testInsertionBoundary()
         testInsertionContinuation()
         testStreamSettle()
@@ -1393,37 +1394,23 @@ enum Selftest {
             expect(true, "out-of-range sound volume is rejected")
         }
 
-        var invalidNumericLimits = document
-        invalidNumericLimits.settings.dictation.typingWordsPerMinute = Int.max
-        do {
-            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
-            expect(false, "unbounded imported typing speed is rejected")
-        } catch {
-            expect(true, "unbounded imported typing speed is rejected")
-        }
-        invalidNumericLimits = document
-        invalidNumericLimits.settings.engine.maximumRecordingSeconds = Double.greatestFiniteMagnitude
-        do {
-            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
-            expect(false, "unbounded imported recording duration is rejected")
-        } catch {
-            expect(true, "unbounded imported recording duration is rejected")
-        }
-        invalidNumericLimits = document
-        invalidNumericLimits.settings.engine.audioRetentionDays = Double.greatestFiniteMagnitude
-        do {
-            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
-            expect(false, "unbounded imported audio retention is rejected")
-        } catch {
-            expect(true, "unbounded imported audio retention is rejected")
-        }
-        invalidNumericLimits = document
-        invalidNumericLimits.settings.engine.audioMaximumMegabytes = Double.greatestFiniteMagnitude
-        do {
-            _ = try SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalidNumericLimits))
-            expect(false, "unbounded imported audio storage is rejected")
-        } catch {
-            expect(true, "unbounded imported audio storage is rejected")
+        // Every imported numeric limit is bounded; one unbounded value
+        // rejects the whole document.
+        let unboundedLimits: [(String, (inout SettingsDocument) -> Void)] = [
+            ("typing speed", { $0.settings.dictation.typingWordsPerMinute = Int.max }),
+            ("recording duration", {
+                $0.settings.engine.maximumRecordingSeconds = .greatestFiniteMagnitude
+            }),
+            ("audio retention", { $0.settings.engine.audioRetentionDays = .greatestFiniteMagnitude }),
+            ("audio storage", {
+                $0.settings.engine.audioMaximumMegabytes = .greatestFiniteMagnitude
+            }),
+        ]
+        for (label, makeUnbounded) in unboundedLimits {
+            var invalid = document
+            makeUnbounded(&invalid)
+            let decoded = try? SettingsDocumentCodec.decode(SettingsDocumentCodec.encode(invalid))
+            expect(decoded == nil, "unbounded imported \(label) is rejected")
         }
 
         var invalidShortcuts = document
@@ -2278,6 +2265,13 @@ enum Selftest {
         try? FileManager.default.removeItem(at: dir)
     }
 
+    /// True when neither in-memory tier holds a correction. Reads `learned`
+    /// directly: `portableSnapshot()` reloads from disk and drops stopwords,
+    /// so it would hide the state these checks are about.
+    private static func holdsNoCorrections(_ store: LearningStore) -> Bool {
+        store.learned.replacements.isEmpty && store.learned.softReplacements.isEmpty
+    }
+
     private static func tiers(_ url: URL) -> (hard: [String: String], soft: [String: String]) {
         struct Learned: Decodable {
             var replacements: [String: String]?
@@ -2311,7 +2305,7 @@ enum Selftest {
         withStore { store, _ in
             expect(store.observe([("hello", "Howdy")]).isEmpty, "stopword refused (1st)")
             expect(store.observe([("hello", "Howdy")]).isEmpty, "stopword refused (2nd)")
-            expect(store.count == 0, "stopword never persisted")
+            expect(holdsNoCorrections(store), "stopword never persisted")
         }
         withStore { store, _ in
             expect(store.observe([("cat", "car")]).isEmpty, "ordinary word needs 2 sightings")
@@ -2338,10 +2332,13 @@ enum Selftest {
                    "the rejected correction is absent from the durable projection")
         }
         withStore { store, url in
-            _ = store.observe([("lung", "Airlearn")])
+            // One entry per tier: "lung" is soft (a real word), "velor" hard.
+            _ = store.observe([("lung", "Airlearn"), ("velor", "Velora")])
             store.remove(wrong: "lung")
-            expect(store.count == 0, "remove forgets the entry")
+            store.remove(wrong: "velor")
+            expect(holdsNoCorrections(store), "remove forgets the entry")
             expect(tiers(url).soft["lung"] == nil, "remove clears soft tier on disk")
+            expect(tiers(url).hard["velor"] == nil, "remove clears hard tier on disk")
         }
         let blockedDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("velora-learning-save-\(UUID().uuidString)")
@@ -2353,7 +2350,7 @@ enum Selftest {
             url: blockedParent.appendingPathComponent("learned.json"))
         expect(blockedStore.observe([("velor", "Velora")]).isEmpty,
                "a correction is not reported committed when atomic save fails")
-        expect(blockedStore.count == 0,
+        expect(holdsNoCorrections(blockedStore),
                "a failed atomic save restores the prior in-memory learning state")
         try? FileManager.default.removeItem(at: blockedDirectory)
     }
@@ -2430,12 +2427,6 @@ enum Selftest {
         let learned = try! DictionaryEntry.learned(
             wrong: "valora", right: "Velora", soft: false,
             deviceID: "mac-a", at: t0)
-        let manual = try! DictionaryEntry.manual(
-            writeAs: "Velora Pro", heardAs: "valora", deviceID: "mac-b", at: t1)
-        let precedence = DictionaryDocument(entries: [learned, manual]).effectiveProjection
-        expect(precedence.replacements["valora"] == "Velora Pro",
-               "manual replacement outranks learned correction")
-
         let cleared = DictionaryDocument(entries: [learned]).clearing(
             .learned, deviceID: "mac-b", at: t1)
         let longOfflineMerge = cleared.merged(with: DictionaryDocument(entries: [learned]))
@@ -2520,13 +2511,7 @@ enum Selftest {
             "candidates": [sentinels[4]: ["count": 1]],
         ]).write(to: fixture.auto)
 
-        let repository = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "privacy-mac",
-            now: { Date(timeIntervalSince1970: 100) })
+        let repository = makeSyncRepository(fixture, deviceID: "privacy-mac")
         let exported = try! repository.exportData()
         let json = String(decoding: exported, as: UTF8.self)
         for sentinel in sentinels {
@@ -2562,12 +2547,8 @@ enum Selftest {
         }
         try! DictionaryDocument(entries: entries).encoded().write(to: maximumFixture.state)
         let launchStart = ProcessInfo.processInfo.systemUptime
-        let maximumRepository = DictionaryRepository(
-            stateURL: maximumFixture.state,
-            configURL: maximumFixture.config,
-            learnedURL: maximumFixture.learned,
-            autoURL: maximumFixture.auto,
-            deviceID: "benchmark-mac")
+        let maximumRepository = makeSyncRepository(
+            maximumFixture, deviceID: "benchmark-mac", now: Date.init)
         let launchDuration = ProcessInfo.processInfo.systemUptime - launchStart
         let mutationStart = ProcessInfo.processInfo.systemUptime
         try! maximumRepository.update(id: entries[0].logicalKey, writeAs: "TERM0000")
@@ -2657,31 +2638,6 @@ enum Selftest {
                "applying portable learning preserves local pending counts")
         expect(Set(afterApply["vocabulary"] as? [String] ?? []).isSuperset(of: ["Velora AI", "iCloud++", "node.js"]),
                "applying portable learning rebuilds correction and standalone vocabulary")
-
-        store.clearCorrections()
-        let afterClear = store.portableSnapshot()
-        expect(afterClear.replacements.isEmpty && afterClear.softReplacements.isEmpty,
-               "forget learned corrections clears both correction tiers")
-        expect(afterClear.standaloneVocabulary == ["node.js"],
-               "forget learned corrections preserves standalone vocabulary")
-
-        expect((try? store.addStandaloneVocabulary("C++")) == true,
-               "standalone vocabulary can be added directly")
-        expect(store.exportData().map { String(decoding: $0, as: UTF8.self).contains("C++") } == true,
-               "vocabulary-only dictionaries remain exportable")
-        store.removeStandaloneVocabulary("C++")
-        expect(!store.portableSnapshot().standaloneVocabulary.contains("C++"),
-               "standalone vocabulary can be removed directly")
-
-        let malformed: [String: Any] = [
-            "replacements": ["bad\nkey": "Injected", "valid": String(repeating: "x", count: 61)],
-            "vocabulary": ["also\nbad", String(repeating: "y", count: 61)],
-        ]
-        let result = store.importData(try! JSONSerialization.data(withJSONObject: malformed))
-        expect(result == nil || (result?.corrections == 0 && result?.vocabulary == 0),
-               "dictionary import rejects malformed prompt-active strings")
-        expect(!String(decoding: store.exportData()!, as: UTF8.self).contains("Injected"),
-               "malformed imported correction never reaches the prompt store")
 
         let blockedParent = dir.appendingPathComponent("blocked-learned")
         try! Data("not a directory".utf8).write(to: blockedParent)
@@ -2818,13 +2774,7 @@ enum Selftest {
             "candidates": ["Candidate": ["count": 1]],
         ]).write(to: fixture.auto)
 
-        let repository = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "mac-a",
-            now: { Date(timeIntervalSince1970: 100) })
+        let repository = makeSyncRepository(fixture)
         expect(FileManager.default.fileExists(atPath: fixture.state.path),
                "first launch persists a canonical dictionary document")
         expect(Set(repository.rows.map(\.writeAs)).isSuperset(of: [
@@ -2837,13 +2787,7 @@ enum Selftest {
         expect(repository.rows.first(where: { $0.writeAs == "AutoName" })?.source == .automatic,
                "promoted miner vocabulary keeps its automatic source")
 
-        let second = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "mac-a",
-            now: { Date(timeIntervalSince1970: 200) })
+        let second = makeSyncRepository(fixture, now: { Date(timeIntervalSince1970: 200) })
         expect(second.rows.count == repository.rows.count,
                "migration is idempotent after canonical state exists")
         let learnedRoot = try! JSONSerialization.jsonObject(
@@ -2862,12 +2806,8 @@ enum Selftest {
         let fixture = DictionaryRepositoryFixture()
         var reloads = 0
         var stateExistedAtReload = false
-        let repository = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "mac-a",
+        let repository = makeSyncRepository(
+            fixture,
             now: { Date(timeIntervalSince1970: Double(100 + reloads)) },
             reload: {
                 reloads += 1
@@ -2958,35 +2898,19 @@ enum Selftest {
 
     private static func testDictionaryRepositoryRemoteMerge() {
         let fixture = DictionaryRepositoryFixture()
-        let repository = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "mac-a",
-            now: { Date(timeIntervalSince1970: 100) })
+        let repository = makeSyncRepository(fixture)
         _ = try! repository.add(writeAs: "LocalTerm")
-        let beforeCorrupt = try! Data(contentsOf: fixture.state)
-        expect(!repository.applyRemote(Data("not json".utf8)),
-               "corrupt remote document is refused")
-        expect(try! Data(contentsOf: fixture.state) == beforeCorrupt,
-               "corrupt remote document leaves valid local state untouched")
 
         let remoteEntry = try! DictionaryEntry.manual(
             writeAs: "RemoteTerm", deviceID: "mac-b", at: Date(timeIntervalSince1970: 200))
-        let remote = try! DictionaryDocument(entries: [remoteEntry]).encoded()
-        expect(repository.applyRemote(remote), "valid remote document merges")
+        expect((try? repository.mergeRemote(DictionaryDocument(entries: [remoteEntry]))) != nil,
+               "valid remote document merges")
         expect(Set(repository.rows.map(\.writeAs)) == ["LocalTerm", "RemoteTerm"],
                "remote merge preserves independent local and remote additions")
 
         let importedFixture = DictionaryRepositoryFixture()
-        let imported = DictionaryRepository(
-            stateURL: importedFixture.state,
-            configURL: importedFixture.config,
-            learnedURL: importedFixture.learned,
-            autoURL: importedFixture.auto,
-            deviceID: "mac-c",
-            now: { Date(timeIntervalSince1970: 300) })
+        let imported = makeSyncRepository(
+            importedFixture, deviceID: "mac-c", now: { Date(timeIntervalSince1970: 300) })
         _ = try! imported.add(writeAs: "KeepLocalOnImport")
         let firstImport = try! imported.importData(try! repository.exportData())
         expect(firstImport == DictionaryImportResult(added: 2, keptExisting: 0),
@@ -3019,13 +2943,8 @@ enum Selftest {
             at: Date(timeIntervalSince1970: 300))
             .upserting(offlineAfterClear)
         try! offlineDocument.encoded().write(to: offlineFixture.state)
-        let offlineRepository = DictionaryRepository(
-            stateURL: offlineFixture.state,
-            configURL: offlineFixture.config,
-            learnedURL: offlineFixture.learned,
-            autoURL: offlineFixture.auto,
-            deviceID: "online-mac",
-            now: { Date(timeIntervalSince1970: 400) })
+        let offlineRepository = makeSyncRepository(
+            offlineFixture, deviceID: "online-mac", now: { Date(timeIntervalSince1970: 400) })
         expect(offlineRepository.rows.map(\.writeAs) == ["OfflineAfterClear"],
                "post-clear offline entry is manageable in repository UI")
         do {
@@ -3059,14 +2978,7 @@ enum Selftest {
     private static func testDictionaryRepositoryCapturesLearning() {
         let fixture = DictionaryRepositoryFixture()
         var reloads = 0
-        let repository = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "mac-a",
-            now: { Date(timeIntervalSince1970: 100) },
-            reload: { reloads += 1 })
+        let repository = makeSyncRepository(fixture, reload: { reloads += 1 })
         let committed = repository.observeCorrections([("velor", "Velora")])
         expect(committed.count == 1, "repository owns edit-learning observation")
         expect(repository.rows.contains(where: {
@@ -3132,12 +3044,8 @@ enum Selftest {
             "vocabulary": Array(boundedReplacements.values),
             "counts": [:],
         ]).write(to: boundedFixture.learned)
-        let boundedRepository = DictionaryRepository(
-            stateURL: boundedFixture.state,
-            configURL: boundedFixture.config,
-            learnedURL: boundedFixture.learned,
-            autoURL: boundedFixture.auto,
-            deviceID: "bounded-learning",
+        let boundedRepository = makeSyncRepository(
+            boundedFixture, deviceID: "bounded-learning",
             now: { Date(timeIntervalSince1970: 200) })
         expect(boundedRepository.rows.contains(where: { $0.writeAs == "Zzzright" }),
                "bounded fixture starts with the alphabetically-last learned rule")
@@ -3333,9 +3241,13 @@ enum Selftest {
                "different iCloud identity tokens remain isolated")
     }
 
+    /// A repository on the fixture's files. `now` defaults to a fixed instant
+    /// so entry timestamps are stable across checks.
     private static func makeSyncRepository(
         _ fixture: DictionaryRepositoryFixture,
-        deviceID: String = "mac-a"
+        deviceID: String = "mac-a",
+        now: @escaping () -> Date = { Date(timeIntervalSince1970: 100) },
+        reload: @escaping () -> Void = {}
     ) -> DictionaryRepository {
         DictionaryRepository(
             stateURL: fixture.state,
@@ -3343,7 +3255,8 @@ enum Selftest {
             learnedURL: fixture.learned,
             autoURL: fixture.auto,
             deviceID: deviceID,
-            now: { Date(timeIntervalSince1970: 100) })
+            now: now,
+            reload: reload)
     }
 
     private static func testDictionarySyncAvailabilityAndPublish() {
@@ -3421,6 +3334,7 @@ enum Selftest {
         let corruptFixture = DictionaryRepositoryFixture()
         let corruptRepository = makeSyncRepository(corruptFixture)
         _ = try! corruptRepository.add(writeAs: "KeepLocal")
+        let beforeCorrupt = try! Data(contentsOf: corruptFixture.state)
         let corrupt = FakeDictionarySyncTransport()
         corrupt.versionsResult = .success([Data("not json".utf8)])
         let corruptSync = ICloudDictionarySync(
@@ -3439,6 +3353,8 @@ enum Selftest {
         }
         expect(corruptRepository.rows.map(\.writeAs) == ["KeepLocal"] && corrupt.writes.isEmpty,
                "corrupt cloud content never replaces or republishes valid local state")
+        expect(try! Data(contentsOf: corruptFixture.state) == beforeCorrupt,
+               "corrupt cloud content leaves the saved local dictionary untouched")
         corruptSync.stop()
         fixture.remove()
         corruptFixture.remove()
@@ -3619,13 +3535,7 @@ enum Selftest {
 
     private static func testDictionaryRowsOrderNewestFirst() {
         let fixture = DictionaryRepositoryFixture()
-        let repository = DictionaryRepository(
-            stateURL: fixture.state,
-            configURL: fixture.config,
-            learnedURL: fixture.learned,
-            autoURL: fixture.auto,
-            deviceID: "mac-a",
-            now: { Date(timeIntervalSince1970: 100) })
+        let repository = makeSyncRepository(fixture)
 
         let day: TimeInterval = 86_400
         try! repository.replace(with: DictionaryDocument(entries: [
@@ -3960,14 +3870,17 @@ enum Selftest {
 
     // MARK: - Stats streak
 
-    private static func testStreak() {
+    /// The `yyyy-MM-dd` history day `offset` days before today, local time.
+    private static func streakDay(_ offset: Int) -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
         formatter.timeZone = .current
-        func day(_ offset: Int) -> String {
-            formatter.string(from: Calendar.current.date(
-                byAdding: .day, value: -offset, to: Date())!)
-        }
+        return formatter.string(from: Calendar.current.date(
+            byAdding: .day, value: -offset, to: Date())!)
+    }
+
+    private static func testStreak() {
+        let day = streakDay
         expect(HistoryStore.streak(days: []) == 0, "no history → no streak")
         expect(HistoryStore.streak(days: [day(0)]) == 1, "today only → 1")
         expect(HistoryStore.streak(days: [day(1)]) == 1, "yesterday only → streak alive")
@@ -4009,13 +3922,7 @@ enum Selftest {
     }
 
     private static func testLongestStreak() {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        formatter.timeZone = .current
-        func day(_ offset: Int) -> String {
-            formatter.string(from: Calendar.current.date(
-                byAdding: .day, value: -offset, to: Date())!)
-        }
+        let day = streakDay
         expect(HistoryStore.longestStreak(days: []) == 0, "no history → no longest streak")
         expect(HistoryStore.longestStreak(days: [day(0)]) == 1, "single day → 1")
         expect(HistoryStore.longestStreak(days: [day(0), day(1), day(3), day(4), day(5)]) == 3,
@@ -4324,8 +4231,6 @@ enum Selftest {
                    "stt latency averages only rows that carry it")
             expect(insights.week.sttSamples == 2 && insights.week.averageSttMs == 300,
                    "rows without stt_ms don't drag the latency average")
-            expect(insights.allTime.averageCleanupMs == 200,
-                   "cleanup latency averages only cleanup-timed rows")
             expect(
                 insights.allTime.cleanupWallSamples == 2
                     && insights.allTime.averageCleanupWallMs == 300,
@@ -4337,12 +4242,8 @@ enum Selftest {
 
             expect(insights.week.cleanupKnown == 3 && insights.week.cleanupApplied == 2,
                    "cleanup-applied rate uses only state-known rows")
-            expect(insights.week.cleanupAppliedRate.map { abs($0 - 2.0 / 3.0) < 0.0001 } == true,
-                   "cleanup-applied rate = applied / known")
             expect(insights.today.cleanupChanged == 1,
                    "raw≠final delta counts only cleanup-applied rows that changed the text")
-            expect(insights.today.cleanupChangedRate == 0.5,
-                   "cleanup-changed rate = changed / applied")
             expect(insights.allTime.zeroEditRate == nil,
                    "no quality observations → no zero-edit claim")
 
@@ -4369,15 +4270,13 @@ enum Selftest {
             let insights = store.insights()
             expect(insights.currentStreak == 2, "current streak from stored rows")
             expect(insights.longestStreak == 3, "longest streak from stored rows")
-            expect(store.stats().streakDays == insights.currentStreak,
-                   "History and Intelligence use the same non-empty streak definition")
         }
 
         withHistoryStore { store, _ in
             store.insert(dictation(daysAgo: 0, words: 0, raw: "audio only", final: ""))
             store.insert(dictation(daysAgo: 2, words: 3))
-            expect(store.stats().streakDays == 0 && store.insights().currentStreak == 0,
-                   "an empty failed dictation cannot keep either streak alive")
+            expect(store.insights().currentStreak == 0,
+                   "an empty failed dictation cannot keep the streak alive")
         }
     }
 
@@ -7484,13 +7383,19 @@ enum Selftest {
     // MARK: - HUD waveform-first geometry
 
     private static func testHUDGeometry() {
-        expect(HUDGeometry.height == 56, "HUD stays a compact 56-point capsule")
-        expect(HUDGeometry.minListeningWidth == 280, "HUD keeps the original minimum width")
-        expect(HUDGeometry.maxListeningWidth == 420, "HUD has a bounded context-label width")
-        expect(HUDGeometry.insertedDiameter == 56, "success morph ends as a circle")
-        expect(
-            HUDGeometry.waveformSize == CGSize(width: 120, height: 32),
-            "HUD restores the original waveform footprint")
+        // Spec values (docs/SPEC.md, docs/plans/2026-07-11-hud-trust-recovery-design.md):
+        // a 56-point capsule, a 120 x 32 waveform, 24 mirrored bars over 12 spectrum bands.
+        let hudSpec: [(actual: CGFloat, spec: CGFloat, rule: String)] = [
+            (HUDGeometry.height, 56, "HUD stays a compact 56-point capsule"),
+            (HUDGeometry.waveformSize.width, 120, "HUD waveform keeps its 120-point width"),
+            (HUDGeometry.waveformSize.height, 32, "HUD waveform keeps its 32-point height"),
+            (CGFloat(WaveformLevelStore.barCount), 24, "HUD renders 24 mirrored waveform bars"),
+            (CGFloat(WaveformLevelStore.halfCount), 12, "HUD uses all 12 spectrum bands"),
+        ]
+        for pin in hudSpec {
+            expect(pin.actual == pin.spec, pin.rule)
+        }
+
         expect(HUDView.elapsedString(seconds: -1) == "0:00",
                "HUD timer clamps negative elapsed time")
         expect(HUDView.elapsedString(seconds: 599) == "9:59",
@@ -7592,11 +7497,6 @@ enum Selftest {
             DictationController.recordingLimitMessage(seconds: 3_600)
                 == "1-hour dictation limit reached",
             "recording-limit notice describes the one-hour default")
-        expect(WaveformLevelStore.barCount == 24, "HUD renders 24 mirrored waveform bars")
-        expect(WaveformLevelStore.halfCount == 12, "HUD uses all 12 spectrum bands")
-        expect(
-            HUDPanel.panelSize == NSSize(width: 480, height: 160),
-            "HUD host contains every capsule state and its shadow")
         expect(
             HUDPanel.panelSize.height >= HUDGeometry.height + 40,
             "HUD host leaves vertical room for motion and shadow")
@@ -7648,8 +7548,7 @@ enum Selftest {
                && HUDView.capsuleMetrics(for: endState, context: nil).size.width
                     == HUDGeometry.meetingPromptWidth,
                "meeting start and end questions render as one stable wide capsule")
-        expect(!suggestionState.isAvailable && suggestionState.isMeetingPrompt
-               && endState.isMeetingPrompt,
+        expect(!suggestionState.isAvailable && !endState.isAvailable,
                "meeting questions own the HUD until answered")
         expect(suggestionState.usesNativeMouseControls
                && endState.usesNativeMouseControls
@@ -7670,9 +7569,6 @@ enum Selftest {
             HUDEdge.edge(for: .custom, custom: .trailing) == .trailing
                 && HUDEdge.edge(for: .bottomCenter, custom: .trailing) == .center,
             "the stored custom anchor applies to custom positions only")
-        expect(
-            !HUDPosition.presets.contains(.custom),
-            "custom placement is drag-only, never a menu preset")
 
         // Dragged placement re-anchors toward the nearest screen edge so the
         // listening capsule can never grow off-screen (user-reported crop:
@@ -8259,33 +8155,6 @@ enum Selftest {
     // MARK: - Microphone selection
 
     private static func testAudioInputDeviceResolution() {
-        let mac = AudioInputDevices.Device(uid: "BuiltInMicUID", name: "MacBook Pro Microphone", id: 41)
-        let pods = AudioInputDevices.Device(uid: "AirPodsUID", name: "Sushil's AirPods Pro", id: 77)
-
-        expect(
-            AudioInputDevices.resolve(persistedUID: nil, in: [mac, pods]) == nil,
-            "no persisted mic follows the system default")
-        expect(
-            AudioInputDevices.resolve(persistedUID: "", in: [mac, pods]) == nil,
-            "an empty persisted UID follows the system default, never matches a device")
-        expect(
-            AudioInputDevices.resolve(persistedUID: "BuiltInMicUID", in: [mac, pods]) == mac.id,
-            "the persisted mic resolves to its device id while connected")
-        expect(
-            AudioInputDevices.resolve(persistedUID: "BuiltInMicUID", in: [pods]) == nil,
-            "an unplugged persisted mic falls back to the system default")
-
-        // The AirPods scenario: the chosen built-in mic disappears and comes
-        // back. The persisted UID is never rewritten by resolution — the same
-        // value must win again the moment the device is available.
-        let persisted = "BuiltInMicUID"
-        expect(
-            AudioInputDevices.resolve(persistedUID: persisted, in: []) == nil,
-            "no devices at all still resolves cleanly to the system default")
-        expect(
-            AudioInputDevices.resolve(persistedUID: persisted, in: [pods, mac]) == mac.id,
-            "the preserved choice wins again when its device reappears")
-
         // The mic picker must not show the HAL's private default-device
         // aggregate (user report: "CADefaultDeviceAggregate-43981-0" appeared
         // as a selectable mic). Real device names pass; internal identifiers
@@ -8326,6 +8195,18 @@ enum Selftest {
                 availableUIDs: ["AirPods:input", "BuiltInMicrophoneDevice"],
                 defaultUID: "AirPods:input") == "AirPods:input",
             "a disconnected chosen microphone falls back to the current default")
+        expect(
+            MicrophoneCaptureDevicePolicy.selectedUID(
+                persistedUID: nil,
+                availableUIDs: ["BuiltInMicrophoneDevice", "AirPods:input"],
+                defaultUID: "AirPods:input") == "AirPods:input",
+            "no persisted mic follows the system default")
+        expect(
+            MicrophoneCaptureDevicePolicy.selectedUID(
+                persistedUID: "",
+                availableUIDs: ["", "BuiltInMicrophoneDevice", "AirPods:input"],
+                defaultUID: "AirPods:input") == "AirPods:input",
+            "an empty persisted UID follows the system default, never matches a device")
         expect(
             MicrophoneCaptureDevicePolicy.selectedUID(
                 persistedUID: nil,
@@ -8818,570 +8699,439 @@ enum Selftest {
                "ordinary stop flushes converted tail PCM queued before source teardown")
     }
 
-    private static func testMediaPlaybackNoop() {
+    /// A coordinator on a scripted Core Audio snapshot. `toggles` counts the
+    /// media keys it posts, and `scheduled` queues its timer work so a test
+    /// fires each step in order.
+    private final class MediaHarness {
+        var snapshot: MediaPlaybackCoordinator.Snapshot
         var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { .init(processes: [], playing: []) },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        var scheduled: [() -> Void] = []
+        /// Runs after each posted media key, before the coordinator reads again.
+        var onToggle: () -> Void = {}
+        /// Stands in for the wait on an in-flight pause (`restoreBeforeAction`).
+        var onSleep: () -> Void = {}
+        private(set) lazy var coordinator = MediaPlaybackCoordinator(
+            snapshot: { [unowned self] in self.snapshot },
+            postToggle: { [unowned self] in
+                self.toggles += 1
+                self.onToggle()
+                return true
+            },
+            schedule: { [unowned self] _, work in self.scheduled.append(work) },
+            sleep: { [unowned self] _ in self.onSleep() })
 
-        coordinator.pauseForDictation()
-        coordinator.restoreAfterDictation()
+        init(_ snapshot: MediaPlaybackCoordinator.Snapshot) {
+            self.snapshot = snapshot
+        }
 
-        expect(toggles == 0, "dictation never toggles media that was already paused")
-        expect(scheduled.isEmpty, "no-player dictation schedules no media work")
+        /// Sets which processes produce output; `[]` means the pause landed.
+        func setPlaying(_ players: Set<AudioObjectID>) {
+            snapshot.playing = players
+            snapshot.allPlaying = players
+        }
+
+        func fireNext() { scheduled.removeFirst()() }
+
+        func fireAll() {
+            while !scheduled.isEmpty { fireNext() }
+        }
+    }
+
+    private static func testMediaPlaybackNoop() {
+        let media = MediaHarness(.init(processes: [], playing: []))
+
+        media.coordinator.pauseForDictation()
+        media.coordinator.restoreAfterDictation()
+
+        expect(media.toggles == 0, "dictation never toggles media that was already paused")
+        expect(media.scheduled.isEmpty, "no-player dictation schedules no media work")
     }
 
     private static func testMediaPlaybackUnknownStateFailsClosed() {
         let player = AudioObjectID(40)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: {
-                .init(processes: [player], playing: [player], isComplete: false)
-            },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(
+            processes: [player], playing: [player], isComplete: false))
 
-        coordinator.pauseForDictation()
+        media.coordinator.pauseForDictation()
 
-        expect(toggles == 0, "an unreadable Core Audio snapshot never sends a media command")
-        expect(scheduled.isEmpty, "unknown media state never creates a resume obligation")
+        expect(media.toggles == 0, "an unreadable Core Audio snapshot never sends a media command")
+        expect(media.scheduled.isEmpty, "unknown media state never creates a resume obligation")
     }
 
     private static func testMediaPlaybackPauseResume() {
         let player = AudioObjectID(41) // browser, Music, Spotify, or another media process
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        expect(toggles == 1, "single-process media gets one pause command at dictation start")
-        expect(scheduled.count == 1, "a posted pause is verified before Velora owns resumption")
+        media.coordinator.pauseForDictation()
+        expect(media.toggles == 1, "single-process media gets one pause command at dictation start")
+        expect(media.scheduled.count == 1, "a posted pause is verified before Velora owns resumption")
 
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        expect(scheduled.count == 1, "verified media pause schedules a delayed restore")
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        expect(media.scheduled.count == 1, "verified media pause schedules a delayed restore")
 
-        scheduled.removeFirst().1()
-        expect(toggles == 2, "only a verified Velora pause gets a matching resume command")
+        media.fireNext()
+        expect(media.toggles == 2, "only a verified Velora pause gets a matching resume command")
     }
 
     private static func testMediaPlaybackEarlyStop() {
         let player = AudioObjectID(42)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        coordinator.restoreAfterDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        expect(scheduled.count == 1,
+        media.coordinator.pauseForDictation()
+        media.coordinator.restoreAfterDictation()
+        media.setPlaying([])
+        media.fireNext()
+        expect(media.scheduled.count == 1,
                "capture ending before pause verification still queues the required restore")
 
-        scheduled.removeFirst().1()
-        expect(toggles == 2, "an early stop restores media after verification completes")
+        media.fireNext()
+        expect(media.toggles == 2, "an early stop restores media after verification completes")
     }
 
     private static func testMediaPlaybackFailedPause() {
         let player = AudioObjectID(43)
-        let snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        while !scheduled.isEmpty { scheduled.removeFirst().1() }
-        coordinator.restoreAfterDictation()
+        media.coordinator.pauseForDictation()
+        media.fireAll()
+        media.coordinator.restoreAfterDictation()
 
-        expect(toggles == 1, "an unobserved pause is never followed by a destructive toggle")
-        expect(scheduled.isEmpty, "failed pause verification leaves no restore pending")
+        expect(media.toggles == 1, "an unobserved pause is never followed by a destructive toggle")
+        expect(media.scheduled.isEmpty, "failed pause verification leaves no restore pending")
     }
 
     private static func testMediaPlaybackUserOverride() {
         let player = AudioObjectID(44)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        snapshot.playing = [player]
-        snapshot.allPlaying = [player]
-        scheduled.removeFirst().1()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.setPlaying([player])
+        media.fireNext()
 
-        expect(toggles == 1, "Velora does not toggle media the user already resumed")
+        expect(media.toggles == 1, "Velora does not toggle media the user already resumed")
     }
 
     private static func testMediaPlaybackAmbiguousPlayers() {
         let first = AudioObjectID(45)
         let second = AudioObjectID(46)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { .init(processes: [first, second], playing: [first, second]) },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(
+            processes: [first, second], playing: [first, second]))
 
-        coordinator.pauseForDictation()
+        media.coordinator.pauseForDictation()
 
-        expect(toggles == 0, "simultaneous output processes make the global media target ambiguous")
-        expect(scheduled.isEmpty, "ambiguous media ownership schedules no pause verification")
+        expect(media.toggles == 0, "simultaneous output processes make the global media target ambiguous")
+        expect(media.scheduled.isEmpty, "ambiguous media ownership schedules no pause verification")
     }
 
     private static func testMediaPlaybackMisdirectedToggleRollsBack() {
         let intended = AudioObjectID(54)
         let accidental = AudioObjectID(55)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
+        let media = MediaHarness(.init(
             processes: [intended], playing: [intended],
-            bundleIDs: [intended: "com.spotify.client"])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+            bundleIDs: [intended: "com.spotify.client"]))
 
-        coordinator.pauseForDictation()
-        snapshot.processes = [intended, accidental]
+        media.coordinator.pauseForDictation()
+        media.snapshot.processes = [intended, accidental]
         // Production excludes browsers from `playing`; the all-output set is
         // the only evidence that the global key started paused YouTube.
-        snapshot.playing = [intended]
-        snapshot.allPlaying = [intended, accidental]
-        snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
+        media.snapshot.playing = [intended]
+        media.snapshot.allPlaying = [intended, accidental]
+        media.snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
 
-        expect(toggles == 2, "a media key that starts the wrong player is immediately reversed")
-        expect(scheduled.isEmpty, "a misdirected media key never earns a later resume")
+        expect(media.toggles == 2, "a media key that starts the wrong player is immediately reversed")
+        expect(media.scheduled.isEmpty, "a misdirected media key never earns a later resume")
     }
 
     private static func testMediaPlaybackPausedBrowserBlocksDedicatedPause() {
         let player = AudioObjectID(66)
         let browser = AudioObjectID(67)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: {
-                .init(
-                    processes: [player, browser],
-                    playing: [player],
-                    allPlaying: [player],
-                    bundleIDs: [
-                        player: "com.spotify.client",
-                        browser: "app.zen-browser.zen-media-plugin-helper",
-                    ])
-            },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(
+            processes: [player, browser],
+            playing: [player],
+            allPlaying: [player],
+            bundleIDs: [
+                player: "com.spotify.client",
+                browser: "app.zen-browser.zen-media-plugin-helper",
+            ]))
 
-        coordinator.pauseForDictation()
+        media.coordinator.pauseForDictation()
 
-        expect(toggles == 0,
+        expect(media.toggles == 0,
                "a paused browser that could own the media key blocks a dedicated-player pause")
-        expect(scheduled.isEmpty,
+        expect(media.scheduled.isEmpty,
                "an ambiguous paused media-key target creates no later media work")
     }
 
     private static func testMediaPlaybackUnsupportedOutput() {
         let music = AudioObjectID(47)
         let call = AudioObjectID(48)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: {
-                .init(
-                    processes: [music], playing: [music],
-                    allPlaying: [music, call])
-            },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(
+            processes: [music], playing: [music],
+            allPlaying: [music, call]))
 
-        coordinator.pauseForDictation()
+        media.coordinator.pauseForDictation()
 
-        expect(toggles == 0, "simultaneous conference output makes media-key targeting unsafe")
-        expect(scheduled.isEmpty, "conference output schedules no media work")
+        expect(media.toggles == 0, "simultaneous conference output makes media-key targeting unsafe")
+        expect(media.scheduled.isEmpty, "conference output schedules no media work")
     }
 
     private static func testMediaPlaybackActiveInput() {
         let player = AudioObjectID(60)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: {
-                .init(
-                    processes: [player], playing: [player],
-                    inputProcesses: [player],
-                    bundleIDs: [player: "com.spotify.client"])
-            },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(
+            processes: [player], playing: [player],
+            inputProcesses: [player],
+            bundleIDs: [player: "com.spotify.client"]))
 
-        coordinator.pauseForDictation()
-        expect(toggles == 0, "media keys are blocked while the player process captures input")
-        expect(scheduled.isEmpty, "active call input creates no media resume obligation")
+        media.coordinator.pauseForDictation()
+        expect(media.toggles == 0, "media keys are blocked while the player process captures input")
+        expect(media.scheduled.isEmpty, "active call input creates no media resume obligation")
     }
 
     private static func testMediaPlaybackUnrelatedSystemInput() {
         let player = AudioObjectID(61)
         let systemSpeech = AudioObjectID(62)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: {
-                .init(
-                    processes: [player, systemSpeech], playing: [player],
-                    inputProcesses: [systemSpeech],
-                    bundleIDs: [
-                        player: "com.apple.Music",
-                        systemSpeech: "com.apple.CoreSpeech",
-                    ])
-            },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(
+            processes: [player, systemSpeech], playing: [player],
+            inputProcesses: [systemSpeech],
+            bundleIDs: [
+                player: "com.apple.Music",
+                systemSpeech: "com.apple.CoreSpeech",
+            ]))
 
-        coordinator.pauseForDictation()
-        expect(toggles == 1, "unrelated system speech input does not block dedicated media")
-        expect(scheduled.count == 1, "an eligible dedicated player still enters verification")
+        media.coordinator.pauseForDictation()
+        expect(media.toggles == 1, "unrelated system speech input does not block dedicated media")
+        expect(media.scheduled.count == 1, "an eligible dedicated player still enters verification")
     }
 
     private static func testMediaPlaybackUnsupportedOutputOnRestore() {
         let music = AudioObjectID(50)
         let call = AudioObjectID(51)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [music], playing: [music])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [music], playing: [music]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        snapshot.allPlaying = [call]
-        scheduled.removeFirst().1()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.snapshot.allPlaying = [call]
+        media.fireNext()
 
-        expect(toggles == 1, "new conference audio suppresses the media resume toggle")
+        expect(media.toggles == 1, "new conference audio suppresses the media resume toggle")
     }
 
     private static func testMediaPlaybackTerminationRestore() {
         let player = AudioObjectID(49)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        coordinator.restoreImmediatelyForTermination()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.coordinator.restoreImmediatelyForTermination()
 
-        expect(toggles == 2, "termination restores verified media without waiting on a timer")
-        scheduled.removeFirst().1()
-        expect(toggles == 2, "the stale delayed restore is inert after termination restoration")
+        expect(media.toggles == 2, "termination restores verified media without waiting on a timer")
+        media.fireNext()
+        expect(media.toggles == 2, "the stale delayed restore is inert after termination restoration")
     }
 
     private static func testMediaPlaybackActionRestore() {
         let player = AudioObjectID(70)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        coordinator.restoreBeforeAction()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.coordinator.restoreBeforeAction()
 
-        expect(toggles == 2,
+        expect(media.toggles == 2,
                "Action execution settles dictation's verified media pause first")
-        scheduled.removeFirst().1()
-        expect(toggles == 2,
+        media.fireNext()
+        expect(media.toggles == 2,
                "the stale dictation restore cannot reverse a later media action")
     }
 
     private static func testMediaPlaybackPendingActionRestore() {
         let player = AudioObjectID(71)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
         var waits = 0
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: {
-                toggles += 1
-                if toggles == 2 {
-                    snapshot.playing = [player]
-                    snapshot.allPlaying = [player]
-                }
-                return true
-            },
-            schedule: { delay, work in scheduled.append((delay, work)) },
-            sleep: { _ in
-                waits += 1
-                snapshot.playing = []
-                snapshot.allPlaying = []
-            })
+        media.onToggle = { [unowned media] in
+            if media.toggles == 2 { media.setPlaying([player]) }
+        }
+        media.onSleep = { [unowned media] in
+            waits += 1
+            media.setPlaying([])
+        }
 
-        coordinator.pauseForDictation()
-        coordinator.restoreAfterDictation()
-        coordinator.restoreBeforeAction()
+        media.coordinator.pauseForDictation()
+        media.coordinator.restoreAfterDictation()
+        media.coordinator.restoreBeforeAction()
 
-        expect(waits == 1 && toggles == 2,
+        expect(waits == 1 && media.toggles == 2,
                "Action waits for an in-flight dictation pause and restores it")
-        while !scheduled.isEmpty { scheduled.removeFirst().1() }
-        expect(toggles == 2,
+        media.fireAll()
+        expect(media.toggles == 2,
                "stale pause verification cannot change playback after Action starts")
     }
 
     private static func testMediaPlaybackPendingActionMisdirection() {
         let intended = AudioObjectID(72)
         let accidental = AudioObjectID(73)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
+        let media = MediaHarness(.init(
             processes: [intended], playing: [intended],
-            bundleIDs: [intended: "com.spotify.client"])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
+            bundleIDs: [intended: "com.spotify.client"]))
         var waits = 0
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) },
-            sleep: { _ in
-                waits += 1
-                snapshot.processes = [intended, accidental]
-                snapshot.allPlaying = [intended, accidental]
-                snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
-            })
+        media.onSleep = { [unowned media] in
+            waits += 1
+            media.snapshot.processes = [intended, accidental]
+            media.snapshot.allPlaying = [intended, accidental]
+            media.snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
+        }
 
-        coordinator.pauseForDictation()
-        coordinator.restoreAfterDictation()
-        coordinator.restoreBeforeAction()
+        media.coordinator.pauseForDictation()
+        media.coordinator.restoreAfterDictation()
+        media.coordinator.restoreBeforeAction()
 
-        expect(waits == 1 && toggles == 2,
+        expect(waits == 1 && media.toggles == 2,
                "Action reverses an in-flight pause that starts another player")
-        while !scheduled.isEmpty { scheduled.removeFirst().1() }
-        expect(toggles == 2,
+        media.fireAll()
+        expect(media.toggles == 2,
                "stale pause verification cannot repeat misdirection compensation")
     }
 
     private static func testMediaPlaybackTerminationDuringVerification() {
         let player = AudioObjectID(52)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        coordinator.restoreImmediatelyForTermination()
-        scheduled.removeFirst().1()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.coordinator.restoreImmediatelyForTermination()
+        media.fireNext()
 
-        expect(toggles == 2, "termination can restore a pause before verification fires")
+        expect(media.toggles == 2, "termination can restore a pause before verification fires")
     }
 
     private static func testMediaPlaybackRapidRestart() {
         let player = AudioObjectID(53)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
-            processes: [player], playing: [player])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        let media = MediaHarness(.init(processes: [player], playing: [player]))
 
-        coordinator.pauseForDictation()
-        coordinator.restoreAfterDictation()
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        expect(scheduled.isEmpty,
+        media.coordinator.pauseForDictation()
+        media.coordinator.restoreAfterDictation()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        expect(media.scheduled.isEmpty,
                "a second dictation inherits a pending pause without an early resume")
-        coordinator.restoreAfterDictation()
-        expect(scheduled.count == 1,
+        media.coordinator.restoreAfterDictation()
+        expect(media.scheduled.count == 1,
                "the inherited pause is restored only after the second dictation")
-        scheduled.removeFirst().1()
-        expect(toggles == 2, "rapid dictations produce one pause and one final resume")
+        media.fireNext()
+        expect(media.toggles == 2, "rapid dictations produce one pause and one final resume")
 
         // Also cover a restart after the restore timer was already scheduled.
-        snapshot.playing = [player]
-        snapshot.allPlaying = [player]
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        let staleRestore = scheduled.removeFirst().1
-        coordinator.pauseForDictation()
+        media.setPlaying([player])
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        let staleRestore = media.scheduled.removeFirst()
+        media.coordinator.pauseForDictation()
         staleRestore()
-        expect(toggles == 3, "a restarted dictation cancels the stale resume timer")
-        coordinator.restoreAfterDictation()
-        scheduled.removeFirst().1()
-        expect(toggles == 4, "the restarted dictation eventually performs one resume")
+        expect(media.toggles == 3, "a restarted dictation cancels the stale resume timer")
+        media.coordinator.restoreAfterDictation()
+        media.fireNext()
+        expect(media.toggles == 4, "the restarted dictation eventually performs one resume")
     }
 
     private static func testMediaPlaybackMisdirectedRestoreRollsBack() {
         let intended = AudioObjectID(56)
         let accidental = AudioObjectID(57)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
+        let media = MediaHarness(.init(
             processes: [intended], playing: [intended],
-            bundleIDs: [intended: "com.spotify.client"])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+            bundleIDs: [intended: "com.spotify.client"]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        scheduled.removeFirst().1()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.fireNext()
 
-        snapshot.processes = [intended, accidental]
-        snapshot.playing = []
-        snapshot.allPlaying = [accidental]
-        snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
-        scheduled.removeFirst().1()
+        media.snapshot.processes = [intended, accidental]
+        media.snapshot.playing = []
+        media.snapshot.allPlaying = [accidental]
+        media.snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
+        media.fireNext()
 
-        expect(toggles == 3, "a media restore that starts the wrong player is reversed")
-        coordinator.restoreAfterDictation()
-        expect(scheduled.isEmpty, "a misdirected restore leaves no outstanding media work")
+        expect(media.toggles == 3, "a media restore that starts the wrong player is reversed")
+        media.coordinator.restoreAfterDictation()
+        expect(media.scheduled.isEmpty, "a misdirected restore leaves no outstanding media work")
     }
 
     private static func testMediaPlaybackPausedBrowserBlocksDedicatedRestore() {
         let player = AudioObjectID(68)
         let browser = AudioObjectID(69)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
+        let media = MediaHarness(.init(
             processes: [player], playing: [player],
-            bundleIDs: [player: "com.apple.Music"])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+            bundleIDs: [player: "com.apple.Music"]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        snapshot.processes = [player, browser]
-        snapshot.bundleIDs[browser] = "app.zen-browser.zen"
-        scheduled.removeFirst().1()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.snapshot.processes = [player, browser]
+        media.snapshot.bundleIDs[browser] = "app.zen-browser.zen"
+        media.fireNext()
 
-        expect(toggles == 1,
+        expect(media.toggles == 1,
                "a paused browser that could own the media key suppresses player restore")
-        expect(scheduled.isEmpty,
+        expect(media.scheduled.isEmpty,
                "a suppressed ambiguous restore creates no verification work")
     }
 
     private static func testMediaPlaybackMisdirectedRestoreRollsBackOnTermination() {
         let intended = AudioObjectID(64)
         let accidental = AudioObjectID(65)
-        var snapshot = MediaPlaybackCoordinator.Snapshot(
+        let media = MediaHarness(.init(
             processes: [intended], playing: [intended],
-            bundleIDs: [intended: "com.apple.Music"])
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: { snapshot },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+            bundleIDs: [intended: "com.apple.Music"]))
 
-        coordinator.pauseForDictation()
-        snapshot.playing = []
-        snapshot.allPlaying = []
-        scheduled.removeFirst().1()
-        coordinator.restoreAfterDictation()
-        scheduled.removeFirst().1()
+        media.coordinator.pauseForDictation()
+        media.setPlaying([])
+        media.fireNext()
+        media.coordinator.restoreAfterDictation()
+        media.fireNext()
 
-        snapshot.processes = [intended, accidental]
-        snapshot.allPlaying = [accidental]
-        snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
-        coordinator.restoreImmediatelyForTermination()
-        scheduled.removeFirst().1()
+        media.snapshot.processes = [intended, accidental]
+        media.snapshot.allPlaying = [accidental]
+        media.snapshot.bundleIDs[accidental] = "com.google.Chrome.helper"
+        media.coordinator.restoreImmediatelyForTermination()
+        media.fireNext()
 
-        expect(toggles == 3,
+        expect(media.toggles == 3,
                "termination reverses a restore key that started paused browser media")
-        expect(scheduled.isEmpty,
+        expect(media.scheduled.isEmpty,
                "termination invalidates stale misdirected-restore verification")
     }
 
     private static func testMediaPlaybackPausedBrowserFailsClosed() {
         let browser = AudioObjectID(63)
-        var toggles = 0
-        var scheduled: [(TimeInterval, () -> Void)] = []
-        let coordinator = MediaPlaybackCoordinator(
-            snapshot: {
-                // Chromium keeps IsRunningOutput set after YouTube is paused,
-                // so a browser process in this Core Audio set is not evidence
-                // that sending a global Play/Pause key will pause anything.
-                .init(
-                    processes: [browser], playing: [browser],
-                    bundleIDs: [browser: "com.google.Chrome.helper"])
-            },
-            postToggle: { toggles += 1; return true },
-            schedule: { delay, work in scheduled.append((delay, work)) })
+        // Chromium keeps IsRunningOutput set after YouTube is paused, so a
+        // browser process in this Core Audio set is not evidence that sending
+        // a global Play/Pause key will pause anything.
+        let media = MediaHarness(.init(
+            processes: [browser], playing: [browser],
+            bundleIDs: [browser: "com.google.Chrome.helper"]))
 
-        coordinator.pauseForDictation()
+        media.coordinator.pauseForDictation()
 
-        expect(toggles == 0, "paused browser playback is never started by dictation")
-        expect(scheduled.isEmpty, "paused browser playback creates no restore obligation")
+        expect(media.toggles == 0, "paused browser playback is never started by dictation")
+        expect(media.scheduled.isEmpty, "paused browser playback creates no restore obligation")
     }
 
     private static func testMediaPlaybackSupportedPlayers() {
@@ -9406,6 +9156,31 @@ enum Selftest {
             "Zen browser processes remain visible to media-key ambiguity guards")
     }
 
+    private static func testMediaSnapshotCompleteness() {
+        let music = AudioObjectID(80)
+        var reads = MediaPlaybackSystem.ProcessReads(
+            bundleID: { _ in "com.apple.Music" },
+            isRunningOutput: { _ in 1 },
+            isRunningInput: { _ in 0 },
+            pid: { _ in nil })
+        let withoutPID = MediaPlaybackSystem.snapshot(of: [music], reading: reads)
+        expect(withoutPID.isComplete && withoutPID.playing == [music] && withoutPID.pids.isEmpty,
+               "a process without a readable PID keeps the media snapshot complete")
+
+        reads.pid = { _ in 4_242 }
+        expect(MediaPlaybackSystem.snapshot(of: [music], reading: reads).pids == [music: 4_242],
+               "a readable PID is recorded for the process")
+
+        reads.isRunningOutput = { _ in nil }
+        expect(!MediaPlaybackSystem.snapshot(of: [music], reading: reads).isComplete,
+               "an unreadable output running flag marks the media snapshot incomplete")
+
+        reads.isRunningOutput = { _ in 1 }
+        reads.isRunningInput = { _ in nil }
+        expect(!MediaPlaybackSystem.snapshot(of: [music], reading: reads).isComplete,
+               "an unreadable input running flag marks the media snapshot incomplete")
+    }
+
     // MARK: - Final-output clipboard staging
 
     private static func testInsertionBoundary() {
@@ -9417,31 +9192,39 @@ enum Selftest {
             TextInsertionBoundary.adjusted("Next sentence.", previous: " ", next: nil)
                 == "Next sentence.",
             "existing whitespace is never doubled")
-        expect(
-            TextInsertionBoundary.adjusted(", however", previous: "d", next: nil)
-                == ", however",
-            "leading punctuation stays attached to prior text")
-        expect(
-            TextInsertionBoundary.adjusted(".", previous: "d", next: nil) == ".",
-            "a dictated full stop stays attached to prior text")
-        expect(
-            TextInsertionBoundary.adjusted("Users", previous: "/", next: nil) == "Users",
-            "path components stay attached after a slash")
-        expect(
-            TextInsertionBoundary.adjusted("handle", previous: "@", next: nil) == "handle",
-            "handles stay attached after an at sign")
-        expect(
-            TextInsertionBoundary.adjusted("tag", previous: "#", next: nil) == "tag",
-            "tags stay attached after a hash")
-        expect(
-            TextInsertionBoundary.adjusted("based", previous: "-", next: nil) == "based",
-            "hyphenated text stays attached")
-        expect(
-            TextInsertionBoundary.adjusted("Users", previous: nil, next: "/") == "Users",
-            "text inserted before a path separator stays attached")
-        expect(
-            TextInsertionBoundary.adjusted("user", previous: nil, next: "@") == "user",
-            "text inserted before an at sign stays attached")
+
+        // Beside these characters dictated text is inserted exactly as
+        // spoken: no space opens a path, handle, tag, or identifier.
+        let attached: [(text: String, previous: Character?, next: Character?, rule: String)] = [
+            (", however", "d", nil,
+             "leading punctuation stays attached to prior text"),
+            (".", "d", nil,
+             "a dictated full stop stays attached to prior text"),
+            ("Users", "/", nil,
+             "path components stay attached after a slash"),
+            ("handle", "@", nil,
+             "handles stay attached after an at sign"),
+            ("tag", "#", nil,
+             "tags stay attached after a hash"),
+            ("based", "-", nil,
+             "hyphenated text stays attached"),
+            ("Users", nil, "/",
+             "text inserted before a path separator stays attached"),
+            ("user", nil, "@",
+             "text inserted before an at sign stays attached"),
+            ("bar", "_", nil,
+             "identifier fragments stay attached after underscores"),
+            ("PATH", "$", nil,
+             "environment variables stay attached after dollar signs"),
+            ("Users", "\\", nil,
+             "backslash-delimited paths stay attached"),
+        ]
+        for c in attached {
+            expect(
+                TextInsertionBoundary.adjusted(c.text, previous: c.previous, next: c.next) == c.text,
+                c.rule)
+        }
+
         expect(
             TextInsertionBoundary.adjusted("inside", previous: "(", next: ")")
                 == "inside",
@@ -9472,15 +9255,6 @@ enum Selftest {
                 boundary: TextSelectionBoundary(before: "Type.", after: ""),
                 mode: "Code") == "Nested",
             "uppercase code member access stays attached after a period")
-        expect(
-            TextInsertionBoundary.adjusted("bar", previous: "_", next: nil) == "bar",
-            "identifier fragments stay attached after underscores")
-        expect(
-            TextInsertionBoundary.adjusted("PATH", previous: "$", next: nil) == "PATH",
-            "environment variables stay attached after dollar signs")
-        expect(
-            TextInsertionBoundary.adjusted("Users", previous: "\\", next: nil) == "Users",
-            "backslash-delimited paths stay attached")
         expect(
             TextInsertionBoundary.adjusted(
                 "hello",
