@@ -2,6 +2,7 @@
 WhisperBackend segment closing/stitching (with a monkeypatched mlx_whisper —
 tests never load MLX), glossary prompt building, and the prompt-echo guard."""
 
+import contextlib
 import sys
 import types
 
@@ -131,6 +132,11 @@ def whisper(monkeypatch):
         mod = types.ModuleType("mlx_whisper")
         mod.transcribe = fake.transcribe
         monkeypatch.setitem(sys.modules, "mlx_whisper", mod)
+        # No real model behind the fake library: keep the configured
+        # language and skip the encoder memo (test_whisper_encoder_reuse).
+        monkeypatch.setattr(
+            stt_mod, "_encoding_once",
+            lambda _path, _audio, language: contextlib.nullcontext(language))
         backend = WhisperBackend("mlx-community/whisper-large-v3-turbo", "auto")
         backend._loaded = True  # noqa: SLF001 — skip load(); decode is faked
         backend._model_path = "/fake/model"  # noqa: SLF001

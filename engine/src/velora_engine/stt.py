@@ -15,12 +15,15 @@ All heavy imports are lazy (inside load()) so tests never touch MLX.
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import logging
 import math
 import os
 import re
 import time
 import zlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -557,6 +560,128 @@ def whisper_language(language: str | None) -> str | None:
     return language
 
 
+# Top-language probability at which first-window detection is trusted.
+# Below it (short or noisy clips, near chance) the zero-padded window and
+# stock's silence-padded clip can disagree, so stock decides instead.
+_SURE_LANGUAGE_P = 0.5
+
+
+class _EncodingMemo:
+    """The last Whisper encoder pass as (mel window, encoding), or None.
+
+    A plain object on purpose: MLX modules register tuple and array
+    attributes as parameters, so the pair cannot live on the encoder."""
+
+    __slots__ = ("entry",)
+
+    def __init__(self) -> None:
+        self.entry: tuple[Any, Any] | None = None
+
+
+@functools.cache
+def _memo_encoder_class() -> type:
+    """AudioEncoder that returns its previous encoding for an equal window.
+
+    Built on first use because the engine imports MLX lazily. The encoder
+    is deterministic, so a hit returns exactly what a fresh pass would:
+
+        detect_language(window) ─encode─▶ memo ◀─hit─ decode(window)
+                                               ◀─hit─ temperature fallbacks
+    """
+    import mlx.core as mx
+    from mlx_whisper.whisper import AudioEncoder
+
+    class MemoEncoder(AudioEncoder):
+        def __call__(self, x: Any) -> Any:
+            # Hit: same window as the last pass. Shape and dtype first so
+            # a mismatch never pays for the element-wise compare.
+            entry = self.memo.entry
+            if entry is not None:
+                seen, encoded = entry
+                if seen is x or (
+                    seen.shape == x.shape
+                    and seen.dtype == x.dtype
+                    and mx.array_equal(seen, x).item()
+                ):
+                    return encoded
+
+            encoded = super().__call__(x)
+            self.memo.entry = (x, encoded)
+            return encoded
+
+    return MemoEncoder
+
+
+def _install_encoder_memo(model: Any) -> _EncodingMemo:
+    """Make `model.encoder` reuse its last pass; return that pass's slot.
+
+    Swapping the instance's class keeps the parameter tree untouched, so
+    the loaded weights and ModelHolder's cache stay as they are."""
+    memo_class = _memo_encoder_class()
+    encoder = model.encoder
+    if not isinstance(encoder, memo_class):
+        encoder.__class__ = memo_class
+        encoder.memo = _EncodingMemo()
+    return encoder.memo
+
+
+def _detect_on_first_window(model: Any, audio: np.ndarray) -> str | None:
+    """Detect the language on the exact window the first decode will see.
+
+    Stock mlx-whisper detects on the silence-padded clip, which differs
+    from the decode window, so the two cannot share an encoding. This
+    rebuilds the first window the way `transcribe` does (log-mel padded by
+    30 s, first ≤30 s of content, zero-padded to 3000 frames, fp16), so
+    the decode's encoder call hits the memo. English-only models return
+    None and let `transcribe` pick "en" without detecting.
+
+    An unsure answer (below `_SURE_LANGUAGE_P`) is replaced by stock's own
+    detection, so an unsure clip decodes in the same language as before
+    at stock's cost of one extra pass. On 838 archived dictations the two
+    inputs disagreed on 3 clips, all with top p ≤ 0.40; at 0.5, 24 clips
+    (2.9%) fall back and no disagreement remains."""
+    import mlx.core as mx
+    from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
+
+    if not model.is_multilingual:
+        return None
+
+    mel = log_mel_spectrogram(audio, n_mels=model.dims.n_mels, padding=N_SAMPLES)
+    content_frames = mel.shape[-2] - N_FRAMES
+    window = mel[: min(N_FRAMES, content_frames)]
+    window = pad_or_trim(window, N_FRAMES, axis=-2).astype(mx.float16)
+    _, probs = model.detect_language(window)
+    language = max(probs, key=probs.get)
+    if probs[language] >= _SURE_LANGUAGE_P:
+        return language
+
+    stock_window = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
+    _, probs = model.detect_language(stock_window)
+    return max(probs, key=probs.get)
+
+
+@contextlib.contextmanager
+def _encoding_once(
+    model_path: str, audio: np.ndarray, language: str | None
+) -> Iterator[str | None]:
+    """Scope one decode in which the loaded model encodes each window once.
+
+    Yields the language to decode with: `language` itself when fixed,
+    else detected on the first decode window. The memo is emptied on the
+    way out, detection failures included, so no encoding outlives it."""
+    import mlx.core as mx
+    from mlx_whisper.transcribe import ModelHolder
+
+    model = ModelHolder.get_model(model_path, mx.float16)
+    memo = _install_encoder_memo(model)
+    try:
+        if language is None:
+            language = _detect_on_first_window(model, audio)
+        yield language
+    finally:
+        memo.entry = None
+
+
 class WhisperBackend:
     """Batch STT via mlx-whisper, with hallucination guard and in-session
     segmenting: pause-aligned spans are decoded DURING recording so the server
@@ -672,21 +797,30 @@ class WhisperBackend:
         *,
         temperature: float | None = None,
     ) -> dict[str, Any]:
-        """Run one engine decode and return the mlx-whisper result shape."""
+        """Run one engine decode and return the mlx-whisper result shape.
+
+        Each audio window is encoded once. Stock auto-language encodes the
+        first window twice (detect, then decode) and re-encodes it on every
+        temperature fallback; the encoder is ~40% of a dictation's decode.
+        """
         import mlx_whisper
 
         options: dict[str, Any] = {}
         if temperature is not None:
             options["temperature"] = temperature
-        return mlx_whisper.transcribe(
-            audio,
-            path_or_hf_repo=self._model_path,
-            condition_on_previous_text=False,
-            language=whisper_language(self.language),
-            fp16=True,
-            initial_prompt=initial_prompt,
-            **options,
-        )
+
+        with _encoding_once(
+            self._model_path, audio, whisper_language(self.language)
+        ) as language:
+            return mlx_whisper.transcribe(
+                audio,
+                path_or_hf_repo=self._model_path,
+                condition_on_previous_text=False,
+                language=language,
+                fp16=True,
+                initial_prompt=initial_prompt,
+                **options,
+            )
 
     def _decode(
         self,
