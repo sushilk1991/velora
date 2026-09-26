@@ -82,7 +82,6 @@ async def test_transcribe_file_applies_explicit_mode(engine, tmp_path, monkeypat
         app_name="Local file",
         explicit_mode="Note",
         cancel_event=eng._transcribe_preempt,
-        resume_parts=[],
     )
 
 

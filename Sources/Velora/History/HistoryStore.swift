@@ -438,29 +438,6 @@ final class HistoryStore {
         }
     }
 
-    /// A stalled session keeps one row; late STT only improves that row.
-    @discardableResult
-    func updateRecovered(session: String, raw: String, final: String, mode: String?) -> Bool {
-        queue.sync { [self] in
-            guard db != nil else { return false }
-            let sql = """
-                UPDATE dictations SET raw = ?, final = ?, mode = ?, quality_state = NULL
-                WHERE session_id = ?;
-                """
-            var stmt: OpaquePointer?
-            guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
-                return false
-            }
-            defer { sqlite3_finalize(stmt) }
-            bindText(stmt, 1, raw)
-            bindText(stmt, 2, final)
-            bindText(stmt, 3, mode)
-            bindText(stmt, 4, session)
-            guard sqlite3_step(stmt) == SQLITE_DONE else { return false }
-            return sqlite3_changes(db) == 1
-        }
-    }
-
     /// Deletes a single row and its archived audio clip (if any).
     func delete(id: Int64) {
         queue.sync { [self] in

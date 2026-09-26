@@ -50,7 +50,7 @@ from .decisions import (
 log = logging.getLogger("velora.cleanup")
 
 TIMEOUT_MS = 1500  # base budget, for a short/normal sentence
-TIMEOUT_CEILING_MS = 6000  # wedge guard for one generation, not the dictation
+TIMEOUT_CEILING_MS = 6000  # hard ceiling however long the dictation
 HARD_TIMEOUT_GRACE_S = 3.0  # independent TTFT/prefill wedge allowance
 # A cancelled preview/streaming generation can remain inside native prefill
 # until MLX yields. Final cleanup must not spend its own generation budget
@@ -184,8 +184,8 @@ def adaptive_timeout_ms(raw: str, base: int = TIMEOUT_MS) -> int:
 
     A fixed 1500ms silently dropped long paragraphs to raw (uncleaned) text —
     measured cleanup is ~0.5s for a sentence but ~0.75s already at 37 words and
-    climbs from there. Give each piece proportional headroom, up to a ceiling
-    so a truly wedged generation still bails. The server splits long text."""
+    climbs from there. Give longer dictation proportionally more headroom, up to
+    a ceiling so a truly wedged generation still bails."""
     words = len(raw.split())
     extra = max(0, words - BASE_WORDS) * MS_PER_WORD
     return min(base + extra, TIMEOUT_CEILING_MS)

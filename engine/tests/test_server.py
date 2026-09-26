@@ -3025,21 +3025,19 @@ async def test_stop_discards_inflight_preview_result_before_final(engine, monkey
         client.close()
 
 
-async def test_queue_overflow_catches_up_while_recording(engine, monkeypatch):
+async def test_queue_overflow_aborts_session(engine, monkeypatch):
     eng, sock = engine
     monkeypatch.setattr(server_mod, "QUEUE_MAX_FRAMES", 3)
+    monkeypatch.setattr(server_mod, "MAX_DROPPED_FRAMES", 5)
     feed_started = threading.Event()
     release = threading.Event()
-    seen = []
 
     def stuck_feed(chunk):  # simulate STT far below realtime
         feed_started.set()
         release.wait(10)
-        seen.append(len(chunk))
         return None
 
     monkeypatch.setattr(eng.stt, "feed_chunk", stuck_feed)
-    monkeypatch.setattr(eng.stt, "finalize", lambda: str(sum(seen)))
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({"cmd": "start", "session": "s-of", "context": {}})
@@ -3048,22 +3046,20 @@ async def test_queue_overflow_catches_up_while_recording(engine, monkeypatch):
     # may not have dequeued anything yet and the accepted count is one lower.
     await client.send_audio(AUDIO)
     assert await asyncio.to_thread(feed_started.wait, 2)
-    for _ in range(11):
+    for _ in range(11):  # capacity (3) + drops past threshold
         await client.send_audio(AUDIO)
-    for _ in range(100):
-        if eng.session is not None and eng.session.backlog_cursor is not None:
-            break
-        await asyncio.sleep(0.01)
-    assert eng.session is not None and eng.session.backlog_cursor is not None
+
+    evt = await client.recv(timeout=5)
+    assert evt["event"] == "error"
+    assert "overflow" in evt["message"]
+    assert evt["session"] == "s-of"
+    spool = eng.config.audio_dir / ".active" / "s-of.pcm16.part"
+    assert spool.is_file()
+    accepted_frames = 3 + 1 + 5 + 1  # queued + in-flight + allowed drops + aborting frame
+    assert spool.stat().st_size == AUDIO.size * 2 * accepted_frames
     release.set()
-    for _ in range(200):
-        if eng.session is not None and eng.session.backlog_cursor == eng.session.samples:
-            break
-        await asyncio.sleep(0.01)
-    assert eng.session is not None and eng.session.backlog_cursor == eng.session.samples
-    await client.send_json({"cmd": "stop", "session": "s-of"})
-    final = await client.recv_event("final")
-    assert final["raw"] == str(12 * AUDIO.size)
+
+    # engine recovered: idle again and responsive
     await client.send_json({"cmd": "ping"})
     assert (await client.recv())["event"] == "pong"
     assert eng.session is None
@@ -3078,25 +3074,23 @@ def test_default_max_recording_duration_is_one_hour(home):
     assert config.max_recording_s == 3600
 
 
-async def test_recording_continues_past_duration_setting(engine):
+async def test_auto_stop_at_max_duration(engine):
     eng, sock = engine
     eng.config.data["max_recording_s"] = 0.05  # 800 samples at 16 kHz
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({"cmd": "start", "session": "s-cap", "context": {}})
-    await client.send_audio(AUDIO)
-    for _ in range(100):
-        if eng.session is not None and eng.session.samples == len(AUDIO):
-            break
-        await asyncio.sleep(0.01)
-    assert eng.session is not None
-    assert eng.session.samples == len(AUDIO)
-    await client.send_json({"cmd": "stop", "session": "s-cap"})
+    await client.send_audio(AUDIO)  # 1600 samples > cap → auto-finalize, no stop sent
+
+    auto_stop = await client.recv_event("recording_auto_stopped")
+    assert auto_stop["session"] == "s-cap"
+    assert auto_stop["limit_s"] == 0.05
+    assert auto_stop["duration_s"] == 0.1
     transcript = await client.recv_event("transcript")
     assert transcript["session"] == "s-cap"
     final = await client.recv_event("final")
     assert final["session"] == "s-cap"
-    assert final.get("auto_stopped") is not True
+    assert final["auto_stopped"] is True
     assert final["text"] == "hello world this is a fake transcript."
     assert eng.session is None
     client.close()

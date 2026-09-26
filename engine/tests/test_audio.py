@@ -2,7 +2,6 @@
 save-on-finalize / reprocess-from-clip flow (fake STT)."""
 
 import asyncio
-import os
 import shutil
 import tempfile
 import time
@@ -160,20 +159,6 @@ def test_audio_store_prune_retention_and_cap(tmp_path):
     deleted = store.prune(retention_days=180, max_bytes=None)
     assert deleted == 1
     assert not old_path.exists()
-
-
-def test_prune_keeps_unacknowledged_final(tmp_path):
-    store = AudioStore(tmp_path / "audio")
-    pcm = np.full(8000, 0.1, dtype=np.float32)
-    protected = store.save("pending-final", pcm)
-    disposable = store.save("old-final", pcm)
-    assert protected is not None and disposable is not None
-    old = time.time() - 400 * 86400
-    os.utime(store.path_for(protected), (old, old))
-    os.utime(store.path_for(disposable), (old + 1, old + 1))
-    store.prune(retention_days=180, max_bytes=1, protected_names={protected})
-    assert store.path_for(protected).exists()
-    assert not store.path_for(disposable).exists()
 
 
 # ---- server integration (fake STT) ----

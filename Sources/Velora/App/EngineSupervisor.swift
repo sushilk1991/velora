@@ -58,7 +58,6 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
 
     let client = EngineClient()
-    private(set) var audioExt: String?
     weak var delegate: EngineSupervisorDelegate?
 
     private(set) var state: State = .stopped {
@@ -168,17 +167,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     /// Sends a command if connected (fire-and-forget; events come back via
     /// the delegate).
-    #if DEBUG
-    private(set) var selftestCommands: [[String: Any]] = []
-
-    func selftestSetAudioExt(_ value: String) {
-        audioExt = value
-    }
-    #endif
     func send(_ command: [String: Any]) {
-        #if DEBUG
-        selftestCommands.append(command)
-        #endif
         client.send(json: command)
     }
 
@@ -410,8 +399,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     func engineClient(_ client: EngineClient, didReceive event: EngineEvent) {
         switch event {
-        case .ready(let setupIsComplete, let activeSTTModel, let audioExt):
-            self.audioExt = audioExt
+        case .ready(let setupIsComplete, let activeSTTModel):
             if state != .ready {
                 restartAttempts = 0
                 state = .ready

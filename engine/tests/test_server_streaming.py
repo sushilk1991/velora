@@ -371,7 +371,7 @@ async def test_priority_tail_uses_its_own_generation_budget(
     client.close()
 
 
-async def test_unapplied_priority_tail_keeps_clean_prefix(engine, segments):
+async def test_unapplied_priority_tail_uses_whole_text_fallback(engine, segments):
     eng, sock = engine
     cleanup = PendingLastCleanup(fail_merged=True)
     eng.cleanup = cleanup
@@ -385,10 +385,10 @@ async def test_unapplied_priority_tail_keeps_clean_prefix(engine, segments):
     await client.send_json({"cmd": "stop", "session": "tail-fallback"})
     final = await client.recv_event("final")
 
-    merged = f"{SEG2} {TAIL}"
-    assert [call[0] for call in cleanup.calls] == [SEG1, SEG2, merged, merged]
-    assert final["text"] == f"<{SEG1}> {merged}."
-    assert final["cleanup_applied"] is False
+    raw = f"{SEG1} {SEG2} {TAIL}"
+    assert [call[0] for call in cleanup.calls][-1] == raw
+    assert final["text"] == f"<{raw}>."
+    assert final["cleanup_applied"] is True
     client.close()
 
 
@@ -626,7 +626,9 @@ async def test_streaming_numbering_restart_falls_back_to_whole_text(engine, monk
         context={"bundle_id": "com.apple.Terminal", "app_name": "Terminal"},
     )
     final = await client.recv_event("final")
-    assert [call[0] for call in cleanup.calls] == [SEG1, SEG2, f"{SEG1} {SEG2}"]
+    raw = f"{SEG1} {SEG2}"
+
+    assert [call[0] for call in cleanup.calls] == [SEG1, SEG2, raw]
     assert "continue with the next number; never restart at 1" in cleanup.calls[1][1]
     assert final["text"] == (
         "1. Saving is slow.\n"
@@ -751,7 +753,7 @@ async def test_romanize_latin_segment_with_non_latin_tail_uses_whole_text(engine
     client.close()
 
 
-async def test_native_script_tail_reuses_clean_latin_chunk(engine, monkeypatch):
+async def test_native_script_tail_uses_whole_text_multilingual_cleanup(engine, monkeypatch):
     tail = (
         "यह दूसरी समस्या है और इसे पूरा रखना है क्योंकि यह अंतिम लंबा हिस्सा है "
         "और इसकी भाषा तथा सूची की संरचना नहीं बदलनी चाहिए"
@@ -767,8 +769,10 @@ async def test_native_script_tail_reuses_clean_latin_chunk(engine, monkeypatch):
 
     await run_dictation(client, "native-script-tail", chunks=2)
     final = await client.recv_event("final")
-    assert [call[0] for call in cleanup.calls] == [SEG1, f"{SEG1} {tail}"]
-    assert final["text"] == f"<{SEG1} {tail}>"
+    raw = f"{SEG1} {tail}"
+
+    assert [call[0] for call in cleanup.calls] == [SEG1, raw]
+    assert final["text"] == f"<{raw}>"
     assert final["cleanup_applied"] is True
     client.close()
 
@@ -1083,7 +1087,9 @@ async def test_empty_tail_last_chunk_past_its_budget_falls_back(engine, monkeypa
 
 
 async def test_empty_tail_last_chunk_not_applied_falls_back(engine, monkeypatch):
-    # Keep the completed first chunk; retry only the uncleaned last chunk.
+    # The waited-for last chunk fell back to deterministic cleanup. Like the
+    # merged-tail path, the final then cleans the whole text instead of
+    # stitching an uncleaned segment in.
     monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{SEG2}")
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "")
     monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
@@ -1100,7 +1106,6 @@ async def test_empty_tail_last_chunk_not_applied_falls_back(engine, monkeypatch)
     await client.send_json({"cmd": "stop", "session": "empty-tail-raw"})
     final = await client.recv_event("final")
 
-    assert [raw for raw, _prompt in cleanup.calls] == [SEG1, SEG2, SEG2]
-    assert final["text"] == f"<{SEG1}> {SEG2}."
-    assert final["cleanup_applied"] is False
+    assert [raw for raw, _prompt in cleanup.calls] == [SEG1, SEG2, f"{SEG1} {SEG2}"]
+    assert final["text"] == f"<{SEG1} {SEG2}>."
     client.close()

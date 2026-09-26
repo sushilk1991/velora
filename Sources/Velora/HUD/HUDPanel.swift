@@ -43,9 +43,6 @@ final class HUDPanel: NSObject {
     var menuHooks: MenuHooks?
 
     private let panel: NSPanel
-    #if DEBUG
-    private var selftestHidden = false
-    #endif
     /// Selftest hook: whether the panel is ordered on screen right now.
     var isOnScreen: Bool { panel.isVisible }
     /// Selftest hook: the panel's window level.
@@ -434,12 +431,7 @@ final class HUDPanel: NSObject {
         // "Hide Pill" is honoured immediately, session or not: the user
         // asked for the surface to go away, so the mid-session deferral
         // below (which protects placement, not visibility) does not apply.
-        #if DEBUG
-        let visible = AppConfig.shared.hudVisible && !selftestHidden
-        #else
-        let visible = AppConfig.shared.hudVisible
-        #endif
-        guard visible else {
+        guard AppConfig.shared.hudVisible else {
             hideWorkItem?.cancel()
             hideWorkItem = nil
             stopMouseSync()
@@ -494,11 +486,7 @@ final class HUDPanel: NSObject {
         //
         //     state → transition ─┬─ hudVisible ── position + orderFront
         //                         └─ closed ───── orderOut, no mouse sync
-        #if DEBUG
-        let pillClosed = !AppConfig.shared.hudVisible || selftestHidden
-        #else
         let pillClosed = !AppConfig.shared.hudVisible
-        #endif
         if !target.isHidden, !pillClosed {
             let promptShouldFollowMainDisplay: Bool = {
                 guard AppConfig.shared.hudPosition != .custom,
@@ -545,17 +533,6 @@ final class HUDPanel: NSObject {
             onAvailable?()
         }
     }
-
-    #if DEBUG
-    // Headless controller tests must leave no pill on the user's screen.
-    func selftestOrderOut() {
-        selftestHidden = true
-        hideWorkItem?.cancel()
-        hideWorkItem = nil
-        stopMouseSync()
-        panel.orderOut(nil)
-    }
-    #endif
 
     /// Places the panel per the position preference; capsule edges keep a
     /// 20 pt inset from the visible frame (above the Dock / below the menubar,
