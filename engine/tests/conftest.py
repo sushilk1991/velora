@@ -1,7 +1,33 @@
 import pytest
+from fixtures.fake_cleanup_worker import PID_DIR_ENV, kill_leaked
 
+import velora_engine.cleanup_process as cleanup_process_mod
 from velora_engine import batch_priority, diarization
 from velora_engine.config import Config
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_leaked_fake_workers(tmp_path_factory):
+    """SIGKILL every fake cleanup worker this run started that still lives.
+
+    A test that ends with its worker wedged (SIGTERM ignored, SIGKILL patched
+    to land late) would otherwise leave it running after pytest exits.
+    Workers register their pids in PID_DIR_ENV, which they inherit.
+    """
+    pid_dir = tmp_path_factory.mktemp("fake-worker-pids")
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv(PID_DIR_ENV, str(pid_dir))
+        yield
+    kill_leaked(pid_dir)
+
+
+@pytest.fixture(autouse=True)
+def forget_retired_workers():
+    """The retired-worker registry is process-wide. A worker whose test loop
+    closed before it exited would otherwise hold the next test's spawns, in
+    any module that runs a real CleanupProcess."""
+    yield
+    cleanup_process_mod._retired_workers.clear()
 
 
 @pytest.fixture(autouse=True)

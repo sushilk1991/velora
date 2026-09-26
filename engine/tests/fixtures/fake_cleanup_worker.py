@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import signal
 import socket
+import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import NoReturn
@@ -16,6 +19,16 @@ from velora_engine.cleanup_ipc import (
     CLEANUP_IPC_STREAM_LIMIT_BYTES,
     encode_cleanup_ipc_message,
 )
+
+# Each worker drops a file named by its pid here, so the pytest session can
+# SIGKILL any worker a test leaked (tests/conftest.py).
+PID_DIR_ENV = "VELORA_FAKE_WORKER_PID_DIR"
+# A worker orphaned by a dead pytest notices within this poll.
+ORPHAN_POLL_S = 0.2
+# A fixture worker leaked by a live pytest exits after this long.
+MAX_LIFETIME_S = 120.0
+# A cleanup whose raw text holds "__notes__" answers with these meeting notes.
+NOTES_JSON = json.dumps({"summary": "Notes.", "decisions": [], "action_items": []})
 
 
 def wedge_like_native_code() -> NoReturn:
@@ -30,12 +43,65 @@ def wedge_like_native_code() -> NoReturn:
         time.sleep(3600)
 
 
+def exit_when_abandoned(parent_pid: int, max_lifetime_s: float) -> None:
+    """Exit once the spawning process is gone or the lifetime cap passes.
+
+    Runs on a daemon thread, so it fires while the event loop is wedged:
+
+        pytest dies  ->  worker reparented (getppid changes)  ->  exit
+        pytest lives but leaked it  ->  max_lifetime_s passes  ->  exit
+    """
+    deadline = time.monotonic() + max_lifetime_s
+    while os.getppid() == parent_pid and time.monotonic() < deadline:
+        time.sleep(ORPHAN_POLL_S)
+    os._exit(0)
+
+
+def register_pid() -> None:
+    """Record this worker for the session cleanup, when a session runs one."""
+    pid_dir = os.environ.get(PID_DIR_ENV)
+    if pid_dir:
+        (Path(pid_dir) / str(os.getpid())).touch()
+
+
+def kill_leaked(pid_dir: Path) -> list[int]:
+    """SIGKILL every registered worker still alive; returns their pids."""
+    killed = []
+    for entry in pid_dir.iterdir():
+        pid = int(entry.name)
+        if not _is_fixture_worker(pid):
+            continue
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+            killed.append(pid)
+    return killed
+
+
+def _is_fixture_worker(pid: int) -> bool:
+    # A registered pid that exited may since belong to another process; an
+    # exited but unreaped worker shows no command line.
+    command = subprocess.run(
+        ["ps", "-o", "command=", "-p", str(pid)],
+        capture_output=True, text=True, check=False,
+    ).stdout
+    return Path(__file__).name in command
+
+
 async def main(
     fd: int,
     fail_next_replacement: Path | None = None,
     fail_all_replacements: Path | None = None,
+    exit_after_load: bool = False,
+    hang_first_load: Path | None = None,
+    fail_every_load: bool = False,
     prefix_delay_s: float = 0.0,
     hang_prefix: bool = False,
+    load_delay_s: float = 0.0,
+    hang_every_load: bool = False,
+    wedge_second_load: Path | None = None,
+    fail_first_load: Path | None = None,
+    model: str = "",
+    fail_load_for: str | None = None,
 ) -> None:
     sock = socket.socket(fileno=fd)
     sock.setblocking(False)
@@ -54,6 +120,33 @@ async def main(
         request_id = message["id"]
         operation = message["op"]
         if operation == "load":
+            if fail_every_load or (fail_load_for is not None and model == fail_load_for):
+                await respond(request_id, ok=False, error="injected persistent load failure")
+                return
+            if hang_first_load is not None and not hang_first_load.exists():
+                # A load that outlives LOAD_TIMEOUT_S; the next worker loads.
+                hang_first_load.touch()
+                await asyncio.sleep(3600)
+            if fail_first_load is not None and not fail_first_load.exists():
+                fail_first_load.touch()
+                await respond(request_id, ok=False, error="injected first load failure")
+                return
+            if hang_every_load:
+                # A load that never returns and outlives SIGTERM.
+                signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                await asyncio.sleep(3600)
+            if wedge_second_load is not None:
+                # Loads 1 and 3+ succeed; load 2 wedges like native code:
+                # it blocks and ignores SIGTERM, so only SIGKILL ends it.
+                if not wedge_second_load.exists():
+                    wedge_second_load.write_text("1")
+                elif wedge_second_load.read_text() == "1":
+                    # Ignore SIGTERM before the marker tells the test it wedged.
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                    wedge_second_load.write_text("2")
+                    wedge_like_native_code()
+            if load_delay_s:
+                await asyncio.sleep(load_delay_s)
             if fail_all_replacements is not None:
                 if fail_all_replacements.exists():
                     await respond(request_id, ok=False, error="injected persistent load failure")
@@ -67,6 +160,9 @@ async def main(
                     await respond(request_id, ok=False, error="injected load failure")
                     return
             await respond(request_id, ok=True)
+            if exit_after_load:
+                # Crash loop: every worker loads, then dies before serving.
+                asyncio.get_running_loop().call_later(0.05, os._exit, 17)
             return
         if operation == "prepare_prefix":
             if hang_prefix or message.get("candidates", [[None]])[0][0] == "__hang__":
@@ -96,9 +192,7 @@ async def main(
             return
         if operation == "decide":
             if message.get("state") == "__hang__":
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                while True:
-                    pass
+                wedge_like_native_code()
             if message.get("state") == "__cancel__":
                 while request_id not in cancelled:
                     await asyncio.sleep(0.01)
@@ -143,11 +237,9 @@ async def main(
         if raw == "__crash__":
             os._exit(17)
         if "__hang__" in raw:
-            # Native-style hard wedge: retain the child GIL, ignore protocol
-            # cancellation, and ignore SIGTERM so the parent must SIGKILL.
-            signal.signal(signal.SIGTERM, signal.SIG_IGN)
-            while True:
-                pass
+            # Native-style hard wedge: ignore protocol cancellation and
+            # SIGTERM, so the parent must SIGKILL.
+            wedge_like_native_code()
         if raw == "__cancel__":
             while request_id not in cancelled:
                 await asyncio.sleep(0.01)
@@ -186,6 +278,7 @@ async def main(
                          if raw == "__limits__"
                          else str(message.get("copy_draft"))
                          if raw == "__copy_draft__"
+                         else NOTES_JSON if "__notes__" in raw
                          else raw.upper()),
                 "applied": True,
                 "ms": 7,
@@ -215,15 +308,40 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--fail-next-replacement", type=Path)
     parser.add_argument("--fail-all-replacements", type=Path)
+    parser.add_argument("--exit-after-load", action="store_true")
+    parser.add_argument("--hang-first-load", type=Path)
+    parser.add_argument("--fail-every-load", action="store_true")
     parser.add_argument("--prefix-delay", type=float, default=0.0)
     parser.add_argument("--hang-prefix", action="store_true")
+    parser.add_argument("--load-delay", type=float, default=0.0)
+    parser.add_argument("--hang-every-load", action="store_true")
+    parser.add_argument("--wedge-second-load", type=Path)
+    parser.add_argument("--fail-first-load", type=Path)
+    # Every load of this one model fails; other models load.
+    parser.add_argument("--fail-load-for")
+    parser.add_argument("--max-lifetime", type=float, default=MAX_LIFETIME_S)
     args = parser.parse_args()
+    register_pid()
+    threading.Thread(
+        target=exit_when_abandoned,
+        args=(os.getppid(), args.max_lifetime),
+        daemon=True,
+    ).start()
     asyncio.run(
         main(
             args.fd,
             args.fail_next_replacement,
             args.fail_all_replacements,
+            args.exit_after_load,
+            args.hang_first_load,
+            args.fail_every_load,
             args.prefix_delay,
             args.hang_prefix,
+            args.load_delay,
+            args.hang_every_load,
+            args.wedge_second_load,
+            args.fail_first_load,
+            args.model,
+            args.fail_load_for,
         )
     )

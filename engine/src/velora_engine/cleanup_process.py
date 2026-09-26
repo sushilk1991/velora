@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from .cleanup import (
     HARD_TIMEOUT_GRACE_S,
@@ -59,7 +59,72 @@ PREFIX_TIMEOUT_S = 6.0
 RECOVERY_ATTEMPTS = 3
 RECOVERY_BACKOFF_S = 0.25
 MAX_RECOVERY_DEFERRALS = 3
+# A healthy worker exits ~30 ms after SIGTERM or SIGKILL, even mid-prefill, and
+# ~30 ms after closing its socket. Each step of a reap waits this long.
+EXIT_WAIT_S = 0.5
+# A wedged worker was still alive a second after SIGKILL (2026-09-25), inside
+# the kernel: SIGKILL cannot be ignored, so it exits once that call returns.
+# The caller waits only this long; the worker is then retired (see `_retire`)
+# and asyncio's child watcher reaps it whenever it exits.
+KILL_REAP_TIMEOUT_S = 0.5
+# No worker spawns while a retired worker, which may still hold the model in
+# memory, is alive. One alive this long after its retirement is stuck in the
+# kernel, and cleanup escalates to an engine restart. The restart delays the
+# overlap rather than preventing it: the new engine does not know the orphan,
+# so its first load may run beside it.
+RETIRED_EXIT_TIMEOUT_S = 60.0
+# Crash-loop guard. A worker lost within RESPAWN_STREAK_RESET_S of becoming
+# ready extends the streak; each respawn in a streak waits twice as long:
+#   loss 1 → now, 2 → 5 s, 3 → 10 s, 4 → 20 s, ... capped at 5 min.
+# A worker that stayed up longer, or served a cleanup, was healthy, so its
+# loss starts a new streak.
+RESPAWN_BACKOFF_S = 5.0
+RESPAWN_BACKOFF_MAX_S = 300.0
+RESPAWN_STREAK_RESET_S = 600.0
+# 5 s x 2**6 already passes the 300 s cap. Clamping the exponent keeps a
+# streak past 1,024 from overflowing the float.
+RESPAWN_BACKOFF_MAX_STEP = 10
 WORKER_MODULE = "velora_engine.cleanup_worker"
+
+
+def respawn_backoff_s(step: int) -> float:
+    """The `step`-th wait of the respawn backoff: 5 s, 10 s, 20 s, ... 300 s.
+
+    Shared by worker respawns and the server's startup load retry.
+    """
+    exponent = min(max(step, 0), RESPAWN_BACKOFF_MAX_STEP)
+    return min(RESPAWN_BACKOFF_S * 2 ** exponent, RESPAWN_BACKOFF_MAX_S)
+
+
+def _respawn_delay_s(streak: int) -> float:
+    """Backoff before the respawn that follows the `streak`-th quick loss."""
+    if streak <= 1:
+        return 0.0
+    return respawn_backoff_s(streak - 2)
+
+
+class _Retired(NamedTuple):
+    retired_at: float  # time.monotonic() when the reap gave up on it
+    exited: asyncio.Task[None]  # done once the worker has exited
+
+
+# Workers that outlived the reap wait, kept until they exit (see `_retire`).
+# Module level, so every CleanupProcess in the engine (startup, retry,
+# set_model, recovery) waits on the same workers before it spawns.
+_retired_workers: dict[asyncio.subprocess.Process, _Retired] = {}
+
+
+def _retired_exit_deadline() -> float | None:
+    """`time.monotonic()` at which the oldest live retired worker escalates,
+    or None when none is alive."""
+    alive = [
+        entry.retired_at
+        for process, entry in _retired_workers.items()
+        if process.returncode is None
+    ]
+    if not alive:
+        return None
+    return min(alive) + RETIRED_EXIT_TIMEOUT_S
 
 
 class _WorkerExited(RuntimeError):
@@ -68,6 +133,23 @@ class _WorkerExited(RuntimeError):
 
 class _LoadCancelled(RuntimeError):
     pass
+
+
+class _WorkerStillExiting(RuntimeError):
+    pass
+
+
+async def _forget_on_exit(process: asyncio.subprocess.Process) -> None:
+    """Drop a retired worker from `_retired_workers` once it exits."""
+    with contextlib.suppress(Exception):
+        await process.wait()
+    entry = _retired_workers.pop(process, None)
+    if entry is not None:
+        log.warning(
+            "retired cleanup worker pid=%d exited %.1fs after retirement",
+            process.pid,
+            time.monotonic() - entry.retired_at,
+        )
 
 
 class CleanupProcess:
@@ -112,6 +194,17 @@ class CleanupProcess:
         self._deferred_recovery_reason: str | None = None
         self._recovery_deferrals = 0
         self._on_unhealthy = on_unhealthy
+        # Crash-loop guard state (see RESPAWN_BACKOFF_S). `_ready_at` is when
+        # the current worker became ready; `_note_loss` consumes it once per
+        # loss, when the loss is detected.
+        self._ready_at: float | None = None
+        self._respawn_streak = 0
+        self._respawn_not_before = 0.0
+        # True while a recovery waits out its backoff or a retired worker's
+        # exit: it has loaded nothing, so interrupting it costs nothing.
+        self._respawn_waiting = False
+        # While `_start_and_load` runs: when its load should have finished.
+        self._loading_until: float | None = None
 
     async def load_async(self, warm_system_prompt: str | None = None) -> None:
         self._warm_system_prompt = warm_system_prompt
@@ -144,9 +237,16 @@ class CleanupProcess:
             raise RuntimeError("cleanup process is closed")
         self.recovering = True
         self.loaded = False
+        self._loading_until = time.monotonic() + LOAD_TIMEOUT_S
         request_task: asyncio.Task[dict[str, Any]] | None = None
         cancel_task: asyncio.Task[None] | None = None
         try:
+            # Reap the current worker before the wait: one that outlives
+            # SIGKILL is retired, and the wait then holds the spawn for it.
+            await self._stop_worker()
+            await self._await_retired_exit(cancel_event)
+            # The load's own bound starts once nothing holds the spawn.
+            self._loading_until = time.monotonic() + LOAD_TIMEOUT_S
             await self._spawn()
             if self._closed:
                 raise _LoadCancelled("cleanup process closed during load")
@@ -179,6 +279,7 @@ class CleanupProcess:
             self._hibernated = False
             self.unhealthy = False
             self._recovery_deferrals = 0
+            self._ready_at = time.monotonic()
             log.info("cleanup worker ready model=%s pid=%s", self.model_id, self.pid)
         except BaseException:
             if request_task is not None and not request_task.done():
@@ -191,6 +292,7 @@ class CleanupProcess:
             if cancel_task is not None:
                 cancel_task.cancel()
             self.recovering = False
+            self._loading_until = None
 
     @property
     def pid(self) -> int | None:
@@ -199,6 +301,29 @@ class CleanupProcess:
     @property
     def hibernated(self) -> bool:
         return self._hibernated
+
+    @property
+    def recovery_deadline(self) -> float | None:
+        """`time.monotonic()` by which a replacement should have loaded, or
+        None when no load is due or running.
+
+            crash-loop backoff end ───────────────┐
+                                                  ├─ later ─▶ + LOAD_TIMEOUT_S
+            oldest retired worker's exit bound ───┘
+            a load already running ─────────────── its start + LOAD_TIMEOUT_S
+
+        Meeting notes and Action Mode wait until then instead of treating the
+        recovery as a lost model.
+        """
+        if self._closed or self.unhealthy:
+            return None
+        load_not_before = max(
+            self._respawn_not_before,
+            _retired_exit_deadline() or 0.0,
+        )
+        if time.monotonic() < load_not_before:
+            return load_not_before + LOAD_TIMEOUT_S
+        return self._loading_until
 
     async def _spawn(self) -> None:
         await self._stop_worker()
@@ -263,22 +388,19 @@ class CleanupProcess:
             error = exc
         finally:
             if generation == self._generation:
+                # Judge the crash-loop streak now, not when a recovery that
+                # dictation may defer finally runs.
+                self._note_loss()
+                if error is None:
+                    # End of stream: the worker exited or is exiting. Give it a
+                    # moment so the failure below carries its real status.
+                    with contextlib.suppress(TimeoutError):
+                        await asyncio.wait_for(process.wait(), timeout=EXIT_WAIT_S)
                 # A malformed or oversized response can leave an otherwise
-                # live child behind. Retire it on a bounded wall instead of
-                # waiting forever before the pending request learns it failed.
-                if error is not None and process.returncode is None:
-                    with contextlib.suppress(ProcessLookupError):
-                        process.terminate()
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=0.5)
-                    except TimeoutError:
-                        with contextlib.suppress(ProcessLookupError):
-                            process.kill()
-                        with contextlib.suppress(Exception):
-                            await asyncio.wait_for(process.wait(), timeout=0.5)
-                else:
-                    with contextlib.suppress(Exception):
-                        await process.wait()
+                # live child behind, and a closed socket does not prove an
+                # exit. Reap on a bounded wall instead of waiting forever
+                # before the pending request learns it failed.
+                await self._reap(process)
                 failure = error or _WorkerExited(
                     f"cleanup worker exited with status {process.returncode}"
                 )
@@ -454,6 +576,10 @@ class CleanupProcess:
                 # If it wins the deadline race, its MLX thread is retired even
                 # though the protocol response itself arrived normally.
                 self._schedule_replacement(f"child_{result.reason}")
+            elif result.applied:
+                # A worker that served a cleanup is not crash-looping: its
+                # next loss respawns at once (see RESPAWN_BACKOFF_S).
+                self._respawn_streak = 0
             return result
         except TimeoutError:
             elapsed = int((time.perf_counter() - call_started) * 1000)
@@ -499,6 +625,7 @@ class CleanupProcess:
         except Exception as exc:
             elapsed = int((time.perf_counter() - call_started) * 1000)
             log.exception("cleanup process call failed")
+            self._note_loss()
             self._schedule_recovery("call_failed")
             return CleanupResult(raw, False, 0, f"error:{exc}", wall_ms=elapsed)
         finally:
@@ -853,6 +980,10 @@ class CleanupProcess:
                     return self.loaded
                 except _LoadCancelled:
                     return False
+                except _WorkerStillExiting:
+                    log.critical("hibernated cleanup worker not reloaded", exc_info=True)
+                    self._mark_unhealthy()
+                    return False
                 except Exception:
                     if self._closed:
                         return False
@@ -877,6 +1008,7 @@ class CleanupProcess:
 
     def _schedule_replacement(self, reason: str) -> None:
         """Retire the current worker now and reap it in a tracked task."""
+        self._note_loss()
         self.loaded = False
         self.recovering = True
         current = self._replacement_task
@@ -906,6 +1038,7 @@ class CleanupProcess:
             return
 
         async def recover() -> None:
+            await self._respawn_backoff()
             log.info("warming replacement cleanup worker reason=%s", reason)
             for attempt in range(1, RECOVERY_ATTEMPTS + 1):
                 try:
@@ -913,6 +1046,10 @@ class CleanupProcess:
                     return
                 except asyncio.CancelledError:
                     raise
+                except _WorkerStillExiting:
+                    log.critical("replacement cleanup worker not loaded", exc_info=True)
+                    self._mark_unhealthy()
+                    return
                 except Exception:
                     if attempt == RECOVERY_ATTEMPTS:
                         self._mark_unhealthy()
@@ -931,6 +1068,49 @@ class CleanupProcess:
 
         self._recovery_task = asyncio.create_task(recover())
 
+    def _note_loss(self) -> None:
+        """Count a lost ready worker toward the crash-loop streak.
+
+        Runs when the loss is detected, once per worker: a loss within
+        RESPAWN_STREAK_RESET_S of ready extends the streak, a later one starts
+        a new streak, and the respawn may not start before the backoff ends.
+
+            ready ──2 s──▶ crash (quick: streak 2, respawn at +5 s)
+                             └ dictation defers recovery 30 s; still streak 2
+        """
+        ready_at = self._ready_at
+        if ready_at is None:
+            return
+        self._ready_at = None
+        now = time.monotonic()
+        if now - ready_at >= RESPAWN_STREAK_RESET_S:
+            self._respawn_streak = 0
+        self._respawn_streak += 1
+        self._respawn_not_before = now + _respawn_delay_s(self._respawn_streak)
+
+    async def _respawn_backoff(self) -> None:
+        """Wait out the crash-loop backoff before loading a replacement.
+
+        A recovery that dictation deferred and later resumed waits only for
+        the rest of the same deadline. The proxy reports `recovering` for the
+        whole wait, so callers keep durable work instead of failing it.
+        """
+        wait_s = self._respawn_not_before - time.monotonic()
+        if wait_s <= 0:
+            return
+        log.warning(
+            "cleanup worker lost %d times in a row; respawning in %.0fs",
+            self._respawn_streak,
+            wait_s,
+        )
+        self.recovering = True
+        self._respawn_waiting = True
+        try:
+            await asyncio.sleep(wait_s)
+        finally:
+            self._respawn_waiting = False
+            self.recovering = False
+
     async def defer_recovery(self) -> None:
         """Prevent replacement model warm-up while live dictation owns Metal."""
         if self._hibernated:
@@ -941,10 +1121,14 @@ class CleanupProcess:
             return
         self._recovery_task = None
         self._deferred_recovery_reason = "dictation_active"
+        # A recovery still waiting out its crash-loop backoff or a retired
+        # worker's exit has not started a warm-up, so interrupting it does
+        # not count toward escalation.
+        waiting = self._respawn_waiting
         recovery_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await recovery_task
-        if not self.loaded:
+        if not self.loaded and not waiting:
             self._recovery_deferrals += 1
             log.warning(
                 "cleanup recovery interrupted by dictation count=%d/%d",
@@ -990,24 +1174,110 @@ class CleanupProcess:
             writer.close()
         process = self._process
         self._process = None
-        if process is not None and process.returncode is None:
-            with contextlib.suppress(ProcessLookupError):
-                process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=0.5)
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    process.kill()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=0.5)
-                except TimeoutError:
-                    self._mark_unhealthy()
-                    log.critical("cleanup worker pid=%d could not be reaped", process.pid)
+        if process is not None:
+            await self._reap(process)
         failure = _WorkerExited("cleanup worker replaced")
         for request_id, future in list(self._pending.items()):
             if not future.done():
                 future.set_exception(failure)
             self._pending.pop(request_id, None)
+
+    async def _reap(self, process: asyncio.subprocess.Process) -> None:
+        """Stop `process` within about a second, whatever state it is in.
+
+            SIGTERM ─EXIT_WAIT_S─▶ SIGKILL ─KILL_REAP_TIMEOUT_S─▶ still alive?
+                                                                  └▶ `_retire`
+
+        Chunk cancels and dictation starts wait on this, so it never waits
+        for a wedged worker's exit; `_await_retired_exit` does, before the
+        next spawn.
+        """
+        # A retired worker already has its SIGKILL; only its exit is pending.
+        if process.returncode is not None or process in _retired_workers:
+            return
+        try:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=EXIT_WAIT_S)
+                return
+            with contextlib.suppress(ProcessLookupError):
+                process.kill()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=KILL_REAP_TIMEOUT_S)
+                return
+            self._retire(process)
+        except asyncio.CancelledError:
+            # Never drop a live worker: kill it and track it until it exits.
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                self._retire(process)
+            raise
+
+    def _retire(self, process: asyncio.subprocess.Process) -> None:
+        """Track a SIGKILLed worker that has not exited yet.
+
+        It may still hold the model in memory, so `_await_retired_exit` holds
+        every later spawn, by any proxy, until it is gone.
+        """
+        if process in _retired_workers:
+            return
+        log.critical(
+            "cleanup worker pid=%d still exiting after SIGKILL; "
+            "no replacement loads until it exits",
+            process.pid,
+        )
+        exited = asyncio.create_task(_forget_on_exit(process))
+        _retired_workers[process] = _Retired(time.monotonic(), exited)
+
+    async def _await_retired_exit(
+        self,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        """Wait until every retired worker has exited, before a spawn.
+
+        Re-reads the registry on every pass, so a worker retired during the
+        wait, by this proxy or another, holds the spawn too. Raises
+        _WorkerStillExiting RETIRED_EXIT_TIMEOUT_S after the oldest live one
+        was retired, however many waits dictation interrupted meanwhile, and
+        _LoadCancelled when `cancel_event` is set first. Recovery runs this
+        with dictation already deferred, so the wait costs no dictation.
+        """
+        logged: set[int] = set()
+        try:
+            while True:
+                deadline = _retired_exit_deadline()
+                pending = {
+                    process: entry.exited
+                    for process, entry in _retired_workers.items()
+                    if process.returncode is None and not entry.exited.done()
+                }
+                if deadline is None or not pending:
+                    return
+                pids = sorted(process.pid for process in pending)
+                if not logged.issuperset(pids):
+                    log.warning(
+                        "waiting for retired cleanup worker pids=%s to exit "
+                        "before loading",
+                        pids,
+                    )
+                    logged.update(pids)
+                self._respawn_waiting = True
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _LoadCancelled("cleanup model load cancelled")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise _WorkerStillExiting(
+                        f"retired cleanup worker pids={pids} "
+                        f"alive {RETIRED_EXIT_TIMEOUT_S:.0f}s after retirement"
+                    )
+                if cancel_event is not None:
+                    # A threading.Event cannot wake the loop, so poll it.
+                    remaining = min(remaining, 0.02)
+                await asyncio.wait(set(pending.values()), timeout=remaining)
+        finally:
+            self._respawn_waiting = False
 
     def close(self) -> None:
         self._closed = True

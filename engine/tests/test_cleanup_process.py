@@ -3,12 +3,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import signal
+import socket
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
 import velora_engine.cleanup_process as cleanup_process_mod
+from fixtures.fake_cleanup_worker import PID_DIR_ENV, kill_leaked
 from velora_engine import actions
 from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_ipc import (
@@ -35,8 +40,8 @@ def fixture_command() -> list[str]:
     ]
 
 
-async def wait_until_loaded(cleanup: CleanupProcess) -> None:
-    for _ in range(200):
+async def wait_until_loaded(cleanup: CleanupProcess, timeout_s: float = 2.0) -> None:
+    for _ in range(int(timeout_s * 100)):
         if cleanup.loaded:
             return
         await asyncio.sleep(0.01)
@@ -49,6 +54,16 @@ async def wait_until_unhealthy(cleanup: CleanupProcess) -> None:
             return
         await asyncio.sleep(0.01)
     raise AssertionError("cleanup process did not escalate failed recovery")
+
+
+async def wait_until(condition, failure: str, timeout_s: float = 10.0) -> None:
+    """Poll `condition`; raise AssertionError(failure) after `timeout_s`, so a
+    wait that a later change breaks fails instead of hanging the suite."""
+    for _ in range(int(timeout_s * 100)):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(failure)
 
 
 async def test_cleanup_process_round_trip_and_prefix() -> None:
@@ -557,6 +572,671 @@ async def test_recovery_exhaustion_escalates_to_engine_restart(tmp_path) -> None
         await wait_until_unhealthy(cleanup)
         assert cleanup.loaded is False
         assert cleanup.unhealthy is True
+    finally:
+        await cleanup.aclose()
+
+
+# A healthy real worker exits ~30 ms after SIGKILL, even mid-prefill. On
+# 2026-09-25 two wedged workers were still alive 1 s after SIGTERM + SIGKILL.
+SLOW_EXIT_S = 0.8
+
+
+def process_gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+# SIGKILL lands this late in the tests below: long enough that a caller which
+# waits for the exit is plainly slower than CALLER_WAIT_MAX_S.
+LATE_KILL_S = 3.0
+# SIGTERM wait + SIGKILL wait (0.5 s each) plus slack for a loaded machine.
+CALLER_WAIT_MAX_S = 2.0
+
+
+def deliver_sigkill_late(monkeypatch, delay_s: float) -> None:
+    """Make every SIGKILL land `delay_s` late, as for a worker inside a
+    kernel call. A timer thread delivers it, so it still fires after the
+    test's event loop has closed and no wedged fixture outlives the run."""
+    killed: set[int] = set()
+
+    def late_kill(process: asyncio.subprocess.Process) -> None:
+        if process.pid in killed:
+            return
+        killed.add(process.pid)
+
+        def kill() -> None:
+            # returncode stays None until the pid is reaped, so it is still ours.
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(process.pid, signal.SIGKILL)
+
+        threading.Timer(delay_s, kill).start()
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "kill", late_kill)
+
+
+async def wait_until_wedged(loads: Path, timeout_s: float = 10.0) -> None:
+    """Wait until a `--wedge-second-load` worker is inside its wedged load."""
+    for _ in range(int(timeout_s * 100)):
+        if loads.exists() and loads.read_text() == "2":
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the second load never wedged")
+
+
+def record_spawns(monkeypatch) -> tuple[list[int], list[int]]:
+    """Record every worker spawn.
+
+    Returns (spawned, alive_at_spawn): the pids in spawn order, and each
+    earlier pid that was still alive when a later worker spawned.
+    """
+    spawned: list[int] = []
+    alive_at_spawn: list[int] = []
+    create = asyncio.create_subprocess_exec
+
+    async def recording_create(*args, **kwargs):
+        alive_at_spawn.extend(pid for pid in spawned if not process_gone(pid))
+        process = await create(*args, **kwargs)
+        spawned.append(process.pid)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_create)
+    return spawned, alive_at_spawn
+
+
+async def test_worker_slow_to_exit_after_sigkill_is_replaced(monkeypatch) -> None:
+    """A wedged worker that takes SLOW_EXIT_S to die is still reaped and
+    replaced, so the next dictation gets cleanup.
+
+    Before: the 0.5 s wait after SIGKILL gave up, marked cleanup unhealthy,
+    and every later dictation returned raw text until the app restarted.
+    Delivering SIGKILL late gives the parent the same exit latency.
+    """
+    loop = asyncio.get_running_loop()
+
+    def late_kill(process: asyncio.subprocess.Process) -> None:
+        def kill() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(process.pid, signal.SIGKILL)
+
+        loop.call_later(SLOW_EXIT_S, kill)
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "kill", late_kill)
+    monkeypatch.setattr(cleanup_process_mod, "PREFIX_TIMEOUT_S", 0.05)
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        hard_timeout_grace_s=0.05,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        wedged_pid = cleanup.pid
+        assert wedged_pid is not None
+
+        # The fixture hangs in prefill and ignores SIGTERM.
+        prepared = await cleanup.prepare_prefix(
+            [("__hang__", "alpha"), ("__hang__", "zulu")]
+        )
+        assert prepared.reason == "timeout_hard"
+
+        await wait_until_loaded(cleanup)
+        assert cleanup.unhealthy is False
+        assert cleanup.pid != wedged_pid
+        assert process_gone(wedged_pid)
+        result = await cleanup.cleanup("next dictation", "system")
+        assert result.text == "NEXT DICTATION"
+        assert result.applied is True
+    finally:
+        await cleanup.aclose()
+
+
+async def test_crash_looping_worker_is_respawned_with_backoff() -> None:
+    """Workers that die right after loading are respawned once at once, then
+    only after a backoff, so a crash loop cannot reload the model back to back.
+    """
+    command = fixture_command() + ["--exit-after-load"]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    spawned: list[int] = []
+    spawn = cleanup._spawn
+
+    async def counting_spawn() -> None:
+        await spawn()
+        spawned.append(cleanup.pid or 0)
+
+    cleanup._spawn = counting_spawn  # type: ignore[method-assign]
+    try:
+        await cleanup.load_async("warm prompt")
+        await asyncio.sleep(1.5)
+
+        # The first worker plus one immediate respawn; the next waits.
+        assert len(spawned) == 2
+        assert cleanup.unhealthy is False
+    finally:
+        await cleanup.aclose()
+
+
+async def test_replacement_waits_for_a_worker_outliving_the_reap_wait(
+    monkeypatch,
+) -> None:
+    """No replacement loads while the retired worker still holds its weights.
+
+    Before: recovery spawned the replacement 0.6 s in, while the old worker
+    lived until 1.3 s: two copies of the model at once.
+    """
+    loop = asyncio.get_running_loop()
+
+    def late_kill(process: asyncio.subprocess.Process) -> None:
+        def kill() -> None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(process.pid, signal.SIGKILL)
+
+        loop.call_later(SLOW_EXIT_S, kill)
+
+    monkeypatch.setattr(asyncio.subprocess.Process, "kill", late_kill)
+    monkeypatch.setattr(cleanup_process_mod, "KILL_REAP_TIMEOUT_S", 0.1)
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        hard_timeout_grace_s=0.05,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        wedged_pid = cleanup.pid
+        assert wedged_pid is not None
+        result = await cleanup.cleanup("__hang__", "system", timeout_ms=50)
+        assert result.reason == "timeout_hard"
+
+        await wait_until_loaded(cleanup)
+        assert len(spawned) == 2
+        assert alive_at_spawn == []
+        assert process_gone(wedged_pid)
+        assert cleanup.unhealthy is False
+        assert (await cleanup.cleanup("next dictation", "system")).text == "NEXT DICTATION"
+    finally:
+        await cleanup.aclose()
+
+
+async def test_cancelled_wedged_chunk_returns_before_the_worker_exits(
+    monkeypatch,
+) -> None:
+    """Cancelling a wedged chunk returns in about a second, however late
+    SIGKILL lands; the replacement still waits for the old worker's exit.
+
+    Before: the cancel waited for the exit, up to 5.5 s, on the streaming path.
+    """
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        cancel_grace_s=0.05,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        wedged_pid = cleanup.pid
+        assert wedged_pid is not None
+        chunk = asyncio.create_task(
+            cleanup.cleanup("__hang__", "system", timeout_ms=60_000))
+        await asyncio.sleep(0.2)
+
+        started = time.monotonic()
+        chunk.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await chunk
+        assert time.monotonic() - started < CALLER_WAIT_MAX_S
+        assert not process_gone(wedged_pid)
+
+        await wait_until_loaded(cleanup, timeout_s=LATE_KILL_S + 5)
+        assert process_gone(wedged_pid)
+        assert len(spawned) == 2
+        assert alive_at_spawn == []
+        assert (await cleanup.cleanup("after", "system")).text == "AFTER"
+    finally:
+        await cleanup.aclose()
+
+
+async def test_defer_during_a_wedged_reload_returns_before_the_worker_exits(
+    monkeypatch, tmp_path,
+) -> None:
+    """A dictation start that interrupts a wedged replacement load waits about
+    a second, not for SIGKILL to land.
+
+    Before: `defer_recovery` waited for the exit, up to 5.5 s, before the
+    dictation could start.
+    """
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    command = fixture_command() + ["--wedge-second-load", str(tmp_path / "loads")]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        await cleanup.load_async("warm prompt")
+        # The crash is the first quick loss, so the reload starts at once.
+        await cleanup.cleanup("__crash__", "system")
+        await wait_until_wedged(tmp_path / "loads")
+        assert len(spawned) == 2
+
+        started = time.monotonic()
+        await cleanup.defer_recovery()
+        assert time.monotonic() - started < CALLER_WAIT_MAX_S
+        assert not process_gone(spawned[1])
+
+        # Dictations that interrupt the wait for that exit load nothing, so
+        # they do not count toward the deferral escalation.
+        for _ in range(cleanup_process_mod.MAX_RECOVERY_DEFERRALS):
+            cleanup.resume_recovery()
+            await asyncio.sleep(0.05)
+            await cleanup.defer_recovery()
+        assert cleanup.unhealthy is False
+
+        cleanup.resume_recovery()
+        await wait_until_loaded(cleanup, timeout_s=LATE_KILL_S + 5)
+        assert process_gone(spawned[1])
+        assert len(spawned) == 3
+        assert alive_at_spawn == []
+    finally:
+        await cleanup.aclose()
+
+
+async def test_worker_alive_past_the_exit_bound_escalates_instead_of_loading(
+    monkeypatch, caplog,
+) -> None:
+    """A retired worker still alive at RETIRED_EXIT_TIMEOUT_S is stuck in the
+    kernel: cleanup escalates to an engine restart rather than load a second
+    copy of the model beside it."""
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    monkeypatch.setattr(cleanup_process_mod, "RETIRED_EXIT_TIMEOUT_S", 0.3)
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    escalated = asyncio.Event()
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        hard_timeout_grace_s=0.05,
+        on_unhealthy=escalated.set,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        result = await cleanup.cleanup("__hang__", "system", timeout_ms=50)
+        assert result.reason == "timeout_hard"
+
+        await asyncio.wait_for(escalated.wait(), CALLER_WAIT_MAX_S + 1)
+        assert cleanup.unhealthy is True
+        assert len(spawned) == 1
+        assert alive_at_spawn == []
+        # One bound, not one per recovery attempt.
+        assert caplog.text.count("waiting for retired cleanup worker") == 1
+    finally:
+        await cleanup.aclose()
+
+
+async def test_new_proxy_waits_for_a_worker_another_proxy_retired(
+    monkeypatch,
+) -> None:
+    """A worker one proxy retired holds every other proxy's spawn as well.
+
+    Before: each proxy kept its own registry, so the retry, set_model or a
+    restarted load built a fresh proxy and loaded beside the retired worker.
+    """
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    first = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        cancel_grace_s=0.05,
+    )
+    second: CleanupProcess | None = None
+    try:
+        await first.load_async("warm prompt")
+        wedged_pid = first.pid
+        assert wedged_pid is not None
+        chunk = asyncio.create_task(
+            first.cleanup("__hang__", "system", timeout_ms=60_000))
+        await asyncio.sleep(0.2)
+        chunk.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await chunk
+        await first.aclose()
+        assert not process_gone(wedged_pid)  # retired, still exiting
+
+        # Built after the retirement, as set_model and the retry build theirs.
+        second = CleanupProcess("fake", worker_command=fixture_command())
+        await second.load_async("warm prompt")
+        assert process_gone(wedged_pid)
+        assert len(spawned) == 2
+        assert alive_at_spawn == []
+    finally:
+        await first.aclose()
+        if second is not None:
+            await second.aclose()
+
+
+async def test_retired_exit_bound_runs_from_retirement_across_deferrals(
+    monkeypatch, tmp_path,
+) -> None:
+    """Dictations that keep interrupting the wait for a retired worker do not
+    restart its bound: cleanup escalates RETIRED_EXIT_TIMEOUT_S after the
+    worker was retired.
+
+    Before: each resumed recovery waited a fresh bound, so a user who
+    dictated at least once per bound kept cleanup raw with no escalation.
+    """
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    monkeypatch.setattr(cleanup_process_mod, "RETIRED_EXIT_TIMEOUT_S", 0.8)
+    spawned, _ = record_spawns(monkeypatch)
+    command = fixture_command() + ["--wedge-second-load", str(tmp_path / "loads")]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        await cleanup.load_async("warm prompt")
+        await cleanup.cleanup("__crash__", "system")  # its reload wedges
+        await wait_until_wedged(tmp_path / "loads")
+        await cleanup.defer_recovery()  # retires the wedged worker
+        retired_at = time.monotonic()
+
+        # A dictation every 0.3 s, each shorter than the bound.
+        while time.monotonic() - retired_at < 1.6 and not cleanup.unhealthy:
+            cleanup.resume_recovery()
+            await asyncio.sleep(0.25)
+            await cleanup.defer_recovery()
+
+        assert cleanup.unhealthy is True
+        assert not process_gone(spawned[1])  # escalated before it exited
+        assert len(spawned) == 2
+    finally:
+        await cleanup.aclose()
+
+
+async def test_hard_timeout_loop_is_respawned_with_backoff(monkeypatch) -> None:
+    """Workers lost to hard timeouts right after loading extend the crash-loop
+    streak as crashes do, so the second loss waits out a backoff.
+
+    Before: only the response reader counted losses, and a replacement
+    retires its worker without it, so hard timeouts reloaded back to back.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 2.0)
+    spawned, _ = record_spawns(monkeypatch)
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        hard_timeout_grace_s=0.05,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        result = await cleanup.cleanup("__hang__", "system", timeout_ms=50)
+        assert result.reason == "timeout_hard"
+        await wait_until_loaded(cleanup)  # loss 1 respawns at once
+        result = await cleanup.cleanup("__hang__", "system", timeout_ms=50)
+        assert result.reason == "timeout_hard"
+
+        await asyncio.sleep(1.2)  # past the reap, inside the 2 s backoff
+        assert len(spawned) == 2
+        assert cleanup.recovery_deadline is not None
+        await wait_until_loaded(cleanup, timeout_s=5)
+        assert len(spawned) == 3
+    finally:
+        await cleanup.aclose()
+
+
+async def test_loss_after_a_healthy_run_respawns_at_once(monkeypatch) -> None:
+    """Crashes spaced past RESPAWN_STREAK_RESET_S are not a crash loop."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_STREAK_RESET_S", 0.2)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        for _ in range(3):
+            await asyncio.sleep(0.25)
+            crashed = await cleanup.cleanup("__crash__", "system")
+            assert crashed.applied is False
+            await wait_until_loaded(cleanup)
+        assert (await cleanup.cleanup("after", "system")).text == "AFTER"
+    finally:
+        await cleanup.aclose()
+
+
+def backoff_left_s(cleanup: CleanupProcess) -> float:
+    """Seconds until the crash-loop backoff lets a respawn start."""
+    return max(0.0, cleanup._respawn_not_before - time.monotonic())
+
+
+async def test_a_worker_that_served_resets_the_crash_streak(monkeypatch) -> None:
+    """A loss after the worker served a cleanup respawns at once, however many
+    such losses came before. Losses with no success between still back off.
+
+    Before: every quick loss grew the streak, so eight timeouts spread over a
+    busy afternoon reached the 300 s cap, and every later loss left
+    dictation raw for five minutes.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 30.0)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        for _ in range(3):
+            assert (await cleanup.cleanup("hello", "system")).applied
+            await cleanup.cleanup("__crash__", "system")
+            assert backoff_left_s(cleanup) == 0.0
+            await wait_until_loaded(cleanup, timeout_s=10.0)
+
+        # The last loss above had no success after it, so this one backs off.
+        await cleanup.cleanup("__crash__", "system")
+        assert backoff_left_s(cleanup) > 20.0
+    finally:
+        await cleanup.aclose()
+
+
+class SpawnWatch:
+    """Record, at each worker spawn, which watched pids are still alive."""
+
+    def __init__(self, monkeypatch, watched: list[int]) -> None:
+        self.alive_at_spawn: list[list[int]] = []
+        create = asyncio.create_subprocess_exec
+
+        async def recording_create(*args, **kwargs):
+            self.alive_at_spawn.append(
+                [pid for pid in watched if not process_gone(pid)])
+            return await create(*args, **kwargs)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", recording_create)
+
+
+async def retire_worker(cleanup: CleanupProcess) -> int:
+    """Wedge `cleanup`'s worker and cancel into it, so its reap retires it."""
+    pid = cleanup.pid
+    assert pid is not None
+    chunk = asyncio.create_task(
+        cleanup.cleanup("__hang__", "system", timeout_ms=60_000))
+    await asyncio.sleep(0.2)
+    chunk.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await chunk
+    assert pid in [process.pid for process in cleanup_process_mod._retired_workers]
+    return pid
+
+
+async def test_spawn_waits_for_a_worker_retired_during_its_wait(
+    monkeypatch,
+) -> None:
+    """A worker retired while a load already waits on another one holds
+    that load too, until it has exited.
+
+    Before: the wait watched only the workers retired when it began, so the
+    load spawned beside the later one as soon as the first exited.
+    """
+    deliver_sigkill_late(monkeypatch, 4.0)
+    first = CleanupProcess(
+        "fake", worker_command=fixture_command(), cancel_grace_s=0.05)
+    third = CleanupProcess(
+        "fake", worker_command=fixture_command(), cancel_grace_s=0.05)
+    second: CleanupProcess | None = None
+    loading: asyncio.Task[None] | None = None
+    try:
+        await first.load_async("warm prompt")
+        await third.load_async("warm prompt")
+        watch = SpawnWatch(monkeypatch, [first.pid, third.pid])
+        await retire_worker(first)
+        await first.aclose()
+
+        second = CleanupProcess("fake", worker_command=fixture_command())
+        loading = asyncio.create_task(second.load_async("warm prompt"))
+        await wait_until(
+            lambda: second._respawn_waiting,
+            "the second load never waited for the retired worker",
+        )
+        await retire_worker(third)  # while `second` waits on `first`'s worker
+        await third.aclose()
+        await asyncio.wait_for(loading, timeout=20.0)
+
+        assert watch.alive_at_spawn == [[]]
+    finally:
+        if loading is not None and not loading.done():
+            loading.cancel()
+        await first.aclose()
+        await third.aclose()
+        if second is not None:
+            await second.aclose()
+
+
+async def test_recovery_waits_for_the_worker_it_stops_itself(monkeypatch) -> None:
+    """A recovery that starts while its own worker still runs (a failed call
+    schedules one without stopping the worker) reaps that worker first and
+    waits for it like any retired worker.
+
+    Before: the wait ran before the spawn stopped the worker, so a worker
+    that outlived SIGKILL was retired after the check, and the replacement
+    spawned beside it.
+    """
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        watch = SpawnWatch(monkeypatch, [cleanup.pid])
+        chunk = asyncio.create_task(
+            cleanup.cleanup("__hang__", "system", timeout_ms=60_000))
+        await asyncio.sleep(0.2)
+
+        cleanup._schedule_recovery("call_failed")
+        await wait_until(
+            lambda: not cleanup.loaded, "the recovery never began")
+        await wait_until_loaded(cleanup, timeout_s=15.0)
+
+        assert watch.alive_at_spawn == [[]]
+        assert (await chunk).applied is False
+    finally:
+        await cleanup.aclose()
+
+
+async def test_replacement_load_reports_its_deadline() -> None:
+    """A replacement loading right after a first loss (no backoff, no
+    retired worker) still reports when it should have loaded.
+
+    Before: recovery_deadline was None once the backoff had passed, so
+    meeting notes that met the load took the model for lost and restarted
+    the engine.
+    """
+    cleanup = CleanupProcess(
+        "fake", worker_command=[*fixture_command(), "--load-delay", "1.0"])
+    try:
+        await cleanup.load_async("warm prompt")
+        await cleanup.cleanup("__crash__", "system")
+        for _ in range(200):
+            if cleanup.recovering:
+                break
+            await asyncio.sleep(0.01)
+        assert cleanup.recovering and not cleanup.loaded
+
+        deadline = cleanup.recovery_deadline
+        assert deadline is not None
+        assert 0 < deadline - time.monotonic() <= cleanup_process_mod.LOAD_TIMEOUT_S
+        await wait_until_loaded(cleanup, timeout_s=10.0)
+        assert cleanup.recovery_deadline is None
+    finally:
+        await cleanup.aclose()
+
+
+async def test_deferred_recovery_still_counts_a_quick_crash(monkeypatch) -> None:
+    """A crash right after ready extends the streak even when a long dictation
+    defers recovery past RESPAWN_STREAK_RESET_S.
+
+    Before: the streak was judged when recovery ran, so the deferral turned a
+    quick crash into a healthy run and the respawn skipped its backoff.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_STREAK_RESET_S", 1.0)
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 2.5)
+    spawned, _ = record_spawns(monkeypatch)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        await cleanup.cleanup("__crash__", "system")  # loss 1 respawns at once
+        await wait_until_loaded(cleanup)
+
+        await cleanup.defer_recovery()  # a dictation starts
+        await cleanup.cleanup("__crash__", "system")  # loss 2, just after ready
+        await asyncio.sleep(1.3)  # the dictation outlasts the reset window
+        cleanup.resume_recovery()
+        await asyncio.sleep(0.3)
+        assert len(spawned) == 2  # still inside loss 2's 2.5 s backoff
+
+        await wait_until_loaded(cleanup, timeout_s=5)
+        assert len(spawned) == 3
+    finally:
+        await cleanup.aclose()
+
+
+def test_respawn_backoff_saturates_past_a_1024_streak() -> None:
+    """5 s x 2**1024 overflows a float; a long crash loop stays at the cap."""
+    cap = cleanup_process_mod.RESPAWN_BACKOFF_MAX_S
+    assert cleanup_process_mod._respawn_delay_s(1_500) == cap
+    assert cleanup_process_mod.respawn_backoff_s(1_500) == cap
+    assert cleanup_process_mod.respawn_backoff_s(0) == cleanup_process_mod.RESPAWN_BACKOFF_S
+
+
+async def test_respawn_backoff_reports_recovering_until_its_deadline(
+    monkeypatch,
+) -> None:
+    """Callers can tell a crash-loop backoff from a lost model: the proxy
+    reports recovering and when the replacement may load."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 1.0)
+    command = fixture_command() + ["--exit-after-load"]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        await cleanup.load_async("warm prompt")
+        for _ in range(300):
+            if cleanup.recovery_deadline is not None:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)  # the lost worker is reaped; recovery waits
+        deadline = cleanup.recovery_deadline
+        assert deadline is not None
+        # The backoff, then the replacement's load.
+        load_s = cleanup_process_mod.LOAD_TIMEOUT_S
+        assert load_s < deadline - time.monotonic() <= 1.0 + load_s
+        assert cleanup.recovering is True
+        assert cleanup.loaded is False
+        result = await cleanup.cleanup("during backoff", "system")
+        assert result.reason == "llm_recovering"
+    finally:
+        await cleanup.aclose()
+
+
+async def test_dictation_during_respawn_backoff_does_not_escalate() -> None:
+    """Deferring a recovery that is only waiting out its backoff is not a
+    stuck warm-up, however many dictations arrive meanwhile."""
+    command = fixture_command() + ["--exit-after-load"]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        await cleanup.load_async("warm prompt")
+        for _ in range(200):
+            if time.monotonic() < cleanup._respawn_not_before:
+                break
+            await asyncio.sleep(0.01)
+        assert cleanup._respawn_streak == 2
+
+        for _ in range(cleanup_process_mod.MAX_RECOVERY_DEFERRALS + 1):
+            await cleanup.defer_recovery()
+            cleanup.resume_recovery()
+            await asyncio.sleep(0.01)
+        assert cleanup.unhealthy is False
     finally:
         await cleanup.aclose()
 
@@ -1089,3 +1769,147 @@ async def test_repeated_task_cancel_cannot_interrupt_decision_handoff(
 
     assert cleanup._operation_lock.locked() is False
     assert replaced == ["decision_cancel_unresponsive"]
+
+
+def spawn_fixture_worker(*flags: str) -> tuple[subprocess.Popen, socket.socket]:
+    """Start the fake worker without a proxy; returns it and our socket end."""
+    ours, theirs = socket.socketpair()
+    worker = subprocess.Popen(
+        [*fixture_command(), "--fd", str(theirs.fileno()), "--model", "fake",
+         *flags],
+        pass_fds=(theirs.fileno(),),
+    )
+    theirs.close()
+    return worker, ours
+
+
+# Two loads: the second wedges a `--wedge-second-load` worker.
+TWO_LOADS = b'{"id":"1","op":"load"}\n{"id":"2","op":"load"}\n'
+
+
+def process_state(pid: int) -> str:
+    """The ps state letters, e.g. "S" sleeping or "R" running."""
+    return subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+
+
+async def test_wedged_fixture_worker_sleeps_instead_of_spinning(tmp_path) -> None:
+    """A wedged fake worker blocks, so one a test leaks costs no CPU.
+
+    Before: wedges spun on `while True: pass`; four leaked workers each held
+    a core and pushed the load average past 240.
+    """
+    loads = tmp_path / "loads"
+    worker, ours = spawn_fixture_worker("--wedge-second-load", str(loads))
+    try:
+        ours.sendall(TWO_LOADS)
+        await wait_until_wedged(loads)
+
+        states = []
+        for _ in range(5):
+            states.append(process_state(worker.pid))
+            await asyncio.sleep(0.1)
+        assert sum(state.startswith("R") for state in states) <= 1, states
+    finally:
+        worker.kill()
+        worker.wait()
+        ours.close()
+
+
+# Runs the fake worker from argv, wedges it, prints its pid, then waits for
+# stdin to close; killing this parent orphans the wedged worker.
+ORPHANING_PARENT = """
+import socket, subprocess, sys
+ours, theirs = socket.socketpair()
+worker = subprocess.Popen(
+    [*sys.argv[1:], "--fd", str(theirs.fileno()), "--model", "fake"],
+    pass_fds=(theirs.fileno(),),
+)
+ours.sendall(b'{"id":"1","op":"load"}\\n{"id":"2","op":"load"}\\n')
+print(worker.pid, flush=True)
+sys.stdin.read()
+"""
+
+
+async def test_orphaned_fixture_worker_exits_on_its_own(tmp_path) -> None:
+    """A wedged fake worker whose parent died exits without being killed.
+
+    Before: a pytest run that died with a worker wedged left it running,
+    ignoring SIGTERM, until someone SIGKILLed it by hand.
+    """
+    loads = tmp_path / "loads"
+    parent = subprocess.Popen(
+        [sys.executable, "-c", ORPHANING_PARENT, *fixture_command(),
+         "--wedge-second-load", str(loads)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    assert parent.stdout is not None
+    worker_pid = int(parent.stdout.readline())
+    try:
+        await wait_until_wedged(loads)
+        parent.kill()
+        parent.wait()
+
+        for _ in range(500):
+            if process_gone(worker_pid):
+                break
+            await asyncio.sleep(0.01)
+        assert process_gone(worker_pid)
+    finally:
+        parent.kill()
+        parent.wait()
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(worker_pid, signal.SIGKILL)
+
+
+async def test_fixture_worker_exits_at_its_lifetime_cap(tmp_path) -> None:
+    """A wedged fake worker that its live parent leaked exits at its cap.
+
+    Before: it ran for as long as the pytest process that leaked it.
+    """
+    lifetime_s = 4.0
+    loads = tmp_path / "loads"
+    started = time.monotonic()
+    worker, ours = spawn_fixture_worker(
+        "--wedge-second-load", str(loads), "--max-lifetime", str(lifetime_s))
+    try:
+        ours.sendall(TWO_LOADS)
+        await wait_until_wedged(loads, timeout_s=lifetime_s)
+
+        # Wedged means SIGTERM is ignored and the socket is never read, so
+        # only the cap can end it here.
+        worker.wait(timeout=lifetime_s + 5.0)
+        assert time.monotonic() - started >= lifetime_s
+    finally:
+        worker.kill()
+        worker.wait()
+        ours.close()
+
+
+async def test_session_cleanup_kills_only_leaked_fixture_workers(
+    tmp_path, monkeypatch,
+) -> None:
+    """The session cleanup SIGKILLs a worker a test leaked, and spares a
+    process that has since taken a registered pid."""
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    loads = tmp_path / "loads"
+    monkeypatch.setenv(PID_DIR_ENV, str(pid_dir))
+    worker, ours = spawn_fixture_worker("--wedge-second-load", str(loads))
+    bystander = subprocess.Popen(["sleep", "30"])
+    (pid_dir / str(bystander.pid)).touch()
+    try:
+        ours.sendall(TWO_LOADS)
+        await wait_until_wedged(loads)
+        assert (pid_dir / str(worker.pid)).exists()
+
+        assert kill_leaked(pid_dir) == [worker.pid]
+        assert worker.wait(timeout=5.0) == -signal.SIGKILL
+        assert bystander.poll() is None
+    finally:
+        for process in (worker, bystander):
+            process.kill()
+            process.wait()
+        ours.close()

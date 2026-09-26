@@ -8,14 +8,22 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
 
-from test_cleanup_process import fixture_command
+from test_cleanup_process import (
+    deliver_sigkill_late,
+    fixture_command,
+    process_gone,
+    record_spawns,
+)
 
+import velora_engine.cleanup_process as cleanup_process_mod
 import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_process import CleanupProcess
@@ -95,6 +103,20 @@ async def engine(home, fake_stt):
 async def connect(sock) -> Client:
     reader, writer = await asyncio.open_unix_connection(str(sock))
     return Client(reader, writer)
+
+
+async def restart_exit(eng: Engine) -> None:
+    """Wait for the engine's scheduled restart to reach its hard exit.
+
+    The restart gives pending audio archive writes up to
+    CLEANUP_RESTART_ARCHIVE_GRACE_S before its CLEANUP_RESTART_GRACE_S, so a
+    fixed sleep of that grace raced a dictation's archive write under load.
+    """
+    await asyncio.wait_for(
+        eng._cleanup_restart_task,
+        server_mod.CLEANUP_RESTART_ARCHIVE_GRACE_S
+        + server_mod.CLEANUP_RESTART_GRACE_S + 1.0,
+    )
 
 
 AUDIO = (np.sin(np.linspace(0, 100, 1600)) * 0.1).astype(np.float32)  # one 100ms chunk
@@ -366,7 +388,7 @@ async def test_hard_wedged_cleanup_sends_raw_final_then_restarts_engine(engine):
     assert final["text"] == final["raw"] + "."
     assert final["cleanup_applied"] is False
     assert eng.shutdown.is_set()
-    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    await restart_exit(eng)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     client.close()
 
@@ -469,6 +491,801 @@ async def test_cleanup_model_swap_reaps_old_worker_before_ack(engine, monkeypatc
     else:
         raise AssertionError("retired cleanup model survived model_set acknowledgement")
     client.close()
+
+
+@contextlib.asynccontextmanager
+async def serve_with_startup_worker(
+    monkeypatch, *worker_flags: str, is_cached=lambda _model_id: True,
+    retry_idle_s: float = 0.0, load_then_swap: bool = False,
+):
+    """Serve an engine whose startup cleanup load runs the fixture worker.
+
+    Yields (engine, socket, workers, spawned): every CleanupProcess the engine
+    built, with the monotonic time it was built, in order; and the pid of
+    every worker spawned, in order. A retry attempt waits `retry_idle_s` of
+    idle. `load_then_swap` allows set_model's designed overlap: its model
+    loads beside the adopted one, which it then replaces.
+    """
+    workers: list[tuple[float, CleanupProcess]] = []
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    monkeypatch.setattr(server_mod, "CLEANUP_RETRY_IDLE_S", retry_idle_s)
+
+    def new_cleanup(model_id: str, **kwargs) -> CleanupProcess:
+        cleanup = CleanupProcess(
+            model_id,
+            worker_command=[*fixture_command(), *worker_flags],
+            **kwargs,
+        )
+        workers.append((time.monotonic(), cleanup))
+        return cleanup
+
+    monkeypatch.setattr(server_mod, "CleanupProcess", new_cleanup)
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    monkeypatch.setattr(server_mod.models, "is_cached", is_cached)
+    # Adoption prunes superseded models from the real Hugging Face cache.
+    monkeypatch.setattr(server_mod.models, "remove_from_cache", lambda _model_id: 0)
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    sock_dir = Path(tempfile.mkdtemp(prefix="velora-t-"))
+    sock = sock_dir / "e.sock"
+    task = asyncio.create_task(eng.serve(sock))
+    for _ in range(100):
+        if sock.exists():
+            break
+        await asyncio.sleep(0.01)
+    try:
+        yield eng, sock, workers, spawned
+    finally:
+        eng.shutdown.set()
+        await asyncio.wait_for(task, 5)
+        shutil.rmtree(sock_dir, ignore_errors=True)
+        # Shutdown stops the retry and reaps every worker, including one a
+        # retry was loading; none is built after it.
+        built = len(workers)
+        await asyncio.sleep(0.3)
+        assert len(workers) == built
+        assert all(process_gone(pid) for pid in spawned)
+        # No worker, and so no model load, ever ran beside another.
+        if not load_then_swap:
+            assert alive_at_spawn == []
+
+
+async def dictate(client: Client, session: str) -> dict:
+    await client.send_json({"cmd": "start", "session": session, "context": {}})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": session})
+    return await client.recv_event("final", timeout=2.0)
+
+
+async def test_timed_out_startup_cleanup_load_is_retried(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """The one-shot startup load left dictation raw until the app restarted."""
+    # The retried worker must spawn and load within this, even on a busy machine.
+    monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    monkeypatch.setenv(
+        "VELORA_FAKE_STT_TEXT",
+        "the retried writing worker cleans up this dictation once it loads",
+    )
+    async with serve_with_startup_worker(
+        monkeypatch, "--hang-first-load", str(tmp_path / "hung")
+    ) as (eng, sock, workers, spawned):
+        client = await connect(sock)
+        ready = await client.recv_event("ready")
+        if not ready["setup_complete"]:
+            await client.recv_event("setup_complete")
+        for _ in range(1000):
+            if eng.cleanup is not None:
+                break
+            await asyncio.sleep(0.01)
+
+        assert eng.cleanup is not None and eng.cleanup.loaded
+        assert len(workers) == 2
+        assert process_gone(spawned[0])  # the timed-out worker was reaped
+        final = await dictate(client, "after-retry")
+        assert final["cleanup_applied"] is True
+        client.close()
+
+
+async def test_failing_startup_cleanup_load_backs_off(home, fake_stt, monkeypatch):
+    """A model that never loads is retried on the capped backoff, not in a loop."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_MAX_S", 0.2)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-every-load"
+    ) as (eng, _sock, workers, spawned):
+        for _ in range(1000):
+            if len(workers) >= 4:
+                break
+            await asyncio.sleep(0.01)
+
+        assert eng.cleanup is None
+        assert not eng.shutdown.is_set()
+        assert eng.setup_complete
+        built = [at for at, _ in workers]
+        gaps = [later - earlier for earlier, later in zip(built, built[1:])]
+        assert len(gaps) >= 3
+        for retry, gap in enumerate(gaps):
+            assert gap >= min(0.05 * 2 ** retry, 0.2)
+        assert all(process_gone(pid) for pid in spawned[:3])
+
+
+async def test_cleanup_load_retry_waits_for_dictation(home, fake_stt, monkeypatch):
+    """A retry never loads during a dictation, whose final stays raw and prompt."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.2)
+    monkeypatch.setenv(
+        "VELORA_FAKE_STT_TEXT",
+        "this dictation finishes raw while the writing model retries its load",
+    )
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-every-load"
+    ) as (eng, sock, workers, _spawned):
+        client = await connect(sock)
+        ready = await client.recv_event("ready")
+        if not ready["setup_complete"]:
+            await client.recv_event("setup_complete")
+        await client.send_json({"cmd": "start", "session": "held", "context": {}})
+        await client.send_audio(AUDIO)
+        await client.recv_event("partial")
+        built = len(workers)
+        await asyncio.sleep(0.6)
+
+        assert len(workers) == built
+        await client.send_json({"cmd": "stop", "session": "held"})
+        final = await client.recv_event("final", timeout=2.0)
+        assert final["cleanup_applied"] is False
+        assert final["text"] == final["raw"] + "."
+        for _ in range(200):
+            if len(workers) > built:
+                break
+            await asyncio.sleep(0.01)
+        assert len(workers) > built  # the held retry ran once dictation ended
+        client.close()
+
+
+async def wait_for(condition, timeout_s: float = 5.0) -> None:
+    for _ in range(int(timeout_s * 100)):
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition not reached")
+
+
+async def ready_client(sock: Path) -> Client:
+    client = await connect(sock)
+    ready = await client.recv_event("ready")
+    if not ready["setup_complete"]:
+        await client.recv_event("setup_complete")
+    return client
+
+
+async def test_set_model_during_a_cleanup_retry_load_loads_one_model_at_a_time(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """set_model stops a retry mid-load before loading its own model.
+
+    Before: both loaded at once, two copies of the weights in memory.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-first-load", str(tmp_path / "failed"),
+        "--load-delay", "0.8",
+    ) as (eng, sock, workers, spawned):
+        client = await ready_client(sock)
+        await wait_for(lambda: len(spawned) == 2)  # the retry is loading
+        retry_pid = spawned[1]
+
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        changed = await client.recv_event("model_set", timeout=5.0)
+
+        assert changed["model"] == "fake-new"
+        assert eng.cleanup is not None and eng.cleanup.model_id == "fake-new"
+        assert eng.cleanup.loaded
+        assert len(spawned) == 3
+        assert process_gone(retry_pid)
+        assert eng._cleanup_retry_task is not None and eng._cleanup_retry_task.done()
+        client.close()
+
+
+async def test_failed_set_model_restarts_the_stopped_cleanup_retry(
+    home, fake_stt, monkeypatch
+):
+    """The retry that set_model stopped runs again when set_model's own load
+    fails, so dictation does not stay raw until the next launch."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-every-load"
+    ) as (eng, sock, workers, spawned):
+        client = await ready_client(sock)
+        await wait_for(lambda: eng._cleanup_retry_task is not None)
+        first_retry = eng._cleanup_retry_task
+
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        error = await client.recv_event("error", timeout=5.0)
+
+        assert "set_model" in error["message"]
+        assert first_retry.done()
+        assert eng.cleanup is None
+        restarted = eng._cleanup_retry_task
+        assert restarted is not None and restarted is not first_retry
+        assert not restarted.done()
+        built = len(spawned)
+        await wait_for(lambda: len(spawned) > built)  # the restarted retry loads
+        client.close()
+
+
+async def test_dictation_start_abandons_a_cleanup_retry_load(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """A retry load in flight when a dictation starts is abandoned at once and
+    runs again after it; the dictation itself stays raw.
+
+    Before: the load finished during the dictation, competing for the GPU.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    monkeypatch.setenv(
+        "VELORA_FAKE_STT_TEXT",
+        "a dictation that starts while the writing model is loading stays raw",
+    )
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-first-load", str(tmp_path / "failed"),
+        "--load-delay", "0.8",
+    ) as (eng, sock, workers, spawned):
+        client = await ready_client(sock)
+        await wait_for(lambda: len(spawned) == 2)  # the retry is loading
+        retry_pid = spawned[1]
+
+        await client.send_json({"cmd": "start", "session": "mid-load", "context": {}})
+        await client.send_audio(AUDIO)
+        await client.recv_event("partial")
+        await wait_for(lambda: process_gone(retry_pid), timeout_s=1.0)
+        assert eng.cleanup is None
+        assert len(spawned) == 2
+
+        await client.send_json({"cmd": "stop", "session": "mid-load"})
+        final = await client.recv_event("final", timeout=2.0)
+        assert final["cleanup_applied"] is False
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        final = await dictate(client, "after-load")
+        assert final["cleanup_applied"] is True
+        client.close()
+
+
+async def test_cleanup_retry_rechecks_for_a_dictation_after_the_cache_check(
+    home, fake_stt, monkeypatch
+):
+    """A dictation that starts while the retry checks the model cache holds
+    the load until it ends."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    cleanup_model = Config().cleanup_model
+    cache_checks = 0
+    retry_checking = threading.Event()
+
+    def slow_is_cached(model_id: str) -> bool:
+        nonlocal cache_checks
+        if model_id != cleanup_model:
+            return True
+        cache_checks += 1
+        if cache_checks == 2:  # the retry's check; the first is startup's
+            retry_checking.set()
+            time.sleep(0.3)
+        return True
+
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-every-load", is_cached=slow_is_cached,
+    ) as (eng, sock, workers, spawned):
+        client = await ready_client(sock)
+        await wait_for(retry_checking.is_set)
+        built = len(spawned)
+        await client.send_json({"cmd": "start", "session": "held", "context": {}})
+        await client.send_audio(AUDIO)
+        await client.recv_event("partial")
+        await asyncio.sleep(0.5)
+        assert len(spawned) == built
+
+        await client.send_json({"cmd": "stop", "session": "held"})
+        await client.recv_event("final", timeout=2.0)
+        await wait_for(lambda: len(spawned) > built)
+        client.close()
+
+
+async def test_cleanup_retry_waits_for_batch_jobs(home, fake_stt, monkeypatch):
+    """Background batch work (the vocabulary miner) holds a retry load too."""
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-every-load"
+    ) as (eng, _sock, workers, spawned):
+        await wait_for(lambda: eng._cleanup_retry_task is not None)
+        eng._begin_batch_job(lower_priority=True)
+        await asyncio.sleep(0.8)
+        assert len(spawned) == 1
+
+        eng._end_batch_job(lower_priority=True)
+        await wait_for(lambda: len(spawned) > 1)
+
+
+async def test_cleanup_retry_loads_the_model_config_names_after_a_switch(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """A retry whose load finishes for a model config no longer names tries
+    again with the new one.
+
+    Before: it closed the loaded engine and stopped retrying for good.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-first-load", str(tmp_path / "failed"),
+        "--load-delay", "0.5",
+    ) as (eng, _sock, workers, spawned):
+        await wait_for(lambda: len(spawned) == 2)  # the retry is loading
+        eng.config.data["cleanup_model"] = "fake-other"
+
+        await wait_for(lambda: eng.cleanup is not None)
+        assert eng.cleanup.model_id == "fake-other"
+        assert eng.cleanup.loaded
+
+
+async def test_shutdown_during_a_hung_cleanup_retry_load_reaps_the_worker(
+    home, fake_stt, monkeypatch
+):
+    """Shutdown stops a retry whose load never returns, and its worker, which
+    ignores SIGTERM, is gone once serve() returns."""
+    monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
+    async with serve_with_startup_worker(
+        monkeypatch, "--hang-every-load"
+    ) as (eng, _sock, workers, spawned):
+        await wait_for(lambda: eng._cleanup_retry_task is not None)
+        # The startup load timed out; the retry's load hangs for good.
+        monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 60.0)
+        await wait_for(lambda: len(spawned) == 2)
+        await asyncio.sleep(0.2)
+        assert eng._cleanup_loading is not None
+        started = time.monotonic()
+        eng.shutdown.set()
+    # The teardown waited 0.3 s for stray respawns and found every pid gone.
+    assert time.monotonic() - started < 3.0
+
+
+async def test_set_model_during_the_startup_load_keeps_a_working_cleanup(
+    home, fake_stt, monkeypatch
+):
+    """set_model waits for the startup load, which is adopted; when set_model's
+    own model then fails to load, the startup model keeps serving.
+
+    Before: set_model loaded beside the startup load and failed; the startup
+    engine then found config naming the new model and closed itself, so
+    dictation stayed raw until the next launch.
+    """
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    async with serve_with_startup_worker(
+        monkeypatch, "--load-delay", "0.8", "--fail-load-for", "fake-new",
+        load_then_swap=True,
+    ) as (eng, sock, _workers, spawned):
+        client = await connect(sock)
+        await client.recv_event("ready")
+        await wait_for(lambda: len(spawned) == 1)  # the startup load runs
+        # Whether the startup engine was adopted when each later worker spawned.
+        adopted_at_spawn: list[bool] = []
+        spawn = CleanupProcess._spawn
+
+        async def recording_spawn(self) -> None:
+            adopted_at_spawn.append(eng.cleanup is not None)
+            await spawn(self)
+
+        monkeypatch.setattr(CleanupProcess, "_spawn", recording_spawn)
+        # The app writes its pick to config.json, then sends set_model.
+        eng.config.data["cleanup_model"] = "fake-new"
+        eng.config.save(keys={"cleanup_model"})
+
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        error = await client.recv_event("error", timeout=5.0)
+
+        assert "set_model" in error["message"]
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        # set_model loaded only after the startup load ended, never beside it.
+        assert adopted_at_spawn == [True]
+        client.close()
+
+
+async def test_startup_load_skips_a_model_set_model_already_installed(
+    home, fake_stt, monkeypatch
+):
+    """A set_model that takes the load lock before the startup load installs
+    its model; the startup load then loads nothing beside it."""
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    startup_model = Config().cleanup_model
+    startup_checking = threading.Event()
+
+    def slow_startup_cache_check(model_id: str) -> bool:
+        if model_id == startup_model and not startup_checking.is_set():
+            startup_checking.set()
+            time.sleep(0.8)  # set_model takes the lock meanwhile
+        return True
+
+    async with serve_with_startup_worker(
+        monkeypatch, is_cached=slow_startup_cache_check,
+    ) as (eng, sock, _workers, spawned):
+        client = await connect(sock)
+        await client.recv_event("ready")
+        await wait_for(startup_checking.is_set)
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        await client.recv_event("model_set", timeout=5.0)
+        await wait_for(lambda: eng.setup_complete)
+
+        assert eng.cleanup is not None and eng.cleanup.model_id == "fake-new"
+        assert len(spawned) == 1
+        client.close()
+
+
+async def test_failed_set_model_starts_a_retry_when_none_runs(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """A set_model whose load fails with no engine left starts the retry, even
+    when no retry was running for it to stop.
+
+    Before: only a retry that set_model had stopped ran again, so cleanup
+    stayed absent until the next launch.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    startup_model = Config().cleanup_model
+    checks = 0
+
+    def missing_at_the_first_retry(model_id: str) -> bool:
+        nonlocal checks
+        if model_id != startup_model:
+            return True
+        checks += 1
+        return checks != 2  # startup's check passes; the retry's stops it
+
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-first-load", str(tmp_path / "failed"),
+        "--fail-load-for", "fake-new", is_cached=missing_at_the_first_retry,
+    ) as (eng, sock, _workers, _spawned):
+        client = await ready_client(sock)
+        await wait_for(
+            lambda: eng._cleanup_retry_task is not None and eng._cleanup_retry_task.done())
+        assert eng.cleanup is None
+
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        await client.recv_event("error", timeout=5.0)
+
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        assert eng.cleanup.model_id == startup_model
+        client.close()
+
+
+async def test_cleanup_retry_runs_once_at_a_time(home, monkeypatch):
+    """A second start while a retry runs keeps the running one, which
+    set_model can then stop."""
+    monkeypatch.setattr(server_mod, "respawn_backoff_s", lambda _step: 3600.0)
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    eng._start_cleanup_retry()
+    running = eng._cleanup_retry_task
+
+    eng._start_cleanup_retry()
+
+    assert eng._cleanup_retry_task is running
+    await eng._stop_cleanup_retry()
+    assert running.done()
+
+
+async def test_meeting_notes_do_not_cancel_a_cleanup_retry_load(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """Notes that start during a retry load wait for it, as they do for the
+    startup load.
+
+    Before: the retry counted notes as foreground work and abandoned its
+    load, and the notes then failed with no model to wait for.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-first-load", str(tmp_path / "failed"),
+        "--load-delay", "0.8",
+    ) as (eng, _sock, _workers, spawned):
+        await wait_for(lambda: len(spawned) == 2)  # the retry is loading
+        retry_pid = spawned[1]
+        eng._meeting_notes_running = True
+
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        assert eng.cleanup.pid == retry_pid
+        eng._meeting_notes_running = False
+
+
+async def test_cleanup_retry_waits_for_continuous_idle(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """Gaps between dictations shorter than a load start no retry load.
+
+    Before: each gap spawned a worker that the next dictation abandoned, so a
+    burst of dictations churned workers and never restored cleanup.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.05)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-first-load", str(tmp_path / "failed"),
+        "--load-delay", "0.8", retry_idle_s=1.0,
+    ) as (eng, _sock, _workers, spawned):
+        # Dictations 0.3 s long, 0.5 s apart: every gap is shorter than
+        # both the load and the idle requirement.
+        for _ in range(5):
+            eng._editing = True
+            await asyncio.sleep(0.3)
+            eng._editing = False
+            await asyncio.sleep(0.5)
+        assert len(spawned) == 1  # the failed startup load only
+
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        assert len(spawned) == 2
+
+
+async def test_stop_cleanup_retry_keeps_the_callers_cancellation(home):
+    """Cancelling set_model while it stops the retry cancels set_model.
+
+    Before: stopping the retry swallowed every CancelledError, including one
+    aimed at its caller.
+    """
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+
+    async def retry_slow_to_stop() -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.5)  # reaping its worker
+            raise
+
+    eng._cleanup_retry_task = asyncio.create_task(retry_slow_to_stop())
+    await asyncio.sleep(0)
+    stopping = asyncio.create_task(eng._stop_cleanup_retry())
+    await asyncio.sleep(0.05)
+    stopping.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+
+
+def frozen_clock(eng: Engine, now: float = 100.0) -> list[float]:
+    """Drive `eng`'s monotonic clock by hand: set `clock[0]` to move it."""
+    clock = [now]
+    eng._clock = lambda: clock[0]
+    return clock
+
+
+async def test_action_model_wait_covers_a_delayed_recovery(home, monkeypatch):
+    """A recovery due after ACTION_MODEL_RECOVERY_WAIT_S (a crash-loop
+    backoff, a retired worker's exit) is still a recovery: Action Mode waits
+    for the replacement instead of failing."""
+    monkeypatch.setattr(server_mod, "ACTION_MODEL_RECOVERY_WAIT_S", 1.0)
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    clock = frozen_clock(eng)
+    cleanup = SimpleNamespace(
+        loaded=False, unhealthy=False, recovering=True,
+        recovery_deadline=clock[0] + 10.0)
+    eng.cleanup = cleanup
+    waiting = asyncio.create_task(eng._wait_for_action_model_recovery())
+    await asyncio.sleep(0.1)
+
+    clock[0] += 5.0  # past the ordinary wait, inside the recovery
+    await asyncio.sleep(0.1)
+    assert not waiting.done()
+    cleanup.loaded = True
+    assert await asyncio.wait_for(waiting, 1.0) is True
+
+
+async def test_action_fails_now_when_a_recovery_outlasts_the_turn(
+    home, monkeypatch
+):
+    monkeypatch.setattr(server_mod, "ACTION_MODEL_RECOVERY_WAIT_S", 0.05)
+    monkeypatch.setattr(server_mod, "ACTION_MODEL_RECOVERY_WAIT_MAX_S", 0.3)
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    clock = frozen_clock(eng)
+    eng.cleanup = SimpleNamespace(
+        loaded=False, unhealthy=False, recovering=True,
+        recovery_deadline=clock[0] + 1.0)
+
+    # The clock never moves, so only the up-front check can end this wait.
+    assert await asyncio.wait_for(eng._wait_for_action_model_recovery(), 1.0) is False
+
+
+async def test_action_waits_out_a_retired_worker_exit(home, monkeypatch):
+    """Action Mode waits for a replacement held back by a retired worker's
+    exit instead of failing at its ordinary model wait.
+
+    Before: only a crash-loop backoff extended the wait, so the turn failed
+    at ACTION_MODEL_RECOVERY_WAIT_S while the replacement was still due.
+    """
+    deliver_sigkill_late(monkeypatch, 2.0)
+    monkeypatch.setattr(server_mod, "ACTION_MODEL_RECOVERY_WAIT_S", 0.2)
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=fixture_command(),
+        hard_timeout_grace_s=0.05,
+    )
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    eng.cleanup = cleanup
+    try:
+        await cleanup.load_async("warm prompt")
+        result = await cleanup.cleanup("__hang__", "system", timeout_ms=50)
+        assert result.reason == "timeout_hard"
+        await wait_for(lambda: bool(cleanup_process_mod._retired_workers))
+
+        assert await eng._wait_for_action_model_recovery() is True
+        assert cleanup.loaded
+    finally:
+        await cleanup.aclose()
+
+
+class RecoveringNotesCleanup:
+    """Notes model whose replacement is due at `recovery_deadline`."""
+
+    unhealthy = False
+    recovering = True
+
+    def __init__(self, *, loaded: bool, recovery_deadline: float | None):
+        self.loaded = loaded
+        self.recovery_deadline = recovery_deadline
+        self.calls = 0
+
+    async def cleanup(self, raw, system_prompt, **kwargs):
+        self.calls += 1
+        return SimpleNamespace(
+            applied=True,
+            text=json.dumps({
+                "summary": "Notes after the recovery.",
+                "decisions": [],
+                "action_items": [],
+            }),
+        )
+
+
+async def run_notes(
+    eng: Engine,
+    meeting_id: str,
+    transcript: str = "[00:00] Me: Summarize this after the recovery.",
+) -> list[dict]:
+    eng._send = AsyncMock()
+    eng._meeting_notes_running = True
+    await eng._run_meeting_notes({
+        "id": f"{meeting_id}-notes", "meeting_id": meeting_id,
+        "transcript": transcript,
+    })
+    return [call.args[0] for call in eng._send.await_args_list]
+
+
+async def test_meeting_notes_wait_out_a_delayed_recovery(engine, monkeypatch):
+    """Notes wait for a replacement due after their own model wait (a
+    crash-loop backoff, a retired worker's exit) instead of restarting the
+    engine when that wait runs out."""
+    eng, _sock = engine
+    monkeypatch.setattr(server_mod, "MEETING_NOTES_MODEL_READY_WAIT_S", 0.2)
+    cleanup = RecoveringNotesCleanup(
+        loaded=False, recovery_deadline=time.monotonic() + 1.0)
+    eng.cleanup = cleanup
+    asyncio.get_running_loop().call_later(0.6, setattr, cleanup, "loaded", True)
+
+    sent = await run_notes(eng, "m-delayed")
+
+    assert cleanup.calls == 1
+    assert not eng.shutdown.is_set()
+    assert any(item.get("event") == "meeting_notes_ready" for item in sent)
+
+
+async def test_meeting_notes_wait_out_a_recovery_that_starts_mid_call(
+    engine, monkeypatch
+):
+    """A notes call that finds its worker just replaced (a dictation's hard
+    timeout, while the call waited its turn) waits for the replacement.
+
+    Before: the notes treated the replacement as a lost model and restarted
+    the engine, though the proxy was recovering on schedule.
+    """
+    eng, _sock = engine
+    monkeypatch.setattr(server_mod, "MEETING_NOTES_MODEL_READY_WAIT_S", 0.2)
+    cleanup = RecoveringNotesCleanup(loaded=True, recovery_deadline=None)
+    succeed = cleanup.cleanup
+
+    async def replaced_on_first_call(raw, system_prompt, **kwargs):
+        if cleanup.calls:
+            return await succeed(raw, system_prompt, **kwargs)
+        cleanup.calls += 1
+        cleanup.loaded = False
+        cleanup.recovery_deadline = time.monotonic() + 1.0
+        asyncio.get_running_loop().call_later(0.4, setattr, cleanup, "loaded", True)
+        return SimpleNamespace(applied=False, reason="llm_recovering", text=raw)
+
+    cleanup.cleanup = replaced_on_first_call
+    eng.cleanup = cleanup
+
+    sent = await run_notes(eng, "m-mid-call")
+
+    assert cleanup.calls == 2
+    assert not eng.shutdown.is_set()
+    assert any(item.get("event") == "meeting_notes_ready" for item in sent)
+
+
+async def test_meeting_notes_wait_for_a_replacement_loading_after_a_loss(
+    engine, monkeypatch
+):
+    """Notes that meet a replacement still loading after a first worker loss
+    (no backoff, no retired worker) wait for it instead of restarting the
+    engine. The real proxy reports its own recovery_deadline here.
+
+    Before: the proxy reported no deadline during that load, so the notes
+    gave up after their own model wait and restarted the engine.
+    """
+    eng, _sock = engine
+    monkeypatch.setattr(server_mod, "MEETING_NOTES_MODEL_READY_WAIT_S", 0.2)
+    cleanup = CleanupProcess(
+        "fake", worker_command=[*fixture_command(), "--load-delay", "1.0"])
+    try:
+        await cleanup.load_async("warm prompt")
+        eng.cleanup = cleanup
+        await cleanup.cleanup("__crash__", "system")
+
+        sent = await asyncio.wait_for(
+            run_notes(eng, "m-reload", transcript="[00:00] Me: __notes__"),
+            timeout=15.0,
+        )
+
+        assert not eng.shutdown.is_set()
+        assert any(item.get("event") == "meeting_notes_ready" for item in sent)
+    finally:
+        await cleanup.aclose()
+
+
+async def test_meeting_notes_stop_retrying_an_overdue_recovery(engine):
+    """A model that still answers llm_recovering once its replacement is
+    overdue is lost: the notes restart the engine instead of retrying.
+
+    Before: every llm_recovering answer went straight back to the model with
+    no pause and no deadline, so a model stuck recovering pinned a core.
+    """
+    eng, _sock = engine
+    clock = frozen_clock(eng)
+    cleanup = RecoveringNotesCleanup(loaded=True, recovery_deadline=clock[0] + 5.0)
+
+    async def still_recovering(raw, system_prompt, **kwargs):
+        cleanup.calls += 1
+        clock[0] += 1.0
+        await asyncio.sleep(0)
+        return SimpleNamespace(applied=False, reason="llm_recovering", text=raw)
+
+    cleanup.cleanup = still_recovering
+    eng.cleanup = cleanup
+
+    sent = await asyncio.wait_for(run_notes(eng, "m-overdue"), timeout=10.0)
+
+    assert cleanup.calls == 5  # one per clock second until the deadline
+    assert eng.shutdown.is_set()
+    assert not any(item.get("event") == "meeting_notes_ready" for item in sent)
+
+
+async def test_meeting_notes_pace_retries_while_a_recovery_is_due(engine):
+    """Retries while a replacement is due pause between calls instead of
+    spinning on a proxy that still reports loaded."""
+    eng, _sock = engine
+    cleanup = RecoveringNotesCleanup(
+        loaded=True, recovery_deadline=time.monotonic() + 0.5)
+
+    async def still_recovering(raw, system_prompt, **kwargs):
+        cleanup.calls += 1
+        await asyncio.sleep(0)
+        return SimpleNamespace(applied=False, reason="llm_recovering", text=raw)
+
+    cleanup.cleanup = still_recovering
+    eng.cleanup = cleanup
+
+    await asyncio.wait_for(run_notes(eng, "m-paced"), timeout=10.0)
+
+    assert cleanup.calls <= 6  # 0.5 s at no more than one call per 0.1 s
 
 
 async def test_partials_emitted(engine):
@@ -1210,7 +2027,7 @@ async def test_cancel_sends_confirmation_then_restarts_unhealthy_cleanup(engine)
     cancelled = await client.recv_event("cancelled")
     assert cancelled["session"] == "cancel-poisoned"
     assert eng.shutdown.is_set()
-    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    await restart_exit(eng)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     client.close()
 
@@ -1241,7 +2058,7 @@ async def test_detached_reap_failure_restarts_engine_without_another_request(
 
     assert cleanup.unhealthy is True
     assert eng.shutdown.is_set()
-    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    await restart_exit(eng)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     await cleanup.aclose()
 
@@ -1272,7 +2089,7 @@ async def test_unhealthy_notification_waits_for_active_dictation_fallback(engine
     cancelled = await client.recv_event("cancelled")
     assert cancelled["session"] == "defer-unhealthy"
     assert eng.shutdown.is_set()
-    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    await restart_exit(eng)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
 
     client.close()
@@ -1301,7 +2118,7 @@ async def test_cleanup_restart_waits_for_pending_audio_archive(engine):
 
     release.set()
     await archive
-    await asyncio.sleep(server_mod.CLEANUP_RESTART_GRACE_S + 0.01)
+    await restart_exit(eng)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
 
 

@@ -45,7 +45,7 @@ from .cleanup import (
     _RETRACTION_RE,
     adaptive_timeout_ms,
 )
-from .cleanup_process import CleanupProcess
+from .cleanup_process import CleanupProcess, respawn_backoff_s
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import TransientMediaError, load_media, load_meeting_media, split_for_batch
@@ -155,6 +155,16 @@ def _memory_pressure_level() -> int:
 CLEANUP_RESTART_EXIT_CODE = os.EX_TEMPFAIL
 CLEANUP_RESTART_GRACE_S = 0.1
 CLEANUP_RESTART_ARCHIVE_GRACE_S = 1.0
+# A retry of a failed startup cleanup load waits for the dictation in flight
+# to finish, checking this often (see _retry_cleanup_load).
+CLEANUP_RETRY_IDLE_POLL_S = 0.25
+# A retry load in flight checks this often whether foreground work has
+# started, and abandons the load when it has.
+CLEANUP_RETRY_INTERRUPT_POLL_S = 0.02
+# A retry attempt starts only after the engine has stayed idle this long, so
+# a burst of dictations with gaps shorter than a load (3-7 s) does not spawn
+# a worker in every gap only for the next dictation to kill it.
+CLEANUP_RETRY_IDLE_S = 2.0
 
 PARENT_POLL_S = 2.0
 
@@ -268,6 +278,11 @@ MEETING_NOTES_MODEL_READY_WAIT_S = 15.0
 # replacement once instead of burning repair/rejection budgets against the
 # brief `loaded = false` interval. The observed replacement takes ~6 seconds.
 ACTION_MODEL_RECOVERY_WAIT_S = 12.0
+# A replacement delayed by a crash-loop backoff or a retired worker's exit is
+# due by the proxy's recovery deadline, so Action Mode waits until then. One
+# due later than this fails the turn now instead of at the app's 150-second
+# backstop. It covers the longest retired-worker wait plus a load (60 + 20 s).
+ACTION_MODEL_RECOVERY_WAIT_MAX_S = 90.0
 # Avoid unload/reload churn when the user chains actions. Under pressure the
 # weight-owning writing-model child is reaped only after the whole engine has
 # remained idle for this grace period.
@@ -532,6 +547,14 @@ class Engine:
         # ready can wait for the same worker instead of failing in the brief
         # self.cleanup == nil publication window.
         self._cleanup_loading: CleanupProcess | None = None
+        # Background retry of a startup cleanup load that failed or timed out.
+        self._cleanup_retry_task: asyncio.Task[None] | None = None
+        # One writing-model load at a time: the startup load, the retry and
+        # set_model each load under this lock, so two copies of the weights
+        # never load together.
+        self._cleanup_load_lock = asyncio.Lock()
+        # The monotonic clock that model-wait deadlines read; tests drive it.
+        self._clock: Callable[[], float] = time.monotonic
         self.session: Session | None = None
         self.writer: asyncio.StreamWriter | None = None
         self.shutdown = asyncio.Event()
@@ -909,14 +932,19 @@ class Engine:
                 if not await asyncio.to_thread(models.is_cached, self.config.cleanup_model):
                     await self._download_with_progress(self.config.cleanup_model, "writing")
                     await self._set_loading("Preparing the writing model…")
-                await engine.load_async(STATIC_SYSTEM_PROMPT)
-                await self._set_loading(None)
-                # A set_model during this warm-up may already have installed a
-                # newer cleanup engine; don't clobber it (that would leak the new
-                # one and silently run the old model). Only adopt this engine if
-                # nothing newer took its place.
-                if self.cleanup is None and self.config.cleanup_model == engine.model_id:
-                    self.cleanup = engine
+                # Load and adopt under the load lock. A set_model that arrives
+                # meanwhile waits, then swaps this engine out; if its own load
+                # fails, this engine keeps serving, as any working one does.
+                async with self._cleanup_load_lock:
+                    # A set_model that took the lock first already installed
+                    # its engine: loading this one would only replace it.
+                    if self.cleanup is None:
+                        await engine.load_async(STATIC_SYSTEM_PROMPT)
+                    await self._set_loading(None)
+                    adopted = self.cleanup is None
+                    if adopted:
+                        self.cleanup = engine
+                if adopted:
                     # Only now — with a loaded, adopted replacement — is it safe
                     # to reclaim the old weights.
                     await self._prune_superseded_models()
@@ -935,6 +963,7 @@ class Engine:
                     await close_startup_engine_once()
                 with contextlib.suppress(Exception):
                     await self._set_loading(None)  # never leave a stale phase up
+                self._start_cleanup_retry()
             finally:
                 if self._cleanup_loading is engine:
                     self._cleanup_loading = None
@@ -946,6 +975,151 @@ class Engine:
         # First mining pass a while after startup — the loop itself re-checks
         # every skip condition (busy, LLM missing, disabled) before doing work.
         self._schedule_mining(delay=MINE_STARTUP_DELAY_S)
+
+    def _start_cleanup_retry(self) -> None:
+        """Start the retry unless one is already running."""
+        task = self._cleanup_retry_task
+        if task is not None and not task.done():
+            return
+        self._cleanup_retry_task = asyncio.create_task(self._retry_cleanup_load())
+
+    async def _stop_cleanup_retry(self) -> None:
+        """Cancel a running retry and wait until its worker is reaped."""
+        task = self._cleanup_retry_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            # The retry's own cancellation ends here; the caller's does not.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+
+    def _cleanup_retry_may_load(self) -> bool:
+        """A retry loads only while no dictation, job or batch work runs.
+
+        Meeting notes are the exception: they need the model, and wait on
+        `_cleanup_loading` for the retry's load as they do for startup's.
+        """
+        return self._idle_but_for_notes() and self._batch_jobs == 0
+
+    async def _wait_for_retry_idle(self) -> None:
+        """Return once the retry may load and has been able to for
+        CLEANUP_RETRY_IDLE_S without a break.
+
+            busy ─┐  idle 0.5 s  ┌─ busy ─┐  idle 2 s ─────────▶ load
+                  └──────────────┘        └──── (0.5 s restarts the wait)
+        """
+        idle_since: float | None = None
+        while True:
+            if not self._cleanup_retry_may_load():
+                idle_since = None
+            elif idle_since is None:
+                idle_since = self._clock()
+            if idle_since is not None and self._clock() - idle_since >= CLEANUP_RETRY_IDLE_S:
+                return
+            await asyncio.sleep(CLEANUP_RETRY_IDLE_POLL_S)
+
+    async def _retry_cleanup_load(self) -> None:
+        """Retry the writing model after the startup load failed or timed out.
+
+        Dictations return raw text meanwhile. The first retry that loads
+        restores cleanup for the next dictation, with no app restart. Waits
+        follow the worker respawn backoff, so a model that never loads costs
+        one attempt per five minutes rather than a hot loop:
+
+            startup fails → 5 s → retry 1 fails → 10 s → retry 2 → 20 s → ...
+                                                      (each wait capped at 300 s)
+
+        An attempt loads only while the engine is otherwise idle, so a load
+        never competes with a dictation or job for the GPU. Work that starts
+        mid-load abandons that load; it runs again, with no extra wait, once
+        the engine is idle.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            await asyncio.sleep(respawn_backoff_s(attempt - 1))
+            if await self._retry_cleanup_attempt(attempt):
+                return
+
+    async def _retry_cleanup_attempt(self, attempt: int) -> bool:
+        """Run one retry attempt. False means back off and try again."""
+        while True:
+            await self._wait_for_retry_idle()
+
+            # A set_model since startup already installed a working engine.
+            if self.cleanup is not None:
+                return True
+
+            # Loading an uncached model would download it inside the worker,
+            # without progress UI; a failed download waits for the next launch.
+            model_id = self.config.cleanup_model
+            if not await asyncio.to_thread(models.is_cached, model_id):
+                log.warning("writing model %s is not downloaded; stopped retrying", model_id)
+                return True
+
+            async with self._cleanup_load_lock:
+                # A set_model may have held the lock. Work that started during
+                # any await above is caught by _load_unless_busy before its
+                # load spawns a worker.
+                if self.cleanup is not None:
+                    return True
+                engine = self._new_cleanup_process(model_id)
+                self._cleanup_loading = engine
+                try:
+                    loaded = await self._load_unless_busy(engine)
+                except asyncio.CancelledError:
+                    await asyncio.shield(engine.aclose())
+                    raise
+                except Exception:
+                    log.exception("writing model retry %d failed; dictations stay raw", attempt)
+                    with contextlib.suppress(Exception):
+                        await engine.aclose()
+                    return False
+                finally:
+                    if self._cleanup_loading is engine:
+                        self._cleanup_loading = None
+
+                if not loaded:
+                    log.info("writing model retry %d paused for foreground work", attempt)
+                    await engine.aclose()
+                    continue
+
+                # Same adoption rule as startup: never clobber a newer engine.
+                if self.cleanup is None and self.config.cleanup_model == engine.model_id:
+                    self.cleanup = engine
+                    log.info("writing model loaded on retry %d; cleanup restored", attempt)
+                    await self._prune_superseded_models()
+                    return True
+                await engine.aclose()
+                # Config now names another model: load that one next.
+                return self.cleanup is not None
+
+    async def _load_unless_busy(self, engine: CleanupProcess) -> bool:
+        """Load `engine`, abandoning the load when foreground work starts.
+
+        Returns False when abandoned; load errors propagate.
+        """
+        load = asyncio.create_task(engine.load_async(STATIC_SYSTEM_PROMPT))
+        try:
+            while not load.done():
+                if not self._cleanup_retry_may_load():
+                    load.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await load
+                    return False
+                await asyncio.wait({load}, timeout=CLEANUP_RETRY_INTERRUPT_POLL_S)
+        except asyncio.CancelledError:
+            load.cancel()
+            await asyncio.wait({load})
+            if not load.cancelled():
+                load.exception()  # retrieved: the caller's cancellation wins
+            raise
+        load.result()
+        return True
 
     # ---------------- serving ----------------
 
@@ -974,6 +1148,11 @@ class Engine:
             # reaped any cold-start sidecar before serve() can return. A bare
             # cancel left that child alive during app replacement.
             await asyncio.gather(watchdog, loader, return_exceptions=True)
+            if self._cleanup_retry_task is not None:
+                # Cancelling reaps the worker a retry may be loading.
+                self._cleanup_retry_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._cleanup_retry_task
             if self._miner_task is not None:
                 self._miner_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -2817,23 +2996,37 @@ class Engine:
             self.config.data["stt_model"] = model_id
             await self._close_stt_backend(old)
         else:
-            # Load-then-swap: build and fully load the replacement FIRST, then
-            # retire the old one. A failed load (bad download, OOM) therefore
-            # leaves the working engine intact instead of leaving no cleanup at
-            # all. Peak memory holds both only for the load window (rare,
-            # user-initiated); aclose() reaps the old model process before ack.
-            engine = self._new_cleanup_process(model_id)
-            if not fake_stt_enabled():
-                try:
-                    await engine.load_async(STATIC_SYSTEM_PROMPT)
-                except Exception:
-                    await engine.aclose()
-                    raise  # keep self.cleanup pointing at the old, working engine
-            old = self.cleanup
-            self.cleanup = engine
-            self.config.data["cleanup_model"] = model_id
-            if old is not None:
-                await old.aclose()
+            # A startup retry would load beside this model: stop it first, and
+            # restart it below if this load fails too.
+            await self._stop_cleanup_retry()
+            try:
+                async with self._cleanup_load_lock:
+                    # Load-then-swap: build and fully load the replacement
+                    # FIRST, then retire the old one. A failed load (bad
+                    # download, OOM) therefore leaves the working engine intact
+                    # instead of leaving no cleanup at all. Peak memory holds
+                    # both only for the load window (rare, user-initiated);
+                    # aclose() reaps the old model process before ack.
+                    engine = self._new_cleanup_process(model_id)
+                    if not fake_stt_enabled():
+                        try:
+                            await engine.load_async(STATIC_SYSTEM_PROMPT)
+                        except Exception:
+                            await engine.aclose()
+                            raise  # keep self.cleanup pointing at the old, working engine
+                    old = self.cleanup
+                    self.cleanup = engine
+                    self.config.data["cleanup_model"] = model_id
+                    if old is not None:
+                        await old.aclose()
+            except BaseException:
+                # No engine to keep serving: retry in the background, whether
+                # or not a retry ran before, so cleanup does not stay absent
+                # until the next launch.
+                if (self.cleanup is None and self.config.cleanup_enabled
+                        and not self.shutdown.is_set()):
+                    self._start_cleanup_retry()
+                raise
         self.config.save(keys={f"{kind}_model"})
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)
@@ -3040,6 +3233,9 @@ class Engine:
             task.cancel()
 
     def _cleanup_model_is_idle(self) -> bool:
+        return self._idle_but_for_notes() and not self._meeting_notes_running
+
+    def _idle_but_for_notes(self) -> bool:
         return not (
             self.shutdown.is_set()
             or self.session is not None
@@ -3047,7 +3243,6 @@ class Engine:
             or self._finalizing
             or self._reprocessing
             or self._transcribing
-            or self._meeting_notes_running
             or self._editing
             or self._planning
             or self._action_session is not None
@@ -3130,8 +3325,7 @@ class Engine:
         burst of fresh observations that exhausts the session's rejection cap
         while the same worker is still warming.
         """
-        deadline = (
-            asyncio.get_running_loop().time() + ACTION_MODEL_RECOVERY_WAIT_S)
+        deadline = self._clock() + ACTION_MODEL_RECOVERY_WAIT_S
         while not self._action_cancel.is_set() and not self.shutdown.is_set():
             cleanup = self.cleanup
             if cleanup is None:
@@ -3140,10 +3334,22 @@ class Engine:
                 return True
             if getattr(cleanup, "unhealthy", False):
                 return False
-            if asyncio.get_running_loop().time() >= deadline:
+            # A crash-loop backoff or a retired worker's exit delays the
+            # replacement: wait until it is due, unless that outlasts the turn.
+            recovery_deadline = self._recovery_deadline(cleanup)
+            if recovery_deadline - self._clock() > ACTION_MODEL_RECOVERY_WAIT_MAX_S:
+                return False
+            deadline = max(deadline, recovery_deadline)
+            if self._clock() >= deadline:
                 return False
             await asyncio.sleep(0.05)
         return False
+
+    @staticmethod
+    def _recovery_deadline(cleanup: object) -> float:
+        """Monotonic time by which `cleanup`'s delayed replacement should have
+        loaded (see CleanupProcess.recovery_deadline); 0 when none is delayed."""
+        return getattr(cleanup, "recovery_deadline", None) or 0.0
 
     async def _cmd_action_start(self, msg: dict[str, Any]) -> None:
         """Action Mode, turn 1: open an observe→decide→act session.
@@ -4604,10 +4810,7 @@ class Engine:
                 # Dictation just released the machine (wait loop above), or a
                 # cleanup child respawned — recompute who gets demoted.
                 self._refresh_batch_priority()
-                model_ready_deadline = (
-                    asyncio.get_running_loop().time()
-                    + MEETING_NOTES_MODEL_READY_WAIT_S
-                )
+                model_ready_deadline = self._clock() + MEETING_NOTES_MODEL_READY_WAIT_S
                 cleanup = self.cleanup or self._cleanup_loading
                 if cleanup is None:
                     return (
@@ -4621,9 +4824,11 @@ class Engine:
                         or self.shutdown.is_set()
                     ):
                         return None, "cancelled", None
-                    if cleanup.unhealthy or (
-                        asyncio.get_running_loop().time() >= model_ready_deadline
-                    ):
+                    # A crash-loop backoff or a retired worker's exit delays
+                    # the replacement: the notes wait until it is due.
+                    model_ready_deadline = max(
+                        model_ready_deadline, self._recovery_deadline(cleanup))
+                    if cleanup.unhealthy or self._clock() >= model_ready_deadline:
                         return (
                             None, "the local notes model is unavailable",
                             _NotesFailure.model)
@@ -4654,6 +4859,19 @@ class Engine:
                     continue
                 if not result.applied:
                     reason = str(getattr(result, "reason", None) or "no output")
+                    if (
+                        reason == "llm_recovering"
+                        and not cleanup.unhealthy
+                        and self._clock() < self._recovery_deadline(cleanup)
+                    ):
+                        # The worker was replaced while this call waited its
+                        # turn (a dictation's hard timeout, say) and its
+                        # replacement is due. Wait for it above rather than
+                        # restart the engine; once it is overdue the model is
+                        # lost, as below. The pause keeps a proxy that still
+                        # reports loaded from spinning this loop.
+                        await asyncio.sleep(0.1)
+                        continue
                     if reason in MEETING_NOTES_MODEL_GONE_REASONS:
                         failure = _NotesFailure.model
                     elif reason in MEETING_NOTES_SECTION_TIMEOUT_REASONS:
