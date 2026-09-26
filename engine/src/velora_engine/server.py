@@ -1108,8 +1108,12 @@ class Engine:
             while not load.done():
                 if not self._cleanup_retry_may_load():
                     load.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await load
+                    # asyncio.wait, not `await load` under suppress: that
+                    # also swallowed a cancel of this task, and the retry
+                    # then waited for idle through shutdown.
+                    await asyncio.wait({load})
+                    if not load.cancelled():
+                        load.result()  # a load that failed first still raises
                     return False
                 await asyncio.wait({load}, timeout=CLEANUP_RETRY_INTERRUPT_POLL_S)
         except asyncio.CancelledError:

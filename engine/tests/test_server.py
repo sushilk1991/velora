@@ -829,6 +829,42 @@ async def test_cleanup_retry_loads_the_model_config_names_after_a_switch(
         assert eng.cleanup.loaded
 
 
+async def test_shutdown_while_a_retry_abandons_its_load_stops_the_retry(
+    home, fake_stt, monkeypatch
+):
+    """Shutdown stops a retry that is still abandoning its load for
+    foreground work.
+
+    Before: the abandon awaited the load under suppress(CancelledError),
+    which also swallowed serve()'s cancel; the retry then waited for idle
+    forever and serve() never returned.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 0.5)
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
+    async with serve_with_startup_worker(
+        monkeypatch, "--hang-every-load"
+    ) as (eng, _sock, workers, spawned):
+        await wait_for(lambda: eng._cleanup_retry_task is not None)
+        monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 60.0)
+        await wait_for(lambda: len(spawned) == 2)
+
+        # Hold the retry's abandon open after its worker is reaped, as a
+        # worker slow to exit does, so shutdown lands inside it.
+        reaped = asyncio.Event()
+        reap = CleanupProcess._reap
+
+        async def slow_reap(self, process):
+            await reap(self, process)
+            reaped.set()
+            await asyncio.sleep(0.5)
+
+        monkeypatch.setattr(CleanupProcess, "_reap", slow_reap)
+        eng._starting = True
+        await asyncio.wait_for(reaped.wait(), 2.0)
+        eng.shutdown.set()
+        await wait_for(lambda: eng._cleanup_retry_task.done(), timeout_s=3.0)
+
+
 async def test_shutdown_during_a_hung_cleanup_retry_load_reaps_the_worker(
     home, fake_stt, monkeypatch
 ):
