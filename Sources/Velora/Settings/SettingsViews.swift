@@ -422,7 +422,7 @@ struct DictationSettingsView: View {
 ///       Whisper Turbo · 1.6 GB
 ///       ○ Parakeet v3 / Fastest. English and 24 … (only while unfolded)
 ///     Cleanup                                          [Change…]
-///       Quality · 4.8 GB
+///       Quality · 5.2 GB
 struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = Self.calculating

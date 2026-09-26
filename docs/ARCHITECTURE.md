@@ -404,6 +404,8 @@ changes length.
 
 **Streaming segment pipeline (whisper, smartness-v2):** preview-only mechanics remain available to explicit diagnostic fixtures but are disabled in production. The backend commits a segment when ≥10s of un-decoded audio meets a ≥0.7s pause (energy VAD; hard cap 25s), and the server starts that segment's LLM cleanup while the user is speaking. Superseded chunk work receives cooperative cancellation. On `stop`, dictations ≤45s re-decode the whole clip and clean once; longer ones stitch committed segments and decode/clean the tail. Any failure falls back to the whole-text path, so the fast path cannot lose transcript content. Config: `streaming_cleanup` (default true).
 
+**Parakeet segments:** the same pause rule, but past 25s a segment closes at the first 0.2s of quiet rather than mid-speech; audio with no quiet at all (steady room noise) is never cut and decodes whole at stop. At any length, `stop` decodes only the un-decoded tail and stitches the committed segments; the whole clip is decoded instead when nothing was committed, a segment decode failed, or the tail decoded empty over speech. A speech span that decodes empty stays pending and is retried 3s later, the wait doubling per consecutive empty decode up to 48s. Spans over 120s decode in windows that share 15s of audio. Each seam joins on the longest run of ≥3 tokens that agree in text and within 1.5s; among equally long runs, the one with the smallest timing error wins. With no such run, the seam is cut at the widest gap between words. With Stream Typing, previews decode the last 25s of the open span about every 0.5s, backing off with decode time, and never change segment state.
+
 ## Smart formatting policy (the "smart as Wispr Flow" part)
 
 Two stages, both local:
@@ -449,7 +451,7 @@ Concurrency: Swift 5 language mode (`.swiftLanguageMode(.v5)`) to avoid strict-c
 | Module | Responsibility |
 |---|---|
 | `server.py` | asyncio unix-socket server, framing, session state machine |
-| `stt.py` | parakeet-mlx streaming wrapper; mlx-whisper fallback backend behind one interface |
+| `stt.py` | mlx-whisper and parakeet-mlx backends behind one interface; both decode pause-bounded segments during recording and serve Stream Typing previews (see Streaming segment pipeline) |
 | `cleanup.py` | mlx-lm load/generate, immutable prefix snapshot/fork, cancellation, TTFT-aware deadline, divergence guard |
 | `formatting.py` | deterministic gate, mode resolution, prompt assembly, replacements |
 | `models.py` | HF download/verify, model registry (user-selectable) |

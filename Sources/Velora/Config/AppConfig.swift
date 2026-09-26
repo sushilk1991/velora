@@ -45,7 +45,7 @@ struct STTModel: Identifiable, Equatable {
         STTModel(
             id: "handy-computer/whisper-large-v3-turbo-gguf",
             displayName: "Whisper Turbo Q8 (Experimental)",
-            size: "0.85 GB", speed: "Faster", languages: "99 languages, still in testing"
+            size: "0.9 GB", speed: "Faster", languages: "99 languages, still in testing"
         ),
         STTModel(
             id: "mlx-community/whisper-large-v3-mlx",
@@ -65,7 +65,7 @@ struct STTModel: Identifiable, Equatable {
         STTModel(
             id: "mlx-community/parakeet-tdt-0.6b-v2",
             displayName: "Parakeet v2",
-            size: "2.3 GB", speed: "Fastest (live streaming)", languages: "English only"
+            size: "2.5 GB", speed: "Fastest (live streaming)", languages: "English only"
         ),
         STTModel(
             id: "mlx-community/whisper-large-v3-turbo-q4",
