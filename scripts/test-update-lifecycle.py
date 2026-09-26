@@ -30,10 +30,9 @@ class UpdateLifecycleTests(unittest.TestCase):
         scratch = Path(cls.scratch.name)
         delegate = (ROOT / "Sources/Velora/App/AppDelegate.swift").read_text()
         installer = (ROOT / "Sources/Velora/App/UpdateInstaller.swift").read_text()
-        gate = _closure_after(
-            delegate, "UpdateInstaller.shared.relaunchBlockReason ="
-        )
+        gate = _closure_after(delegate, "UpdateInstaller.shared.relaunchBlock =")
         restart = _closure_after(delegate, "private func restartBlockReason()")
+        restart_block = _closure_after(delegate, "private func restartBlock()")
         policy = _closure_after(delegate, "enum UpdateRelaunchSafety")
         tool_run = _closure_after(installer, "private static func run(")
         quit_install = _closure_after(installer, "func installOnExit()")
@@ -66,13 +65,13 @@ class UpdateLifecycleTests(unittest.TestCase):
 import Darwin
 final class UpdateInstaller {
     static let shared = UpdateInstaller()
-    var relaunchBlockReason: (() -> String?)?
+    var relaunchBlock: (() -> UpdateRelaunchSafety.Block?)?
 }
 final class GateOwner {
     var reason: String?
-    func restartBlockReason() -> String? { reason }
+    func restartBlock() -> UpdateRelaunchSafety.Block? { reason.map { .busy($0) } }
     func connect() {
-        UpdateInstaller.shared.relaunchBlockReason = """
+        UpdateInstaller.shared.relaunchBlock = """
             + gate
             + """
     }
@@ -82,6 +81,9 @@ final class Application {
 }
 let NSApp = Application()
 func veloraLog(_ message: String) { print(message) }
+enum UpdateCopy {
+    static func saveModeToInstall(_ name: String) -> String { name }
+}
 enum UpdateRelaunchSafety """
             + policy
             + """
@@ -92,6 +94,7 @@ final class Activity {
     var terminationWorkInFlight = false
 }
 struct Queue { var pendingURLs: [URL] = [] }
+final class ModesOwner { var unsavedModeName: String? }
 final class RestartOwner {
     let dictation = Activity()
     let transcriber = Activity()
@@ -99,8 +102,12 @@ final class RestartOwner {
     var openFileTranscriptionQueue = Queue()
     var openFileRetryPending = false
     var terminationPending = false
+    var mainController: ModesOwner? = ModesOwner()
     func restartBlockReason() -> String? """
             + restart
+            + """
+    func restartBlock() -> UpdateRelaunchSafety.Block? """
+            + restart_block
             + """
 }
 enum ToolOwner {
@@ -168,23 +175,25 @@ case "idle", "busy", "gone":
     owner?.connect()
     switch CommandLine.arguments[1] {
     case "idle":
-        guard UpdateInstaller.shared.relaunchBlockReason?() == nil else { exit(1) }
+        guard UpdateInstaller.shared.relaunchBlock?() == nil else { exit(1) }
     case "busy":
         owner?.reason = "Recording a meeting"
-        guard UpdateInstaller.shared.relaunchBlockReason?() == owner?.reason else { exit(1) }
+        guard UpdateInstaller.shared.relaunchBlock?()?.reason == owner?.reason else { exit(1) }
     default:
         owner = nil
-        guard UpdateInstaller.shared.relaunchBlockReason?() != nil else { exit(1) }
+        guard UpdateInstaller.shared.relaunchBlock?() != nil else { exit(1) }
     }
 case "stalled-quit":
     QuitOwner().requestQuit()
     exit(1)
-case "queued", "retry", "quitting":
+case "queued", "retry", "quitting", "unsaved-mode":
     let owner = RestartOwner()
     if CommandLine.arguments[1] == "queued" {
         owner.openFileTranscriptionQueue.pendingURLs = [URL(fileURLWithPath: "/unused.wav")]
     } else if CommandLine.arguments[1] == "retry" {
         owner.openFileRetryPending = true
+    } else if CommandLine.arguments[1] == "unsaved-mode" {
+        owner.mainController?.unsavedModeName = "Work"
     } else {
         owner.terminationPending = true
     }
@@ -243,6 +252,9 @@ default: exit(2)
 
     def test_quit_prevents_relaunch(self):
         self._run_probe("quitting")
+
+    def test_unsaved_mode_blocks(self):
+        self._run_probe("unsaved-mode")
 
     def test_tool_eof_is_not_exit(self):
         self._run_probe("early-eof")
