@@ -16,6 +16,8 @@ log = logging.getLogger("velora.models")
 TRANSCRIBE_CPP_Q8_MODEL = "handy-computer/whisper-large-v3-turbo-gguf"
 TRANSCRIBE_CPP_Q8_REVISION = "d222c9f621c1128299248f2ded4d8a1820519780"
 TRANSCRIBE_CPP_Q8_SHA256 = "d5e65f2b0828802ae2c231673d31982cebe3a778c95d9494a9f3efee6bd17448"
+# Registry sizes are decimal gigabytes of download (Hub byte counts).
+_BYTES_PER_GB = 10**9
 _SINGLE_FILE_MODELS = {
     TRANSCRIBE_CPP_Q8_MODEL: "whisper-large-v3-turbo-Q8_0.gguf",
 }
@@ -51,7 +53,7 @@ REGISTRY: list[ModelInfo] = [
         name="Whisper Turbo Q8 (Experimental)",
         kind="stt",
         backend="transcribe-cpp",
-        size="0.85 GB",
+        size="0.9 GB",
         description=(
             "Faster and smaller than Whisper Turbo, with the same languages. "
             "Still in testing."
@@ -95,7 +97,7 @@ REGISTRY: list[ModelInfo] = [
         name="Parakeet v2",
         kind="stt",
         backend="parakeet",
-        size="2.3 GB",
+        size="2.5 GB",
         description="Fastest for English. English only.",
     ),
     ModelInfo(
@@ -112,7 +114,7 @@ REGISTRY: list[ModelInfo] = [
         name="Compact",
         kind="cleanup",
         backend="mlx-lm",
-        size="1.6 GB",
+        size="1.7 GB",
         description=(
             "For Macs with 8 GB of memory. Uses the least memory and disk."
         ),
@@ -122,7 +124,7 @@ REGISTRY: list[ModelInfo] = [
         name="Balanced",
         kind="cleanup",
         backend="mlx-lm",
-        size="2.8 GB",
+        size="3.1 GB",
         description=(
             "For Macs with 16 GB of memory. The Quality model in about half "
             "the memory."
@@ -133,7 +135,7 @@ REGISTRY: list[ModelInfo] = [
         name="Quality",
         kind="cleanup",
         backend="mlx-lm",
-        size="4.8 GB",
+        size="5.2 GB",
         description=(
             "For Macs with 24 GB of memory or more. The cleanest writing."
         ),
@@ -298,12 +300,16 @@ def is_cached(model_id: str) -> bool:
 
 
 def expected_bytes(model_id: str) -> int | None:
-    """Approximate download size from the registry ("1.6 GB" → bytes)."""
+    """Approximate download size from the registry ("1.6 GB" → bytes).
+
+    GB is decimal, like the Hub's byte counts and the on-disk cache that
+    download progress divides by this.
+    """
     info = lookup(model_id)
     if info is None:
         return None
     m = re.match(r"([\d.]+)\s*GB", info.size or "")
-    return int(float(m.group(1)) * 1024**3) if m else None
+    return int(float(m.group(1)) * _BYTES_PER_GB) if m else None
 
 
 def _repo_cache_dir(model_id: str) -> Path | None:

@@ -182,7 +182,9 @@ def test_model_helpers_cover_tiers_sizes_and_probe_failures(monkeypatch):
     assert models.recommended_cleanup_model(16).endswith("Qwen3.5-4B-MLX-4bit")
     assert models.recommended_cleanup_model(32).endswith("Qwen3.5-4B-MLX-8bit")
     assert models.expected_bytes("missing/model") is None
-    assert models.expected_bytes(models.TRANSCRIBE_CPP_Q8_MODEL) == int(0.85 * 1024**3)
+    # Registry sizes are decimal GB, the unit Hub byte counts come in.
+    assert models.expected_bytes(models.TRANSCRIBE_CPP_Q8_MODEL) == int(0.9 * 10**9)
+    assert models.expected_bytes("mlx-community/parakeet-tdt-0.6b-v2") == int(2.5 * 10**9)
 
     def unavailable_cache(**_kwargs):
         raise RuntimeError("cache unavailable")

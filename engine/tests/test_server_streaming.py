@@ -542,7 +542,9 @@ async def test_stream_gather_timeout_cooperatively_cancels_before_fallback(
     engine,
     monkeypatch,
 ):
-    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", SEG1)
+    # An earlier chunk is still running at stop, so the bounded gather
+    # applies (a lone last chunk with an empty tail gets its own budget).
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{SEG2}")
     monkeypatch.delenv("VELORA_FAKE_STT_TEXT", raising=False)
     monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
     eng, sock = engine
@@ -552,17 +554,18 @@ async def test_stream_gather_timeout_cooperatively_cancels_before_fallback(
     await client.recv_event("ready")
 
     await client.send_json({"cmd": "start", "session": "gather-timeout", "context": {}})
-    for _ in range(2):
+    for _ in range(4):
         await client.send_audio(AUDIO)
     await asyncio.wait_for(cleanup.started.wait(), 1)
     await client.send_json({"cmd": "stop", "session": "gather-timeout"})
     final = await client.recv_event("final")
 
-    assert final["text"] == f"<{SEG1}>."
+    raw = f"{SEG1} {SEG2}"
+    assert final["text"] == f"<{raw}>."
     assert final["cleanup_applied"] is True
     assert cleanup.cancel_events[0] is not None
     assert cleanup.cancel_events[0].is_set()
-    assert [call[0] for call in cleanup.calls] == [SEG1, SEG1]
+    assert [call[0] for call in cleanup.calls] == [SEG1, raw]
     client.close()
 
 
@@ -994,4 +997,115 @@ async def test_chunk_llm_receives_converted_breaks(engine, monkeypatch):
     assert "new line" not in sent.lower()
     assert "⏎" in sent
     assert "\n" in final["text"]
+    client.close()
+
+
+class SlowLastCleanup(FakeCleanup):
+    """The last segment's cleanup is still running at stop and finishes a
+    little later: after the 1.5 s gather limit, within its own budget."""
+
+    def __init__(self, last_delay: float, last_applied: bool = True):
+        super().__init__()
+        self.last_started = asyncio.Event()
+        self.last_delay = last_delay
+        self.last_applied = last_applied
+
+    async def cleanup(
+        self, raw, system_prompt, timeout_ms=None, check_ratio=True,
+        cancel_event=None, allowed_terms=None, prefix_candidates=None,
+        copy_draft=False, queue_timeout_s=None,
+    ):
+        self.calls.append((raw, system_prompt))
+        self.cancel_events.append(cancel_event)
+        self.allowed_terms_calls.append(allowed_terms)
+        self.copy_draft_calls.append(copy_draft)
+        if raw == SEG2:
+            self.last_started.set()
+            await asyncio.sleep(self.last_delay)
+            if not self.last_applied:
+                return CleanupResult(text=raw, applied=False, ms=7, reason="test")
+        return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
+
+
+async def test_empty_tail_waits_for_the_last_chunk_with_its_own_budget(
+    engine,
+    monkeypatch,
+):
+    # A pause before stop closes the last segment moments before stop: the
+    # tail is empty and only that segment's cleanup is still running. Waiting
+    # for it is cheaper than cleaning the whole text again.
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{SEG2}")
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "")
+    monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
+    eng, sock = engine
+    cleanup = SlowLastCleanup(last_delay=0.08)
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "empty-tail", "context": {}})
+    for _ in range(4):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.last_started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "empty-tail"})
+    final = await client.recv_event("final")
+
+    assert [raw for raw, _prompt in cleanup.calls] == [SEG1, SEG2]
+    assert final["text"] == f"<{SEG1}> <{SEG2}>."
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_empty_tail_last_chunk_past_its_budget_falls_back(engine, monkeypatch):
+    # The wait on a lone last chunk is bounded by its own budget (shrunk
+    # here to 0.3 s); past it, the chunk is cancelled before whole-text
+    # cleanup, as on the gather path.
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", SEG1)
+    monkeypatch.delenv("VELORA_FAKE_STT_TEXT", raising=False)
+    monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
+    monkeypatch.setattr(server_mod, "adaptive_timeout_ms", lambda _text: 50)
+    monkeypatch.setattr(server_mod, "HARD_TIMEOUT_GRACE_S", 0.0)
+    monkeypatch.setattr(server_mod, "QUEUE_TIMEOUT_S", 0.0)
+    eng, sock = engine
+    cleanup = FirstCallHangsCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "empty-tail-budget", "context": {}})
+    for _ in range(2):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "empty-tail-budget"})
+    final = await client.recv_event("final")
+
+    assert final["text"] == f"<{SEG1}>."
+    assert cleanup.cancel_events[0] is not None
+    assert cleanup.cancel_events[0].is_set()
+    assert [call[0] for call in cleanup.calls] == [SEG1, SEG1]
+    client.close()
+
+
+async def test_empty_tail_last_chunk_not_applied_falls_back(engine, monkeypatch):
+    # The waited-for last chunk fell back to deterministic cleanup. Like the
+    # merged-tail path, the final then cleans the whole text instead of
+    # stitching an uncleaned segment in.
+    monkeypatch.setenv("VELORA_FAKE_STT_SEGMENTS", f"{SEG1}|{SEG2}")
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "")
+    monkeypatch.setattr(server_mod, "STREAM_GATHER_TIMEOUT_S", 0.02)
+    eng, sock = engine
+    cleanup = SlowLastCleanup(last_delay=0.08, last_applied=False)
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "empty-tail-raw", "context": {}})
+    for _ in range(4):
+        await client.send_audio(AUDIO)
+    await asyncio.wait_for(cleanup.last_started.wait(), 1)
+    await client.send_json({"cmd": "stop", "session": "empty-tail-raw"})
+    final = await client.recv_event("final")
+
+    assert [raw for raw, _prompt in cleanup.calls] == [SEG1, SEG2, f"{SEG1} {SEG2}"]
+    assert final["text"] == f"<{SEG1} {SEG2}>."
     client.close()

@@ -2472,12 +2472,27 @@ class Engine:
                     priority_task.cancel()
                     await asyncio.gather(priority_task, return_exceptions=True)
         else:
+            # A pause before stop can close the last segment just before
+            # stop: the tail is empty and that segment's cleanup has only just
+            # started. Like the merged tail above, it is a fresh generation,
+            # so it gets the same budget instead of the 1.5 s gather, which
+            # would cancel it and clean the whole text again.
+            gather_timeout_s = STREAM_GATHER_TIMEOUT_S
+            waited_on_last = not tail and not last_task.done() and earlier_ready
+            if waited_on_last:
+                gather_timeout_s = (
+                    adaptive_timeout_ms(session.chunk_raws[-1]) / 1000.0
+                    + HARD_TIMEOUT_GRACE_S
+                    + QUEUE_TIMEOUT_S
+                    + 0.25
+                )
+                log.info("empty final tail — waiting on the last chunk cleanup")
             # A timeout must cooperatively cancel unfinished worker requests
             # before whole-text fallback. Bare wait_for(gather()) left native
             # generation alive and made the fallback miss its queue deadline.
             _done, pending = await asyncio.wait(
                 list(session.chunk_tasks),
-                timeout=STREAM_GATHER_TIMEOUT_S,
+                timeout=gather_timeout_s,
             )
             if pending:
                 for task in pending:
@@ -2494,6 +2509,11 @@ class Engine:
             results = [task.result() for task in session.chunk_tasks]
             if any(not isinstance(result, _ChunkResult) for result in results):
                 log.warning("streaming chunk task did not complete — falling back")
+                return None
+            # As on the merged-tail path: a waited-for chunk that fell back to
+            # deterministic cleanup sends the whole text to the LLM instead.
+            if waited_on_last and not results[-1].applied:
+                log.warning("empty final tail cleanup was not applied — falling back")
                 return None
             cleaned = [result.text for result in results]
             applied_any = any(result.applied for result in results)

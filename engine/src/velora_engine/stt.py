@@ -1,7 +1,7 @@
 """STT backends behind one interface.
 
-- ParakeetBackend: parakeet-mlx `transcribe_stream` — audio is processed DURING
-  recording so stop→transcript only flushes the tail.
+- ParakeetBackend: parakeet-mlx — each pause-bounded segment is decoded whole
+  DURING recording, so stop→transcript only decodes the tail.
 - WhisperBackend: mlx-whisper — accumulates PCM, batch-transcribes on stop,
   with hallucination guard (compression/repetition checks, repeated-tail trim).
   Long recordings are additionally decoded in pause-aligned SEGMENTS during
@@ -38,11 +38,36 @@ SAMPLE_RATE = 16_000
 # hallucination. No intelligible utterance fits in this span; fail fast.
 MIN_FINAL_AUDIO_S = 0.15
 
-# Feed parakeet in ~0.5s increments: each add_audio() call runs the encoder,
-# so per-100ms-frame calls would waste compute for no latency win.
-_PARAKEET_FEED_SAMPLES = SAMPLE_RATE // 2
+# Parakeet decodes each span whole (see ParakeetBackend). Attention memory grows
+# with the square of span length (12 GB peak on one 440 s clip), so longer spans
+# decode in windows that share 15 s of audio for the merge to align on.
+_PARAKEET_WINDOW_S = 120.0
+_PARAKEET_OVERLAP_S = 15.0
+# The same token decoded by two windows lands within this many seconds of
+# itself (up to 1.3 s apart on 24 seams of 58 min of Indian-English audio), and
+# this many identical tokens in a row is an alignment, not chance. parakeet-mlx's
+# own merge accepts half the overlap (7.5 s): at that width a repeated word
+# ("no no no") pairs with a copy several words away and the join drops or
+# repeats words.
+_MERGE_TIME_TOLERANCE_S = 1.5
+_MERGE_MIN_RUN = 3
+# After a speech-bearing span decodes empty, wait this long before decoding it
+# again with the audio that arrived since (a standing pause would otherwise
+# retry on every chunk). Each retry decodes the whole growing span, so the
+# wait doubles on every consecutive empty decode, up to the max: 5 minutes of
+# hum the tracker hears as speech costs 10 span decodes, not about 48.
+_EMPTY_SPAN_RETRY_S = 3.0
+_EMPTY_SPAN_RETRY_MAX_S = 48.0
+# Past HARD_SEGMENT_S a segment closes at the first quiet stretch this long.
+# A single quiet 100 ms chunk can be the closure inside a word. Audio that is
+# never quiet (steady room noise) is never cut: it decodes whole at stop.
+_HARD_CUT_QUIET_S = 0.2
+# Stream Typing previews decode the open span this often (then back off with
+# decode time). Parakeet runs about 110x real time (p50 over the owner's
+# clips), so a 10 s open span costs about 0.1 s.
+_PARAKEET_PREVIEW_INTERVAL_S = 0.5
 
-# --- in-session segmenting (whisper only) -------------------------------------
+# --- in-session segmenting (whisper; parakeet reuses the pause rules) ---------
 # Whisper decodes ~97x realtime but the cleanup LLM does not; segments decoded
 # DURING recording let the server clean them concurrently, so at stop only the
 # tail remains (flat stop→final latency at any dictation length).
@@ -58,9 +83,11 @@ PREVIEW_PAUSE_S = 0.3
 PREVIEW_BASE_INTERVAL_S = 1.5
 PREVIEW_MAX_INTERVAL_S = 4.0
 PREVIEW_MIN_NEW_S = 0.8
-# Keep every word in the current uncommitted span visible. A shorter rolling
-# window makes earlier provisional words disappear during continuous speech;
-# the hard-segment cap already gives this snapshot a strict upper bound.
+# A preview decodes at most the last PREVIEW_WINDOW_S of the uncommitted span.
+# Whisper closes a segment at HARD_SEGMENT_S even mid-speech, so its whole
+# open span fits and no provisional word drops out of view. Parakeet closes
+# segments only in a pause, so past this length its preview shows only the
+# newest words.
 PREVIEW_WINDOW_S = HARD_SEGMENT_S
 PREVIEW_BACKOFF = 1.5
 # Below this total duration, finalize re-decodes the WHOLE clip exactly like the
@@ -72,7 +99,8 @@ LONG_DICTATION_S = 45.0
 
 @dataclass(frozen=True)
 class WhisperPreviewRequest:
-    """Immutable, display-only audio snapshot for one Whisper HUD preview."""
+    """Immutable, display-only audio snapshot for one HUD preview (Whisper or
+    Parakeet)."""
 
     audio: np.ndarray
     committed_segments: tuple[str, ...]
@@ -145,8 +173,8 @@ def speech_window_fraction(
 class STTBackend(Protocol):
     """Interface: load, feed_chunk, finalize, reset (+ optional segmenting).
 
-    Segmenting surface (only WhisperBackend implements it for real; parakeet
-    and fake keep no-op defaults so the server can call these unconditionally):
+    Segmenting surface (whisper and parakeet implement it; fake keeps no-op
+    defaults unless configured, so the server can call these unconditionally):
     - `initial_prompt`: glossary text biasing recognition (whisper only).
     - `take_new_segments()`: raw segment texts finalized since the last call —
       the server kicks off per-segment cleanup from these.
@@ -324,23 +352,197 @@ def strip_prompt_echo(
     return text.strip()
 
 
+@dataclass(frozen=True)
+class _Token:
+    """One decoded parakeet token, times in seconds."""
+
+    text: str
+    start: float
+    end: float
+
+
+def _same_token(a: _Token, b: _Token) -> bool:
+    return a.text == b.text and abs(a.start - b.start) < _MERGE_TIME_TOLERANCE_S
+
+
+def _merge_overlap(
+    kept: list[_Token],
+    new: list[_Token],
+    *,
+    seam_start_s: float,
+    seam_end_s: float,
+) -> list[_Token]:
+    """Join two windows' tokens so the words in their shared audio appear once.
+
+    Both windows decoded [seam_start_s, seam_end_s). The longest run of tokens
+    the two agree on (same text at the same time) anchors the join: `kept`
+    through the run, then `new` after it. Of equally long runs, the one whose
+    timings agree best wins: in "no no no" a run shifted by one word also
+    matches within tolerance. Without such a run, cut in the widest gap
+    between words (see _widest_gap_cut).
+
+        kept  ... w103 w104 w105 ... w119
+        new                 w105 ... w119 w120 w121 ...
+                            '-- run --'
+        out   ... w103 w104 w105 ... w119 w120 w121 ...
+    """
+    if not kept:
+        return list(new)
+    if not new:
+        return list(kept)
+
+    # Only tokens inside the seam can pair up.
+    kept_from = next((i for i, t in enumerate(kept) if t.end > seam_start_s), len(kept))
+    new_to = next((j for j, t in enumerate(new) if t.start >= seam_end_s), len(new))
+
+    best_len, best_error, best_i, best_j = 0, 0.0, 0, 0
+    for i in range(kept_from, len(kept)):
+        for j in range(new_to):
+            run, error = 0, 0.0
+            while (
+                i + run < len(kept)
+                and j + run < new_to
+                and _same_token(kept[i + run], new[j + run])
+            ):
+                error += abs(kept[i + run].start - new[j + run].start)
+                run += 1
+            if run > best_len or (run == best_len and run > 0 and error < best_error):
+                best_len, best_error, best_i, best_j = run, error, i, j
+
+    if best_len >= _MERGE_MIN_RUN:
+        return kept[: best_i + best_len] + new[best_j + best_len :]
+
+    cut_s = _widest_gap_cut(kept[kept_from:] + new[:new_to], seam_start_s, seam_end_s)
+    return [t for t in kept if t.start < cut_s] + [t for t in new if t.start >= cut_s]
+
+
+def _widest_gap_cut(tokens: list[_Token], seam_start_s: float, seam_end_s: float) -> float:
+    """The middle of the longest stretch of the seam where no window placed a
+    word.
+
+    Both windows' tokens count, so the cut lands where both heard nothing and
+    no word straddles it. A word the two windows place on opposite sides of
+    the seam midpoint (drift) sits on one side of a real pause in both.
+
+        seam   |......okay(kept)....okay(new)......|
+        gaps   '--6.3 s--'         '1.9'    '--5.8 s--'
+        cut        ^ keep kept words before, new words after
+    """
+    spans = sorted((max(t.start, seam_start_s), min(t.end, seam_end_s)) for t in tokens)
+    widest, cut_s = -1.0, (seam_start_s + seam_end_s) / 2
+    cursor = seam_start_s
+    for start, end in [*spans, (seam_end_s, seam_end_s)]:
+        if start - cursor > widest:
+            widest, cut_s = start - cursor, (cursor + start) / 2
+        cursor = max(cursor, end)
+    return cut_s
+
+
+def _chunk_span(chunks: list[np.ndarray], start_sample: int, end_sample: int) -> np.ndarray:
+    """Samples [start_sample, end_sample) of a chunked buffer, copying only
+    that range. Joining every chunk first costs O(session) per segment: about
+    230 MB per decode at the one-hour limit. WhisperBackend._audio_span
+    slices the same way.
+    """
+    pieces: list[np.ndarray] = []
+    cursor = 0
+    for chunk in chunks:
+        next_cursor = cursor + len(chunk)
+        if cursor >= end_sample:
+            break
+        local_start = max(0, start_sample - cursor)
+        local_end = min(len(chunk), end_sample - cursor)
+        if local_start < local_end:
+            pieces.append(chunk[local_start:local_end])
+        cursor = next_cursor
+
+    if not pieces:
+        return np.empty(0, dtype=np.float32)
+    if len(pieces) == 1:
+        return pieces[0]
+    return np.concatenate(pieces)
+
+
+def _has_tracked_speech(audio: np.ndarray) -> bool:
+    """Whether a fresh SilenceTracker, fed the app's 100 ms chunks, flags at
+    least _MIN_SPAN_SPEECH_SAMPLES of this audio as speech."""
+    chunk = SAMPLE_RATE // 10
+    speech_samples = speech_window_fraction(audio, chunk) * len(audio)
+    return speech_samples >= _MIN_SPAN_SPEECH_SAMPLES
+
+
+def _clear_mlx_cache() -> None:
+    """Return MLX's buffer cache to the OS; the model weights stay loaded.
+
+    Decoding grows the cache to the largest working set (3.25 GB for a
+    120 s window) and MLX keeps it for the life of the process otherwise.
+    """
+    try:
+        import mlx.core as mx
+
+        mx.clear_cache()
+    except Exception:  # noqa: BLE001 — memory hygiene must never fail a session
+        log.debug("mlx cache clear failed", exc_info=True)
+
+
 class ParakeetBackend:
-    """Streaming STT via parakeet-mlx (default)."""
+    """Parakeet-mlx STT that decodes each pause-bounded segment whole.
+
+    Segments close on whisper's pause rule (MIN_SEGMENT_S of audio, then a
+    SEGMENT_SILENCE_S pause), and past HARD_SEGMENT_S at the first 200 ms of
+    quiet (see _segment_due). Audio with no quiet at all is never cut. The
+    server cleans each segment while the user keeps talking; at stop only the
+    tail is decoded. With Stream Typing on, previews decode the last
+    PREVIEW_WINDOW_S of the open span about every 0.5 s.
+
+        audio   |---- seg 1 ----|..|---- seg 2 ----|..|- tail -|
+        decode                     ^ pause            ^ pause    ^ stop
+        final   "seg 1 seg 2 tail"
+
+    This replaced transcribe_stream fed in 0.5 s steps: its 256-frame
+    attention context scored about 25% WER on Common Voice India, against
+    about 10% for the same model decoding each clip whole.
+    """
 
     def __init__(self, model_id: str) -> None:
         self.model_id = model_id
         self._model: Any = None
-        self._stream: Any = None
-        self._pending: list[np.ndarray] = []
-        self._pending_samples = 0
-        # Segmenting surface (see STTBackend): parakeet already streams, so it
-        # never produces cleanup segments and ignores the whisper glossary.
+        # Segmenting surface (see STTBackend). Parakeet has no prompt input,
+        # so the whisper glossary is ignored.
         self.initial_prompt: str | None = None
+        self.segmenting_enabled = True  # transcribe_clip: one whole decode
         self.segments_used_for_final = False
         self.final_tail = ""
+        # All PCM stays buffered: after a failed segment decode, finalize
+        # recovers every word with one whole-clip decode.
+        self._chunks: list[np.ndarray] = []
+        self._samples = 0
+        self._decoded_samples = 0  # offset of the first un-decoded sample
+        self._segments: list[str] = []
+        self._new_segments: list[str] = []
+        self._silence = SilenceTracker()
+        # Tracker-flagged speech since the last committed span. An empty
+        # decode of a span with speech is not evidence that it was empty.
+        self._span_speech_samples = 0
+        self._retry_at_samples = 0  # backoff after an empty speech-span decode
+        self._retry_wait_s = _EMPTY_SPAN_RETRY_S  # doubles per consecutive one
+        # Display-only preview lane, driven by the server for Stream Typing.
+        # Previews read the open span and never touch segment state.
+        self.preview_enabled = False
+        self._last_preview_samples = 0
+        self._preview_had_new_speech = False
+        self._preview_interval_s = _PARAKEET_PREVIEW_INTERVAL_S
+        self._pending_preview: WhisperPreviewRequest | None = None
+        self._segment_decode_failed = False
 
     def take_new_segments(self) -> list[str]:
-        return []
+        out = self._new_segments
+        self._new_segments = []
+        return out
+
+    @property
+    def _span_had_speech(self) -> bool:
+        return self._span_speech_samples >= _MIN_SPAN_SPEECH_SAMPLES
 
     def load(self) -> None:
         from parakeet_mlx import from_pretrained
@@ -355,50 +557,232 @@ class ParakeetBackend:
 
     def start_session(self) -> None:
         self.reset()
-        # depth=2: first two encoder layers carry exact cache across chunks —
-        # good accuracy/latency tradeoff for dictation.
-        self._stream = self._model.transcribe_stream(context_size=(256, 256), depth=2)
-        self._stream.__enter__()
 
     def feed_chunk(self, chunk: np.ndarray) -> str | None:
-        if self._stream is None:
+        self._chunks.append(chunk)
+        self._samples += len(chunk)
+        if self._silence.feed(chunk):
+            self._span_speech_samples += len(chunk)
+            self._preview_had_new_speech = True
+        if self._model is None or not self.segmenting_enabled or self._segment_decode_failed:
             return None
-        self._pending.append(chunk)
-        self._pending_samples += len(chunk)
-        if self._pending_samples < _PARAKEET_FEED_SAMPLES:
+        backing_off = self._samples < self._retry_at_samples
+        if backing_off or not self._segment_due():
+            self._queue_preview_if_due()
             return None
-        self._flush_pending()
-        return self._stream.result.text
 
-    def _flush_pending(self) -> None:
-        import mlx.core as mx
+        # The segment decode supersedes any preview of the same open span.
+        self._pending_preview = None
+        end = self._samples
+        try:
+            text = self._transcribe(self._audio_span(self._decoded_samples, end))
+        except Exception:  # noqa: BLE001 — a failed decode must not kill the feed loop
+            log.exception("parakeet segment decode failed — decoding the whole clip at stop")
+            self._segment_decode_failed = True
+            return None
 
-        if not self._pending:
+        if not text and self._span_had_speech:
+            # Keep the span pending: the next close decodes it again with
+            # more audio, or the tail decode at stop covers it.
+            self._retry_at_samples = self._samples + int(self._retry_wait_s * SAMPLE_RATE)
+            self._retry_wait_s = min(self._retry_wait_s * 2, _EMPTY_SPAN_RETRY_MAX_S)
+            return None
+
+        self._decoded_samples = end
+        self._span_speech_samples = 0
+        self._retry_wait_s = _EMPTY_SPAN_RETRY_S
+        self._silence.consume_pause()  # the pause that closed this segment
+        self._last_preview_samples = self._samples
+        self._preview_had_new_speech = False
+        if not text:
+            return None  # a span without speech or words: consumed
+        self._segments.append(text)
+        self._new_segments.append(text)
+        return " ".join(self._segments)
+
+    def _segment_due(self) -> bool:
+        """Whether the open span closes now, at the end of the audio (always
+        inside a pause, so no word is split).
+
+            open audio         needs
+            >= MIN_SEGMENT_S   SEGMENT_SILENCE_S pause
+            >= HARD_SEGMENT_S  _HARD_CUT_QUIET_S quiet
+        """
+        undecoded_s = (self._samples - self._decoded_samples) / SAMPLE_RATE
+        silence_s = self._silence.trailing_silence_s
+        if undecoded_s >= MIN_SEGMENT_S and silence_s >= SEGMENT_SILENCE_S:
+            return True
+        return undecoded_s >= HARD_SEGMENT_S and silence_s >= _HARD_CUT_QUIET_S
+
+    def _queue_preview_if_due(self) -> None:
+        """Replace the pending preview once enough new speech arrived.
+
+        No model work here: the server decodes the request between feeds.
+        Replacing rather than queueing means a slow decode always catches up
+        to the newest audio instead of working through a backlog.
+        """
+        if not self.preview_enabled or not self._preview_had_new_speech:
             return
-        audio = np.concatenate(self._pending)
-        self._pending = []
-        self._pending_samples = 0
-        self._stream.add_audio(mx.array(audio))
+        new_s = (self._samples - self._last_preview_samples) / SAMPLE_RATE
+        if new_s < self._preview_interval_s:
+            return
+
+        # The open span, capped like Whisper's to the last PREVIEW_WINDOW_S:
+        # a span that never closes would otherwise make every preview decode
+        # more audio. Copy it: finalize or reset may drop the chunks mid-decode.
+        window_samples = int(PREVIEW_WINDOW_S * SAMPLE_RATE)
+        start = max(self._decoded_samples, self._samples - window_samples)
+        audio = np.array(self._audio_span(start, self._samples), copy=True)
+        self._pending_preview = WhisperPreviewRequest(
+            audio=audio,
+            committed_segments=tuple(self._segments),
+        )
+        self._last_preview_samples = self._samples
+        self._preview_had_new_speech = False
+
+    def take_preview_request(self) -> WhisperPreviewRequest | None:
+        request = self._pending_preview
+        self._pending_preview = None
+        return request
+
+    def discard_preview_request(self) -> None:
+        self._pending_preview = None
+
+    def decode_preview(self, request: WhisperPreviewRequest) -> str | None:
+        """Decode one display-only snapshot: committed segments plus the open
+        span. The next preview waits for at least 1.5x this decode's time."""
+        started = time.perf_counter()
+        try:
+            text = self._transcribe(request.audio)
+        except Exception:  # noqa: BLE001 — a preview must not affect the final text
+            log.exception("parakeet preview decode failed — final transcription remains available")
+            return None
+        finally:
+            elapsed = time.perf_counter() - started
+            self._preview_interval_s = min(
+                PREVIEW_MAX_INTERVAL_S,
+                max(_PARAKEET_PREVIEW_INTERVAL_S, elapsed * PREVIEW_BACKOFF),
+            )
+        if not text:
+            return None
+        return " ".join((*request.committed_segments, text))
+
+    def _audio_span(self, start_sample: int, end_sample: int) -> np.ndarray:
+        return _chunk_span(self._chunks, start_sample, end_sample)
 
     def finalize(self) -> str:
-        if self._stream is None:
+        self.segments_used_for_final = False
+        self.final_tail = ""
+        try:
+            return self._final_text()
+        finally:
+            self.reset()
+
+    def _final_text(self) -> str:
+        """Committed segments plus the decoded tail, or one whole-clip decode
+        when nothing was committed, segmenting failed, or the tail lost its
+        words.
+
+            committed   [seg 1][blank][seg 2]   decode the tail only
+            nothing     [...............tail]   decode the whole clip
+
+        No tracked speech is no reason to skip: Parakeet hears speakers below
+        the tracker's floor, and has no integrity guard that discards their
+        words the way Whisper's does.
+        """
+        if not self._decoded_samples or self._segment_decode_failed:
+            return self._decode_whole_clip()
+
+        try:
+            tail = self._transcribe(self._audio_span(self._decoded_samples, self._samples))
+        except Exception:  # noqa: BLE001 — the whole-clip decode below recovers
+            log.exception("parakeet tail decode failed — decoding the whole clip")
+            return self._decode_whole_clip()
+        if not tail and self._span_had_speech:
+            log.warning("empty parakeet tail over speech — decoding the whole clip")
+            return self._decode_whole_clip()
+
+        # Only a cleaned segment makes this a streamed result for the server.
+        if self._segments:
+            self.segments_used_for_final = True
+            self.final_tail = tail
+        return " ".join(self._segments + ([tail] if tail else []))
+
+    def _decode_whole_clip(self) -> str:
+        return self._transcribe(self._audio_span(0, self._samples))
+
+    def _transcribe(self, audio: np.ndarray) -> str:
+        """Decode one span; past _PARAKEET_WINDOW_S, in overlapping windows.
+
+            span      0 ................................... 250 s
+            window 1  [0 ......... 120)
+            window 2           [105 ......... 225)
+            window 3                     [210 ......... 250)
+                                ^^^^^^^ decoded twice, merged once
+        """
+        if len(audio) < MIN_FINAL_AUDIO_S * SAMPLE_RATE:
             return ""
-        # Flush the tail plus a little silence so the draft region decodes.
-        self._pending.append(np.zeros(SAMPLE_RATE // 2, dtype=np.float32))
-        self._flush_pending()
-        text = self._stream.result.text.strip()
-        self.reset()
-        return text
+
+        window = int(_PARAKEET_WINDOW_S * SAMPLE_RATE)
+        step = window - int(_PARAKEET_OVERLAP_S * SAMPLE_RATE)
+        merged: list[_Token] = []
+        prev_end = 0
+        for start in range(0, len(audio), step):
+            end = min(start + window, len(audio))
+            offset_s = start / SAMPLE_RATE
+            tokens = [
+                _Token(t.text, t.start + offset_s, t.end + offset_s)
+                for t in self._decode_tokens(audio[start:end])
+            ]
+            # An empty window over speech is a model failure, and the merge
+            # would keep the other windows' words without a trace. No retry:
+            # the whole-clip decode fails the same way. Log where it was.
+            windowed = len(audio) > window
+            if windowed and not tokens and _has_tracked_speech(audio[prev_end:end]):
+                log.warning("parakeet window at %.1f s decoded empty over speech", offset_s)
+            merged = _merge_overlap(
+                merged,
+                tokens,
+                seam_start_s=offset_s,
+                seam_end_s=prev_end / SAMPLE_RATE,
+            )
+            prev_end = end
+            if end == len(audio):
+                break
+        return "".join(t.text for t in merged).strip()
+
+    def _decode_tokens(self, audio: np.ndarray) -> list[_Token]:
+        """The model call: one span in, span-relative tokens out."""
+        import mlx.core as mx
+        from parakeet_mlx.audio import get_logmel
+
+        mel = get_logmel(mx.array(audio), self._model.preprocessor_config)
+        result = self._model.generate(mel)[0]
+        return [_Token(t.text, t.start, t.end) for t in result.tokens]
 
     def reset(self) -> None:
-        if self._stream is not None:
-            try:
-                self._stream.__exit__(None, None, None)
-            except Exception:  # noqa: BLE001
-                log.exception("parakeet stream teardown failed")
-        self._stream = None
-        self._pending = []
-        self._pending_samples = 0
+        had_audio = self._samples > 0
+        self._chunks = []
+        self._samples = 0
+        self._decoded_samples = 0
+        self._segments = []
+        self._new_segments = []
+        self._silence.reset()
+        self._span_speech_samples = 0
+        self._retry_at_samples = 0
+        self._retry_wait_s = _EMPTY_SPAN_RETRY_S
+        self._last_preview_samples = 0
+        self._preview_had_new_speech = False
+        self._preview_interval_s = _PARAKEET_PREVIEW_INTERVAL_S
+        self._pending_preview = None
+        self._segment_decode_failed = False
+        # initial_prompt / segments_used_for_final / final_tail survive a reset:
+        # the server reads the finalize flags after finalize() has reset.
+
+        # Finalize and abort both end here. Release the session's decode
+        # buffers now; between sessions they would only hold memory.
+        if had_audio and self._model is not None:
+            _clear_mlx_cache()
 
 
 # --- whisper hallucination guard ---------------------------------------------
