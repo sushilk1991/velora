@@ -122,6 +122,7 @@ class Worker:
                     max_tokens=message.get("max_tokens"),
                     cache_scope=message.get("cache_scope"),
                     max_input_tokens=message.get("max_input_tokens"),
+                    copy_draft=bool(message.get("copy_draft", False)),
                 )
                 await self._respond(request_id, ok=True, result=asdict(result))
                 return

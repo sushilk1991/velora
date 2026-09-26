@@ -8,7 +8,9 @@ import json
 import os
 import signal
 import socket
+import time
 from pathlib import Path
+from typing import NoReturn
 
 from velora_engine.cleanup_ipc import (
     CLEANUP_IPC_STREAM_LIMIT_BYTES,
@@ -16,10 +18,24 @@ from velora_engine.cleanup_ipc import (
 )
 
 
+def wedge_like_native_code() -> NoReturn:
+    """Stop serving the way a native call that never returns does.
+
+    The event loop blocks, so protocol cancels go unread, and SIGTERM is
+    ignored, so only SIGKILL ends the worker. It sleeps rather than spins,
+    so a worker a test leaks costs no CPU.
+    """
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        time.sleep(3600)
+
+
 async def main(
     fd: int,
     fail_next_replacement: Path | None = None,
     fail_all_replacements: Path | None = None,
+    prefix_delay_s: float = 0.0,
+    hang_prefix: bool = False,
 ) -> None:
     sock = socket.socket(fileno=fd)
     sock.setblocking(False)
@@ -53,10 +69,8 @@ async def main(
             await respond(request_id, ok=True)
             return
         if operation == "prepare_prefix":
-            if message.get("candidates", [[None]])[0][0] == "__hang__":
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                while True:
-                    pass
+            if hang_prefix or message.get("candidates", [[None]])[0][0] == "__hang__":
+                wedge_like_native_code()
             if message.get("candidates", [[None]])[0][0] == "__cancel__":
                 while request_id not in cancelled:
                     await asyncio.sleep(0.01)
@@ -71,6 +85,9 @@ async def main(
                     },
                 )
                 return
+            if prefix_delay_s:
+                # A slow but progressing warm-up that ignores cancellation.
+                await asyncio.sleep(prefix_delay_s)
             await respond(
                 request_id,
                 ok=True,
@@ -166,7 +183,10 @@ async def main(
         else:
             result = {
                 "text": (str(message.get("max_input_tokens"))
-                         if raw == "__limits__" else raw.upper()),
+                         if raw == "__limits__"
+                         else str(message.get("copy_draft"))
+                         if raw == "__copy_draft__"
+                         else raw.upper()),
                 "applied": True,
                 "ms": 7,
                 "reason": None,
@@ -195,11 +215,15 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True)
     parser.add_argument("--fail-next-replacement", type=Path)
     parser.add_argument("--fail-all-replacements", type=Path)
+    parser.add_argument("--prefix-delay", type=float, default=0.0)
+    parser.add_argument("--hang-prefix", action="store_true")
     args = parser.parse_args()
     asyncio.run(
         main(
             args.fd,
             args.fail_next_replacement,
             args.fail_all_replacements,
+            args.prefix_delay,
+            args.hang_prefix,
         )
     )

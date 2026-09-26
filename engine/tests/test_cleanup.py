@@ -4,16 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 import asyncio
+import contextlib
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
 
+import velora_engine.cleanup as cleanup_mod
 from velora_engine.cleanup import (
     CleanupEngine,
     CleanupResult,
+    COPY_DRAFT_PASS_TOKENS,
     _PrefixCancelled,
+    _copy_draft,
     _restore_prompt_cache,
     _snapshot_prompt_cache,
 )
@@ -125,6 +129,69 @@ async def test_prepare_prefix_rejects_single_candidate_without_caching_transcrip
         engine.close()
 
 
+class WarmStepCleanup(RecordingCleanup):
+    """Counts the one-token warm-up forward instead of running a model."""
+
+    def __init__(self):
+        super().__init__()
+        self.warm_steps: list[int] = []
+
+    def _warm_step_locked(self, tokens, snapshot):
+        self.warm_steps.append(len(tokens))
+
+
+@pytest.mark.asyncio
+async def test_prepare_prefix_extends_the_warm_snapshot_instead_of_the_whole_prompt():
+    # Stop-time preparation for a new app/mode must cost only the delta after
+    # the static snapshot (~600 tokens), not the whole ~3k-token prompt.
+    engine = WarmStepCleanup()
+    engine._warm("stable instructions")
+    static_tokens = list(engine._prepared_tokens)
+    system = "stable instructions\n\nFormatting strength: FULL."
+    engine.prefilled = []
+    try:
+        result = await engine.prepare_prefix([
+            (system, "alpha"),
+            (system + "\n\nScreen context", "zulu"),
+        ])
+
+        assert result.applied is True
+        assert result.tokens == len(engine._prepared_tokens)
+        assert engine.prefilled == []
+        assert engine.extended == [engine._prepared_tokens[len(static_tokens):]]
+        assert engine._fallback_prepared_tokens == static_tokens
+        assert engine.warm_steps == []
+    finally:
+        engine.close()
+
+
+@pytest.mark.asyncio
+async def test_prepare_prefix_of_installed_prefix_only_warms_the_model():
+    # An idle writing model pays ~600 ms to page its weights back in on the
+    # first forward. Re-preparing a prefix that is already installed must run
+    # one warm-up step over it and never re-prefill it.
+    engine = WarmStepCleanup()
+    candidates = [
+        ("stable instructions", "alpha"),
+        ("stable instructions plus entity", "zulu"),
+    ]
+    try:
+        first = await engine.prepare_prefix(candidates)
+        prepared = list(engine._prepared_tokens)
+        engine.prefilled = []
+
+        second = await engine.prepare_prefix(candidates)
+
+        assert second.applied is True
+        assert second.tokens == first.tokens == len(prepared)
+        assert engine.prefilled == []
+        assert engine.extended == []
+        assert engine.warm_steps == [len(prepared)]
+        assert engine._prepared_tokens == prepared
+    finally:
+        engine.close()
+
+
 def test_static_warm_cache_matches_extended_runtime_system_prompt():
     engine = RecordingCleanup()
     try:
@@ -223,6 +290,169 @@ def test_prepared_prefix_mismatch_uses_fresh_cache():
         assert hit is False
         assert engine.cache_creations == 1
         assert cache[0].state == []
+    finally:
+        engine.close()
+
+
+def test_copy_draft_continues_the_transcript_after_the_output_tail():
+    source = [ord(c) for c in "we should ship it today"]
+    output = [ord(c) for c in "We should sh"]
+
+    # " sh" first appears in " should"; the cursor says output is past it.
+    draft, start = _copy_draft(source, output, cursor=len("we should"), limit=11)
+
+    assert "".join(map(chr, draft)) == "ip it today"
+    assert start == len("we should sh")
+    # A one-token tail matches too often by chance to draft from.
+    assert _copy_draft(source, [ord("Q"), ord("w")], cursor=0, limit=11) == ([], 0)
+
+
+EOS = 0
+
+
+class DraftTokenizer(CharacterTokenizer):
+    eos_token_ids = {EOS}
+
+    @staticmethod
+    def decode(tokens):
+        return "".join(chr(t) for t in tokens)
+
+
+class GreedyOracle:
+    """Fake model whose greedy output is ``target``, then EOS.
+
+    It reads the whole fed history from the cache, the way a recurrent layer
+    carries it: a rejected draft left in the cache derails every later token.
+    """
+
+    vocab = 128
+
+    def __init__(self, target: str):
+        self.target = [ord(c) for c in target] + [EOS]
+        self.prompt: list[int] = []
+        self.forwards = 0
+        self.pass_sizes: list[int] = []
+
+    def next_token(self, history: list[int]) -> int:
+        output = history[len(self.prompt):]
+        if output != self.target[:len(output)] or len(output) >= len(self.target):
+            return ord("?")
+        return self.target[len(output)]
+
+    def __call__(self, inputs, cache):
+        import mlx.core as mx
+
+        self.forwards += 1
+        self.pass_sizes.append(inputs.shape[1])
+        if not cache[0].state:
+            cache[0].state = [[]]
+        history = cache[0].state[0]
+        rows = []
+        for token in inputs[0].tolist():
+            history.append(token)
+            row = [0.0] * self.vocab
+            row[self.next_token(history)] = 1.0
+            rows.append(row)
+        return mx.array([rows])
+
+
+def _oracle_cleanup(monkeypatch, target: str):
+    """RecordingCleanup on a GreedyOracle; stock generation steps one token."""
+    import mlx.core as mx
+    import mlx_lm
+
+    engine = RecordingCleanup()
+    engine._tokenizer = DraftTokenizer()
+    oracle = GreedyOracle(target)
+    engine._model = oracle
+    # Copy-draft runs only on benched models; treat the fake as one.
+    monkeypatch.setattr(
+        cleanup_mod, "COPY_DRAFT_MODELS", frozenset({engine.model_id}), raising=False)
+
+    def one_token_at_a_time(model, _tokenizer, prompt, max_tokens, prompt_cache, **_kwargs):
+        engine._prefill_into_cache_locked(prompt_cache, list(prompt[:-1]))
+        pending = list(prompt[-1:])
+        for count in range(1, max_tokens + 1):
+            token = int(mx.argmax(model(mx.array([pending]), prompt_cache)[0, -1]).item())
+            if token == EOS:
+                return
+            yield SimpleNamespace(text=chr(token), token=token, generation_tokens=count)
+            pending = [token]
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", one_token_at_a_time)
+    return engine, oracle
+
+
+@contextlib.contextmanager
+def recorded_generation_context(monkeypatch):
+    """Swap mlx_lm's wired_limit and generation stream for recorders.
+
+    Yields (stream, wired): the stream to expect model calls on, and the
+    wired-limit events in order: ("enter", streams) then ("exit", None).
+    """
+    import importlib
+
+    import mlx.core as mx
+
+    # `mlx_lm.generate` as an attribute is the generate() function.
+    generate_mod = importlib.import_module("mlx_lm.generate")
+    stream = mx.new_stream(mx.default_device())
+    wired: list[tuple[str, Any]] = []
+
+    @contextlib.contextmanager
+    def recording_wired_limit(_model, streams=None):
+        wired.append(("enter", streams))
+        try:
+            yield
+        finally:
+            wired.append(("exit", None))
+
+    monkeypatch.setattr(generate_mod, "generation_stream", stream)
+    monkeypatch.setattr(generate_mod, "wired_limit", recording_wired_limit)
+    yield stream, wired
+
+
+def _observed_model(oracle, on_forward):
+    """The oracle as a model callable that runs ``on_forward(n)`` first."""
+
+    def model(inputs, cache):
+        on_forward(oracle.forwards + 1)
+        return oracle(inputs, cache)
+
+    return model
+
+
+def test_dictation_cleanup_verifies_transcript_drafts_in_bulk(monkeypatch):
+    # "uh" is dropped and "," inserted mid-draft: two rejected drafts.
+    raw = "we should uh ship it today okay"
+    target = "We should ship it today, okay."
+    engine, oracle = _oracle_cleanup(monkeypatch, target)
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    try:
+        result = engine._run(raw, "rules", timeout_ms=1_000, copy_draft=True)
+
+        assert result.applied is True
+        assert result.text == target
+        # Stock greedy decoding needs one forward per output token plus EOS;
+        # drafts cut that by at least a third, in passes no longer than the
+        # cheap size (the first pass is the transcript's last prompt token).
+        assert oracle.forwards <= (len(target) + 1) * 2 // 3
+        assert max(oracle.pass_sizes) <= COPY_DRAFT_PASS_TOKENS
+    finally:
+        engine.close()
+
+
+def test_transformations_keep_one_token_decoding(monkeypatch):
+    # "uh" is dropped and "," inserted mid-draft: two rejected drafts.
+    raw = "we should uh ship it today okay"
+    target = "We should ship it today, okay."
+    engine, oracle = _oracle_cleanup(monkeypatch, target)
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    try:
+        result = engine._run(raw, "rules", timeout_ms=1_000, check_ratio=False)
+
+        assert result.text == target
+        assert oracle.forwards == len(target) + 1
     finally:
         engine.close()
 
@@ -569,8 +799,10 @@ def test_prefill_cancel_is_safe(monkeypatch, cancel_at):
     try:
         engine._warm("system")
         snapshot = engine._prepared_cache
+        # check_ratio=False keeps stream_generate's own prefill; dictation's
+        # copy-draft prefill is covered by the test below.
         result = engine._run(
-            "raw", "system", timeout_ms=100, cancel_event=cancel,
+            "raw", "system", timeout_ms=100, check_ratio=False, cancel_event=cancel,
         )
 
         assert result.reason == "cancelled"
@@ -583,9 +815,283 @@ def test_prefill_cancel_is_safe(monkeypatch, cancel_at):
         assert released == [[]]
 
         # A later uncancelled request must use the same warm model normally.
-        final = engine._run("raw", "system", timeout_ms=100)
+        final = engine._run("raw", "system", timeout_ms=100, check_ratio=False)
         assert final.text == "raw"
         assert final.applied is True
+    finally:
+        engine.close()
+
+
+def test_copy_draft_is_requested_explicitly_not_implied_by_check_ratio(monkeypatch):
+    raw = "we should uh ship it today okay"
+    target = "We should ship it today, okay."
+    engine, oracle = _oracle_cleanup(monkeypatch, target)
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    try:
+        result = engine._run(raw, "rules", timeout_ms=1_000, check_ratio=True)
+
+        assert result.text == target
+        assert oracle.forwards == len(target) + 1
+    finally:
+        engine.close()
+
+
+def test_copy_draft_runs_only_on_benched_models(monkeypatch):
+    raw = "we should uh ship it today okay"
+    target = "We should ship it today, okay."
+    engine, oracle = _oracle_cleanup(monkeypatch, target)
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    monkeypatch.setattr(cleanup_mod, "COPY_DRAFT_MODELS", frozenset())
+    try:
+        result = engine._run(raw, "rules", timeout_ms=1_000, copy_draft=True)
+
+        assert result.text == target
+        assert oracle.forwards == len(target) + 1
+    finally:
+        engine.close()
+
+
+def test_copy_draft_ships_only_on_the_benched_4b_tiers():
+    """The 4B tiers passed the exact-match and stop-to-final bench; 2B was never
+    benched, so the low-RAM tier keeps one-token decoding."""
+    assert cleanup_mod.COPY_DRAFT_MODELS == {
+        "mlx-community/Qwen3.5-4B-MLX-8bit",
+        "mlx-community/Qwen3.5-4B-MLX-4bit",
+    }
+
+
+def test_copy_draft_runs_inside_wired_limit_on_the_generation_stream(monkeypatch):
+    """Copy-draft sets up the GPU the way stream_generate does."""
+    import mlx.core as mx
+
+    raw = "we should uh ship it today okay"
+    target = "We should ship it today, okay."
+    engine, oracle = _oracle_cleanup(monkeypatch, target)
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    seen: list[tuple[bool, bool]] = []
+    with recorded_generation_context(monkeypatch) as (stream, wired):
+        engine._model = _observed_model(oracle, lambda _n: seen.append((
+            wired[-1:] == [("enter", [stream])],
+            mx.default_stream(mx.default_device()) == stream,
+        )))
+        try:
+            result = engine._run(raw, "rules", timeout_ms=1_000, copy_draft=True)
+        finally:
+            engine.close()
+
+    assert result.text == target
+    assert seen and all(inside and on_stream for inside, on_stream in seen)
+    assert wired == [("enter", [stream]), ("exit", None)]
+
+
+def test_cancelled_stock_generation_is_closed_before_its_cache_is_cleared(monkeypatch):
+    import mlx_lm
+
+    engine = RecordingCleanup()
+    engine._tokenizer = DraftTokenizer()
+    caches: list[list[Any]] = []
+
+    def make_prompt_cache():
+        caches.append([FakeCache()])
+        return caches[-1]
+
+    engine._make_prompt_cache = make_prompt_cache
+    cancel = threading.Event()
+    closed_with: list[int] = []
+
+    def generate(_model, _tokenizer, prompt, max_tokens, prompt_cache, **_kwargs):
+        try:
+            for count in range(1, max_tokens + 1):
+                if count == 2:
+                    cancel.set()
+                yield SimpleNamespace(text="a", token=ord("a"), generation_tokens=count)
+        finally:
+            closed_with.append(len(prompt_cache))
+
+    monkeypatch.setattr(mlx_lm, "stream_generate", generate)
+    try:
+        result = engine._run(
+            "we should ship it today", "rules", timeout_ms=1_000, cancel_event=cancel)
+
+        assert result.reason == "cancelled"
+        # Closed while its cache still existed, then the cache was dropped.
+        assert closed_with == [1]
+        assert caches[-1] == []
+    finally:
+        engine.close()
+
+
+def test_copy_draft_cancelled_between_passes_stops_and_closes(monkeypatch):
+    raw = "we should uh ship it today okay"
+    engine, oracle = _oracle_cleanup(monkeypatch, "We should ship it today, okay.")
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    cancel = threading.Event()
+    with recorded_generation_context(monkeypatch) as (_stream, wired):
+        # Cancel lands after pass 1 computed its tokens, before pass 2.
+        def cancel_after_first_pass(n):
+            if n == 2:
+                raise AssertionError("a pass ran after the cancel")
+
+        model = _observed_model(oracle, cancel_after_first_pass)
+
+        def first_pass_then_cancel(inputs, cache):
+            logits = model(inputs, cache)
+            cancel.set()
+            return logits
+
+        engine._model = first_pass_then_cancel
+        try:
+            engine._warm("rules")
+            snapshot = engine._prepared_cache
+            result = engine._run(
+                raw, "rules", timeout_ms=1_000, cancel_event=cancel, copy_draft=True)
+
+            assert result.reason == "cancelled"
+            assert result.applied is False
+            assert oracle.forwards == 1
+            assert wired[-1] == ("exit", None)
+            assert engine._prepared_cache is snapshot
+        finally:
+            engine.close()
+
+
+def test_copy_draft_timeout_mid_pass_returns_raw_and_closes(monkeypatch):
+    raw = "we should uh ship it today okay"
+    target = "We should ship it today, okay."
+    engine, oracle = _oracle_cleanup(monkeypatch, target)
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    with recorded_generation_context(monkeypatch) as (_stream, wired):
+        # Every pass after the first outlasts the whole output budget, so the
+        # first token of pass 2 times out with the rest of that pass unread.
+        engine._model = _observed_model(
+            oracle, lambda n: time.sleep(0.05) if n > 1 else None)
+        try:
+            result = engine._run(raw, "rules", timeout_ms=10, copy_draft=True)
+        finally:
+            engine.close()
+
+    assert result.reason == "timeout"
+    assert result.applied is False
+    assert result.text == raw
+    assert 0 < result.output_tokens < len(target)
+    assert wired == [("enter", [wired[0][1][0]]), ("exit", None)]
+
+
+class EndOfTurnTokenizer(DraftTokenizer):
+    """Chat template with an end-of-turn EOS right after the user text, as
+    Qwen's <|im_end|>: a draft copied past the transcript's end carries it."""
+
+    @staticmethod
+    def apply_chat_template(messages, **_kwargs):
+        system = messages[0]["content"]
+        user = messages[1]["content"]
+        return (
+            [ord(c) for c in f"<system>{system}</system><user>{user}"]
+            + [EOS]
+            + [ord(c) for c in "<bot>"]
+        )
+
+
+def test_copy_draft_stops_at_an_eos_drafted_from_the_prompt(monkeypatch):
+    raw = "we should ship it today"
+    engine, oracle = _oracle_cleanup(monkeypatch, raw)
+    engine._tokenizer = EndOfTurnTokenizer()
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    try:
+        result = engine._run(raw, "rules", timeout_ms=1_000, copy_draft=True)
+
+        assert result.applied is True
+        assert result.text == raw
+        assert result.output_tokens == len(raw)
+        assert oracle.forwards < len(raw)
+    finally:
+        engine.close()
+
+
+class HFCharacterTokenizer:
+    """The Hugging Face surface mlx_lm's TokenizerWrapper reads."""
+
+    eos_token_id = EOS
+    bos_token = None
+    chat_template = None
+    clean_up_tokenization_spaces = False
+    apply_chat_template = staticmethod(CharacterTokenizer.apply_chat_template)
+
+    @staticmethod
+    def get_vocab():
+        return {}
+
+    @staticmethod
+    def encode(text, add_special_tokens=False):
+        return [ord(c) for c in text]
+
+    @staticmethod
+    def decode(tokens):
+        return "".join(chr(t) for t in tokens if t != EOS)
+
+
+CEILING_RAW = "we should ship it today"
+CEILING_TARGET = "We should ship it today."
+
+
+@pytest.mark.parametrize("copy_draft", [False, True], ids=["stock", "copy_draft"])
+@pytest.mark.parametrize(
+    ("max_tokens", "reason"),
+    [(len(CEILING_TARGET) + 1, None), (len(CEILING_TARGET), "length")],
+    ids=["eos_is_the_last_allowed_token", "ceiling_before_eos"],
+)
+def test_eos_at_the_token_ceiling_counts_the_same_in_both_decoders(
+    monkeypatch, copy_draft, max_tokens, reason
+):
+    """Real mlx_lm stream_generate: its closing step carries the EOS token.
+
+    EOS is never output, so an answer whose EOS is the last allowed token is
+    complete, and one cut off at the ceiling is "length", in either decoder.
+    """
+    from mlx_lm.tokenizer_utils import TokenizerWrapper
+
+    engine = RecordingCleanup()
+    engine._tokenizer = TokenizerWrapper(HFCharacterTokenizer(), eos_token_ids=[EOS])
+    oracle = GreedyOracle(CEILING_TARGET)
+    engine._model = oracle
+    monkeypatch.setattr(
+        cleanup_mod, "COPY_DRAFT_MODELS", frozenset({engine.model_id}), raising=False)
+    oracle.prompt = engine._prompt_tokens("rules", CEILING_RAW)
+    try:
+        result = engine._run(
+            CEILING_RAW, "rules", timeout_ms=1_000,
+            copy_draft=copy_draft, max_tokens_override=max_tokens)
+
+        assert result.reason == reason
+        assert result.applied is (reason is None)
+        assert result.text == (CEILING_TARGET if reason is None else CEILING_RAW)
+        assert result.output_tokens == len(CEILING_TARGET)
+    finally:
+        engine.close()
+
+
+def test_copy_draft_prefill_cancel_keeps_the_warm_snapshot(monkeypatch):
+    raw = "we should uh ship it today okay"
+    engine, oracle = _oracle_cleanup(monkeypatch, "We should ship it today, okay.")
+    oracle.prompt = engine._prompt_tokens("rules", raw)
+    cancel = threading.Event()
+    prefill = engine._prefill_into_cache_locked
+
+    def cancelled_mid_prefill(cache, tokens, cancel_event=None):
+        cancel.set()
+        return prefill(cache, tokens, cancel_event)
+
+    engine._prefill_into_cache_locked = cancelled_mid_prefill
+    try:
+        engine._warm("rules")
+        snapshot = engine._prepared_cache
+        result = engine._run(
+            raw, "rules", timeout_ms=1_000, cancel_event=cancel, copy_draft=True)
+
+        assert result.reason == "cancelled"
+        assert result.applied is False
+        assert oracle.forwards == 0
+        assert engine._prepared_cache is snapshot
     finally:
         engine.close()
 

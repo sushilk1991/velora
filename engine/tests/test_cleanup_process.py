@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 import velora_engine.cleanup_process as cleanup_process_mod
 from velora_engine import actions
+from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_ipc import (
     CLEANUP_IPC_STREAM_LIMIT_BYTES,
     encode_cleanup_ipc_message,
@@ -64,6 +65,9 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         limited = await cleanup.cleanup(
             "__limits__", "system", max_input_tokens=16_384)
         assert limited.text == "16384"
+        assert (await cleanup.cleanup("__copy_draft__", "system")).text == "False"
+        drafted = await cleanup.cleanup("__copy_draft__", "system", copy_draft=True)
+        assert drafted.text == "True"
 
         prefix = await cleanup.prepare_prefix([("system", "alpha"), ("system", "zulu")])
         assert prefix.applied is True
@@ -73,6 +77,30 @@ async def test_cleanup_process_round_trip_and_prefix() -> None:
         assert memory.peak_bytes == 750_000_000
         assert memory.cache_bytes == 25_000_000
         await cleanup.release_action_memory()
+    finally:
+        await cleanup.aclose()
+
+
+async def test_cleanup_queue_timeout_can_be_set_per_request() -> None:
+    """A request can outwait the default queue timeout for a busy worker."""
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[*fixture_command(), "--prefix-delay", "0.3"],
+        queue_timeout_s=0.05,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        pid = cleanup.pid
+        prefix = asyncio.create_task(
+            cleanup.prepare_prefix([("system", "alpha"), ("system", "zulu")]))
+        while not cleanup._operation_lock.locked():  # noqa: SLF001
+            await asyncio.sleep(0.005)
+
+        result = await cleanup.cleanup("hello", "system", queue_timeout_s=2.0)
+
+        assert (result.text, result.applied) == ("HELLO", True)
+        assert (await prefix).applied is True
+        assert cleanup.loaded and cleanup.pid == pid
     finally:
         await cleanup.aclose()
 
@@ -941,6 +969,47 @@ async def test_worker_keeps_a_cancel_read_with_its_request() -> None:
             await asyncio.sleep(0.01)
 
         assert seen == [True]
+    finally:
+        serving.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await serving
+
+
+async def test_worker_passes_copy_draft_to_the_engine() -> None:
+    from velora_engine.cleanup_worker import Worker
+
+    seen: list[bool] = []
+
+    class RecordingEngine:
+        async def cleanup(self, raw, _prompt, *, copy_draft=False, **_kwargs):
+            seen.append(copy_draft)
+            return CleanupResult(raw, True, 1)
+
+    class Sink:
+        def write(self, _data: bytes) -> None:
+            pass
+
+        async def drain(self) -> None:
+            pass
+
+    reader = asyncio.StreamReader()
+    for request_id, flag in (("r1", True), ("r2", None)):
+        message = {"id": request_id, "op": "cleanup", "raw": "hi",
+                   "system_prompt": "s", "timeout_ms": 1_000}
+        if flag is not None:
+            message["copy_draft"] = flag
+        reader.feed_data(encode_cleanup_ipc_message(message))
+    worker = Worker("unused", reader, Sink())
+    worker.engine.close()
+    worker.engine = RecordingEngine()
+    serving = asyncio.create_task(worker.serve())
+    try:
+        for _ in range(100):
+            if len(seen) == 2:
+                break
+            await asyncio.sleep(0.01)
+
+        assert seen == [True, False]
     finally:
         serving.cancel()
         with contextlib.suppress(asyncio.CancelledError):

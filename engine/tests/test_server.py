@@ -19,7 +19,7 @@ from test_cleanup_process import fixture_command
 import velora_engine.server as server_mod
 from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_process import CleanupProcess
-from velora_engine import protocol
+from velora_engine import formatting, protocol
 from velora_engine.config import Config
 from velora_engine.server import Engine
 
@@ -525,9 +525,454 @@ async def test_recording_never_runs_cleanup_prefill_against_live_stt(engine):
 
     assert final["text"] == "Hello world, this is a fake transcript."
     assert final["cleanup_applied"] is True
-    assert cleanup.calls == []
+    # The only preparation is the stop-time warm-up, which starts after the
+    # live stream has ended.
+    assert len(cleanup.calls) == 1
     assert cleanup.unhealthy is False
     assert not eng.shutdown.is_set()
+    client.close()
+
+
+NOTES_CONTEXT = {
+    "bundle_id": "com.apple.Notes",
+    "app_name": "Notes",
+    "entities": [{"type": "nearby", "value": "cursor text"}],
+}
+
+
+class WarmupCleanup:
+    """Fake cleanup worker whose prefix warm-up blocks until released.
+
+    ``release`` ends the warm-up; its ``cancel_event`` ends it too. Calls land
+    in ``calls`` in order, so tests can check what waited for what.
+    """
+
+    loaded = True
+    model_id = "fake-warmup"
+    unhealthy = False
+
+    def __init__(self):
+        self.calls = []
+        self.started = threading.Event()
+        self.release = threading.Event()
+        self.cancel_event = None
+
+    async def prepare_prefix(self, candidates, cancel_event=None):
+        self.calls.append(("prepare", candidates))
+        self.cancel_event = cancel_event
+        self.started.set()
+
+        def wait_for_release_or_cancel():
+            while not (self.release.is_set() or cancel_event.is_set()):
+                self.release.wait(0.01)
+
+        await asyncio.to_thread(wait_for_release_or_cancel)
+        self.calls.append(("prepared", cancel_event.is_set()))
+
+    async def cleanup(self, raw, _prompt, **kwargs):
+        self.calls.append(("cleanup", kwargs.get("prefix_candidates")))
+        if kwargs["cancel_event"].is_set():
+            return CleanupResult(raw, False, 0, "cancelled")
+        return CleanupResult("Hello world, this is a fake transcript.", True, 3)
+
+
+class StubbornWarmupCleanup(WarmupCleanup):
+    """Warm-up that ignores its cancel event and runs until released.
+
+    ``task`` is the warm-up task, so tests can see when it has finished.
+    """
+
+    task = None
+
+    async def prepare_prefix(self, candidates, cancel_event=None):
+        self.calls.append(("prepare", candidates))
+        self.cancel_event = cancel_event
+        self.task = asyncio.current_task()
+        self.started.set()
+        await asyncio.to_thread(self.release.wait, 5.0)
+        self.calls.append(("prepared", cancel_event.is_set()))
+
+    async def aclose(self):
+        self.calls.append(("aclose", self.task is not None and self.task.done()))
+
+
+def notes_prefix_candidates(config):
+    return formatting.build_prefill_prompt_candidates(
+        config,
+        bundle_id=NOTES_CONTEXT["bundle_id"],
+        app_name=NOTES_CONTEXT["app_name"],
+        explicit_mode=None,
+        entities=NOTES_CONTEXT["entities"],
+    )
+
+
+async def test_stop_warms_cleanup_beside_stt_finalize(engine, monkeypatch):
+    """The cleanup warm-up overlaps STT finalize, and cleanup waits for it.
+
+    stop ─► STT finalize ───────────────► cleanup ─► final
+       └──► prepare_prefix (warm-up) ───┘
+    """
+    eng, sock = engine
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    # STT finalize holds until the warm-up has started, then lets the warm-up
+    # run past it: cleanup must still wait for the warm-up to finish.
+    finalize = eng.stt.finalize
+    overlapped = []
+
+    def finalize_beside_warmup():
+        overlapped.append(cleanup.started.wait(timeout=1.0))
+        threading.Timer(0.2, cleanup.release.set).start()
+        return finalize()
+
+    monkeypatch.setattr(eng.stt, "finalize", finalize_beside_warmup)
+    await client.send_json({"cmd": "start", "session": "warm", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "warm"})
+    final = await client.recv_event("final")
+
+    expected = notes_prefix_candidates(eng.config)
+    assert expected
+    assert overlapped == [True]
+    assert cleanup.calls == [
+        ("prepare", expected),
+        ("prepared", False),
+        ("cleanup", expected),
+    ]
+    assert final["cleanup_applied"] is True
+    client.close()
+
+
+async def test_stalled_cleanup_warmup_is_cancelled_before_cleanup(engine, monkeypatch):
+    """A warm-up past its wait budget is cancelled; the final is not held."""
+    eng, sock = engine
+    monkeypatch.setattr(server_mod, "CLEANUP_WARMUP_WAIT_S", 0.05)
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "stall", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "stall"})
+    final = await client.recv_event("final", timeout=2.0)
+
+    assert final["cleanup_applied"] is True
+    assert cleanup.cancel_event is not None and cleanup.cancel_event.is_set()
+    assert [call[0] for call in cleanup.calls] == ["prepare", "prepared", "cleanup"]
+    client.close()
+
+
+async def test_short_final_does_not_wait_for_cleanup_warmup(engine, monkeypatch):
+    """A final that skips the model is not held, and its warm-up is cancelled."""
+    eng, sock = engine
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "sounds good")
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "short", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "short"})
+    final = await client.recv_event("final", timeout=1.0)
+
+    assert final["cleanup_applied"] is False
+    assert cleanup.started.is_set()
+    for _ in range(100):
+        if ("prepared", True) in cleanup.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert cleanup.calls == [("prepare", notes_prefix_candidates(eng.config)), ("prepared", True)]
+    client.close()
+
+
+async def load_fixture_cleanup(
+    eng: Engine, *worker_flags: str, queue_timeout_s: float = 0.1
+) -> CleanupProcess:
+    """Make the fixture worker the engine's cleanup."""
+    cleanup = CleanupProcess(
+        "fake",
+        worker_command=[*fixture_command(), *worker_flags],
+        queue_timeout_s=queue_timeout_s,
+    )
+    await cleanup.load_async("warm prompt")
+    eng.cleanup = cleanup
+    return cleanup
+
+
+async def test_slow_cleanup_warmup_delays_cleanup_without_a_replacement(
+    engine, monkeypatch
+):
+    """A warm-up that ignores cancel but finishes only delays cleanup.
+
+    The old waits (0.1 s, cancel, 0.1 s, then the 0.1 s queue timeout here)
+    gave up on a 0.6 s warm-up: raw text, and a healthy worker replaced.
+    """
+    eng, sock = engine
+    monkeypatch.setattr(server_mod, "CLEANUP_WARMUP_WAIT_S", 0.1)
+    cleanup = await load_fixture_cleanup(eng, "--prefix-delay", "0.6")
+    pid = cleanup.pid
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "slow", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "slow"})
+    final = await client.recv_event("final", timeout=5.0)
+
+    assert final["cleanup_applied"] is True
+    assert cleanup.loaded and cleanup.pid == pid
+    client.close()
+
+
+async def test_wedged_cleanup_warmup_gives_raw_after_the_budget_and_one_replacement(
+    engine, monkeypatch, caplog
+):
+    """Only a warm-up that outlives the cleanup's whole budget costs the final.
+
+    The cleanup waits its own budget (1.5 s timeout + 0.1 s grace here), then
+    returns raw at once, not after the worker's 2 s queue timeout, and retires
+    the worker once. The retirement fails the wedged warm-up's request, so its
+    own watchdog never retires a second worker.
+    """
+    eng, sock = engine
+    monkeypatch.setattr(server_mod, "CLEANUP_WARMUP_WAIT_S", 0.1)
+    monkeypatch.setattr(server_mod, "HARD_TIMEOUT_GRACE_S", 0.1)
+    cleanup = await load_fixture_cleanup(eng, "--hang-prefix", queue_timeout_s=2.0)
+    pid = cleanup.pid
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "wedged", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "wedged"})
+    final = await client.recv_event("final", timeout=5.0)
+
+    budget_ms = server_mod.adaptive_timeout_ms(final["raw"]) + 100
+    assert final["cleanup_applied"] is False
+    assert budget_ms - 20 <= final["cleanup_wall_ms"] < budget_ms + 1000
+    for _ in range(500):
+        if cleanup.loaded and cleanup.pid != pid:
+            break
+        await asyncio.sleep(0.01)
+    assert cleanup.loaded and cleanup.pid not in (None, pid)
+    replacements = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("replacing cleanup worker")
+    ]
+    assert replacements == ["replacing cleanup worker asynchronously reason=timeout_queue"]
+    client.close()
+
+
+async def test_cancel_during_the_warmup_wait_lets_the_next_start_through(
+    engine, monkeypatch
+):
+    """Cancelling a final that waits on the warm-up frees the engine at once.
+
+    The wait held the finalize for up to 4 s, so the next start got "busy
+    finalizing the previous dictation".
+    """
+    eng, sock = engine
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "first", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "first"})
+    # The transcript goes out just before formatting waits on the warm-up.
+    await client.recv_event("transcript")
+    await client.send_json({"cmd": "cancel", "session": "first"})
+    await client.recv_event("cancelled", timeout=1.0)
+
+    # The next final skips the model, so it does not wait on its own warm-up.
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "sounds good")
+    await client.send_json({"cmd": "start", "session": "next", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "next"})
+    final = await client.recv_event("final", timeout=1.0)
+
+    assert final["session"] == "next"
+    for _ in range(100):
+        if cleanup.calls.count(("prepared", True)) == 2:
+            break
+        await asyncio.sleep(0.01)
+    assert cleanup.calls.count(("prepared", True)) == 2
+    client.close()
+
+
+async def test_next_start_waits_for_a_warmup_that_outlived_its_final(
+    engine, monkeypatch
+):
+    """A new dictation starts with the cleanup worker free.
+
+    The short final skips the model and cancels its warm-up, which ignores
+    the cancel. The next start waits for it rather than record beside it.
+    """
+    eng, sock = engine
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "sounds good")
+    cleanup = StubbornWarmupCleanup()
+    eng.cleanup = cleanup
+    start_session = eng.stt.start_session
+    warmup_running_at_start = []
+
+    def record_start():
+        warmup_running_at_start.append(
+            cleanup.task is not None and not cleanup.task.done())
+        start_session()
+
+    monkeypatch.setattr(eng.stt, "start_session", record_start)
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "short", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "short"})
+    await client.recv_event("final", timeout=1.0)
+    threading.Timer(0.2, cleanup.release.set).start()
+    await client.send_json({"cmd": "start", "session": "next", "context": {}})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "next"})
+    await client.recv_event("final", timeout=2.0)
+
+    assert warmup_running_at_start == [False, False]
+    client.close()
+
+
+async def test_finalize_ends_after_its_warmup_stops(engine, monkeypatch):
+    """A finalize leaves no warm-up running behind it, within its bound."""
+    eng, sock = engine
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "sounds good")
+    cleanup = StubbornWarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "short", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "short"})
+    await client.recv_event("final", timeout=1.0)
+    finalize = eng._finalize_task  # noqa: SLF001
+    threading.Timer(0.2, cleanup.release.set).start()
+    if finalize is not None:
+        await asyncio.wait_for(asyncio.shield(finalize), 2.0)
+
+    assert cleanup.task is not None and cleanup.task.done()
+    client.close()
+
+
+async def test_shutdown_waits_for_a_running_cleanup_warmup(engine, monkeypatch):
+    """Shutdown cancels a running warm-up and waits for it before closing."""
+    eng, sock = engine
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "sounds good")
+    cleanup = StubbornWarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "short", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "short"})
+    await client.recv_event("final", timeout=1.0)
+    client.close()
+    threading.Timer(0.2, cleanup.release.set).start()
+    eng.shutdown.set()
+    for _ in range(300):
+        if cleanup.calls[-1][0] == "aclose":
+            break
+        await asyncio.sleep(0.01)
+
+    assert cleanup.calls[-2:] == [("prepared", True), ("aclose", True)]
+
+
+async def test_failed_cleanup_warmup_start_still_delivers_the_final(
+    engine, monkeypatch
+):
+    """The warm-up is an optimization: its failure never costs the final."""
+    eng, sock = engine
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    build = formatting.build_prefill_prompt_candidates
+    builds = []
+
+    def fail_first_build(*args, **kwargs):
+        builds.append(args)
+        if len(builds) == 1:
+            raise RuntimeError("injected warm-up failure")
+        return build(*args, **kwargs)
+
+    monkeypatch.setattr(formatting, "build_prefill_prompt_candidates", fail_first_build)
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "s", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "s"})
+    final = await client.recv_event("final", timeout=2.0)
+
+    assert final["cleanup_applied"] is True
+    assert [call[0] for call in cleanup.calls] == ["cleanup"]
+    client.close()
+
+
+HINDI_TRANSCRIPT = "नमस्ते दुनिया यह एक छोटा परीक्षण है"
+
+
+async def test_romanize_final_does_not_wait_for_the_cleanup_warmup(
+    engine, monkeypatch
+):
+    """Romanization uses its own prompt, so the warm-up is cancelled at once.
+
+    The Latin preview could not predict the romanize final; the final used to
+    wait CLEANUP_WARMUP_WAIT_S for a warm-up it cannot use.
+    """
+    eng, sock = engine
+    eng.config.data["romanize_output"] = True
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", HINDI_TRANSCRIPT)
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "hi", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "hi"})
+    final = await client.recv_event("final", timeout=1.0)
+
+    assert final["cleanup_applied"] is True
+    for _ in range(100):
+        if ("prepared", True) in cleanup.calls:
+            break
+        await asyncio.sleep(0.01)
+    assert sorted(call[0] for call in cleanup.calls) == ["cleanup", "prepare", "prepared"]
+    assert ("prepared", True) in cleanup.calls
+    client.close()
+
+
+async def test_romanize_preview_starts_no_cleanup_warmup(engine, monkeypatch):
+    """A non-Latin preview under romanize predicts a final the warm-up can't serve."""
+    eng, sock = engine
+    eng.config.data["romanize_output"] = True
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", HINDI_TRANSCRIPT)
+    monkeypatch.setattr(eng.stt, "feed_chunk", lambda _chunk: HINDI_TRANSCRIPT)
+    cleanup = WarmupCleanup()
+    eng.cleanup = cleanup
+    client = await connect(sock)
+    await client.recv_event("ready")
+
+    await client.send_json({"cmd": "start", "session": "hi", "context": NOTES_CONTEXT})
+    await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "stop", "session": "hi"})
+    final = await client.recv_event("final", timeout=1.0)
+
+    assert final["cleanup_applied"] is True
+    assert [call[0] for call in cleanup.calls] == ["cleanup"]
     client.close()
 
 

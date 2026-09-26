@@ -181,6 +181,22 @@ MAX_DROPPED_FRAMES = 50
 # nearly-finished chunk; otherwise cancel it and use the whole-text path. A
 # long wait here is pure post-hotkey latency and previously reached 15 seconds.
 STREAM_GATHER_TIMEOUT_S = 1.5
+# The whole-text cleanup waits this long for the stop-time warm-up, then
+# cancels it. Measured warm-ups (one idle-cold forward plus a ~600-token prompt
+# extension) finish within ~1.9 s of stop, and STT finalize covers part of that.
+# A longer wait would only hold the final behind a wedged worker.
+CLEANUP_WARMUP_WAIT_S = 2.0
+# A cancelled warm-up stops between prefill steps within ~50 ms. The finalize,
+# the next start and shutdown wait this long for one to free the worker; one
+# still running is wedged, and a queue timeout or its own watchdog retires it.
+CLEANUP_WARMUP_SETTLE_S = 1.0
+# finalize_cancel is a threading.Event, so waits that end on it poll it.
+FINALIZE_CANCEL_POLL_S = 0.01
+# A start waits this long for a cancelled finalize to unwind before refusing
+# it as busy. Its waits return within one poll; STT finalize cannot be cut.
+FINALIZE_CANCEL_UNWIND_S = 1.0
+# Transliteration rewrites every word, so it gets more than cleanup's budget.
+ROMANIZE_TIMEOUT_MS = 4000
 # Cleanup replacement stays deferred for the complete foreground session.
 # Failed-worker formatting uses the lossless deterministic fallback; recovery
 # resumes only after the user-facing final event has been sent.
@@ -395,6 +411,11 @@ class Session:
         # Finalization runs beside the socket reader so an explicit cancel can
         # preempt cleanup before any final or audio archive becomes durable.
         self.finalize_cancel = threading.Event()
+        # Stop-time cleanup warm-up (Engine._start_cleanup_warmup) and the
+        # event that stops it between prefill steps. The session owns both, so
+        # a later session can neither replace nor orphan them.
+        self.cleanup_warmup: asyncio.Task[Any] | None = None
+        self.cleanup_warmup_cancel = threading.Event()
         # ONE system prompt for every chunk of this session, computed from the
         # first segment's gate. Per-chunk run_gate applied end-of-utterance
         # transforms (short-utterance period, per-chunk replacements/tag/strip)
@@ -487,6 +508,9 @@ class Engine:
         self._finalizing_session_id: str | None = None
         self._finalizing_session: Session | None = None
         self._finalize_task: asyncio.Task[None] | None = None
+        # Sessions whose stop-time cleanup warm-up is still running. A warm-up
+        # can outlive its final, so the next start and shutdown settle these.
+        self._warming_sessions: set[Session] = set()
         # Mirror-image guard for START: `self.session` is published only after
         # the (possibly queued) start_session call returns, and a transcribe
         # chunk submitted in that window would destroy the fresh live stream
@@ -962,6 +986,11 @@ class Engine:
                 self._finalize_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._finalize_task
+            # Stop warm-ups before their worker closes below; a wedged one
+            # ends when that close kills the worker.
+            warming = list(self._warming_sessions)
+            for session in warming:
+                await self._settle_cleanup_warmup(session)
             self._server.close()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._server.wait_closed()
@@ -985,6 +1014,13 @@ class Engine:
                     close_cleanup = getattr(cleanup, "close", None)
                     if callable(close_cleanup):
                         close_cleanup()
+            wedged = [
+                session.cleanup_warmup
+                for session in warming
+                if session.cleanup_warmup is not None and not session.cleanup_warmup.done()
+            ]
+            if wedged:
+                await asyncio.wait(wedged, timeout=CLEANUP_WARMUP_SETTLE_S)
             log.info("engine shut down")
 
     async def _watch_parent(self) -> None:
@@ -1247,6 +1283,7 @@ class Engine:
     # ---------------- session state machine ----------------
 
     async def _cmd_start(self, msg: dict[str, Any]) -> None:
+        await self._await_cancelled_finalize()
         if self._finalizing:
             await self._error(
                 "busy finalizing the previous dictation", msg.get("session"))
@@ -1313,6 +1350,10 @@ class Engine:
             # Finish/cancel that optional recovery before live STT starts, then
             # hold future warm-up until finalize/abort releases the machine.
             await self._defer_cleanup_recovery()
+            # A warm-up that outlived its final would hold the cleanup worker
+            # into this dictation's first cleanup: stop it and wait for it.
+            for warming in list(self._warming_sessions):
+                await self._settle_cleanup_warmup(warming)
             # A dictation owns the machine: stop any pending idle mining right now,
             # AND preempt an in-flight mining generation on the cleanup thread
             # (task cancellation alone can't reach the executor).
@@ -1651,6 +1692,21 @@ class Engine:
         # leaving the poisoned single-worker executor for the next dictation.
         self._restart_if_cleanup_unhealthy()
 
+    async def _await_cancelled_finalize(self) -> None:
+        """Let a cancelled finalize unwind before refusing a new start.
+
+        The app sends `start` as soon as it sees `cancelled`, which can beat
+        the finalize task to its first check of the cancel. Waiting here keeps
+        a cancel from ever reading as "busy finalizing".
+        """
+        session = self._finalizing_session
+        if not self._finalizing or session is None or not session.cancelled:
+            return
+
+        deadline = time.monotonic() + FINALIZE_CANCEL_UNWIND_S
+        while self._finalizing and time.monotonic() < deadline:
+            await asyncio.sleep(FINALIZE_CANCEL_POLL_S)
+
     async def _cancel_finalizing(self, session: Session) -> None:
         """Cancel one exact finalization and delete every audio representation."""
         session.cancelled = True
@@ -1778,6 +1834,9 @@ class Engine:
         try:
             await self._finalize_session_inner(session, auto_stopped)
         finally:
+            # A final that skipped the model (short or cancelled) no longer
+            # needs the warm-up; free the worker for the next request.
+            session.cleanup_warmup_cancel.set()
             if session.spool is not None:
                 if session.cancelled:
                     self.audio.discard_active(session.spool)
@@ -1795,6 +1854,9 @@ class Engine:
             self._schedule_mining()
             if session.cancelled:
                 self._restart_if_cleanup_unhealthy()
+            # After `_finalizing` clears, so the next start is never refused
+            # while this waits.
+            await self._settle_cleanup_warmup(session)
 
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
         t_stop = time.perf_counter()
@@ -1803,6 +1865,7 @@ class Engine:
         if session.cancelled:
             await self._stt_call(self.stt.reset)
             return
+        self._start_cleanup_warmup(session)
         try:
             raw = await self._stt_call(self.stt.finalize)
         except Exception as exc:
@@ -1844,6 +1907,7 @@ class Engine:
                 explicit_mode=ctx.get("mode"),
                 entities=ctx.get("entities"),
                 cancel_event=session.finalize_cancel,
+                session=session,
             )
         text, mode_name, cleanup_ms, cleanup_applied, reason = result
         cleanup_wall_ms = int((time.perf_counter() - format_started) * 1000)
@@ -2095,6 +2159,7 @@ class Engine:
                 cancel_event=cancel_event,
                 allowed_terms=session.stream_allowed_terms,
                 prefix_candidates=session.stream_prefix_candidates,
+                copy_draft=True,
             )
             if result.applied:
                 return _ChunkResult(result.text, result.ms, applied=True)
@@ -2295,6 +2360,145 @@ class Engine:
         # itself as LLM-cleaned to the app/history (review finding).
         return text, gate.mode.name, tail_ms, applied_any, "streaming"
 
+    def _start_cleanup_warmup(self, session: Session) -> None:
+        """Warm the cleanup model's prompt prefix while STT finalizes.
+
+        After a minute idle the first cleanup forward pass costs ~600 ms more,
+        and an app or vocabulary change adds a ~600-token prompt extension.
+        Both used to run after STT, on the stop-to-final path:
+
+            before:  stop ─► STT finalize ─► [cold + extend] cleanup ─► final
+            after:   stop ─► STT finalize ─┬─► cleanup ─► final
+                     └──► prepare_prefix ──┘
+
+        Streaming sessions skip it: their chunk cleanups already warmed the
+        model and are still using the worker. The warm-up is an optimization,
+        so a failure to start it is logged and finalize goes on to STT.
+        """
+        try:
+            cleanup = self.cleanup
+            prepare = getattr(cleanup, "prepare_prefix", None)
+            if (
+                cleanup is None
+                or not cleanup.loaded
+                or getattr(cleanup, "unhealthy", False)
+                or not callable(prepare)
+                or session.chunk_tasks
+            ):
+                return
+
+            # Romanization runs its own short prompt, which this warm-up does
+            # not prepare. A non-Latin preview predicts that final. A short
+            # preview predicts nothing: the rest of the audio can add words.
+            ctx = session.context
+            preview = session.last_raw_partial
+            if preview and self.config.romanize_output and formatting.run_gate(
+                preview,
+                self.config,
+                bundle_id=ctx.get("bundle_id"),
+                app_name=ctx.get("app_name"),
+                explicit_mode=ctx.get("mode"),
+                entities=ctx.get("entities"),
+            ).romanize:
+                return
+
+            # Same candidates _apply_formatting will pass for this session; []
+            # when the mode never reaches the model (Raw, formatting off).
+            candidates = formatting.build_prefill_prompt_candidates(
+                self.config,
+                bundle_id=ctx.get("bundle_id"),
+                app_name=ctx.get("app_name"),
+                explicit_mode=ctx.get("mode"),
+                entities=ctx.get("entities"),
+            )
+            if not candidates:
+                return
+
+            cancel = session.cleanup_warmup_cancel
+
+            async def run() -> None:
+                try:
+                    await prepare(candidates, cancel_event=cancel)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — the warm-up is an optimization
+                    log.exception("session %s cleanup warm-up failed", session.id)
+
+            task = asyncio.create_task(run())
+            session.cleanup_warmup = task
+            self._warming_sessions.add(session)
+            task.add_done_callback(lambda _done: self._warming_sessions.discard(session))
+        except Exception:  # noqa: BLE001 — the warm-up is an optimization
+            log.exception("session %s cleanup warm-up did not start", session.id)
+
+    async def _finish_cleanup_warmup(
+        self,
+        session: Session | None,
+        budget_s: float,
+        wait_s: float,
+    ) -> float | None:
+        """Let the stop-time warm-up free the worker before cleanup queues on it.
+
+        The warm-up gets `wait_s` to finish, since it extends the prompt cache
+        this cleanup reads, and is then cancelled. Cleanup keeps waiting for
+        it up to its own budget, so a warm-up that ignores the cancel but
+        progresses only delays cleanup. One that outlives the budget is wedged.
+
+            stop ─► warm-up ───────────────┬─► cleanup ─► final
+                    ├─ wait_s ─┤ cancel    │
+                    ├──────── budget_s ────┴─► (past it) raw + retire
+
+        Returns cleanup's queue timeout: 0.0 for a wedged warm-up, so cleanup
+        returns raw and retires the worker once, else None (the default).
+        Returns at once when the final is cancelled.
+        """
+        task = session.cleanup_warmup if session is not None else None
+        if session is None or task is None or task.done():
+            return None
+
+        started = time.monotonic()
+        await self._wait_for_warmup(session, task, started + min(wait_s, budget_s))
+        if not task.done() and not session.finalize_cancel.is_set():
+            session.cleanup_warmup_cancel.set()
+            if wait_s > 0:
+                log.warning("cleanup warm-up still running after %.1fs — cancelled", wait_s)
+            await self._wait_for_warmup(session, task, started + budget_s)
+        if task.done() or session.finalize_cancel.is_set():
+            return None
+
+        log.error("cleanup warm-up still running after the %.1fs cleanup budget", budget_s)
+        return 0.0
+
+    @staticmethod
+    async def _wait_for_warmup(
+        session: Session,
+        task: asyncio.Task[Any],
+        deadline: float,
+    ) -> None:
+        """Wait for a warm-up until the monotonic `deadline` or the final's cancel."""
+        while not task.done() and not session.finalize_cancel.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.wait({task}, timeout=min(remaining, FINALIZE_CANCEL_POLL_S))
+
+    async def _settle_cleanup_warmup(self, session: Session) -> None:
+        """Cancel a session's stop-time warm-up and wait for it to stop.
+
+        Bounded by CLEANUP_WARMUP_SETTLE_S. A warm-up still running after that
+        is wedged; the next cleanup's queue timeout or the warm-up's own
+        watchdog retires its worker.
+        """
+        session.cleanup_warmup_cancel.set()
+        task = session.cleanup_warmup
+        if task is None or task.done():
+            return
+
+        done, _ = await asyncio.wait({task}, timeout=CLEANUP_WARMUP_SETTLE_S)
+        if not done:
+            log.warning("session %s cleanup warm-up still running %.1fs after cancel",
+                        session.id, CLEANUP_WARMUP_SETTLE_S)
+
     async def _apply_formatting(
         self,
         raw: str,
@@ -2303,10 +2507,12 @@ class Engine:
         explicit_mode: str | None,
         entities: list[dict[str, str]] | None = None,
         cancel_event: threading.Event | None = None,
+        session: Session | None = None,
     ) -> tuple[str, str, int, bool, str]:
         """Run the gate + optional LLM cleanup. Returns
         (text, mode_name, cleanup_ms, cleanup_applied, reason). Shared by live
-        finalize and history reprocessing."""
+        finalize and history reprocessing; `session` is the live dictation,
+        whose stop-time warm-up the cleanup waits for."""
         gate = formatting.run_gate(
             raw,
             self.config,
@@ -2328,6 +2534,16 @@ class Engine:
                 entities=entities,
                 romanize=gate.romanize,
             )
+            # Romanization cannot use the warm-up's prompt, so it cancels the
+            # warm-up at once. The budget is the cleanup's own hard wall.
+            timeout_ms = (
+                ROMANIZE_TIMEOUT_MS if gate.romanize
+                else adaptive_timeout_ms(formatting.encode_breaks(gate.text)))
+            queue_timeout_s = await self._finish_cleanup_warmup(
+                session,
+                budget_s=timeout_ms / 1000.0 + HARD_TIMEOUT_GRACE_S,
+                wait_s=0.0 if gate.romanize else CLEANUP_WARMUP_WAIT_S,
+            )
             # The model gets gate.text, NOT raw: the gate already converted
             # spoken break commands ("now a new line") into real line breaks
             # and scrubbed fillers. Passing raw here (the original bug) showed
@@ -2336,16 +2552,20 @@ class Engine:
                 # Transliteration: skip the length-ratio guard and allow longer.
                 result = await self.cleanup.cleanup(
                     gate.text, gate.system_prompt or STATIC_SYSTEM_PROMPT,
-                    timeout_ms=4000, check_ratio=False, cancel_event=cancel_event,
+                    timeout_ms=timeout_ms, check_ratio=False, cancel_event=cancel_event,
                     prefix_candidates=prefix_candidates,
+                    queue_timeout_s=queue_timeout_s,
                 )
             else:
                 result = await self.cleanup.cleanup(
                     formatting.encode_breaks(gate.text),
                     gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    timeout_ms=timeout_ms,
                     cancel_event=cancel_event,
                     allowed_terms=self._allowed_terms(gate.mode),
                     prefix_candidates=prefix_candidates,
+                    copy_draft=True,
+                    queue_timeout_s=queue_timeout_s,
                 )
             if result.applied:
                 text = formatting.postprocess(result.text, gate)

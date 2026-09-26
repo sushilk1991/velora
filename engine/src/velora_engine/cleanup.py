@@ -24,7 +24,9 @@ import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from .decisions import (
@@ -75,6 +77,20 @@ NOVEL_FRACTION_MAX = 0.20
 NOVEL_MIN_TOKENS = 3
 MIN_MAX_TOKENS = 96
 OUTPUT_TOKEN_FACTOR = 1.8
+# Copy drafts (see CleanupEngine._copy_draft_steps). An output tail of 3, then
+# 2 tokens is looked up in the transcript; one token matches too often by
+# chance. A pass feeds at most 3 tokens: on Qwen3.5-4B-8bit (M4 Max) a pass of
+# 1, 2 or 3 tokens took 18, 20 and 22 ms, but 4 to 9 tokens took 28-97 ms.
+COPY_DRAFT_NGRAM = 3
+COPY_DRAFT_MIN_NGRAM = 2
+COPY_DRAFT_PASS_TOKENS = 3
+# Copy-draft is greedy decoding up to logit near-ties, so it ships only on
+# models it was benched against (exact-match and stop-to-final latency over
+# real dictation history). Every other model decodes one token per step.
+COPY_DRAFT_MODELS = frozenset({
+    "mlx-community/Qwen3.5-4B-MLX-8bit",
+    "mlx-community/Qwen3.5-4B-MLX-4bit",
+})
 
 # A cleanup may add punctuation or line breaks, but it must not silently
 # translate away the transcript's writing system. Two letters is enough to
@@ -440,6 +456,39 @@ def _restore_prompt_cache(
     ]
 
 
+def _copy_draft(
+    source: list[int],
+    output: list[int],
+    cursor: int,
+    limit: int,
+) -> tuple[list[int], int]:
+    """Up to ``limit`` ``source`` tokens after where ``output``'s tail appears.
+
+    Tries the last COPY_DRAFT_NGRAM output tokens, down to COPY_DRAFT_MIN_NGRAM.
+    Output follows the transcript's order, so the first match at or after
+    ``cursor`` wins, else the last one before it. Returns the draft and the
+    source index it starts at; no match returns ([], cursor).
+
+        source: "we should ship it today"   cursor ─────┐ (after "should")
+        output: "We should sh"  →  tail " sh" matches " ship" → "ip it today"
+    """
+    for size in range(min(COPY_DRAFT_NGRAM, len(output)), COPY_DRAFT_MIN_NGRAM - 1, -1):
+        tail = output[-size:]
+        match = None
+        for start in range(len(source) - size):
+            if source[start:start + size] != tail:
+                continue
+            match = start
+            if start + size >= cursor:
+                break
+        if match is None:
+            continue
+
+        begin = match + size
+        return source[begin:begin + limit], begin
+    return [], cursor
+
+
 def _longest_common_tokens(sequences: list[list[int]]) -> list[int]:
     if not sequences:
         return []
@@ -697,10 +746,27 @@ class CleanupEngine:
                 prefix = _longest_common_tokens(sequences)
                 if not prefix:
                     return PrefixPreparation(False, 0, int((time.perf_counter() - t0) * 1000), "no_prefix")
-                cache = self._prefill_tokens_locked(prefix, cancel_event)
-                self._install_prepared_prefix(prefix, cache)
+                installed = self._installed_snapshot(prefix)
+                added = 0
+                if installed is not None:
+                    # Already prepared: only bring an idle model's weights
+                    # back, so the request that follows starts warm.
+                    self._warm_step_locked(prefix, installed)
+                else:
+                    # Prefill only the delta after the longest warm snapshot
+                    # (static prompt → this mode/app: ~600 of ~3k tokens).
+                    cache, common, hit = self._cache_for_tokens(prefix)
+                    if hit:
+                        cache = self._prefill_into_cache_locked(
+                            cache, prefix[common:], cancel_event)
+                    else:
+                        cache = self._prefill_tokens_locked(prefix, cancel_event)
+                    self._install_prepared_prefix(prefix, cache)
+                    added = len(prefix) - common
             ms = int((time.perf_counter() - t0) * 1000)
-            log.info("cleanup prefix prepared tokens=%d prefill_ms=%d", len(prefix), ms)
+            log.info(
+                "cleanup prefix prepared tokens=%d added_tokens=%d prefill_ms=%d",
+                len(prefix), added, ms)
             return PrefixPreparation(True, len(prefix), ms)
         except _PrefixCancelled:
             # The in-progress cache is local until the successful assignment
@@ -822,6 +888,38 @@ class CleanupEngine:
                 return _restore_prompt_cache(snapshot), len(prepared), True
         return self._make_prompt_cache(), 0, False
 
+    def _installed_snapshot(
+        self,
+        tokens: list[int],
+    ) -> list[tuple[type[Any], Any, Any]] | None:
+        """The dictation snapshot that holds exactly ``tokens``, if any."""
+        for prepared, snapshot in (
+            (self._prepared_tokens, self._prepared_cache),
+            (self._fallback_prepared_tokens, self._fallback_prepared_cache),
+        ):
+            if snapshot is not None and prepared == tokens:
+                return snapshot
+        return None
+
+    def _warm_step_locked(
+        self,
+        tokens: list[int],
+        snapshot: list[tuple[type[Any], Any, Any]],
+    ) -> None:
+        """Run one token over a restored snapshot and discard the result.
+
+        After about a minute idle, the first forward pass pays to bring the
+        weights and cached prompt state back (measured on Qwen3.5-4B-8bit,
+        three runs: the one-token step took 590-1280 ms, and the cleanup
+        after it reached its first token in 310-640 ms instead of 925-970 ms).
+        Holding MLX's wired limit did not avoid it; touching the arrays does. The snapshot stays unmodified: a restored
+        cache allocates before it extends the exact-length snapshot state.
+        """
+        import mlx.core as mx
+
+        cache = _restore_prompt_cache(snapshot)
+        mx.eval(self._model(mx.array(tokens[-1:])[None], cache=cache))
+
     def _extend_runtime_prefix_locked(
         self,
         tokens: list[int],
@@ -887,8 +985,13 @@ class CleanupEngine:
         prefix_candidates: list[tuple[str, str]] | None = None,
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
+        copy_draft: bool = False,
     ) -> _GenerationResult:
-        """Generate with a quality budget that begins at first output token."""
+        """Generate with a quality budget that begins at first output token.
+
+        ``copy_draft`` decodes with drafts copied from the prompt; see
+        _copy_draft_steps.
+        """
         import mlx.core as mx
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
@@ -960,8 +1063,10 @@ class CleanupEngine:
             if cancel_event is not None and cancel_event.is_set():
                 raise _PrefixCancelled
 
-        try:
-            for resp in stream_generate(
+        if copy_draft:
+            responses = self._copy_draft_steps(cache, suffix, max_tokens, cancel_event)
+        else:
+            responses = stream_generate(
                 self._model,
                 self._tokenizer,
                 prompt=suffix,
@@ -969,7 +1074,9 @@ class CleanupEngine:
                 sampler=sampler,
                 prompt_cache=cache,
                 prompt_progress_callback=progress,
-            ):
+            )
+        try:
+            for resp in responses:
                 now = time.perf_counter()
                 if cancel_event is not None and cancel_event.is_set():
                     status = "cancelled"
@@ -977,6 +1084,12 @@ class CleanupEngine:
                 if first_token_at is None:
                     first_token_at = now
                 out_text.append(resp.text)
+                if getattr(resp, "finish_reason", None) == "stop":
+                    # stream_generate's closing step carries the EOS token. Its
+                    # text flushes the detokenizer, but EOS is not output, and
+                    # copy-draft never yields it: count neither toward the
+                    # token ceiling.
+                    break
                 generation_tokens = getattr(resp, "generation_tokens", None)
                 if generation_tokens is None:
                     gen_tokens.append(resp.token)
@@ -990,6 +1103,11 @@ class CleanupEngine:
                     break
         except _PrefixCancelled:
             status = "cancelled"
+        finally:
+            # Leaving the loop early suspends the generator inside its wired
+            # limit, with GPU work possibly in flight. Closing it synchronizes
+            # and restores the limit, and must precede dropping the cache.
+            responses.close()
 
         if status == "cancelled":
             # A prefill callback can exit before MLX clears temporary buffers.
@@ -1017,7 +1135,8 @@ class CleanupEngine:
         ttft_ms = int(((first_token_at or finished) - started) * 1000)
         decode_ms = int((finished - first_token_at) * 1000) if first_token_at else 0
         return result(
-            text="".join(out_text),
+            # Copy-draft steps carry no text; decode the whole output once.
+            text=self._tokenizer.decode(gen_tokens) if copy_draft else "".join(out_text),
             status=status,
             ttft_ms=ttft_ms,
             decode_ms=decode_ms,
@@ -1026,6 +1145,85 @@ class CleanupEngine:
             output_tokens=len(gen_tokens),
             cache_hit=cache_hit,
         )
+
+    def _copy_draft_steps(
+        self,
+        cache: list[Any],
+        suffix: list[int],
+        max_tokens: int,
+        cancel_event: threading.Event | None,
+    ) -> Iterator[SimpleNamespace]:
+        """Greedy decoding that copies drafts from the prompt, verified in bulk.
+
+        Cleanup output mostly repeats the transcript. When the output's last
+        tokens appear in the prompt suffix, the tokens after them there are a
+        draft. One forward pass scores the whole draft; every draft token that
+        equals the greedy choice is kept, plus the model's own next token. The
+        text is the greedy text, in fewer passes: a pass of up to
+        COPY_DRAFT_PASS_TOKENS costs about what a one-token step does.
+
+            transcript:  ... so we should ship it today ...
+            output:      So we should sh
+            draft:                       ip it today
+            one pass:    greedy after each → i ✓ p ✓ ... today ✓ + "."
+
+        Qwen3.5's recurrent layers cannot be trimmed, so a partly rejected
+        draft restores the snapshot from before the pass. The kept tokens then
+        ride along at the front of the next pass instead of costing their own:
+
+            pass n:    [pending | draft ✓✗]     → rewind
+            pass n+1:  [pending ✓ choice | draft]
+
+        Yields stream_generate-shaped steps without text; EOS is not yielded.
+        Like stream_generate, it keeps the weights wired for the whole decode
+        and runs every pass on mlx_lm's generation stream, so callers must
+        close() it when they stop reading early.
+        """
+        import mlx.core as mx
+        from mlx_lm.generate import generation_stream, wired_limit
+
+        eos = set(self._tokenizer.eos_token_ids)
+        with wired_limit(self._model, [generation_stream]):
+            if len(suffix) > 1:
+                cache = self._prefill_into_cache_locked(cache, suffix[:-1], cancel_event)
+
+            # The cache holds every token before ``pending``; the next pass
+            # feeds pending, then the draft.
+            output: list[int] = []
+            pending = suffix[-1:]
+            cursor = 0
+            while len(output) < max_tokens:
+                limit = min(COPY_DRAFT_PASS_TOKENS - len(pending), max_tokens - len(output) - 1)
+                draft, start = (
+                    _copy_draft(suffix, output, cursor, limit) if limit > 0 else ([], cursor))
+                with mx.stream(generation_stream):
+                    before = _snapshot_prompt_cache(cache) if draft else None
+                    logits = self._model(mx.array(pending + draft)[None], cache=cache)
+                    # The last pending position predicts the first new token.
+                    choices = mx.argmax(logits[0, len(pending) - 1:], axis=-1).tolist()
+
+                    kept = 0
+                    while (
+                        kept < len(draft)
+                        and draft[kept] not in eos
+                        and choices[kept] == draft[kept]
+                    ):
+                        kept += 1
+                    new = draft[:kept] + [choices[kept]]
+                    if kept < len(draft):
+                        cache = _restore_prompt_cache(before)
+                        pending = pending + new
+                    else:
+                        pending = new[-1:]
+                cursor = start + kept
+
+                for token in new:
+                    if token in eos:
+                        return
+                    output.append(token)
+                    yield SimpleNamespace(text="", token=token, generation_tokens=None)
+                    if len(output) >= max_tokens:
+                        return
 
     def _run(
         self,
@@ -1039,6 +1237,7 @@ class CleanupEngine:
         max_tokens_override: int | None = None,
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
+        copy_draft: bool = False,
     ) -> CleanupResult:
         t0 = time.perf_counter()
         with self._lock:
@@ -1060,6 +1259,7 @@ class CleanupEngine:
                 prefix_candidates,
                 cache_scope,
                 max_input_tokens,
+                copy_draft=copy_draft and self.model_id in COPY_DRAFT_MODELS,
             )
         ms = int((time.perf_counter() - t0) * 1000)
         log.info(
@@ -1134,13 +1334,16 @@ class CleanupEngine:
         max_tokens: int | None = None,
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
+        copy_draft: bool = False,
     ) -> CleanupResult:
         """Clean `raw` under `system_prompt`. Never raises; returns raw on any failure.
 
         `timeout_ms` defaults to a length-adaptive budget (see
         `adaptive_timeout_ms`); pass an explicit value to override.
         `cancel_event` lets a BACKGROUND caller (vocab mining) be preempted
-        mid-generation the moment a dictation needs the model."""
+        mid-generation the moment a dictation needs the model.
+        `copy_draft` marks output that mostly copies `raw` (dictation cleanup);
+        it decodes with copied drafts on benched models (COPY_DRAFT_MODELS)."""
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
         if self.unhealthy:
@@ -1160,7 +1363,7 @@ class CleanupEngine:
             return self._run(
                 raw, system_prompt, timeout_ms, check_ratio,
                 worker_cancel, allowed_terms, prefix_candidates, max_tokens,
-                cache_scope, max_input_tokens,
+                cache_scope, max_input_tokens, copy_draft,
             )
 
         worker = loop.run_in_executor(self._executor, run_started)

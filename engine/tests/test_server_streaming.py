@@ -33,6 +33,7 @@ class FakeCleanup:
         self.calls: list[tuple[str, str]] = []
         self.cancel_events = []
         self.allowed_terms_calls: list[list[str] | None] = []
+        self.copy_draft_calls: list[bool] = []
         self.recovery_events: list[str] = []
 
     async def defer_recovery(self):
@@ -44,10 +45,12 @@ class FakeCleanup:
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
+        copy_draft=False, queue_timeout_s=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
         self.allowed_terms_calls.append(allowed_terms)
+        self.copy_draft_calls.append(copy_draft)
         if self.delay:
             await asyncio.sleep(self.delay)
         return CleanupResult(text=f"<{raw}>", applied=True, ms=7)
@@ -59,10 +62,12 @@ class RestartingListCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
+        copy_draft=False, queue_timeout_s=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
         self.allowed_terms_calls.append(allowed_terms)
+        self.copy_draft_calls.append(copy_draft)
         if raw == SEG1:
             text = "1. Saving is slow.\n2. Search misses files."
         elif raw == SEG2:
@@ -92,10 +97,12 @@ class PendingLastCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
+        copy_draft=False, queue_timeout_s=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
         self.allowed_terms_calls.append(allowed_terms)
+        self.copy_draft_calls.append(copy_draft)
         if raw == SEG2:
             self.last_started.set()
             await asyncio.Event().wait()
@@ -116,10 +123,12 @@ class FirstCallHangsCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
+        copy_draft=False, queue_timeout_s=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
         self.allowed_terms_calls.append(allowed_terms)
+        self.copy_draft_calls.append(copy_draft)
         self.call_count += 1
         if self.call_count == 1:
             self.started.set()
@@ -139,10 +148,12 @@ class HardTimeoutThenRecoveringCleanup(FakeCleanup):
     async def cleanup(
         self, raw, system_prompt, timeout_ms=None, check_ratio=True,
         cancel_event=None, allowed_terms=None, prefix_candidates=None,
+        copy_draft=False, queue_timeout_s=None,
     ):
         self.calls.append((raw, system_prompt))
         self.cancel_events.append(cancel_event)
         self.allowed_terms_calls.append(allowed_terms)
+        self.copy_draft_calls.append(copy_draft)
         if not self.timed_out.is_set():
             self.loaded = False
             self.timed_out.set()
@@ -682,6 +693,8 @@ async def test_romanize_enabled_keeps_latin_long_session_streaming(engine, segme
     final = await client.recv_event("final")
 
     assert [call[0] for call in cleanup.calls] == [SEG1, SEG2, TAIL]
+    # Chunk cleanups copy their segment, so they decode with copied drafts.
+    assert cleanup.copy_draft_calls == [True, True, True]
     assert final["text"] == f"<{SEG1}> <{SEG2}> <{TAIL}>."
     assert final["cleanup_applied"] is True
     client.close()
@@ -704,6 +717,8 @@ async def test_romanize_enabled_non_latin_uses_whole_text_path(engine, monkeypat
     raw = f"{segment} {tail}"
 
     assert [call[0] for call in cleanup.calls] == [raw]
+    # Transliteration does not copy its input.
+    assert cleanup.copy_draft_calls == [False]
     assert final["text"] == f"<{raw}>"
     assert final["cleanup_applied"] is True
     client.close()
@@ -906,6 +921,7 @@ async def test_streaming_cleanup_off_uses_whole_text_path(engine, segments):
     raw = f"{SEG1} {SEG2} {TAIL}"
     # exactly the legacy path: ONE cleanup over the whole raw text
     assert [c[0] for c in cleanup.calls] == [raw]
+    assert cleanup.copy_draft_calls == [True]
     assert final["text"] == f"<{raw}>."
     assert final["cleanup_applied"] is True
     client.close()

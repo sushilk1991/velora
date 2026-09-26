@@ -349,11 +349,22 @@ class CleanupProcess:
         max_tokens: int | None = None,
         cache_scope: str | None = None,
         max_input_tokens: int | None = None,
+        copy_draft: bool = False,
+        queue_timeout_s: float | None = None,
     ) -> CleanupResult:
+        """Clean one transcript on the worker.
+
+        `queue_timeout_s` overrides how long this request waits for the worker
+        before it declares the worker wedged, returns raw and replaces it.
+        Dictation passes 0.0 once a stop-time warm-up has held the worker past
+        the cleanup's whole budget.
+        """
         if cancel_event is not None and cancel_event.is_set():
             return CleanupResult(raw, False, 0, "cancelled")
         if timeout_ms is None:
             timeout_ms = adaptive_timeout_ms(raw)
+        if queue_timeout_s is None:
+            queue_timeout_s = self._queue_timeout_s
         if not self.loaded and self._hibernated:
             await self.ensure_loaded(cancel_event=cancel_event)
         if not self.loaded:
@@ -367,7 +378,7 @@ class CleanupProcess:
         try:
             await asyncio.wait_for(
                 self._operation_lock.acquire(),
-                timeout=self._queue_timeout_s,
+                timeout=queue_timeout_s,
             )
         except TimeoutError:
             elapsed = int((time.perf_counter() - call_started) * 1000)
@@ -376,7 +387,7 @@ class CleanupProcess:
             return CleanupResult(
                 raw,
                 False,
-                int(self._queue_timeout_s * 1000),
+                int(queue_timeout_s * 1000),
                 "timeout_queue",
                 wall_ms=elapsed,
             )
@@ -416,6 +427,7 @@ class CleanupProcess:
                 "max_tokens": max_tokens,
                 "cache_scope": cache_scope,
                 "max_input_tokens": max_input_tokens,
+                "copy_draft": copy_draft,
             }
             async with self._write_lock:
                 writer.write(encode_cleanup_ipc_message(message))
