@@ -175,13 +175,19 @@ final class UpdateWindowModel: ObservableObject {
         let installerState: UpdateInstaller.State
         let installsWhenReady: Bool
         let installBlocker: String?
+        var waitingFor: UpdateRelaunchSafety.Block? = nil
     }
 
     @Published private(set) var release: UpdateChecker.Release?
     @Published private(set) var installerState: UpdateInstaller.State
     @Published private(set) var installsWhenReady: Bool
+    /// What this window's committed install waits on, if anything.
+    @Published private(set) var waitingFor: UpdateRelaunchSafety.Block?
 
     var onDismiss: (() -> Void)?
+    /// Opens the main window on Modes, where a parked draft comes back.
+    /// Set by the AppDelegate, so the window never reaches for it.
+    static var showModes: (() -> Void)?
 
     private let preview: Preview?
     private var installerObserver: NSObjectProtocol?
@@ -191,6 +197,7 @@ final class UpdateWindowModel: ObservableObject {
         installerState = preview?.installerState ?? UpdateInstaller.shared.state
         installsWhenReady = preview?.installsWhenReady
             ?? UpdateInstaller.shared.installsWhenReady
+        waitingFor = preview?.waitingFor
         guard preview == nil else { return }
         installerObserver = NotificationCenter.default.addObserver(
             forName: .veloraUpdateStateChanged, object: nil, queue: .main
@@ -219,6 +226,7 @@ final class UpdateWindowModel: ObservableObject {
         installerState = installer.state
         installsWhenReady = Self.installsWhenReady(
             installer.installsWhenReady, state: installer.state, releaseVersion: release?.version)
+        waitingFor = installsWhenReady ? installer.waitingFor : nil
     }
 
     /// The installer's one intent flag, narrowed to the release this window
@@ -363,6 +371,16 @@ final class UpdateWindowModel: ObservableObject {
     func openReleasePage() {
         guard let release else { return }
         NSWorkspace.shared.open(release.page)
+    }
+
+    /// The mode whose unsaved edits hold the install, for Show Modes.
+    var waitingModeName: String? {
+        guard case .unsavedMode(let name) = waitingFor else { return nil }
+        return name
+    }
+
+    func showModes() {
+        Self.showModes?()
     }
 }
 
@@ -517,12 +535,22 @@ struct UpdateWindowView: View {
                     for: model.installerState, installsWhenReady: model.installsWhenReady))
             }
         case .ready:
-            Label {
-                caption(UpdateCopy.caption(
-                    for: model.installerState, installsWhenReady: model.installsWhenReady))
-            } icon: {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(VeloraBrand.accent)
+            // Waiting on mode edits, the caption names the mode and Show
+            // Modes opens it: nothing else would bring the draft back.
+            HStack(spacing: VeloraSpacing.s) {
+                Label {
+                    caption(UpdateCopy.caption(
+                        for: model.installerState, installsWhenReady: model.installsWhenReady,
+                        waitingFor: model.waitingFor))
+                } icon: {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(VeloraBrand.accent)
+                }
+                if model.waitingModeName != nil {
+                    Button(UpdateCopy.showModesTitle) { model.showModes() }
+                        .buttonStyle(.link)
+                        .font(.system(size: 12))
+                }
             }
         case .failed(let reason):
             warning(reason)

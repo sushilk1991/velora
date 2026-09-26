@@ -185,6 +185,8 @@ enum WindowShellMetrics {
     static let detailLeading: CGFloat = 20
     /// Finder/Notes-style rail row (MainSidebar and SettingsSidebar).
     static let rowHeight: CGFloat = 32
+    /// Gap between rail rows.
+    static let rowSpacing: CGFloat = 2
     /// 22 pt well for the monochrome symbol and the coloured IconTile.
     static let symbolWell: CGFloat = 22
     /// SF Symbol point size inside the monochrome well.
@@ -283,11 +285,26 @@ struct SidebarTopSpace: View {
 /// coloured `IconTile` — the one deliberate difference.
 struct SidebarRowFrame<Content: View>: View {
     let selected: Bool
+    private let focus: SidebarFocus
     private let content: Content
 
-    init(selected: Bool, @ViewBuilder content: () -> Content) {
+    init(
+        selected: Bool, focus: SidebarFocus = .inactive,
+        @ViewBuilder content: () -> Content
+    ) {
         self.selected = selected
+        self.focus = focus
         self.content = content()
+    }
+
+    /// Accent on the selected row while the list has keyboard focus, grey
+    /// otherwise.
+    private var fill: Color {
+        guard selected else {
+            return .clear
+        }
+
+        return focus == .focused ? VeloraBrand.accent : VeloraPanel.sidebarSelection
     }
 
     var body: some View {
@@ -297,7 +314,7 @@ struct SidebarRowFrame<Content: View>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous)
-                    .fill(selected ? VeloraPanel.sidebarSelection : .clear))
+                    .fill(fill))
             .contentShape(
                 RoundedRectangle(cornerRadius: VeloraRadius.row, style: .continuous))
     }
@@ -374,7 +391,7 @@ struct FloatingSidebar<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: WindowShellMetrics.rowSpacing) {
             content
         }
         .padding(WindowShellMetrics.railInset)
@@ -420,14 +437,24 @@ struct SidebarRow<Trailing: View>: View {
     let symbol: String
     let title: String
     let selected: Bool
+    var focus = SidebarFocus.inactive
     @ViewBuilder var trailing: Trailing
 
+    /// The selected row on the accent fill reads in on-accent ink.
+    private var onAccentFill: Bool {
+        selected && focus == .focused
+    }
+
     private var symbolStyle: AnyShapeStyle {
-        selected ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary)
+        if onAccentFill {
+            return AnyShapeStyle(VeloraPanel.onAccent)
+        }
+
+        return selected ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.secondary)
     }
 
     var body: some View {
-        SidebarRowFrame(selected: selected) {
+        SidebarRowFrame(selected: selected, focus: focus) {
             HStack(spacing: VeloraSpacing.s) {
                 Image(systemName: symbol)
                     .font(.system(size: WindowShellMetrics.symbolSize, weight: .medium))
@@ -438,6 +465,7 @@ struct SidebarRow<Trailing: View>: View {
                     .accessibilityHidden(true)
                 Text(title)
                     .font(.system(size: 13, weight: selected ? .medium : .regular))
+                    .foregroundStyle(onAccentFill ? AnyShapeStyle(VeloraPanel.onAccent) : AnyShapeStyle(.primary))
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 trailing
@@ -450,8 +478,23 @@ struct SidebarRow<Trailing: View>: View {
 }
 
 extension SidebarRow where Trailing == EmptyView {
-    init(symbol: String, title: String, selected: Bool) {
-        self.init(symbol: symbol, title: title, selected: selected) { EmptyView() }
+    init(symbol: String, title: String, selected: Bool, focus: SidebarFocus = .inactive) {
+        self.init(symbol: symbol, title: title, selected: selected, focus: focus) { EmptyView() }
+    }
+}
+
+/// Whether a sidebar list has keyboard focus. As in Finder, the selected
+/// row turns accent while its list has focus and stays grey otherwise; a
+/// focus ring around the whole list is never drawn.
+enum SidebarFocus {
+    case inactive
+    case focused
+
+    /// Focused only while the list holds focus in the key window: the
+    /// selection turns grey when the window is inactive, even though the
+    /// list keeps its focus for when the window comes back.
+    init(listFocused: Bool, window: ControlActiveState) {
+        self = listFocused && window == .key ? .focused : .inactive
     }
 }
 

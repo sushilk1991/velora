@@ -8,6 +8,7 @@ import Foundation
 ///     downloading ──▶ "Downloading Velora 1.2.3 (42%)"
 ///     verifying ──▶ "Verifying Velora 1.2.3…"
 ///     ready ──▶ "Restart to Update"  or  "Waiting to Install…" once committed
+///               (each surface names unsaved mode edits it waits on)
 ///     installing ──▶ "Installing…"
 ///     failed ──▶ the reason, plus "Try Again" or "Open Releases Page"
 enum UpdateCopy {
@@ -20,6 +21,7 @@ enum UpdateCopy {
     static let skipTitle = "Skip This Version"
     static let notNowTitle = "Not Now"
     static let cancelInstallTitle = "Cancel Install"
+    static let showModesTitle = "Show Modes"
 
     /// Menubar and Settings offer for a discovered, not yet staged release.
     static func updateTitle(_ version: String) -> String {
@@ -31,9 +33,16 @@ enum UpdateCopy {
         "Restart to Update to \(version)"
     }
 
-    /// Caption for a non-idle installer state; nil while idle.
+    /// A committed install held by unsaved edits to a mode.
+    static func saveModeToInstall(_ name: String) -> String {
+        "Save or discard your changes to “\(name)” to install."
+    }
+
+    /// Caption for a non-idle installer state; nil while idle. A committed
+    /// install `waitingFor` mode edits names the mode.
     static func caption(
-        for state: UpdateInstaller.State, installsWhenReady: Bool
+        for state: UpdateInstaller.State, installsWhenReady: Bool,
+        waitingFor: UpdateRelaunchSafety.Block? = nil
     ) -> String? {
         switch state {
         case .idle:
@@ -43,6 +52,9 @@ enum UpdateCopy {
         case .verifying(let version):
             return "Verifying Velora \(version)…"
         case .ready(let version):
+            if installsWhenReady, case .unsavedMode(let name) = waitingFor {
+                return saveModeToInstall(name)
+            }
             if installsWhenReady {
                 return "Velora \(version) installs when current work finishes."
             }

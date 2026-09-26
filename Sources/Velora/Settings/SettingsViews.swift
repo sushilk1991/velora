@@ -279,7 +279,8 @@ struct UpdateActionRow: View {
 
     private var stateCaption: String? {
         UpdateCopy.caption(
-            for: model.updateState, installsWhenReady: model.updateInstallsWhenReady)
+            for: model.updateState, installsWhenReady: model.updateInstallsWhenReady,
+            waitingFor: model.updateWaitingFor)
     }
 
     @ViewBuilder

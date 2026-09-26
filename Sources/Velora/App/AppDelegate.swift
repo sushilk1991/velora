@@ -51,21 +51,68 @@ enum MeetingFailureHUDReplayPolicy {
 }
 
 enum UpdateRelaunchSafety {
+    /// What holds an update relaunch back.
+    enum Block: Equatable {
+        /// Work that finishes by itself; the reason says which.
+        case busy(String)
+        /// Edits to this mode that only the user can save or discard. The
+        /// update window names the mode and offers Show Modes.
+        case unsavedMode(String)
+
+        var reason: String {
+            switch self {
+            case .busy(let reason):
+                return reason
+            case .unsavedMode(let name):
+                return UpdateCopy.saveModeToInstall(name)
+            }
+        }
+
+        /// What the control socket's `status` tells local agents: that a
+        /// restart waits, without the update window's words or the mode's
+        /// name.
+        var controlReason: String {
+            switch self {
+            case .busy(let reason):
+                return reason
+            case .unsavedMode:
+                return "Waiting for unsaved mode changes to be saved or discarded"
+            }
+        }
+    }
+
+    static func block(
+        dictationBusy: Bool,
+        fileTranscriptionBusy: Bool,
+        meetingCaptureBusy: Bool,
+        unsavedMode: String? = nil
+    ) -> Block? {
+        if dictationBusy {
+            return .busy("Waiting for dictation or voice editing to finish")
+        }
+        if fileTranscriptionBusy {
+            return .busy("Waiting for audio-file transcription to finish")
+        }
+        if meetingCaptureBusy {
+            return .busy("Waiting for the meeting recording to finish")
+        }
+        // The relaunch helper hard-exits after quit starts, past any
+        // Save / Don't Save / Cancel, so unsaved edits hold it instead.
+        if let unsavedMode {
+            return .unsavedMode(unsavedMode)
+        }
+        return nil
+    }
+
     static func blockReason(
         dictationBusy: Bool,
         fileTranscriptionBusy: Bool,
         meetingCaptureBusy: Bool
     ) -> String? {
-        if dictationBusy {
-            return "Waiting for dictation or voice editing to finish"
-        }
-        if fileTranscriptionBusy {
-            return "Waiting for audio-file transcription to finish"
-        }
-        if meetingCaptureBusy {
-            return "Waiting for the meeting recording to finish"
-        }
-        return nil
+        block(
+            dictationBusy: dictationBusy,
+            fileTranscriptionBusy: fileTranscriptionBusy,
+            meetingCaptureBusy: meetingCaptureBusy)?.reason
     }
 }
 
@@ -638,9 +685,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         contextTracker.start()
         hotkeyMonitor.start()
 
-        UpdateInstaller.shared.relaunchBlockReason = { [weak self] in
-            guard let self else { return "Velora is unavailable" }
-            return self.restartBlockReason()
+        UpdateInstaller.shared.relaunchBlock = { [weak self] in
+            guard let self else { return .busy("Velora is unavailable") }
+            return self.restartBlock()
+        }
+        // The update window's Show Modes, when an install waits on edits.
+        UpdateWindowModel.showModes = { [weak self] in
+            self?.showMain(selecting: .modes)
         }
 
         // The menubar mirrors the checker after every completed check, so an
@@ -720,19 +771,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func restartBlockReason() -> String? {
+        restartBlock()?.controlReason
+    }
+
+    private func restartBlock() -> UpdateRelaunchSafety.Block? {
         if !Thread.isMainThread {
-            return DispatchQueue.main.sync { restartBlockReason() }
+            return DispatchQueue.main.sync { restartBlock() }
         }
         if terminationPending {
-            return "Velora is quitting"
+            return .busy("Velora is quitting")
         }
-        return UpdateRelaunchSafety.blockReason(
+        return UpdateRelaunchSafety.block(
             dictationBusy: dictation.hasUserOperationInFlight,
             fileTranscriptionBusy: transcriber.isTranscribing
                 || !openFileTranscriptionQueue.pendingURLs.isEmpty
                 || openFileRetryPending,
             meetingCaptureBusy: meetingCoordinator.foregroundCaptureActive
-                || meetingCoordinator.terminationWorkInFlight)
+                || meetingCoordinator.terminationWorkInFlight,
+            unsavedMode: mainController?.unsavedModeName)
     }
 
     private func showMeetingFailureIfPossible() {
@@ -789,6 +845,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !terminationPending else { return .terminateLater }
+        // Unsaved mode edits ask Save / Don't Save / Cancel before any
+        // teardown starts; Cancel leaves Velora running as it was.
+        if let mainController, !mainController.confirmQuit() {
+            veloraLog("Velora: quit cancelled with unsaved mode edits")
+            return .terminateCancel
+        }
         terminationPending = true
         veloraLog("Velora: termination requested")
         // Watchdog: if any teardown callback below is parked and never fires,

@@ -426,17 +426,17 @@ extension Selftest {
     private static func testModesDraftGuard() {
         withTempDirectory { dir in
             let vm = ModesViewModel(supervisor: nil, directory: dir)
-            vm.select("Email")
+            vm.select("email")
             vm.draft.prompt = "Edited prompt"
             expect(vm.isDirty, "an edited draft is dirty")
 
-            vm.requestSelect("Message")
-            expect(vm.selectedID == "Email" && vm.draft.prompt == "Edited prompt",
+            vm.requestSelect("message")
+            expect(vm.selectedID == "email" && vm.draft.prompt == "Edited prompt",
                    "switching with unsaved edits keeps the draft")
-            expect(vm.pendingChange == .select("Message"), "the switch waits for a decision")
+            expect(vm.pendingChange == .select("message"), "the switch waits for a decision")
 
             vm.saveAndContinue()
-            expect(vm.selectedID == "Message" && vm.pendingChange == nil,
+            expect(vm.selectedID == "message" && vm.pendingChange == nil,
                    "saving completes the switch")
             let reread = ModesViewModel(supervisor: nil, directory: dir)
             expect(reread.modes.first { $0.name == "Email" }?.prompt == "Edited prompt",
@@ -447,13 +447,13 @@ extension Selftest {
             expect(vm.pendingChange == .newMode && vm.draft.prompt == "Throwaway",
                    "New Mode waits too")
             vm.discardAndContinue()
-            expect(vm.selectedID?.hasPrefix("New Mode") == true,
+            expect(vm.selectedName?.hasPrefix("New Mode") == true,
                    "discarding completes the pending New Mode")
             expect(vm.modes.first { $0.name == "Message" }?.prompt != "Throwaway",
                    "discarded edits are gone")
 
-            vm.requestSelect("Email")
-            expect(vm.pendingChange == .select("Email"),
+            vm.requestSelect("email")
+            expect(vm.pendingChange == .select("email"),
                    "an unsaved new mode also asks before it is dropped")
             vm.discardAndContinue()
             expect(!vm.modes.contains { $0.name.hasPrefix("New Mode") },
@@ -462,7 +462,7 @@ extension Selftest {
             vm.draft.prompt = "Parked edit"
             vm.park()
             let returned = ModesViewModel(supervisor: nil, directory: dir)
-            expect(returned.selectedID == "Email" && returned.draft.prompt == "Parked edit"
+            expect(returned.selectedID == "email" && returned.draft.prompt == "Parked edit"
                     && returned.isDirty,
                    "leaving the pane parks the draft for the next visit")
         }
@@ -471,17 +471,20 @@ extension Selftest {
     private static func testModesProtectionAndSymbols() {
         withTempDirectory { dir in
             let vm = ModesViewModel(supervisor: nil, directory: dir)
-            vm.select("Default")
+            vm.select("default")
             expect(!vm.canDelete, "a protected built-in can't be deleted")
-            vm.select("Email")
-            expect(vm.canDelete, "a normal mode can be deleted")
+            vm.select("email")
+            expect(!vm.canDelete, "a mode Velora ships resets instead of deleting")
+            vm.newMode()
+            vm.save()
+            expect(vm.canDelete, "a mode you made can be deleted")
         }
         let terminal = Mode(name: "Terminal", prompt: "", formatting: "off",
                             apps: [], vocabulary: [], replacements: [])
         expect(terminal.symbol == "terminal", "Terminal mode has its own symbol")
-        expect(Mode.builtInTemplates.first { $0.name == "Code" }?.symbol
-                == "chevron.left.forwardslash.chevron.right",
-               "Code keeps its symbol")
+        let code = Mode(name: "Code", prompt: "", formatting: "light",
+                        apps: [], vocabulary: [], replacements: [])
+        expect(code.symbol == "chevron.left.forwardslash.chevron.right", "Code keeps its symbol")
     }
 
     // MARK: - Dictionary

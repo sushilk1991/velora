@@ -414,13 +414,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         }
         let installer = UpdateInstaller.shared
         let caption = UpdateCopy.caption(
-            for: installer.state, installsWhenReady: installer.installsWhenReady)
+            for: installer.state, installsWhenReady: installer.installsWhenReady,
+            waitingFor: installer.waitingFor)
         switch installer.state {
         case .downloading, .verifying, .installing:
             add(caption ?? "", action: nil)
         case .ready(let version):
             if installer.installsWhenReady {
-                add(UpdateCopy.waitingTitle, action: nil, toolTip: caption)
+                menu.addItem(updateWaitingItem(version: version, waitingFor: installer.waitingFor))
                 return
             }
             add(UpdateCopy.restartTitle(version), action: #selector(installStagedUpdate))
@@ -448,6 +449,29 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                     toolTip: failure)
             }
         }
+    }
+
+    // Test seam: internal so Selftest can reach it.
+    /// The row for an install committed to run once work finishes:
+    /// "Waiting to Install…", with what it waits on as the tooltip. Unsaved
+    /// mode edits wait on the user, so that row opens Modes; work that
+    /// finishes by itself leaves it inert.
+    func updateWaitingItem(version: String, waitingFor: UpdateRelaunchSafety.Block?) -> NSMenuItem {
+        let item = NSMenuItem(title: UpdateCopy.waitingTitle, action: nil, keyEquivalent: "")
+        item.toolTip = UpdateCopy.caption(
+            for: .ready(version: version), installsWhenReady: true, waitingFor: waitingFor)
+        guard case .unsavedMode = waitingFor else {
+            item.isEnabled = false
+            return item
+        }
+        item.action = #selector(showModes)
+        item.target = self
+        return item
+    }
+
+    /// The update window's Show Modes route (set by the app delegate).
+    @objc private func showModes() {
+        UpdateWindowModel.showModes?()
     }
 
     private static func truncate(_ text: String, to limit: Int) -> String {

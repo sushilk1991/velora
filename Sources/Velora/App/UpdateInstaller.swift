@@ -102,9 +102,21 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     /// Main-queue safety gate supplied by the composition root. A one-click
     /// install waits for user-owned foreground work instead of cancelling it
     /// when a slow download happens to finish.
-    var relaunchBlockReason: (() -> String?)?
+    var relaunchBlock: (() -> UpdateRelaunchSafety.Block?)?
+    /// The same gate as text, for logs and diagnostics.
+    var relaunchBlockReason: (() -> String?)? {
+        relaunchBlock.map { block in { block()?.reason } }
+    }
     private var installRetryWorkItem: DispatchWorkItem?
-    private var lastRelaunchBlockReason: String?
+    /// What a committed install waits on right now; nil once it runs or is
+    /// withdrawn. The update window says it, by name for mode edits.
+    private(set) var waitingFor: UpdateRelaunchSafety.Block? {
+        didSet {
+            guard waitingFor != oldValue else { return }
+            NotificationCenter.default.post(
+                name: .veloraUpdateStateChanged, object: nil)
+        }
+    }
 
     static var updatesDirectory: URL {
         ResourceLocator.applicationSupportDirectory
@@ -502,10 +514,19 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
             cancelInstallRetry()
             return
         }
-        if let reason = relaunchBlockReason?() {
-            if reason != lastRelaunchBlockReason {
-                veloraLog("Velora: update ready — \(reason.lowercased())")
-                lastRelaunchBlockReason = reason
+        if let block = relaunchBlock?() {
+            if block != waitingFor {
+                // A busy reason reads on as a clause ("waiting for …"); a
+                // mode's keeps its name as written ("“Work”").
+                let reason: String
+                switch block {
+                case .busy(let text):
+                    reason = text.lowercased()
+                case .unsavedMode:
+                    reason = block.reason
+                }
+                veloraLog("Velora: update ready — \(reason)")
+                waitingFor = block
             }
             guard installRetryWorkItem == nil else { return }
             let retry = DispatchWorkItem { [weak self] in
@@ -569,7 +590,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
                     // signature/Gatekeeper pass or in the run-loop turn above.
                     // Gate and spawn in this same callback, so no AppKit event
                     // can start user work between the last check and quit.
-                    if self.relaunchBlockReason?() != nil {
+                    if self.relaunchBlock?() != nil {
                         self.state = .ready(version: version)
                         self.installAndRelaunchWhenReady = true
                         self.installWhenSafe()
@@ -606,7 +627,7 @@ final class UpdateInstaller: NSObject, URLSessionDownloadDelegate {
     private func cancelInstallRetry() {
         installRetryWorkItem?.cancel()
         installRetryWorkItem = nil
-        lastRelaunchBlockReason = nil
+        waitingFor = nil
     }
 
     private func abandonVerification(version: String) {

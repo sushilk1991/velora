@@ -31,6 +31,24 @@ enum MainPane: String, CaseIterable, Identifiable {
         case .modes: return "slider.horizontal.3"
         }
     }
+
+    /// The pane ↑ or ↓ reaches from this one in the sidebar. The ends stop
+    /// rather than wrap, as Finder's and Notes' sidebars do.
+    func moved(_ direction: MoveCommandDirection) -> MainPane {
+        let panes = Self.allCases
+        guard let index = panes.firstIndex(of: self) else {
+            return self
+        }
+
+        switch direction {
+        case .up:
+            return panes[max(index - 1, 0)]
+        case .down:
+            return panes[min(index + 1, panes.count - 1)]
+        default:
+            return self
+        }
+    }
 }
 
 /// Sidebar selection shared between the window controller (deep links from
@@ -39,7 +57,26 @@ enum MainPane: String, CaseIterable, Identifiable {
 final class MainWindowSelection: ObservableObject {
     @Published var pane: MainPane? = .home
 
+    /// The Modes pane's model while it shows. It can hold a switch while
+    /// a mode has unsaved edits, and switches once the user answers.
+    weak var openModes: ModesViewModel?
+
     var current: MainPane { pane ?? .home }
+
+    /// Every switch: a sidebar click, ⌘1–⌘6, Open Velora and deep links
+    /// (`MainWindowController.show(selecting:)`). Switches unless the open
+    /// pane holds it.
+    func request(_ target: MainPane) {
+        guard target != current else {
+            return
+        }
+
+        if let openModes, !openModes.requestLeave({ [weak self] in self?.pane = target }) {
+            return
+        }
+
+        pane = target
+    }
 }
 
 /// App actions the main window triggers but does not own. Injected by the
@@ -237,9 +274,70 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     /// Velora menus (user report: no app menu when focused).
     func show(selecting pane: MainPane? = nil) {
         if let pane {
-            selection.pane = pane
+            selection.request(pane)
         }
         Self.presentShell(self, holding: &holdsActivation)
+    }
+
+    /// The mode with unsaved edits, open or parked when the pane closed.
+    /// An update relaunch waits on it (AppDelegate's `restartBlock`).
+    var unsavedModeName: String? {
+        ModesViewModel.unsavedModeName(open: selection.openModes)
+    }
+
+    /// Asked before Velora quits. Unsaved mode edits, open or parked when
+    /// the pane closed, get Save / Don't Save / Cancel; false keeps Velora
+    /// running (Cancel, a save that failed, or a quit while the prompt is
+    /// already up).
+    func confirmQuit() -> Bool {
+        ModesViewModel.confirmQuit(
+            open: selection.openModes,
+            ask: { Self.askBeforeQuit(saving: $0) },
+            report: { Self.reportQuitFailure($0) })
+    }
+
+    private static func askBeforeQuit(saving name: String) -> ModesViewModel.QuitAnswer {
+        let alert = NSAlert()
+        alert.messageText = "Save changes to “\(name)” before quitting?"
+        alert.informativeText = "Your edits to this mode aren't saved yet."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch runQuitAlert(alert) {
+        case .alertFirstButtonReturn:
+            return .save
+        case .alertSecondButtonReturn:
+            return .dontSave
+        default:
+            return .cancel
+        }
+    }
+
+    private static func reportQuitFailure(_ reason: String) {
+        let alert = NSAlert()
+        alert.messageText = "Can't save mode"
+        alert.informativeText = reason
+        _ = runQuitAlert(alert)
+    }
+
+    /// Shows a quit alert where the user can reach it, as VisibleAlert
+    /// does: a regular app while it's up (with the window closed, Velora
+    /// is an accessory with no Dock icon), a modal-panel level, and no
+    /// hiding on deactivate. Modal, not VisibleAlert's async sessions:
+    /// `applicationShouldTerminate` needs the answer before it returns.
+    /// The main window has been on screen, so the app has the WindowServer
+    /// connection `runModal` needs (see VisibleAlert).
+    private static func runQuitAlert(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        AppActivation.acquireRegular()
+        defer { AppActivation.releaseRegular() }
+
+        alert.layout()
+        let window = alert.window
+        window.level = .modalPanel
+        window.hidesOnDeactivate = false
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        NSApp.activate(ignoringOtherApps: true)
+        return alert.runModal()
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -295,10 +393,9 @@ struct MainRootView: View {
             // Draws its own PaneHeader: the search and Add state live inside it.
             DictionarySettingsView(model: model)
         case .modes:
-            VStack(alignment: .leading, spacing: VeloraSpacing.m) {
-                PaneHeader(title: pane.title)
-                ModesSettingsView(supervisor: supervisor)
-            }
+            // Draws its own PaneHeader (New Mode, or Save on a mode) and
+            // swaps list and editor in place.
+            ModesSettingsView(supervisor: supervisor, selection: selection)
         }
     }
 }
@@ -351,17 +448,35 @@ struct MainSidebar: View {
     @ObservedObject var selection: MainWindowSelection
     let supervisor: EngineSupervisor?
     let openSettings: () -> Void
+    @FocusState private var listFocused: Bool
+    @Environment(\.controlActiveState) private var controlActiveState
 
     var body: some View {
         FloatingSidebar {
             SidebarTopSpace()
-            ForEach(MainPane.allCases) { pane in
-                Button {
-                    selection.pane = pane
-                } label: {
-                    SidebarRow(symbol: pane.symbol, title: pane.title, selected: selection.current == pane)
+            // Focusable as one list, like Finder's sidebar: Tab lands on it
+            // and ↑/↓ walk the panes through `request`, so Modes can still
+            // hold a switch while it has unsaved edits. Focus shows on the
+            // selected row (`SidebarFocus`), never as a ring round the list.
+            VStack(alignment: .leading, spacing: WindowShellMetrics.rowSpacing) {
+                ForEach(MainPane.allCases) { pane in
+                    Button {
+                        selection.request(pane)
+                    } label: {
+                        SidebarRow(
+                            symbol: pane.symbol, title: pane.title,
+                            selected: selection.current == pane,
+                            focus: SidebarFocus(
+                                listFocused: listFocused, window: controlActiveState))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
+            }
+            .focusable()
+            .focused($listFocused)
+            .focusEffectDisabled()
+            .onMoveCommand { direction in
+                selection.request(selection.current.moved(direction))
             }
             Spacer(minLength: VeloraSpacing.m)
             Button(action: openSettings) {

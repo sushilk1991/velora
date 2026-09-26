@@ -371,6 +371,7 @@ final class SettingsModel: ObservableObject {
         autoInstallUpdates = config.autoInstallUpdates
         updateState = UpdateInstaller.shared.state
         updateInstallsWhenReady = UpdateInstaller.shared.installsWhenReady
+        updateWaitingFor = UpdateInstaller.shared.waitingFor
         availableUpdate = UpdateChecker.shared.available
         meetingSuggestions = config.meetingSuggestions
         meetingCalendar = config.meetingCalendar
@@ -423,6 +424,7 @@ final class SettingsModel: ObservableObject {
             guard let self else { return }
             self.updateState = UpdateInstaller.shared.state
             self.updateInstallsWhenReady = UpdateInstaller.shared.installsWhenReady
+            self.updateWaitingFor = UpdateInstaller.shared.waitingFor
             let available = UpdateChecker.shared.available
             self.availableUpdate = available
             // Installer transitions can arrive after the check notification.
@@ -767,6 +769,9 @@ final class SettingsModel: ObservableObject {
     @Published var updateState: UpdateInstaller.State
     /// True once the user committed to an install on any surface.
     @Published var updateInstallsWhenReady: Bool
+    /// What that committed install waits on; the caption names a mode
+    /// whose edits hold it.
+    @Published var updateWaitingFor: UpdateRelaunchSafety.Block?
     @Published var availableUpdate: UpdateChecker.Update?
 
     static func statusAfterSuccessfulUpdateCheck(

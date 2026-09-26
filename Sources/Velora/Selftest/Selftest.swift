@@ -126,6 +126,12 @@ enum Selftest {
             testLiveContext()
         }
         testModeApplicationAssignments()
+        testModesPaneNavigation()
+        testModesReviewFixes()
+        testModesListAccessibility()
+        testModesFileIdentity()
+        testModesQuitGuards()
+        testModesListWindowKeys()
         testVoiceCommands()
         testStreak()
         testLongestStreak()
@@ -187,6 +193,8 @@ enum Selftest {
         testHomeTakeHistoryRow()
         testRetryDelivery()
         testOwnWindowFinal()
+        testSidebarFocus()
+        testSidebarArrowKeys()
         testMeetingListWindowKeys()
         testEngineStatusCaption()
         testEngineUpdateStatus()
@@ -9718,14 +9726,6 @@ enum Selftest {
             Mode.firstAssignmentConflict(
                 applications: ["com.apple.Mail"], modes: [email, note], excluding: email.id) == nil,
             "saving an app assignment back to its current mode remains valid")
-        expect(
-            Mode.assignmentConflictExclusion(
-                selectedID: email.id, originalIsProtected: true, draftName: "Work Email") == nil,
-            "renaming a protected mode validates inherited apps against the retained original")
-        expect(
-            Mode.assignmentConflictExclusion(
-                selectedID: email.id, originalIsProtected: false, draftName: "Work Email") == email.id,
-            "renaming a normal mode excludes the row it replaces")
         let index = ModeApplicationIndex.build([
             (name: "Banter", applications: ["COM.TINYSPECK.SLACKMACGAP"]),
         ])
@@ -9751,6 +9751,1485 @@ enum Selftest {
         lifecycleIndex.reload(directory: directory)
         expect(lifecycleIndex.modeName(forBundleID: "com.apple.Terminal") == "Terminal",
                "ready-state cache refresh follows engine mode migration")
+    }
+
+    /// The Modes pane is a list that opens one mode's editor in place, like
+    /// Meetings: nil selection is the list, and every way out of the editor
+    /// (Back, Delete) lands there.
+    private static func testModesPaneNavigation() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-modes-pane-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // What Velora ships, so the list doesn't depend on the checkout.
+        let stock = directory.appendingPathComponent("stock", isDirectory: true)
+        try! FileManager.default.createDirectory(at: stock, withIntermediateDirectories: true)
+        for name in ["Default", "Email", "Raw", "Code"] {
+            try! Data(#"{"name":"\#(name)","prompt":"Stock","formatting":"light","apps":[],"vocabulary":[],"replacements":{}}"#.utf8)
+                .write(to: stock.appendingPathComponent("\(name.lowercased()).json"))
+        }
+
+        let vm = ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: stock)
+        expect(vm.selectedID == nil && !vm.hasSelection,
+               "Modes opens on the list of modes, not inside the first mode")
+        expect(vm.modes.map(\.name) == ["Default", "Code", "Email", "Raw"],
+               "the list shows every mode Velora ships before any file exists")
+        let rest = vm.modes.dropFirst().map(\.name)
+        expect(vm.modes.first?.name == Mode.defaultName
+                   && rest == rest.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
+               "Default, the fallback, leads the list; the rest run A to Z")
+
+        // Back from an edited mode asks first; Discard returns to the list.
+        vm.requestSelect(modeID(vm, "Email"))
+        expect(vm.selectedName == "Email", "a row opens that mode's editor")
+        expect(!vm.isDirty, "an untouched mode has nothing to save")
+        vm.draft.prompt = "Edited"
+        vm.requestSelect(nil)
+        expect(vm.pendingChange == .select(nil) && vm.selectedName == "Email",
+               "Back with unsaved edits holds on the editor and asks")
+        vm.discardAndContinue()
+        expect(vm.selectedID == nil && vm.draft.prompt != "Edited"
+                   && !FileManager.default.fileExists(
+                       atPath: directory.appendingPathComponent("email.json").path),
+               "Discard Changes returns to the list without writing the edit")
+
+        // Deleting a saved mode closes its editor.
+        vm.requestNewMode()
+        vm.save()
+        let created = vm.selectedID
+        expect(vm.selectedName == "New Mode" && created == "new-mode",
+               "New Mode opens its editor and saves to new-mode.json")
+        vm.delete()
+        expect(vm.selectedID == nil && !vm.modes.contains { $0.id == created },
+               "Delete removes the mode and returns to the list")
+        vm.park()
+
+        ModesViewModel.requestOpen("Email")
+        expect(ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: stock).selectedName == "Email",
+               "a requested mode opens the next pane straight into its editor")
+        expect(ModesViewModel(supervisor: nil, directory: directory, packagedDirectory: stock).selectedID == nil,
+               "the open request is one-shot")
+
+        let email = Mode(
+            name: "Email", prompt: "", formatting: "full",
+            apps: ["com.apple.Mail"], vocabulary: [], replacements: [])
+        expect(email.listSummary == "Full formatting · 1 app",
+               "a list row names the formatting strength and app count")
+        let raw = Mode(
+            name: "Raw", prompt: "", formatting: "off",
+            apps: [], vocabulary: [], replacements: [])
+        expect(raw.listSummary == "No formatting · No apps",
+               "a list row says when a mode formats nothing and has no apps")
+        let code = Mode(
+            name: "Code", prompt: "", formatting: "light",
+            apps: ["dev.zed.Zed", "com.todesktop.230313mzl4w4u92"],
+            vocabulary: [], replacements: [])
+        expect(code.listSummary == "Light formatting · 2 apps",
+               "a list row counts several apps")
+        let fallback = Mode(
+            name: "Default", prompt: "", formatting: "full",
+            apps: [], vocabulary: [], replacements: [])
+        expect(fallback.listSummary == "Full formatting · Used when no other mode matches",
+               "Default's row says it is the fallback, not that it has no apps")
+
+        // App rows never show a bundle ID: the installed name, else a known
+        // name, else the ID's last part as words.
+        expect(Mode.applicationName(for: "com.todesktop.230313mzl4w4u92", installedName: "Cursor") == "Cursor",
+               "an installed app shows its own name")
+        expect(Mode.applicationName(for: "com.microsoft.VSCode", installedName: nil) == "Visual Studio Code",
+               "a known app that isn't installed shows its name")
+        expect(Mode.applicationName(for: "COM.SUBLIMETEXT.3", installedName: nil) == "Sublime Text 3",
+               "known names match bundle IDs case-insensitively")
+        expect(Mode.applicationName(for: "com.example.my-tool", installedName: nil) == "My Tool",
+               "an unknown app's ID reads as words")
+
+        // A mode Velora ships resets to its packaged file instead of
+        // deleting: the engine reinstalls a deleted one on its next reload.
+        let packaged = directory.appendingPathComponent("packaged", isDirectory: true)
+        let userModes = directory.appendingPathComponent("user", isDirectory: true)
+        for folder in [packaged, userModes] {
+            try! FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        try! Data(#"{"name":"Code","prompt":"Stock","formatting":"light","apps":["dev.zed.Zed"],"vocabulary":[],"replacements":{}}"#.utf8)
+            .write(to: packaged.appendingPathComponent("code.json"))
+        try! Data(#"{"name":"Code","prompt":"Mine","formatting":"full","apps":[],"vocabulary":[],"replacements":{}}"#.utf8)
+            .write(to: userModes.appendingPathComponent("code.json"))
+        try! Data(#"{"name":"Banter","prompt":"","formatting":"light","apps":[],"vocabulary":[],"replacements":{}}"#.utf8)
+            .write(to: userModes.appendingPathComponent("banter.json"))
+        let shipped = ModesViewModel(supervisor: nil, directory: userModes, packagedDirectory: packaged)
+        shipped.requestSelect(modeID(shipped, "Banter"))
+        expect(!shipped.resetsToDefault && shipped.canDelete,
+               "a mode the user made has no default; it deletes")
+        shipped.requestSelect(modeID(shipped, "Code"))
+        expect(shipped.resetsToDefault && shipped.canReset && !shipped.isAtDefault,
+               "an edited mode Velora ships offers Reset to Default")
+        shipped.delete()
+        expect(!shipped.canDelete && shipped.selectedName == "Code"
+                   && FileManager.default.fileExists(atPath: userModes.appendingPathComponent("code.json").path),
+               "a mode Velora ships never deletes")
+        shipped.resetToDefault()
+        let restored = Mode.loadAll(from: userModes).first { $0.name == "Code" }
+        expect(shipped.selectedName == "Code" && shipped.draft.prompt == "Stock"
+                   && shipped.draft.apps == ["dev.zed.Zed"] && restored?.prompt == "Stock",
+               "Reset to Default restores the shipped file and keeps its editor open")
+        expect(shipped.isAtDefault && !shipped.canReset, "a mode at its default has nothing to reset")
+
+        // A shipped mode keeps its name. Renaming Code wrote coding.json while
+        // the engine reinstalled code.json, and both claimed the same apps.
+        shipped.draft.name = "Coding"
+        shipped.save()
+        let afterRename = Mode.loadAll(from: userModes).map(\.name)
+        expect(shipped.saveError != nil && afterRename.contains("Code") && !afterRename.contains("Coding"),
+               "renaming a mode Velora ships is refused; Duplicate makes your own")
+        shipped.saveError = nil
+        shipped.select(modeID(shipped, "Code"))
+
+        // Duplicate copies how a mode writes, not its apps: each app activates
+        // one mode, so a copy holding Code's apps could never be saved.
+        shipped.duplicate()
+        expect(shipped.selectedName == "Code Copy" && shipped.draft.prompt == "Stock"
+                   && shipped.draft.apps.isEmpty,
+               "Duplicate copies the writing and leaves the apps with the original")
+        shipped.save()
+        expect(shipped.saveError == nil && !shipped.isDirty
+                   && Mode.loadAll(from: userModes).contains { $0.name == "Code Copy" },
+               "a duplicate saves, and Save has nothing left to do")
+
+        // Leaving the pane with unsaved edits asks Save / Don't Save / Cancel.
+        var left = false
+        expect(shipped.requestLeave { left = true } && !left,
+               "a saved mode lets the pane switch straight away")
+        shipped.draft.prompt = "Half typed"
+        expect(!shipped.requestLeave { left = true } && shipped.pendingChange == .leave && !left,
+               "switching panes with unsaved edits holds and asks first")
+        shipped.cancelPending()
+        expect(shipped.draft.prompt == "Half typed" && !left, "Cancel stays on the edit")
+        _ = shipped.requestLeave { left = true }
+        shipped.discardAndContinue()
+        expect(left && shipped.draft.prompt == "Stock", "Don't Save drops the edit, then switches panes")
+
+        // Without the engine's files a shipped mode still never deletes (the
+        // engine would reinstall it); Reset waits for a file to restore.
+        let unpackaged = ModesViewModel(supervisor: nil, directory: userModes, packagedDirectory: nil)
+        unpackaged.requestSelect(modeID(unpackaged, "Code"))
+        expect(unpackaged.resetsToDefault && !unpackaged.canReset && !unpackaged.canDelete,
+               "a shipped mode is known by name when its packaged file is missing")
+    }
+
+    /// The Modes review round: every way out of an unsaved mode asks, and
+    /// no write leaves an app with two modes or clobbers another mode's file.
+    ///
+    ///     packaged/  code (Zed, VS Code)  default  email  terminal
+    ///     user/      code (Zed)  email  work (VS Code)
+    private static func testModesReviewFixes() {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("velora-modes-review-\(UUID().uuidString)")
+        let packaged = root.appendingPathComponent("packaged", isDirectory: true)
+        let user = root.appendingPathComponent("user", isDirectory: true)
+        for folder in [packaged, user] {
+            try! fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        defer { try? fm.removeItem(at: root) }
+
+        func write(_ json: String, _ folder: URL, _ stem: String) {
+            try! Data(json.utf8).write(to: folder.appendingPathComponent("\(stem).json"))
+        }
+        write(#"{"name":"Code","prompt":"Stock","formatting":"light","apps":["dev.zed.Zed","com.microsoft.VSCode"],"vocabulary":[],"replacements":{}}"#, packaged, "code")
+        write(#"{"name":"Default","prompt":"Clean","formatting":"light","apps":[],"vocabulary":[],"replacements":{}}"#, packaged, "default")
+        write(#"{"name":"Email","prompt":"Mail","formatting":"full","apps":["com.apple.mail"],"vocabulary":[],"replacements":{}}"#, packaged, "email")
+        write(#"{"name":"Terminal","prompt":"Shell","formatting":"off","apps":["com.apple.Terminal"],"vocabulary":[],"replacements":{}}"#, packaged, "terminal")
+        write(#"{"name":"Code","prompt":"Mine","formatting":"full","apps":["dev.zed.Zed"],"vocabulary":[],"replacements":{}}"#, user, "code")
+        write(#"{"name":"Email","prompt":"Mail","formatting":"full","apps":["com.apple.mail"],"vocabulary":[],"replacements":{}}"#, user, "email")
+        write(#"{"name":"Work","prompt":"","formatting":"light","apps":["com.microsoft.VSCode"],"vocabulary":[],"replacements":{}}"#, user, "work")
+
+        func fileURL(_ stem: String) -> URL {
+            user.appendingPathComponent("\(stem).json")
+        }
+        func onDisk(_ stem: String) -> [String: Any]? {
+            guard let data = try? Data(contentsOf: fileURL(stem)) else {
+                return nil
+            }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        /// The modes on disk that claim `bundleID`, by name.
+        func owners(_ bundleID: String) -> [String] {
+            let files = (try? fm.contentsOfDirectory(at: user, includingPropertiesForKeys: nil)) ?? []
+            return files.filter { $0.pathExtension == "json" }.compactMap { url -> String? in
+                let stem = url.deletingPathExtension().lastPathComponent
+                guard let mode = onDisk(stem),
+                      let apps = mode["apps"] as? [String],
+                      apps.contains(where: { $0.caseInsensitiveCompare(bundleID) == .orderedSame })
+                else {
+                    return nil
+                }
+                return mode["name"] as? String
+            }.sorted()
+        }
+
+        // The list is what the engine installs: the packaged set, Terminal
+        // included, never a hard-coded template list.
+        let vm = ModesViewModel(supervisor: nil, directory: user, packagedDirectory: packaged)
+        expect(vm.modes.map(\.name) == ["Default", "Code", "Email", "Terminal", "Work"],
+               "the Modes list folds in every packaged mode, Terminal included, and nothing else")
+
+        // Reset never re-claims an app another mode took since.
+        vm.requestSelect(modeID(vm, "Code"))
+        expect(vm.resetNotes == ["Visual Studio Code stays in Work."],
+               "Reset to Default names each app another mode now owns")
+        vm.resetToDefault()
+        expect(owners("com.microsoft.VSCode") == ["Work"],
+               "after Reset an app has exactly one owner on disk")
+        expect(onDisk("code")?["prompt"] as? String == "Stock"
+                   && onDisk("code")?["apps"] as? [String] == ["dev.zed.Zed"],
+               "Reset restores the packaged mode, less the apps other modes kept")
+        expect(vm.isAtDefault && !vm.canReset,
+               "a reset mode reads as at its default, with nothing left to reset")
+
+        // A Reset that can't write says so.
+        vm.draft.prompt = "Mine again"
+        vm.save()
+        try! fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: user.path)
+        vm.resetToDefault()
+        try! fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: user.path)
+        expect(vm.saveError != nil && onDisk("code")?["prompt"] as? String == "Mine again",
+               "a failed Reset write reports saveError and leaves the file alone")
+        expect(vm.saveErrorTitle == "Couldn't update mode",
+               "a failed Reset isn't titled as a failed save")
+        vm.saveError = nil
+
+        // Duplicate with unsaved edits asks Save / Don't Save / Cancel.
+        vm.requestSelect(modeID(vm, "Work"))
+        vm.draft.prompt = "Edited work"
+        vm.requestDuplicate()
+        expect(vm.pendingChange == .duplicate && vm.selectedName == "Work",
+               "Duplicate with unsaved edits holds and asks first")
+        vm.cancelPending()
+        expect(vm.selectedName == "Work" && vm.draft.prompt == "Edited work"
+                   && !vm.modes.contains { $0.name == "Work Copy" },
+               "Cancel keeps the edit and makes no copy")
+        vm.requestDuplicate()
+        vm.saveAndContinue()
+        expect(onDisk("work")?["prompt"] as? String == "Edited work"
+                   && vm.selectedName == "Work Copy" && vm.draft.prompt == "Edited work",
+               "Save writes the edit, then copies it")
+        vm.requestSelect(modeID(vm, "Work"))
+        vm.discardAndContinue()
+        vm.draft.prompt = "Throwaway"
+        vm.requestDuplicate()
+        vm.discardAndContinue()
+        expect(vm.selectedName == "Work Copy" && vm.draft.prompt == "Edited work"
+                   && onDisk("work")?["prompt"] as? String == "Edited work",
+               "Don't Save drops the edit, then copies the saved mode")
+        vm.requestSelect(nil)
+        vm.discardAndContinue()
+
+        // Delete removes the open mode's file, whatever its draft is named.
+        for name in ["Banter", "Other"] {
+            vm.requestNewMode()
+            vm.draft.name = name
+            vm.save()
+        }
+        vm.requestSelect(modeID(vm, "Banter"))
+        vm.draft.name = "Other"
+        vm.delete()
+        expect(!fm.fileExists(atPath: fileURL("banter").path)
+                   && fm.fileExists(atPath: fileURL("other").path)
+                   && vm.modes.contains { $0.name == "Other" }
+                   && !vm.modes.contains { $0.name == "Banter" },
+               "Delete goes by the selected mode, not the name typed into its draft")
+
+        // Names collide by file stem: "Email!" is email.json too.
+        let emailBytes = try? Data(contentsOf: fileURL("email"))
+        vm.requestNewMode()
+        vm.draft.name = "Email!"
+        vm.save()
+        expect(vm.saveError != nil && (try? Data(contentsOf: fileURL("email"))) == emailBytes,
+               "a name that shares another mode's file stem is refused, and the file is untouched")
+        vm.saveError = nil
+        vm.requestSelect(nil)
+        vm.discardAndContinue()
+
+        // A blank name is refused by save() itself, so the leave guard's
+        // Save can't write one either.
+        vm.requestNewMode()
+        vm.draft.name = "  "
+        vm.requestSelect(nil)
+        vm.saveAndContinue()
+        expect(vm.saveError != nil && vm.selectedID != nil
+                   && !fm.fileExists(atPath: fileURL("mode").path),
+               "the guard's Save refuses a blank name and keeps the editor open")
+        vm.saveError = nil
+        vm.requestSelect(nil)
+        vm.discardAndContinue()
+
+        // The conflict names the app, never its bundle ID.
+        vm.requestSelect(modeID(vm, "Other"))
+        vm.draft.apps = ["com.microsoft.VSCode"]
+        vm.save()
+        expect(vm.saveError?.contains("Visual Studio Code") == true
+                   && vm.saveError?.contains("com.microsoft.VSCode") == false,
+               "an app conflict names the app, not its bundle ID")
+        vm.saveError = nil
+        vm.requestSelect(nil)
+        vm.discardAndContinue()
+
+        // Without the packaged files, every name Velora ships stays
+        // reserved, and Reset's help doesn't claim the mode matches.
+        let bare = ModesViewModel(supervisor: nil, directory: user, packagedDirectory: nil)
+        bare.requestNewMode()
+        bare.draft.name = "Terminal"
+        bare.save()
+        expect(bare.saveError != nil && !fm.fileExists(atPath: fileURL("terminal").path),
+               "a name Velora ships is refused even when its packaged file is missing")
+        bare.saveError = nil
+        bare.requestSelect(modeID(bare, "Code"))
+        bare.discardAndContinue()
+        expect(bare.selectedName == "Code" && bare.resetsToDefault && !bare.canReset
+                   && !bare.resetHelp.contains("matches"),
+               "Reset's help doesn't say a mode matches a default it can't read")
+
+        // The packaged folder is read where it ships: never through
+        // locateEngine(), which re-syncs the engine under the running one.
+        let resources = root.appendingPathComponent("Resources", isDirectory: true)
+        let bundled = resources.appendingPathComponent(
+            "engine/src/velora_engine/modes_builtin", isDirectory: true)
+        let override = root.appendingPathComponent("override", isDirectory: true)
+        for folder in [bundled, override.appendingPathComponent("src/velora_engine/modes_builtin")] {
+            try! fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        expect(Mode.findPackagedModes(
+                environment: [:], resources: resources, bakedEngine: nil, repoRoot: nil)?
+                .standardizedFileURL == bundled.standardizedFileURL,
+               "a bundled app reads its packaged modes in place")
+        expect(Mode.findPackagedModes(
+                environment: ["VELORA_ENGINE_DIR": override.path], resources: resources,
+                bakedEngine: nil, repoRoot: nil)?.path.hasPrefix(override.path) == true,
+               "VELORA_ENGINE_DIR wins, as it does for the engine")
+        expect(Mode.findPackagedModes(
+                environment: [:], resources: nil, bakedEngine: nil, repoRoot: nil) == nil,
+               "no engine anywhere means no packaged modes")
+
+        // Every route into another pane asks the open Modes pane first:
+        // the sidebar, ⌘1–⌘6, Open Velora and deep links all end in
+        // `request` (MainWindowController.show(selecting:)).
+        let selection = MainWindowSelection()
+        selection.pane = .modes
+        selection.openModes = vm
+        vm.requestSelect(modeID(vm, "Work"))
+        selection.request(.history)
+        expect(selection.current == .history, "a clean Modes pane lets a route switch")
+        selection.pane = .modes
+        vm.draft.prompt = "Route edit"
+        selection.request(.home)
+        expect(selection.current == .modes && vm.pendingChange == .leave,
+               "an unsaved edit holds a route on Modes and asks")
+        vm.saveAndContinue()
+        expect(selection.current == .home && onDisk("work")?["prompt"] as? String == "Route edit",
+               "Save writes the edit, then finishes the switch")
+
+        // Quit asks too, for the open draft and one parked when the pane closed.
+        vm.draft.prompt = "Quit edit"
+        var asked: [String] = []
+        expect(ModesViewModel.settleBeforeQuit(open: vm) { asked.append($0); return .cancel } == .stay
+                   && asked == ["Work"] && vm.draft.prompt == "Quit edit",
+               "Cancel keeps Velora running and the edit open")
+        try! fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: user.path)
+        let failed = ModesViewModel.settleBeforeQuit(open: vm) { _ in .save }
+        try! fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: user.path)
+        if case .failed = failed {
+            expect(vm.saveError == nil, "a failed save on quit is reported once, by the quit alert")
+        } else {
+            expect(false, "a save that fails on quit keeps Velora running and says why")
+        }
+        expect(ModesViewModel.settleBeforeQuit(open: vm) { _ in .save } == .quit
+                   && onDisk("work")?["prompt"] as? String == "Quit edit",
+               "Save writes the edit, then lets Velora quit")
+        vm.draft.prompt = "Parked quit"
+        vm.park()
+        asked = []
+        expect(ModesViewModel.settleBeforeQuit(open: nil) { asked.append($0); return .cancel } == .stay
+                   && asked == ["Work"],
+               "a draft parked when the pane closed asks before quitting")
+        expect(ModesViewModel.settleBeforeQuit(open: nil) { _ in .dontSave } == .quit
+                   && onDisk("work")?["prompt"] as? String == "Quit edit",
+               "Don't Save drops the parked edit and quits")
+        var askedAgain = false
+        expect(ModesViewModel.settleBeforeQuit(open: nil) { _ in askedAgain = true; return .cancel } == .quit
+                   && !askedAgain,
+               "with nothing unsaved, Quit doesn't ask")
+    }
+
+    /// VoiceOver reads the mode list as one group named "Modes" with a
+    /// button per mode, and pressing one opens that mode. Needs the
+    /// SwiftUI accessibility tree (`enableSwiftUIAccessibilityTree`), so
+    /// an untrusted process skips it.
+    private static func testModesListAccessibility() {
+        guard enableSwiftUIAccessibilityTree() else {
+            print("skip: Modes list accessibility needs an Accessibility-trusted process")
+            return
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-modes-ax-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        // Never ordered on screen, so it can't take a click from anyone.
+        let hosting = NSHostingView(rootView: ModesSettingsView(
+            supervisor: nil, selection: MainWindowSelection(), directory: directory))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 900),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        func settle() {
+            hosting.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        }
+        settle()
+
+        /// The first element, depth first, labelled `label` in role `role`.
+        func find(_ role: NSAccessibility.Role, _ label: String, in element: AnyObject) -> AnyObject? {
+            if element.accessibilityRole?() == role, element.accessibilityLabel?() == label {
+                return element
+            }
+            for child in (element.accessibilityChildren?() ?? nil) ?? [] {
+                if let found = find(role, label, in: child as AnyObject) {
+                    return found
+                }
+            }
+            return nil
+        }
+
+        let names = ModesViewModel(supervisor: nil, directory: directory).modes.map(\.name)
+        guard let list = find(.group, "Modes", in: hosting) else {
+            expect(false, "VoiceOver finds the mode list as one group named Modes")
+            return
+        }
+        let rows = ((list.accessibilityChildren?() ?? nil) ?? [])
+            .map { $0 as AnyObject }
+            .filter { $0.accessibilityRole?() == .button }
+        let rowNames = rows.map {
+            ($0.accessibilityLabel?() ?? nil)?.components(separatedBy: ",").first ?? ""
+        }
+        expect(!names.isEmpty && rowNames == names,
+               "the Modes group holds one button per mode, in list order")
+
+        guard let code = rows.first(where: {
+            ($0.accessibilityLabel?() ?? nil)?.hasPrefix("Code,") == true
+        }) as? NSAccessibilityElementProtocol & NSObjectProtocol else {
+            expect(false, "the Code row is reachable by VoiceOver")
+            return
+        }
+        _ = (code as AnyObject).accessibilityPerformPress?()
+        settle()
+        expect(find(.group, "Modes", in: hosting) == nil
+                   && find(.button, "All Modes", in: hosting) != nil,
+               "pressing a mode's row with VoiceOver opens its editor")
+    }
+
+    /// The mode list in a real, short window: ↓ walks focus to the last
+    /// of 40 modes and scrolls it into view, and ‹ Back focuses the mode
+    /// just closed, scrolled into view. Rows report their frames through
+    /// the pane's test seam, so it runs without Accessibility trust.
+    ///
+    ///     open first ─ Back ─ Return ─▶ first      (focus came back)
+    ///     Back ─ ↓ × 39+ ─▶ last row in view ─ Return ─▶ last
+    ///     Back ─▶ last row in view ─ Return ─▶ last
+    private static func testModesListWindowKeys() {
+        final class Frames {
+            var byID: [String: CGRect] = [:]
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-modes-keys-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for number in 0..<40 {
+            let name = String(format: "Mode %02d", number)
+            let json = #"{"name":"\#(name)","prompt":"","formatting":"light","apps":[],"vocabulary":[],"replacements":{}}"#
+            try! json.write(
+                to: directory.appendingPathComponent("\(ModesViewModel.slug(name)).json"),
+                atomically: true, encoding: .utf8)
+        }
+        let ids = ModesViewModel(supervisor: nil, directory: directory).modes.map(\.id)
+        guard let first = ids.first, let last = ids.last, ids.count >= 40 else {
+            expect(false, "the list holds the 40 modes written (got \(ids.count))")
+            return
+        }
+
+        let selection = MainWindowSelection()
+        let frames = Frames()
+        let window = MainWindowController.makeShellWindow(
+            rootView: ModesSettingsView(
+                supervisor: nil, selection: selection, directory: directory,
+                rowFrames: { frames.byID[$0] = $1 }),
+            title: "Selftest", size: NSSize(width: 600, height: 300),
+            minimumSize: NSSize(width: 300, height: 150))
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        waitUntil(timeout: 0.4) { false }
+        guard let vm = selection.openModes else {
+            expect(false, "the Modes pane registers its model with the window")
+            return
+        }
+
+        func press(_ key: Int, _ character: Int, flags: NSEvent.ModifierFlags = [], settle: TimeInterval = 0.2) {
+            let text = String(UnicodeScalar(UInt32(character)).map(Character.init) ?? " ")
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: text, charactersIgnoringModifiers: text,
+                isARepeat: false, keyCode: UInt16(key)) else {
+                return
+            }
+            window.sendEvent(event)
+            waitUntil(timeout: settle) { false }
+        }
+
+        /// Whether the row for `id` lies inside the list's scroll view,
+        /// both in window points from the top (SwiftUI's `.global`).
+        func rowInView(_ id: String) -> (inView: Bool, row: CGRect, list: CGRect) {
+            func scrollViews(_ view: NSView) -> [NSScrollView] {
+                (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+            }
+            let row = frames.byID[id] ?? .zero
+            guard let content = window.contentView, let list = scrollViews(content).first else {
+                return (false, row, .zero)
+            }
+            let base = list.convert(list.bounds, to: nil)
+            let visible = CGRect(
+                x: base.minX, y: content.bounds.height - base.maxY,
+                width: base.width, height: base.height)
+            return (!row.isEmpty && visible.contains(row), row, visible)
+        }
+
+        let downArrow = (key: 125, character: NSDownArrowFunctionKey)
+        let returnKey = (key: 36, character: 13)
+
+        vm.requestSelect(first)
+        waitUntil(timeout: 0.3) { false }
+        vm.requestSelect(nil)
+        waitUntil(timeout: 0.3) { false }
+        press(returnKey.key, returnKey.character)
+        expect(vm.selectedID == first,
+               "‹ Back focuses the mode just closed (opened \(vm.selectedID ?? "nothing"))")
+
+        vm.requestSelect(nil)
+        waitUntil(timeout: 0.3) { false }
+        let before = rowInView(last)
+        expect(!before.row.isEmpty && before.row.minY >= before.list.maxY,
+               "the last of \(ids.count) modes starts below a 300 pt window (row \(before.row), list \(before.list))")
+        for _ in 1..<ids.count {
+            press(downArrow.key, downArrow.character, flags: [.numericPad, .function], settle: 0.03)
+        }
+        waitUntil(timeout: 0.4) { false }
+        let walked = rowInView(last)
+        expect(walked.inView,
+               "↓ to the last mode scrolls it into view (row \(walked.row), list \(walked.list))")
+        press(returnKey.key, returnKey.character)
+        expect(vm.selectedID == last,
+               "↓ walks focus to the last mode (opened \(vm.selectedID ?? "nothing"))")
+
+        vm.requestSelect(nil)
+        waitUntil(timeout: 0.4) { false }
+        let back = rowInView(last)
+        expect(back.inView,
+               "‹ Back from the last mode shows its row (row \(back.row), list \(back.list))")
+        press(returnKey.key, returnKey.character)
+        expect(vm.selectedID == last,
+               "‹ Back from the last mode focuses it (opened \(vm.selectedID ?? "nothing"))")
+        vm.requestSelect(nil)
+
+        // An edit left open when the window closes still holds an update
+        // relaunch (AppDelegate's restartBlock asks the window's
+        // selection): through the pane while it lives, then through the
+        // draft it parks as it goes.
+        vm.requestSelect(first)
+        vm.draft.prompt = "Unsaved"
+        let savedName = vm.selectedName
+        window.close()
+        waitUntil(timeout: 0.2) { false }
+        let whileClosed = ModesViewModel.unsavedModeName(open: selection.openModes)
+        window.contentView = nil
+        waitUntil(timeout: 0.3) { false }
+        let torndown = ModesViewModel.unsavedModeName(open: selection.openModes)
+        expect(savedName != nil && whileClosed == savedName && torndown == savedName
+                   && selection.openModes == nil,
+               "a closed window's unsaved edit holds the update (closed \(whileClosed ?? "nil"), torn down \(torndown ?? "nil"), pane \(selection.openModes == nil ? "gone" : "open"))")
+        _ = ModesViewModel.settleBeforeQuit(open: nil, ask: { _ in .dontSave })
+    }
+
+    /// A mode is its file: a hand-edited `a.json` named "B" is still
+    /// a.json to Delete, Save, rename and Reset, never the b.json its name
+    /// would slug to, and two files named "B" are two modes. A rename whose
+    /// old file won't go rolls back whole.
+    ///
+    ///     a.json {"name":"B"}   b.json {"name":"C"}
+    ///       B ─ delete / save / rename / reset ─▶ a.json only
+    ///     a.json {"name":"B"}   b.json {"name":"B"}
+    ///       two rows; saving either is refused until it's renamed
+    private static func testModesFileIdentity() {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("velora-modes-identity-\(UUID().uuidString)")
+        let noPackaged = root.appendingPathComponent("no-packaged", isDirectory: true)
+        try! fm.createDirectory(at: noPackaged, withIntermediateDirectories: true)
+        var locked: [URL] = []
+        defer {
+            for file in locked {
+                try? fm.setAttributes([.immutable: false], ofItemAtPath: file.path)
+            }
+            try? fm.removeItem(at: root)
+        }
+
+        func mode(_ name: String, prompt: String) -> String {
+            #"{"name":"\#(name)","prompt":"\#(prompt)","formatting":"light","apps":[],"vocabulary":[],"replacements":{}}"#
+        }
+        func folder(_ name: String, _ files: [String: String]) -> URL {
+            let url = root.appendingPathComponent(name, isDirectory: true)
+            try! fm.createDirectory(at: url, withIntermediateDirectories: true)
+            for (stem, json) in files {
+                try! Data(json.utf8).write(to: url.appendingPathComponent("\(stem).json"))
+            }
+            return url
+        }
+        func read(_ folder: URL, _ stem: String) -> [String: Any]? {
+            guard let data = try? Data(contentsOf: folder.appendingPathComponent("\(stem).json")) else {
+                return nil
+            }
+            return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }
+        func exists(_ folder: URL, _ stem: String) -> Bool {
+            fm.fileExists(atPath: folder.appendingPathComponent("\(stem).json").path)
+        }
+        let handEdited = ["a": mode("B", prompt: "mine"), "b": mode("C", prompt: "c")]
+
+        let deleting = folder("delete", handEdited)
+        let deleter = ModesViewModel(supervisor: nil, directory: deleting, packagedDirectory: noPackaged)
+        deleter.requestSelect("a")
+        deleter.delete()
+        expect(!exists(deleting, "a") && read(deleting, "b")?["name"] as? String == "C",
+               "Delete removes the file B came from (a.json), never C's b.json")
+
+        let editing = folder("edit", handEdited)
+        let editor = ModesViewModel(supervisor: nil, directory: editing, packagedDirectory: noPackaged)
+        editor.requestSelect("a")
+        editor.draft.prompt = "edited"
+        editor.save()
+        expect(editor.saveError == nil && read(editing, "a")?["prompt"] as? String == "edited"
+                   && read(editing, "b")?["name"] as? String == "C",
+               "saving B writes back to a.json and leaves C's b.json alone")
+        editor.draft.name = "D"
+        editor.save()
+        expect(read(editing, "d")?["name"] as? String == "D" && !exists(editing, "a")
+                   && read(editing, "b")?["name"] as? String == "C",
+               "renaming B writes d.json and removes a.json, never b.json")
+
+        let resetting = folder("reset", handEdited)
+        let stock = folder("stock", ["a": mode("B", prompt: "Stock")])
+        let resetter = ModesViewModel(supervisor: nil, directory: resetting, packagedDirectory: stock)
+        resetter.requestSelect("a")
+        expect(resetter.resetsToDefault && resetter.canReset,
+               "B, loaded from a.json, is the shipped a mode and offers Reset")
+        resetter.resetToDefault()
+        expect(read(resetting, "a")?["prompt"] as? String == "Stock"
+                   && read(resetting, "b")?["name"] as? String == "C",
+               "Reset writes a.json, never C's b.json")
+
+        // A rename that can't remove the old file rolls back: two files
+        // would both claim the mode's apps.
+        let stuck = folder("stuck", ["banter": mode("Banter", prompt: "")])
+        let renamer = ModesViewModel(supervisor: nil, directory: stuck, packagedDirectory: noPackaged)
+        renamer.requestSelect("banter")
+        let old = stuck.appendingPathComponent("banter.json")
+        try! fm.setAttributes([.immutable: true], ofItemAtPath: old.path)
+        locked.append(old)
+        renamer.draft.name = "Chatter"
+        renamer.save()
+        expect(renamer.saveError != nil && !exists(stuck, "chatter") && exists(stuck, "banter")
+                   && renamer.selectedID == "banter" && renamer.modes.map(\.name) == ["Banter"],
+               "a rename whose old file can't be removed leaves one file and the model unchanged")
+        expect(renamer.saveErrorTitle == "Can't save mode", "a failed save says it couldn't save")
+        renamer.saveError = nil
+        if case .failed = ModesViewModel.settleBeforeQuit(open: renamer, ask: { _ in .save }) {
+            expect(!exists(stuck, "chatter"), "Quit's Save reports the failed rename and writes nothing")
+        } else {
+            expect(false, "Quit's Save reports the failed rename and keeps Velora running")
+        }
+
+        // Two files that both say "B": two modes, each its own file.
+        let twins = ["a": mode("B", prompt: "from a"), "b": mode("B", prompt: "from b")]
+        func twinsIntact(_ folder: URL) -> Bool {
+            read(folder, "a")?["prompt"] as? String == "from a"
+                && read(folder, "b")?["prompt"] as? String == "from b"
+        }
+        let pair = folder("twins", twins)
+        let twin = ModesViewModel(supervisor: nil, directory: pair, packagedDirectory: noPackaged)
+        expect(twin.modes.map(\.id) == ["a", "b"] && twin.modes.map(\.name) == ["B", "B"],
+               "two files named B list as two modes, a and b (got \(twin.modes.map(\.id)))")
+        twin.requestSelect("a")
+        twin.draft.prompt = "edited"
+        twin.save()
+        expect(twin.saveError != nil && twinsIntact(pair),
+               "saving one of two modes named B is refused before any write")
+        twin.draft.name = "D"
+        twin.save()
+        expect(twin.saveError == nil && read(pair, "d")?["prompt"] as? String == "edited"
+                   && !exists(pair, "a") && read(pair, "b")?["prompt"] as? String == "from b"
+                   && twin.modes.map(\.id) == ["b", "d"] && twin.selectedID == "d",
+               "renaming one B to D moves only a.json to d.json (ids \(twin.modes.map(\.id)))")
+        twin.requestSelect(nil)
+        twin.requestNewMode()
+        twin.draft.name = "d"
+        twin.save()
+        expect(twin.saveError != nil && read(pair, "d")?["prompt"] as? String == "edited",
+               "a new mode named d is refused: D has that name in another case")
+
+        let pruning = folder("twins-delete", twins)
+        let pruner = ModesViewModel(supervisor: nil, directory: pruning, packagedDirectory: noPackaged)
+        pruner.requestSelect("b")
+        pruner.delete()
+        expect(!exists(pruning, "b") && read(pruning, "a")?["prompt"] as? String == "from a"
+                   && pruner.modes.map(\.id) == ["a"],
+               "deleting one B removes b.json and its one row, never a's")
+
+        let restoring = folder("twins-reset", twins)
+        let twinStock = folder("twins-stock", ["a": mode("B", prompt: "Stock")])
+        let restorer = ModesViewModel(supervisor: nil, directory: restoring, packagedDirectory: twinStock)
+        restorer.requestSelect("a")
+        restorer.resetToDefault()
+        expect(read(restoring, "a")?["prompt"] as? String == "Stock"
+                   && read(restoring, "b")?["prompt"] as? String == "from b"
+                   && restorer.modes.map(\.id) == ["a", "b"],
+               "resetting one B writes a.json only")
+
+        // The stem keeps its case on disk, and a case-only rename keeps
+        // the file: the disk would call Work.json and work.json one file.
+        func listing(_ folder: URL) -> [String] {
+            ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted()
+        }
+        let cased = folder("cased", ["Work": mode("Work", prompt: "")])
+        let caser = ModesViewModel(supervisor: nil, directory: cased, packagedDirectory: noPackaged)
+        caser.requestSelect("Work")
+        caser.draft.prompt = "edited"
+        caser.save()
+        expect(caser.saveError == nil && caser.modes.map(\.id) == ["Work"]
+                   && caser.modes.map(\.stem) == ["Work"] && listing(cased) == ["Work.json"]
+                   && read(cased, "Work")?["prompt"] as? String == "edited",
+               "Work.json stays Work.json when saved (files \(listing(cased)), stems \(caser.modes.map(\.stem)))")
+        let renaming = folder("case-rename", ["a": mode("B", prompt: "")])
+        let recaser = ModesViewModel(supervisor: nil, directory: renaming, packagedDirectory: noPackaged)
+        recaser.requestSelect("a")
+        recaser.draft.name = "b"
+        recaser.save()
+        expect(recaser.saveError == nil && listing(renaming) == ["a.json"]
+                   && read(renaming, "a")?["name"] as? String == "b" && recaser.selectedID == "a",
+               "renaming B to b keeps a.json (files \(listing(renaming)))")
+
+        // Save rereads the folder: it can hold a file the list never
+        // showed. d.json isn't valid JSON, E.json is what a disk that
+        // ignores case opens for e.json, f.json arrived after the pane
+        // opened. Each refusal names the file and writes nothing.
+        let unseen = folder("unseen", ["a": mode("B", prompt: "mine"), "d": "not json", "E": "not json"])
+        func untouched(_ stem: String) -> Bool {
+            (try? String(contentsOf: unseen.appendingPathComponent("\(stem).json"), encoding: .utf8)) == "not json"
+        }
+        for (name, file) in [("D", "d.json"), ("e", "E.json"), ("F", "f.json")] {
+            let blind = ModesViewModel(supervisor: nil, directory: unseen, packagedDirectory: noPackaged)
+            if name == "F" {
+                try! Data("not json".utf8).write(to: unseen.appendingPathComponent("f.json"))
+            }
+            blind.requestSelect("a")
+            blind.draft.name = name
+            blind.save()
+            expect(blind.saveError?.contains(file) == true
+                       && untouched("d") && untouched("E") && (name != "F" || untouched("f"))
+                       && read(unseen, "a")?["name"] as? String == "B" && blind.selectedID == "a",
+                   "renaming B to \(name) is refused for \(file), which it would overwrite (\(blind.saveError ?? "saved"))")
+        }
+        let late = folder("late-new", [:])
+        let lateModel = ModesViewModel(supervisor: nil, directory: late, packagedDirectory: noPackaged)
+        lateModel.requestNewMode()
+        try! Data("not json".utf8).write(to: late.appendingPathComponent("new-mode.json"))
+        lateModel.save()
+        expect(lateModel.saveError?.contains("new-mode.json") == true
+                   && (try? String(contentsOf: late.appendingPathComponent("new-mode.json"), encoding: .utf8)) == "not json",
+               "a new mode is refused for a new-mode.json added after the pane opened (\(lateModel.saveError ?? "saved"))")
+
+        // A hand-made "New Mode.json" named Foo is the row New Mode; a
+        // new mode named New Mode is a second row with an id of its own.
+        let handMade = folder("hand-made", ["New Mode": mode("Foo", prompt: "foo")])
+        let maker = ModesViewModel(supervisor: nil, directory: handMade, packagedDirectory: noPackaged)
+        maker.requestNewMode()
+        let rowIDs = maker.modes.map(\.id)
+        expect(Set(rowIDs).count == rowIDs.count && maker.selectedName == "New Mode"
+                   && maker.selectedID != "New Mode",
+               "an unsaved mode's row id never matches a file's stem (ids \(rowIDs))")
+        maker.draft.prompt = "new"
+        maker.save()
+        expect(maker.saveError == nil && read(handMade, "New Mode")?["name"] as? String == "Foo"
+                   && read(handMade, "new-mode")?["prompt"] as? String == "new"
+                   && maker.selectedID == "new-mode" && maker.modes.count == 2,
+               "saving it writes new-mode.json beside Foo's New Mode.json (ids \(maker.modes.map(\.id)))")
+        maker.requestSelect("New Mode")
+        expect(maker.draft.name == "Foo", "the New Mode row still opens Foo")
+
+        // Modes that share a name list by file, whatever order the disk
+        // returns them in.
+        let many = folder("many-twins", Dictionary(uniqueKeysWithValues: (0..<10).map {
+            ("t\($0)", mode("Twin", prompt: "\($0)"))
+        }))
+        let byFile = (0..<10).map { "t\($0)" }
+        let manyModel = ModesViewModel(supervisor: nil, directory: many, packagedDirectory: noPackaged)
+        let loadedStems = Mode.loadAll(from: many, packaged: noPackaged).compactMap(\.stem)
+        manyModel.requestNewMode()
+        let afterNew = manyModel.modes.compactMap(\.stem)
+        expect(loadedStems == byFile && afterNew == byFile,
+               "modes named alike list by file (loaded \(loadedStems), after New Mode \(afterNew))")
+
+        // The lock marks the built-in's file, as Reset and Delete go by
+        // it: default.json named Foo is locked, x.json named Default isn't.
+        let locks = folder("locks", ["default": mode("Foo", prompt: ""), "x": mode("Default", prompt: "")])
+        var lockByStem: [String: Bool] = [:]
+        for row in Mode.loadAll(from: locks, packaged: noPackaged) {
+            lockByStem[row.stem ?? row.name] = row.isProtected
+        }
+        expect(lockByStem == ["default": true, "x": false],
+               "the lock follows default.json, not the name Default (got \(lockByStem))")
+
+        // Email keeps its name, so a hand-made x.json also named Email is
+        // the file to remove, not a name to change.
+        let shippedTwin = folder("shipped-twin", ["email": mode("Email", prompt: "mine"), "x": mode("Email", prompt: "copy")])
+        let mailer = ModesViewModel(supervisor: nil, directory: shippedTwin, packagedDirectory: noPackaged)
+        mailer.requestSelect("email")
+        mailer.draft.prompt = "edited"
+        mailer.save()
+        expect(mailer.saveError?.contains("x.json") == true
+                   && mailer.saveError?.contains("Choose a different name") == false,
+               "saving Email beside x.json named Email names x.json to delete (\(mailer.saveError ?? "saved"))")
+
+        // A hand-edited vocabulary the field tidies as it opens (spaces,
+        // a blank entry) is no edit: nothing to save, no update held.
+        let tidy = folder("tidy", [
+            "t": #"{"name":"Tidy","prompt":"","formatting":"light","apps":[],"vocabulary":[" Kubernetes ","","Velora"],"replacements":{}}"#,
+        ])
+        let tidier = ModesViewModel(supervisor: nil, directory: tidy, packagedDirectory: noPackaged)
+        tidier.requestSelect("t")
+        tidier.draft.vocabulary = Mode.parseList(tidier.draft.vocabulary.joined(separator: ", "))
+        expect(!tidier.isDirty && !ModesViewModel.hasUnsavedEdits(open: tidier),
+               "opening a hand-edited vocabulary isn't an edit (draft \(tidier.draft.vocabulary))")
+
+        // Save, Reset and Delete touch only the files the list read. One
+        // replaced or rewritten since is refused by name, and nothing is
+        // written. Each refusal says the same thing, and does it: going
+        // back to All Modes (Don't Save, for an edit) loads that version,
+        // and the next Save or Delete works without reopening Modes.
+        func changedBy(_ file: String) -> String {
+            "\(file) was changed by another app. To load that version, go back to All Modes and choose Don't Save if asked."
+        }
+        func goBackDiscarding(_ vm: ModesViewModel) {
+            vm.requestSelect(nil)
+            vm.discardAndContinue()
+        }
+        let changed = folder("changed", ["a": mode("B", prompt: "mine")])
+        let changedFile = changed.appendingPathComponent("a.json")
+        let stale = ModesViewModel(supervisor: nil, directory: changed, packagedDirectory: noPackaged)
+        stale.requestSelect("a")
+        try! Data(mode("B", prompt: "theirs").utf8).write(to: changedFile, options: .atomic)
+        stale.draft.prompt = "edited"
+        stale.save()
+        expect(stale.saveError == changedBy("a.json")
+                   && read(changed, "a")?["prompt"] as? String == "theirs",
+               "saving B over an a.json replaced since it loaded is refused (\(stale.saveError ?? "saved"))")
+        stale.saveError = nil
+        goBackDiscarding(stale)
+        let staleRow = stale.modes.first { $0.id == "a" }?.prompt
+        stale.requestSelect("a")
+        stale.draft.prompt = "mine again"
+        stale.save()
+        expect(staleRow == "theirs" && stale.saveError == nil
+                   && read(changed, "a")?["prompt"] as? String == "mine again",
+               "Don't Save loads a.json as replaced, and the next Save writes (row \(staleRow ?? "gone"), \(stale.saveError ?? "saved"))")
+        let staleDelete = ModesViewModel(supervisor: nil, directory: changed, packagedDirectory: noPackaged)
+        staleDelete.requestSelect("a")
+        try! Data(mode("B", prompt: "replaced").utf8).write(to: changedFile, options: .atomic)
+        staleDelete.delete()
+        expect(staleDelete.saveError == changedBy("a.json")
+                   && read(changed, "a")?["prompt"] as? String == "replaced"
+                   && staleDelete.selectedID == "a" && staleDelete.modes.contains { $0.id == "a" },
+               "deleting B after a.json was replaced removes nothing (\(staleDelete.saveError ?? "deleted"))")
+        staleDelete.saveError = nil
+        staleDelete.requestSelect(nil)
+        staleDelete.requestSelect("a")
+        let reopenedPrompt = staleDelete.draft.prompt
+        staleDelete.delete()
+        expect(reopenedPrompt == "replaced" && staleDelete.saveError == nil && !exists(changed, "a"),
+               "going back to All Modes loads a.json as replaced, and Delete then works (\(staleDelete.saveError ?? "deleted"))")
+        try! Data(mode("B", prompt: "mine").utf8).write(to: changedFile)
+        let staleRename = ModesViewModel(supervisor: nil, directory: changed, packagedDirectory: noPackaged)
+        staleRename.requestSelect("a")
+        try! Data(mode("B", prompt: "rewritten").utf8).write(to: changedFile)
+        staleRename.draft.name = "C"
+        staleRename.save()
+        expect(staleRename.saveError == changedBy("a.json") && !exists(changed, "c")
+                   && read(changed, "a")?["prompt"] as? String == "rewritten",
+               "renaming B after a.json was rewritten in place writes and removes nothing (\(staleRename.saveError ?? "saved"))")
+        staleRename.saveError = nil
+        goBackDiscarding(staleRename)
+        staleRename.requestSelect("a")
+        staleRename.draft.name = "C"
+        staleRename.save()
+        expect(staleRename.saveError == nil && read(changed, "c")?["prompt"] as? String == "rewritten"
+                   && !exists(changed, "a"),
+               "after Don't Save, renaming B to C moves a.json as rewritten (\(staleRename.saveError ?? "saved"))")
+
+        // The old file changes while a rename writes the new one: the
+        // cleanup refuses with the same words and takes the new file back.
+        let midRename = folder("mid-rename", ["a": mode("B", prompt: "mine")])
+        let midFile = midRename.appendingPathComponent("a.json")
+        let midRenamer = ModesViewModel(
+            supervisor: nil, directory: midRename, packagedDirectory: noPackaged,
+            writeBytes: { data, url in
+                try Data(mode("B", prompt: "theirs").utf8).write(to: midFile, options: .atomic)
+                try ModesViewModel.diskWriter(data, url)
+            })
+        midRenamer.requestSelect("a")
+        midRenamer.draft.name = "C"
+        midRenamer.save()
+        expect(midRenamer.saveError == changedBy("a.json") && !exists(midRename, "c")
+                   && read(midRename, "a")?["prompt"] as? String == "theirs",
+               "a rename whose old file changed mid-save is refused and rolled back (\(midRenamer.saveError ?? "saved"))")
+
+        // Velora's Code with no file of its own yet: a code.json that
+        // Velora can't read is still a file, so Save and Reset leave it.
+        let broken = folder("broken-code", ["code": "not json"])
+        let codeStock = folder("code-stock", ["code": mode("Code", prompt: "Stock")])
+        let coder = ModesViewModel(supervisor: nil, directory: broken, packagedDirectory: codeStock)
+        coder.requestSelect("code")
+        coder.draft.prompt = "edited"
+        coder.save()
+        let codeSave = coder.saveError
+        coder.saveError = nil
+        coder.resetToDefault()
+        let codeBytes = try? String(contentsOf: broken.appendingPathComponent("code.json"), encoding: .utf8)
+        let unreadable = "code.json isn't a mode Velora can read. Fix or remove it, then save."
+        expect(codeSave == unreadable && coder.saveError == unreadable && codeBytes == "not json",
+               "Save and Reset on stock Code leave an unreadable code.json alone (save: \(codeSave ?? "saved"), reset: \(coder.saveError ?? "reset"))")
+
+        // A create that fails partway (a full disk) leaves no file to
+        // block the next Save, and no temp file behind.
+        let partial = folder("partial", [:])
+        var diskFull = true
+        let writer = ModesViewModel(
+            supervisor: nil, directory: partial, packagedDirectory: noPackaged,
+            writeBytes: { data, url in
+                guard diskFull else {
+                    return try ModesViewModel.diskWriter(data, url)
+                }
+                diskFull = false
+                try ModesViewModel.diskWriter(data.prefix(4), url)
+                throw CocoaError(.fileWriteOutOfSpace)
+            })
+        writer.requestNewMode()
+        writer.save()
+        let failedCreate = writer.saveError
+        let afterFailure = listing(partial)
+        writer.save()
+        expect(failedCreate != nil && afterFailure.isEmpty && writer.saveError == nil
+                   && read(partial, "new-mode")?["name"] as? String == "New Mode"
+                   && listing(partial) == ["new-mode.json"],
+               "Save after a failed create writes new-mode.json (then: \(failedCreate ?? "saved"), files \(afterFailure); now: \(writer.saveError ?? "saved"), files \(listing(partial)))")
+
+        // Another app's new-mode.json lands after Save checked the folder,
+        // while Velora writes its own: the install finds it (EEXIST) and
+        // the Save is refused, their bytes untouched, no temp file left.
+        let raced = folder("raced", [:])
+        let racedFile = raced.appendingPathComponent("new-mode.json")
+        let racer = ModesViewModel(
+            supervisor: nil, directory: raced, packagedDirectory: noPackaged,
+            writeBytes: { data, url in
+                try Data("theirs".utf8).write(to: racedFile, options: .withoutOverwriting)
+                try ModesViewModel.diskWriter(data, url)
+            })
+        racer.requestNewMode()
+        racer.save()
+        expect(racer.saveError?.contains("already has new-mode.json") == true
+                   && (try? String(contentsOf: racedFile, encoding: .utf8)) == "theirs"
+                   && listing(raced) == ["new-mode.json"] && racer.isDirty,
+               "a create that finds another app's new file refuses and leaves it (\(racer.saveError ?? "saved"), files \(listing(raced)))")
+
+        // Delete that can't remove the file (locked) says so and keeps
+        // the row; the list changes only once the file is gone.
+        let pinned = folder("pinned", ["a": mode("B", prompt: "mine")])
+        let pinnedFile = pinned.appendingPathComponent("a.json")
+        try! fm.setAttributes([.immutable: true], ofItemAtPath: pinnedFile.path)
+        locked.append(pinnedFile)
+        let pinDeleter = ModesViewModel(supervisor: nil, directory: pinned, packagedDirectory: noPackaged)
+        pinDeleter.requestSelect("a")
+        pinDeleter.delete()
+        try! fm.setAttributes([.immutable: false], ofItemAtPath: pinnedFile.path)
+        expect(pinDeleter.saveError != nil && pinDeleter.saveErrorTitle == "Couldn't delete mode"
+                   && exists(pinned, "a") && pinDeleter.selectedID == "a"
+                   && pinDeleter.modes.contains { $0.id == "a" },
+               "Delete of a locked a.json is refused and B stays (\(pinDeleter.saveError ?? "deleted"))")
+
+        // A file another app already deleted is a finished Delete.
+        let gone = folder("gone", ["a": mode("B", prompt: "mine")])
+        let goner = ModesViewModel(supervisor: nil, directory: gone, packagedDirectory: noPackaged)
+        goner.requestSelect("a")
+        try! fm.removeItem(at: gone.appendingPathComponent("a.json"))
+        goner.delete()
+        expect(goner.saveError == nil && goner.selectedID == nil && goner.modes.isEmpty,
+               "Delete of a file already gone removes B's row (\(goner.saveError ?? "deleted"))")
+
+        // A draft parked while the pane was closed keeps the file it was
+        // read from: a.json replaced meanwhile refuses its Save.
+        let parking = folder("parked-stamp", ["a": mode("B", prompt: "mine")])
+        let parker = ModesViewModel(supervisor: nil, directory: parking, packagedDirectory: noPackaged)
+        parker.requestSelect("a")
+        parker.draft.prompt = "edited"
+        parker.park()
+        try! Data(mode("B", prompt: "theirs").utf8)
+            .write(to: parking.appendingPathComponent("a.json"), options: .atomic)
+        let reopened = ModesViewModel(supervisor: nil, directory: parking, packagedDirectory: noPackaged)
+        let restoredDraft = reopened.draft.prompt
+        reopened.save()
+        expect(restoredDraft == "edited" && reopened.saveError == changedBy("a.json")
+                   && read(parking, "a")?["prompt"] as? String == "theirs",
+               "a parked draft's Save after a.json was replaced is refused (\(reopened.saveError ?? "saved"))")
+        reopened.park()
+        let quitCheck = ModesViewModel.settleBeforeQuit(open: nil, ask: { _ in .save })
+        let quitRefused: Bool
+        if case .failed(let reason) = quitCheck {
+            quitRefused = reason == changedBy("a.json")
+        } else {
+            quitRefused = false
+        }
+        expect(quitRefused && read(parking, "a")?["prompt"] as? String == "theirs",
+               "Quit's Save of that parked draft is refused too (\(quitCheck))")
+        let returned = ModesViewModel(supervisor: nil, directory: parking, packagedDirectory: noPackaged)
+        returned.save()
+        let parkedRefusal = returned.saveError
+        returned.saveError = nil
+        goBackDiscarding(returned)
+        let parkedRow = returned.modes.first { $0.id == "a" }?.prompt
+        returned.requestSelect("a")
+        returned.draft.prompt = "new edit"
+        returned.save()
+        expect(parkedRefusal == changedBy("a.json") && parkedRow == "theirs" && returned.saveError == nil
+                   && read(parking, "a")?["prompt"] as? String == "new edit" && !ModesViewModel.hasUnsavedEdits(open: nil),
+               "Don't Save on the restored draft loads a.json as replaced, and a new edit saves (row \(parkedRow ?? "gone"), \(returned.saveError ?? "saved"))")
+
+        // The engine installs a missing built-in on reload. A code.json
+        // equal to Velora's own is that install, so Save replaces it; one
+        // that differs is someone else's, and stays.
+        let installing = folder("engine-install", [:])
+        let installed = installing.appendingPathComponent("code.json")
+        let installer = ModesViewModel(supervisor: nil, directory: installing, packagedDirectory: codeStock)
+        installer.requestSelect("code")
+        try! fm.copyItem(at: codeStock.appendingPathComponent("code.json"), to: installed)
+        installer.draft.prompt = "edited"
+        installer.save()
+        expect(installer.saveError == nil && read(installing, "code")?["prompt"] as? String == "edited",
+               "Save of stock Code replaces the code.json the engine installed (\(installer.saveError ?? "saved"))")
+        let foreign = folder("foreign-code", [:])
+        let foreigner = ModesViewModel(supervisor: nil, directory: foreign, packagedDirectory: codeStock)
+        foreigner.requestSelect("code")
+        try! Data(mode("Code", prompt: "theirs").utf8).write(to: foreign.appendingPathComponent("code.json"))
+        foreigner.draft.prompt = "edited"
+        foreigner.save()
+        let foreignSave = foreigner.saveError
+        foreigner.saveError = nil
+        foreigner.resetToDefault()
+        expect(foreignSave == changedBy("code.json") && foreigner.saveError == changedBy("code.json")
+                   && read(foreign, "code")?["prompt"] as? String == "theirs",
+               "Save and Reset of stock Code leave a code.json that isn't Velora's (save: \(foreignSave ?? "saved"), reset: \(foreigner.saveError ?? "reset"))")
+        foreigner.saveError = nil
+        goBackDiscarding(foreigner)
+        foreigner.requestSelect("code")
+        let foreignDraft = foreigner.draft.prompt
+        foreigner.resetToDefault()
+        expect(foreignDraft == "theirs" && foreigner.saveError == nil
+                   && read(foreign, "code")?["prompt"] as? String == "Stock",
+               "after Don't Save, Code shows that code.json and Reset restores Velora's (\(foreigner.saveError ?? "reset"))")
+
+        // A parked draft whose file went while the pane was closed (deleted,
+        // or no longer a mode Velora can read) comes back as an unsaved mode
+        // with its name and edits, so Quit still asks about it.
+        let damages: [(label: String, damage: (URL) -> Void)] = [
+            ("deleted", { try! fm.removeItem(at: $0) }),
+            ("made unreadable", { try! Data("not json".utf8).write(to: $0) }),
+        ]
+        for (index, loss) in damages.enumerated() {
+            let lost = folder("parked-lost-\(index)", ["a": mode("B", prompt: "mine")])
+            let leaver = ModesViewModel(supervisor: nil, directory: lost, packagedDirectory: noPackaged)
+            leaver.requestSelect("a")
+            leaver.draft.prompt = "edited"
+            leaver.park()
+            loss.damage(lost.appendingPathComponent("a.json"))
+            let back = ModesViewModel(supervisor: nil, directory: lost, packagedDirectory: noPackaged)
+            expect(back.hasSelection && back.draft.name == "B" && back.draft.prompt == "edited"
+                       && back.isDirty && ModesViewModel.unsavedModeName(open: back) == "B"
+                       && back.modes.contains { $0.id == back.selectedID },
+                   "a parked draft whose a.json was \(loss.label) comes back as unsaved B (selected \(back.selectedID ?? "nil"))")
+            back.park()
+            var asked: String?
+            _ = ModesViewModel.settleBeforeQuit(open: nil, ask: { asked = $0; return .dontSave })
+            expect(asked == "B", "Quit asks about B once a.json was \(loss.label) (asked \(asked ?? "nothing"))")
+        }
+
+        // The file the list read is gone: Save writes it afresh. Rewritten
+        // as something Velora can't read: Save says that, not "changed".
+        let vanished = folder("vanished", ["a": mode("B", prompt: "mine")])
+        let recreator = ModesViewModel(supervisor: nil, directory: vanished, packagedDirectory: noPackaged)
+        recreator.requestSelect("a")
+        try! fm.removeItem(at: vanished.appendingPathComponent("a.json"))
+        recreator.draft.prompt = "edited"
+        recreator.save()
+        expect(recreator.saveError == nil && read(vanished, "a")?["prompt"] as? String == "edited",
+               "Save after another app deleted a.json writes it again (\(recreator.saveError ?? "saved"))")
+        let garbled = folder("garbled", ["a": mode("B", prompt: "mine")])
+        let garbledFile = garbled.appendingPathComponent("a.json")
+        let garbler = ModesViewModel(supervisor: nil, directory: garbled, packagedDirectory: noPackaged)
+        garbler.requestSelect("a")
+        try! Data("not json".utf8).write(to: garbledFile)
+        garbler.draft.prompt = "edited"
+        garbler.save()
+        expect(garbler.saveError == "a.json isn't a mode Velora can read. Fix or remove it, then save."
+                   && (try? String(contentsOf: garbledFile, encoding: .utf8)) == "not json",
+               "Save after a.json turned unreadable says so and leaves it (\(garbler.saveError ?? "saved"))")
+
+        // A modes folder Velora can't list isn't an empty one: Delete says
+        // why and removes nothing.
+        let sealed = folder("sealed", ["a": mode("B", prompt: "mine")])
+        let sealer = ModesViewModel(supervisor: nil, directory: sealed, packagedDirectory: noPackaged)
+        sealer.requestSelect("a")
+        try! fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: sealed.path)
+        sealer.delete()
+        try! fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sealed.path)
+        expect(sealer.saveError != nil && sealer.saveErrorTitle == "Couldn't delete mode" && exists(sealed, "a")
+                   && sealer.selectedID == "a" && sealer.modes.contains { $0.id == "a" },
+               "Delete in a folder Velora can't list is refused and B stays (\(sealer.saveError ?? "deleted"))")
+
+        // A volume without RENAME_EXCL (ENOTSUP, EINVAL) still creates
+        // exclusively, by hard link: the file lands, a taken name is refused.
+        let linked = folder("no-excl", [:])
+        let linker = ModesViewModel(
+            supervisor: nil, directory: linked, packagedDirectory: noPackaged,
+            renameExclusive: { _, _ in ENOTSUP })
+        linker.requestNewMode()
+        linker.save()
+        expect(linker.saveError == nil && read(linked, "new-mode")?["name"] as? String == "New Mode"
+                   && listing(linked) == ["new-mode.json"],
+               "without RENAME_EXCL a new mode still saves (\(linker.saveError ?? "saved"), files \(listing(linked)))")
+        let linkRaced = folder("no-excl-raced", [:])
+        let linkRacedFile = linkRaced.appendingPathComponent("new-mode.json")
+        let linkRacer = ModesViewModel(
+            supervisor: nil, directory: linkRaced, packagedDirectory: noPackaged,
+            writeBytes: { data, url in
+                try Data("theirs".utf8).write(to: linkRacedFile, options: .withoutOverwriting)
+                try ModesViewModel.diskWriter(data, url)
+            },
+            renameExclusive: { _, _ in EINVAL })
+        linkRacer.requestNewMode()
+        linkRacer.save()
+        expect(linkRacer.saveError?.contains("already has new-mode.json") == true
+                   && (try? String(contentsOf: linkRacedFile, encoding: .utf8)) == "theirs"
+                   && listing(linkRaced) == ["new-mode.json"],
+               "without RENAME_EXCL another app's new file is still refused and kept (\(linkRacer.saveError ?? "saved"), files \(listing(linkRaced)))")
+
+        // Temp files are .velora-<UUID>.partial, whatever the mode's name:
+        // a 230-character name fits (its own temp name would not). One a
+        // crash left goes when Modes next loads, once it's an hour old.
+        func isTempName(_ name: String) -> Bool {
+            guard name.hasPrefix(".velora-"), name.hasSuffix(".partial") else {
+                return false
+            }
+            return UUID(uuidString: String(name.dropFirst(".velora-".count).dropLast(".partial".count))) != nil
+        }
+        let longName = String(repeating: "x", count: 230)
+        let lengthy = folder("long-name", [:])
+        var tempNames: [String] = []
+        let namer = ModesViewModel(
+            supervisor: nil, directory: lengthy, packagedDirectory: noPackaged,
+            writeBytes: { data, url in
+                tempNames.append(url.lastPathComponent)
+                try ModesViewModel.diskWriter(data, url)
+            })
+        namer.requestNewMode()
+        namer.draft.name = longName
+        namer.save()
+        expect(namer.saveError == nil && exists(lengthy, longName) && tempNames.count == 1
+                   && tempNames.allSatisfy(isTempName) && listing(lengthy) == ["\(longName).json"],
+               "a 230-character name saves through a .velora-<UUID>.partial temp (temps \(tempNames), \(namer.saveError ?? "saved"))")
+        let littered = folder("litter", ["a": mode("B", prompt: "mine")])
+        let staleTemp = littered.appendingPathComponent(".velora-\(UUID().uuidString).partial")
+        let freshTemp = littered.appendingPathComponent(".velora-\(UUID().uuidString).partial")
+        let notOurs = littered.appendingPathComponent(".other-\(UUID().uuidString).partial")
+        let twoHoursAgo = Date(timeIntervalSinceNow: -2 * 60 * 60)
+        for url in [staleTemp, freshTemp, notOurs] {
+            try! Data("x".utf8).write(to: url)
+        }
+        for url in [staleTemp, notOurs] {
+            try! fm.setAttributes([.modificationDate: twoHoursAgo], ofItemAtPath: url.path)
+        }
+        _ = ModesViewModel(supervisor: nil, directory: littered, packagedDirectory: noPackaged)
+        expect(!fm.fileExists(atPath: staleTemp.path) && fm.fileExists(atPath: freshTemp.path)
+                   && fm.fileExists(atPath: notOurs.path) && exists(littered, "a"),
+               "loading Modes removes only a .velora-*.partial over an hour old (files \(listing(littered)))")
+
+        // Only a regular file named .velora-<UUID>.partial is a temp: a
+        // look-alike name, a directory and a symlink stay, however old.
+        let lookalikes = folder("litter-lookalikes", [:])
+        let notUUID = lookalikes.appendingPathComponent(".velora-notauuid.partial")
+        let dirTemp = lookalikes.appendingPathComponent(".velora-\(UUID().uuidString).partial", isDirectory: true)
+        let linkTemp = lookalikes.appendingPathComponent(".velora-\(UUID().uuidString).partial")
+        let linkTarget = root.appendingPathComponent("link-target-\(UUID().uuidString).txt")
+        try! Data("x".utf8).write(to: notUUID)
+        try! fm.createDirectory(at: dirTemp, withIntermediateDirectories: false)
+        try! Data("keep".utf8).write(to: dirTemp.appendingPathComponent("keep.txt"))
+        try! Data("target".utf8).write(to: linkTarget)
+        try! fm.createSymbolicLink(at: linkTemp, withDestinationURL: linkTarget)
+        for url in [notUUID, dirTemp] {
+            try! fm.setAttributes([.modificationDate: twoHoursAgo], ofItemAtPath: url.path)
+        }
+        let then = Int(twoHoursAgo.timeIntervalSince1970)
+        var linkTimes = [timeval(tv_sec: then, tv_usec: 0), timeval(tv_sec: then, tv_usec: 0)]
+        let linkAged = lutimes(linkTemp.path, &linkTimes) == 0
+        _ = ModesViewModel(supervisor: nil, directory: lookalikes, packagedDirectory: noPackaged)
+        expect(fm.fileExists(atPath: notUUID.path),
+               "loading Modes keeps an old .velora-notauuid.partial (files \(listing(lookalikes)))")
+        expect(fm.fileExists(atPath: dirTemp.appendingPathComponent("keep.txt").path),
+               "loading Modes keeps an old directory named .velora-<UUID>.partial (files \(listing(lookalikes)))")
+        expect(linkAged && (try? fm.destinationOfSymbolicLink(atPath: linkTemp.path)) != nil
+                   && fm.fileExists(atPath: linkTarget.path),
+               "loading Modes keeps an old symlink named .velora-<UUID>.partial (aged \(linkAged), files \(listing(lookalikes)))")
+
+        // A file Velora can't stat isn't a file that's gone: Delete and
+        // Save refuse and keep the identity they read, and work once the
+        // read does.
+        let cantCheck = "Velora couldn't check a.json for changes. Try again."
+        var deleteStatFails = false
+        let blindDeleting = folder("unchecked-delete", ["a": mode("B", prompt: "mine")])
+        let blindDeleter = ModesViewModel(
+            supervisor: nil, directory: blindDeleting, packagedDirectory: noPackaged,
+            canReadStamp: { _ in !deleteStatFails })
+        blindDeleter.requestSelect("a")
+        deleteStatFails = true
+        blindDeleter.delete()
+        let blindDelete = blindDeleter.saveError
+        blindDeleter.saveError = nil
+        deleteStatFails = false
+        expect(blindDelete == cantCheck && exists(blindDeleting, "a")
+                   && blindDeleter.selectedID == "a" && blindDeleter.modes.contains { $0.id == "a" },
+               "Delete while a.json can't be checked is refused and keeps it (\(blindDelete ?? "deleted"))")
+        blindDeleter.delete()
+        expect(blindDeleter.saveError == nil && !exists(blindDeleting, "a"),
+               "once a.json can be checked, Delete removes it (\(blindDeleter.saveError ?? "deleted"))")
+        var saveStatFails = false
+        let blindSaving = folder("unchecked-save", ["a": mode("B", prompt: "mine")])
+        let blindSaver = ModesViewModel(
+            supervisor: nil, directory: blindSaving, packagedDirectory: noPackaged,
+            canReadStamp: { _ in !saveStatFails })
+        blindSaver.requestSelect("a")
+        blindSaver.draft.prompt = "edited"
+        saveStatFails = true
+        blindSaver.save()
+        let blindSave = blindSaver.saveError
+        blindSaver.saveError = nil
+        saveStatFails = false
+        expect(blindSave == cantCheck && read(blindSaving, "a")?["prompt"] as? String == "mine",
+               "Save while a.json can't be checked is refused and writes nothing (\(blindSave ?? "saved"))")
+        blindSaver.save()
+        expect(blindSaver.saveError == nil && read(blindSaving, "a")?["prompt"] as? String == "edited",
+               "once a.json can be checked, Save writes it (\(blindSaver.saveError ?? "saved"))")
+
+        // Velora's Code keeps its name, so a code.json that lands mid-save
+        // (the engine installing it) asks for another try, not a new name.
+        let builtinRace = folder("builtin-raced", [:])
+        let builtinFile = builtinRace.appendingPathComponent("code.json")
+        let builtinRacer = ModesViewModel(
+            supervisor: nil, directory: builtinRace, packagedDirectory: codeStock,
+            writeBytes: { data, url in
+                try? fm.copyItem(at: codeStock.appendingPathComponent("code.json"), to: builtinFile)
+                try ModesViewModel.diskWriter(data, url)
+            })
+        builtinRacer.requestSelect("code")
+        builtinRacer.draft.prompt = "edited"
+        builtinRacer.save()
+        let builtinRefusal = builtinRacer.saveError
+        builtinRacer.saveError = nil
+        builtinRacer.save()
+        expect(builtinRefusal?.hasSuffix("Try saving again.") == true
+                   && builtinRefusal?.contains("Choose a different name") == false
+                   && builtinRacer.saveError == nil && read(builtinRace, "code")?["prompt"] as? String == "edited",
+               "stock Code raced by the engine's install asks to save again, and that save works (\(builtinRefusal ?? "saved"), then \(builtinRacer.saveError ?? "saved"))")
+    }
+
+    /// The id of the mode named `name` in `vm`'s list: its file stem once
+    /// saved, its name until then.
+    private static func modeID(_ vm: ModesViewModel, _ name: String) -> String? {
+        vm.modes.first { $0.name == name }?.id
+    }
+
+    /// Unsaved mode edits hold an update relaunch (its helper hard-exits
+    /// 75 s after quit starts, past any Cancel), and Quit asks once at a
+    /// time. The update window names the mode and offers Show Modes.
+    private static func testModesQuitGuards() {
+        expect(UpdateRelaunchSafety.block(
+            dictationBusy: false, fileTranscriptionBusy: false, meetingCaptureBusy: false,
+            unsavedMode: "Work") == .unsavedMode("Work"),
+               "an update relaunch waits for unsaved edits to Work")
+        let waiting = UpdateCopy.caption(
+            for: .ready(version: "1.2.3"), installsWhenReady: true, waitingFor: .unsavedMode("Work"))
+        expect(waiting == "Save or discard your changes to “Work” to install.",
+               "the update window names the mode it waits on (got \(waiting ?? "nil"))")
+        let window = UpdateWindowModel(preview: UpdateWindowModel.Preview(
+            installerState: .ready(version: "1.2.3"), installsWhenReady: true,
+            installBlocker: nil, waitingFor: .unsavedMode("Work")))
+        var shown = 0
+        let previousShowModes = UpdateWindowModel.showModes
+        UpdateWindowModel.showModes = { shown += 1 }
+        window.showModes()
+        UpdateWindowModel.showModes = previousShowModes
+        expect(window.waitingModeName == "Work" && shown == 1,
+               "the update window's Show Modes opens Modes while an install waits on Work")
+
+        // Local agents asking `status` hear that edits hold a restart, not
+        // the update window's words or the mode's name.
+        let agentReason = UpdateRelaunchSafety.Block.unsavedMode("Work").controlReason
+        expect(!agentReason.contains("Work") && !agentReason.contains("install"),
+               "the control socket's restart reason is neutral (got \(agentReason))")
+
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("velora-modes-quit-\(UUID().uuidString)")
+        let noPackaged = root.appendingPathComponent("no-packaged", isDirectory: true)
+        let user = root.appendingPathComponent("user", isDirectory: true)
+        for folder in [noPackaged, user] {
+            try! fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: user.path)
+            try? fm.removeItem(at: root)
+        }
+
+        // The menubar's waiting row names the mode too, and opens Modes;
+        // work that finishes by itself leaves the row inert.
+        let menuHistory = HistoryStore(url: root.appendingPathComponent("history.sqlite3"))
+        let menubar = StatusItemController(history: menuHistory)
+        let modesRow = menubar.updateWaitingItem(version: "1.2.3", waitingFor: .unsavedMode("Work"))
+        UpdateWindowModel.showModes = { shown += 1 }
+        if let action = modesRow.action, modesRow.target === menubar {
+            _ = menubar.perform(action)
+        }
+        UpdateWindowModel.showModes = previousShowModes
+        expect(modesRow.toolTip == waiting && modesRow.isEnabled && shown == 2,
+               "the menubar's waiting row names Work and opens Modes (tooltip \(modesRow.toolTip ?? "nil"))")
+        let busyRow = menubar.updateWaitingItem(
+            version: "1.2.3", waitingFor: .busy("Waiting for dictation or voice editing to finish"))
+        expect(busyRow.action == nil && !busyRow.isEnabled
+                   && busyRow.toolTip == "Velora 1.2.3 installs when current work finishes.",
+               "a waiting row held by dictation stays inert")
+
+        try! Data(#"{"name":"Work","prompt":"Mail","formatting":"full","apps":[],"vocabulary":[],"replacements":{}}"#.utf8)
+            .write(to: user.appendingPathComponent("work.json"))
+
+        // The model's init takes any draft an earlier check parked. The
+        // hold goes by the mode's saved name, not each letter typed.
+        let vm = ModesViewModel(supervisor: nil, directory: user, packagedDirectory: noPackaged)
+        let clean = ModesViewModel(supervisor: nil, directory: user, packagedDirectory: noPackaged)
+        expect(!ModesViewModel.hasUnsavedEdits(open: vm), "a clean Modes pane holds no update back")
+        vm.requestSelect(modeID(vm, "Work"))
+        vm.draft.prompt = "Unsaved"
+        vm.draft.name = "Wor"
+        expect(ModesViewModel.unsavedModeName(open: vm) == "Work",
+               "an open unsaved edit holds the update relaunch, by its saved name (got \(ModesViewModel.unsavedModeName(open: vm) ?? "nil"))")
+        vm.park()
+        expect(ModesViewModel.unsavedModeName(open: nil) == "Work",
+               "a draft parked when the pane closed holds it too, by its saved name")
+
+        // An open, clean pane is the truth: a parked copy another model
+        // left behind doesn't hold the update.
+        expect(!ModesViewModel.hasUnsavedEdits(open: clean),
+               "an open clean pane holds no update back, whatever was parked")
+
+        // One quit prompt at a time: a quit while it's up is cancelled.
+        // The prompt's model takes the parked draft, and the update still
+        // waits on it while the prompt is up.
+        var asks = 0
+        var reentered: Bool?
+        var heldDuringPrompt: String?
+        var askedAbout: String?
+        let answered = ModesViewModel.confirmQuit(open: nil, ask: { name in
+            asks += 1
+            askedAbout = name
+            heldDuringPrompt = ModesViewModel.hasUnsavedEdits(open: nil)
+                ? ModesViewModel.unsavedModeName(open: nil) : nil
+            reentered = ModesViewModel.confirmQuit(
+                open: nil, ask: { _ in asks += 1; return .dontSave }, report: { _ in })
+            return .cancel
+        }, report: { _ in })
+        expect(!answered && reentered == false && asks == 1,
+               "a quit that arrives while the prompt is up is cancelled, not asked again")
+        expect(heldDuringPrompt == "Work" && askedAbout == "Work",
+               "the quit prompt's draft still holds the update while the prompt is up")
+
+        // Also while a failed save's report is up.
+        try! fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: user.path)
+        var reported: [String] = []
+        let failed = ModesViewModel.confirmQuit(open: nil, ask: { _ in .save }, report: { reason in
+            reported.append(reason)
+            reentered = ModesViewModel.confirmQuit(
+                open: nil, ask: { _ in asks += 1; return .dontSave }, report: { _ in })
+        })
+        try! fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: user.path)
+        expect(!failed && reported.count == 1 && reentered == false && asks == 1,
+               "a quit during the failed-save report is cancelled, not asked again")
+
+        expect(ModesViewModel.confirmQuit(open: nil, ask: { _ in .dontSave }, report: { _ in })
+                   && !ModesViewModel.hasUnsavedEdits(open: nil),
+               "once the prompt closes, Quit asks again and Don't Save lets it through")
+
+        // A mode not saved yet goes by the name it's being given: a new
+        // one named Client, a copy of Work named Standup.
+        func named(_ open: ModesViewModel) -> (caption: String?, asked: String?) {
+            let block = UpdateRelaunchSafety.block(
+                dictationBusy: false, fileTranscriptionBusy: false, meetingCaptureBusy: false,
+                unsavedMode: ModesViewModel.unsavedModeName(open: open))
+            var asked: String?
+            _ = ModesViewModel.settleBeforeQuit(open: open, ask: { asked = $0; return .cancel })
+            return (UpdateCopy.caption(
+                for: .ready(version: "1.2.3"), installsWhenReady: true, waitingFor: block), asked)
+        }
+        let newcomer = ModesViewModel(supervisor: nil, directory: user, packagedDirectory: noPackaged)
+        newcomer.requestNewMode()
+        newcomer.draft.name = "Client"
+        let client = named(newcomer)
+        expect(client.caption == UpdateCopy.saveModeToInstall("Client") && client.asked == "Client",
+               "a new mode named Client holds the update as Client (caption \(client.caption ?? "nil"), asked \(client.asked ?? "nil"))")
+        newcomer.draft.name = " "
+        expect(ModesViewModel.unsavedModeName(open: newcomer) == "New Mode",
+               "a new mode with a blank name goes by New Mode")
+        let copier = ModesViewModel(supervisor: nil, directory: user, packagedDirectory: noPackaged)
+        copier.requestSelect(modeID(copier, "Work"))
+        copier.requestDuplicate()
+        copier.draft.name = "Standup"
+        let standup = named(copier)
+        expect(standup.caption == UpdateCopy.saveModeToInstall("Standup") && standup.asked == "Standup",
+               "a copy of Work named Standup holds the update as Standup (caption \(standup.caption ?? "nil"), asked \(standup.asked ?? "nil"))")
+        copier.draft.name = " "
+        expect(ModesViewModel.unsavedModeName(open: copier) == copier.selectedName
+                   && copier.selectedName == "Work Copy",
+               "a copy with a blank name goes by its row's name, Work Copy (got \(ModesViewModel.unsavedModeName(open: copier) ?? "nil"))")
     }
 
     // MARK: - HUD waveform-first geometry
@@ -11554,6 +13033,83 @@ enum Selftest {
                "a Slack take stopped from Home is copied, not typed (got \(stopped), \"\(focusedField.string)\")")
         expect(stoppedTally.history == 1 && stoppedTally.copied == 1 && stoppedTally.posted == 0,
                "a Slack take stopped from Home records History once and shows Copied to clipboard")
+    }
+
+    /// The selected sidebar row turns accent only while its list has focus
+    /// in the key window, as in Finder: grey in an inactive window, and in
+    /// a key window whose focus is elsewhere.
+    private static func testSidebarFocus() {
+        let cases: [(Bool, ControlActiveState, SidebarFocus)] = [
+            (true, .key, .focused),
+            (true, .active, .inactive),
+            (true, .inactive, .inactive),
+            (false, .key, .inactive),
+        ]
+        for (listFocused, window, expected) in cases {
+            let focus = SidebarFocus(listFocused: listFocused, window: window)
+            expect(focus == expected,
+                   "list focused \(listFocused) in a \(window) window is \(expected) (got \(focus))")
+        }
+    }
+
+    /// ↑ and ↓ step through the main sidebar in order and stop at its
+    /// ends, as Finder's and Notes' sidebars do; ← and → leave it alone.
+    private static func testSidebarArrowKeys() {
+        let panes = MainPane.allCases
+        for (index, pane) in panes.enumerated() {
+            let below = panes[min(index + 1, panes.count - 1)]
+            let above = panes[max(index - 1, 0)]
+            expect(pane.moved(.down) == below,
+                   "↓ from \(pane.title) selects \(below.title) (got \(pane.moved(.down).title))")
+            expect(pane.moved(.up) == above,
+                   "↑ from \(pane.title) selects \(above.title) (got \(pane.moved(.up).title))")
+            expect(pane.moved(.left) == pane && pane.moved(.right) == pane,
+                   "← and → keep \(pane.title) selected")
+        }
+
+        // The real sidebar in a transparent shell window: Tab lands on it
+        // and the arrow keys walk the panes.
+        let selection = MainWindowSelection()
+        let window = MainWindowController.makeShellWindow(
+            rootView: WindowShell {
+                MainSidebar(selection: selection, supervisor: nil, openSettings: {})
+            } detail: {
+                Color.clear
+            },
+            title: "Selftest", size: NSSize(width: 1180, height: 760),
+            minimumSize: NSSize(width: 960, height: 620))
+        window.alphaValue = 0
+        defer { window.close() }
+        window.orderFrontRegardless()
+        waitUntil(timeout: 0.4) { false }
+        window.selectNextKeyView(nil)
+        waitUntil(timeout: 0.2) { false }
+
+        func press(_ key: Int, _ character: Int) {
+            let text = String(UnicodeScalar(UInt32(character)).map(Character.init) ?? " ")
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [.numericPad, .function],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: text, charactersIgnoringModifiers: text,
+                isARepeat: false, keyCode: UInt16(key)) else {
+                return
+            }
+            window.sendEvent(event)
+            waitUntil(timeout: 0.2) { false }
+        }
+        let downArrow = (key: 125, character: NSDownArrowFunctionKey)
+        let upArrow = (key: 126, character: NSUpArrowFunctionKey)
+
+        press(downArrow.key, downArrow.character)
+        expect(selection.current == .history,
+               "Tab then ↓ in the sidebar selects History (got \(selection.current.title))")
+        press(downArrow.key, downArrow.character)
+        press(upArrow.key, upArrow.character)
+        press(upArrow.key, upArrow.character)
+        expect(selection.current == .home,
+               "↑ walks the sidebar back to Home (got \(selection.current.title))")
+        window.orderOut(nil)
     }
 
     /// The meetings list in a real window: Tab lands on its first row, ↓
