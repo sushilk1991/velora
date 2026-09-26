@@ -589,8 +589,8 @@ def process_gone(pid: int) -> bool:
     return False
 
 
-# SIGKILL lands this late in the tests below: long enough that a caller which
-# waits for the exit is plainly slower than CALLER_WAIT_MAX_S.
+# SIGKILL lands this late in the tests below, so a worker still alive when a
+# caller returns shows the caller did not wait for its exit.
 LATE_KILL_S = 3.0
 # SIGTERM wait + SIGKILL wait (0.5 s each) plus slack for a loaded machine.
 CALLER_WAIT_MAX_S = 2.0
@@ -763,8 +763,8 @@ async def test_replacement_waits_for_a_worker_outliving_the_reap_wait(
 async def test_cancelled_wedged_chunk_returns_before_the_worker_exits(
     monkeypatch,
 ) -> None:
-    """Cancelling a wedged chunk returns in about a second, however late
-    SIGKILL lands; the replacement still waits for the old worker's exit.
+    """Cancelling a wedged chunk returns before the worker exits, however
+    late SIGKILL lands; the replacement still waits for that exit.
 
     Before: the cancel waited for the exit, up to 5.5 s, on the streaming path.
     """
@@ -783,11 +783,11 @@ async def test_cancelled_wedged_chunk_returns_before_the_worker_exits(
             cleanup.cleanup("__hang__", "system", timeout_ms=60_000))
         await asyncio.sleep(0.2)
 
-        started = time.monotonic()
         chunk.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await chunk
-        assert time.monotonic() - started < CALLER_WAIT_MAX_S
+        # A hang detector, not a latency bound: the live worker below shows
+        # the cancel did not wait for its exit.
+        done, _ = await asyncio.wait({chunk}, timeout=CLOSE_HANG_S)
+        assert chunk in done, f"the cancel still waits after {CLOSE_HANG_S:.0f} s"
         assert not process_gone(wedged_pid)
 
         await wait_until_loaded(cleanup, timeout_s=LATE_KILL_S + 5)
@@ -802,8 +802,8 @@ async def test_cancelled_wedged_chunk_returns_before_the_worker_exits(
 async def test_defer_during_a_wedged_reload_returns_before_the_worker_exits(
     monkeypatch, tmp_path,
 ) -> None:
-    """A dictation start that interrupts a wedged replacement load waits about
-    a second, not for SIGKILL to land.
+    """A dictation start that interrupts a wedged replacement load does not
+    wait for SIGKILL to land.
 
     Before: `defer_recovery` waited for the exit, up to 5.5 s, before the
     dictation could start.
@@ -819,9 +819,12 @@ async def test_defer_during_a_wedged_reload_returns_before_the_worker_exits(
         await wait_until_wedged(tmp_path / "loads")
         assert len(spawned) == 2
 
-        started = time.monotonic()
-        await cleanup.defer_recovery()
-        assert time.monotonic() - started < CALLER_WAIT_MAX_S
+        deferring = asyncio.create_task(cleanup.defer_recovery())
+        # A hang detector, not a latency bound: the live worker below shows
+        # the defer did not wait for its exit.
+        done, _ = await asyncio.wait({deferring}, timeout=CLOSE_HANG_S)
+        assert deferring in done, f"the defer still waits after {CLOSE_HANG_S:.0f} s"
+        deferring.result()
         assert not process_gone(spawned[1])
 
         # Dictations that interrupt the wait for that exit load nothing, so
@@ -1135,6 +1138,75 @@ async def test_aclose_after_its_caller_was_cancelled_finishes(
             "a reaped worker never exited",
             timeout_s=CLOSE_HANG_S,
         )
+    finally:
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+
+
+async def test_a_cancelled_stop_still_fails_the_calls_waiting_on_it(
+    monkeypatch, tmp_path,
+) -> None:
+    """A worker stop that a cancel cuts short still fails the calls waiting
+    on that worker, so they return at once, not at their own deadline.
+
+    Before: the cancel skipped the loop that fails them, and the reader that
+    would have failed them was already cancelled.
+    """
+    spawned, _ = record_spawns(monkeypatch)
+    reaping = asyncio.Event()
+    reap = CleanupProcess._reap
+
+    async def signalled_reap(self, process):
+        reaping.set()
+        await reap(self, process)
+
+    monkeypatch.setattr(CleanupProcess, "_reap", signalled_reap)
+    command = fixture_command() + ["--hang-marker-dir", str(tmp_path)]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        hung = await load_then_wedge(cleanup, tmp_path)
+
+        stopping = asyncio.create_task(cleanup._stop_worker())
+        # The worker ignores SIGTERM, so the reap waits EXIT_WAIT_S for it:
+        # the cancel lands inside that wait.
+        await asyncio.wait_for(reaping.wait(), CLOSE_HANG_S)
+        stopping.cancel()
+        # The call's own deadline is 60 s away.
+        done, _ = await asyncio.wait({hung, stopping}, timeout=CLOSE_HANG_S)
+
+        assert stopping in done and stopping.cancelled()
+        assert hung in done
+        assert hung.result().reason.startswith("error:")
+    finally:
+        await cleanup.aclose()
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+
+
+def fail_close_before_reap(cleanup: CleanupProcess) -> None:
+    """Make `cleanup`'s close fail before it reaps the worker: the recovery
+    that close waits on has failed."""
+
+    async def failed_recovery() -> None:
+        raise RuntimeError("recovery failed")
+
+    cleanup._recovery_task = asyncio.create_task(failed_recovery())
+
+
+async def test_a_close_that_fails_still_reaps_the_worker(monkeypatch) -> None:
+    """aclose() leaves the worker exited or retired even when a recovery it
+    waits on has failed, and then raises that failure.
+
+    Before: the failure skipped the reap, so the worker outlived its proxy.
+    """
+    spawned, _ = record_spawns(monkeypatch)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        pid = cleanup.pid
+        fail_close_before_reap(cleanup)
+
+        with pytest.raises(RuntimeError, match="recovery failed"):
+            await cleanup.aclose()
+        assert exited_or_retired(pid)
     finally:
         kill_workers(pid for pid in spawned if not process_gone(pid))
 

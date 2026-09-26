@@ -982,33 +982,47 @@ class Engine:
         if task is not None and not task.done():
             return
         self._cleanup_retry_task = asyncio.create_task(self._retry_cleanup_load())
+        self._cleanup_retry_task.add_done_callback(self._log_cleanup_retry_failure)
 
-    async def _stop_cleanup_retry(self) -> None:
-        """Cancel a running retry and wait until its worker is reaped.
+    @staticmethod
+    def _log_cleanup_retry_failure(task: asyncio.Task[None]) -> None:
+        """Log a retry that ends in an error, as it ends.
 
-        `asyncio.wait` does not carry a cancel of the caller into the retry,
-        so the retry's reap runs to its end, and the cancel reaches the
-        caller after. It raises only for a cancel that lands during the
-        wait, so one the caller swallowed earlier does not count.
+        Nothing else reads the retry's result: a stop may come much later or
+        never, and a stop whose caller is cancelled raises that cancel.
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            log.warning("writing model retry failed; dictations stay raw", exc_info=error)
+
+    async def _end_cleanup_retry(self) -> asyncio.CancelledError | None:
+        """Cancel the retry and wait until it has ended, its worker reaped.
+
+        Never raises, so shutdown's `finally` runs on past it. `asyncio.wait`
+        does not carry a cancel of the caller into the retry, so the retry's
+        reap runs to its end; that cancel is returned for the caller to
+        raise. One the caller swallowed earlier does not count.
         """
         task = self._cleanup_retry_task
-        if task is None or task.done():
-            return
-        task.cancel()
+        if task is None:
+            return None
+        task.cancel()  # a no-op on a retry that has already ended
         caller_cancel: asyncio.CancelledError | None = None
         while not task.done():
             try:
                 await asyncio.wait({task})
             except asyncio.CancelledError as exc:
                 caller_cancel = exc
+        return caller_cancel
+
+    async def _stop_cleanup_retry(self) -> None:
+        """End the retry as `_end_cleanup_retry` does, then raise a cancel of
+        the caller that landed meanwhile."""
+        caller_cancel = await self._end_cleanup_retry()
         if caller_cancel is not None:
-            # The caller gets its cancel, so log a failure it would hide.
-            error = None if task.cancelled() else task.exception()
-            if error is not None:
-                log.warning("writing model retry failed as it stopped", exc_info=error)
             raise caller_cancel
-        if not task.cancelled():
-            task.result()
 
     def _cleanup_retry_may_load(self) -> bool:
         """A retry loads only while no dictation, job or batch work runs.
@@ -1085,7 +1099,10 @@ class Engine:
                 try:
                     loaded = await self._load_unless_busy(engine)
                 except asyncio.CancelledError:
-                    await asyncio.shield(engine.aclose())
+                    # aclose finishes its reap through a further cancel. A
+                    # shield let that cancel end the retry mid-reap, and a
+                    # replacement could then load beside the worker.
+                    await engine.aclose()
                     raise
                 except Exception:
                     log.exception("writing model retry %d failed; dictations stay raw", attempt)
@@ -1130,8 +1147,16 @@ class Engine:
                     return False
                 await asyncio.wait({load}, timeout=CLEANUP_RETRY_INTERRUPT_POLL_S)
         except asyncio.CancelledError:
-            load.cancel()
-            await asyncio.wait({load})
+            # An abandon above may have cancelled the load already, and it
+            # is now reaping: a second cancel would cut that reap short.
+            if not load.cancelling():
+                load.cancel()
+            # The load reaps its worker as it ends. Wait that out through a
+            # further cancel, or the retry ends mid-reap; the raise below
+            # still ends the retry cancelled.
+            while not load.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait({load})
             if not load.cancelled():
                 load.exception()  # retrieved: the caller's cancellation wins
             raise
@@ -1165,11 +1190,10 @@ class Engine:
             # reaped any cold-start sidecar before serve() can return. A bare
             # cancel left that child alive during app replacement.
             await asyncio.gather(watchdog, loader, return_exceptions=True)
-            if self._cleanup_retry_task is not None:
-                # Cancelling reaps the worker a retry may be loading.
-                self._cleanup_retry_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await self._cleanup_retry_task
+            # Cancelling reaps the worker a retry may be loading. A cancel of
+            # serve() meanwhile waits for that reap, and is raised once the
+            # rest of this shutdown has run.
+            retry_cancel = await self._end_cleanup_retry()
             if self._miner_task is not None:
                 self._miner_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1218,6 +1242,8 @@ class Engine:
             if wedged:
                 await asyncio.wait(wedged, timeout=CLEANUP_WARMUP_SETTLE_S)
             log.info("engine shut down")
+            if retry_cancel is not None:
+                raise retry_cancel
 
     async def _watch_parent(self) -> None:
         if self.parent_pid is None:
@@ -3033,11 +3059,18 @@ class Engine:
             self.config.data["stt_model"] = model_id
             await self._close_stt_backend(old)
         else:
-            # A startup retry would load beside this model: stop it first, and
-            # restart it below if this load fails too.
-            await self._stop_cleanup_retry()
             try:
+                # A startup retry would load beside this model: stop it first,
+                # and restart it below if this load fails or is cancelled,
+                # the stop included.
+                await self._stop_cleanup_retry()
                 async with self._cleanup_load_lock:
+                    # Shutdown may have begun while the stop above waited.
+                    # Its close sweep may have run, and would miss a worker
+                    # loaded now.
+                    if self.shutdown.is_set():
+                        await self._error("set_model: engine is shutting down")
+                        return
                     # Load-then-swap: build and fully load the replacement
                     # FIRST, then retire the old one. A failed load (bad
                     # download, OOM) therefore leaves the working engine intact

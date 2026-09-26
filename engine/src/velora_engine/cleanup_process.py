@@ -1174,13 +1174,18 @@ class CleanupProcess:
             writer.close()
         process = self._process
         self._process = None
-        if process is not None:
-            await self._reap(process)
-        failure = _WorkerExited("cleanup worker replaced")
-        for request_id, future in list(self._pending.items()):
-            if not future.done():
-                future.set_exception(failure)
-            self._pending.pop(request_id, None)
+        try:
+            if process is not None:
+                await self._reap(process)
+        finally:
+            # Fail the calls waiting on this worker even when a cancel cuts
+            # the reap short. The reader that would fail them is cancelled
+            # above, so they would otherwise wait out their own deadline.
+            failure = _WorkerExited("cleanup worker replaced")
+            for request_id, future in list(self._pending.items()):
+                if not future.done():
+                    future.set_exception(failure)
+                self._pending.pop(request_id, None)
 
     async def _reap(self, process: asyncio.subprocess.Process) -> None:
         """Stop `process` within about a second, whatever state it is in.
@@ -1344,18 +1349,21 @@ class CleanupProcess:
         """Stop the replacement, recovery and worker for aclose().
 
         aclose() never forwards its caller's cancel here, so a CancelledError
-        from an awaited task is that task's own.
+        from an awaited task is that task's own. One that failed is raised
+        once the worker is reaped: aclose() promises the reap either way.
         """
-        replacement_task = self._replacement_task
-        self._replacement_task = None
-        if replacement_task is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await replacement_task
-        recovery_task = self._recovery_task
-        self._recovery_task = None
-        if recovery_task is not None:
-            recovery_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await recovery_task
-        async with self._load_lock:
-            await self._stop_worker()
+        try:
+            replacement_task = self._replacement_task
+            self._replacement_task = None
+            if replacement_task is not None:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await replacement_task
+            recovery_task = self._recovery_task
+            self._recovery_task = None
+            if recovery_task is not None:
+                recovery_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await recovery_task
+        finally:
+            async with self._load_lock:
+                await self._stop_worker()
