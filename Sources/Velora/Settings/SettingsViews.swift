@@ -92,7 +92,7 @@ struct ExperimentalBadge: View {
             .kerning(0.5)
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
-            .foregroundStyle(VeloraStatus.warning)
+            .foregroundStyle(VeloraStatus.warningText)
             .background(
                 Capsule().fill(VeloraStatus.warning.opacity(0.15))
             )
@@ -164,7 +164,7 @@ struct GeneralSettingsView: View {
             } header: {
                 Text("Pill")
             } footer: {
-                SettingsFooter("To hide the pill, right-click it. Show it again from the menubar.")
+                SettingsFooter("You can also hide it from its right-click menu.")
             }
             Section {
                 Toggle("Check for updates automatically", isOn: $model.updateChecks)
@@ -313,7 +313,7 @@ struct DictationSettingsView: View {
         Form {
             Section {
                 Picker("Microphone", selection: $model.inputDeviceUID) {
-                    Text("System default").tag(String?.none)
+                    Text("System Default").tag(String?.none)
                     ForEach(inputDevices, id: \.uid) { device in
                         Text(device.name).tag(String?.some(device.uid))
                     }
@@ -322,7 +322,7 @@ struct DictationSettingsView: View {
                     // it wins again automatically when it reconnects.
                     if let uid = model.inputDeviceUID,
                        !inputDevices.contains(where: { $0.uid == uid }) {
-                        Text("Chosen microphone (not connected)").tag(String?.some(uid))
+                        Text("Chosen Microphone (Not Connected)").tag(String?.some(uid))
                     }
                 }
                 Picker("Language", selection: $model.language) {
@@ -424,14 +424,18 @@ struct DictationSettingsView: View {
 ///       Quality · 4.8 GB
 struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
-    @State private var storageUsed: String = "…"
-    @State private var unusedSize: String = "…"
+    @State private var storageUsed: String = Self.calculating
+    @State private var unusedSize: String = Self.calculating
     @State private var cachedModels: [ModelStorage.CachedModel] = []
     @State private var confirmRemoveUnused = false
     @State private var changing: Slot?
 
     /// Which "Change…" is unfolded (at most one at a time).
     private enum Slot { case speech, cleanup }
+
+    /// Shown in the storage rows until the first disk scan finishes; a bare
+    /// "…" read as missing data.
+    private static let calculating = "Calculating…"
 
     /// One row in the picker / catalog. Prefers the engine's advertised models
     /// (so newly-shipped models appear without an app update); falls back to the
@@ -676,7 +680,7 @@ struct AdvancedSettingsView: View {
                     if let error = model.agentIntegrationError {
                         Label(error, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundStyle(VeloraStatus.warning)
+                            .foregroundStyle(VeloraStatus.warningText)
                     }
                 }
                 LabeledContent("Engine logs") {
@@ -716,7 +720,7 @@ struct AdvancedSettingsView: View {
                     if result.hasPrefix("Import failed") || result.hasPrefix("Export failed") {
                         Label(result, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
-                            .foregroundStyle(VeloraStatus.warning)
+                            .foregroundStyle(VeloraStatus.warningText)
                     } else {
                         Label(result, systemImage: "checkmark.circle.fill")
                             .font(.caption)
@@ -777,10 +781,11 @@ struct ShortcutsSettingsView: View {
 
     var body: some View {
         Form {
+            // Same feature order as Home's shortcut card.
             dictationSection
             streamTypingSection
-            proofreadSection
             voiceEditSection
+            proofreadSection
             actionModeSection
         }
         .formStyle(.grouped)
@@ -798,7 +803,8 @@ struct ShortcutsSettingsView: View {
     private var dictationSection: some View {
         Section {
             LabeledContent {
-                HotkeyRecorderView(hotkey: $model.hotkey, showsQuickPicks: false)
+                HotkeyRecorderView(
+                    hotkey: $model.hotkey, showsQuickPicks: false, feature: "Dictation")
             } label: {
                 featureLabel(
                     "Dictation",
@@ -899,7 +905,7 @@ struct ShortcutsSettingsView: View {
                     Toggle(isOn: $model.backgroundActions) {
                         featureLabel(
                             "Work in the background",
-                            caption: "Velora drives an exact target through Cua while your current app stays in front.")
+                            caption: "Velora works in the target app\u{2019}s window while yours stays in front.")
                     }
                 }
                 musicPermissionRow
@@ -957,18 +963,20 @@ struct ShortcutsSettingsView: View {
     /// hears rows out of context: four identical "Shortcut" rows told the
     /// user nothing, so the spoken label names the feature.
     private func shortcutRow(for feature: String, hotkey: Binding<Hotkey>) -> some View {
-        LabeledContent {
-            HotkeyRecorderView(hotkey: hotkey, showsQuickPicks: false)
-        } label: {
+        // An HStack, not LabeledContent: the Form top-aligns a LabeledContent
+        // label, which left "Shortcut" riding above the taller keycap field.
+        HStack {
             Text("Shortcut")
                 .accessibilityLabel("\(feature) shortcut")
+            Spacer()
+            HotkeyRecorderView(hotkey: hotkey, showsQuickPicks: false, feature: feature)
         }
     }
 
     private func conflictLabel(_ text: String) -> some View {
         Label(text, systemImage: "exclamationmark.triangle.fill")
             .font(.caption)
-            .foregroundStyle(VeloraStatus.warning)
+            .foregroundStyle(VeloraStatus.warningText)
     }
 
     private func refreshMusicPermission() {

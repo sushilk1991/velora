@@ -62,7 +62,12 @@ final class OnboardingModel: ObservableObject {
             fraction: setupFraction)
     }
 
-    init() {
+    /// The settle gate's clock. `Date()` in the app; the selftest steps its
+    /// own, so the gate doesn't depend on how loaded the machine is.
+    private let now: () -> Date
+
+    init(now: @escaping () -> Date = Date.init) {
+        self.now = now
         // 1 s live-poll: cards flip to granted with no "I did it" button.
         pollTimer = Timer.publish(every: 1.0, on: .main, in: .common)
             .autoconnect()
@@ -128,9 +133,58 @@ final class OnboardingModel: ObservableObject {
             onFinish?()
             return
         }
+        stepShownAt = now()
         withAnimation(VeloraMotion.springSlow) {
             step = next
         }
+    }
+
+    /// A press this soon after a step appears is dropped: a double Return
+    /// (or double click) must not skip the step the first press revealed.
+    /// About the length of the step's push transition.
+    static let stepSettleInterval: TimeInterval = 0.5
+    /// When the current step appeared; `advance` stamps it.
+    private var stepShownAt = Date.distantPast
+
+    /// Whether a step's primary button may move on. Permission steps wait
+    /// for their grant; Skip is the way past a missing one.
+    func canContinue(from step: Step) -> Bool {
+        switch step {
+        case .microphone:
+            return microphoneGranted
+        case .inputMonitoring:
+            return inputMonitoringGranted
+        case .accessibility:
+            return accessibilityGranted
+        default:
+            return true
+        }
+    }
+
+    /// The primary button's action (Get Started, Continue). One press moves
+    /// one step:
+    ///
+    ///     Return ↓ ─ advance ─ repeat, repeat… (held: dropped)
+    ///     Return ↓ ─ advance ─ Return ↓ < 0.5 s (double: dropped)
+    func pressContinue(isRepeat: Bool) {
+        guard isSettled(isRepeat: isRepeat) else { return }
+        guard canContinue(from: step) else { return }
+        advance()
+    }
+
+    /// Skip moves one step past any missing grant, and finishes on try-it
+    /// (the last step, where `advance` calls `onFinish`). It waits out the
+    /// same gate as Continue: Skip stays put while steps change under it,
+    /// so a double click would skip two.
+    func pressSkip(isRepeat: Bool) {
+        guard isSettled(isRepeat: isRepeat) else { return }
+        advance()
+    }
+
+    /// False for a key repeat, or for a press within `stepSettleInterval`
+    /// of the step appearing.
+    private func isSettled(isRepeat: Bool) -> Bool {
+        !isRepeat && now().timeIntervalSince(stepShownAt) >= Self.stepSettleInterval
     }
 
     func requestMicrophone() {
@@ -193,6 +247,14 @@ struct OnboardingView: View {
         .background(VeloraPanel.canvas.ignoresSafeArea())
     }
 
+    /// True when the press is an autorepeat of a held key: a held Return
+    /// must not walk through the steps. `isARepeat` is only valid on key
+    /// events, so a click reads false.
+    private static var pressIsRepeat: Bool {
+        guard let event = NSApp.currentEvent, event.type == .keyDown else { return false }
+        return event.isARepeat
+    }
+
     // MARK: - Step scaffold
 
     /// Shared vertical structure: fixed title, centered content block,
@@ -239,8 +301,9 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Get Started") { model.advance() }
+            Button("Get Started") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
+                .keyboardShortcut(.defaultAction)
         }
     }
 
@@ -253,19 +316,20 @@ struct OnboardingView: View {
             Image(systemName: "airplane")
                 .font(.system(size: 60))
                 .foregroundStyle(VeloraBrand.iconGradient)
-            Text("Velora has no dictation server. Your audio, your screenshots and the text Velora reads on screen stay on this Mac and are never sent to us. Nothing it reads on screen is kept.")
+            Text("Velora has no dictation server. Your audio, the screenshots it takes and the text it reads on screen stay on this Mac and are never sent to us. Nothing it reads on screen is kept.")
                 .font(.title3)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
-            Text("Dictation works with no internet. Velora goes online only for setup, model downloads, update checks, and syncing your Personal Dictionary through iCloud.")
+            Text("Dictation works with no internet. Velora goes online only for setup, model downloads, update checks, and syncing your Dictionary through iCloud.")
                 .font(.callout)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
                 .frame(width: 440)
         } button: {
-            Button("Continue") { model.advance() }
+            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
+                .keyboardShortcut(.defaultAction)
         }
     }
 
@@ -285,7 +349,7 @@ struct OnboardingView: View {
                         model.requestMicrophone()
                     }
                 }),
-            continueEnabled: model.microphoneGranted)
+            continueEnabled: model.canContinue(from: .microphone))
     }
 
     private var inputMonitoringStep: some View {
@@ -298,7 +362,7 @@ struct OnboardingView: View {
                 granted: model.inputMonitoringGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestInputMonitoring() }),
-            continueEnabled: model.inputMonitoringGranted,
+            continueEnabled: model.canContinue(from: .inputMonitoring),
             staleHint: !model.inputMonitoringGranted)
             // Fire the native "Velora would like to monitor input" prompt as
             // soon as the step appears — this also registers Velora in the
@@ -318,7 +382,7 @@ struct OnboardingView: View {
                 granted: model.accessibilityGranted,
                 buttonTitle: "Open Settings",
                 action: { model.requestAccessibility() }),
-            continueEnabled: model.accessibilityGranted,
+            continueEnabled: model.canContinue(from: .accessibility),
             staleHint: !model.accessibilityGranted)
     }
 
@@ -346,8 +410,9 @@ struct OnboardingView: View {
                 .padding(.top, VeloraSpacing.xs)
             }
         } button: {
-            Button("Continue") { model.advance() }
+            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
+                .keyboardShortcut(.defaultAction)
                 .disabled(!continueEnabled)
         }
     }
@@ -365,8 +430,9 @@ struct OnboardingView: View {
             HotkeyRecorderView(hotkey: $model.hotkey)
                 .fixedSize(horizontal: true, vertical: false)
         } button: {
-            Button("Continue") { model.advance() }
+            Button("Continue") { model.pressContinue(isRepeat: Self.pressIsRepeat) }
                 .buttonStyle(.primaryCapsule)
+                .keyboardShortcut(.defaultAction)
         }
     }
 
@@ -374,7 +440,7 @@ struct OnboardingView: View {
         let setup = model.setupState
         return stepLayout(title: setup.canTryIt ? "Try it" : "Downloading models") {
             if setup.canTryIt {
-                Text("Click the box, hold \(model.hotkey.displayName), and say anything.")
+                Text("Click the box, hold \(model.hotkey.displayLabel), and say anything.")
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -385,10 +451,16 @@ struct OnboardingView: View {
                 // Fixed-height slot so the success label never shifts the layout.
                 Group {
                     if model.dictationSucceeded {
-                        Label("You're set up.", systemImage: "checkmark.circle.fill")
-                            .foregroundStyle(VeloraStatus.success)
-                            .font(.callout.weight(.medium))
-                            .transition(.opacity)
+                        // Green text measured 1.9:1 on light: only the glyph
+                        // is green, the words stay primary.
+                        Label {
+                            Text("You're set up.")
+                        } icon: {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(VeloraStatus.success)
+                        }
+                        .font(.callout.weight(.medium))
+                        .transition(.opacity)
                     }
                 }
                 .frame(height: VeloraSpacing.xl)
@@ -397,14 +469,13 @@ struct OnboardingView: View {
                     .transition(.opacity)
             }
         } button: {
-            if setup.canTryIt {
-                Button(setup.primaryActionTitle) { model.onFinish?() }
-                    .buttonStyle(.primaryCapsule)
-                    .disabled(!model.dictationSucceeded)
-            } else {
-                Button(setup.primaryActionTitle) { model.onFinish?() }
-                    .buttonStyle(.primaryCapsule)
-            }
+            // No Return here: in the try-it box Return is a newline, and
+            // Continue in the Background closes setup mid-download, so it
+            // takes a deliberate click, past the settle gate: it sits where
+            // the hotkey step's Continue was.
+            Button(setup.primaryActionTitle) { model.pressContinue(isRepeat: Self.pressIsRepeat) }
+                .buttonStyle(.primaryCapsule)
+                .disabled(setup.canTryIt && !model.dictationSucceeded)
         }
         .animation(VeloraMotion.standard, value: setup.canTryIt)
     }
@@ -424,13 +495,7 @@ struct OnboardingView: View {
             HStack {
                 Spacer()
                 if model.step != .welcome {
-                    Button("Skip") {
-                        if model.step == .tryIt {
-                            model.onFinish?()
-                        } else {
-                            model.advance()
-                        }
-                    }
+                    Button("Skip") { model.pressSkip(isRepeat: Self.pressIsRepeat) }
                     .buttonStyle(.plain)
                     .font(.callout)
                     .foregroundStyle(.tertiary)
@@ -527,8 +592,17 @@ struct PermissionCard: View {
 
             Spacer()
 
-            Button(granted ? "Granted" : buttonTitle, action: action)
-                .disabled(granted)
+            // Granted is a state, not an action: a label in place of a dead
+            // button. The green check in the leading circle is the card's
+            // one status glyph; green text measured 1.83:1 on the card fill,
+            // so the word stays secondary.
+            if granted {
+                Text("Granted")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Button(buttonTitle, action: action)
+            }
         }
         .padding(VeloraSpacing.l)
         .frame(width: 480)

@@ -200,7 +200,7 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             let submenu = NSMenu()
             if !lastRaw.isEmpty {
                 let rawItem = NSMenuItem(
-                    title: "As Heard (original)", action: #selector(pasteLastRaw),
+                    title: "As Heard (Original)", action: #selector(pasteLastRaw),
                     keyEquivalent: "")
                 rawItem.target = self
                 rawItem.toolTip = "Paste exactly what was transcribed, before any cleanup"
@@ -288,10 +288,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 title: "Stop \(Self.truncate(meeting, to: 34)) & Create Notes",
                 action: #selector(stopMeeting), keyEquivalent: "")
             stop.target = self
+            // Semibold only: an explicit red failed contrast in light and
+            // did not invert on the selection highlight.
             stop.attributedTitle = NSAttributedString(
                 string: stop.title,
-                attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold),
-                             .foregroundColor: NSColor.systemRed])
+                attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
             menu.addItem(stop)
             let discard = NSMenuItem(
                 title: "Discard Meeting Recording…",
@@ -318,9 +319,17 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // Consent/preparation does not use the microphone. Only an actual
         // meeting recording excludes foreground dictation.
         start.isEnabled = meetingRecordingTitle == nil
-        start.attributedTitle = NSAttributedString(
-            string: startTitle,
-            attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
+        // The dictation shortcut under the title. A modifier-only hotkey such
+        // as Right ⌥ can't be a key equivalent, so it rides as the subtitle.
+        let style = Self.dictationRowStyle(on: ProcessInfo.processInfo.operatingSystemVersion)
+        if style != .plainWithShortcut {
+            start.attributedTitle = NSAttributedString(
+                string: startTitle,
+                attributes: [.font: NSFont.menuFont(ofSize: 0).withWeight(.semibold)])
+        }
+        if style != .semiboldOnly, #available(macOS 14.4, *) {
+            start.subtitle = AppConfig.shared.hotkey.displayLabel
+        }
         menu.addItem(start)
 
         // First-run setup: models are downloading — say so instead of letting
@@ -331,6 +340,45 @@ final class StatusItemController: NSObject, NSMenuDelegate {
             menu.addItem(item)
             setupMenuItem = item
         }
+    }
+
+    /// How the dictation row carries its title and shortcut on one macOS.
+    enum DictationRowStyle: Equatable {
+        /// 15 and later: semibold title, shortcut as the subtitle.
+        case semiboldWithShortcut
+        /// 14.4–14.x draws no subtitle under an attributed title
+        /// (NSMenuItem.h), so the shortcut wins and the title stays plain.
+        case plainWithShortcut
+        /// Before 14.4 there is no subtitle: the semibold title alone.
+        case semiboldOnly
+    }
+
+    /// `NSMenuItem.subtitle` arrived in 14.4 and shows under an attributed
+    /// title from 15 on (NSMenuItem.h).
+    private static let subtitleIntroduced = OperatingSystemVersion(
+        majorVersion: 14, minorVersion: 4, patchVersion: 0)
+    private static let subtitleUnderAttributedTitle = OperatingSystemVersion(
+        majorVersion: 15, minorVersion: 0, patchVersion: 0)
+
+    // Test seam: internal so Selftest can reach it.
+    /// The dictation row's style on `version`:
+    ///
+    ///     14.0 ─ semiboldOnly ─ 14.4 ─ plainWithShortcut ─ 15 ─ semiboldWithShortcut ─▶
+    static func dictationRowStyle(on version: OperatingSystemVersion) -> DictationRowStyle {
+        if isAtLeast(version, subtitleUnderAttributedTitle) {
+            return .semiboldWithShortcut
+        }
+        if isAtLeast(version, subtitleIntroduced) {
+            return .plainWithShortcut
+        }
+        return .semiboldOnly
+    }
+
+    private static func isAtLeast(
+        _ version: OperatingSystemVersion, _ floor: OperatingSystemVersion
+    ) -> Bool {
+        (version.majorVersion, version.minorVersion, version.patchVersion)
+            >= (floor.majorVersion, floor.minorVersion, floor.patchVersion)
     }
 
     /// Preserve the old "notice a permission revoked while Velora is

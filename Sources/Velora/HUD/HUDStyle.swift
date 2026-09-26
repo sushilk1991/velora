@@ -93,9 +93,20 @@ enum VeloraBrand {
 /// Semantic status colors. One color per meaning, everywhere: never bare
 /// `.orange` / `.red` / `.green` at a call site.
 enum VeloraStatus {
+    /// Warning glyphs, badges and dots (non-text needs 3:1).
     static let warning = Color(nsColor: .systemOrange)
+    /// Warning as text. systemOrange measures 1.9:1 on a light card, under
+    /// the 4.5:1 text needs, so light mode uses burnt orange (#a34a00,
+    /// 5.1:1); dark keeps systemOrange (6.7:1).
+    static let warningText = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? .systemOrange : warningTextLight
+    })
     static let danger = Color(nsColor: .systemRed)
     static let success = Color(nsColor: .systemGreen)
+
+    private static let warningTextLight = NSColor(
+        srgbRed: 163 / 255, green: 74 / 255, blue: 0, alpha: 1)
 }
 
 /// Motion scale. Every `withAnimation` / `.animation` picks one of these.

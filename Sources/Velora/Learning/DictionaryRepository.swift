@@ -33,7 +33,7 @@ enum DictionaryRepositoryError: Error, LocalizedError {
         case .missingEntry: return "That dictionary entry no longer exists."
         case .notManual: return "Learned entries must be forgotten rather than edited."
         case .duplicateEntry(let writeAs):
-            return "“\(writeAs)” is already in your Personal Dictionary."
+            return "“\(writeAs)” is already in your Dictionary."
         case .conflictingRule(let heardAs, let existingWriteAs):
             return "When Velora hears “\(heardAs)”, it already writes “\(existingWriteAs)”. Edit that entry instead."
         case .couldNotPersist: return "Velora could not save the dictionary on this Mac."

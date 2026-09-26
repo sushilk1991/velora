@@ -44,7 +44,7 @@ Scope: recording HUD, live waveform, menubar, settings + onboarding, sound desig
 
 **Window (AppKit host):**
 - `NSPanel`, `styleMask: [.borderless, .nonactivatingPanel]`
-- `level = .statusBar`, `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]`
+- `level = .floating` (below the Dock, the menu bar and alerts), `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]`
 - `isOpaque = false`, `backgroundColor = .clear`, `hasShadow = false` (shadow drawn in SwiftUI so it animates with the shape)
 - `ignoresMouseEvents = true` while listening; `false` only in the `error` state (which shows a button)
 - Position: horizontally centered on the screen containing the frontmost window; bottom edge **20 pt above** `screen.visibleFrame.minY` (i.e., above the Dock). Never repositions while visible.

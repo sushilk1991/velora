@@ -11,8 +11,9 @@ extension Notification.Name {
 /// Owns the HUD's NSPanel and drives state transitions on the model.
 ///
 /// Panel configuration follows the design brief §1.2 / spike findings:
-/// borderless non-activating panel at `.statusBar` level that joins all
-/// Spaces and never takes focus. The capsule itself is interactive: click
+/// borderless non-activating panel at `.floating` level (as 0.25.0 shipped;
+/// under the Dock, the menu bar and alerts) that joins all Spaces and never
+/// takes focus. The capsule itself is interactive: click
 /// toggles dictation, right-click opens quick actions, drag repositions;
 /// the transparent panel margins stay click-through.
 final class HUDPanel: NSObject {
@@ -44,6 +45,12 @@ final class HUDPanel: NSObject {
     private let panel: NSPanel
     /// Selftest hook: whether the panel is ordered on screen right now.
     var isOnScreen: Bool { panel.isVisible }
+    /// Selftest hook: the panel's window level.
+    var level: NSWindow.Level { panel.level }
+    /// Selftest hook: the pill's AppKit tooltip right now.
+    var toolTip: String? { panel.contentView?.toolTip }
+    /// DESIGN.md §6 HUD copy: ≤ 4 words a phrase, joined by a full stop.
+    private static let standbyToolTip = "Click to dictate. Right-click for more."
     private var hideWorkItem: DispatchWorkItem?
     private var screenObserver: NSObjectProtocol?
     /// Cursor tracking for `ignoresMouseEvents` (see init): event monitors for
@@ -79,7 +86,6 @@ final class HUDPanel: NSObject {
             backing: .buffered,
             defer: false)
         super.init()
-        panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
         // The HUD must remain a dark, high-contrast control surface even when
@@ -101,7 +107,15 @@ final class HUDPanel: NSObject {
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         panel.isFloatingPanel = true
+        // Set after isFloatingPanel, which resets the level. `.floating`
+        // keeps the pill under the Dock, the menu bar and Velora's alerts:
+        // a capsule under the cursor stops ignoring the mouse, so any
+        // higher (`.statusBar`) and it took their clicks. Same as 0.25.0.
+        panel.level = .floating
         panel.becomesKeyOnlyIfNeeded = true
+        // Velora is almost never the active app while the pill is hovered;
+        // without this AppKit drops the standby tooltip.
+        panel.allowsToolTipsWhenApplicationIsInactive = true
 
         let hosting = HUDHostingView(rootView: HUDView(model: model))
         hosting.capsuleHitRect = { [weak self] in self?.currentHitRect() ?? .zero }
@@ -487,6 +501,11 @@ final class HUDPanel: NSObject {
         }
 
         model.state = target
+        // Standby is the state a new user meets cold: the tooltip says what
+        // a click and a right-click do. Set on the AppKit view, not with
+        // SwiftUI `.help`, which would also replace the capsule's
+        // accessibility hint.
+        panel.contentView?.toolTip = target == .standby ? Self.standbyToolTip : nil
 
         if pillClosed {
             // An invisible panel must never be interactive either.
@@ -659,7 +678,7 @@ final class HUDPanel: NSObject {
         }
         if let chosenUID, !devices.contains(where: { $0.uid == chosenUID }) {
             let missing = NSMenuItem(
-                title: "Chosen microphone (not connected)", action: nil, keyEquivalent: "")
+                title: "Chosen Microphone (Not Connected)", action: nil, keyEquivalent: "")
             missing.isEnabled = false
             missing.state = .on
             micMenu.addItem(missing)

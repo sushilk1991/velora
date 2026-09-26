@@ -95,10 +95,11 @@ extension Hotkey {
         modifiers: CGEventFlags.maskAlternate.rawValue | CGEventFlags.maskShift.rawValue,
         isModifierOnly: false)
 
-    /// Curated one-click choices shown next to the recorder.
+    /// Curated one-click choices shown next to the recorder. Names are the
+    /// keycap labels (`displayLabel`) so they match the recorder beside them.
     static let quickPicks: [(name: String, hotkey: Hotkey)] = [
-        ("Right Option", .rightOption),
-        ("Fn / Globe", .fnGlobe),
+        ("Right ⌥", .rightOption),
+        ("fn", .fnGlobe),
         ("F19", .f19),
     ]
 }
@@ -120,7 +121,8 @@ extension Hotkey {
         return label + Self.keyName(for: keyCode)
     }
 
-    /// Prose name used in instructions ("Hold Right Option and speak").
+    /// Spelled-out name for VoiceOver ("Right Option"). On-screen text uses
+    /// `displayLabel`, so no screen mixes the two (DESIGN.md §5).
     var displayName: String {
         guard isModifierOnly else { return displayLabel }
         switch keyCode {
@@ -155,8 +157,15 @@ extension Hotkey {
     /// Human-readable name for a virtual key code: fixed table for named
     /// keys, current keyboard layout (UCKeyTranslate) for character keys.
     static func keyName(for keyCode: Int64) -> String {
+        keyName(for: keyCode, layoutData: currentKeyboardLayoutData())
+    }
+
+    /// `keyName(for:)` against `layoutData` rather than the running layout.
+    private static func keyName(for keyCode: Int64, layoutData: Data?) -> String {
         if let special = specialKeyNames[keyCode] { return special }
-        if let character = characterKeyName(for: keyCode) { return character }
+        if let layoutData, let character = characterKeyName(for: keyCode, layoutData: layoutData) {
+            return character
+        }
         return "Key \(keyCode)"
     }
 
@@ -185,13 +194,6 @@ extension Hotkey {
         105: "F13", 107: "F14", 113: "F15", 106: "F16", 64: "F17", 79: "F18",
         80: "F19", 90: "F20",
     ]
-
-    /// Translates a character-producing key code via the current keyboard
-    /// layout (so "Z" is right on QWERTZ). Returns nil for non-character keys.
-    private static func characterKeyName(for keyCode: Int64) -> String? {
-        guard let layoutData = currentKeyboardLayoutData() else { return nil }
-        return characterKeyName(for: keyCode, layoutData: layoutData)
-    }
 
     private static func currentKeyboardLayoutData() -> Data? {
         guard let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
@@ -263,6 +265,13 @@ extension Hotkey {
     /// or plain typing. Warnings never block — the user may have remapped
     /// the system side — they just surface the conflict.
     var conflictWarning: String? {
+        conflictWarning(layoutData: Self.currentKeyboardLayoutData())
+    }
+
+    // Test seam: internal so Selftest can pass a layout other than the
+    // running one (AZERTY).
+    /// `conflictWarning` with character keys named from `layoutData`.
+    func conflictWarning(layoutData: Data?) -> String? {
         guard !isModifierOnly else { return nil }
         let strict = modifiers & Self.strictModifierMask
         let commandOnly = strict == CGEventFlags.maskCommand.rawValue
@@ -273,20 +282,39 @@ extension Hotkey {
             case 12: return "⌘Q quits the front app. Pick another shortcut."
             default: break
             }
+            // The monitor's tap consumes a combo, so ⌘N would stop
+            // reaching every app, not only Velora's View menu.
+            if let digit = paneDigit {
+                return "⌘\(digit) would stop working in every app, including Velora's View menu. Pick another shortcut."
+            }
         }
-        if strict == 0, Self.isTypingKey(keyCode) {
-            let name = Self.keyName(for: keyCode)
+        if strict == 0, Self.isTypingKey(keyCode, layoutData: layoutData) {
+            let name = Self.keyName(for: keyCode, layoutData: layoutData)
             return "\(name) alone fires every time you type it. Add a modifier."
         }
         return nil
     }
 
+    /// kVK_ANSI_1…kVK_ANSI_6 in digit order: the View menu's ⌘1…⌘6 pane
+    /// shortcuts (`MainMenu.viewMenu`), which a global hotkey would swallow.
+    private static let paneKeyCodes: [Int64] = [18, 19, 20, 21, 23, 22]
+
+    /// The View-menu digit (1…6) this hotkey takes as a bare ⌘ chord, else
+    /// nil. A digit, not the layout's character: AZERTY types "&" on
+    /// kVK_ANSI_1, yet the menu shows the chord as ⌘1.
+    var paneDigit: Int? {
+        let strict = modifiers & Self.strictModifierMask
+        guard !isModifierOnly, strict == CGEventFlags.maskCommand.rawValue,
+              let index = Self.paneKeyCodes.firstIndex(of: keyCode) else { return nil }
+        return index + 1
+    }
+
     /// True for keys that produce text during normal typing (single
     /// characters plus Space/Return/Tab/Delete).
-    private static func isTypingKey(_ keyCode: Int64) -> Bool {
+    private static func isTypingKey(_ keyCode: Int64, layoutData: Data?) -> Bool {
         if [49, 36, 48, 51].contains(keyCode) { return true }
         guard specialKeyNames[keyCode] == nil else { return false }
-        return keyName(for: keyCode).count == 1
+        return keyName(for: keyCode, layoutData: layoutData).count == 1
     }
 }
 

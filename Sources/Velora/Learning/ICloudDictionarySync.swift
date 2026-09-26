@@ -294,10 +294,10 @@ final class ICloudDictionarySync: ObservableObject {
         switch error {
         case DictionaryRepositoryError.couldNotProject:
             status = .error(
-                "The Personal Dictionary was saved on this Mac, but the speech engine could not be updated. Restart Velora and try again.")
+                "The Dictionary was saved on this Mac, but the speech engine could not be updated. Restart Velora and try again.")
         case DictionaryRepositoryError.couldNotPersist:
             status = .error(
-                "Velora could not save the merged Personal Dictionary on this Mac. iCloud was left unchanged.")
+                "Velora could not save the merged Dictionary on this Mac. iCloud was left unchanged.")
         default:
             status = .error(
                 "The iCloud dictionary is unreadable or from a newer Velora version. Your local dictionary was kept.")
@@ -330,7 +330,7 @@ final class ICloudDictionarySync: ObservableObject {
                 }
             }
         } catch {
-            status = .error("Velora could not prepare the personal dictionary for iCloud.")
+            status = .error("Velora could not prepare the Dictionary for iCloud.")
             finish()
         }
     }

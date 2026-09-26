@@ -164,6 +164,8 @@ struct HUDView: View {
         .accessibilityElement(children: usesContainedAccessibility ? .contain : .ignore)
         .accessibilityLabel(meetingAccessibilityLabel)
         .accessibilityHint(meetingAccessibilityHint)
+        // No `.help` here: it doubles as the accessibility hint, and an
+        // empty one blanked the hints above. HUDPanel owns the tooltip.
     }
 
     @ViewBuilder private var background: some View {
@@ -621,9 +623,11 @@ struct HUDView: View {
     private var learnedContent: some View {
         let pair = learnedPair
         return HStack(spacing: VeloraSpacing.s) {
-            Image(systemName: "character.book.closed.fill")
+            // DESIGN.md §7: a learned word is `pencil.line`, and apricot marks
+            // "learned" moments (the pill is always dark, so plain apricot).
+            Image(systemName: "pencil.line")
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(VeloraBrand.sky.color)
+                .foregroundStyle(VeloraBrand.apricot.color)
                 .symbolEffect(.bounce, value: isLearned)
             Text(pair.wrong)
                 .font(.system(size: 12, weight: .medium))
@@ -639,7 +643,7 @@ struct HUDView: View {
                 .lineLimit(1)
             Text("· Learned")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(hudSecondaryText)
+                .foregroundStyle(Self.learnedTextColor(for: colorSchemeContrast).color)
         }
         .padding(.horizontal, HUDGeometry.contentInsetH)
         .padding(.vertical, HUDGeometry.contentInsetV)
@@ -790,34 +794,40 @@ struct HUDView: View {
         return false
     }
 
-    private var isMeetingSurface: Bool {
-        isMeetingRecording || isMeetingSuggestion || isMeetingEnd
-            || meetingFailureID != nil
+    private var usesContainedAccessibility: Bool {
+        Self.containsAccessibility(for: model.state)
     }
 
-    private var usesContainedAccessibility: Bool {
-        isMeetingSurface || isActionResult
+    // Test seam: internal so Selftest can reach it.
+    /// Whether VoiceOver walks into the capsule's children. States that carry
+    /// their own buttons expose them; the rest read as one clickable pill.
+    static func containsAccessibility(for state: HUDState) -> Bool {
+        switch state {
+        case .meetingSuggestion, .meeting, .meetingEnd, .meetingFailure, .actionResult,
+             .error:
+            return true
+        default:
+            return false
+        }
     }
 
     private var meetingAccessibilityHint: String {
-        switch model.state {
-        case .meetingSuggestion:
-            return "Start notes or dismiss the detected meeting"
-        case .meeting:
-            return "Use the stop button to finish the meeting recording"
-        case .meetingEnd:
-            return "Finish notes or keep recording"
-        case .meetingFailure:
-            return "Open the saved transcript or retry meeting processing"
-        case .actionResult(_, _, _, _, let appName):
-            if let appName, !appName.isEmpty {
-                return "Click the result to open \(appName)"
-            }
-            return "Action Mode result"
+        Self.accessibilityHint(for: model.state)
+    }
+
+    // Test seam: internal so Selftest can reach it.
+    /// The capsule's VoiceOver hint. States with their own buttons get
+    /// none: VoiceOver reads the buttons, and "Click to stop dictation"
+    /// was wrong for them.
+    static func accessibilityHint(for state: HUDState) -> String {
+        if containsAccessibility(for: state) {
+            return ""
+        }
+        switch state {
         case .notice(_, let message) where message.contains("Esc cancels"):
             return "Press Escape to cancel the running action"
         default:
-            return isStandby ? "Click to start dictation" : "Click to stop dictation"
+            return state == .standby ? "Click to start dictation" : "Click to stop dictation"
         }
     }
 
@@ -829,7 +839,7 @@ struct HUDView: View {
             return "Recording \(title), \(systemAudio ? "microphone and computer audio" : "microphone only")"
         case .meetingEnd(let title):
             return "Meeting ended, \(title)"
-        case .meetingFailure(_, let message):
+        case .meetingFailure(_, let message), .error(let message):
             return message
         case .actionResult(_, let status, _, let message, let appName):
             let verification: String
@@ -847,6 +857,13 @@ struct HUDView: View {
             return "\(verification), \(message)"
         case .notice(_, let message):
             return message
+        // The pill shows no status word while recording, so VoiceOver gets
+        // the state's name. Not "Polishing": the engine may not run cleanup
+        // (docs/plans/2026-07-11-hud-trust-recovery-design.md).
+        case .listening:
+            return "Listening"
+        case .transcribing:
+            return "Transcribing"
         default:
             return "Velora dictation"
         }
@@ -902,6 +919,19 @@ struct HUDView: View {
 
     private var hudSecondaryText: Color {
         Color.white.opacity(colorSchemeContrast == .increased ? 0.92 : 0.76)
+    }
+
+    /// How far "· Learned" moves from apricot toward white under Increase
+    /// Contrast, as `hudSecondaryText` lifts from 0.76 to 0.92 white.
+    private static let learnedContrastLift = 0.4
+
+    // Test seam: internal so Selftest can reach it.
+    /// The "· Learned" text colour: apricot, lifted toward white when the
+    /// user asks for more contrast.
+    static func learnedTextColor(for contrast: ColorSchemeContrast) -> VeloraBrand.RGB {
+        guard contrast == .increased else { return VeloraBrand.apricot }
+        return VeloraBrand.lerp(
+            VeloraBrand.apricot, VeloraBrand.RGB(r: 1, g: 1, b: 1), learnedContrastLift)
     }
 
     private var desiredListeningWidth: CGFloat {

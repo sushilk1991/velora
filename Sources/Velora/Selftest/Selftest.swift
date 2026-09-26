@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Carbon.HIToolbox
 import CoreAudio
 import Foundation
 import SQLite3
@@ -167,6 +168,9 @@ enum Selftest {
         testShellNavigation()
         testPillVisibilitySetting()
         testShellMenus()
+        testHUDAccessibilityTree()
+        testOnboardingReturn()
+        testStatsAverageKey()
         testWindowShellGeometry()
         testShellCopy()
         testAudioInputDeviceResolution()
@@ -220,10 +224,28 @@ enum Selftest {
             testLiveMeetingCapture()
         }
         testSelftestIsolation()
+        testNothingLeftOnScreen()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
             : "selftest FAILED — \(failures)/\(checks) checks failed")
         return failures == 0 ? 0 : 1
+    }
+
+    /// `--selftest` shows nothing: once the tests have run, no window of this
+    /// process is on screen with any opacity (design-verify: testShellMenus'
+    /// pill sat on the owner's screen from finishLaunching until exit).
+    /// Transparent probe windows other tests order in don't count.
+    private static func testNothingLeftOnScreen() {
+        let onScreen = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+            as? [[String: Any]] ?? []
+        let shown = onScreen.filter {
+            ($0[kCGWindowOwnerPID as String] as? Int32) == getpid()
+                && (($0[kCGWindowAlpha as String] as? Double) ?? 1) > 0
+        }
+        let described = shown.map {
+            "#\($0[kCGWindowNumber as String] ?? 0) layer \($0[kCGWindowLayer as String] ?? 0)"
+        }
+        expect(shown.isEmpty, "the selftest leaves no window of its own on screen (\(described))")
     }
 
     /// `--selftest` must leave the machine as it found it: no lines in the
@@ -4630,6 +4652,17 @@ enum Selftest {
                                      now: now, calendar: calendar)
         expect(StatsSeries.bestCaption(bars: empty, range: .thirtyDays) == nil,
                "no words → no best-day caption")
+
+        // Four tiles across only when an equal share holds the widest one.
+        // An HStack reports the sum of its tiles' ideal widths, then splits
+        // evenly, which truncated "at 40 wpm typing · Change…" at 980 pt.
+        let tileSpacing: CGFloat = 10
+        let tileRow = NSHostingView(rootView: StatsTileRow(spacing: tileSpacing) {
+            Color.clear.frame(idealWidth: 40, idealHeight: 10)
+            Color.clear.frame(idealWidth: 100, idealHeight: 30)
+        })
+        expect(tileRow.fittingSize == CGSize(width: 2 * 100 + tileSpacing, height: 30),
+               "a Stats tile row's ideal width gives every tile the widest tile's width, got \(tileRow.fittingSize)")
     }
 
     // MARK: - Private meeting memory
@@ -8619,6 +8652,32 @@ enum Selftest {
             expect(pin.actual == pin.spec, pin.rule)
         }
 
+        // VoiceOver reaches every button the pill shows: an error's message and
+        // Retry chip as much as meeting controls. Idle and recording states
+        // stay one clickable element.
+        expect(HUDView.containsAccessibility(for: .error("Couldn't transcribe")),
+               "VoiceOver reaches the HUD error message and its Retry button")
+        expect(HUDView.containsAccessibility(
+                for: .meetingFailure(meetingID: "m1", message: "Notes failed")),
+               "VoiceOver reaches the HUD meeting failure Open and Retry buttons")
+        expect(!HUDView.containsAccessibility(for: .standby),
+               "HUD standby pill reads as one clickable element")
+        expect(!HUDView.containsAccessibility(for: .listening),
+               "HUD listening pill reads as one clickable element")
+
+        // "· Learned" is apricot, lifted toward white under Increase
+        // Contrast the way the pill's secondary text is.
+        func luminance(_ rgb: VeloraBrand.RGB) -> Double {
+            0.2126 * rgb.r + 0.7152 * rgb.g + 0.0722 * rgb.b
+        }
+        let learnedStandard = HUDView.learnedTextColor(for: .standard)
+        let learnedIncreased = HUDView.learnedTextColor(for: .increased)
+        expect(learnedStandard.r == VeloraBrand.apricot.r && learnedStandard.g == VeloraBrand.apricot.g
+                   && learnedStandard.b == VeloraBrand.apricot.b,
+               "the pill's \"· Learned\" is apricot")
+        expect(luminance(learnedIncreased) > luminance(learnedStandard),
+               "\"· Learned\" gets brighter under Increase Contrast")
+
         expect(HUDView.elapsedString(seconds: -1) == "0:00",
                "HUD timer clamps negative elapsed time")
         expect(HUDView.elapsedString(seconds: 599) == "9:59",
@@ -9220,8 +9279,49 @@ enum Selftest {
                "Show Pill reflects the stored setting")
         expect(statusTitles.first == "Start Dictation",
                "with no meeting recording, the menubar leads with Start Dictation")
+        // A modifier-only hotkey can't be a key equivalent, so the menubar
+        // shows the dictation shortcut as the item's subtitle.
+        if #available(macOS 14.4, *) {
+            expect(statusMenu.items.first?.subtitle == AppConfig.shared.hotkey.displayLabel,
+                   "the menubar's Start Dictation shows the dictation shortcut")
+        }
+        // NSMenuItem.h: macOS 14 draws no subtitle under an attributed
+        // title, so 14.4–14.x gives up the semibold to keep the shortcut.
+        func macOS(_ major: Int, _ minor: Int) -> OperatingSystemVersion {
+            OperatingSystemVersion(majorVersion: major, minorVersion: minor, patchVersion: 0)
+        }
+        let rowStyles: [(OperatingSystemVersion, StatusItemController.DictationRowStyle)] = [
+            (macOS(14, 0), .semiboldOnly),
+            (macOS(14, 3), .semiboldOnly),
+            (macOS(14, 4), .plainWithShortcut),
+            (macOS(14, 7), .plainWithShortcut),
+            (macOS(15, 0), .semiboldWithShortcut),
+            (macOS(26, 0), .semiboldWithShortcut),
+        ]
+        for (version, style) in rowStyles {
+            expect(StatusItemController.dictationRowStyle(on: version) == style,
+                   "the dictation row on macOS \(version.majorVersion).\(version.minorVersion) is \(style)")
+        }
+        let runningStyle = StatusItemController.dictationRowStyle(
+            on: ProcessInfo.processInfo.operatingSystemVersion)
+        expect((statusMenu.items.first?.attributedTitle != nil) == (runningStyle != .plainWithShortcut),
+               "the built dictation row is semibold exactly when this macOS shows both")
         expect(!statusTitles.contains { $0.contains("\u{2014}") },
                "menubar items carry no em dashes")
+
+        // While a meeting records, stopping it leads the menu, semibold but
+        // in the menu's own text colour: an explicit red failed contrast in
+        // light and stayed red on the selection highlight.
+        let meetingMenu = NSMenu()
+        statusController.meetingRecordingTitle = "Standup"
+        statusController.buildMenu(into: meetingMenu)
+        statusController.meetingRecordingTitle = nil
+        let stopMeeting = meetingMenu.items.first
+        expect(stopMeeting?.title == "Stop Standup & Create Notes",
+               "a recording meeting leads the menubar with Stop … & Create Notes")
+        expect(stopMeeting?.attributedTitle?.attribute(
+                   .foregroundColor, at: 0, effectiveRange: nil) == nil,
+               "Stop … & Create Notes keeps the menu's text colour")
         // macOS 26+ decorates standard items itself (Settings… gets `gear`,
         // Quit `xmark.interface.window`); Velora adds no icons of its own.
         let appKitDecorated: Set<String> = ["Settings…", "Quit Velora"]
@@ -9229,7 +9329,26 @@ enum Selftest {
                 .allSatisfy { $0.image == nil },
                "Velora puts no icon on a menubar item (two update items used to)")
 
+        // The selftest shows nothing: the pill's own panel (the window the
+        // HUDPanel adds) stays transparent while the checks below order it
+        // front, and closes after them. Ordered out, it still came back
+        // on screen once testHUDAccessibilityTree finished launching.
+        let windowsBeforePill = Set(NSApplication.shared.windows.map(ObjectIdentifier.init))
         let pillPanel = HUDPanel()
+        let pillWindows = NSApplication.shared.windows.filter {
+            !windowsBeforePill.contains(ObjectIdentifier($0))
+        }
+        expect(pillWindows.count == 1,
+               "the pill's panel is the one window HUDPanel adds (found \(pillWindows.count))")
+        for window in pillWindows {
+            window.alphaValue = 0
+        }
+        // As 0.25.0 shipped: under the Dock, the menu bar and Velora's own
+        // alerts. A capsule under the cursor stops ignoring the mouse, so
+        // any higher and it would take their clicks.
+        expect(pillPanel.level == .floating, "the pill floats at .floating, as 0.25.0 shipped")
+        expect(pillPanel.level.rawValue < NSWindow.Level.modalPanel.rawValue,
+               "the pill sits under Velora's alerts, the Dock and the menu bar")
         let pillMenu = pillPanel.buildContextMenu()
         let pillTitles = pillMenu.items.map(\.title)
         // One way to make the pill go away ("Hide Pill", the inverse of the
@@ -9268,6 +9387,453 @@ enum Selftest {
         pillPanel.applyPreferences()
         expect(pillPanel.isOnScreen, "Show Pill restores a session that was closed mid-way")
         pillPanel.transition(to: .hidden(.cancel))
+
+        // The standby tooltip lives on the AppKit view, only in standby.
+        // (SwiftUI `.help` would also overwrite the capsule's VoiceOver
+        // hint; testHUDAccessibilityTree reads those.)
+        AppConfig.shared.hudVisible = false
+        pillPanel.transition(to: .standby)
+        expect(pillPanel.toolTip == "Click to dictate. Right-click for more.",
+               "the standby pill's tooltip says what a click and a right-click do")
+        pillPanel.transition(to: .listening)
+        expect(pillPanel.toolTip == nil, "a listening pill has no tooltip")
+        pillPanel.transition(to: .standby)
+        expect(pillPanel.toolTip == "Click to dictate. Right-click for more.",
+               "back in standby after dictating, the pill's tooltip returns")
+        pillPanel.transition(to: .hidden(.cancel))
+        for window in pillWindows {
+            window.close()
+        }
+
+        // View › panes: every sidebar pane, in sidebar order, on ⌘1…⌘6
+        // (HIG: frequent destinations get shortcuts).
+        let viewMenu = MainMenu.viewMenu(target: NSObject())
+        expect(viewMenu.items.map { $0.representedObject as? MainPane } == MainPane.allCases,
+               "the View menu lists every pane in sidebar order")
+        expect(viewMenu.items.map(\.keyEquivalent)
+                == MainPane.allCases.indices.map { String($0 + 1) },
+               "View menu panes take ⌘1 onward in sidebar order")
+        expect(viewMenu.items.allSatisfy {
+                   $0.action == #selector(AppDelegate.menuShowPane(_:))
+                       && $0.keyEquivalentModifierMask == [.command]
+               },
+               "every View menu pane routes through menuShowPane on ⌘")
+
+        // The menu bar as installed: View › panes on ⌘1…⌘6, no two items
+        // anywhere sharing key + modifiers, and no AppKit tab items.
+        _ = NSApplication.shared
+        let savedMainMenu = NSApp.mainMenu
+        let savedWindowsMenu = NSApp.windowsMenu
+        let savedHelpMenu = NSApp.helpMenu
+        let menuTarget = NSObject()
+        MainMenu.install(target: menuTarget, hotkeys: [])
+        let installedView = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
+        expect(installedView?.items.map(\.keyEquivalent) == ["1", "2", "3", "4", "5", "6"],
+               "the installed View menu takes ⌘1 to ⌘6")
+        var shortcutOwners: [String: String] = [:]
+        var clashes: [String] = []
+        func collectShortcuts(in menu: NSMenu) {
+            for item in menu.items {
+                if let submenu = item.submenu {
+                    collectShortcuts(in: submenu)
+                }
+                guard !item.keyEquivalent.isEmpty else { continue }
+                let shortcut = "\(item.keyEquivalentModifierMask.rawValue)+\(item.keyEquivalent)"
+                if let owner = shortcutOwners[shortcut] {
+                    clashes.append("\(owner) / \(item.title)")
+                }
+                shortcutOwners[shortcut] = item.title
+            }
+        }
+        if let installed = NSApp.mainMenu {
+            collectShortcuts(in: installed)
+        }
+        expect(clashes.isEmpty, "no two menu bar items share a shortcut \(clashes)")
+        expect(!NSWindow.allowsAutomaticWindowTabbing,
+               "window tabbing is off, so AppKit adds no Show Tab Bar to View")
+
+        // A global hotkey on a pane chord takes it from every app, so View
+        // drops that ⌘N instead of showing a key that never arrives (a
+        // 0.25.0 user may have ⌘3 saved). Only the bare ⌘ chord counts,
+        // AppKit's own View items keep their keys, and a hotkey change
+        // gives the key back.
+        let command = CGEventFlags.maskCommand.rawValue
+        let kVKANSI3: Int64 = 20
+        MainMenu.install(
+            target: menuTarget,
+            hotkeys: [Hotkey(keyCode: kVKANSI3, modifiers: command, isModifierOnly: false)])
+        let takenView = NSApp.mainMenu?.items.first { $0.title == "View" }?.submenu
+        expect(takenView?.items.map(\.keyEquivalent) == ["1", "2", "", "4", "5", "6"],
+               "a ⌘3 hotkey drops ⌘3 from View › \(MainPane.allCases[2].title)")
+        expect(takenView?.items[2].keyEquivalentModifierMask == [],
+               "the dropped pane item shows no stray ⌘")
+        let fullScreen = NSMenuItem(title: "Enter Full Screen", action: nil, keyEquivalent: "f")
+        fullScreen.keyEquivalentModifierMask = [.control, .command]
+        takenView?.addItem(fullScreen)
+        MainMenu.refreshPaneKeys(hotkeys: [
+            Hotkey(keyCode: kVKANSI3, modifiers: command | CGEventFlags.maskShift.rawValue,
+                   isModifierOnly: false),
+            .rightOption,
+        ])
+        expect(takenView?.items.prefix(6).map(\.keyEquivalent) == ["1", "2", "3", "4", "5", "6"],
+               "a hotkey change off ⌘3 gives View its ⌘3 back; ⇧⌘3 takes nothing")
+        expect(takenView?.items[2].keyEquivalentModifierMask == [.command],
+               "the restored pane item is on ⌘ again")
+        expect(fullScreen.keyEquivalent == "f" && fullScreen.keyEquivalentModifierMask == [.control, .command],
+               "refreshing pane keys leaves AppKit's Enter Full Screen on ⌃⌘F")
+        NSApp.mainMenu = savedMainMenu
+        NSApp.windowsMenu = savedWindowsMenu
+        NSApp.helpMenu = savedHelpMenu
+        withExtendedLifetime(menuTarget) {}
+    }
+
+    // MARK: - Accessibility tree
+
+    private static var accessibilityTreeReady: Bool?
+
+    /// SwiftUI builds no accessibility nodes until an assistive client
+    /// connects. Finishing launch and asking this process for its AX role
+    /// over the AX API counts as one; either step alone does not (probed).
+    /// The selftest never becomes a regular app first, and nothing here
+    /// activates or makes a window key, so the owner's front app keeps
+    /// focus. False when the process is not trusted for Accessibility.
+    // Test seam: internal so ContentSelftest can read the Dictionary list's tree.
+    static func enableSwiftUIAccessibilityTree() -> Bool {
+        if let ready = accessibilityTreeReady {
+            return ready
+        }
+        guard AXIsProcessTrusted() else {
+            accessibilityTreeReady = false
+            return false
+        }
+        // An unbundled binary starts `.prohibited`; a run from inside the
+        // app bundle could start `.regular`, so drop that to `.accessory`.
+        let app = NSApplication.shared
+        if app.activationPolicy() == .regular {
+            app.setActivationPolicy(.accessory)
+        }
+        app.finishLaunching()
+        var role: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(
+            AXUIElementCreateApplication(getpid()), kAXRoleAttribute as CFString, &role)
+        accessibilityTreeReady = true
+        return true
+    }
+
+    /// Every node under `root` as (label, help), depth first.
+    private static func accessibilityNodes(under root: NSView) -> [(label: String?, help: String?)] {
+        var nodes: [(label: String?, help: String?)] = []
+        func walk(_ element: Any, depth: Int) {
+            guard depth < 16 else { return }
+            let node = element as AnyObject
+            nodes.append((node.accessibilityLabel?() ?? nil, node.accessibilityHelp?() ?? nil))
+            for child in (node.accessibilityChildren?() ?? nil) ?? [] {
+                walk(child, depth: depth + 1)
+            }
+        }
+        walk(root, depth: 0)
+        return nodes
+    }
+
+    /// The HUD capsule's VoiceOver hint per state, read from the AppKit tree
+    /// of a hosted HUDView (review: a `.help("")` outside the capsule
+    /// replaced these with an empty hint), plus the recorders' names.
+    private static func testHUDAccessibilityTree() {
+        // States with their own buttons carry no capsule hint: VoiceOver
+        // reads the buttons, and "Click to stop dictation" was wrong for
+        // them. Read from the hint itself, so no Accessibility trust needed.
+        let buttonStates: [HUDState] = [
+            .error("Couldn't transcribe"),
+            .meetingSuggestion(title: "Standup", source: "Zoom"),
+            .meeting(title: "Standup", systemAudio: true),
+            .meetingEnd(title: "Standup"),
+            .meetingFailure(meetingID: "m1", message: "Couldn't finish notes"),
+            .actionResult(id: "a1", status: .verified, symbol: "checkmark", message: "Sent",
+                          appName: "Mail"),
+        ]
+        for state in buttonStates {
+            expect(HUDView.accessibilityHint(for: state).isEmpty,
+                   "the \(state) pill has no capsule hint (got \"\(HUDView.accessibilityHint(for: state))\")")
+        }
+
+        guard enableSwiftUIAccessibilityTree() else {
+            print("  skip: accessibility tree checks (process not trusted for Accessibility)")
+            return
+        }
+        let model = HUDModel()
+        let hosting = NSHostingView(rootView: HUDView(model: model))
+        let window = NSWindow(
+            contentRect: NSRect(origin: CGPoint(x: -3000, y: -3000), size: HUDPanel.panelSize),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = hosting
+        func settle() {
+            hosting.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        }
+
+        // States read as one element: label → hint.
+        let escNotice = "Working. Esc cancels"
+        let oneElement: [(state: HUDState, label: String, hint: String)] = [
+            (.standby, "Velora dictation", "Click to start dictation"),
+            (.listening, "Listening", "Click to stop dictation"),
+            // No "Polishing" before the engine knows cleanup will run
+            // (docs/plans/2026-07-11-hud-trust-recovery-design.md).
+            (.transcribing, "Transcribing", "Click to stop dictation"),
+            (.notice(symbol: "stop.circle", message: escNotice), escNotice,
+             "Press Escape to cancel the running action"),
+        ]
+        for pin in oneElement {
+            model.state = pin.state
+            settle()
+            let capsule = accessibilityNodes(under: hosting).first { $0.label == pin.label }
+            expect(capsule?.help == pin.hint,
+                   "the \(pin.label) pill's VoiceOver hint is \"\(pin.hint)\" (got \(String(describing: capsule?.help)))")
+        }
+
+        // States with their own buttons: no node carries an emptied hint.
+        let contained: [HUDState] = [
+            .error("Couldn't transcribe"),
+            .meeting(title: "Standup", systemAudio: true),
+            .meetingEnd(title: "Standup"),
+        ]
+        for state in contained {
+            model.state = state
+            settle()
+            expect(!accessibilityNodes(under: hosting).contains { $0.help == "" },
+                   "no \(state) node reads an empty VoiceOver hint")
+        }
+        window.contentView = nil
+
+        // Settings lists five recorders; each says which shortcut it changes.
+        let recorder = NSHostingView(rootView: HotkeyRecorderView(
+            hotkey: .constant(.rightOption), showsQuickPicks: false, feature: "Stream Typing"))
+        window.contentView = recorder
+        recorder.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        expect(accessibilityNodes(under: recorder).contains { $0.label == "Change Stream Typing shortcut" },
+               "a Settings recorder reads \"Change Stream Typing shortcut\" to VoiceOver")
+        window.contentView = nil
+    }
+
+    /// Which onboarding buttons answer Return, and that one press moves one
+    /// step. Return goes through the hosting view's key equivalents, the
+    /// path a real keypress takes to a `.defaultAction` button.
+    private static func testOnboardingReturn() {
+        // Model rule first: repeats, quick second presses and missing
+        // grants don't advance. Every model here reads this clock, stepped
+        // by hand, so the gate never depends on how loaded the machine is.
+        var clock = Date(timeIntervalSinceReferenceDate: 0)
+        let model = OnboardingModel(now: { clock })
+        model.step = .welcome
+        model.pressContinue(isRepeat: true)
+        expect(model.step == .welcome, "a held Return's autorepeat does not advance onboarding")
+        model.pressContinue(isRepeat: false)
+        expect(model.step == .privacy, "one Return advances one step")
+        clock += 0.2
+        model.pressContinue(isRepeat: false)
+        expect(model.step == .privacy, "a second Return right after the first is dropped")
+        clock += OnboardingModel.stepSettleInterval
+        model.pressContinue(isRepeat: false)
+        expect(model.step == .microphone, "a Return once the step has settled advances")
+        model.microphoneGranted = false
+        clock += 10
+        model.pressContinue(isRepeat: false)
+        expect(model.step == .microphone, "Return does not pass a permission that isn't granted")
+
+        // Skip sits still while the steps change under it, so it waits out
+        // the same gate: a double click passes one step. It still passes a
+        // missing grant; that is what it is for.
+        let skipper = OnboardingModel(now: { clock })
+        skipper.step = .privacy
+        skipper.microphoneGranted = false
+        skipper.pressContinue(isRepeat: false)
+        clock += 0.2
+        skipper.pressSkip(isRepeat: false)
+        expect(skipper.step == .microphone, "a Skip right after Continue is dropped")
+        clock += 5
+        skipper.pressSkip(isRepeat: true)
+        expect(skipper.step == .microphone, "a held Skip's autorepeat does not advance")
+        skipper.pressSkip(isRepeat: false)
+        expect(skipper.step == .inputMonitoring, "a settled Skip passes a missing grant")
+
+        // The wiring: host the real view on a step, press Return, see where
+        // it lands. Input Monitoring is never hosted: its onAppear raises
+        // the system prompt.
+        func returnKey(for view: NSView) -> NSEvent? {
+            NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                windowNumber: view.window?.windowNumber ?? 0, context: nil,
+                characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false,
+                keyCode: 36)
+        }
+        func afterReturn(
+            on step: OnboardingModel.Step, presses: Int = 1,
+            setUp: (OnboardingModel) -> Void = { _ in }
+        ) -> (step: OnboardingModel.Step, finished: Bool) {
+            let model = OnboardingModel(now: { clock })
+            var finished = false
+            model.onFinish = { finished = true }
+            setUp(model)
+            model.step = step
+            let hosting = NSHostingView(rootView: OnboardingView(model: model))
+            let window = NSWindow(
+                contentRect: NSRect(x: -3000, y: -3000, width: 640, height: 520),
+                styleMask: [.titled], backing: .buffered, defer: false)
+            window.contentView = hosting
+            hosting.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            for _ in 0..<presses {
+                if let event = returnKey(for: hosting) {
+                    _ = hosting.performKeyEquivalent(with: event)
+                }
+            }
+            let landed = (model.step, finished)
+            // Detach before the run loop can draw the step Return led to.
+            window.contentView = nil
+            return landed
+        }
+
+        expect(afterReturn(on: .welcome).step == .privacy, "Return on the welcome step is Get Started")
+        expect(afterReturn(on: .privacy).step == .microphone, "Return on the privacy step is Continue")
+        expect(afterReturn(on: .welcome, presses: 2).step == .privacy,
+               "a double Return on the welcome step moves one step, not two")
+        expect(afterReturn(on: .microphone) { $0.microphoneGranted = false }.step == .microphone,
+               "Return on the microphone step waits for the grant")
+        expect(afterReturn(on: .accessibility) { $0.accessibilityGranted = false }.step == .accessibility,
+               "Return on the Accessibility step waits for the grant")
+        expect(afterReturn(on: .accessibility) { $0.accessibilityGranted = true }.step == .hotkey,
+               "Return on a granted Accessibility step is Continue")
+        expect(afterReturn(on: .hotkey).step == .tryIt, "Return on the hotkey step is Continue")
+        let tryIt = afterReturn(on: .tryIt) {
+            $0.setupComplete = true
+            $0.setupStatus = nil
+            $0.dictationSucceeded = true
+        }
+        expect(tryIt.step == .tryIt && !tryIt.finished,
+               "Return in the try-it step stays a newline; Finish takes a click")
+        let downloading = afterReturn(on: .tryIt) {
+            $0.setupComplete = false
+            $0.setupStatus = "Downloading the speech model: 42%"
+        }
+        expect(!downloading.finished, "Return does not choose Continue in the Background")
+
+        // A double click on the hotkey step's Continue lands its second
+        // click on try-it's Continue in the Background (same spot) or on
+        // Skip. Both wait out the gate, then finish. Clicked through the
+        // AppKit tree, the path VoiceOver and a real click share.
+        guard enableSwiftUIAccessibilityTree() else {
+            print("  skip: onboarding click checks (process not trusted for Accessibility)")
+            return
+        }
+        let clicked = OnboardingModel(now: { clock })
+        var clickedFinished = false
+        clicked.onFinish = { clickedFinished = true }
+        clicked.setupComplete = false
+        clicked.setupStatus = "Downloading the speech model: 42%"
+        clicked.step = .hotkey
+        let hosting = NSHostingView(rootView: OnboardingView(model: clicked))
+        let window = NSWindow(
+            contentRect: NSRect(x: -3000, y: -3000, width: 640, height: 520),
+            styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        func click(_ title: String) -> Bool {
+            func find(_ element: Any, depth: Int) -> AnyObject? {
+                guard depth < 24 else { return nil }
+                let node = element as AnyObject
+                let named = node.accessibilityLabel?() == title || node.accessibilityTitle?() == title
+                if named, node.accessibilityRole?() == .button {
+                    return node
+                }
+                for child in (node.accessibilityChildren?() ?? nil) ?? [] {
+                    if let hit = find(child, depth: depth + 1) {
+                        return hit
+                    }
+                }
+                return nil
+            }
+            // Let SwiftUI apply the last click's step change first.
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            hosting.layoutSubtreeIfNeeded()
+            guard let button = find(hosting, depth: 0) else { return false }
+            return button.accessibilityPerformPress?() ?? false
+        }
+        let continued = click("Continue")
+        expect(continued && clicked.step == .tryIt, "a click on the hotkey step's Continue opens try-it")
+        let background = click("Continue in the Background")
+        expect(background && !clickedFinished,
+               "a double click's second half does not choose Continue in the Background")
+        let skipped = click("Skip")
+        expect(skipped && !clickedFinished, "nor does it Skip past try-it")
+        clock += OnboardingModel.stepSettleInterval + 0.1
+        expect(click("Skip") && clickedFinished, "a settled Skip on try-it finishes setup")
+        window.contentView = nil
+    }
+
+    /// The words chart keys its average above the plot, and the plot keeps
+    /// one height with or without an average to key (review: a key row
+    /// that came and went moved every bar). Read from the AppKit tree of
+    /// a hosted chart.
+    private static func testStatsAverageKey() {
+        guard enableSwiftUIAccessibilityTree() else {
+            print("  skip: Stats Average key checks (process not trusted for Accessibility)")
+            return
+        }
+        typealias Node = (role: String?, text: String?, frame: CGRect)
+        func chartTree(words: [Int]) -> [Node] {
+            let calendar = Calendar.current
+            let today = calendar.startOfDay(for: Date())
+            let bars = words.enumerated().map { index, count in
+                StatsBar(
+                    date: calendar.date(byAdding: .day, value: index - words.count + 1, to: today) ?? today,
+                    label: "", words: count)
+            }
+            let hosting = NSHostingView(rootView: StatsWordsChart(bars: bars, range: .sevenDays))
+            let window = NSWindow(
+                contentRect: NSRect(x: -3000, y: -3000, width: 600, height: 190),
+                styleMask: [.borderless], backing: .buffered, defer: false)
+            window.contentView = hosting
+            hosting.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+            var nodes: [Node] = []
+            func walk(_ element: Any, depth: Int) {
+                guard depth < 16 else { return }
+                let node = element as AnyObject
+                let label = node.accessibilityLabel?() ?? nil
+                let readValue: (() -> Any?)? = node.accessibilityValue
+                let value = (readValue?() ?? nil) as? String
+                nodes.append((node.accessibilityRole?()?.rawValue, label ?? value,
+                              node.accessibilityFrame?() ?? .zero))
+                for child in (node.accessibilityChildren?() ?? nil) ?? [] {
+                    walk(child, depth: depth + 1)
+                }
+            }
+            walk(hosting, depth: 0)
+            window.contentView = nil
+            return nodes
+        }
+
+        // 7,280 words over seven days: an average of 1,040.
+        let keyed = chartTree(words: [900, 1200, 1000, 1100, 800, 1300, 980])
+        let empty = chartTree(words: [0, 0, 0, 0, 0, 0, 0])
+        // The tree: the box, the key's text, then the Chart's own group.
+        func plot(in tree: [Node]) -> CGRect? {
+            tree.dropFirst().first { $0.role == NSAccessibility.Role.group.rawValue }?.frame
+        }
+        let key = keyed.first { $0.text == "Average 1,040" }
+        expect(key != nil, "the words chart keys its average as \"Average 1,040\"")
+        if let key, let keyedPlot = plot(in: keyed) {
+            // AX frames are y-up: above means a higher minY.
+            expect(key.frame.minY >= keyedPlot.maxY,
+                   "the Average key sits above the plot, clear of the bars")
+        }
+        expect(!empty.contains { $0.text?.hasPrefix("Average") == true },
+               "a chart with no words keys no average to VoiceOver")
+        let keyedHeight = plot(in: keyed)?.height
+        let emptyHeight = plot(in: empty)?.height
+        expect(keyedHeight != nil && keyedHeight == emptyHeight,
+               "the plot keeps its height with no average to key (\(String(describing: keyedHeight)) vs \(String(describing: emptyHeight)))")
     }
 
     // MARK: - Window shell geometry
@@ -9370,9 +9936,70 @@ enum Selftest {
         expect(Hotkey(keyCode: 54, modifiers: CGEventFlags.maskCommand.rawValue,
                       isModifierOnly: true).displayLabel == "Right ⌘",
                "a bare Right Command shortcut reads Right ⌘")
+        // The quick picks sit under the keycap recorder, so they use the
+        // same glyph label: one screen never mixes "Right Option" and "Right ⌥".
+        for pick in Hotkey.quickPicks {
+            expect(pick.name == pick.hotkey.displayLabel,
+                   "the \(pick.name) quick pick uses its keycap label")
+        }
         expect(Hotkey(keyCode: 49, modifiers: CGEventFlags.maskCommand.rawValue,
                       isModifierOnly: false).conflictWarning?.contains("\u{2014}") == false,
                "shortcut warnings carry no em dash")
+
+        // ⌘1…⌘6 open panes from the View menu; a global dictation shortcut
+        // there would swallow them in every app. kVK_ANSI_1…6 by View-menu key.
+        let digitKeyCodes: [String: Int64] = ["1": 18, "2": 19, "3": 20, "4": 21, "5": 23, "6": 22]
+        func commandHotkey(_ keyCode: Int64) -> Hotkey {
+            Hotkey(keyCode: keyCode, modifiers: CGEventFlags.maskCommand.rawValue, isModifierOnly: false)
+        }
+        for item in MainMenu.viewMenu(target: NSObject()).items {
+            let warning = digitKeyCodes[item.keyEquivalent].map { commandHotkey($0).conflictWarning }
+            expect(warning == "⌘\(item.keyEquivalent) would stop working in every app, including Velora's View menu. Pick another shortcut.",
+                   "a ⌘\(item.keyEquivalent) dictation shortcut warns that every app loses it (got \(String(describing: warning)))")
+        }
+        // AZERTY types "&" on kVK_ANSI_1. The warning still names the chord
+        // by its digit, as the View menu shows it, while a typing-key
+        // warning names the layout's own key.
+        if let azerty = keyboardLayoutData(id: "com.apple.keylayout.French") {
+            let azertyPane = commandHotkey(18).conflictWarning(layoutData: azerty)
+            expect(azertyPane?.hasPrefix("⌘1 ") == true,
+                   "on AZERTY a ⌘1 shortcut warns as ⌘1, not ⌘& (got \(String(describing: azertyPane)))")
+            let kVKANSIQ: Int64 = 12
+            expect(Hotkey(keyCode: kVKANSIQ, modifiers: 0, isModifierOnly: false)
+                       .conflictWarning(layoutData: azerty)
+                       == "A alone fires every time you type it. Add a modifier.",
+                   "on AZERTY a bare typing-key warning names the key AZERTY types there")
+        } else {
+            print("  skip: AZERTY warning checks (French layout not installed)")
+        }
+        let kVKANSI7: Int64 = 26
+        expect(commandHotkey(kVKANSI7).conflictWarning == nil,
+               "⌘7 opens no pane, so it carries no warning")
+
+        // An armed recorder: bare Esc and Return cancel; anything else records.
+        expect(HotkeyRecorderView.captureOutcome(keyCode: 36, modifiers: 0) == .cancel,
+               "a bare Return cancels the recorder like Esc instead of recording ↩")
+        expect(HotkeyRecorderView.captureOutcome(keyCode: 53, modifiers: 0) == .cancel,
+               "a bare Esc cancels the recorder")
+        let kVKANSIKeypadEnter: Int64 = 76
+        expect(HotkeyRecorderView.captureOutcome(keyCode: kVKANSIKeypadEnter, modifiers: 0) == .cancel,
+               "a bare keypad Enter cancels the recorder like Return")
+        expect(HotkeyRecorderView.captureOutcome(
+                   keyCode: 36, modifiers: CGEventFlags.maskCommand.rawValue)
+                   == .record(commandHotkey(36)),
+               "⌘Return is still a recordable shortcut")
+    }
+
+    /// An installed keyboard layout's key map, enabled or not, without
+    /// switching the owner's input source. Nil when it isn't installed.
+    private static func keyboardLayoutData(id: String) -> Data? {
+        let filter = [kTISPropertyInputSourceID as String: id] as CFDictionary
+        guard let sources = TISCreateInputSourceList(filter, true)?.takeRetainedValue()
+                as? [TISInputSource],
+              let source = sources.first,
+              let layout = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
+        else { return nil }
+        return Unmanaged<CFData>.fromOpaque(layout).takeUnretainedValue() as Data
     }
 
     // MARK: - Microphone selection

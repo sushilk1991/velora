@@ -210,7 +210,7 @@ The pill by the cursor is the product's face. Rules:
   timer. Inserted collapses to a circle with a check. Error is 320 pt with a
   single retry chip.
 - The HUD never takes focus and never appears over a secure input field.
-- Copy in the HUD is ≤ 4 words, present tense: `Listening`, `Polishing`,
+- Copy in the HUD is ≤ 4 words, present tense: `Listening`, `Transcribing`,
   `Pasted at your cursor`, `Proofread text on clipboard`. Two phrases join
   with a full stop, never a dash: `Couldn't transcribe. Try again`.
 - Right-click menu, in this order: the dictation toggle, Microphone, Recent

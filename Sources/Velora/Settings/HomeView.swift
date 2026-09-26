@@ -130,7 +130,7 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
             SerifHeadline("Ready when you are", size: .hero)
             (Text("Press ")
-                + Text(model.hotkey.displayName).fontWeight(.medium)
+                + Text(model.hotkey.displayLabel).fontWeight(.medium)
                 + Text(" and talk, anywhere you can type. Your voice never leaves this Mac."))
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)

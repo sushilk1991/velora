@@ -127,6 +127,59 @@ enum StatTileTrend {
     case days([Bool])
 }
 
+/// The Stats tiles four across: equal columns, every tile as tall as the
+/// tallest. Its ideal width is the widest tile's times the count, so the
+/// pane's `ViewThatFits` picks this row only when an equal share holds every
+/// tile's text. An HStack reports the sum of ideals and then splits evenly,
+/// which truncated "at 40 wpm typing · Change…" at 980 pt.
+///
+///     ideal = count × widest + gaps       placed = equal columns
+///     ┌ 90 ┐ ┌ 150 ┐ ┌ 120 ┐   →   ┌ 150 ┐┌ 150 ┐┌ 150 ┐
+struct StatsTileRow: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else {
+            return .zero
+        }
+        let width: CGFloat
+        if let proposed = proposal.width, proposed.isFinite {
+            width = proposed
+        } else {
+            let widest = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
+            width = widest * CGFloat(subviews.count) + gaps(subviews)
+        }
+        let column = columnWidth(width, subviews)
+        let height = subviews
+            .map { $0.sizeThatFits(ProposedViewSize(width: column, height: nil)).height }
+            .max() ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        let column = columnWidth(bounds.width, subviews)
+        for (index, subview) in subviews.enumerated() {
+            let x = bounds.minX + CGFloat(index) * (column + spacing)
+            subview.place(
+                at: CGPoint(x: x, y: bounds.minY),
+                proposal: ProposedViewSize(width: column, height: bounds.height))
+        }
+    }
+
+    private func gaps(_ subviews: Subviews) -> CGFloat {
+        spacing * CGFloat(max(0, subviews.count - 1))
+    }
+
+    private func columnWidth(_ width: CGFloat, _ subviews: Subviews) -> CGFloat {
+        guard !subviews.isEmpty else {
+            return 0
+        }
+        return max(0, (width - gaps(subviews)) / CGFloat(subviews.count))
+    }
+}
+
 /// A hero metric: label, value, a context line and a trend, on the
 /// GroupCard fill. The app's one metric tile (DESIGN.md §7).
 ///
@@ -290,10 +343,12 @@ private struct StatsDayStrip: View {
     }
 }
 
-/// Words per bucket with a dashed average rule; trailing y axis.
+/// Words per bucket with a dashed average rule, keyed above the plot;
+/// trailing y axis.
 ///
+///     - - Average 1,040
 ///     ▂▃▅▂▇▃▁▅▆▂▃▅▂▇▃▁▅▆▂▃▅▂▇▃▁▅▆▂▃█   190 pt
-///     - - - - - - - - - - - Average 1,040
+///     - - - - - - - - - - - - - - - -
 ///     Aug 10    Aug 17    Aug 25    Sep 1
 struct StatsWordsChart: View {
     let bars: [StatsBar]
@@ -306,6 +361,8 @@ struct StatsWordsChart: View {
     private static let daysPerTick = 7
     private static let monthTicks = 6
     private static let dash: [CGFloat] = [3, 3]
+    /// Length of the dashed swatch in the Average key.
+    private static let keySwatchWidth: CGFloat = 14
     /// Room above the plot for the top y label, which centres on the top
     /// grid line and would otherwise clip ("1,000" losing its top half).
     private static let topInset: CGFloat = 8
@@ -313,36 +370,56 @@ struct StatsWordsChart: View {
     var body: some View {
         let average = StatsSeries.average(bars)
         StatsChartBox(height: Self.height) {
-            Chart {
-                ForEach(bars) { bar in
-                    BarMark(x: .value("Date", bar.date, unit: unit), y: .value("Words", bar.words))
-                        .foregroundStyle(VeloraBrand.accent)
-                        .cornerRadius(Self.radius)
+            // The rule's label is a key above the plot: on the rule, an
+            // opaque plate hid the tops of bars near the average (review,
+            // snapshot-confirmed). Charts shows no custom legend for an
+            // unstyled series, so the key is a plain row. With no average
+            // the row stays, invisible, so the plot keeps its height.
+            VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+                averageKey(average)
+                    .opacity(average > 0 ? 1 : 0)
+                    .accessibilityHidden(average <= 0)
+                Chart {
+                    ForEach(bars) { bar in
+                        BarMark(x: .value("Date", bar.date, unit: unit), y: .value("Words", bar.words))
+                            .foregroundStyle(VeloraBrand.accent)
+                            .cornerRadius(Self.radius)
+                    }
+                    if average > 0 {
+                        RuleMark(y: .value("Average", average))
+                            .foregroundStyle(Color.secondary)
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: Self.dash))
+                    }
                 }
-                if average > 0 {
-                    RuleMark(y: .value("Average", average))
-                        .foregroundStyle(Color.secondary)
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: Self.dash))
-                        .annotation(position: .top, alignment: .trailing) {
-                            Text("Average \(HistoryJournal.grouped(Int(average.rounded())))")
-                                .font(StatsChartStyle.axisFont)
-                                .foregroundStyle(.secondary)
-                        }
+                .chartXAxis {
+                    AxisMarks(values: xTicks) { _ in
+                        AxisGridLine().foregroundStyle(StatsChartStyle.grid)
+                        AxisValueLabel(format: xFormat)
+                    }
                 }
+                .chartYAxis {
+                    AxisMarks(position: .trailing, values: .automatic(desiredCount: Self.yTicks)) { _ in
+                        AxisGridLine().foregroundStyle(StatsChartStyle.grid)
+                        AxisValueLabel()
+                    }
+                }
+                .padding(.top, Self.topInset)
             }
-            .chartXAxis {
-                AxisMarks(values: xTicks) { _ in
-                    AxisGridLine().foregroundStyle(StatsChartStyle.grid)
-                    AxisValueLabel(format: xFormat)
-                }
+        }
+    }
+
+    /// A short dash in the rule's style, then "Average 1,040".
+    private func averageKey(_ average: Double) -> some View {
+        HStack(spacing: VeloraSpacing.xs) {
+            Path { path in
+                path.move(to: .zero)
+                path.addLine(to: CGPoint(x: Self.keySwatchWidth, y: 0))
             }
-            .chartYAxis {
-                AxisMarks(position: .trailing, values: .automatic(desiredCount: Self.yTicks)) { _ in
-                    AxisGridLine().foregroundStyle(StatsChartStyle.grid)
-                    AxisValueLabel()
-                }
-            }
-            .padding(.top, Self.topInset)
+            .stroke(Color.secondary, style: StrokeStyle(lineWidth: 1, dash: Self.dash))
+            .frame(width: Self.keySwatchWidth, height: 1)
+            Text("Average \(HistoryJournal.grouped(Int(average.rounded())))")
+                .font(StatsChartStyle.axisFont)
+                .foregroundStyle(.secondary)
         }
     }
 

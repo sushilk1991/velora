@@ -6,7 +6,8 @@ import SwiftUI
 ///
 /// Flow: click → "Press your shortcut…" → the next keyDown is captured with
 /// its modifiers. Releasing a bare modifier without pressing a key records
-/// the modifier itself (Right ⌥ / Fn / Globe stay recordable). Esc cancels.
+/// the modifier itself (Right ⌥ / Fn / Globe stay recordable). A bare Esc,
+/// Return or keypad Enter cancels.
 /// While capturing, a local `NSEvent` monitor consumes the events and the
 /// global `HotkeyMonitor` suspends matching (via
 /// `.veloraHotkeyRecordingActive`) so the capture can't trigger dictation.
@@ -14,6 +15,9 @@ struct HotkeyRecorderView: View {
     @Binding var hotkey: Hotkey
     /// Show the curated quick-pick buttons under the recorder field.
     var showsQuickPicks = true
+    /// The feature this shortcut runs ("Stream Typing"). Names the field
+    /// for VoiceOver where several recorders share one list.
+    var feature: String?
 
     @State private var isRecording = false
     @State private var monitor: Any?
@@ -63,9 +67,16 @@ struct HotkeyRecorderView: View {
             .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.tile, style: .continuous))
         }
         .buttonStyle(.plain)
-        .help("Click, then press the new shortcut. A single key like Right Option works too.")
+        .help("Click, then press the new shortcut. A single key like Right ⌥ works too.")
         .accessibilityLabel(
-            isRecording ? "Recording shortcut; press keys now" : "Change shortcut")
+            isRecording ? "Recording shortcut; press keys now" : changeLabel)
+    }
+
+    /// "Change Stream Typing shortcut", so Settings' recorders don't all
+    /// read "Change shortcut".
+    private var changeLabel: String {
+        guard let feature else { return "Change shortcut" }
+        return "Change \(feature) shortcut"
     }
 
     // MARK: - Quick picks
@@ -90,7 +101,7 @@ struct HotkeyRecorderView: View {
         if !isRecording, let warning = hotkey.conflictWarning {
             Label(warning, systemImage: "exclamationmark.triangle.fill")
                 .font(.callout)
-                .foregroundStyle(VeloraStatus.warning)
+                .foregroundStyle(VeloraStatus.warningText)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -121,21 +132,44 @@ struct HotkeyRecorderView: View {
         NotificationCenter.default.post(name: .veloraHotkeyRecordingActive, object: false)
     }
 
+    /// What a keyDown does while the recorder is armed.
+    enum CaptureOutcome: Equatable {
+        case cancel
+        case record(Hotkey)
+    }
+
+    /// kVK_Escape, kVK_Return and kVK_ANSI_KeypadEnter.
+    private static let escapeKeyCode: Int64 = 53
+    private static let returnKeyCode: Int64 = 36
+    private static let keypadEnterKeyCode: Int64 = 76
+
+    // Test seam: internal so Selftest can reach it.
+    /// A bare Esc, Return or keypad Enter cancels: Esc stays the dictation
+    /// cancel key, and a bare ↩ or ⌤ as a global shortcut would fire on
+    /// every line break. Anything else, ⌘↩ included, is recorded.
+    static func captureOutcome(keyCode: Int64, modifiers: UInt64) -> CaptureOutcome {
+        let bare = modifiers == 0
+        let cancelKeys = [escapeKeyCode, returnKeyCode, keypadEnterKeyCode]
+        if bare, cancelKeys.contains(keyCode) {
+            return .cancel
+        }
+        return .record(Hotkey(keyCode: keyCode, modifiers: modifiers, isModifierOnly: false))
+    }
+
     private func handle(_ event: NSEvent) {
         switch event.type {
         case .keyDown:
             let keyCode = Int64(event.keyCode)
             let modifiers = Hotkey.cgFlags(from: event.modifierFlags) & Hotkey.strictModifierMask
-            // Esc (unmodified) cancels the capture — it stays the dictation
-            // cancel key and can never be a hotkey itself.
-            if keyCode == 53, modifiers == 0 {
-                endRecording(reason: "Esc")
-                return
+            // The local monitor consumes the event either way, so a
+            // cancelling Return never reaches the window's default button.
+            switch Self.captureOutcome(keyCode: keyCode, modifiers: modifiers) {
+            case .cancel:
+                endRecording(reason: "cancel key")
+            case .record(let captured):
+                apply(captured, source: "captured combo")
+                endRecording(reason: "captured")
             }
-            apply(
-                Hotkey(keyCode: keyCode, modifiers: modifiers, isModifierOnly: false),
-                source: "captured combo")
-            endRecording(reason: "captured")
 
         case .flagsChanged:
             let keyCode = Int64(event.keyCode)

@@ -912,6 +912,10 @@ struct StatsHeaderControls: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            // Large (30 pt, measured) is the nearest native height to the
+            // 28 pt capsules beside it (Share…, and HeaderMenu on the other
+            // panes); regular is 22 pt.
+            .controlSize(.large)
             .fixedSize()
             ShareLink(
                 item: StatsShareImage(card: viewModel.shareCard),
@@ -1022,7 +1026,8 @@ struct IntelligenceSettingsView: View {
     /// buckets (Active days: a dot per day). Today swaps Active days for
     /// the streak.
     ///
-    /// Four across while every caption fits on one line; narrower (the
+    /// Four across while every caption fits on one line in an equal quarter
+    /// (`StatsTileRow`); narrower (the
     /// 960 pt minimum window leaves each tile about 138 pt) a 2 × 2 grid,
     /// so "at 40 wpm typing · Change…" is never clipped.
     ///
@@ -1030,7 +1035,7 @@ struct IntelligenceSettingsView: View {
     ///     └───────┘└───────┘└───────┘└──────┘  or  ┌ Dict. ─┐┌ Days ──┐
     private func tiles(bars: [StatsBar]) -> some View {
         ViewThatFits(in: .horizontal) {
-            HStack(spacing: VeloraSpacing.m) {
+            StatsTileRow(spacing: VeloraSpacing.m) {
                 wordsTile(bars: bars)
                 savedTile(bars: bars)
                 dictationsTile(bars: bars)

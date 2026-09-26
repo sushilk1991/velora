@@ -33,8 +33,13 @@ enum AppActivation {
 enum MainMenu {
     /// `target` is the AppDelegate providing the @objc actions; standard
     /// selectors (close, copy, minimize…) stay nil-targeted so the responder
-    /// chain resolves them.
-    static func install(target: AnyObject) {
+    /// chain resolves them. `hotkeys` are the global ones in force, whose
+    /// ⌘1…⌘6 the View menu leaves out (`setPaneKeys`).
+    static func install(target: AnyObject, hotkeys: [Hotkey]) {
+        // Velora's windows never tab. Left on, AppKit adds Show Tab Bar and
+        // Show All Tabs to the View menu and tab items to Window (probed).
+        NSWindow.allowsAutomaticWindowTabbing = false
+
         let main = NSMenu()
 
         // App menu (title is replaced by the process name at display time).
@@ -57,7 +62,7 @@ enum MainMenu {
         // ⌘O — the real key equivalent behind the menubar's display-only one.
         fileMenu.addItem(item(
             "Open Velora", #selector(AppDelegate.menuOpenMain), target: target, key: "o"))
-        fileMenu.addItem(item("Close Window", #selector(NSWindow.performClose(_:)), key: "w"))
+        fileMenu.addItem(item("Close", #selector(NSWindow.performClose(_:)), key: "w"))
         main.addItem(submenuItem(fileMenu))
 
         // Standard first-responder editing commands — these are what make the
@@ -72,6 +77,10 @@ enum MainMenu {
         editMenu.addItem(item("Delete", #selector(NSText.delete(_:))))
         editMenu.addItem(item("Select All", #selector(NSText.selectAll(_:)), key: "a"))
         main.addItem(submenuItem(editMenu))
+
+        let view = viewMenu(target: target)
+        setPaneKeys(in: view, takenBy: hotkeys)
+        main.addItem(submenuItem(view))
 
         let windowMenu = NSMenu(title: "Window")
         windowMenu.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), key: "m"))
@@ -97,6 +106,50 @@ enum MainMenu {
         NSApp.mainMenu = main
         NSApp.windowsMenu = windowMenu
         NSApp.helpMenu = helpMenu
+    }
+
+    /// The View menu's title; `refreshPaneKeys` finds the menu by it.
+    private static let viewTitle = "View"
+
+    /// View › one item per sidebar pane, in sidebar order, on ⌘1…⌘6. Each
+    /// item carries its `MainPane` for `menuShowPane(_:)`. Internal (not
+    /// private) so the selftest can pin the order.
+    static func viewMenu(target: AnyObject) -> NSMenu {
+        let menu = NSMenu(title: viewTitle)
+        for (index, pane) in MainPane.allCases.enumerated() {
+            let paneItem = item(
+                pane.title, #selector(AppDelegate.menuShowPane(_:)),
+                target: target, key: String(index + 1))
+            paneItem.representedObject = pane
+            menu.addItem(paneItem)
+        }
+        return menu
+    }
+
+    /// Re-derives the installed View menu's ⌘1…⌘6 after a hotkey change.
+    static func refreshPaneKeys(hotkeys: [Hotkey]) {
+        guard let view = NSApp.mainMenu?.item(withTitle: viewTitle)?.submenu else {
+            return
+        }
+        setPaneKeys(in: view, takenBy: hotkeys)
+    }
+
+    /// Gives each pane item its ⌘N unless a global hotkey takes that chord.
+    /// The hotkey tap consumes it in every app, so the menu would show a
+    /// shortcut that never arrives (a 0.25.0 user may have ⌘3 saved).
+    /// Items without a pane (AppKit's Enter Full Screen) keep their keys.
+    ///
+    ///     hotkeys [⌘3]  →  Home ⌘1  History ⌘2  Stats —  Modes ⌘4 …
+    private static func setPaneKeys(in menu: NSMenu, takenBy hotkeys: [Hotkey]) {
+        let taken = Set(hotkeys.compactMap(\.paneDigit))
+        for item in menu.items {
+            guard let pane = item.representedObject as? MainPane,
+                  let index = MainPane.allCases.firstIndex(of: pane) else { continue }
+            let digit = index + 1
+            let isTaken = taken.contains(digit)
+            item.keyEquivalent = isTaken ? "" : String(digit)
+            item.keyEquivalentModifierMask = isTaken ? [] : [.command]
+        }
     }
 
     private static func submenuItem(_ menu: NSMenu) -> NSMenuItem {

@@ -152,13 +152,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var openFileTranscriptionQueue = FileTranscriptionQueue()
     private var openFileRetryPending = false
 
+    /// Every chord the hotkey monitor watches: dictation plus each enabled
+    /// secondary role. The View menu drops any ⌘1…⌘6 one of these takes.
+    private var globalHotkeys: [Hotkey] {
+        [config.hotkey] + Array(config.activeSecondaryHotkeys.values)
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // No Dock icon. LSUIElement covers the bundled app; the programmatic
         // call is the reliable path for bare `swift build` binaries.
         NSApp.setActivationPolicy(.accessory)
         // Ready before any window opens: the moment the app becomes regular
         // (AppActivation), the menu bar must show real menus.
-        MainMenu.install(target: self)
+        MainMenu.install(target: self, hotkeys: globalHotkeys)
         SettingsModel.applyAppearance(config.appearance)
 
         config.ensureVeloraDirectory()
@@ -678,6 +684,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.hotkeyMonitor.hotkey = self.config.hotkey
             self.hotkeyMonitor.secondaryHotkeys = self.config.activeSecondaryHotkeys
+            MainMenu.refreshPaneKeys(hotkeys: self.globalHotkeys)
         }
 
         // First-run setup progress (venv bootstrap, model downloads) →
@@ -959,6 +966,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func menuOpenMain() {
         showMain(selecting: .home)
+    }
+
+    /// View › Home … Modes (⌘1–⌘6): each item carries its `MainPane`.
+    @objc func menuShowPane(_ sender: NSMenuItem) {
+        guard let pane = sender.representedObject as? MainPane else { return }
+        showMain(selecting: pane)
     }
 
     @objc func menuOpenSetupAssistant() {

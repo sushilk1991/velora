@@ -538,7 +538,7 @@ struct UpdateWindowView: View {
     private func warning(_ text: String) -> some View {
         Label(text, systemImage: "exclamationmark.triangle.fill")
             .font(.caption)
-            .foregroundStyle(VeloraStatus.warning)
+            .foregroundStyle(VeloraStatus.warningText)
             .textSelection(.enabled)
     }
 }
