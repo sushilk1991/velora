@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 import velora_engine.cleanup_process as cleanup_process_mod
-from fixtures.fake_cleanup_worker import PID_DIR_ENV, kill_leaked
+from fixtures.fake_cleanup_worker import PID_DIR_ENV, kill_leaked, kill_workers
 from velora_engine import actions
 from velora_engine.cleanup import CleanupResult
 from velora_engine.cleanup_ipc import (
@@ -839,6 +839,304 @@ async def test_defer_during_a_wedged_reload_returns_before_the_worker_exits(
         assert alive_at_spawn == []
     finally:
         await cleanup.aclose()
+
+
+class ContendedLock(asyncio.Lock):
+    """An asyncio.Lock that tells a test once a caller waits for it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.contended = asyncio.Event()
+
+    async def acquire(self) -> bool:
+        if self.locked():
+            self.contended.set()
+        return await super().acquire()
+
+
+async def load_then_wedge(cleanup: CleanupProcess, marker_dir: Path) -> asyncio.Task:
+    """Load `cleanup`, then wedge its worker in a cleanup that never returns.
+
+    Only SIGKILL ends that worker: it ignores SIGTERM and never reads the
+    socket's EOF. Returns the hung cleanup call, which ends once the worker
+    is reaped.
+    """
+    await cleanup.load_async("warm prompt")
+    pid = cleanup.pid
+    hung = asyncio.create_task(
+        cleanup.cleanup("__hang__", "system", timeout_ms=60_000))
+    await wait_until(lambda: (marker_dir / str(pid)).exists(), "the worker never wedged")
+    return hung
+
+
+# A hang detector for the cancelled-aclose() tests, not a latency bound: the
+# reap alone waits EXIT_WAIT_S + KILL_REAP_TIMEOUT_S, and a loaded machine
+# stretches both.
+CLOSE_HANG_S = 10.0
+
+
+class ReapLog:
+    """How a test's `_reap` calls went: how many run now, and how many a
+    cancel cut short."""
+
+    def __init__(self) -> None:
+        self.running = 0
+        self.cut_short = 0
+
+
+def record_reaps(monkeypatch) -> ReapLog:
+    """Count every `_reap` of the test in a ReapLog."""
+    reaps = ReapLog()
+    reap = CleanupProcess._reap
+
+    async def recording_reap(self, process):
+        reaps.running += 1
+        try:
+            await reap(self, process)
+        except asyncio.CancelledError:
+            reaps.cut_short += 1
+            raise
+        finally:
+            reaps.running -= 1
+
+    monkeypatch.setattr(CleanupProcess, "_reap", recording_reap)
+    return reaps
+
+
+def retired_pids() -> set[int]:
+    return {process.pid for process in cleanup_process_mod._retired_workers}
+
+
+def exited_or_retired(pid: int) -> bool:
+    """Whether a finished reap is done with worker `pid`: it exited, or it
+    outlived SIGKILL and the retired registry holds the next spawn for it."""
+    return process_gone(pid) or pid in retired_pids()
+
+
+async def check_cancelled_close(
+    closing: asyncio.Task, pids: list[int], reaps: ReapLog,
+) -> set[int]:
+    """Check that a cancelled aclose() finished every reap before the cancel
+    reached its caller, and that every worker then exits.
+
+    It checks what a reap guarantees, not how fast it runs. A worker that
+    outlives SIGKILL by KILL_REAP_TIMEOUT_S is retired, not waited for, and
+    a loaded machine can make a healthy worker look like one. Returns the
+    pids that were retired, not exited, when the cancel reached the caller.
+    """
+    at_cancel: dict[str, object] = {}
+
+    def snapshot(_task: asyncio.Task) -> None:
+        at_cancel["reaps running"] = reaps.running
+        at_cancel["settled"] = all(exited_or_retired(pid) for pid in pids)
+        at_cancel["retired"] = retired_pids() & set(pids)
+
+    closing.add_done_callback(snapshot)
+    done, _ = await asyncio.wait({closing}, timeout=CLOSE_HANG_S)
+    assert closing in done, f"aclose() still running {CLOSE_HANG_S:.0f} s after its cancel"
+    assert closing.cancelled()
+    assert at_cancel["reaps running"] == 0
+    assert at_cancel["settled"]
+    assert reaps.cut_short == 0
+    await wait_until(
+        lambda: all(process_gone(pid) for pid in pids),
+        "a reaped worker never exited",
+        timeout_s=CLOSE_HANG_S,
+    )
+    return at_cancel["retired"]
+
+
+async def test_cancelled_aclose_reaps_the_worker_then_propagates(
+    monkeypatch, tmp_path,
+) -> None:
+    """A cancel that lands while aclose() waits for a recovery reaches the
+    caller once the recovery has reaped its worker.
+
+    Before: aclose() awaited the recovery under suppress(CancelledError),
+    which swallowed the caller's cancel too. Then it awaited the recovery
+    directly, which carried the cancel into the recovery's reap: SIGKILL at
+    once, and a return before the worker exited.
+    """
+    spawned, _ = record_spawns(monkeypatch)
+    reaps = record_reaps(monkeypatch)
+    command = fixture_command() + ["--wedge-second-load", str(tmp_path / "loads")]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    try:
+        await cleanup.load_async("warm prompt")
+        await cleanup.cleanup("__crash__", "system")
+        await wait_until_wedged(tmp_path / "loads")
+
+        # aclose() cancels the recovery, whose load then reaps the wedged
+        # worker; SIGTERM is ignored, so that reap takes EXIT_WAIT_S.
+        closing = asyncio.create_task(cleanup.aclose())
+        await wait_until(lambda: cleanup.pid is None, "the recovery never began its reap")
+        closing.cancel()
+        await check_cancelled_close(closing, spawned, reaps)
+    finally:
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+
+
+async def test_cancelled_aclose_finishes_its_own_reap(monkeypatch, tmp_path) -> None:
+    """A cancel that lands while aclose() reaps a worker that ignores SIGTERM
+    reaches the caller once that reap has finished.
+
+    Before: the cancel landed in the reap itself, which SIGKILLed the worker
+    and raised without waiting for its exit.
+    """
+    spawned, _ = record_spawns(monkeypatch)
+    reaps = record_reaps(monkeypatch)
+    command = fixture_command() + ["--hang-marker-dir", str(tmp_path)]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    hung = None
+    try:
+        hung = await load_then_wedge(cleanup, tmp_path)
+
+        closing = asyncio.create_task(cleanup.aclose())
+        # _stop_worker clears the pid, then SIGTERMs in the same step.
+        await wait_until(lambda: cleanup.pid is None, "aclose() never began its reap")
+        closing.cancel()
+        await check_cancelled_close(closing, spawned, reaps)
+    finally:
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+        if hung is not None:
+            await asyncio.wait({hung}, timeout=CLOSE_HANG_S)
+
+
+async def test_cancelled_aclose_retires_a_worker_that_outlives_sigkill(
+    monkeypatch, tmp_path,
+) -> None:
+    """A cancelled aclose() of a worker that outlives SIGKILL reaches its
+    caller once the reap has retired that worker, never before.
+
+    aclose() does not wait for that exit, by design: the retired registry
+    holds every later spawn until the worker is gone.
+    """
+    deliver_sigkill_late(monkeypatch, LATE_KILL_S)
+    spawned, _ = record_spawns(monkeypatch)
+    reaps = record_reaps(monkeypatch)
+    command = fixture_command() + ["--hang-marker-dir", str(tmp_path)]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    hung = None
+    try:
+        hung = await load_then_wedge(cleanup, tmp_path)
+        pid = cleanup.pid
+
+        closing = asyncio.create_task(cleanup.aclose())
+        await wait_until(lambda: cleanup.pid is None, "aclose() never began its reap")
+        closing.cancel()
+        assert await check_cancelled_close(closing, spawned, reaps) == {pid}
+    finally:
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+        if hung is not None:
+            await asyncio.wait({hung}, timeout=CLOSE_HANG_S)
+
+
+async def test_aclose_cancelled_waiting_for_the_load_lock_still_reaps(
+    monkeypatch, tmp_path,
+) -> None:
+    """A cancel that lands while aclose() waits for a load or hibernate to
+    release the load lock still reaps the worker, and then reaches the
+    caller.
+
+    Before: the cancel ended the lock wait, so aclose() never stopped the
+    worker at all.
+    """
+    spawned, _ = record_spawns(monkeypatch)
+    reaps = record_reaps(monkeypatch)
+    command = fixture_command() + ["--hang-marker-dir", str(tmp_path)]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    lock = cleanup._load_lock = ContendedLock()
+    hung = None
+    try:
+        hung = await load_then_wedge(cleanup, tmp_path)
+        await lock.acquire()  # a load or hibernate in flight
+
+        closing = asyncio.create_task(cleanup.aclose())
+        await asyncio.wait_for(lock.contended.wait(), CLOSE_HANG_S)
+        closing.cancel()
+        lock.release()
+        await check_cancelled_close(closing, spawned, reaps)
+    finally:
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+        if hung is not None:
+            await asyncio.wait({hung}, timeout=CLOSE_HANG_S)
+
+
+async def test_cancelled_aclose_logs_a_failure_the_cancel_hides(
+    monkeypatch, caplog,
+) -> None:
+    """A teardown that fails while aclose()'s caller is cancelled is logged:
+    the caller gets its cancel, not the failure, so the log is its only
+    trace."""
+    stopping = asyncio.Event()
+
+    async def stop_failing(self) -> None:
+        stopping.set()
+        await asyncio.sleep(0.2)  # reaping the worker
+        raise RuntimeError("reap failed")
+
+    monkeypatch.setattr(CleanupProcess, "_stop_worker", stop_failing)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    closing = asyncio.create_task(cleanup.aclose())
+    await asyncio.wait_for(stopping.wait(), CLOSE_HANG_S)
+    closing.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert any(
+        record.levelname == "WARNING"
+        and record.exc_info is not None
+        and str(record.exc_info[1]) == "reap failed"
+        for record in caplog.records
+    )
+
+
+async def test_aclose_after_its_caller_was_cancelled_finishes(
+    monkeypatch, tmp_path,
+) -> None:
+    """aclose() in a `finally` that a cancel entered, as serve()'s is,
+    returns normally, so the rest of that `finally` runs.
+
+    A regression guard; no release shipped this bug. A draft of the aclose()
+    cancel fix raised whenever its task had a cancel pending, which counted
+    the cancel that entered the `finally`. Its own cancel of the recovery
+    then passed for the caller's, and serve() skipped closing its other
+    engines.
+    """
+    spawned, _ = record_spawns(monkeypatch)
+    command = fixture_command() + ["--wedge-second-load", str(tmp_path / "loads")]
+    cleanup = CleanupProcess("fake", worker_command=command)
+    serving_started = asyncio.Event()
+    finished: list[str] = []
+
+    async def serve_like() -> None:
+        try:
+            serving_started.set()
+            await asyncio.Event().wait()
+        finally:
+            await cleanup.aclose()
+            finished.append("rest of finally")
+
+    try:
+        await cleanup.load_async("warm prompt")
+        await cleanup.cleanup("__crash__", "system")
+        await wait_until_wedged(tmp_path / "loads")
+
+        serving = asyncio.create_task(serve_like())
+        await serving_started.wait()
+        serving.cancel()
+        await asyncio.wait({serving}, timeout=CLOSE_HANG_S)
+
+        assert finished == ["rest of finally"]
+        assert serving.cancelled()
+        assert all(exited_or_retired(pid) for pid in spawned)
+        await wait_until(
+            lambda: all(process_gone(pid) for pid in spawned),
+            "a reaped worker never exited",
+            timeout_s=CLOSE_HANG_S,
+        )
+    finally:
+        kill_workers(pid for pid in spawned if not process_gone(pid))
 
 
 async def test_worker_alive_past_the_exit_bound_escalates_instead_of_loading(

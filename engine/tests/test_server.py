@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -16,6 +17,7 @@ from unittest.mock import AsyncMock, Mock
 import numpy as np
 import pytest
 
+from fixtures.fake_cleanup_worker import kill_workers
 from test_cleanup_process import (
     deliver_sigkill_late,
     fixture_command,
@@ -493,6 +495,10 @@ async def test_cleanup_model_swap_reaps_old_worker_before_ack(engine, monkeypatc
     client.close()
 
 
+# How long serve() may take to return after shutdown before a test fails.
+SERVE_SHUTDOWN_MAX_S = 5.0
+
+
 @contextlib.asynccontextmanager
 async def serve_with_startup_worker(
     monkeypatch, *worker_flags: str, is_cached=lambda _model_id: True,
@@ -536,17 +542,36 @@ async def serve_with_startup_worker(
         yield eng, sock, workers, spawned
     finally:
         eng.shutdown.set()
-        await asyncio.wait_for(task, 5)
-        shutil.rmtree(sock_dir, ignore_errors=True)
-        # Shutdown stops the retry and reaps every worker, including one a
-        # retry was loading; none is built after it.
-        built = len(workers)
-        await asyncio.sleep(0.3)
-        assert len(workers) == built
-        assert all(process_gone(pid) for pid in spawned)
-        # No worker, and so no model load, ever ran beside another.
-        if not load_then_swap:
-            assert alive_at_spawn == []
+        try:
+            # asyncio.wait, not wait_for: serve() can swallow wait_for's
+            # cancel and return, so a retry that hung shutdown passed at the
+            # timeout.
+            done, _ = await asyncio.wait({task}, timeout=SERVE_SHUTDOWN_MAX_S)
+            hung = task not in done
+            if hung:
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=SERVE_SHUTDOWN_MAX_S)
+            assert not hung, (
+                f"serve() still running {SERVE_SHUTDOWN_MAX_S:.0f} s after shutdown"
+                + ("" if task in done else ", and after a cancel"))
+            task.result()
+            # The startup retry, hung or not, ended with serve().
+            retry = eng._cleanup_retry_task
+            assert retry is None or retry.done()
+            # Shutdown stops the retry and reaps every worker, including one
+            # a retry was loading; none is built after it.
+            built = len(workers)
+            await asyncio.sleep(0.3)
+            assert len(workers) == built
+            assert all(process_gone(pid) for pid in spawned)
+            # No worker, and so no model load, ever ran beside another.
+            if not load_then_swap:
+                assert alive_at_spawn == []
+        finally:
+            shutil.rmtree(sock_dir, ignore_errors=True)
+            # A failed check above leaves no worker that ignores SIGTERM
+            # running into later tests.
+            kill_workers(pid for pid in spawned if not process_gone(pid))
 
 
 async def dictate(client: Client, session: str) -> dict:
@@ -829,8 +854,39 @@ async def test_cleanup_retry_loads_the_model_config_names_after_a_switch(
         assert eng.cleanup.loaded
 
 
+def hung_retry_flags(marker_dir: Path) -> tuple[str, ...]:
+    """Worker flags for a startup retry whose load hangs.
+
+    The startup load fails at once. Every later load never returns, touches
+    marker_dir/<pid>, and leaves a worker only SIGKILL ends (see
+    wait_for_hung_retry_load).
+    """
+    return (
+        "--fail-first-load", str(marker_dir / "startup-load-failed"),
+        "--hang-every-load", "--hang-marker-dir", str(marker_dir),
+    )
+
+
+async def wait_for_hung_retry_load(spawned: list[int], marker_dir: Path) -> None:
+    """Return once the retry's worker holds its load and only SIGKILL ends it.
+
+    A stop from then on ends the load through `_reap`. Waiting for the spawn
+    alone raced: a stop before the worker's socket connected killed it
+    inside `_spawn`, which never calls `_reap`.
+
+        spawn recorded ─▶ socket connects ─▶ load sent ─▶ SIGTERM ignored
+           (old wait)                                     (this wait)
+    """
+    # This spans two cold worker starts, the backoff and the load read, all
+    # slower on a loaded machine.
+    await wait_for(
+        lambda: len(spawned) == 2 and (marker_dir / str(spawned[1])).exists(),
+        timeout_s=15.0,
+    )
+
+
 async def test_shutdown_while_a_retry_abandons_its_load_stops_the_retry(
-    home, fake_stt, monkeypatch
+    home, fake_stt, monkeypatch, tmp_path
 ):
     """Shutdown stops a retry that is still abandoning its load for
     foreground work.
@@ -839,14 +895,11 @@ async def test_shutdown_while_a_retry_abandons_its_load_stops_the_retry(
     which also swallowed serve()'s cancel; the retry then waited for idle
     forever and serve() never returned.
     """
-    monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 0.5)
     monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
     async with serve_with_startup_worker(
-        monkeypatch, "--hang-every-load"
+        monkeypatch, *hung_retry_flags(tmp_path)
     ) as (eng, _sock, workers, spawned):
-        await wait_for(lambda: eng._cleanup_retry_task is not None)
-        monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 60.0)
-        await wait_for(lambda: len(spawned) == 2)
+        await wait_for_hung_retry_load(spawned, tmp_path)
 
         # Hold the retry's abandon open after its worker is reaped, as a
         # worker slow to exit does, so shutdown lands inside it.
@@ -866,25 +919,96 @@ async def test_shutdown_while_a_retry_abandons_its_load_stops_the_retry(
 
 
 async def test_shutdown_during_a_hung_cleanup_retry_load_reaps_the_worker(
-    home, fake_stt, monkeypatch
+    home, fake_stt, monkeypatch, tmp_path
 ):
     """Shutdown stops a retry whose load never returns, and its worker, which
     ignores SIGTERM, is gone once serve() returns."""
-    monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 0.5)
     monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
     async with serve_with_startup_worker(
-        monkeypatch, "--hang-every-load"
+        monkeypatch, *hung_retry_flags(tmp_path)
     ) as (eng, _sock, workers, spawned):
-        await wait_for(lambda: eng._cleanup_retry_task is not None)
-        # The startup load timed out; the retry's load hangs for good.
-        monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", 60.0)
-        await wait_for(lambda: len(spawned) == 2)
-        await asyncio.sleep(0.2)
+        # Shut down only once the retry's worker ignores SIGTERM. A fixed
+        # 0.2 s sleep usually ended before it read its load, so SIGTERM
+        # alone reaped it and the SIGKILL path went untested.
+        await wait_for_hung_retry_load(spawned, tmp_path)
         assert eng._cleanup_loading is not None
         started = time.monotonic()
         eng.shutdown.set()
     # The teardown waited 0.3 s for stray respawns and found every pid gone.
     assert time.monotonic() - started < 3.0
+
+
+async def test_stopping_a_retry_that_abandons_its_load_ends_it(
+    home, fake_stt, monkeypatch, tmp_path
+):
+    """set_model's stop of the startup retry ends a retry that is still
+    abandoning its load for foreground work.
+
+    Before: the abandon swallowed the stop's cancel too, so the retry
+    waited out the foreground work and set_model waited on it.
+    """
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
+    async with serve_with_startup_worker(
+        monkeypatch, *hung_retry_flags(tmp_path)
+    ) as (eng, _sock, workers, spawned):
+        await wait_for_hung_retry_load(spawned, tmp_path)
+
+        # Hold the abandon open after its worker is reaped, as a worker
+        # slow to exit does, so the stop lands inside it.
+        reaped = asyncio.Event()
+        reap = CleanupProcess._reap
+
+        async def slow_reap(self, process):
+            await reap(self, process)
+            reaped.set()
+            await asyncio.sleep(0.5)
+
+        monkeypatch.setattr(CleanupProcess, "_reap", slow_reap)
+        eng._starting = True
+        await asyncio.wait_for(reaped.wait(), 2.0)
+
+        # asyncio.wait, not wait_for: the stop absorbs wait_for's cancel and
+        # keeps waiting, so a retry that never ends hung the suite.
+        stopping = asyncio.create_task(eng._stop_cleanup_retry())
+        done, _ = await asyncio.wait({stopping}, timeout=3.0)
+        assert stopping in done, "the stop still waits on the retry after 3 s"
+        stopping.result()
+
+
+async def test_a_load_failing_as_it_is_abandoned_is_a_failed_retry(
+    home, fake_stt, monkeypatch, caplog
+):
+    """A retry load that fails while foreground work abandons it counts as a
+    failed attempt, which backs off, not as a pause, which does not."""
+    caplog.set_level(logging.INFO, logger="velora.server")
+    monkeypatch.setattr(cleanup_process_mod, "RESPAWN_BACKOFF_S", 0.3)
+    async with serve_with_startup_worker(
+        monkeypatch, "--fail-every-load"
+    ) as (eng, _sock, workers, spawned):
+        await wait_for(lambda: eng._cleanup_retry_task is not None)
+        loading = asyncio.Event()
+
+        async def load_failing_on_cancel(self, warm_system_prompt=None):
+            # A load whose own teardown fails, as a reap that errors would.
+            loading.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                raise RuntimeError("load failed while abandoned") from None
+
+        monkeypatch.setattr(CleanupProcess, "load_async", load_failing_on_cancel)
+        await asyncio.wait_for(loading.wait(), 2.0)
+        eng._starting = True
+
+        # Attempt 1 failed through the abandon, not through a real load that
+        # ran before the patch: the error it logged is the abandon's.
+        await wait_for(lambda: any(
+            record.getMessage().startswith("writing model retry 1 failed")
+            and record.exc_info is not None
+            and str(record.exc_info[1]) == "load failed while abandoned"
+            for record in caplog.records
+        ))
+        assert "paused for foreground work" not in caplog.text
 
 
 async def test_set_model_during_the_startup_load_keeps_a_working_cleanup(
@@ -1064,18 +1188,22 @@ async def test_cleanup_retry_waits_for_continuous_idle(
 
 
 async def test_stop_cleanup_retry_keeps_the_callers_cancellation(home):
-    """Cancelling set_model while it stops the retry cancels set_model.
+    """Cancelling set_model while it stops the retry cancels set_model, once
+    the retry has reaped its worker.
 
     Before: stopping the retry swallowed every CancelledError, including one
-    aimed at its caller.
+    aimed at its caller. Then it awaited the retry directly, which carried
+    that cancel into the retry's reap and cut it short.
     """
     eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    reaped: list[str] = []
 
     async def retry_slow_to_stop() -> None:
         try:
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             await asyncio.sleep(0.5)  # reaping its worker
+            reaped.append("worker")
             raise
 
     eng._cleanup_retry_task = asyncio.create_task(retry_slow_to_stop())
@@ -1086,6 +1214,67 @@ async def test_stop_cleanup_retry_keeps_the_callers_cancellation(home):
 
     with pytest.raises(asyncio.CancelledError):
         await stopping
+    assert reaped == ["worker"]
+
+
+async def test_stop_cleanup_retry_logs_a_failure_its_callers_cancel_hides(
+    home, caplog
+):
+    """A retry that fails while a cancelled caller stops it is logged: the
+    caller gets its cancel, not the failure, so the log is its only trace."""
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+
+    async def retry_failing_to_stop() -> None:
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.2)  # reaping its worker
+            raise RuntimeError("reap failed") from None
+
+    eng._cleanup_retry_task = asyncio.create_task(retry_failing_to_stop())
+    await asyncio.sleep(0)
+    stopping = asyncio.create_task(eng._stop_cleanup_retry())
+    await asyncio.sleep(0.05)
+    stopping.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert any(
+        record.levelname == "WARNING"
+        and record.exc_info is not None
+        and str(record.exc_info[1]) == "reap failed"
+        for record in caplog.records
+    )
+
+
+async def test_stop_cleanup_retry_after_its_caller_was_cancelled_returns(home):
+    """Stopping the retry in a `finally` that a cancel entered returns once
+    the retry ends, so the rest of that `finally` runs.
+
+    Before: it re-raised the retry's own cancel whenever its task had a
+    cancel pending, which counted the cancel that entered the `finally`.
+    """
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    eng._cleanup_retry_task = asyncio.create_task(asyncio.sleep(3600))
+    caller_started = asyncio.Event()
+    finished: list[str] = []
+
+    async def caller() -> None:
+        try:
+            caller_started.set()
+            await asyncio.Event().wait()
+        finally:
+            await eng._stop_cleanup_retry()
+            finished.append("rest of finally")
+
+    calling = asyncio.create_task(caller())
+    await caller_started.wait()
+    calling.cancel()
+    await asyncio.wait({calling}, timeout=SERVE_SHUTDOWN_MAX_S)
+
+    assert finished == ["rest of finally"]
+    assert calling.cancelled()
+    assert eng._cleanup_retry_task.cancelled()
 
 
 def frozen_clock(eng: Engine, now: float = 100.0) -> list[float]:

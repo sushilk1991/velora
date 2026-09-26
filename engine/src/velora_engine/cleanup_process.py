@@ -1303,9 +1303,49 @@ class CleanupProcess:
         loop.create_task(finish_close())
 
     async def aclose(self) -> None:
-        """Close and reap the child before the parent event loop exits."""
+        """Close and reap the child before the parent event loop exits.
+
+        The teardown runs in its own task, so a cancel of the caller neither
+        cuts the reap short nor skips it. The cancel reaches the caller once
+        the reap has finished: the worker has exited, or it outlived SIGKILL
+        by KILL_REAP_TIMEOUT_S and is retired, and the next spawn by any
+        proxy waits for its exit.
+
+            caller ──cancel──▶ aclose ···(not forwarded)···▶ _teardown
+                               waits ◀──────── done ──────── reap
+                               raise CancelledError
+
+        A cancel therefore cannot cut aclose() short. Its longest wait is for
+        `_load_lock`: a hibernated worker's reload holds it until it sees
+        `_closed`, up to RETIRED_EXIT_TIMEOUT_S + LOAD_TIMEOUT_S.
+
+        `asyncio.wait` raises only for a cancel that lands during the wait,
+        so one the caller swallowed earlier, as serve()'s `finally` does,
+        does not make aclose() raise.
+        """
         self._closed = True
         self.loaded = False
+        teardown = asyncio.create_task(self._teardown())
+        caller_cancel: asyncio.CancelledError | None = None
+        while not teardown.done():
+            try:
+                await asyncio.wait({teardown})
+            except asyncio.CancelledError as exc:
+                caller_cancel = exc
+        if caller_cancel is not None:
+            # The caller gets its cancel, so log a failure it would hide.
+            error = None if teardown.cancelled() else teardown.exception()
+            if error is not None:
+                log.warning("cleanup worker teardown failed", exc_info=error)
+            raise caller_cancel
+        teardown.result()
+
+    async def _teardown(self) -> None:
+        """Stop the replacement, recovery and worker for aclose().
+
+        aclose() never forwards its caller's cancel here, so a CancelledError
+        from an awaited task is that task's own.
+        """
         replacement_task = self._replacement_task
         self._replacement_task = None
         if replacement_task is not None:

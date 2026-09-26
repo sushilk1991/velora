@@ -984,18 +984,31 @@ class Engine:
         self._cleanup_retry_task = asyncio.create_task(self._retry_cleanup_load())
 
     async def _stop_cleanup_retry(self) -> None:
-        """Cancel a running retry and wait until its worker is reaped."""
+        """Cancel a running retry and wait until its worker is reaped.
+
+        `asyncio.wait` does not carry a cancel of the caller into the retry,
+        so the retry's reap runs to its end, and the cancel reaches the
+        caller after. It raises only for a cancel that lands during the
+        wait, so one the caller swallowed earlier does not count.
+        """
         task = self._cleanup_retry_task
         if task is None or task.done():
             return
         task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            # The retry's own cancellation ends here; the caller's does not.
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise
+        caller_cancel: asyncio.CancelledError | None = None
+        while not task.done():
+            try:
+                await asyncio.wait({task})
+            except asyncio.CancelledError as exc:
+                caller_cancel = exc
+        if caller_cancel is not None:
+            # The caller gets its cancel, so log a failure it would hide.
+            error = None if task.cancelled() else task.exception()
+            if error is not None:
+                log.warning("writing model retry failed as it stopped", exc_info=error)
+            raise caller_cancel
+        if not task.cancelled():
+            task.result()
 
     def _cleanup_retry_may_load(self) -> bool:
         """A retry loads only while no dictation, job or batch work runs.

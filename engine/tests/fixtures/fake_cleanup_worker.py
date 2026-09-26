@@ -12,6 +12,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections.abc import Iterable
 from pathlib import Path
 from typing import NoReturn
 
@@ -31,14 +32,17 @@ MAX_LIFETIME_S = 120.0
 NOTES_JSON = json.dumps({"summary": "Notes.", "decisions": [], "action_items": []})
 
 
-def wedge_like_native_code() -> NoReturn:
+def wedge_like_native_code(marker_dir: Path | None = None) -> NoReturn:
     """Stop serving the way a native call that never returns does.
 
     The event loop blocks, so protocol cancels go unread, and SIGTERM is
     ignored, so only SIGKILL ends the worker. It sleeps rather than spins,
-    so a worker a test leaks costs no CPU.
+    so a worker a test leaks costs no CPU. With `marker_dir`, it touches
+    marker_dir/<pid> once only SIGKILL ends it, to tell the test.
     """
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if marker_dir is not None:
+        (marker_dir / str(os.getpid())).touch()
     while True:
         time.sleep(3600)
 
@@ -66,9 +70,17 @@ def register_pid() -> None:
 
 def kill_leaked(pid_dir: Path) -> list[int]:
     """SIGKILL every registered worker still alive; returns their pids."""
+    return kill_workers(int(entry.name) for entry in pid_dir.iterdir())
+
+
+def kill_workers(pids: Iterable[int]) -> list[int]:
+    """SIGKILL each of `pids` that is still a fixture worker; returns those.
+
+    A test calls this in `finally`, so a failed check leaves no worker that
+    ignores SIGTERM running into later tests.
+    """
     killed = []
-    for entry in pid_dir.iterdir():
-        pid = int(entry.name)
+    for pid in pids:
         if not _is_fixture_worker(pid):
             continue
         with contextlib.suppress(ProcessLookupError):
@@ -102,6 +114,7 @@ async def main(
     fail_first_load: Path | None = None,
     model: str = "",
     fail_load_for: str | None = None,
+    hang_marker_dir: Path | None = None,
 ) -> None:
     sock = socket.socket(fileno=fd)
     sock.setblocking(False)
@@ -132,9 +145,10 @@ async def main(
                 await respond(request_id, ok=False, error="injected first load failure")
                 return
             if hang_every_load:
-                # A load that never returns and outlives SIGTERM.
-                signal.signal(signal.SIGTERM, signal.SIG_IGN)
-                await asyncio.sleep(3600)
+                # A load that never returns and that only SIGKILL ends. It
+                # blocks the loop: an asyncio sleep here left the loop free
+                # to read EOF when the parent closed the socket, and exit.
+                wedge_like_native_code(hang_marker_dir)
             if wedge_second_load is not None:
                 # Loads 1 and 3+ succeed; load 2 wedges like native code:
                 # it blocks and ignores SIGTERM, so only SIGKILL ends it.
@@ -239,7 +253,7 @@ async def main(
         if "__hang__" in raw:
             # Native-style hard wedge: ignore protocol cancellation and
             # SIGTERM, so the parent must SIGKILL.
-            wedge_like_native_code()
+            wedge_like_native_code(hang_marker_dir)
         if raw == "__cancel__":
             while request_id not in cancelled:
                 await asyncio.sleep(0.01)
@@ -315,6 +329,9 @@ if __name__ == "__main__":
     parser.add_argument("--hang-prefix", action="store_true")
     parser.add_argument("--load-delay", type=float, default=0.0)
     parser.add_argument("--hang-every-load", action="store_true")
+    # A hung load or __hang__ cleanup touches <dir>/<pid> once it ignores
+    # SIGTERM.
+    parser.add_argument("--hang-marker-dir", type=Path)
     parser.add_argument("--wedge-second-load", type=Path)
     parser.add_argument("--fail-first-load", type=Path)
     # Every load of this one model fails; other models load.
@@ -343,5 +360,6 @@ if __name__ == "__main__":
             args.fail_first_load,
             args.model,
             args.fail_load_for,
+            args.hang_marker_dir,
         )
     )
