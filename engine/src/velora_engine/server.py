@@ -165,6 +165,8 @@ CLEANUP_RETRY_INTERRUPT_POLL_S = 0.02
 # a burst of dictations with gaps shorter than a load (3-7 s) does not spawn
 # a worker in every gap only for the next dictation to kill it.
 CLEANUP_RETRY_IDLE_S = 2.0
+# set_model's reply once shutdown has begun: it loads no model then.
+SET_MODEL_SHUTTING_DOWN = "set_model: engine is shutting down"
 
 PARENT_POLL_S = 2.0
 
@@ -1223,13 +1225,22 @@ class Engine:
             self.cleanup = None
             self._cleanup_loading = None
             closed_cleanup_ids: set[int] = set()
+            sweep_cancel: asyncio.CancelledError | None = None
             for cleanup in cleanup_candidates:
                 if cleanup is None or id(cleanup) in closed_cleanup_ids:
                     continue
                 closed_cleanup_ids.add(id(cleanup))
                 close_cleanup_async = getattr(cleanup, "aclose", None)
                 if callable(close_cleanup_async):
-                    await close_cleanup_async()
+                    # A failed or cancelled close has still reaped its
+                    # worker. Log a failure, hold a cancel until the end, and
+                    # go on, so the other engine closes and shutdown ends.
+                    try:
+                        await close_cleanup_async()
+                    except asyncio.CancelledError as exc:
+                        sweep_cancel = exc
+                    except Exception:
+                        log.exception("cleanup engine close failed during shutdown")
                 else:
                     close_cleanup = getattr(cleanup, "close", None)
                     if callable(close_cleanup):
@@ -1244,6 +1255,8 @@ class Engine:
             log.info("engine shut down")
             if retry_cancel is not None:
                 raise retry_cancel
+            if sweep_cancel is not None:
+                raise sweep_cancel
 
     async def _watch_parent(self) -> None:
         if self.parent_pid is None:
@@ -3058,6 +3071,7 @@ class Engine:
             self.stt = backend
             self.config.data["stt_model"] = model_id
             await self._close_stt_backend(old)
+            self.config.save(keys={"stt_model"})
         else:
             try:
                 # A startup retry would load beside this model: stop it first,
@@ -3069,7 +3083,7 @@ class Engine:
                     # Its close sweep may have run, and would miss a worker
                     # loaded now.
                     if self.shutdown.is_set():
-                        await self._error("set_model: engine is shutting down")
+                        await self._error(SET_MODEL_SHUTTING_DOWN)
                         return
                     # Load-then-swap: build and fully load the replacement
                     # FIRST, then retire the old one. A failed load (bad
@@ -3084,11 +3098,24 @@ class Engine:
                         except Exception:
                             await engine.aclose()
                             raise  # keep self.cleanup pointing at the old, working engine
+                    # Shutdown may also begin during that load, and its sweep
+                    # may run before the load ends: close this worker here,
+                    # as the sweep no longer can.
+                    if self.shutdown.is_set():
+                        await engine.aclose()
+                        await self._error(SET_MODEL_SHUTTING_DOWN)
+                        return
                     old = self.cleanup
                     self.cleanup = engine
                     self.config.data["cleanup_model"] = model_id
-                    if old is not None:
-                        await old.aclose()
+                    # The switch is done once the new engine serves: save it
+                    # before the old one closes, so a failure of that close,
+                    # which still reaps the old worker, is not the switch's.
+                    try:
+                        self.config.save(keys={"cleanup_model"})
+                    finally:
+                        if old is not None:
+                            await self._close_replaced(old)
             except BaseException:
                 # No engine to keep serving: retry in the background, whether
                 # or not a retry ran before, so cleanup does not stay absent
@@ -3097,9 +3124,23 @@ class Engine:
                         and not self.shutdown.is_set()):
                     self._start_cleanup_retry()
                 raise
-        self.config.save(keys={f"{kind}_model"})
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)
+
+    async def _close_replaced(self, old: CleanupProcess) -> None:
+        """Close the cleanup engine a switch replaced.
+
+        A failure here is logged, never replied: the switch it follows is
+        saved, and the close has reaped the old worker either way. A cancel
+        is logged too, and raised.
+        """
+        try:
+            await old.aclose()
+        except asyncio.CancelledError:
+            log.warning("replaced cleanup engine close cancelled")
+            raise
+        except Exception:
+            log.exception("replaced cleanup engine close failed")
 
     async def _stt_for_reprocess(self, model_id: str, language: str) -> STTBackend:
         """Return a loaded backend for `model_id`: the live one if it matches,

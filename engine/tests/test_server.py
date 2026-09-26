@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import tempfile
 import threading
 import time
@@ -18,14 +19,18 @@ import numpy as np
 import pytest
 
 from fixtures.fake_cleanup_worker import kill_workers
-from test_cleanup_process import (
+from fixtures.reap_probes import (
     ReapLog,
-    deliver_sigkill_late,
     exited_or_retired,
-    fail_close_before_reap,
-    fixture_command,
+    hold_reaps,
     process_gone,
     record_reaps,
+    snapshot_at_end,
+)
+from test_cleanup_process import (
+    deliver_sigkill_late,
+    fail_close_before_reap,
+    fixture_command,
     record_spawns,
 )
 
@@ -688,6 +693,24 @@ async def ready_client(sock: Path) -> Client:
     return client
 
 
+async def attach_client(eng: Engine) -> Client:
+    """Connect a client to a bare `eng` over a real socket, as serve() does
+    for the app, so a test reads what `eng` sends."""
+    ours, theirs = socket.socketpair()
+    _reader, eng.writer = await asyncio.open_unix_connection(sock=ours)
+    return Client(*await asyncio.open_unix_connection(sock=theirs))
+
+
+async def events_until_eof(client: Client) -> list[dict]:
+    """Every event the engine sends `client` until it closes the connection."""
+    events: list[dict] = []
+    while True:
+        try:
+            events.append(await client.recv(timeout=STOP_HANG_S))
+        except asyncio.IncompleteReadError:
+            return events
+
+
 async def test_set_model_during_a_cleanup_retry_load_loads_one_model_at_a_time(
     home, fake_stt, monkeypatch, tmp_path
 ):
@@ -897,33 +920,6 @@ STOP_HANG_S = 10.0
 SECOND_CANCEL_HOLD_S = 0.2
 
 
-def hold_reaps(monkeypatch) -> asyncio.Event:
-    """Hold every `_reap` until the returned event is set, as a worker slow
-    to exit does, so a test can land a cancel while one runs."""
-    release = asyncio.Event()
-    reap = CleanupProcess._reap
-
-    async def held_reap(self, process):
-        await release.wait()
-        await reap(self, process)
-
-    monkeypatch.setattr(CleanupProcess, "_reap", held_reap)
-    return release
-
-
-def snapshot_retry_end(eng: Engine, pid: int, reaps: ReapLog) -> dict[str, object]:
-    """Record, as the retry ends, how many reaps still run and whether
-    worker `pid` has exited or been retired."""
-    at_end: dict[str, object] = {}
-
-    def snapshot(_task: asyncio.Task) -> None:
-        at_end["reaps running"] = reaps.running
-        at_end["settled"] = exited_or_retired(pid)
-
-    eng._cleanup_retry_task.add_done_callback(snapshot)
-    return at_end
-
-
 async def check_retry_outlives_its_reap(
     eng: Engine, pid: int, reaps: ReapLog, release: asyncio.Event,
 ) -> None:
@@ -935,7 +931,7 @@ async def check_retry_outlives_its_reap(
         shutdown ─────────────────────────▶ cancel                  retry ends
     """
     retry = eng._cleanup_retry_task
-    at_end = snapshot_retry_end(eng, pid, reaps)
+    at_end = snapshot_at_end(retry, pid, reaps)
     stopping = asyncio.create_task(eng._stop_cleanup_retry())
     try:
         await wait_for(lambda: reaps.running == 1, timeout_s=STOP_HANG_S)
@@ -1116,7 +1112,7 @@ async def test_a_retry_stopped_while_abandoning_its_load_ends_after_the_reap(
         await wait_for_hung_retry_load(spawned, tmp_path)
         release = hold_reaps(monkeypatch)
         reaps = record_reaps(monkeypatch)
-        at_end = snapshot_retry_end(eng, spawned[1], reaps)
+        at_end = snapshot_at_end(eng._cleanup_retry_task, spawned[1], reaps)
 
         eng._starting = True  # foreground work: the retry abandons its load
         try:
@@ -1693,6 +1689,159 @@ async def test_set_model_after_shutdown_began_builds_no_worker(home, monkeypatch
     setting.result()
     assert built == []
     assert eng._cleanup_retry_task.done()  # shutdown: no restart either
+
+
+async def test_set_model_whose_load_ends_in_shutdown_closes_its_worker(
+    home, monkeypatch
+):
+    """set_model whose load ends after shutdown began closes the worker it
+    loaded rather than publish it: serve()'s close sweep may have run during
+    the load, and nothing would close that worker after it.
+
+    Before: it published the engine, and its worker outlived shutdown.
+    """
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
+    spawned, _ = record_spawns(monkeypatch)
+    monkeypatch.setattr(
+        server_mod, "CleanupProcess",
+        lambda model_id, **kwargs: CleanupProcess(
+            model_id, worker_command=fixture_command(), **kwargs))
+    loaded = asyncio.Event()
+    release = asyncio.Event()
+    load = CleanupProcess.load_async
+
+    async def load_then_hold(self, warm_system_prompt=None):
+        await load(self, warm_system_prompt)
+        loaded.set()
+        await release.wait()
+
+    monkeypatch.setattr(CleanupProcess, "load_async", load_then_hold)
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    client = await attach_client(eng)
+    setting = asyncio.create_task(eng._cmd_set_model(
+        {"cmd": "set_model", "kind": "cleanup", "model": "fake-new"}))
+    try:
+        await asyncio.wait_for(loaded.wait(), STOP_HANG_S)
+        eng.shutdown.set()
+        release.set()
+        done, _ = await asyncio.wait({setting}, timeout=STOP_HANG_S)
+
+        assert setting in done, f"set_model still running {STOP_HANG_S:.0f} s after its load"
+        setting.result()
+        eng.writer.close()
+        assert await events_until_eof(client) == [
+            {"event": "error", "message": server_mod.SET_MODEL_SHUTTING_DOWN}]
+        assert eng.config.cleanup_model != "fake-new"
+        assert Config().cleanup_model != "fake-new"  # as saved
+        assert eng.cleanup is None
+        assert len(spawned) == 1 and exited_or_retired(spawned[0])
+    finally:
+        client.close()
+        kill_workers(pid for pid in spawned if not process_gone(pid))
+
+
+async def test_shutdown_closes_every_cleanup_engine_when_one_close_fails(
+    home, monkeypatch, caplog
+):
+    """A cleanup close that fails during shutdown is logged, and shutdown
+    still closes the other engine and runs to its end.
+
+    Before: the failure left the loading engine open and skipped the rest
+    of shutdown.
+    """
+    caplog.set_level(logging.INFO, logger="velora.server")
+    closed: list[str] = []
+
+    async def failing_close() -> None:
+        closed.append("serving")
+        raise RuntimeError("close failed")
+
+    async def close() -> None:
+        closed.append("loading")
+
+    async with serve_without_models(monkeypatch) as (eng, serving, _sock):
+        eng.cleanup = SimpleNamespace(aclose=failing_close)
+        eng._cleanup_loading = SimpleNamespace(aclose=close)
+        eng.shutdown.set()
+        done, _ = await asyncio.wait({serving}, timeout=SERVE_SHUTDOWN_MAX_S)
+
+        assert serving in done, f"serve() still running {SERVE_SHUTDOWN_MAX_S:.0f} s after shutdown"
+        serving.result()
+        assert closed == ["serving", "loading"]
+        assert "engine shut down" in caplog.text
+        assert [
+            record for record in caplog.records
+            if record.exc_info is not None and str(record.exc_info[1]) == "close failed"
+        ]
+
+
+async def test_sweep_survives_a_cancel(home, monkeypatch, caplog):
+    """serve() cancelled while its shutdown closes one cleanup engine still
+    closes the other and runs to its end, and then ends cancelled.
+
+    Before: the cancel left the sweep at the first close, so the other
+    engine's worker outlived shutdown.
+    """
+    caplog.set_level(logging.INFO, logger="velora.server")
+    closing = asyncio.Event()
+    closed: list[str] = []
+
+    async def reaping_close() -> None:
+        closed.append("serving")
+        closing.set()
+        # Reaping. A cancel ends it by raising, as aclose() raises one once
+        # its reap is done.
+        await asyncio.sleep(3600)
+
+    async def close() -> None:
+        closed.append("loading")
+
+    async with serve_without_models(monkeypatch) as (eng, serving, _sock):
+        eng.cleanup = SimpleNamespace(aclose=reaping_close)
+        eng._cleanup_loading = SimpleNamespace(aclose=close)
+        eng.shutdown.set()
+        await asyncio.wait_for(closing.wait(), STOP_HANG_S)
+        serving.cancel()
+        done, _ = await asyncio.wait({serving}, timeout=SERVE_SHUTDOWN_MAX_S)
+
+        assert serving in done, f"serve() still running {SERVE_SHUTDOWN_MAX_S:.0f} s after its cancel"
+        assert serving.cancelled()
+        assert closed == ["serving", "loading"]
+        assert "engine shut down" in caplog.text
+
+
+async def test_set_model_commits_first(home, fake_stt, monkeypatch, caplog):
+    """set_model whose old engine then fails to close still replies that the
+    switch succeeded, with the new model saved and serving. The failure is
+    only logged, and that close has still reaped the old worker.
+
+    Before: the failure became set_model's reply, while the new engine
+    served and the saved config still named the old model.
+    """
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    async with serve_with_startup_worker(
+        monkeypatch, load_then_swap=True,
+    ) as (eng, sock, _workers, _spawned):
+        client = await ready_client(sock)
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        old_pid = eng.cleanup.pid
+        fail_close_before_reap(eng.cleanup)
+
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        # The engine reads the EOF, and so closes, once set_model is done.
+        client.writer.write_eof()
+        events = await events_until_eof(client)
+
+        replies = [evt["event"] for evt in events if evt["event"] in {"model_set", "error"}]
+        assert replies == ["model_set"]
+        assert Config().cleanup_model == "fake-new"  # as saved
+        assert eng.cleanup is not None and eng.cleanup.model_id == "fake-new"
+        assert eng.cleanup.loaded
+        assert exited_or_retired(old_pid)
+        assert len(retry_failures(caplog, "recovery failed")) == 1
+        client.close()
 
 
 def frozen_clock(eng: Engine, now: float = 100.0) -> list[float]:
