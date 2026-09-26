@@ -369,20 +369,40 @@ final class MeetingStore {
         }
     }
 
+    // Test seam: internal so Selftest can reach it.
+    /// Replaces SQLite's step result after the orphan sweep's first row, so
+    /// a test can make the read of meeting ids stop mid-iteration while a
+    /// store opens. Static because the sweep runs inside `init`. Nil in the
+    /// app.
+    static var orphanSweepStepOverride: Int32?
+
     private func removeOrphanedCaptureDirectories() {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, "SELECT id FROM meetings;", -1, &stmt, nil) == SQLITE_OK
         else { return }
         var retained = Set<String>()
-        while sqlite3_step(stmt) == SQLITE_ROW {
+        var step = sqlite3_step(stmt)
+        while step == SQLITE_ROW {
             if let id = columnText(stmt, 0) { retained.insert(id) }
+            step = Self.orphanSweepStepOverride ?? sqlite3_step(stmt)
         }
         sqlite3_finalize(stmt)
+        // A read that stopped early (busy, an I/O error, corruption) is
+        // missing rows, and a missing row reads as an orphan: sweeping then
+        // would take the audio of every meeting not yet read.
+        guard step == SQLITE_DONE else {
+            NSLog("Velora: meeting orphan sweep skipped (%d)", step)
+            return
+        }
+        // Every capture directory is named for its meeting's UUID. Anything
+        // else here (the database and its journal, a folder the user made)
+        // is not Velora's to sweep.
         let children = (try? FileManager.default.contentsOfDirectory(
             at: filesRoot, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
         for child in children {
             let isDirectory = (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
-            if isDirectory && !retained.contains(child.lastPathComponent) {
+            let name = child.lastPathComponent
+            if isDirectory && UUID(uuidString: name) != nil && !retained.contains(name) {
                 try? FileManager.default.removeItem(at: child)
             }
         }
@@ -412,7 +432,7 @@ final class MeetingStore {
                       let url = audioURL(relativePath: relative) else { return nil }
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 guard size > 4_096 else {
-                    try? FileManager.default.removeItem(at: url)
+                    removeTrack(relativePath: relative)
                     return nil
                 }
                 if let audio = try? AVAudioFile(forReading: url), audio.length > 0 {
@@ -421,7 +441,7 @@ final class MeetingStore {
                 // Retrying an unreadable container only creates a predictable
                 // engine failure. Keep recovery and the Retry affordance on
                 // the same contract: Core Audio must observe real frames.
-                try? FileManager.default.removeItem(at: url)
+                removeTrack(relativePath: relative)
                 return nil
             }
             let recoveredMic = recoveredTrack(mic)
@@ -837,14 +857,38 @@ final class MeetingStore {
         }
     }
 
-    func delete(meetingID: String) {
+    // Test seam: internal so Selftest can reach it.
+    /// Replaces SQLite's step result for the row check `delete` runs after
+    /// a DELETE that removed nothing, so a test can make that check fail.
+    /// Nil in the app.
+    var rowCheckStepOverride: Int32?
+
+    /// Deletes a meeting with its audio and search entry. False when SQLite
+    /// refused it: the meeting then keeps all three.
+    @discardableResult
+    func delete(meetingID: String) -> Bool {
         queue.sync { [self] in
             var stmt: OpaquePointer?
             guard sqlite3_prepare_v2(db, "DELETE FROM meetings WHERE id = ?;", -1, &stmt, nil)
-                    == SQLITE_OK else { return }
+                    == SQLITE_OK else {
+                NSLog("Velora: meeting delete failed: %@", lastError)
+                return false
+            }
             defer { sqlite3_finalize(stmt) }
             bindText(stmt, 1, meetingID)
-            sqlite3_step(stmt)
+            // A refused DELETE (busy, say) keeps the row, so it keeps its
+            // audio and search entry too.
+            guard sqlite3_step(stmt) == SQLITE_DONE else {
+                NSLog("Velora: meeting delete failed: %@", lastError)
+                return false
+            }
+            // DONE can still leave the row (a trigger's RAISE(IGNORE)), so
+            // the files go only once no row is left. No row at all counts:
+            // the coordinator's cleanup of an unsaved meeting relies on it.
+            let deleted = sqlite3_changes(db) > 0
+            guard deleted || rowCheckOnQueue(meetingID: meetingID) == .absent else {
+                return false
+            }
             if ftsAvailable {
                 var fts: OpaquePointer?
                 if sqlite3_prepare_v2(
@@ -857,6 +901,65 @@ final class MeetingStore {
             if let directory = meetingDirectoryURL(id: meetingID) {
                 try? FileManager.default.removeItem(at: directory)
             }
+            // A notes window showing this meeting reloads to "Meeting not
+            // found" instead of showing it on.
+            if deleted {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .veloraMeetingsChanged, object: nil)
+                }
+            }
+            return true
+        }
+    }
+
+    /// Removes a meeting's audio directory and leaves its row: the
+    /// coordinator's cleanup of a capture SQLite wouldn't delete. True when
+    /// nothing is left there (nothing ever was counts); false for an id
+    /// that names no meeting directory or a removal the file system refused.
+    func removeAudioDirectory(meetingID: String) -> Bool {
+        queue.sync { [self] in
+            guard let directory = meetingDirectoryURL(id: meetingID) else {
+                return false
+            }
+            do {
+                try FileManager.default.removeItem(at: directory)
+            } catch CocoaError.fileNoSuchFile {
+                return true
+            } catch {
+                return false
+            }
+            return true
+        }
+    }
+
+    /// Whether a meeting's row is in the table, or `unknown` when SQLite
+    /// couldn't say (busy, an error), which `delete` treats as present.
+    private enum RowCheck {
+        case present
+        case absent
+        case unknown
+    }
+
+    private func rowCheckOnQueue(meetingID: String) -> RowCheck {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM meetings WHERE id = ?;", -1, &stmt, nil)
+                == SQLITE_OK else {
+            NSLog("Velora: meeting delete check failed: %@", lastError)
+            return .unknown
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, meetingID)
+        let step = rowCheckStepOverride ?? sqlite3_step(stmt)
+        switch step {
+        case SQLITE_ROW:
+            NSLog("Velora: meeting delete left meeting %@ in place", meetingID)
+            return .present
+        case SQLITE_DONE:
+            return .absent
+        default:
+            NSLog("Velora: meeting delete check failed (%d): %@", step, lastError)
+            return .unknown
         }
     }
 
@@ -891,10 +994,7 @@ final class MeetingStore {
                 guard let id = columnText(stmt, 0) else { continue }
                 ids.append(id)
                 for column in [1, 2] {
-                    if let relative = columnText(stmt, Int32(column)),
-                       let url = audioURL(relativePath: relative) {
-                        try? FileManager.default.removeItem(at: url)
-                    }
+                    removeTrack(relativePath: columnText(stmt, Int32(column)))
                 }
             }
             sqlite3_finalize(stmt)
@@ -1137,13 +1237,41 @@ final class MeetingStore {
         return captured.allSatisfy { hasUsableAudio(relativePath: $0) }
     }
 
+    /// Removes one track as `<root>/<id>/<track>`, left unresolved, so a
+    /// link planted as the track goes and its target stays. `audioURL`
+    /// validates the path but stays the read side: it resolves links to keep
+    /// every read inside the root. Nothing is removed unless `<root>/<id>`
+    /// is a real directory, since an unresolved path still follows a link
+    /// there into what it points at (a sibling meeting).
+    ///
+    ///   <root>/<id>/them.caf -> ../meetings.sqlite3   the link goes
+    ///   <root>/<id> -> <sibling>                      nothing goes
+    private func removeTrack(relativePath: String?) {
+        guard let relativePath, audioURL(relativePath: relativePath) != nil else {
+            return
+        }
+        let components = relativePath.split(separator: "/").map(String.init)
+        guard components.count == 2,
+              let directory = meetingDirectoryURL(id: components[0]) else {
+            return
+        }
+        // `attributesOfItem` reads the entry itself (lstat), not a link's target.
+        let attributes = try? FileManager.default.attributesOfItem(atPath: directory.path)
+        guard attributes?[.type] as? FileAttributeType == .typeDirectory else {
+            return
+        }
+        try? FileManager.default.removeItem(
+            at: directory.appendingPathComponent(components[1], isDirectory: false))
+    }
+
+    /// `<filesRoot>/<id>` itself. Only the root's own links resolve, so
+    /// removing the result removes a link planted at `<id>`, never its
+    /// target (a sibling meeting, the root). A UUID holds no `/` or `..`,
+    /// so the result is always a direct child of the root.
     private func meetingDirectoryURL(id: String) -> URL? {
         guard UUID(uuidString: id) != nil else { return nil }
         let root = filesRoot.standardizedFileURL.resolvingSymlinksInPath()
-        let candidate = root.appendingPathComponent(id, isDirectory: true)
-            .standardizedFileURL.resolvingSymlinksInPath()
-        guard candidate.path.hasPrefix(root.path + "/") else { return nil }
-        return candidate
+        return root.appendingPathComponent(id, isDirectory: true)
     }
 
     private func recordsOnQueue(
@@ -1340,28 +1468,43 @@ final class MeetingStore {
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
         var stmt: OpaquePointer?
+        // One row per meeting. Its excerpt lines come from subqueries in
+        // transcript order (`idx_meeting_segments_order`), so the same
+        // search always shows the same line: the first matching one, and
+        // the first line for a meeting matched elsewhere.
         let sql = """
-            SELECT DISTINCT m.id, m.title, m.started_at,
-                CASE WHEN m.summary != '' THEN m.summary ELSE s.text END
-            FROM meetings m LEFT JOIN meeting_segments s ON s.meeting_id = m.id
+            SELECT m.id, m.title, m.started_at, m.summary,
+                (SELECT text FROM meeting_segments
+                 WHERE meeting_id = m.id AND text LIKE ?1 ESCAPE '\\'
+                 ORDER BY start_ms, speaker, chunk_index LIMIT 1),
+                (SELECT text FROM meeting_segments
+                 WHERE meeting_id = m.id
+                 ORDER BY start_ms, speaker, chunk_index LIMIT 1)
+            FROM meetings m
             WHERE m.status = 'ready' AND (
-                m.title LIKE ? ESCAPE '\\' OR m.summary LIKE ? ESCAPE '\\'
-                OR m.decisions LIKE ? ESCAPE '\\' OR m.action_items LIKE ? ESCAPE '\\'
-                OR s.text LIKE ? ESCAPE '\\')
-            ORDER BY m.started_at DESC LIMIT ?;
+                m.title LIKE ?1 ESCAPE '\\' OR m.summary LIKE ?1 ESCAPE '\\'
+                OR m.decisions LIKE ?1 ESCAPE '\\' OR m.action_items LIKE ?1 ESCAPE '\\'
+                OR EXISTS (
+                    SELECT 1 FROM meeting_segments
+                    WHERE meeting_id = m.id AND text LIKE ?1 ESCAPE '\\'))
+            ORDER BY m.started_at DESC LIMIT ?2;
             """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
-        let pattern = "%\(escaped)%"
-        for index in 1...5 { bindText(stmt, Int32(index), pattern) }
-        sqlite3_bind_int(stmt, 6, Int32(min(100, max(1, limit))))
+        bindText(stmt, 1, "%\(escaped)%")
+        sqlite3_bind_int(stmt, 2, Int32(min(100, max(1, limit))))
         var hits: [MeetingSearchHit] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let id = columnText(stmt, 0), let title = columnText(stmt, 1) else { continue }
+            // A matching line shows where the query was found; otherwise
+            // the summary, else the first line.
+            let summary = columnText(stmt, 3) ?? ""
+            let firstLine = columnText(stmt, 5) ?? ""
+            let snippet = columnText(stmt, 4) ?? (summary.isEmpty ? firstLine : summary)
             hits.append(MeetingSearchHit(
                 id: id, meetingID: id, title: title,
                 startedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 2)),
-                snippet: columnText(stmt, 3) ?? ""))
+                snippet: snippet))
         }
         return hits
     }

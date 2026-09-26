@@ -924,6 +924,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     startMeeting: { [weak self] in self?.meetingCoordinator.startManual() },
                     openSettings: { [weak self] in self?.showSettings() },
                     openMeetingNotes: { [weak self] id in self?.showMeetingNotes(meetingID: id) },
+                    openMeetingSettings: { [weak self] in self?.showSettings(selecting: .advanced) },
                     dictation: dictationActivity))
         }
         mainController?.show(selecting: pane)

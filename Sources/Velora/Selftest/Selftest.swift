@@ -147,6 +147,13 @@ enum Selftest {
         testMeetingFailurePresentation()
         testMeetingCaptureReadiness()
         testMeetingSystemAudioBackendPolicy()
+        testMeetingTranscriptEarlyExpand()
+        testMeetingEngineRestartStop()
+        testMeetingsPaneOpenMeeting()
+        testMeetingDeleteNotifies()
+        testMeetingDeleteRefused()
+        testMeetingAudioRemovalLinks()
+        testMeetingOrphanSweep()
         testMeetingSystemAudioFrameMath()
         testMeetingSystemAudioFileWriter()
         testMeetingSystemAudioWarnings()
@@ -180,6 +187,7 @@ enum Selftest {
         testHomeTakeHistoryRow()
         testRetryDelivery()
         testOwnWindowFinal()
+        testMeetingListWindowKeys()
         testEngineStatusCaption()
         testEngineUpdateStatus()
         testEngineStatusFollowsState()
@@ -4809,6 +4817,87 @@ enum Selftest {
                && store.search("Durable transcript", limit: 10)
                     .contains(where: { $0.meetingID == notesFailedID }),
                "notes-only failure keeps the durable transcript searchable")
+        // The LIKE fallback (a query FTS can't tokenize, such as "?!") lists
+        // a meeting once however many of its lines match, so ↓ moves on.
+        let repeatedID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: repeatedID, title: "Repeated matches",
+            startedAt: started.addingTimeInterval(-7_200),
+            endedAt: started.addingTimeInterval(-7_140), status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: repeatedID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 2_000, text: "First line?!"))
+        store.appendSegment(MeetingSegment(
+            meetingID: repeatedID, speaker: .them, chunkIndex: 1,
+            startMs: 2_000, endMs: 4_000, text: "Second line?!"))
+        store.complete(meetingID: repeatedID, notes: MeetingNotes(summary: ""))
+        let repeatedHits = store.search("?!", limit: 10).filter { $0.meetingID == repeatedID }
+        expect(repeatedHits.count == 1,
+               "fallback search lists a meeting once (got \(repeatedHits.count) rows)")
+        store.delete(meetingID: repeatedID)
+        // Its excerpt is the first matching line in transcript order, even
+        // when the summary matches too. The later match is written first,
+        // so insertion order can't pass for transcript order.
+        let excerptID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: excerptID, title: "Excerpt check",
+            startedAt: started.addingTimeInterval(-10_800),
+            endedAt: started.addingTimeInterval(-10_740), status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: excerptID, speaker: .me, chunkIndex: 2,
+            startMs: 6_000, endMs: 8_000, text: "Timeline?!"))
+        store.appendSegment(MeetingSegment(
+            meetingID: excerptID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 2_000, text: "Nothing to see."))
+        store.appendSegment(MeetingSegment(
+            meetingID: excerptID, speaker: .them, chunkIndex: 1,
+            startMs: 2_000, endMs: 4_000, text: "Budget?!"))
+        store.appendSegment(MeetingSegment(
+            meetingID: excerptID, speaker: .them, chunkIndex: 3,
+            startMs: 4_000, endMs: 6_000, text: "Hiring."))
+        store.complete(meetingID: excerptID, notes: MeetingNotes(summary: "Plan?! for the week."))
+        let excerpt = store.search("?!", limit: 10).first { $0.meetingID == excerptID }?.snippet ?? ""
+        expect(excerpt == "Budget?!",
+               "a fallback search excerpt is the first matching line (got \(excerpt))")
+        store.delete(meetingID: excerptID)
+        // Matching lines that start together sort by speaker, then chunk.
+        // Written in the opposite order, the first one is still the excerpt.
+        let tieID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: tieID, title: "Tie check",
+            startedAt: started.addingTimeInterval(-14_400),
+            endedAt: started.addingTimeInterval(-14_340), status: .processing))
+        let tiedLines: [(speaker: MeetingSpeaker, chunk: Int, text: String)] = [
+            (.them, 2, "Them?!"), (.me, 5, "Me later?!"), (.me, 4, "Me first?!"),
+        ]
+        for line in tiedLines {
+            store.appendSegment(MeetingSegment(
+                meetingID: tieID, speaker: line.speaker, chunkIndex: line.chunk,
+                startMs: 2_000, endMs: 4_000, text: line.text))
+        }
+        store.complete(meetingID: tieID, notes: MeetingNotes(summary: ""))
+        let tie = store.search("?!", limit: 10).first { $0.meetingID == tieID }?.snippet ?? ""
+        expect(tie == "Me first?!",
+               "matching lines that start together give the excerpt by speaker, then chunk (got \(tie))")
+        store.delete(meetingID: tieID)
+        // A meeting matched only by its title, with no summary, shows its
+        // first line in transcript order.
+        let titleOnlyID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: titleOnlyID, title: "Title?! only",
+            startedAt: started.addingTimeInterval(-18_000),
+            endedAt: started.addingTimeInterval(-17_940), status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: titleOnlyID, speaker: .me, chunkIndex: 1,
+            startMs: 2_000, endMs: 4_000, text: "Second line."))
+        store.appendSegment(MeetingSegment(
+            meetingID: titleOnlyID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 2_000, text: "First line."))
+        store.complete(meetingID: titleOnlyID, notes: MeetingNotes(summary: ""))
+        let titleOnly = store.search("?!", limit: 10).first { $0.meetingID == titleOnlyID }?.snippet ?? ""
+        expect(titleOnly == "First line.",
+               "a title-only match shows the meeting's first line (got \(titleOnly))")
+        store.delete(meetingID: titleOnlyID)
         expect(!store.hasUsableAudio(relativePath: "\(id)/me.caf"),
                "header-only or tiny meeting captures are not offered for Retry")
         expect(store.audioURL(relativePath: "../outside.wav") == nil
@@ -4927,6 +5016,9 @@ enum Selftest {
         reopened.complete(
             meetingID: pruneID, notes: MeetingNotes(summary: "Old notes"))
         var pruneNotificationReceived = false
+        // The deletes above queued change posts on main. Deliver them now,
+        // so only the prune's own post can satisfy the check below.
+        _ = waitUntil(timeout: 0.1) { false }
         let pruneObserver = NotificationCenter.default.addObserver(
             forName: .veloraMeetingsChanged, object: nil, queue: .main
         ) { _ in
@@ -5385,20 +5477,37 @@ enum Selftest {
                "focused meeting presentation returns immediately while metadata loads")
         expect(waitUntil { model.record?.id == id },
                "focused meeting presentation loads completed notes asynchronously")
+        expect(model.hasTranscript,
+               "a meeting with transcript lines offers its Transcript card")
         expect(model.record?.notes == notes && model.record?.segments.isEmpty == true,
                "focused meeting presentation renders notes without eagerly loading transcript rows")
-        model.loadTranscript()
-        expect(waitUntil { model.transcript?.count == 2 },
+        model.transcript.setExpanded(true)
+        expect(waitUntil { model.transcript.segments?.count == 2 },
                "focused meeting transcript loads only after explicit expansion")
-        let firstPresentation = model.presentationToken
+        // Retry Notes and Recreate present their meeting again when the
+        // notes land (`onNotesReady`).
         model.show(meetingID: id)
-        expect(model.presentationToken != firstPresentation && model.transcript == nil,
-               "showing the same finished meeting resets lazy transcript presentation")
+        expect(model.transcript.expanded && model.transcript.segments?.count == 2,
+               "presenting the meeting already shown keeps its transcript open")
 
         model.show(meetingID: UUID().uuidString)
+        expect(!model.transcript.expanded && model.transcript.segments == nil,
+               "another meeting's transcript starts closed")
         model.show(meetingID: id)
         expect(waitUntil { model.record?.id == id },
                "a stale async meeting load cannot replace the latest selection")
+
+        // A failed row is never resumed, so it can't disturb the jobs below.
+        let noLinesID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: noLinesID, title: "Nothing transcribed",
+            startedAt: Date(timeIntervalSince1970: 1_700_002_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_002_060),
+            status: .processing))
+        store.markFailed(meetingID: noLinesID, error: MeetingProcessor.noUsableAudioMessage)
+        model.show(meetingID: noLinesID)
+        expect(waitUntil { model.record?.id == noLinesID } && !model.hasTranscript,
+               "a meeting without transcript lines has no Transcript card to offer")
 
         let transcriptOnlyID = UUID().uuidString
         store.insertProcessing(MeetingRecord(
@@ -7314,9 +7423,127 @@ enum Selftest {
         expect(MeetingSystemAudioPolicy.relativePath(meetingID: "m1") == "m1/them.caf",
                "computer audio is stored as a crash-resilient CAF track")
         expect(MeetingCoordinator.consentDescription.count <= 110
-               && MeetingCoordinator.consentDescription.contains("microphone")
-               && MeetingCoordinator.consentDescription.contains("computer audio"),
+               && MeetingCoordinator.consentDescription.contains("mic and Mac audio"),
                "meeting consent stays minimal while naming both recorded sources")
+        // The pane, the HUD's recording line and VoiceOver name a recording's
+        // sources with this pair; "system" and "computer" audio are retired.
+        expect(MeetingCoordinator.sourcesLabel(systemAudio: true) == "Mic + Mac audio"
+               && MeetingCoordinator.sourcesLabel(systemAudio: false) == "Mic only",
+               "a recording's sources read Mic + Mac audio or Mic only")
+        // A failed meeting states its cause once. When any other cause left
+        // it without audio (failed capture, missing files, retention), the
+        // line under it says so without guessing which source was at fault.
+        expect(MeetingsSettingsView.failureCaption(
+                   error: MeetingProcessor.noUsableAudioMessage, recoverable: false) == nil,
+               "a meeting that failed for lack of audio says so once")
+        expect(MeetingsSettingsView.failureCaption(
+                   error: "Meeting audio is missing or unreadable",
+                   recoverable: false) == "This meeting has no audio left to transcribe.",
+               "a failed meeting whose audio is gone says so without naming a source")
+        expect(MeetingsSettingsView.failureCaption(
+                   error: "Meeting audio is missing or unreadable", recoverable: true) == nil,
+               "a failed meeting that still has audio adds no caption")
+        // The Transcript card shows while processing adds lines, and after
+        // that only when the meeting has some.
+        expect(MeetingTranscriptCard.shows(status: .processing, hasTranscript: false),
+               "a processing meeting shows its Transcript card before the first line lands")
+        expect(MeetingTranscriptCard.shows(status: .ready, hasTranscript: true)
+               && !MeetingTranscriptCard.shows(status: .ready, hasTranscript: false)
+               && !MeetingTranscriptCard.shows(status: .failed, hasTranscript: false),
+               "a finished meeting shows its Transcript card only when it has lines")
+        // VoiceOver hears the transcript link as what it does, plus its state.
+        let collapsed = MeetingTranscriptCard.linkAccessibility(expanded: false)
+        let expanded = MeetingTranscriptCard.linkAccessibility(expanded: true)
+        expect(collapsed.label == "Show Transcript" && collapsed.value == "Collapsed"
+               && expanded.label == "Hide Transcript" && expanded.value == "Expanded",
+               "the transcript link reads Show or Hide Transcript with its expanded state")
+        // The meetings list is one Tab stop, as a native table is: the arrows
+        // move within it and Return opens the focused meeting.
+        let listIDs = ["a", "b", "c"]
+        expect(MeetingListKeys.tabStop(nil, in: listIDs) == "a"
+               && MeetingListKeys.tabStop("b", in: listIDs) == "b"
+               && MeetingListKeys.tabStop("gone", in: listIDs) == "a"
+               && MeetingListKeys.tabStop(nil, in: []) == nil,
+               "the meetings list's Tab stop is the last focused row, else the first")
+        expect(MeetingListKeys.command(for: .downArrow, on: "a", in: listIDs) == .focus("b")
+               && MeetingListKeys.command(for: .upArrow, on: "b", in: listIDs) == .focus("a")
+               && MeetingListKeys.command(for: .upArrow, on: "a", in: listIDs) == nil
+               && MeetingListKeys.command(for: .downArrow, on: "c", in: listIDs) == nil,
+               "the arrows move through the meetings list and stop at its ends")
+        expect(MeetingListKeys.command(for: .return, on: "b", in: listIDs) == .open("b"),
+               "Return opens the focused meeting")
+        expect(MeetingListKeys.keys.contains(.space)
+               && MeetingListKeys.command(for: .space, on: "b", in: listIDs) == .open("b"),
+               "Space opens the focused meeting, as it presses a focused button")
+        // An engine that keeps restarting stops the job. The message says
+        // what happened, then which button goes on, unless the notes will
+        // retry on their own.
+        let stopped = "Velora's speech engine kept restarting, so processing stopped."
+        let restartMessages: [(job: MeetingProcessor.RestartedJob, message: String)] = [
+            (.transcription, stopped + " In Meetings, open this meeting and choose Retry."),
+            (.recreate, stopped + " In Meetings, open this meeting and choose Retry Recreate."),
+            (.notes(autoRetryLeft: true), stopped),
+            (.notes(autoRetryLeft: false), stopped + " In Meetings, open this meeting and choose Retry Notes."),
+        ]
+        for item in restartMessages {
+            let message = MeetingProcessor.engineRestartsMessage(for: item.job)
+            expect(message == item.message,
+                   "a \(item.job) job the engine stopped reads \(item.message) (got \(message))")
+        }
+        expect(MeetingProcessor.restartedJob(
+                   reprocessing: true, notesOnly: false, autoRetried: false, notes: nil) == .recreate
+               && MeetingProcessor.restartedJob(
+                   reprocessing: false, notesOnly: false, autoRetried: false, notes: nil) == .transcription
+               && MeetingProcessor.restartedJob(
+                   reprocessing: false, notesOnly: true, autoRetried: false,
+                   notes: MeetingNotes()) == .notes(autoRetryLeft: true),
+               "a stopped job is a Recreate, a transcription, or notes that still retry once")
+        expect(MeetingProcessor.restartedJob(
+                   reprocessing: false, notesOnly: true, autoRetried: true,
+                   notes: MeetingNotes()) == .notes(autoRetryLeft: false),
+               "notes whose automatic retry is spent wait for Retry Notes")
+        expect(MeetingProcessor.restartedJob(
+                   reprocessing: false, notesOnly: true, autoRetried: false,
+                   notes: MeetingNotes(summary: "Part.", partial: true)) == .notes(autoRetryLeft: false),
+               "partial notes get no automatic retry, so they wait for Retry Notes")
+        // Back from a meeting, the list focuses it only when it lists it.
+        expect(MeetingsSettingsView.returnFocus(closing: "b", listed: listIDs) == "b"
+               && MeetingsSettingsView.returnFocus(closing: nil, listed: listIDs) == nil,
+               "the list focuses the meeting just closed")
+        expect(MeetingsSettingsView.returnFocus(closing: "gone", listed: listIDs) == nil,
+               "a meeting the list doesn't show leaves no focus request behind")
+        // Another meeting starts closed; a changed record or readability
+        // reads the same meeting's lines again.
+        expect(MeetingTranscriptLoader.update(
+                   meetingChanged: true, recordChanged: true, readableChanged: true) == .show
+               && MeetingTranscriptLoader.update(
+                   meetingChanged: false, recordChanged: true, readableChanged: false) == .refresh
+               && MeetingTranscriptLoader.update(
+                   meetingChanged: false, recordChanged: false, readableChanged: true) == .refresh
+               && MeetingTranscriptLoader.update(
+                   meetingChanged: false, recordChanged: false, readableChanged: false) == .none,
+               "a transcript shows another meeting, refreshes a changed one, or stays as it is")
+        let paneRecord = MeetingRecord(
+            id: "a", title: "A", startedAt: Date(timeIntervalSince1970: 0),
+            endedAt: Date(timeIntervalSince1970: 60), status: .ready)
+        expect(MeetingsSettingsView.transcriptUpdate(
+                   shownID: "a", shownRecord: paneRecord, shownReadable: true,
+                   freshID: "a", freshRecord: paneRecord, freshReadable: true) == .none
+               && MeetingsSettingsView.transcriptUpdate(
+                   shownID: "a", shownRecord: paneRecord, shownReadable: true,
+                   freshID: "b", freshRecord: paneRecord, freshReadable: true) == .show
+               && MeetingsSettingsView.transcriptUpdate(
+                   shownID: "a", shownRecord: paneRecord, shownReadable: true,
+                   freshID: nil, freshRecord: paneRecord, freshReadable: true) == .show,
+               "a pane reload keeps the same meeting's transcript and closes another's")
+        // The first transcription hides the transcript. Retry Notes, a
+        // Recreate and the automatic notes retry run over a finished one.
+        expect(!MeetingTranscriptCard.loads(status: .processing, reprocessing: false, notesPending: false)
+               && MeetingTranscriptCard.loads(status: .ready, reprocessing: false, notesPending: false),
+               "a transcript is read once its first transcription is done")
+        expect(MeetingTranscriptCard.loads(status: .processing, reprocessing: true, notesPending: false)
+               && MeetingTranscriptCard.loads(status: .processing, reprocessing: false, notesPending: true),
+               "a Recreate or a notes retry keeps the finished transcript readable")
         expect(MeetingCoordinator.systemAudioFailurePresentation == .hud,
                "computer-audio degradation stays in the compact HUD instead of opening a modal")
         expect(MeetingCoordinator.State.preparing(title: "Starting…").isActive
@@ -7339,6 +7566,867 @@ enum Selftest {
                     dictationIsIdle: true, meetingIsIdle: true,
                     hudAllowsMeetingProgress: false),
                "background meeting-note progress never overwrites capture or error UI")
+    }
+
+    /// A transcript expanded while its meeting processes waits for the
+    /// result. Lines commit without a notification, so an early read would
+    /// stick at "No transcript is available." once the meeting finished.
+    private static func testMeetingTranscriptEarlyExpand() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-early-expand-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Early expand",
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_000_060),
+            status: .processing))
+
+        let model = MeetingNotesWindowModel(store: store)
+        model.show(meetingID: id)
+        expect(waitUntil { model.record?.status == .processing },
+               "the notes window opens a meeting that is still processing")
+        model.transcript.setExpanded(true)
+        _ = waitUntil(timeout: 0.3) { model.transcript.segments != nil }
+        expect(model.transcript.segments == nil && !model.transcript.loading,
+               "a transcript expanded while its meeting processes caches nothing")
+
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 2_000, text: "Finished line."))
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Done."))
+        model.reload()
+        expect(waitUntil { model.record?.status == .ready },
+               "the notes window sees the meeting finish")
+        expect(waitUntil { model.transcript.segments?.count == 1 },
+               "an open transcript reads the finished lines when processing ends "
+               + "(got \(model.transcript.segments?.count ?? -1) lines)")
+
+        // Lines read while ready go stale when the meeting runs again with
+        // new lines: the changed record drops them and the open card reads
+        // the new ones.
+        store.markProcessing(meetingID: id)
+        store.deleteSegments(meetingID: id, remoteTrack: false)
+        for index in 0..<3 {
+            store.appendSegment(MeetingSegment(
+                meetingID: id, speaker: .me, chunkIndex: index,
+                startMs: index * 2_000, endMs: (index + 1) * 2_000, text: "Redone line \(index)."))
+        }
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Redone."))
+        model.reload()
+        expect(waitUntil { model.transcript.segments?.count == 3 },
+               "the notes window drops lines read before the meeting ran again "
+               + "(got \(model.transcript.segments?.count ?? -1) lines)")
+
+        // Retry Notes lands and presents the same meeting again: its open
+        // transcript stays open and reads the changed record.
+        store.markProcessing(meetingID: id, notesPending: true)
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .them, chunkIndex: 3,
+            startMs: 6_000, endMs: 8_000, text: "Retried line."))
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Retried."))
+        let readsBeforeRetry = model.transcript.readCount
+        model.show(meetingID: id)
+        expect(model.transcript.expanded,
+               "presenting the same meeting again keeps its transcript open")
+        expect(waitUntil { model.transcript.segments?.count == 4 },
+               "presenting the same meeting again reads its changed transcript "
+               + "(got \(model.transcript.segments?.count ?? -1) lines)")
+        _ = waitUntil { model.record?.notes.summary == "Retried." && !model.transcript.loading }
+        expect(model.transcript.readCount == readsBeforeRetry + 1,
+               "presenting the same meeting again reads its lines once "
+               + "(got \(model.transcript.readCount - readsBeforeRetry) reads)")
+
+        // A Recreate whose notes match the old ones changes only the lines,
+        // which the metadata leaves out. Presenting it again still reads them.
+        store.deleteSegments(meetingID: id, remoteTrack: false)
+        for index in 0..<3 {
+            store.appendSegment(MeetingSegment(
+                meetingID: id, speaker: .me, chunkIndex: index,
+                startMs: index * 2_000, endMs: (index + 1) * 2_000, text: "Recreated line \(index)."))
+        }
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Retried."))
+        let readsBeforeRecreate = model.transcript.readCount
+        model.show(meetingID: id)
+        expect(waitUntil { model.transcript.segments?.first?.text == "Recreated line 0." },
+               "presenting the same meeting again reads lines that changed under identical notes")
+        _ = waitUntil { !model.transcript.loading }
+        expect(model.transcript.readCount == readsBeforeRecreate + 1,
+               "unchanged metadata still reads the lines once "
+               + "(got \(model.transcript.readCount - readsBeforeRecreate) reads)")
+
+        // A notification's reload right after `show` replaces the one show
+        // started. The read show asked for still happens, once.
+        store.deleteSegments(meetingID: id, remoteTrack: false)
+        for index in 0..<3 {
+            store.appendSegment(MeetingSegment(
+                meetingID: id, speaker: .me, chunkIndex: index,
+                startMs: index * 2_000, endMs: (index + 1) * 2_000, text: "Again line \(index)."))
+        }
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Retried."))
+        let readsBeforeRace = model.transcript.readCount
+        model.show(meetingID: id)
+        model.reload()
+        expect(waitUntil { model.transcript.segments?.first?.text == "Again line 0." },
+               "a reload right after show still reads the lines show asked for")
+        _ = waitUntil { !model.transcript.loading }
+        expect(model.transcript.readCount == readsBeforeRace + 1,
+               "a reload right after show reads the lines once "
+               + "(got \(model.transcript.readCount - readsBeforeRace) reads)")
+
+        // Closing the window forgets the card, as 0.25.0 did. The
+        // controller's window is never ordered in.
+        let controller = MeetingNotesWindowController(store: store)
+        expect(controller.window?.frameAutosaveName.isEmpty == true,
+               "a notes window saves no frame to the live defaults until it is shown")
+        controller.model.show(meetingID: id)
+        controller.model.transcript.setExpanded(true)
+        expect(waitUntil { controller.model.transcript.segments?.count == 4 },
+               "the window's transcript opens on the meeting's lines")
+        controller.windowWillClose(Notification(
+            name: NSWindow.willCloseNotification, object: controller.window))
+        expect(!controller.model.transcript.expanded && controller.model.transcript.segments == nil,
+               "closing the notes window closes its transcript and drops its lines")
+        controller.model.show(meetingID: id)
+        expect(!controller.model.transcript.expanded && controller.model.transcript.segments == nil,
+               "the notes window reopens its meeting with the transcript closed")
+
+        // The Meetings pane's path: its reload refreshes the same loader on
+        // a changed record, which keeps an open card open.
+        let loader = MeetingTranscriptLoader(store: store)
+        loader.show(meetingID: id, readable: true)
+        loader.setExpanded(true)
+        expect(waitUntil { loader.segments?.count == 4 },
+               "the pane's transcript loads when opened")
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .them, chunkIndex: 4,
+            startMs: 8_000, endMs: 10_000, text: "Late line."))
+        loader.refresh(readable: true)
+        expect(loader.expanded,
+               "a changed record keeps an open transcript open")
+        expect(loader.segments?.count == 4,
+               "a changed record keeps the reader's lines on screen until the new read lands "
+               + "(got \(loader.segments?.count ?? -1) lines)")
+        expect(waitUntil { loader.segments?.count == 5 },
+               "a changed record reads an open transcript again (got \(loader.segments?.count ?? -1) lines)")
+        loader.refresh(readable: false)
+        expect(loader.segments == nil,
+               "a transcript that can't be read drops its lines")
+
+        // Closed mid-read, the card ignores that read. The main run loop
+        // turns while it is closed, so the read's result arrives then and
+        // must not land; opening it again reads afresh.
+        loader.refresh(readable: true)
+        loader.setExpanded(false)
+        expect(!loader.loading,
+               "closing a transcript stops the read in flight")
+        _ = waitUntil(timeout: 0.3) { false }
+        expect(loader.segments == nil,
+               "a read that finishes after its transcript closed is ignored "
+               + "(got \(loader.segments?.count ?? -1) lines)")
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .them, chunkIndex: 5,
+            startMs: 10_000, endMs: 12_000, text: "After close."))
+        loader.setExpanded(true)
+        expect(waitUntil { loader.segments?.count == 6 },
+               "reopening a transcript closed mid-read reads it afresh "
+               + "(got \(loader.segments?.count ?? -1) lines)")
+
+        // Hide then Show reopens on the cached lines at once, as 0.25.0
+        // did, and reads them again behind them.
+        _ = waitUntil { !loader.loading }
+        loader.setExpanded(false)
+        expect(loader.segments?.count == 6,
+               "hiding a transcript keeps its lines (got \(loader.segments?.count ?? -1))")
+        let readsBeforeShow = loader.readCount
+        loader.setExpanded(true)
+        expect(loader.segments?.count == 6,
+               "showing a hidden transcript puts its lines back at once "
+               + "(got \(loader.segments?.count ?? -1))")
+        expect(waitUntil { !loader.loading } && loader.segments?.count == 6,
+               "showing a hidden transcript reads its lines again")
+        expect(loader.readCount == readsBeforeShow + 1,
+               "showing a hidden transcript reads its lines once "
+               + "(got \(loader.readCount - readsBeforeShow) reads)")
+
+        // A closed card's lines may go stale: a refresh drops them and
+        // reads nothing until the card opens.
+        loader.setExpanded(false)
+        let readsBeforeRefresh = loader.readCount
+        loader.refresh(readable: true)
+        expect(loader.segments == nil && !loader.loading
+               && loader.readCount == readsBeforeRefresh,
+               "a closed transcript drops its lines on refresh and reads nothing")
+    }
+
+    /// An engine that restarts three times stops a notes job. This one is
+    /// the automatic notes retry, so the retry is spent and the row's error
+    /// names Retry Notes; a Recreate or transcription hint means the call
+    /// site passed the job's stage or retry state wrong.
+    private static func testMeetingEngineRestartStop() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-restart-stop-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Restart stop",
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_000_060),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: id, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 2_000, text: "Only line."))
+        store.markNotesFailed(meetingID: id, error: "Notes failed.")
+
+        var commands: [[String: Any]] = []
+        let processor = MeetingProcessor(
+            store: store, engineIsReady: { true },
+            sendToEngine: { commands.append($0) })
+        processor.handleEngineStateChange(.ready)
+        expect(commands.last?["cmd"] as? String == "meeting_notes"
+               && store.notesAutoRetried(meetingID: id),
+               "engine ready starts the claimed automatic notes retry")
+
+        // Each restart before the third queues the job for the next ready.
+        let restarts = 3
+        for restart in 1...restarts {
+            processor.handleEngineStateChange(.launching)
+            if restart < restarts {
+                processor.handleEngineStateChange(.ready)
+            }
+        }
+        let expected = "Velora's speech engine kept restarting, so processing stopped. "
+            + "In Meetings, open this meeting and choose Retry Notes."
+        let error = store.recordMetadata(id: id)?.error
+        expect(error == expected,
+               "a notes job the engine stopped names Retry Notes (got \(error ?? "nil"))")
+    }
+
+    /// The pane lists the 100 most recent meetings, and a meeting opened
+    /// from search can be older. Its reload keeps it open all the same.
+    private static func testMeetingsPaneOpenMeeting() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-open-meeting-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let listed = 100
+        var oldestID = ""
+        for index in 0...listed {
+            let id = UUID().uuidString
+            if index == 0 {
+                oldestID = id
+            }
+            store.insertProcessing(MeetingRecord(
+                id: id, title: "Meeting \(index)",
+                startedAt: Date(timeIntervalSince1970: 1_700_000_000 + Double(index) * 3_600),
+                endedAt: Date(timeIntervalSince1970: 1_700_000_060 + Double(index) * 3_600),
+                status: .processing))
+        }
+        expect(!store.recentMetadata(limit: listed).contains { $0.id == oldestID },
+               "the oldest meeting is past the listed \(listed)")
+        expect(MeetingsSettingsView.openMeeting(oldestID, in: store)?.id == oldestID,
+               "a reload keeps open a meeting older than the listed \(listed)")
+        expect(MeetingsSettingsView.openMeeting(UUID().uuidString, in: store) == nil
+               && MeetingsSettingsView.openMeeting(nil, in: store) == nil,
+               "a reload closes a meeting the store no longer has, and opens none itself")
+    }
+
+    /// A notes window showing a meeting that is deleted turns to "Meeting
+    /// not found": the delete posts the change its view reloads on.
+    private static func testMeetingDeleteNotifies() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-delete-notifies-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(url: root.appendingPathComponent("meetings.sqlite3"), filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Deleted while open",
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_000_060),
+            status: .processing))
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Soon gone."))
+
+        let model = MeetingNotesWindowModel(store: store)
+        // As `MeetingNotesWindowView` does.
+        let observer = NotificationCenter.default.addObserver(
+            forName: .veloraMeetingsChanged, object: nil, queue: .main) { _ in
+            model.reload()
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+        model.show(meetingID: id)
+        expect(waitUntil { model.record?.id == id },
+               "the notes window opens the meeting")
+        store.delete(meetingID: id)
+        expect(waitUntil { model.record == nil && !model.loading },
+               "deleting the meeting a notes window shows leaves it on Meeting not found")
+    }
+
+    /// A DELETE SQLite refuses (busy, say) keeps the meeting, so it keeps
+    /// its audio and its search entry too. A trigger that aborts the delete
+    /// stands in for the busy database.
+    private static func testMeetingDeleteRefused() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-delete-refused-\(UUID().uuidString)", isDirectory: true)
+        let databaseURL = root.appendingPathComponent("meetings.sqlite3")
+        let store = MeetingStore(url: databaseURL, filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let id = UUID().uuidString
+        let directory = root.appendingPathComponent(id, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(directory)
+        FileManager.default.createFile(
+            atPath: directory.appendingPathComponent("me.caf").path, contents: Data(count: 16))
+        store.insertProcessing(MeetingRecord(
+            id: id, title: "Refused delete",
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            endedAt: Date(timeIntervalSince1970: 1_700_000_060),
+            status: .processing, micPath: "\(id)/me.caf"))
+        store.complete(meetingID: id, notes: MeetingNotes(summary: "Quarterly roadmap."))
+
+        var handle: OpaquePointer?
+        guard sqlite3_open(databaseURL.path, &handle) == SQLITE_OK else {
+            expect(false, "the test opens the meeting database beside the store")
+            return
+        }
+        defer { sqlite3_close(handle) }
+        // Nothing changes, so nothing is announced: a refused delete posts
+        // no `.veloraMeetingsChanged`. Earlier posts land first.
+        _ = waitUntil(timeout: 0.1) { false }
+        var posts = 0
+        let observer = NotificationCenter.default.addObserver(
+            forName: .veloraMeetingsChanged, object: nil, queue: .main) { _ in
+            posts += 1
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        // Each trigger refuses the delete its own way: ABORT fails the step;
+        // IGNORE skips the row and still reports DONE.
+        let refusals: [(name: String, action: String)] = [
+            ("ABORT", "RAISE(ABORT, 'refused')"),
+            ("IGNORE", "RAISE(IGNORE)"),
+        ]
+        for refusal in refusals {
+            expect(sqlite3_exec(handle, """
+                CREATE TRIGGER refuse_delete BEFORE DELETE ON meetings
+                BEGIN SELECT \(refusal.action); END;
+                """, nil, nil, nil) == SQLITE_OK,
+                   "the test installs the refusing \(refusal.name) trigger")
+            expect(!store.delete(meetingID: id),
+                   "a delete refused by \(refusal.name) reports that it failed")
+            expect(store.recordMetadata(id: id) != nil,
+                   "a delete refused by \(refusal.name) keeps the meeting")
+            expect(FileManager.default.fileExists(atPath: directory.path),
+                   "a delete refused by \(refusal.name) keeps the meeting's audio")
+            expect(store.search("roadmap").contains { $0.meetingID == id },
+                   "a delete refused by \(refusal.name) keeps the meeting's search entry")
+            expect(sqlite3_exec(handle, "DROP TRIGGER refuse_delete;", nil, nil, nil) == SQLITE_OK,
+                   "the test removes the refusing \(refusal.name) trigger")
+        }
+
+        // After IGNORE the row check decides. A check SQLite fails (busy,
+        // an error) can't tell that the row is gone, so everything stays.
+        expect(sqlite3_exec(handle, """
+            CREATE TRIGGER refuse_delete BEFORE DELETE ON meetings
+            BEGIN SELECT RAISE(IGNORE); END;
+            """, nil, nil, nil) == SQLITE_OK,
+               "the test installs the refusing IGNORE trigger again")
+        for failure in [SQLITE_BUSY, SQLITE_ERROR] {
+            store.rowCheckStepOverride = failure
+            expect(!store.delete(meetingID: id)
+                   && store.recordMetadata(id: id) != nil
+                   && FileManager.default.fileExists(atPath: directory.path)
+                   && store.search("roadmap").contains { $0.meetingID == id },
+                   "a delete whose row check fails (\(failure)) keeps the meeting, its audio and search entry")
+        }
+        store.rowCheckStepOverride = nil
+        expect(sqlite3_exec(handle, "DROP TRIGGER refuse_delete;", nil, nil, nil) == SQLITE_OK,
+               "the test removes the refusing IGNORE trigger again")
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(posts == 0,
+               "a refused delete announces no change (got \(posts) posts)")
+
+        expect(store.delete(meetingID: id)
+               && store.recordMetadata(id: id) == nil
+               && !FileManager.default.fileExists(atPath: directory.path),
+               "the same delete, once SQLite allows it, removes the meeting and its audio")
+        var searchRows: OpaquePointer?
+        var searchEntries: Int32 = -1
+        if sqlite3_prepare_v2(
+            handle, "SELECT count(*) FROM meeting_search WHERE meeting_id = '\(id)';",
+            -1, &searchRows, nil) == SQLITE_OK,
+           sqlite3_step(searchRows) == SQLITE_ROW {
+            searchEntries = sqlite3_column_int(searchRows, 0)
+        }
+        sqlite3_finalize(searchRows)
+        expect(searchEntries == 0,
+               "the delete removes the meeting's search entry (got \(searchEntries))")
+
+        // No row at all still clears the files: the coordinator's cleanup
+        // of a meeting that was never saved relies on it. With no meeting
+        // gone, it announces nothing.
+        _ = waitUntil(timeout: 0.1) { false }
+        let postsBeforeUnsaved = posts
+        let unsavedID = UUID().uuidString
+        let unsavedDirectory = root.appendingPathComponent(unsavedID, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(unsavedDirectory)
+        expect(store.delete(meetingID: unsavedID)
+               && !FileManager.default.fileExists(atPath: unsavedDirectory.path),
+               "deleting a meeting that has no row removes its leftover audio")
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(posts == postsBeforeUnsaved,
+               "a delete with no row announces no change (got \(posts - postsBeforeUnsaved) posts)")
+
+        // The pane deletes before it forgets the meeting's job: a refused
+        // delete keeps a meeting, so it keeps its queued job too.
+        let queuedID = UUID().uuidString
+        store.insertProcessing(MeetingRecord(
+            id: queuedID, title: "Queued notes",
+            startedAt: Date(timeIntervalSince1970: 1_700_003_600),
+            endedAt: Date(timeIntervalSince1970: 1_700_003_660),
+            status: .processing))
+        store.appendSegment(MeetingSegment(
+            meetingID: queuedID, speaker: .me, chunkIndex: 0,
+            startMs: 0, endMs: 2_000, text: "Queued line."))
+        store.markNotesFailed(meetingID: queuedID, error: "Notes failed.")
+        let processor = MeetingProcessor(
+            store: store, engineIsReady: { false }, sendToEngine: { _ in })
+        processor.enqueue(meetingID: queuedID)
+        func waitsForEngine() -> Bool {
+            guard case .processing(let meetingID, _, _) = processor.state else {
+                return false
+            }
+            return meetingID == queuedID
+        }
+        expect(waitsForEngine(), "the Retry Notes job waits for the engine")
+
+        // Velora abandons a capture (Discard, a failed start, quitting).
+        // When SQLite refuses its delete, the row is marked failed, so the
+        // pane offers Delete instead of listing a recording nothing runs.
+        // Each capture starts with a microphone track Retry would accept.
+        func insertAbandoned(_ title: String) -> (id: String, directory: URL) {
+            let abandonedID = UUID().uuidString
+            let abandonedDirectory = root.appendingPathComponent(abandonedID, isDirectory: true)
+            MeetingStore.ensurePrivateDirectory(abandonedDirectory)
+            if let format = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1),
+               let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 9_600) {
+                buffer.frameLength = 9_600
+                if let samples = buffer.floatChannelData?[0] {
+                    for index in 0..<Int(buffer.frameLength) {
+                        samples[index] = sin(Float(index) * 0.04) * 0.1
+                    }
+                }
+                autoreleasepool {
+                    if let file = try? AVAudioFile(
+                        forWriting: abandonedDirectory.appendingPathComponent("me.caf"),
+                        settings: format.settings) {
+                        try? file.write(from: buffer)
+                    }
+                }
+            }
+            store.insertRecording(MeetingRecord(
+                id: abandonedID, title: title,
+                startedAt: Date(timeIntervalSince1970: 1_700_007_200),
+                endedAt: Date(timeIntervalSince1970: 1_700_007_200),
+                status: .recording, micPath: "\(abandonedID)/me.caf"))
+            return (abandonedID, abandonedDirectory)
+        }
+        let abandoned = insertAbandoned("Discarded")
+        expect(store.hasUsableAudio(relativePath: "\(abandoned.id)/me.caf"),
+               "the discarded recording starts with audio Retry would accept")
+        // A second capture, discarded further down, is meanwhile the
+        // sibling whose audio the first discard must leave alone.
+        let stuck = insertAbandoned("Stuck")
+        let stuckTrack = stuck.directory.appendingPathComponent("me.caf")
+
+        expect(sqlite3_exec(handle, """
+            CREATE TRIGGER refuse_delete BEFORE DELETE ON meetings
+            BEGIN SELECT RAISE(ABORT, 'refused'); END;
+            """, nil, nil, nil) == SQLITE_OK,
+               "the test installs the refusing trigger for the pane and a discard")
+        expect(!MeetingsSettingsView.deleteMeeting(queuedID, store: store, processor: processor),
+               "the pane's delete reports a refusal")
+        expect(waitsForEngine(),
+               "a refused delete keeps the meeting's queued job")
+        _ = waitUntil(timeout: 0.1) { false }
+        let postsBeforeDiscard = posts
+        var logged: [String] = []
+        MeetingCoordinator.deleteAbandoned(meetingID: abandoned.id, in: store) {
+            logged.append($0)
+        }
+        let abandonedRecord = store.recordMetadata(id: abandoned.id)
+        expect(abandonedRecord?.status == .failed && abandonedRecord?.error != nil,
+               "a discarded recording SQLite won't delete is left failed, not recording "
+               + "(got \(abandonedRecord.map { "\($0.status)" } ?? "no row"))")
+        expect(!FileManager.default.fileExists(atPath: abandoned.directory.path)
+               && abandonedRecord.map { !store.hasAnyUsableAudio(for: $0) } == true,
+               "a refused discard still removes the recording's audio, so the failed row offers no Retry")
+        expect(FileManager.default.fileExists(atPath: stuckTrack.path),
+               "a refused discard leaves a sibling meeting's audio")
+        expect(logged.isEmpty,
+               "a refused discard that removes its audio and marks the row failed logs nothing "
+               + "(\(logged.count) lines)")
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(posts == postsBeforeDiscard + 1,
+               "a refused discard that marks the row failed refreshes the pane "
+               + "(got \(posts - postsBeforeDiscard) posts)")
+
+        // SQLite refuses the failed mark too. The row stays a recording
+        // (with its audio gone, the next launch's recovery drops it), nothing
+        // changed to announce, and the log is the only trail.
+        expect(sqlite3_exec(handle, """
+            CREATE TRIGGER refuse_update BEFORE UPDATE ON meetings
+            BEGIN SELECT RAISE(ABORT, 'refused'); END;
+            """, nil, nil, nil) == SQLITE_OK,
+               "the test installs the trigger that also refuses the failed mark")
+        _ = waitUntil(timeout: 0.1) { false }
+        let postsBeforeStuck = posts
+        MeetingCoordinator.deleteAbandoned(meetingID: stuck.id, in: store) {
+            logged.append($0)
+        }
+        expect(store.recordMetadata(id: stuck.id)?.status == .recording,
+               "a discard SQLite neither deletes nor marks failed leaves the recording row")
+        expect(!FileManager.default.fileExists(atPath: stuck.directory.path),
+               "a discard SQLite neither deletes nor marks failed still removes its audio")
+        expect(logged.contains { $0.contains(stuck.id) },
+               "a discard SQLite neither deletes nor marks failed is logged (\(logged.count) lines)")
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(posts == postsBeforeStuck,
+               "a discard SQLite neither deletes nor marks failed announces no change "
+               + "(got \(posts - postsBeforeStuck) posts)")
+        expect(sqlite3_exec(handle, "DROP TRIGGER refuse_update;", nil, nil, nil) == SQLITE_OK,
+               "the test removes the trigger that refused the failed mark")
+        expect(sqlite3_exec(handle, "DROP TRIGGER refuse_delete;", nil, nil, nil) == SQLITE_OK,
+               "the test removes the refusing trigger for the pane and a discard")
+
+        expect(MeetingsSettingsView.deleteMeeting(queuedID, store: store, processor: processor)
+               && processor.state == .idle,
+               "a delete that goes through forgets the meeting's job")
+        expect(MeetingsSettingsView.deleteMeeting(abandoned.id, store: store, processor: processor)
+               && store.recordMetadata(id: abandoned.id) == nil,
+               "the pane deletes the failed row a refused discard left")
+    }
+
+    /// Removing a meeting's audio removes what sits at `<filesRoot>/<id>`,
+    /// never what a link there points to, so a planted link can't take a
+    /// sibling meeting's audio, the filesRoot or the database with it.
+    ///
+    ///   <root>/meetings.sqlite3
+    ///   <root>/<sibling>/me.caf
+    ///   <root>/<id>          -> <sibling>           directoryToSibling
+    ///   <root>/<id>/them.caf -> <sibling>/me.caf    trackToSibling
+    ///   <root>/<id>/them.caf -> meetings.sqlite3    trackToDatabase
+    ///   <root>/<id>          -> .                   directoryToRoot
+    private static func testMeetingAudioRemovalLinks() {
+        enum PlantedLink: CaseIterable {
+            case directoryToSibling
+            case trackToSibling
+            case trackToDatabase
+            case directoryToRoot
+        }
+        struct Fixture {
+            let root: URL
+            let database: URL
+            let store: MeetingStore
+            let siblingTrack: URL
+            let id: String
+        }
+        var roots: [URL] = []
+        defer { roots.forEach { try? FileManager.default.removeItem(at: $0) } }
+
+        // Whether anything sits at `url` itself; a link is never followed.
+        func entryExists(_ url: URL) -> Bool {
+            (try? FileManager.default.attributesOfItem(atPath: url.path)) != nil
+        }
+
+        // A fresh root holding the database, a sibling meeting (its row
+        // keeps it through a reopened store's orphan sweep) with a track,
+        // and a new meeting id with `link` planted, or a plain directory
+        // holding a track when there is no link.
+        func makeFixture(_ link: PlantedLink?) -> Fixture {
+            let root = FileManager.default.temporaryDirectory
+                .appendingPathComponent("velora-audio-links-\(UUID().uuidString)", isDirectory: true)
+            roots.append(root)
+            let database = root.appendingPathComponent("meetings.sqlite3")
+            let store = MeetingStore(url: database, filesRoot: root)
+            let siblingID = UUID().uuidString
+            let siblingDirectory = root.appendingPathComponent(siblingID, isDirectory: true)
+            let siblingTrack = siblingDirectory.appendingPathComponent("me.caf")
+            MeetingStore.ensurePrivateDirectory(siblingDirectory)
+            FileManager.default.createFile(atPath: siblingTrack.path, contents: Data(count: 16))
+            store.insertProcessing(MeetingRecord(
+                id: siblingID, title: "Sibling",
+                startedAt: Date(timeIntervalSince1970: 1_700_010_000),
+                endedAt: Date(timeIntervalSince1970: 1_700_010_060),
+                status: .processing, micPath: "\(siblingID)/me.caf"))
+
+            let id = UUID().uuidString
+            let directory = root.appendingPathComponent(id, isDirectory: true)
+            let fixture = Fixture(
+                root: root, database: database, store: store,
+                siblingTrack: siblingTrack, id: id)
+            guard let link else {
+                MeetingStore.ensurePrivateDirectory(directory)
+                FileManager.default.createFile(
+                    atPath: directory.appendingPathComponent("me.caf").path,
+                    contents: Data(count: 16))
+                return fixture
+            }
+            var linkPath = directory.path
+            var destination = siblingID
+            switch link {
+            case .directoryToSibling:
+                break
+            case .trackToSibling:
+                MeetingStore.ensurePrivateDirectory(directory)
+                linkPath = directory.appendingPathComponent("them.caf").path
+                destination = "../\(siblingID)/me.caf"
+            case .trackToDatabase:
+                MeetingStore.ensurePrivateDirectory(directory)
+                linkPath = directory.appendingPathComponent("them.caf").path
+                destination = "../\(database.lastPathComponent)"
+            case .directoryToRoot:
+                destination = "."
+            }
+            try? FileManager.default.createSymbolicLink(
+                atPath: linkPath, withDestinationPath: destination)
+            expect((try? FileManager.default.destinationOfSymbolicLink(atPath: linkPath)) != nil,
+                   "the test plants a \(link) link")
+            return fixture
+        }
+
+        // A trigger stored in the database refuses every delete, from any
+        // connection, after this one closes.
+        func refuseDeletes(in database: URL) -> Bool {
+            var handle: OpaquePointer?
+            defer { sqlite3_close(handle) }
+            guard sqlite3_open(database.path, &handle) == SQLITE_OK else {
+                return false
+            }
+            return sqlite3_exec(handle, """
+                CREATE TRIGGER refuse_delete BEFORE DELETE ON meetings
+                BEGIN SELECT RAISE(ABORT, 'refused'); END;
+                """, nil, nil, nil) == SQLITE_OK
+        }
+
+        func insertAbandoned(_ fixture: Fixture) {
+            fixture.store.insertRecording(MeetingRecord(
+                id: fixture.id, title: "Abandoned",
+                startedAt: Date(timeIntervalSince1970: 1_700_010_000),
+                endedAt: Date(timeIntervalSince1970: 1_700_010_000),
+                status: .recording))
+        }
+
+        // A recording row naming both tracks, so a removal that reaches
+        // them goes through whatever link is planted. The sibling's 16-byte
+        // track takes recovery's tiny-file branch; the database, several
+        // SQLite pages, takes its unreadable-audio branch.
+        func insertWithTracks(_ fixture: Fixture) {
+            fixture.store.insertRecording(MeetingRecord(
+                id: fixture.id, title: "Tracked",
+                startedAt: Date(timeIntervalSince1970: 1_700_010_000),
+                endedAt: Date(timeIntervalSince1970: 1_700_010_060),
+                status: .recording, micPath: "\(fixture.id)/me.caf",
+                systemPath: "\(fixture.id)/them.caf"))
+        }
+
+        // Nothing a link pointed at went with the removal.
+        func expectTargetsSurvive(_ fixture: Fixture, _ link: PlantedLink, by remover: String) {
+            expect(entryExists(fixture.siblingTrack),
+                   "\(remover) behind a \(link) link leaves the sibling meeting's audio")
+            expect(entryExists(fixture.database),
+                   "\(remover) behind a \(link) link leaves the filesRoot and the database")
+        }
+
+        // `<root>/<id>` itself is gone, and nothing a link pointed at went
+        // with it.
+        func expectContained(_ fixture: Fixture, _ link: PlantedLink, by remover: String) {
+            let directory = fixture.root.appendingPathComponent(fixture.id, isDirectory: true)
+            expect(!entryExists(directory),
+                   "\(remover) behind a \(link) link removes the meeting's own entry")
+            expectTargetsSurvive(fixture, link, by: remover)
+        }
+
+        // The coordinator's cleanup of an unsaved meeting: `delete` finds no
+        // row and removes the directory.
+        for link in PlantedLink.allCases {
+            let fixture = makeFixture(link)
+            expect(fixture.store.delete(meetingID: fixture.id),
+                   "deleting an unsaved meeting behind a \(link) link succeeds")
+            expectContained(fixture, link, by: "a delete")
+        }
+
+        // A capture Velora abandoned whose delete SQLite refuses: the
+        // coordinator removes its audio through the store.
+        for link in PlantedLink.allCases {
+            let fixture = makeFixture(link)
+            insertAbandoned(fixture)
+            expect(refuseDeletes(in: fixture.database),
+                   "the test refuses deletes behind a \(link) link")
+            var logged: [String] = []
+            MeetingCoordinator.deleteAbandoned(meetingID: fixture.id, in: fixture.store) {
+                logged.append($0)
+            }
+            expectContained(fixture, link, by: "a refused discard")
+            expect(logged.isEmpty,
+                   "a refused discard behind a \(link) link logs nothing (\(logged.count) lines)")
+        }
+
+        // Launch recovery drops a recording row that left no audio, and its
+        // directory with it.
+        for link in PlantedLink.allCases {
+            let fixture = makeFixture(link)
+            insertAbandoned(fixture)
+            _ = MeetingStore(url: fixture.database, filesRoot: fixture.root)
+            expectContained(fixture, link, by: "launch recovery")
+        }
+
+        // Launch recovery removes a named track it can't use (tiny or
+        // unreadable) before it drops the row.
+        for link in PlantedLink.allCases {
+            let fixture = makeFixture(link)
+            insertWithTracks(fixture)
+            _ = MeetingStore(url: fixture.database, filesRoot: fixture.root)
+            expectContained(fixture, link, by: "launch recovery of named tracks")
+        }
+
+        // Audio retention removes a finished meeting's tracks and keeps its
+        // directory: a link planted as a track goes, and a link planted as
+        // the directory keeps retention out of what it points at.
+        let trackLinks: [PlantedLink] = [.trackToSibling, .trackToDatabase]
+        for link in PlantedLink.allCases {
+            let fixture = makeFixture(link)
+            insertWithTracks(fixture)
+            fixture.store.markFailed(meetingID: fixture.id, error: "Old capture.")
+            fixture.store.pruneAudio(olderThanDays: 1)
+            // Retention runs on the store's queue; a read waits behind it.
+            let pruned = fixture.store.recordMetadata(id: fixture.id)
+            expect(pruned != nil && pruned?.micPath == nil && pruned?.systemPath == nil,
+                   "retention behind a \(link) link clears the meeting's tracks")
+            expectTargetsSurvive(fixture, link, by: "retention")
+            guard trackLinks.contains(link) else {
+                continue
+            }
+            let planted = fixture.root.appendingPathComponent(fixture.id, isDirectory: true)
+                .appendingPathComponent("them.caf")
+            expect(!entryExists(planted),
+                   "retention removes the planted \(link) link itself")
+        }
+
+        // A removal the file system refuses leaves the audio in place, so the
+        // coordinator logs it.
+        let locked = makeFixture(nil)
+        let lockedDirectory = locked.root.appendingPathComponent(locked.id, isDirectory: true)
+        insertAbandoned(locked)
+        expect(refuseDeletes(in: locked.database),
+               "the test refuses deletes for the locked discard")
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o500], ofItemAtPath: lockedDirectory.path)
+        var lockedLog: [String] = []
+        MeetingCoordinator.deleteAbandoned(meetingID: locked.id, in: locked.store) {
+            lockedLog.append($0)
+        }
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: lockedDirectory.path)
+        expect(entryExists(lockedDirectory),
+               "the file system refuses to remove the locked discard's audio")
+        expect(lockedLog.contains { $0.contains(locked.id) },
+               "a discard whose audio stays is logged (\(lockedLog.count) lines)")
+    }
+
+    /// A store's launch sweep removes capture directories no meeting row
+    /// names, and only those. A read of the rows that stops early would
+    /// look like no meetings and take every meeting's audio, so it sweeps
+    /// nothing; a child that isn't a UUID-named capture is never swept.
+    private static func testMeetingOrphanSweep() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-orphan-sweep-\(UUID().uuidString)", isDirectory: true)
+        let databaseURL = root.appendingPathComponent("meetings.sqlite3")
+        let store = MeetingStore(url: databaseURL, filesRoot: root)
+        defer { try? FileManager.default.removeItem(at: root) }
+        func exists(_ url: URL) -> Bool {
+            FileManager.default.fileExists(atPath: url.path)
+        }
+
+        // Two meetings, so the failing read returns one row before it stops.
+        var meetingDirectories: [URL] = []
+        for title in ["First", "Second"] {
+            let id = UUID().uuidString
+            let directory = root.appendingPathComponent(id, isDirectory: true)
+            MeetingStore.ensurePrivateDirectory(directory)
+            FileManager.default.createFile(
+                atPath: directory.appendingPathComponent("me.caf").path, contents: Data(count: 16))
+            store.insertProcessing(MeetingRecord(
+                id: id, title: title,
+                startedAt: Date(timeIntervalSince1970: 1_700_020_000),
+                endedAt: Date(timeIntervalSince1970: 1_700_020_060),
+                status: .processing, micPath: "\(id)/me.caf"))
+            meetingDirectories.append(directory)
+        }
+        let orphan = root.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(orphan)
+        let userFolder = root.appendingPathComponent("Exports", isDirectory: true)
+        MeetingStore.ensurePrivateDirectory(userFolder)
+
+        MeetingStore.orphanSweepStepOverride = SQLITE_BUSY
+        let logged = captureStandardError {
+            _ = MeetingStore(url: databaseURL, filesRoot: root)
+        }
+        MeetingStore.orphanSweepStepOverride = nil
+        expect(meetingDirectories.allSatisfy(exists) && exists(orphan) && exists(userFolder),
+               "a launch whose read of meetings stops early sweeps nothing")
+        expect(logged?.contains("orphan sweep skipped (\(SQLITE_BUSY))") == true,
+               "a launch that skips the sweep logs why (stderr captured: \(logged != nil))")
+
+        _ = MeetingStore(url: databaseURL, filesRoot: root)
+        expect(!exists(orphan),
+               "a launch removes a capture directory no meeting names")
+        expect(meetingDirectories.allSatisfy(exists),
+               "a launch keeps every meeting's audio")
+        expect(exists(userFolder),
+               "a launch keeps a folder in the meetings directory that isn't a capture")
+    }
+
+    /// Runs `body` with standard error sent to a pipe and returns what was
+    /// written there, so a test can read a store's NSLog line. One store's
+    /// lines stay far below the pipe's 64 KB, so `body` never blocks.
+    /// Nil when stderr couldn't be redirected (`body` then runs uncaptured)
+    /// or put back.
+    ///
+    ///   saved = dup(2)      2 -> pipe      body()      2 -> saved (defer)
+    private static func captureStandardError(_ body: () -> Void) -> String? {
+        let pipe = Pipe()
+        let saved = dup(STDERR_FILENO)
+        guard saved >= 0 else {
+            body()
+            return nil
+        }
+
+        fflush(stderr)
+        guard dup2(pipe.fileHandleForWriting.fileDescriptor, STDERR_FILENO) >= 0 else {
+            close(saved)
+            body()
+            return nil
+        }
+
+        var restored = false
+        do {
+            defer {
+                fflush(stderr)
+                restored = dup2(saved, STDERR_FILENO) >= 0
+                close(saved)
+                try? pipe.fileHandleForWriting.close()
+            }
+            body()
+        }
+
+        // Still on the pipe, fd 2 holds a write end open, so reading to
+        // end of file would wait forever.
+        guard restored else {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func testMeetingSystemAudioWarnings() {
@@ -10466,6 +11554,117 @@ enum Selftest {
                "a Slack take stopped from Home is copied, not typed (got \(stopped), \"\(focusedField.string)\")")
         expect(stoppedTally.history == 1 && stoppedTally.copied == 1 && stoppedTally.posted == 0,
                "a Slack take stopped from Home records History once and shows Copied to clipboard")
+    }
+
+    /// The meetings list in a real window: Tab lands on its first row, ↓
+    /// moves focus, and Return or Space opens the focused meeting. A list
+    /// that comes back from a meeting focuses that meeting and clears the
+    /// request, so a later list leaves focus where it is.
+    private static func testMeetingListWindowKeys() {
+        struct Row: Identifiable {
+            let id: String
+        }
+        final class Probe {
+            var opened: [String] = []
+            var returnFocus: String?
+        }
+        final class Frames {
+            var byID: [String: CGRect] = [:]
+        }
+        let rows = [Row(id: "a"), Row(id: "b"), Row(id: "c")]
+
+        func host(_ probe: Probe, rows: [Row], height: CGFloat = 400, frames: Frames = Frames()) -> NSWindow {
+            let list = MeetingRowList(
+                label: "Meetings", items: rows,
+                returnFocus: Binding(get: { probe.returnFocus }, set: { probe.returnFocus = $0 })
+            ) { row in
+                probe.opened.append(row.id)
+            } row: { row in
+                Text(row.id)
+                    .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+                    .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+                        frames.byID[row.id] = $0
+                    }
+            }
+            let window = MainWindowController.makeShellWindow(
+                rootView: list, title: "Selftest", size: NSSize(width: 600, height: height),
+                minimumSize: NSSize(width: 300, height: 150))
+            window.alphaValue = 0
+            window.orderFrontRegardless()
+            waitUntil(timeout: 0.4) { false }
+            return window
+        }
+
+        func press(
+            _ window: NSWindow, key: Int, character: Int, flags: NSEvent.ModifierFlags = [],
+            settle: TimeInterval = 0.2
+        ) {
+            let text = String(UnicodeScalar(UInt32(character)).map(Character.init) ?? " ")
+            guard let event = NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: flags,
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                characters: text, charactersIgnoringModifiers: text,
+                isARepeat: false, keyCode: UInt16(key)) else {
+                return
+            }
+            window.sendEvent(event)
+            waitUntil(timeout: settle) { false }
+        }
+        let downArrow = (key: 125, character: NSDownArrowFunctionKey)
+        let returnKey = (key: 36, character: 13)
+        let space = (key: 49, character: 32)
+
+        let probe = Probe()
+        let window = host(probe, rows: rows)
+        window.selectNextKeyView(nil)
+        waitUntil(timeout: 0.2) { false }
+        press(window, key: returnKey.key, character: returnKey.character)
+        expect(probe.opened == ["a"],
+               "Tab focuses the first meeting and Return opens it (opened \(probe.opened))")
+        press(window, key: downArrow.key, character: downArrow.character, flags: [.numericPad, .function])
+        press(window, key: space.key, character: space.character)
+        expect(probe.opened == ["a", "b"],
+               "↓ focuses the next meeting and Space opens it (opened \(probe.opened))")
+        window.orderOut(nil)
+        window.close()
+
+        let returning = Probe()
+        returning.returnFocus = "c"
+        let back = host(returning, rows: rows)
+        press(back, key: returnKey.key, character: returnKey.character)
+        expect(returning.opened == ["c"],
+               "the list focuses the meeting just closed (opened \(returning.opened))")
+        expect(returning.returnFocus == nil,
+               "the list clears the focus request once it has used it")
+        back.orderOut(nil)
+        back.close()
+
+        // A list taller than its window: ↓ to the last row scrolls it into
+        // view.
+        let longRows = (0..<40).map { Row(id: "row \($0)") }
+        let lastID = longRows[longRows.count - 1].id
+        let scrolling = Probe()
+        let frames = Frames()
+        let short = host(scrolling, rows: longRows, height: 200, frames: frames)
+        let visibleHeight = short.contentView?.bounds.height ?? 0
+        expect((frames.byID[lastID]?.minY ?? 0) > visibleHeight,
+               "the last of 40 rows starts below a 200 pt window")
+        short.selectNextKeyView(nil)
+        waitUntil(timeout: 0.2) { false }
+        for _ in 1..<longRows.count {
+            press(short, key: downArrow.key, character: downArrow.character,
+                  flags: [.numericPad, .function], settle: 0.03)
+        }
+        waitUntil(timeout: 0.4) { false }
+        let lastFrame = frames.byID[lastID] ?? .zero
+        expect(lastFrame.minY >= 0 && lastFrame.maxY <= visibleHeight,
+               "↓ to the last row scrolls it into view (frame \(lastFrame), window \(visibleHeight) pt)")
+        press(short, key: returnKey.key, character: returnKey.character)
+        expect(scrolling.opened == [lastID],
+               "↓ walks focus to the last row (opened \(scrolling.opened))")
+        short.orderOut(nil)
+        short.close()
     }
 
     /// The sidebar's engine line names the state, not the machinery:

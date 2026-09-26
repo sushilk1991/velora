@@ -108,6 +108,17 @@ final class MeetingProcessor: ObservableObject {
     private var unsavedOutcomes: Set<String> = []
     /// Seconds before notes SQLite refused are written once more.
     private static let notesSaveRetryDelay: TimeInterval = 1
+    /// The saved error of a meeting with no audio left to transcribe. The
+    /// Meetings pane matches it so it doesn't say the same thing twice.
+    static let noUsableAudioMessage = "No usable audio was captured for this meeting"
+    /// Why a meeting stopped after the engine restarted mid-job three times.
+    private static let engineRestartsStopped =
+        "Velora's speech engine kept restarting, so processing stopped."
+    /// Where a stopped job goes on when nothing restarts it, by job. The
+    /// notes window shows these too, without Retry buttons.
+    private static let transcriptionRetryHint = "In Meetings, open this meeting and choose Retry."
+    private static let recreateRetryHint = "In Meetings, open this meeting and choose Retry Recreate."
+    private static let notesRetryHint = "In Meetings, open this meeting and choose Retry Notes."
     /// The engine's code for a track file it can never transcribe (engine
     /// server.py, `MEETING_UNSUPPORTED_AUDIO`). Only this skips one track;
     /// every other failure is transient and fails the job for Retry.
@@ -124,6 +135,46 @@ final class MeetingProcessor: ObservableObject {
     private static let audioLoadRetryDelay: TimeInterval = 30
     /// Seconds a "busy" engine gets before the job starts again.
     private static let busyRetryDelay: TimeInterval = 2
+    /// The job the engine's restarts stopped, which decides what its
+    /// message tells the user to do.
+    enum RestartedJob: Equatable {
+        case transcription
+        case recreate
+        /// Notes from a saved transcript. `autoRetryLeft` when
+        /// `requeueStalledNotes` will still try them once on its own.
+        case notes(autoRetryLeft: Bool)
+    }
+
+    // Test seam: internal so Selftest can reach it.
+    /// A notes job has its automatic retry left under `stalledNotes`'s
+    /// terms: the retry is unspent and no notes, partial ones included,
+    /// were saved.
+    static func restartedJob(
+        reprocessing: Bool, notesOnly: Bool, autoRetried: Bool, notes: MeetingNotes?
+    ) -> RestartedJob {
+        if reprocessing {
+            return .recreate
+        }
+        guard notesOnly else {
+            return .transcription
+        }
+        return .notes(autoRetryLeft: !autoRetried && (notes?.isEmpty ?? true))
+    }
+
+    // Test seam: internal so Selftest can reach it.
+    /// The saved error once restarts stop a job: what happened, then the
+    /// button that goes on, unless the notes will retry on their own.
+    static func engineRestartsMessage(for job: RestartedJob) -> String {
+        switch job {
+        case .transcription:
+            return "\(engineRestartsStopped) \(transcriptionRetryHint)"
+        case .recreate:
+            return "\(engineRestartsStopped) \(recreateRetryHint)"
+        case .notes(let autoRetryLeft):
+            return autoRetryLeft ? engineRestartsStopped : "\(engineRestartsStopped) \(notesRetryHint)"
+        }
+    }
+
     /// Automatic notes retries one engine-ready may queue. An upgrade can
     /// find many stalled meetings at once; the rest wait for a later ready.
     private static let automaticNotesRetriesPerReady = 3
@@ -174,7 +225,7 @@ final class MeetingProcessor: ObservableObject {
         guard notesOnly || (reprocessing
                 ? store.hasAllCapturedAudio(for: record)
                 : hasRecoverableAudio(record)) else {
-            failUnqueued(meetingID: meetingID, message: "No usable audio was captured for this meeting")
+            failUnqueued(meetingID: meetingID, message: Self.noUsableAudioMessage)
             return
         }
         enqueueValidated(
@@ -379,7 +430,9 @@ final class MeetingProcessor: ObservableObject {
             }
             state = .processing(
                 meetingID: meetingID,
-                label: "Transcribing \(speaker.displayName)…",
+                // Names the track as the pane and HUD name sources
+                // (MeetingCoordinator.sourcesLabel), not "Me" / "Them".
+                label: speaker.isRemote ? "Transcribing Mac audio…" : "Transcribing your mic…",
                 fraction: trackBase(work))
         case .meetingSegment(let id, let segment):
             guard matches(id: id, meetingID: segment.meetingID, work: work) else { return }
@@ -476,14 +529,15 @@ final class MeetingProcessor: ObservableObject {
                 engineRestartAttempts[meetingID] = attempts
                 let automatic = interruptedWork?.automatic ?? false
                 if attempts >= 3 {
+                    let message = Self.engineRestartsMessage(for: Self.restartedJob(
+                        reprocessing: reprocessing, notesOnly: notesOnly,
+                        autoRetried: store.notesAutoRetried(meetingID: meetingID),
+                        notes: store.recordMetadata(id: meetingID)?.notes))
                     persistFailure(
                         meetingID: meetingID, reprocessing: reprocessing,
-                        notesOnly: notesOnly,
-                        message: "Speech engine repeatedly restarted on this meeting; retry manually")
+                        notesOnly: notesOnly, message: message)
                     present(
-                        .failed(
-                            meetingID: meetingID,
-                            message: "Meeting processing stopped after repeated engine restarts"),
+                        .failed(meetingID: meetingID, message: message),
                         automatic: automatic)
                 } else {
                     store.markProcessing(

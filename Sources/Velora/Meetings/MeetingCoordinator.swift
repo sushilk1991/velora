@@ -15,8 +15,15 @@ final class MeetingCoordinator: ObservableObject {
     }
 
     static let consentDescription =
-        "Records your microphone and computer audio locally. Make sure everyone knows."
+        "Records your mic and Mac audio locally. Make sure everyone knows."
     static let systemAudioFailurePresentation: SystemAudioFailurePresentation = .hud
+
+    /// The one name for a recording's sources, in the Meetings pane, the
+    /// HUD and VoiceOver: "Mic + Mac audio", or "Mic only" when Mac audio
+    /// could not start.
+    static func sourcesLabel(systemAudio: Bool) -> String {
+        systemAudio ? "Mic + Mac audio" : "Mic only"
+    }
 
     enum State: Equatable {
         case idle
@@ -217,7 +224,7 @@ final class MeetingCoordinator: ObservableObject {
         let pendingID = pendingMeetingID
         capture.stop(cancelled: true) { [weak self] _ in
             guard let self else { completion(); return }
-            if let pendingID { self.store.delete(meetingID: pendingID) }
+            if let pendingID { Self.deleteAbandoned(meetingID: pendingID, in: self.store) }
             self.pendingMeetingID = nil
             self.pendingMetadata = nil
             self.state = .idle
@@ -287,7 +294,7 @@ final class MeetingCoordinator: ObservableObject {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Discard this meeting recording?"
-        alert.informativeText = "The temporary microphone and system-audio files will be deleted. No meeting will be saved."
+        alert.informativeText = "The temporary mic and Mac audio files will be deleted. No meeting will be saved."
         alert.addButton(withTitle: "Discard")
         alert.addButton(withTitle: "Keep Recording")
         // Owned token: if the recording stops through another path first,
@@ -559,10 +566,11 @@ final class MeetingCoordinator: ObservableObject {
             guard !self.terminating else {
                 if self.capture.isCapturing {
                     self.capture.stop(cancelled: true) { [weak self] _ in
-                        self?.store.delete(meetingID: id)
+                        guard let self else { return }
+                        Self.deleteAbandoned(meetingID: id, in: self.store)
                     }
                 } else {
-                    self.store.delete(meetingID: id)
+                    Self.deleteAbandoned(meetingID: id, in: self.store)
                 }
                 self.pendingMetadata = nil
                 self.pendingMeetingID = nil
@@ -574,7 +582,7 @@ final class MeetingCoordinator: ObservableObject {
                 veloraLog("Velora: meeting \(id) capture failed to start: \(error.localizedDescription)")
                 self.pendingMetadata = nil
                 self.pendingMeetingID = nil
-                self.store.delete(meetingID: id)
+                Self.deleteAbandoned(meetingID: id, in: self.store)
                 self.state = .idle
                 self.sounds.play(.error)
                 self.showError(error.localizedDescription)
@@ -617,6 +625,39 @@ final class MeetingCoordinator: ObservableObject {
         return .start
     }
 
+    /// The error on a capture Velora abandoned but SQLite wouldn't delete.
+    private static let undeletedMessage =
+        "Velora stopped this recording but couldn't delete it. Choose Delete to remove it."
+
+    // Test seam: internal so Selftest can reach it.
+    /// Deletes a capture Velora abandoned (Discard, a failed start, quitting).
+    /// When SQLite refuses, the row is marked failed instead, so the pane
+    /// offers Delete rather than listing a recording nothing runs, and a
+    /// relaunch doesn't recover it as a meeting. The audio goes either way:
+    /// an abandoned capture's audio is never wanted, and a failed row that
+    /// kept it would offer Retry.
+    static func deleteAbandoned(
+        meetingID: String, in store: MeetingStore,
+        log: (String) -> Void = veloraLog
+    ) {
+        guard !store.delete(meetingID: meetingID) else {
+            return
+        }
+
+        if !store.removeAudioDirectory(meetingID: meetingID) {
+            log("Velora: abandoned meeting \(meetingID) audio could not be removed")
+        }
+
+        // Neither write landed: the row stays a recording (with its audio
+        // gone, the next launch's recovery drops it) and nothing changed to
+        // announce, so the log is the only trail.
+        guard store.markFailed(meetingID: meetingID, error: undeletedMessage) else {
+            log("Velora: abandoned meeting \(meetingID) could not be deleted or marked failed")
+            return
+        }
+        NotificationCenter.default.post(name: .veloraMeetingsChanged, object: nil)
+    }
+
     private func discardActiveCapture() {
         guard case .recording(let id, let title, _, _, _) = state else { return }
         settleEndWatch()
@@ -625,7 +666,7 @@ final class MeetingCoordinator: ObservableObject {
         sounds.play(.stop)
         capture.stop(cancelled: true) { [weak self] _ in
             guard let self else { return }
-            self.store.delete(meetingID: id)
+            Self.deleteAbandoned(meetingID: id, in: self.store)
             self.pendingMeetingID = nil
             self.pendingMetadata = nil
             self.discardingMeetingID = nil

@@ -542,6 +542,9 @@ struct GroupCard<Content: View>: View {
 
     private let header: String?
     private let headerLink: HeaderLink?
+    /// VoiceOver's name and state for the link, when its on-screen title
+    /// alone doesn't say what it acts on ("Show" → "Show Transcript").
+    private let headerLinkAccessibility: (label: String, value: String)?
     /// Secondary text on the header's trailing edge, in place of a link
     /// ("Best day 15 Sep · 3,000 words" over a Stats chart).
     private let headerCaption: String?
@@ -552,11 +555,13 @@ struct GroupCard<Content: View>: View {
 
     init(
         header: String? = nil, headerLink: HeaderLink? = nil,
+        headerLinkAccessibility: (label: String, value: String)? = nil,
         headerCaption: String? = nil, footer: String? = nil,
         @ViewBuilder content: () -> Content
     ) {
         self.header = header
         self.headerLink = headerLink
+        self.headerLinkAccessibility = headerLinkAccessibility
         self.headerCaption = headerCaption
         self.footer = footer
         self.content = content()
@@ -574,6 +579,7 @@ struct GroupCard<Content: View>: View {
                             .buttonStyle(.plain)
                             .font(.system(size: 12))
                             .foregroundStyle(VeloraBrand.link)
+                            .modifier(HeaderLinkAccessibility(named: headerLinkAccessibility))
                     }
                     if let headerCaption {
                         Spacer(minLength: VeloraSpacing.s)
@@ -598,6 +604,22 @@ struct GroupCard<Content: View>: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Self.labelInset)
             }
+        }
+    }
+}
+
+/// Applies a header link's VoiceOver name and state when it has them, and
+/// leaves the default (its title, no value) untouched otherwise.
+private struct HeaderLinkAccessibility: ViewModifier {
+    let named: (label: String, value: String)?
+
+    func body(content: Content) -> some View {
+        if let named {
+            content
+                .accessibilityLabel(named.label)
+                .accessibilityValue(named.value)
+        } else {
+            content
         }
     }
 }

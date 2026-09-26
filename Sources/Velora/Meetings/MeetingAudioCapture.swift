@@ -278,9 +278,9 @@ final class MeetingAudioCapture {
             || detail.localizedCaseInsensitiveContains("denied")
             || detail.localizedCaseInsensitiveContains("not allowed")
         if permissionFailure {
-            return "macOS has not allowed computer-audio capture. In System Settings, open Privacy & Security → Screen & System Audio Recording, allow Velora, then relaunch it. Velora records system audio, not your screen. This meeting is recording your microphone only."
+            return "macOS has not allowed Mac audio capture. In System Settings, open Privacy & Security → Screen & System Audio Recording, allow Velora, then relaunch it. Velora records Mac audio, not your screen. This meeting is recording your mic only."
         }
-        return "Computer audio could not start (\(detail)). This meeting is recording your microphone only."
+        return "Mac audio could not start (\(detail)). This meeting is recording your mic only."
     }
 
     func stop(
@@ -455,7 +455,7 @@ final class MeetingAudioCapture {
                     self.startupSystemAudio = false
                     self.startupWarning = [
                         self.startupWarning,
-                        "Computer audio did not deliver any samples. This meeting is recording your microphone only.",
+                        "Mac audio did not deliver any samples. This meeting is recording your mic only.",
                     ].compactMap { $0 }.joined(separator: " ")
                     if readiness.continueWithoutSystemAudio() { self.finishStartupIfReady() }
                 }

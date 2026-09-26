@@ -54,6 +54,8 @@ struct MainWindowActions {
     var openSettings: () -> Void
     /// Opens the focused notes window for one meeting.
     var openMeetingNotes: (String) -> Void
+    /// Opens Settings › Advanced, where the meeting preferences live.
+    var openMeetingSettings: () -> Void = {}
     /// The dictation phase behind `toggleDictation`, for Home's button.
     var dictation = DictationActivity()
 }
@@ -287,7 +289,8 @@ struct MainRootView: View {
             // swaps list and detail in place.
             MeetingsSettingsView(
                 model: model, coordinator: meetingCoordinator,
-                processor: meetingProcessor, store: meetings)
+                processor: meetingProcessor, store: meetings,
+                openMeetingSettings: actions.openMeetingSettings)
         case .dictionary:
             // Draws its own PaneHeader: the search and Add state live inside it.
             DictionarySettingsView(model: model)

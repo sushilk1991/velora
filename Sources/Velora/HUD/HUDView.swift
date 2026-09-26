@@ -352,7 +352,7 @@ struct HUDView: View {
             meetingPrimaryButton("Start Notes") {
                 model.onMeetingSuggestionAccept?()
             }
-                .help("Records your microphone and computer audio locally. Make sure everyone knows.")
+                .help(MeetingCoordinator.consentDescription)
                 .accessibilityLabel("Start meeting notes")
             Button { model.onMeetingSuggestionDismiss?() } label: {
                 Image(systemName: "xmark")
@@ -387,7 +387,7 @@ struct HUDView: View {
                     .foregroundStyle(hudPrimaryText)
                     .lineLimit(1)
                 if meetingValue?.systemAudio == false {
-                    Text("Mic only")
+                    Text(MeetingCoordinator.sourcesLabel(systemAudio: false))
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(VeloraStatus.warning)
                 }
@@ -836,7 +836,7 @@ struct HUDView: View {
         case .meetingSuggestion(let title, let source):
             return "Meeting detected, \(source), \(title)"
         case .meeting(let title, let systemAudio):
-            return "Recording \(title), \(systemAudio ? "microphone and computer audio" : "microphone only")"
+            return "Recording \(title), \(MeetingCoordinator.sourcesLabel(systemAudio: systemAudio))"
         case .meetingEnd(let title):
             return "Meeting ended, \(title)"
         case .meetingFailure(_, let message), .error(let message):
