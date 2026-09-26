@@ -129,17 +129,123 @@ def test_a_failed_detection_keeps_no_encoding(windows, monkeypatch):
     assert ModelHolder.model.encoder.memo.entry is None
 
 
-def test_an_unsure_detection_keeps_the_stock_language(windows, monkeypatch):
+def test_an_unsure_detection_reads_the_stock_window(windows, monkeypatch):
     """Short or noisy clips detect near chance. There the padding
     difference can flip the language (a 5.8 s English dictation read as
-    Japanese), so an unsure clip takes stock's answer instead."""
+    Japanese), so an unsure clip decides on the window stock detects on:
+    the silence-padded clip, not the zero-padded decode window."""
     monkeypatch.setattr(stt, "_SURE_LANGUAGE_P", 1.01)  # nothing is sure
+    detected = []
+    detect = mlx_whisper_model.Whisper.detect_language
+
+    def recording_detect(self, mel):
+        detected.append(window_id(mel))
+        return detect(self, mel)
+
+    monkeypatch.setattr(mlx_whisper_model.Whisper, "detect_language", recording_detect)
     for duration in (2, 4, 7):
         audio = seconds(duration)
-        expected = mlx_whisper.transcribe(
+        detected.clear()
+        mlx_whisper.transcribe(
             audio, path_or_hf_repo=TINY_PATH, condition_on_previous_text=False,
-            language=None, fp16=True, temperature=0.0)["language"]
+            language=None, fp16=True, temperature=0.0)
+        stock_window = detected[-1]
+        detected.clear()
 
-        result = backend("auto")._transcribe(audio, None, temperature=0.0)
+        backend("auto")._transcribe(audio, None, temperature=0.0)
 
-        assert result["language"] == expected
+        assert len(detected) == 2, "an unsure first window must fall back once"
+        assert detected[-1] == stock_window
+
+
+def scripted_detection(monkeypatch, *answers):
+    """Make detection return `answers` in order; return the call count.
+
+    Each answer is one window's language probabilities, the dict
+    `Whisper.detect_language` returns for a single mel window."""
+    queue = list(answers)
+    calls = []
+
+    def detect(self, mel):
+        calls.append(window_id(mel))
+        return None, queue.pop(0)
+
+    monkeypatch.setattr(mlx_whisper_model.Whisper, "detect_language", detect)
+    return calls
+
+
+def detect_auto(monkeypatch, *answers) -> tuple[str, int]:
+    """(language a 4 s auto-language decode used, detect passes it ran)."""
+    calls = scripted_detection(monkeypatch, *answers)
+    result = backend("auto")._transcribe(seconds(4), None, temperature=0.0)
+    return result["language"], len(calls)
+
+
+@pytest.mark.parametrize("probs", [
+    {"de": 0.52, "en": 0.45, "nl": 0.03},    # sure window, English 0.07 behind
+    {"cy": 0.50, "en": 0.45, "hi": 0.05},    # a near tie never goes to Welsh
+    {"de": 0.55, "en": 0.45},                # 0.10 behind: 0.55 - 0.45 > 0.10 in floats
+], ids=["german", "welsh", "exactly-the-margin"])
+def test_english_close_behind_the_top_language_wins(windows, monkeypatch, probs):
+    """The owner dictates English with an Indian accent; auto-detect
+    should lean English. English within 0.10 of the top language wins."""
+    monkeypatch.setattr(stt, "_SURE_LANGUAGE_P", 0.5)
+
+    assert detect_auto(monkeypatch, probs) == ("en", 1)
+
+
+@pytest.mark.parametrize("probs, expected", [
+    ({"hi": 0.80, "en": 0.15, "ur": 0.05}, "hi"),   # confident Hindi
+    ({"hi": 0.56, "en": 0.42, "ur": 0.02}, "hi"),   # English 0.14 behind
+    ({"ja": 0.97, "en": 0.02, "zh": 0.01}, "ja"),
+], ids=["confident-hindi", "hindi-past-the-margin", "japanese"])
+def test_a_clear_lead_keeps_the_detected_language(
+        windows, monkeypatch, probs, expected):
+    """Auto-detect still serves the owner's Hindi dictations: only a
+    near tie turns into English."""
+    monkeypatch.setattr(stt, "_SURE_LANGUAGE_P", 0.5)
+
+    assert detect_auto(monkeypatch, probs) == (expected, 1)
+
+
+@pytest.mark.parametrize("probs, expected", [
+    ({"is": 0.93, "en": 0.05, "no": 0.02}, "en"),
+    ({"is": 0.90, "hi": 0.07, "en": 0.03}, "hi"),
+], ids=["english-next", "hindi-next"])
+def test_icelandic_is_never_detected(windows, monkeypatch, probs, expected):
+    """Indian-accented English reads as Icelandic at p 0.82-0.99, and no
+    one dictates Icelandic, so auto-detect takes the next language.
+    A sure Icelandic window still settles detection in one pass."""
+    monkeypatch.setattr(stt, "_SURE_LANGUAGE_P", 0.5)
+
+    assert detect_auto(monkeypatch, probs) == (expected, 1)
+
+
+def test_an_unsure_window_takes_the_prior_on_the_stock_window(
+        windows, monkeypatch):
+    """The window that decides is the one the prior reads: an unsure
+    first window where English trails by 0.02 is replaced by stock's
+    window, where Korean leads by 0.50."""
+    monkeypatch.setattr(stt, "_SURE_LANGUAGE_P", 0.5)
+    unsure_first = {"ja": 0.30, "en": 0.28, "ko": 0.20}
+    sure_stock = {"ko": 0.70, "en": 0.20, "ja": 0.10}
+
+    assert detect_auto(monkeypatch, unsure_first, sure_stock) == ("ko", 2)
+
+
+def test_english_close_behind_on_the_stock_window_wins(windows, monkeypatch):
+    monkeypatch.setattr(stt, "_SURE_LANGUAGE_P", 0.5)
+    unsure_first = {"ja": 0.40, "ko": 0.35, "en": 0.05}
+    close_stock = {"ja": 0.46, "en": 0.44, "ko": 0.10}
+
+    assert detect_auto(monkeypatch, unsure_first, close_stock) == ("en", 2)
+
+
+def test_a_fixed_language_skips_the_prior(windows, monkeypatch):
+    """A language picked in Settings is used as is, with no detection."""
+    calls = scripted_detection(monkeypatch)
+
+    result = backend("de")._transcribe(seconds(4), None, temperature=0.0)
+
+    assert result["language"] == "de"
+    assert calls == []

@@ -949,6 +949,22 @@ def whisper_language(language: str | None) -> str | None:
 # stock's silence-padded clip can disagree, so stock decides instead.
 _SURE_LANGUAGE_P = 0.5
 
+# English prior on auto-detect: English wins when it trails the top
+# language by at most this much on the window that decided. Indian-accented
+# English is often read as another language with English close behind;
+# clips 0.25.0 detected as Hindi or Urdu all lead English by more.
+_ENGLISH_MARGIN = 0.10
+
+# Slack on that comparison for floating-point subtraction: a gap of exactly
+# the margin must count as within it, but 0.55 - 0.45 is 0.10000000000000003.
+# Far below any difference detection can resolve.
+_MARGIN_SLACK = 1e-9
+
+# Languages auto-detect never answers. Indian-accented English reads as
+# Icelandic at p 0.82-0.99, and Settings does not offer Icelandic; such a
+# window takes the next most likely language instead.
+_NEVER_DETECTED = frozenset({"is"})
+
 
 class _EncodingMemo:
     """The last Whisper encoder pass as (mel window, encoding), or None.
@@ -1023,7 +1039,9 @@ def _detect_on_first_window(model: Any, audio: np.ndarray) -> str | None:
     detection, so an unsure clip decodes in the same language as before
     at stock's cost of one extra pass. On 838 archived dictations the two
     inputs disagreed on 3 clips, all with top p ≤ 0.40; at 0.5, 24 clips
-    (2.9%) fall back and no disagreement remains."""
+    (2.9%) fall back and no disagreement remains.
+
+    The deciding window's probabilities then go through `_lean_english`."""
     import mlx.core as mx
     from mlx_whisper.audio import N_FRAMES, N_SAMPLES, log_mel_spectrogram, pad_or_trim
 
@@ -1037,11 +1055,40 @@ def _detect_on_first_window(model: Any, audio: np.ndarray) -> str | None:
     _, probs = model.detect_language(window)
     language = max(probs, key=probs.get)
     if probs[language] >= _SURE_LANGUAGE_P:
-        return language
+        return _lean_english(probs)
 
     stock_window = pad_or_trim(mel, N_FRAMES, axis=-2).astype(mx.float16)
     _, probs = model.detect_language(stock_window)
-    return max(probs, key=probs.get)
+    return _lean_english(probs)
+
+
+def _lean_english(probs: dict[str, float]) -> str:
+    """The language to decode with, given one window's detection.
+
+    English wins a near tie; otherwise the top language does, skipping
+    `_NEVER_DETECTED`. Both read the same window, so the prior costs no
+    extra detection pass:
+
+        top − p(en) ≤ 0.10 ──▶ "en"         {de .52, en .45} ─▶ en
+              │ no
+              ▼
+        top outside _NEVER_DETECTED         {hi .80, en .15} ─▶ hi
+                                            {is .93, en .05} ─▶ en
+
+    The margin is measured from the raw top, Icelandic included; measured
+    after dropping it, one more Hindi clip turned English.
+
+    On 2016 clips (archived dictations, Monsoon, Common Voice India and
+    Hindi) this fixes 15 of the 17 English clips 0.25.0 decoded in
+    another language and turns no clip 0.25.0 decoded as Hindi or Urdu
+    into English; Hindi read as Hindi or Urdu goes from 360 to 363 of
+    400. The cost: 16 Hindi clips 0.25.0 already decoded in a wrong
+    language (15 as Icelandic) now decode as English."""
+    top = max(probs, key=probs.get)
+    if probs[top] - probs.get("en", 0.0) <= _ENGLISH_MARGIN + _MARGIN_SLACK:
+        return "en"
+
+    return max((lang for lang in probs if lang not in _NEVER_DETECTED), key=probs.get)
 
 
 @contextlib.contextmanager
