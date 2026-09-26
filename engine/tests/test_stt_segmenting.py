@@ -3,6 +3,7 @@ WhisperBackend segment closing/stitching (with a monkeypatched mlx_whisper —
 tests never load MLX), glossary prompt building, and the prompt-echo guard."""
 
 import contextlib
+import logging
 import sys
 import types
 
@@ -831,10 +832,10 @@ def test_prompt_hallucination_retries_whole_clip_after_segment_commit(whisper):
 
 
 def test_true_silence_span_is_consumed(whisper):
-    # An all-silence span decoding to "" is consumed (no retry loop).
+    # An all-silence span is consumed without decoding or retrying.
     backend, fake = whisper([""])
     feed_seconds(backend, MIN_SEGMENT_S + 1, chunk=quiet())
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 0
     assert backend._decoded_samples > 0  # noqa: SLF001 — silence consumed
 
 
@@ -843,6 +844,121 @@ def test_true_silence_span_is_consumed(whisper):
 # trailing "Thank you." fabricated from the stop pause / stop-key click. The
 # segments carried confident metadata (no_speech_prob=0.00, clean logprob and
 # compression), so only audio evidence can catch the class.
+
+
+def test_speechless_direct_span_makes_no_model_call(whisper):
+    backend, fake = whisper(["fabricated text"])
+
+    assert backend._decode(np.zeros(SAMPLE_RATE, dtype=np.float32), had_speech=False) == ""
+    assert fake.calls == []
+
+
+def test_speechless_span_keeps_info_log(whisper, caplog):
+    # Bench tooling reads this bounded info event when a decode is skipped.
+    backend, _fake = whisper(["unused"])
+    with caplog.at_level(logging.INFO, logger="velora.stt"):
+        backend._decode(np.zeros(SAMPLE_RATE, dtype=np.float32), had_speech=False)
+
+    assert any(
+        record.name == "velora.stt"
+        and record.levelno == logging.INFO
+        and "skipped decode of a speechless span" in record.message
+        for record in caplog.records
+    )
+
+
+def test_speechless_span_skips_prompt_free_recovery(whisper, monkeypatch):
+    # A rejected prompted result used to trigger a second decode, then the
+    # speechless guard discarded its text. Neither decode is needed now.
+    rejected = {"text": "loop", "segments": [{"text": "loop", "compression_ratio": 9.0}]}
+    backend, fake = whisper([rejected, "recovered words"])
+    backend.initial_prompt = "Velora"
+    monkeypatch.setattr(stt_mod, "_has_speech_like_modulation", lambda _audio: True)
+
+    assert backend._decode(np.zeros(SAMPLE_RATE, dtype=np.float32), had_speech=True) == ""
+    assert fake.calls == []
+
+
+def test_speechless_span_skips_failed_recovery(whisper, monkeypatch):
+    # The optional recovery could fail in base; its failure was caught and the
+    # speechless guard still returned an empty result.
+    rejected = {"text": "loop", "segments": [{"text": "loop", "compression_ratio": 9.0}]}
+    backend, fake = whisper([rejected, RuntimeError("recovery failed")])
+    backend.initial_prompt = "Velora"
+    monkeypatch.setattr(stt_mod, "_has_speech_like_modulation", lambda _audio: True)
+
+    assert backend._decode(np.zeros(SAMPLE_RATE, dtype=np.float32), had_speech=True) == ""
+    assert fake.calls == []
+
+
+def test_speech_level_span_keeps_stock_decode(whisper):
+    # Speech evidence preserves the existing model call and returned text.
+    backend, fake = whisper(["spoken words"])
+
+    assert backend._decode(np.tile(speechy(), 4), had_speech=True) == "spoken words"
+    assert len(fake.calls) == 1
+
+
+def test_stop_click_tail_skips_model(whisper):
+    # A stop click alone cannot supply speech evidence when the final 0.3 s is
+    # excluded from the integrity check.
+    backend, fake = whisper(["spoken words"])
+    click = np.full(int(0.25 * SAMPLE_RATE), 0.1, dtype=np.float32)
+    noise = np.concatenate((np.zeros(SAMPLE_RATE, dtype=np.float32), click))
+
+    assert backend._decode(noise, had_speech=True, ignore_stop_tail=True) == ""
+    assert fake.calls == []
+
+
+def test_stop_tail_precheck_preserves_speech(whisper):
+    # A real phrase before the stop click still sends the full span to Whisper.
+    backend, fake = whisper(["spoken words"])
+    click = np.full(int(0.25 * SAMPLE_RATE), 0.1, dtype=np.float32)
+    speech = np.concatenate((np.tile(speechy(), 4), np.zeros(CHUNK), click))
+
+    assert backend._decode(speech, had_speech=True, ignore_stop_tail=True) == "spoken words"
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0] == len(speech)
+
+
+def test_speechless_segment_error_contract(whisper):
+    # A silent segment cannot fail decoding; later speech still uses the
+    # existing failed-segment path and whole-clip fallback at stop.
+    backend, fake = whisper([RuntimeError("decode boom"), "whole clip rescue"])
+    feed_seconds(backend, HARD_SEGMENT_S, chunk=quiet())
+
+    assert fake.calls == []
+    assert backend._segment_decode_failed is False
+    assert backend._decoded_samples > 0
+
+    feed_seconds(backend, HARD_SEGMENT_S, chunk=speechy())
+
+    assert backend._segment_decode_failed is True
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0] == int(HARD_SEGMENT_S * SAMPLE_RATE)
+    assert backend.finalize() == "whole clip rescue"
+    assert backend.segments_used_for_final is False
+    assert fake.calls[-1][0] == int(2 * HARD_SEGMENT_S * SAMPLE_RATE)
+
+
+def test_speechless_finalize_error_contract(whisper):
+    # A stop click makes the tracker mark speech, but the final integrity
+    # span is silent. Later real speech still reaches the caller error path.
+    backend, fake = whisper([RuntimeError("decode boom")])
+    feed_seconds(backend, 5, chunk=quiet())
+    backend.feed_chunk(loud())
+
+    assert backend.finalize() == ""
+    assert fake.calls == []
+    assert backend._segment_decode_failed is False
+
+    feed_seconds(backend, 5, chunk=speechy())
+
+    with pytest.raises(RuntimeError, match="decode boom"):
+        backend.finalize()
+    assert len(fake.calls) == 1
+    assert fake.calls[0][0] == 5 * SAMPLE_RATE
+    assert backend._segment_decode_failed is False
 
 
 def test_speechless_batch_clip_skips_model_decode(whisper):
@@ -869,7 +985,7 @@ def test_batch_stop_click_does_not_become_transcript(whisper):
     pcm[-int(0.25 * SAMPLE_RATE):] = 0.1
 
     assert transcribe_clip(backend, pcm) == ""
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 0
 
 
 def test_speechless_tail_is_never_decoded(whisper):

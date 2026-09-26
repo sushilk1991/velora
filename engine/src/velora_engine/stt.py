@@ -1268,6 +1268,30 @@ class WhisperBackend:
         # cannot change how this result is stripped or retried mid-decode.
         prompt = self.initial_prompt
 
+        integrity_audio = (
+            audio[:-_STOP_NOISE_SAMPLES]
+            if ignore_stop_tail and len(audio) > _STOP_NOISE_SAMPLES
+            else audio
+        )
+        if not had_speech or not _reaches_speech_level(
+            integrity_audio, self._speech_reference()
+        ):
+            # The dual of the empty-speech-span integrity rule below: text
+            # decoded from a span that never carried sustained, speaking-level
+            # audio is fabricated. This is where "Thank you." / "Closed
+            # Captioning by ..." credits enter — Whisper decoding a trailing
+            # pause or breath bump with confident metadata (nsp=0.00, clean
+            # logprob/compression), so no metadata threshold can catch it
+            # (field bug, 2026-08-04). Both gates are relative to the
+            # session's own adapted speech level, never absolute.
+            # This audio-only verdict always returned empty after decoding;
+            # skip the model and its optional prompt-free recovery entirely.
+            log.info(
+                "whisper guard: skipped decode of a speechless span (%.1fs audio)",
+                len(audio) / SAMPLE_RATE,
+            )
+            return ""
+
         result = self._transcribe(audio, prompt)
         guarded_text = guard_whisper_result(result)
         # Every segment/preview needs the leading-header guard, but applying the
@@ -1318,29 +1342,6 @@ class WhisperBackend:
                 )
             except Exception:  # noqa: BLE001 — optional recovery must not fail the session
                 log.exception("prompt-free whisper recovery decode failed")
-        integrity_audio = (
-            audio[:-_STOP_NOISE_SAMPLES]
-            if ignore_stop_tail and len(audio) > _STOP_NOISE_SAMPLES
-            else audio
-        )
-        if text and (
-            not had_speech
-            or not _reaches_speech_level(
-                integrity_audio, self._speech_reference()
-            )
-        ):
-            # The dual of the empty-speech-span integrity rule below: text
-            # decoded from a span that never carried sustained, speaking-level
-            # audio is fabricated. This is where "Thank you." / "Closed
-            # Captioning by ..." credits enter — Whisper decoding a trailing
-            # pause or breath bump with confident metadata (nsp=0.00, clean
-            # logprob/compression), so no metadata threshold can catch it
-            # (field bug, 2026-08-04). Both gates are relative to the
-            # session's own adapted speech level, never absolute.
-            log.info(
-                "whisper guard: dropped text decoded from a speechless span "
-                "(%d chars, %.1fs audio)", len(text), len(audio) / SAMPLE_RATE)
-            return ""
         return text
 
     def _strip_final_prompt_echo(self, text: str) -> str:
@@ -1529,10 +1530,10 @@ class WhisperBackend:
             self.reset()
             return ""
         if not self._session_had_speech and not self._segments:
-            # _decode's post-model integrity guard always discards text from
-            # this exact state. Skip the expensive call instead; archived
-            # meeting tracks can otherwise spend minutes decoding pure silence
-            # one chunk at a time only to throw every result away.
+            # _decode's speechless pre-check would skip the model for this
+            # exact state anyway. Return before it to also skip joining the
+            # whole clip, a large allocation on an archived meeting track for
+            # a known-empty result, and the long-batch latency warning.
             log.debug(
                 "whisper skipped %.1fs batch with no tracked speech", duration_s
             )
