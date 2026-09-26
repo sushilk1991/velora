@@ -578,18 +578,24 @@ private struct AppIconView: View {
 // MARK: - Header controls
 
 /// The History pane's title-row controls: a 240 pt search box and the
-/// "All apps" popup. The shell places this beside its `PaneHeader`.
+/// "All Apps" chooser. The shell places this beside its `PaneHeader`.
 struct HistoryHeaderControls: View {
     @ObservedObject var viewModel: HistoryViewModel
 
     private static let searchWidth: CGFloat = 240
+    private static let allApps = "All Apps"
 
     var body: some View {
         HStack(spacing: VeloraSpacing.s) {
             SettingsSearchBox(prompt: "Search what you said", query: $viewModel.searchText)
                 .frame(width: Self.searchWidth)
-            Picker("App", selection: $viewModel.appFilter) {
-                Text("All apps").tag(String?.none)
+            // The shared header chooser, like Home's microphone menu; it
+            // brings its own capsule, tooltip and VoiceOver label.
+            HeaderMenu(
+                "Filter by app", value: viewModel.appFilter ?? Self.allApps,
+                selection: $viewModel.appFilter
+            ) {
+                Text(Self.allApps).tag(String?.none)
                 if !viewModel.appNames.isEmpty {
                     Divider()
                     ForEach(viewModel.appNames, id: \.self) { name in
@@ -597,10 +603,6 @@ struct HistoryHeaderControls: View {
                     }
                 }
             }
-            .pickerStyle(.menu)
-            .labelsHidden()
-            .fixedSize()
-            .accessibilityLabel("Filter by app")
             .onChange(of: viewModel.appFilter) { viewModel.fillFilteredPage() }
         }
     }
@@ -931,7 +933,7 @@ private struct JournalEntry: View {
             if reprocessFailed {
                 Label("Reprocess failed. Try again.", systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
-                    .foregroundStyle(VeloraStatus.warning)
+                    .foregroundStyle(VeloraStatus.warningText)
                     .padding(.leading, Self.timeColumn)
             }
 

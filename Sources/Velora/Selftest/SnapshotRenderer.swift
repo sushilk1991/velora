@@ -310,6 +310,12 @@ enum SnapshotRenderer {
             mainSelection.pane = pane
             writeShell(mainWindow, name: "main-\(pane.rawValue)", into: dir)
         }
+        // Dictionary scrolled to its end: the last rows, built by the lazy
+        // list, above the pinned sync footer.
+        mainSelection.pane = .dictionary
+        RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.8))
+        scrollToEnd(in: mainWindow.contentView)
+        writeShell(mainWindow, name: "main-dictionary-end", into: dir)
         // Stats at the window's minimum size (MainWindowController's
         // contentMinSize): the tiles fold to 2 × 2 so no caption, and no
         // "Change…" link, is clipped.
@@ -391,6 +397,34 @@ enum SnapshotRenderer {
         guard let content = window.contentView else { return }
         content.layoutSubtreeIfNeeded()
         write(view: content, to: dir.appendingPathComponent("\(name).png"))
+    }
+
+    /// Scrolls every scroller under `view` to its end. Twice, with a
+    /// runloop turn between, because a lazy stack grows its height as the
+    /// rows near the end are built.
+    @MainActor
+    private static func scrollToEnd(in view: NSView?) {
+        guard let view else {
+            return
+        }
+        for _ in 0..<2 {
+            for scroller in scrollViews(in: view) {
+                guard let document = scroller.documentView else {
+                    continue
+                }
+                let clip = scroller.contentView
+                let overflow = max(0, document.frame.height - clip.bounds.height)
+                clip.scroll(to: NSPoint(x: 0, y: document.isFlipped ? overflow : 0))
+                scroller.reflectScrolledClipView(clip)
+            }
+            RunLoop.current.run(until: Date(timeIntervalSinceNow: 0.3))
+        }
+    }
+
+    @MainActor
+    private static func scrollViews(in view: NSView) -> [NSScrollView] {
+        let own = (view as? NSScrollView).map { [$0] } ?? []
+        return own + view.subviews.flatMap { scrollViews(in: $0) }
     }
 
     /// Stats dashboard over a deterministic 12-week fixture history — proves

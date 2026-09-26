@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import SwiftUI
 
 /// Home, Stats, History, Dictionary and Modes: the store queries behind the
 /// Swift Charts Stats pane and the content-pane fixes (locale times, the
@@ -22,6 +24,21 @@ extension Selftest {
         testModesDraftGuard()
         testModesProtectionAndSymbols()
         testDictionaryPromoteAutomatic()
+        testDictionarySourceLabels()
+        testDictionaryBulkForgetCopy()
+        testDictionarySelectionAfterChange()
+        testDictionaryRowKeys()
+        testDictionarySavedRowID()
+        testDictionaryFilterMemo()
+        testDictionaryPromotedRow()
+        testDictionaryOpenAction()
+        testDictionaryListWindowKeys()
+        testDictionaryListClick()
+        testDictionaryListRemove()
+        testDictionaryListScrolling()
+        testDictionaryListInactiveWindow()
+        testDictionaryListRevealFromEmpty()
+        testDictionaryListAccessibility()
     }
 
     // MARK: - Fixtures
@@ -42,6 +59,15 @@ extension Selftest {
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         body(dir)
         try? FileManager.default.removeItem(at: dir)
+    }
+
+    /// Added words named by their ids, for the Dictionary list's logic.
+    private static func dictionaryRows(_ ids: String...) -> [DictionaryRow] {
+        ids.map {
+            DictionaryRow(
+                id: $0, writeAs: $0, heardAs: nil,
+                source: .added, isSoftCorrection: false, modifiedAt: Date())
+        }
     }
 
     /// Local wall-clock time `daysAgo` calendar days back, at `hour`:`minute`.
@@ -489,6 +515,917 @@ extension Selftest {
 
     // MARK: - Dictionary
 
+    /// A row says where it came from in words, not "Auto" or "Learned",
+    /// and search finds a row by the words it shows.
+    private static func testDictionarySourceLabels() {
+        func row(_ id: String, _ source: DictionarySource, soft: Bool = false) -> DictionaryRow {
+            DictionaryRow(
+                id: id, writeAs: "Term \(id)", heardAs: nil,
+                source: source, isSoftCorrection: soft, modifiedAt: Date())
+        }
+        let found = row("1", .automatic)
+        let edit = row("2", .learned)
+        let softEdit = row("3", .learned, soft: true)
+        let added = row("4", .added)
+
+        expect(DictionarySettingsLogic.sourceLabel(found) == "Found in your dictations",
+               "an auto-learned word reads as found in your dictations")
+        expect(DictionarySettingsLogic.sourceLabel(edit) == "From your edit",
+               "a learned correction reads as from your edit")
+        expect(DictionarySettingsLogic.sourceLabel(softEdit) == "From your edit · Context-aware",
+               "a context-aware correction keeps its qualifier")
+        expect(DictionarySettingsLogic.sourceLabel(added) == "Added",
+               "an added word still reads Added")
+
+        let rows = [found, edit, softEdit, added]
+        expect(DictionarySettingsLogic.filtered(rows, query: "dictations").map(\.id) == ["1"],
+               "searching the shown origin finds auto-learned words")
+        expect(DictionarySettingsLogic.filtered(rows, query: "your edit").map(\.id) == ["2", "3"],
+               "searching the shown origin finds learned corrections")
+        expect(DictionarySettingsLogic.filtered(rows, query: "auto").map(\.id) == ["1"],
+               "the old source name still finds auto-learned words")
+    }
+
+    /// The ⋯ menu forgets learned words in bulk, in the rows' own terms:
+    /// each confirmation repeats its rows' caption, the items read as
+    /// menu commands, and no copy promises more than the remove does
+    /// (bans are capped, so a forgotten word can come back).
+    private static func testDictionaryBulkForgetCopy() {
+        typealias Logic = DictionarySettingsLogic
+        expect(Logic.BulkForget.allCases.map(\.source) == [.learned, .automatic],
+               "only learned words are forgotten in bulk; added words go one at a time")
+
+        let stale = ["Auto", "auto-learned", "Learned", "learned", "miner"]
+        let permanence = ["again", "never", "won’t", "won't", "permanent"]
+        for kind in Logic.BulkForget.allCases {
+            let caption = Logic.sourceLabel(DictionaryRow(
+                id: "x", writeAs: "x", heardAs: nil,
+                source: kind.source, isSoftCorrection: false, modifiedAt: Date()))
+            let item = Logic.bulkForgetItem(kind)
+            let title = Logic.bulkForgetTitle(kind)
+            let message = Logic.bulkForgetMessage(kind)
+            let originWord = caption.split(separator: " ").last.map(String.init) ?? caption
+
+            expect(item.hasPrefix("Forget ") && item.hasSuffix("…"),
+                   "\(item) is a Forget command that opens a confirmation")
+            expect(item.localizedCaseInsensitiveContains(originWord),
+                   "\(item) names the rows' origin (\(originWord))")
+            expect(title.hasSuffix("?") && title.localizedCaseInsensitiveContains(caption),
+                   "\(title) repeats the rows' caption \(caption)")
+            expect(!permanence.contains { message.contains($0) },
+                   "\(message) says only what the remove does now")
+            for text in [item, title, message] {
+                expect(!stale.contains { text.contains($0) }, "bulk forget copy drops the old source names: \(text)")
+            }
+        }
+        expect(Set(Logic.BulkForget.allCases.map(Logic.bulkForgetItem)).count == Logic.BulkForget.allCases.count,
+               "each bulk forget item is distinct")
+    }
+
+    /// When the rows change (⌫, the ⋯ menu, a context menu, Make Permanent,
+    /// sync, a search), the selection stays on its row while that row is
+    /// listed, else moves to the nearest row still listed, next first, not
+    /// back to the top. With none of its neighbours left, the first row,
+    /// but only in a focused list: without focus, nothing.
+    private static func testDictionarySelectionAfterChange() {
+        let rows = dictionaryRows("a", "b", "c", "d")
+        func keep(_ ids: String...) -> [DictionaryRow] {
+            rows.filter { ids.contains($0.id) }
+        }
+        func after(
+            _ selected: String?, _ new: [DictionaryRow],
+            _ focus: DictionarySettingsLogic.ListFocus = .focused
+        ) -> String? {
+            DictionarySettingsLogic.selectionAfterChange(selected, from: rows, to: new, focus: focus)
+        }
+
+        expect(after("b", keep("a", "c", "d")) == "c", "a removed row hands the selection to the next row")
+        expect(after("d", keep("a", "b", "c")) == "c", "removing the last row moves the selection up")
+        expect(after("b", keep("a", "d")) == "d", "a bulk remove skips rows that left too")
+        expect(after("c", keep("a")) == "a", "with nothing after it, the selection goes to the nearest row before")
+        expect(after("b", keep("b", "c")) == "b", "a selected row that is still listed stays selected")
+        expect(after(nil, keep("a")) == nil, "no selection, nothing to move")
+        expect(after("b", []) == nil, "an emptied list has nothing to select")
+        expect(after("gone", keep("a")) == "a", "a selection that was never listed falls back to the first row")
+        expect(after("b", dictionaryRows("x", "y")) == "x",
+               "a sync that replaced every row selects the first new row, so a focused list keeps a selection")
+        // The editor selects a saved entry before the rows change; an edit
+        // gives it a new id at the top of the list.
+        expect(after("b2", dictionaryRows("b2") + keep("a", "c", "d")) == "b2",
+               "an edited entry selected under its new id stays selected, not b's old neighbour")
+
+        // A search from "a" to "z" in a list without focus replaces every
+        // row; it must not select one the user never picked.
+        expect(after("b", dictionaryRows("x", "y"), .unfocused) == nil,
+               "without focus, a list whose rows were all replaced selects nothing")
+        expect(after("b", keep("a", "c", "d"), .unfocused) == "c",
+               "without focus, a removed row still hands the selection to its neighbour")
+    }
+
+    /// The list answers keys like a native table, on its selection: ⌫ and
+    /// ⌦ ask to remove the selected row, the arrows move the selection and
+    /// stop at the ends, and Return opens it as a double-click does. Focus
+    /// lands on the selection while it is listed, unless a click brought it.
+    private static func testDictionaryRowKeys() {
+        let rows = dictionaryRows("a", "b", "c")
+        func command(_ key: KeyEquivalent, _ id: String?) -> DictionarySettingsLogic.RowCommand? {
+            DictionarySettingsLogic.rowCommand(
+                for: key, on: id, in: rows, page: DictionarySettingsLogic.defaultPageRows)
+        }
+
+        expect(command(.delete, "b") == .confirmDelete(rows[1]),
+               "⌫ asks to remove the selected row")
+        expect(command(.deleteForward, "b") == .confirmDelete(rows[1]),
+               "⌦ asks to remove the selected row")
+        expect(command(.downArrow, "a") == .select("b") && command(.upArrow, "c") == .select("b"),
+               "the arrows select the neighbouring row")
+        expect(command(.upArrow, "a") == nil && command(.downArrow, "c") == nil,
+               "the arrows stop at the first and last rows")
+        expect(command(.return, "b") == .open(rows[1]), "Return opens the selected row")
+        expect(command(.space, "b") == nil, "Space passes through, as in a native table")
+        expect(command(.downArrow, nil) == .select("a") && command(.upArrow, "gone") == .select("a"),
+               "with no listed selection, an arrow selects the first row")
+        expect(command(.delete, "gone") == nil && command(.return, nil) == nil && command(.tab, "b") == nil,
+               "⌫ and Return need a listed selection, and other keys pass through")
+
+        // Home and End go to the ends, Page Up and Down move a page of
+        // rows (3 here); each stops at the ends, where it passes through.
+        let long = dictionaryRows("r0", "r1", "r2", "r3", "r4", "r5", "r6")
+        func paged(_ key: KeyEquivalent, _ id: String?) -> DictionarySettingsLogic.RowCommand? {
+            DictionarySettingsLogic.rowCommand(for: key, on: id, in: long, page: 3)
+        }
+        expect(paged(.home, "r4") == .select("r0") && paged(.end, "r2") == .select("r6"),
+               "Home and End select the first and last rows")
+        expect(paged(.pageDown, "r1") == .select("r4") && paged(.pageUp, "r4") == .select("r1"),
+               "Page Down and Page Up move the selection a page of rows")
+        expect(paged(.pageDown, "r5") == .select("r6") && paged(.pageUp, "r1") == .select("r0"),
+               "a page move stops at the first and last rows")
+        expect(paged(.home, "r0") == nil && paged(.pageUp, "r0") == nil
+                   && paged(.end, "r6") == nil && paged(.pageDown, "r6") == nil,
+               "at the ends the page keys pass through, as the arrows do")
+        expect(paged(.end, nil) == .select("r6") && paged(.home, "gone") == .select("r0")
+                   && paged(.pageDown, nil) == .select("r0") && paged(.pageUp, nil) == .select("r0"),
+               "with no listed selection, End selects the last row and the other page keys the first")
+        expect(DictionarySettingsLogic.pageRows(viewport: 260, listHeight: 5_000, count: 100) == 5,
+               "a page is the rows that fit in the visible height")
+        expect(DictionarySettingsLogic.pageRows(viewport: 20, listHeight: 5_000, count: 100) == 1,
+               "a page is at least one row")
+        expect(DictionarySettingsLogic.pageRows(viewport: 0, listHeight: 0, count: 0) == nil
+                   && DictionarySettingsLogic.defaultPageRows == 10,
+               "until the list is measured, a page is 10 rows")
+
+        let keys = DictionarySettingsLogic.rowKeys
+        let openKeys = DictionarySettingsLogic.openKeys
+        expect(keys == [.deleteForward, .upArrow, .downArrow, .home, .end, .pageUp, .pageDown],
+               "the list takes ⌦, the arrows and the page keys, repeating while held")
+        expect(openKeys == [.return], "Return is the list's one open key, taken without autorepeat")
+        expect(!keys.union(openKeys).contains(.space), "Space is not a list key")
+        expect(!keys.contains(.delete),
+               "⌫ is not a list key: it reaches the list only as the Delete command")
+
+        expect(DictionarySettingsLogic.selectionOnFocus(nil, in: rows) == "a",
+               "focus with no selection selects the first row")
+        expect(DictionarySettingsLogic.selectionOnFocus("c", in: rows) == "c",
+               "focus keeps a listed selection")
+        expect(DictionarySettingsLogic.selectionOnFocus("gone", in: rows) == "a",
+               "a removed or filtered-out selection gives way to the first row")
+        expect(DictionarySettingsLogic.selectionOnFocus(nil, in: []) == nil,
+               "an empty list selects nothing")
+
+        func pointer(_ event: NSEvent.EventType?, buttons: Int = 0) -> Bool {
+            DictionarySettingsLogic.isPointerFocus(event, buttons: buttons)
+        }
+        expect(pointer(.leftMouseDown) && pointer(.leftMouseUp),
+               "focus arriving during a click comes from the pointer")
+        expect(pointer(.leftMouseDragged) && pointer(.pressure) && pointer(.otherMouseDown),
+               "focus arriving during a drag, a Force Touch press or another button's click comes from the pointer")
+        expect(pointer(.keyDown, buttons: 1) && pointer(nil, buttons: 1),
+               "focus arriving while a mouse button is held comes from the pointer, whatever the event")
+        expect(!pointer(.keyDown) && !pointer(nil),
+               "focus from Tab, or with no event, is keyboard focus")
+
+        // As in the sidebar, a list shows focus only in the key window.
+        typealias Focus = DictionarySettingsLogic.ListFocus
+        expect(Focus(listFocused: true, window: .key) == .focused,
+               "a focused list in the key window shows focus")
+        expect(Focus(listFocused: true, window: .active) == .unfocused
+                   && Focus(listFocused: true, window: .inactive) == .unfocused
+                   && Focus(listFocused: false, window: .key) == .unfocused,
+               "a list keeps no focus mark once its window resigns key, nor without focus")
+
+        let idle = DictionarySyncPresentation(.idle)
+        expect(!idle.privacyDetail.contains("on this Mac"),
+               "the idle footer says \"on this Mac\" once, in its title")
+    }
+
+    /// The row a saved editor selects: the entry that is new in the rows
+    /// (an add, an edit that changed the entry's key, Make Permanent…),
+    /// else the edited entry, which kept its id and moved to the top.
+    private static func testDictionarySavedRowID() {
+        let before = dictionaryRows("a", "b")
+        func saved(_ editing: String?, _ after: [DictionaryRow]) -> String? {
+            DictionarySettingsLogic.savedRowID(editing: editing, before: before, after: after)
+        }
+
+        expect(saved(nil, dictionaryRows("n", "a", "b")) == "n", "an added entry is selected")
+        expect(saved("b", dictionaryRows("b2", "a")) == "b2",
+               "an edit that changed the entry's key selects its new id")
+        expect(saved("b", dictionaryRows("b", "a")) == "b", "an edit that kept its key keeps its id")
+        expect(saved(nil, before) == nil, "no new entry and no edited one selects nothing")
+    }
+
+    /// The pane's filter memo answers as `filtered(_:query:)` does and runs
+    /// again when the rows or the query change, so a search or a sync is
+    /// never answered from the previous list.
+    private static func testDictionaryFilterMemo() {
+        let memo = DictionarySettingsLogic.FilterMemo()
+        let rows = dictionaryRows("alpha", "beta")
+        expect(memo.rows(rows, query: "").map(\.id) == ["alpha", "beta"], "an empty query lists every row")
+        expect(memo.rows(rows, query: "").map(\.id) == ["alpha", "beta"], "the same input gives the same rows")
+        expect(memo.rows(rows, query: "al").map(\.id) == ["alpha"], "a new query filters again")
+        expect(memo.rows(rows + dictionaryRows("alps"), query: "al").map(\.id) == ["alpha", "alps"],
+               "changed rows filter again under the same query")
+    }
+
+    // MARK: - Dictionary list in a window
+
+    /// The state around a real `DictionaryEntryList`: its rows, search and
+    /// selection, the rows it opened, and the window frames of the rows the
+    /// lazy stack has built.
+    private final class DictionaryListProbe: ObservableObject {
+        @Published var rows: [DictionaryRow]
+        @Published var query = ""
+        @Published var selection: DictionaryRow.ID?
+        @Published var reveal = false
+        @Published var pending: DictionaryRow?
+        /// The window state the list sees. The tests never make their
+        /// window key, so the host hands the list this one instead.
+        @Published var windowState: ControlActiveState = .key
+        var opened: [DictionaryRow.ID] = []
+        var frames: [DictionaryRow.ID: CGRect] = [:]
+
+        init(rows: [DictionaryRow]) {
+            self.rows = rows
+        }
+
+        /// Added words "Word 0"… with ids "row 0"….
+        convenience init(words count: Int) {
+            self.init(rows: (0..<count).map {
+                DictionaryRow(
+                    id: "row \($0)", writeAs: "Word \($0)", heardAs: nil,
+                    source: .added, isSoftCorrection: false, modifiedAt: Date())
+            })
+        }
+    }
+
+    /// The Entries list as the pane hosts it: real rows under a search box,
+    /// with the pane's delete confirmation, whose Remove drops the row. As
+    /// in the pane, the list exists only while it has rows to show.
+    private struct DictionaryListHost: View {
+        @ObservedObject var probe: DictionaryListProbe
+
+        var body: some View {
+            let rows = DictionarySettingsLogic.filtered(probe.rows, query: probe.query)
+            let content = VStack(spacing: 0) {
+                TextField("Search", text: $probe.query)
+                ScrollView {
+                    if rows.isEmpty {
+                        Text("No entries")
+                    } else {
+                        DictionaryEntryList(
+                            label: "Entries",
+                            rows: rows,
+                            selection: $probe.selection,
+                            reveal: $probe.reveal,
+                            onOpen: { probe.opened.append($0.id) },
+                            onEdit: { _ in },
+                            onPromote: { _ in },
+                            onDelete: { probe.pending = $0 },
+                            rowFrame: { id, frame in probe.frames[id] = frame })
+                    }
+                }
+            }
+            .modifier(DictionaryDeleteConfirmation(row: $probe.pending) { row in
+                probe.rows.removeAll { $0.id == row.id }
+            })
+            .environment(\.controlActiveState, probe.windowState)
+            // A click reaches SwiftUI's gestures in a window that isn't key
+            // only with activation events allowed; the tests never make
+            // their window key.
+            if #available(macOS 15, *) {
+                content.allowsWindowActivationEvents(true)
+            } else {
+                content
+            }
+        }
+    }
+
+    /// A key: its key code, the character it types and its modifiers.
+    private typealias DictionaryListKey = (code: Int, character: Int, flags: NSEvent.ModifierFlags)
+
+    private static let dictionaryArrowFlags: NSEvent.ModifierFlags = [.numericPad, .function]
+    private static let dictionaryTab: DictionaryListKey = (48, 9, [])
+    private static let dictionaryDown: DictionaryListKey = (125, NSDownArrowFunctionKey, dictionaryArrowFlags)
+    private static let dictionaryReturn: DictionaryListKey = (36, 13, [])
+    private static let dictionaryBackspace: DictionaryListKey = (51, 127, [])
+    private static let dictionaryForwardDelete: DictionaryListKey = (117, NSDeleteFunctionKey, [.function])
+    private static let dictionaryHome: DictionaryListKey = (115, NSHomeFunctionKey, [.function])
+    private static let dictionaryEnd: DictionaryListKey = (119, NSEndFunctionKey, [.function])
+    private static let dictionaryPageUp: DictionaryListKey = (116, NSPageUpFunctionKey, [.function])
+    private static let dictionaryPageDown: DictionaryListKey = (121, NSPageDownFunctionKey, [.function])
+
+    /// The host in a 600 × 300 window, ordered in but transparent. Nothing
+    /// makes it key or activates the app.
+    private static func dictionaryListWindow(_ probe: DictionaryListProbe) -> NSWindow {
+        let window = MainWindowController.makeShellWindow(
+            rootView: DictionaryListHost(probe: probe), title: "Selftest",
+            size: NSSize(width: 600, height: 300), minimumSize: NSSize(width: 300, height: 150))
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+        waitUntil(timeout: 0.4) { false }
+        return window
+    }
+
+    private static func dictionaryListViews<T: NSView>(_ type: T.Type, in view: NSView?) -> [T] {
+        guard let view else {
+            return []
+        }
+        let own = (view as? T).map { [$0] } ?? []
+        return own + view.subviews.flatMap { dictionaryListViews(type, in: $0) }
+    }
+
+    /// Delivers `event` as a real one arrives: through the app's queue, so
+    /// `NSApp.currentEvent` is this event while the window handles it.
+    private static func dictionaryListSend(_ event: NSEvent, to window: NSWindow) {
+        let app = NSApplication.shared
+        app.postEvent(event, atStart: true)
+        let mask = NSEvent.EventTypeMask(rawValue: 1 << UInt64(event.type.rawValue))
+        guard let queued = app.nextEvent(matching: mask, until: Date(), inMode: .default, dequeue: true) else {
+            return
+        }
+        window.sendEvent(queued)
+    }
+
+    private static func dictionaryListPress(
+        _ window: NSWindow, _ key: DictionaryListKey, isARepeat: Bool = false, settle: TimeInterval = 0.2
+    ) {
+        let text = String(UnicodeScalar(UInt32(key.character)).map(Character.init) ?? " ")
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: key.flags,
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber, context: nil,
+            characters: text, charactersIgnoringModifiers: text,
+            isARepeat: isARepeat, keyCode: UInt16(key.code)) else {
+            return
+        }
+        dictionaryListSend(event, to: window)
+        waitUntil(timeout: settle) { false }
+    }
+
+    /// A left click at `point`, in the window's content view coordinates
+    /// (top-left origin, as the rows' frames are).
+    private static func dictionaryListClick(_ window: NSWindow, at point: CGPoint) {
+        guard let content = window.contentView else {
+            return
+        }
+        let location = content.convert(point, to: nil)
+        for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+            guard let event = NSEvent.mouseEvent(
+                with: type, location: location, modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0) else {
+                return
+            }
+            dictionaryListSend(event, to: window)
+            waitUntil(timeout: 0.1) { false }
+        }
+        waitUntil(timeout: 0.3) { false }
+    }
+
+    /// Tab past the search box until the list takes focus, which selects
+    /// a row. Tab moves focus only once something in the key loop has it,
+    /// so the first key view takes it directly.
+    private static func dictionaryListTabIn(_ window: NSWindow, _ probe: DictionaryListProbe) {
+        window.selectNextKeyView(nil)
+        waitUntil(timeout: 0.2) { false }
+        for _ in 0..<4 where probe.selection == nil {
+            dictionaryListPress(window, dictionaryTab)
+        }
+    }
+
+    /// The list's scroll view, and its visible rect in content coordinates.
+    private static func dictionaryListScroller(_ window: NSWindow) -> (view: NSScrollView, visible: CGRect)? {
+        let scrollers = dictionaryListViews(NSScrollView.self, in: window.contentView)
+        guard let scroller = scrollers.max(by: { $0.frame.height < $1.frame.height }),
+              let content = window.contentView else {
+            return nil
+        }
+        return (scroller, content.convert(scroller.bounds, from: scroller))
+    }
+
+    /// Scrolls the document so `y` points down from its top sit above the
+    /// view, as a trackpad would, without touching focus or selection.
+    private static func dictionaryListScroll(_ scroller: NSScrollView, to y: CGFloat) {
+        guard let document = scroller.documentView else {
+            return
+        }
+        let clip = scroller.contentView
+        let bottom = document.frame.height - clip.bounds.height
+        let target = min(max(y, 0), bottom)
+        clip.scroll(to: NSPoint(x: 0, y: document.isFlipped ? target : bottom - target))
+        scroller.reflectScrolledClipView(clip)
+        waitUntil(timeout: 0.4) { false }
+    }
+
+    /// Answers the confirmation the list opened with the button titled
+    /// `button`, and returns the confirmation's texts (none if it never
+    /// showed). The sheet is made transparent as it appears.
+    private static func dictionaryListAnswer(_ window: NSWindow, _ button: String) -> [String] {
+        guard waitUntil(timeout: 1, { window.attachedSheet != nil }), let sheet = window.attachedSheet else {
+            return []
+        }
+        sheet.alphaValue = 0
+        let texts = dictionaryListViews(NSTextField.self, in: sheet.contentView).map(\.stringValue)
+        dictionaryListViews(NSButton.self, in: sheet.contentView).first { $0.title == button }?.performClick(nil)
+        waitUntil(timeout: 1) { window.attachedSheet == nil }
+        waitUntil(timeout: 0.2) { false }
+        return texts
+    }
+
+    /// The colours `view` draws at `points`, in its own top-left points.
+    private static func dictionaryListColors(_ view: NSView, at points: [CGPoint]) -> [NSColor?] {
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            return points.map { _ in nil }
+        }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / view.bounds.width
+        return points.map {
+            rep.colorAt(x: Int($0.x * scale), y: Int($0.y * scale))?.usingColorSpace(.sRGB)
+        }
+    }
+
+    /// The largest difference between two colours' channels, premultiplied
+    /// by alpha, and alphas: the host draws no card, so a tint is a colour
+    /// at low alpha over nothing. 1 when either is missing.
+    private static func dictionaryListDistance(_ a: NSColor?, _ b: NSColor?) -> CGFloat {
+        guard let a, let b else {
+            return 1
+        }
+        func channels(_ color: NSColor) -> [CGFloat] {
+            let alpha = color.alphaComponent
+            return [color.redComponent * alpha, color.greenComponent * alpha, color.blueComponent * alpha, alpha]
+        }
+        return zip(channels(a), channels(b)).map { abs($0 - $1) }.max() ?? 1
+    }
+
+    /// The Entries list in a real window keeps its selection as a native
+    /// table does while the lazy stack builds and drops rows around it: ↓
+    /// walks past the fold, the selection outlives being scrolled away, a
+    /// held Return opens once, and no row's ⋯ button is ever a key view.
+    ///
+    ///     ┌ Search ─────────┐
+    ///     │ Word 0          │
+    ///     │ Word 1          │  ↓ × 29: Word 29 built and in view
+    ///     └ …  2,000 rows  ─┘  scrolled to the end, ↓ selects Word 30
+    private static func testDictionaryListWindowKeys() {
+        let probe = DictionaryListProbe(words: DictionaryDocument.maximumEntries)
+        let window = dictionaryListWindow(probe)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        expect(probe.frames.count < 100,
+               "the lazy list builds only rows near the visible ones (\(probe.frames.count) of 2,000)")
+        guard let (scroller, visible) = dictionaryListScroller(window) else {
+            expect(false, "the host has a scroll view")
+            return
+        }
+        func inView(_ id: String) -> Bool {
+            guard let frame = probe.frames[id] else {
+                return false
+            }
+            return frame.minY >= visible.minY - 1 && frame.maxY <= visible.maxY + 1
+        }
+
+        dictionaryListTabIn(window, probe)
+        expect(probe.selection == "row 0", "Tab into the list selects the first row (got \(probe.selection ?? "nil"))")
+        for _ in 1...29 {
+            dictionaryListPress(window, dictionaryDown, settle: 0.03)
+        }
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == "row 29", "↓ × 29 walks the selection past the fold (got \(probe.selection ?? "nil"))")
+        expect(inView("row 29"),
+               "the selected row is built and scrolled into view (\(probe.frames["row 29"] ?? .zero) in \(visible))")
+
+        // Scroll the selection far out of the built range, as a trackpad
+        // would; ↓ still moves on from it and brings the next row back.
+        dictionaryListScroll(scroller, to: .greatestFiniteMagnitude)
+        expect(probe.frames["row 29"] == nil, "scrolling to the end drops the selected row from the lazy stack")
+        dictionaryListPress(window, dictionaryDown)
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == "row 30",
+               "↓ after scrolling the selection away selects the next row (got \(probe.selection ?? "nil"))")
+        expect(inView("row 30"), "the newly selected row scrolls back into view")
+
+        dictionaryListPress(window, dictionaryReturn)
+        expect(probe.opened == ["row 30"], "Return opens the selected row (opened \(probe.opened))")
+        dictionaryListPress(window, dictionaryReturn, isARepeat: true)
+        expect(probe.opened == ["row 30"], "a held Return's autorepeat doesn't open it again (opened \(probe.opened))")
+
+        // End and Home go to the ends of the list; Page Down and Up move a
+        // page, the rows that fit in view. Each brings its row into view.
+        dictionaryListPress(window, dictionaryEnd)
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == "row 1999" && inView("row 1999"),
+               "End selects the last row and scrolls it into view (got \(probe.selection ?? "nil"))")
+        dictionaryListPress(window, dictionaryHome)
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == "row 0" && inView("row 0"),
+               "Home selects the first row and scrolls it into view (got \(probe.selection ?? "nil"))")
+        let fits = probe.frames.filter { inView($0.key) }.count
+        dictionaryListPress(window, dictionaryPageDown)
+        waitUntil(timeout: 0.4) { false }
+        let paged = probe.selection.flatMap { Int($0.dropFirst("row ".count)) } ?? 0
+        expect(paged > 1 && abs(paged - fits) <= 1 && probe.selection.map(inView) == true,
+               "Page Down moves a page of rows (\(paged), \(fits) fit) and keeps the row in view")
+        dictionaryListPress(window, dictionaryPageUp)
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == "row 0", "Page Up moves back a page (got \(probe.selection ?? "nil"))")
+
+        // Under Full Keyboard Access every control that accepts first
+        // responder is a Tab stop, the hidden ⋯ buttons included. None
+        // does, so Tab walks past them all.
+        let popups = dictionaryListViews(NSPopUpButton.self, in: window.contentView)
+        expect(!popups.isEmpty && popups.allSatisfy { !$0.acceptsFirstResponder },
+               "no row's ⋯ button can take keyboard focus (\(popups.count) buttons)")
+        var stops: [String] = []
+        for _ in 0..<6 {
+            window.selectNextKeyView(nil)
+            waitUntil(timeout: 0.05) { false }
+            stops.append(window.firstResponder.map { String(describing: type(of: $0)) } ?? "nil")
+        }
+        expect(!stops.contains { $0.contains("PopUpButton") }, "Tab never stops on a ⋯ button (stops \(stops))")
+    }
+
+    /// A click on a row after scrolling selects that row and leaves the
+    /// view where it is. The list takes focus on the click's mouse-down,
+    /// before its tap: selecting on focus then picked the old row (or the
+    /// first) and scrolled the clicked row away before the tap landed.
+    private static func testDictionaryListClick() {
+        guard #available(macOS 15, *) else {
+            print("  skip: Dictionary list clicks need macOS 15 activation events")
+            return
+        }
+        let probe = DictionaryListProbe(words: 200)
+        let window = dictionaryListWindow(probe)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        guard let (scroller, visible) = dictionaryListScroller(window),
+              let first = probe.frames["row 0"], let second = probe.frames["row 1"] else {
+            expect(false, "the host lists rows in a scroll view")
+            return
+        }
+        let pitch = second.minY - first.minY
+
+        // Nothing selected, no focus: scroll row 60 into view.
+        dictionaryListScroll(scroller, to: 58 * pitch)
+        guard let target = probe.frames["row 60"], visible.contains(target) else {
+            expect(false, "row 60 scrolls into view (\(probe.frames["row 60"] ?? .zero) in \(visible))")
+            return
+        }
+        let origin = scroller.contentView.bounds.origin
+        dictionaryListClick(window, at: CGPoint(x: target.minX + 120, y: target.midY))
+        expect(probe.selection == "row 60",
+               "a click after scrolling selects the clicked row (got \(probe.selection ?? "nil"))")
+        expect(scroller.contentView.bounds.origin == origin,
+               "the click leaves the view where it was scrolled (\(origin) → \(scroller.contentView.bounds.origin))")
+    }
+
+    /// ⌫ and ⌦ open the pane's confirmation for the selected row; Cancel
+    /// keeps it, Remove drops it and selects the next. Typing in the search
+    /// box never pulls focus into the list.
+    private static func testDictionaryListRemove() {
+        let probe = DictionaryListProbe(rows: ["Alpha", "Bravo", "Charlie", "Delta", "Echo"].enumerated().map {
+            DictionaryRow(
+                id: "row \($0.offset)", writeAs: $0.element, heardAs: nil,
+                source: .added, isSoftCorrection: false, modifiedAt: Date())
+        })
+        let window = dictionaryListWindow(probe)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        dictionaryListTabIn(window, probe)
+        dictionaryListPress(window, dictionaryDown)
+        expect(probe.selection == "row 1", "↓ selects the second row (got \(probe.selection ?? "nil"))")
+
+        dictionaryListPress(window, dictionaryBackspace)
+        let asked = dictionaryListAnswer(window, "Cancel")
+        expect(asked.contains("Remove “Bravo”?"), "⌫ asks to remove the selected row (asked \(asked))")
+        expect(probe.rows.count == 5 && probe.selection == "row 1",
+               "Cancel keeps the row and its selection (\(probe.rows.count) rows, \(probe.selection ?? "nil"))")
+
+        dictionaryListPress(window, dictionaryBackspace)
+        _ = dictionaryListAnswer(window, "Remove")
+        expect(probe.rows.map(\.writeAs) == ["Alpha", "Charlie", "Delta", "Echo"],
+               "Remove drops the selected row (rows \(probe.rows.map(\.writeAs)))")
+        expect(probe.selection == "row 2", "the selection lands on the next row (got \(probe.selection ?? "nil"))")
+
+        dictionaryListPress(window, dictionaryForwardDelete)
+        let forward = dictionaryListAnswer(window, "Remove")
+        expect(forward.contains("Remove “Charlie”?") && probe.selection == "row 3" && probe.rows.count == 3,
+               "⌦ asks too, and Remove selects the next row (asked \(forward), got \(probe.selection ?? "nil"))")
+
+        // A row's ⋯ menu asks about its own row, whichever row is selected.
+        let echoActions = dictionaryListViews(NSPopUpButton.self, in: window.contentView)
+            .first { $0.accessibilityLabel() == "Actions for Echo" }
+        let removeItem = echoActions?.menu?.items.firstIndex { $0.title == "Remove" }
+        if let echoActions, let removeItem {
+            echoActions.menu?.performActionForItem(at: removeItem)
+        }
+        let fromMenu = dictionaryListAnswer(window, "Cancel")
+        expect(fromMenu.contains("Remove “Echo”?") && probe.rows.count == 3,
+               "the ⋯ menu's Remove asks about its own row (asked \(fromMenu))")
+
+        // Typing in the search box filters the selected row out; focus
+        // stays in the box for every key.
+        guard let field = dictionaryListViews(NSTextField.self, in: window.contentView).first else {
+            expect(false, "the host has a search field")
+            return
+        }
+        window.makeFirstResponder(field)
+        waitUntil(timeout: 0.2) { false }
+        let letters: [DictionaryListKey] = [(14, 101, []), (8, 99, []), (4, 104, [])]
+        for letter in letters {
+            dictionaryListPress(window, letter)
+        }
+        let editor = window.firstResponder as? NSTextView
+        expect(editor?.isFieldEditor == true && editor?.delegate === field,
+               "typing in search keeps focus in the search box (first responder \(String(describing: window.firstResponder)))")
+        expect(probe.query == "ech", "every key reaches the search box (query \(probe.query))")
+    }
+
+    /// Without focus the list scrolls only when asked: a sync that moves the
+    /// selection leaves the view where the user scrolled it, and a save in
+    /// the editor brings its entry into view once.
+    private static func testDictionaryListScrolling() {
+        let probe = DictionaryListProbe(words: 200)
+        let window = dictionaryListWindow(probe)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        guard let (scroller, visible) = dictionaryListScroller(window),
+              let first = probe.frames["row 0"], let second = probe.frames["row 1"] else {
+            expect(false, "the host lists rows in a scroll view")
+            return
+        }
+        let pitch = second.minY - first.minY
+        probe.selection = "row 5"
+        waitUntil(timeout: 0.2) { false }
+        dictionaryListScroll(scroller, to: 58 * pitch)
+        let shown = probe.frames["row 60"]
+
+        // The scroll view keeps the rows in view where they were as a row
+        // above them leaves; a scroll to the new selection would drop them.
+        probe.rows.removeAll { $0.id == "row 5" }
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == "row 6", "a sync hands the selection to the next row (got \(probe.selection ?? "nil"))")
+        let still = probe.frames["row 60"]
+        expect(shown != nil && still.map { abs($0.minY - shown!.minY) <= 1 } == true,
+               "a sync without focus leaves the view where it was (row 60 \(shown ?? .zero) → \(still ?? .zero))")
+
+        probe.selection = "row 150"
+        probe.reveal = true
+        waitUntil(timeout: 0.4) { false }
+        let saved = probe.frames["row 150"]
+        expect(saved.map { visible.insetBy(dx: 0, dy: -1).contains($0) } == true && !probe.reveal,
+               "a save scrolls its entry into view once (\(saved ?? .zero) in \(visible))")
+
+        // A search that lists none of the rows it listed before (rows 15
+        // and 150–159, then 7 and 70–79) selects nothing in a list without
+        // focus; no row the user never picked turns grey.
+        probe.query = "Word 15"
+        waitUntil(timeout: 0.3) { false }
+        probe.query = "Word 7"
+        waitUntil(timeout: 0.4) { false }
+        expect(probe.selection == nil,
+               "a search without focus doesn't select a row in place of the one it hid (got \(probe.selection ?? "nil"))")
+    }
+
+    /// A list that keeps focus while its window resigns key shows its
+    /// selection as a list without focus does, grey with no accent edge,
+    /// and a sync that moves the selection leaves the view where it was,
+    /// as the sidebar does.
+    ///
+    ///      key                 resigned key
+    ///     ▐▌Word 0 ░░░░░░      ▒▒Word 0 ▒▒▒▒▒▒
+    ///      └ accent edge        └ one grey fill
+    private static func testDictionaryListInactiveWindow() {
+        let probe = DictionaryListProbe(words: 200)
+        let window = dictionaryListWindow(probe)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        guard let content = window.contentView, let (scroller, _) = dictionaryListScroller(window),
+              let first = probe.frames["row 0"], let second = probe.frames["row 1"] else {
+            expect(false, "the host lists rows in a scroll view")
+            return
+        }
+        let pitch = second.minY - first.minY
+        /// The selected row's mark at its edge (5 pt in: the focus mark's
+        /// 2 pt edge, 4 pt inside the card), inside it, and a plain row
+        /// at the same place.
+        func marks() -> (edge: NSColor?, fill: NSColor?, plain: NSColor?) {
+            guard let selected = probe.frames["row 0"], let plain = probe.frames["row 2"] else {
+                return (nil, nil, nil)
+            }
+            let colors = dictionaryListColors(content, at: [
+                CGPoint(x: selected.minX + 5, y: selected.midY),
+                CGPoint(x: selected.minX + 9, y: selected.midY),
+                CGPoint(x: plain.minX + 9, y: plain.midY),
+            ])
+            return (colors[0], colors[1], colors[2])
+        }
+
+        dictionaryListTabIn(window, probe)
+        let focused = marks()
+        expect(probe.selection == "row 0" && dictionaryListDistance(focused.edge, focused.fill) > 0.1,
+               "a focused list in the key window marks its selection with an accent edge (edge \(String(describing: focused.edge)), fill \(String(describing: focused.fill)))")
+
+        probe.windowState = .inactive
+        waitUntil(timeout: 0.3) { false }
+        let resigned = marks()
+        expect(dictionaryListDistance(resigned.edge, resigned.fill) < 0.02
+                   && dictionaryListDistance(resigned.fill, resigned.plain) > 0.02,
+               "once the window resigns key, the selection is one grey fill (edge \(String(describing: resigned.edge)), fill \(String(describing: resigned.fill)))")
+
+        dictionaryListScroll(scroller, to: 58 * pitch)
+        let shown = probe.frames["row 60"]
+        probe.rows.removeAll { $0.id == "row 0" }
+        waitUntil(timeout: 0.4) { false }
+        let still = probe.frames["row 60"]
+        expect(probe.selection == "row 1", "a sync hands the selection to the next row (got \(probe.selection ?? "nil"))")
+        expect(shown != nil && still.map { abs($0.minY - shown!.minY) <= 1 } == true,
+               "a sync while the window isn't key leaves the view where it was (row 60 \(shown ?? .zero) → \(still ?? .zero))")
+    }
+
+    /// The pane builds the list only once it has rows, so the first add to
+    /// an empty dictionary (or under a search with no results) creates the
+    /// list with a reveal already asked for. It clears that one too, so
+    /// the next save still scrolls to its entry.
+    private static func testDictionaryListRevealFromEmpty() {
+        let probe = DictionaryListProbe(rows: [])
+        let window = dictionaryListWindow(probe)
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        func word(_ id: String) -> DictionaryRow {
+            DictionaryRow(
+                id: id, writeAs: id.capitalized, heardAs: nil,
+                source: .added, isSoftCorrection: false, modifiedAt: Date())
+        }
+
+        probe.rows = [word("new 0")]
+        probe.selection = "new 0"
+        probe.reveal = true
+        waitUntil(timeout: 0.4) { false }
+        expect(!probe.reveal, "the first add clears its reveal as the list appears")
+
+        // A sync fills the list, the user scrolls to its end, and the next
+        // add lands at the top.
+        probe.rows += (0..<200).map { word("row \($0)") }
+        waitUntil(timeout: 0.3) { false }
+        guard let (scroller, visible) = dictionaryListScroller(window) else {
+            expect(false, "the host has a scroll view")
+            return
+        }
+        dictionaryListScroll(scroller, to: .greatestFiniteMagnitude)
+        probe.rows.insert(word("new 1"), at: 0)
+        probe.selection = "new 1"
+        probe.reveal = true
+        waitUntil(timeout: 0.4) { false }
+        let saved = probe.frames["new 1"]
+        expect(saved.map { visible.insetBy(dx: 0, dy: -1).contains($0) } == true,
+               "the next add, made while scrolled down, scrolls its entry into view (\(saved ?? .zero) in \(visible))")
+    }
+
+    /// VoiceOver reads the list as one group named Entries holding exactly
+    /// two elements per row: the row, a button named for its word with its
+    /// caption as value, selected state and every ⋯ action; then its ⋯
+    /// button, named "Actions for <word>". Pressing a row opens it. Needs
+    /// the SwiftUI accessibility tree, so an untrusted process skips it.
+    ///
+    /// Without focus, the selected row keeps a grey tint.
+    private static func testDictionaryListAccessibility() {
+        let rows = [
+            DictionaryRow(
+                id: "a", writeAs: "Kubectl", heardAs: "cube control",
+                source: .added, isSoftCorrection: false, modifiedAt: Date()),
+            DictionaryRow(
+                id: "b", writeAs: "Sushil Kumar", heardAs: "social kumar",
+                source: .learned, isSoftCorrection: false, modifiedAt: Date()),
+            DictionaryRow(
+                id: "c", writeAs: "Velora", heardAs: nil,
+                source: .automatic, isSoftCorrection: false, modifiedAt: Date()),
+        ]
+        let probe = DictionaryListProbe(rows: rows)
+        probe.selection = "b"
+        // Never ordered on screen, so it can't take a click from anyone.
+        let hosting = NSHostingView(rootView: DictionaryListHost(probe: probe))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 400),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = hosting
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        defer {
+            window.contentView = nil
+        }
+
+        // The selected row's grey sits in the gap before its symbol, where
+        // an unselected row shows the card.
+        if let rep = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds),
+           let selected = probe.frames["b"], let plain = probe.frames["c"] {
+            hosting.cacheDisplay(in: hosting.bounds, to: rep)
+            let scale = CGFloat(rep.pixelsWide) / hosting.bounds.width
+            func tint(_ frame: CGRect) -> NSColor? {
+                rep.colorAt(x: Int((frame.minX + 9) * scale), y: Int(frame.midY * scale))?.usingColorSpace(.sRGB)
+            }
+            let grey = tint(selected)
+            let card = tint(plain)
+            let difference = zip(
+                [grey?.redComponent, grey?.greenComponent, grey?.blueComponent],
+                [card?.redComponent, card?.greenComponent, card?.blueComponent]
+            ).map { abs(($0 ?? 0) - ($1 ?? 0)) }.max() ?? 0
+            expect(grey != nil && difference > 0.02,
+                   "the selected row keeps a grey tint without focus (\(String(describing: grey)) vs \(String(describing: card)))")
+        } else {
+            expect(false, "the list renders its rows")
+        }
+
+        guard enableSwiftUIAccessibilityTree() else {
+            print("  skip: Dictionary list accessibility needs an Accessibility-trusted process")
+            return
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+
+        func children(_ element: AnyObject) -> [AnyObject] {
+            ((element.accessibilityChildren?() ?? nil) ?? []).map { $0 as AnyObject }
+        }
+        /// The first element labelled `label` that holds others: the list,
+        /// a lazy stack, reports its own group role.
+        func find(_ label: String, in element: AnyObject) -> AnyObject? {
+            if element.accessibilityLabel?() == label, !children(element).isEmpty {
+                return element
+            }
+            return children(element).lazy.compactMap { find(label, in: $0) }.first
+        }
+        /// An element as VoiceOver reads it: a row button's name, value,
+        /// selected state and custom actions (in any order); a ⋯ button's
+        /// name.
+        func reading(_ element: AnyObject) -> String {
+            let role = element.accessibilityRole?() ?? .unknown
+            let name = (element.accessibilityLabel?() ?? nil) ?? ""
+            guard role == .button else {
+                return "\(role.rawValue) \(name)"
+            }
+            let value = (element.accessibilityValue?() ?? nil).map { "\($0)" } ?? ""
+            let selected = (element.isAccessibilitySelected?() ?? false) ? " selected" : ""
+            let actions = ((element.accessibilityCustomActions?() ?? nil) ?? []).map(\.name).sorted()
+            return "\(role.rawValue) \(name) = \(value)\(selected) \(actions)"
+        }
+
+        guard let list = find("Entries", in: hosting) else {
+            expect(false, "VoiceOver finds the list as one group named Entries")
+            return
+        }
+        func caption(_ row: DictionaryRow) -> String {
+            let origin = DictionarySettingsLogic.sourceLabel(row)
+            return row.heardAs.map { "When Velora hears “\($0)” · \(origin)" } ?? origin
+        }
+        let expected = rows.flatMap { row -> [String] in
+            let actions = (row.source == .added ? ["Edit", "Remove"] : ["Make Permanent", "Forget"]).sorted()
+            let selected = row.id == probe.selection ? " selected" : ""
+            return [
+                "AXButton \(row.writeAs) = \(caption(row))\(selected) \(actions)",
+                "AXMenuButton Actions for \(row.writeAs)",
+            ]
+        }
+        let read = children(list).map(reading)
+        expect(read == expected, "each row reads as its button, then its ⋯ button, nothing else (read \(read))")
+
+        let rowButton = children(list).first { ($0.accessibilityLabel?() ?? nil) == "Kubectl" }
+        _ = rowButton?.accessibilityPerformPress?()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        expect(probe.opened == ["a"], "pressing a row with VoiceOver opens it, as Return does (opened \(probe.opened))")
+    }
+
     /// "Make Permanent" on an auto-learned word turns it into an added word
     /// and stops the miner from re-adding it.
     private static func testDictionaryPromoteAutomatic() {
@@ -501,30 +1438,135 @@ extension Selftest {
                 autoURL: auto,
                 deviceID: "mac-a",
                 now: { Date(timeIntervalSince1970: 100) })
-            AutoVocabStore(url: auto).applyPortableSnapshot(.init(terms: ["Kubectl"], banned: []))
+            AutoVocabStore(url: auto).applyPortableSnapshot(.init(terms: ["Kubectl", "Grafana"], banned: []))
             repository.captureAutoVocabulary()
-            guard let row = repository.rows.first(where: { $0.source == .automatic }) else {
-                expect(false, "fixture seeds one auto-learned word")
+            guard let row = repository.rows.first(where: { $0.writeAs == "Kubectl" && $0.source == .automatic }),
+                  let other = repository.rows.first(where: { $0.writeAs == "Grafana" && $0.source == .automatic }) else {
+                expect(false, "fixture seeds two auto-learned words")
+                return
+            }
+            func promote(_ row: DictionaryRow, as draft: DictionaryDraft) {
+                do {
+                    try DictionarySettingsLogic.promoteAutomatic(
+                        row, as: draft, rows: repository.rows,
+                        add: { _ = try repository.add(writeAs: $0.writeAs, heardAs: $0.heardAs) },
+                        remove: { try repository.remove(id: $0.id) })
+                } catch {
+                    expect(false, "promoting an auto-learned word succeeds: \(error)")
+                }
+            }
+
+            // The ⋯ menu's Make Permanent adds the word as found.
+            promote(row, as: DictionaryDraft(writeAs: row.writeAs, heardAs: nil))
+            expect(repository.rows.contains { $0.writeAs == "Kubectl" && $0.heardAs == nil && $0.source == .added },
+                   "the word becomes an added word")
+            expect(!repository.rows.contains { $0.writeAs == "Kubectl" && $0.source == .automatic },
+                   "the auto-learned copy is gone")
+
+            // Make Permanent confirmed in the editor adds what it confirmed.
+            promote(other, as: DictionaryDraft(writeAs: "Grafana Cloud", heardAs: "graph ana"))
+            expect(repository.rows.contains {
+                       $0.writeAs == "Grafana Cloud" && $0.heardAs == "graph ana" && $0.source == .added
+                   },
+                   "a word confirmed in the editor is added as confirmed (\(repository.rows.map(\.writeAs)))")
+            expect(!repository.rows.contains { $0.source == .automatic },
+                   "the confirmed word's auto-learned copy is gone")
+
+            AutoVocabStore(url: auto).applyPortableSnapshot(.init(terms: ["Kubectl", "Grafana"], banned: []))
+            repository.captureAutoVocabulary()
+            expect(!repository.rows.contains { $0.source == .automatic },
+                   "the miner can't add the promoted words back")
+        }
+    }
+
+    /// Make Permanent on an auto-learned word selects the added word it
+    /// leaves: the one it adds, or an identical one already there, which
+    /// it keeps. Never the auto row's old neighbour.
+    ///
+    ///     Kubectl  (auto, newest)  ──▶ removed
+    ///     Bravo                        its neighbour: not selected
+    ///     Kubectl  (added)         ◀── selected
+    private static func testDictionaryPromotedRow() {
+        let auto = DictionaryRow(
+            id: "auto", writeAs: "Kubectl", heardAs: nil,
+            source: .automatic, isSoftCorrection: false, modifiedAt: Date())
+        func added(_ id: String, _ writeAs: String, heardAs: String? = nil) -> DictionaryRow {
+            DictionaryRow(
+                id: id, writeAs: writeAs, heardAs: heardAs,
+                source: .added, isSoftCorrection: false, modifiedAt: Date())
+        }
+        let rows = [auto, added("rule", "Kubectl", heardAs: "cube control"), added("word", "kubectl")]
+        let word = DictionaryDraft(writeAs: auto.writeAs, heardAs: nil)
+        expect(DictionarySettingsLogic.promotedRowID(word, in: rows) == "word",
+               "the promoted word is the added one spelled the same, ignoring case and heard-as rules")
+        expect(DictionarySettingsLogic.promotedRowID(
+                   DictionaryDraft(writeAs: "Kubectl", heardAs: "Cube Control"), in: rows) == "rule",
+               "a word confirmed with a heard-as rule is the added rule, ignoring case")
+        expect(DictionarySettingsLogic.promotedRowID(word, in: [auto]) == nil, "none before it is added")
+
+        withTempDirectory { dir in
+            let autoURL = dir.appendingPathComponent("auto_learned.json")
+            var clock: TimeInterval = 100
+            let repository = DictionaryRepository(
+                stateURL: dir.appendingPathComponent("dictionary_sync.json"),
+                configURL: dir.appendingPathComponent("config.json"),
+                learnedURL: dir.appendingPathComponent("learned.json"),
+                autoURL: autoURL,
+                deviceID: "mac-a",
+                now: {
+                    clock += 1
+                    return Date(timeIntervalSince1970: clock)
+                })
+            var adds = 0
+            do {
+                _ = try repository.add(writeAs: "Kubectl")
+                _ = try repository.add(writeAs: "Alpha")
+                _ = try repository.add(writeAs: "Bravo")
+            } catch {
+                expect(false, "fixture adds three words: \(error)")
+            }
+            AutoVocabStore(url: autoURL).applyPortableSnapshot(.init(terms: ["Kubectl"], banned: []))
+            repository.captureAutoVocabulary()
+            let before = repository.rows
+            guard let row = before.first(where: { $0.source == .automatic }),
+                  let existing = before.first(where: { $0.writeAs == "Kubectl" && $0.source == .added }) else {
+                expect(false, "fixture holds an added and an auto-learned Kubectl")
                 return
             }
 
+            let draft = DictionaryDraft(writeAs: row.writeAs, heardAs: nil)
             do {
                 try DictionarySettingsLogic.promoteAutomatic(
-                    row, rows: repository.rows,
-                    add: { _ = try repository.add(writeAs: $0) },
+                    row, as: draft, rows: before,
+                    add: { _ in adds += 1 },
                     remove: { try repository.remove(id: $0.id) })
             } catch {
                 expect(false, "promoting an auto-learned word succeeds: \(error)")
             }
-            expect(repository.rows.contains { $0.writeAs == "Kubectl" && $0.source == .added },
-                   "the word becomes an added word")
-            expect(!repository.rows.contains { $0.source == .automatic },
-                   "the auto-learned copy is gone")
-
-            AutoVocabStore(url: auto).applyPortableSnapshot(.init(terms: ["Kubectl"], banned: []))
-            repository.captureAutoVocabulary()
-            expect(!repository.rows.contains { $0.source == .automatic },
-                   "the miner can't add the promoted word back")
+            let after = repository.rows
+            let neighbour = DictionarySettingsLogic.selectionAfterChange(
+                row.id, from: before, to: after, focus: .focused)
+            expect(adds == 0, "an identical added word is kept, not added again")
+            expect(DictionarySettingsLogic.promotedRowID(draft, in: after) == existing.id && neighbour != existing.id,
+                   "Make Permanent selects the added word already there, not the auto row's neighbour \(neighbour ?? "nil")")
         }
+    }
+
+    /// A row's default action (Return, a double-click, VoiceOver's press,
+    /// Voice Control's "Click") changes nothing without a confirm step: it
+    /// opens the editor. Making an auto-learned word permanent forgets the
+    /// auto copy, which bans the miner from it, so a stray Return mustn't.
+    private static func testDictionaryOpenAction() {
+        func row(_ source: DictionarySource) -> DictionaryRow {
+            DictionaryRow(
+                id: source.rawValue, writeAs: "Kubectl", heardAs: nil,
+                source: source, isSoftCorrection: false, modifiedAt: Date())
+        }
+        expect(DictionarySettingsLogic.openAction(for: row(.added)) == .edit,
+               "opening an added word edits it")
+        expect(DictionarySettingsLogic.openAction(for: row(.learned)) == .confirmPromotion,
+               "opening a learned correction asks to confirm it in Make Permanent")
+        expect(DictionarySettingsLogic.openAction(for: row(.automatic)) == .confirmPromotion,
+               "opening an auto-learned word asks to confirm it in Make Permanent, not promote it at once")
     }
 }
