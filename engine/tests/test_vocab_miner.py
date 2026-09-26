@@ -189,6 +189,62 @@ async def test_banned_term_never_readded(tmp_path):
     assert state["banned"] == ["Velora"]
 
 
+async def test_whisper_credit_hallucination_never_learned(tmp_path):
+    # Whisper fills silence with subtitle credits memorised from captioned
+    # video, as a whole row or mid-dictation at a pause. The credited name
+    # must not become vocabulary, or the glossary primes Whisper to repeat
+    # it. A lowercase "transcribed by" is real speech and still mines.
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "Closed Captioning by Kris Brandhagen.com.",
+        "put it on TestFlight. Closed Captioning by GetTranscribed.com. Thank you.",
+        "So Closed Captioning by Kris Brandhagen.com.",
+        "Subtitles by the Amara.org community",
+        "the notes were transcribed by Velora",
+        "Velora shipped",
+    ])
+    miner = VocabMiner(home, make_generate([
+        "Kris Brandhagen", "Kris", "Brandhagen.com", "GetTranscribed.com",
+        "Amara.org", "Closed Captioning", "Velora",
+    ]))
+    await miner.step()
+    state = read_state(home)
+    assert state["terms"] == ["Velora"]
+    assert state["candidates"] == {}
+
+
+async def test_captioned_credit_never_learned(tmp_path):
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "Closed Captioned by Kris Brandhagen.com.",
+        "Captioned by GetTranscribed.com.",
+        "Velora shipped",
+    ])
+    credited = ["Kris Brandhagen", "Brandhagen.com", "GetTranscribed.com"]
+    miner = VocabMiner(home, make_generate(credited + ["Velora"]))
+    await miner.step()
+    state = read_state(home)
+    learned = set(state["terms"]) | set(state["candidates"])
+    assert learned & set(credited) == set()
+    assert "Velora" in learned
+
+
+async def test_credit_shaped_speech_reaches_the_miner(tmp_path):
+    # Only known credit templates are cut; a spoken sentence that merely
+    # opens like a credit keeps every word it carries.
+    home = tmp_path / "vh"
+    spoken = [
+        "Transcribed by Velora for the release.",
+        "Captions by Alice explain the feature.",
+        "Translation by Friday is fine.",
+    ]
+    seed_history(home, spoken)
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+    await miner.step()
+    assert calls == ["\n".join(spoken)]
+
+
 async def test_user_corrected_wrong_side_never_promotes(tmp_path):
     home = tmp_path / "vh"
     home.mkdir(parents=True)

@@ -730,6 +730,286 @@ PROMPT_ECHO = {
 }
 
 
+def whisper_result(*windows):
+    """mlx-whisper result for (seek, text, avg_logprob, compression_ratio
+    [, no_speech_prob]) windows; mlx tags each segment with the seek of the
+    window it came from."""
+    segments = [
+        {
+            "seek": seek,
+            "text": text,
+            "avg_logprob": logprob,
+            "compression_ratio": ratio,
+            "no_speech_prob": rest[0] if rest else 0.0,
+        }
+        for seek, text, logprob, ratio, *rest in windows
+    ]
+    return {"text": " ".join(s["text"] for s in segments), "segments": segments}
+
+
+GLOSSARY_LOOP = "Glossary. " * 20
+
+
+def test_glossary_loop_on_short_clip_runs_one_pass_per_decode(whisper):
+    # Field trace: on 1-6 s clips the glossary decode looped to the token
+    # cap at most stock temperatures (~1 s a pass, 5-8 s stop→text), and
+    # the prompt-free retry produced the kept text every time. A float
+    # temperature is one mlx pass per window, so this is two passes.
+    backend, fake = whisper([PROMPT_HALLUCINATION, "two words"])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "two words"
+    assert [kwargs["temperature"] for _, kwargs in fake.calls] == [0.0, 0.0]
+
+
+def test_unsure_glossary_text_kept_when_retry_is_gated_off(whisper):
+    # The modulation gate must never decide the authoritative pass: a quiet
+    # one-word answer with a flat envelope keeps its glossary spelling.
+    backend, fake = whisper([whisper_result((0, "Airlearn", -1.15, 0.6))])
+    backend.initial_prompt = "Glossary: Airlearn."
+    feed_seconds(backend, 2.5, chunk=loud(0.02))
+
+    assert backend.finalize() == "Airlearn"
+    assert len(fake.calls) == 1
+
+
+def test_unsure_hum_takes_stock_ladder_when_retry_is_gated_off(whisper):
+    # Owner-sample hum clip: the greedy glossary pass scored -2.0 on steady
+    # noise and nothing can confirm it. A logprob alone never empties a
+    # transcript; the stock ladder (0.25.0) decides, and on this clip it
+    # returned nothing.
+    backend, fake = whisper([whisper_result((0, "you", -2.04, 0.3)), ""])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=loud(0.02))
+
+    assert backend.finalize() == ""
+    assert len(fake.calls) == 2
+    assert fake.calls[1][1]["initial_prompt"] == "Glossary: project.md."
+    assert "temperature" not in fake.calls[1][1]
+
+
+@pytest.mark.parametrize(
+    ("chunk", "queued"),
+    [
+        # Flat envelope: the prompt-free retry is gated off.
+        (loud(0.02), ["okay"]),
+        # The prompt-free retry runs and hears nothing.
+        (speechy(), ["", "okay"]),
+    ],
+    ids=["retry-gated-off", "retry-empty"],
+)
+def test_unsure_text_below_floor_takes_stock_ladder(whisper, chunk, queued):
+    # Review probe: "okay" at -1.21 with a clean compression ratio. The
+    # guard itself keeps it (it needs cr > 2.0 too), and 0.25.0 laddered
+    # and kept text, so an unconfirmed pass re-decodes on the ladder.
+    backend, fake = whisper([whisper_result((0, "okay", -1.21, 0.6))] + queued)
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 2.5, chunk=chunk)
+
+    assert backend.finalize() == "okay"
+    assert fake.calls[-1][1]["initial_prompt"] == "Glossary: Velora."
+    assert "temperature" not in fake.calls[-1][1]
+
+
+def test_unsure_text_at_floor_is_kept(whisper):
+    backend, fake = whisper([whisper_result((0, "okay", -1.2, 0.6))])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 2.5, chunk=loud(0.02))
+
+    assert backend.finalize() == "okay"
+    assert len(fake.calls) == 1
+
+
+def test_loop_with_retry_gated_off_takes_stock_ladder(whisper):
+    # Only a prompt-free pass that heard nothing may confirm a loop as
+    # silence; without one the stock ladder gets its 0.25.0 chance.
+    backend, fake = whisper([whisper_result((0, GLOSSARY_LOOP, -0.1, 12.0)), "okay"])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 2.5, chunk=loud(0.02))
+
+    assert backend.finalize() == "okay"
+    assert len(fake.calls) == 2
+    assert "temperature" not in fake.calls[1][1]
+
+
+def test_unsure_glossary_text_kept_when_retry_scores_lower(whisper):
+    # Taking the prompt-free pass unconditionally costs glossary spelling.
+    backend, _fake = whisper([
+        whisper_result((0, "Airlearn", -1.15, 0.6)),
+        whisper_result((0, "air learn", -1.4, 0.6)),
+    ])
+    backend.initial_prompt = "Glossary: Airlearn."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "Airlearn"
+
+
+def test_unsure_glossary_text_replaced_when_retry_scores_higher(whisper):
+    # Short speech scored -1.1 to -1.2 with the glossary and -0.2 to -0.9
+    # without it on the same audio (field trace).
+    backend, fake = whisper([
+        whisper_result((0, "to words", -1.15, 0.6)),
+        whisper_result((0, "two words", -0.3, 0.6)),
+    ])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "two words"
+    assert fake.calls[-1][1]["initial_prompt"] is None
+
+
+def test_retry_with_fewer_words_never_replaces_glossary_text(whisper):
+    # mlx averages logprob over generated tokens, so a fragment of the
+    # clip can outscore the whole of it (review probe).
+    backend, _fake = whisper([
+        whisper_result((0, "we ship the fix", -1.15, 0.6)),
+        whisper_result((0, "the fix", -0.3, 0.6)),
+    ])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "we ship the fix"
+
+
+@pytest.mark.parametrize(
+    ("retry", "final"),
+    [
+        # Split spelling loses the term: glossary text stays.
+        ("air learn is live", "Airlearn is live"),
+        # Part of a longer word is not the term.
+        ("Airlearns is live", "Airlearn is live"),
+        # Case differs, word boundaries hold: the term is there.
+        ("airlearn is live", "airlearn is live"),
+    ],
+    ids=["split", "inside-a-word", "case"],
+)
+def test_retry_keeps_every_glossary_term(whisper, retry, final):
+    backend, _fake = whisper([
+        whisper_result((0, "Airlearn is live", -1.15, 0.6)),
+        whisper_result((0, retry, -0.3, 0.6)),
+    ])
+    backend.initial_prompt = "Glossary: Velora, Airlearn."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == final
+
+
+def test_retry_scoring_a_tie_keeps_glossary_text(whisper):
+    backend, _fake = whisper([
+        whisper_result((0, "Velora ships the fix", -1.15, 0.6)),
+        whisper_result((0, "Velora ships the fixes", -1.15, 0.6)),
+    ])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "Velora ships the fix"
+
+
+def test_unsure_glossary_text_kept_when_retry_hears_nothing(whisper):
+    backend, _fake = whisper([whisper_result((0, "Airlearn", -1.15, 0.6)), ""])
+    backend.initial_prompt = "Glossary: Airlearn."
+    feed_seconds(backend, 2.5, chunk=speechy())
+
+    assert backend.finalize() == "Airlearn"
+
+
+@pytest.mark.parametrize(
+    "windows",
+    [
+        # Window 2 restarts without the glossary and is unsure.
+        ((0, "Velora ships", -0.3, 1.2), (2400, "the fix", -1.15, 0.8)),
+        # Window 2 loops: the guard drops it and window 1's text blocks the
+        # prompt-free retry.
+        ((0, "Velora ships", -0.3, 1.2), (2400, GLOSSARY_LOOP, -0.1, 12.0)),
+        # Window 1 loops, window 2 is clean.
+        ((0, GLOSSARY_LOOP, -0.1, 12.0), (2400, "the fix", -0.3, 1.2)),
+    ],
+    ids=["later-unsure", "later-loop", "first-loop"],
+)
+def test_failed_window_in_multi_window_result_takes_stock_ladder(whisper, windows):
+    # A window without a closing timestamp restarts, so audio under 30 s can
+    # decode as two windows (mlx_whisper transcribe.py:382-390). A failure
+    # in either must not cost words the stock ladder (0.25.0) kept.
+    backend, fake = whisper([whisper_result(*windows), "Velora ships the fix"])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 20.0, chunk=speechy())
+
+    assert backend.finalize() == "Velora ships the fix"
+    assert len(fake.calls) == 2
+    assert fake.calls[1][1]["initial_prompt"] == "Glossary: Velora."
+    assert "temperature" not in fake.calls[1][1]
+
+
+def test_all_windows_failed_takes_prompt_free_retry(whisper):
+    # With no clean window there is no text to lose: the ladder only
+    # re-samples the loop (7-20 s on a 4.7 s bench clip, once as words in
+    # another language), so the prompt-free retry covers the clip instead.
+    backend, fake = whisper([
+        whisper_result((0, GLOSSARY_LOOP, -0.1, 12.0), (2400, GLOSSARY_LOOP, -0.1, 12.0)),
+        "",
+    ])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 5.0, chunk=speechy())
+
+    assert backend.finalize() == ""
+    assert len(fake.calls) == 2
+    assert fake.calls[1][1]["initial_prompt"] is None
+    assert fake.calls[1][1]["temperature"] == 0.0
+
+
+def test_ladder_result_is_final(whisper):
+    # The stock ladder is the 0.25.0 path: its last sample is kept as
+    # 0.25.0 kept it, never judged again as a greedy pass.
+    backend, fake = whisper([
+        whisper_result((0, "Velora ships", -0.3, 1.2), (2400, "the fix", -1.15, 0.8)),
+        whisper_result((0, "Velora ships the fix", -1.1, 1.0)),
+    ])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 20.0, chunk=speechy())
+
+    assert backend.finalize() == "Velora ships the fix"
+    assert len(fake.calls) == 2
+
+
+def test_silent_window_is_not_a_failed_window(whisper):
+    # Stock treats a window over 0.6 no-speech probability as silence and
+    # never re-samples it (transcribe.py:238-241); the guard drops its text.
+    backend, fake = whisper([
+        whisper_result(
+            (0, "Velora ships", -0.3, 1.2), (2400, "Thank you.", -0.2, 3.0, 0.7)
+        ),
+    ])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 20.0, chunk=speechy())
+
+    assert backend.finalize() == "Velora ships"
+    assert len(fake.calls) == 1
+
+
+def test_clean_multi_window_greedy_result_is_kept(whisper):
+    backend, fake = whisper([
+        whisper_result((0, "Velora ships", -0.3, 1.2), (2400, "the fix", -0.4, 1.1)),
+    ])
+    backend.initial_prompt = "Glossary: Velora."
+    feed_seconds(backend, 20.0, chunk=speechy())
+
+    assert backend.finalize() == "Velora ships the fix"
+    assert len(fake.calls) == 1
+
+
+def test_multi_window_glossary_decode_keeps_stock_fallback(whisper):
+    # Past one 30 s window a looping window leaves the others' text, so
+    # the prompt-free retry never runs; stock fallback stays its recovery.
+    backend, fake = whisper(["long dictation"])
+    backend.segmenting_enabled = False
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 31.0, chunk=speechy())
+
+    assert backend.finalize() == "long dictation"
+    assert "temperature" not in fake.calls[0][1]
+
+
 def test_prompt_hallucination_retries_speech_without_glossary(whisper):
     backend, fake = whisper([PROMPT_HALLUCINATION, "recovered speech"])
     backend.initial_prompt = "Glossary: project.md."
@@ -783,21 +1063,27 @@ def test_non_prompt_empty_decode_on_noise_does_not_invent_words(whisper):
 
 
 def test_prompt_hallucination_on_stationary_noise_does_not_retry(whisper):
-    backend, fake = whisper([PROMPT_HALLUCINATION, "invented words"])
+    # The greedy loop goes back through the stock ladder (loops again here),
+    # never to a prompt-free pass that could invent words from noise.
+    backend, fake = whisper([PROMPT_HALLUCINATION, PROMPT_HALLUCINATION, "invented words"])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=loud(0.02))
 
     assert backend.finalize() == ""
-    assert len(fake.calls) == 1
+    assert all(kwargs["initial_prompt"] for _, kwargs in fake.calls)
 
 
 def test_prompt_free_retry_failure_degrades_to_empty_final(whisper):
-    backend, fake = whisper([PROMPT_HALLUCINATION, RuntimeError("retry decode boom")])
+    # A failed retry is no evidence of silence: the stock ladder runs (and
+    # loops again here), and the failed retry is not attempted twice.
+    backend, fake = whisper([
+        PROMPT_HALLUCINATION, RuntimeError("retry decode boom"), PROMPT_HALLUCINATION,
+    ])
     backend.initial_prompt = "Glossary: project.md."
     feed_seconds(backend, 2.5, chunk=speechy())
 
     assert backend.finalize() == ""
-    assert len(fake.calls) == 2
+    assert len(fake.calls) == 3
 
 
 def test_prompt_retry_uses_session_snapshot_when_prompt_changes_mid_decode(whisper):
@@ -831,10 +1117,10 @@ def test_prompt_hallucination_retries_whole_clip_after_segment_commit(whisper):
 
 
 def test_true_silence_span_is_consumed(whisper):
-    # An all-silence span decoding to "" is consumed (no retry loop).
+    # An all-silence span is consumed without a model decode (no retry loop).
     backend, fake = whisper([""])
     feed_seconds(backend, MIN_SEGMENT_S + 1, chunk=quiet())
-    assert len(fake.calls) == 1
+    assert fake.calls == []
     assert backend._decoded_samples > 0  # noqa: SLF001 — silence consumed
 
 
@@ -869,7 +1155,22 @@ def test_batch_stop_click_does_not_become_transcript(whisper):
     pcm[-int(0.25 * SAMPLE_RATE):] = 0.1
 
     assert transcribe_clip(backend, pcm) == ""
-    assert len(fake.calls) == 1
+    assert fake.calls == []
+
+
+def test_room_tone_and_stop_click_skip_model_decode(whisper):
+    # Field clip: 9.6 s of room tone, then the stop-key click. The click
+    # counts as tracked speech, so the glossary decode ran and looped
+    # through every temperature fallback (7.4 s stop→text) only for the
+    # speechless-span guard to discard the text. The guard's verdict
+    # depends on the audio alone, so it must run before the model does.
+    backend, fake = whisper([PROMPT_HALLUCINATION])
+    backend.initial_prompt = "Glossary: project.md."
+    feed_seconds(backend, 9.6, chunk=loud(0.001))
+    feed_seconds(backend, 0.2, chunk=loud(0.05))
+
+    assert backend.finalize() == ""
+    assert fake.calls == []
 
 
 def test_speechless_tail_is_never_decoded(whisper):

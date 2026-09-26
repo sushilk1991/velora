@@ -60,6 +60,32 @@ _STOPWORDS = frozenset(
 )
 PROMPT_ARTIFACT_WORDS = frozenset({"glossary"})
 
+# Whisper fills silence with subtitle credits memorised from captioned video:
+#   "Closed Captioning by Kris Brandhagen.com."
+#   "Subtitles by the Amara.org community"
+# They reach history as a whole row or mid-dictation at a pause. Mined, the
+# credited name joins the glossary, which primes Whisper to hallucinate it
+# again. A credit is cut only when it names a known credit domain, so
+# spoken "Captions by Alice explain the feature." keeps every word.
+_WHISPER_CREDIT_DOMAINS = (
+    "Amara.org",  # Whisper's best-known subtitle credit
+    "Brandhagen.com",  # seen in owner history
+    "GetTranscribed.com",  # seen in owner history
+)
+# "<credit word> [provided|made] by [up to 3 words] <domain> [community]."
+_WHISPER_CREDIT = re.compile(
+    r"\b(?:Closed Caption(?:ing|ed)|Caption(?:ing|ed|s)|Subtitles|Subtitled"
+    r"|Transcription|Transcribed|Translation|Translated)"
+    r"(?: (?:provided|made))? by (?:[\w'-]+ ){0,3}(?:www\.)?"
+    r"(?:" + "|".join(re.escape(d) for d in _WHISPER_CREDIT_DOMAINS) + r")"
+    r"(?: community)?\b[.!]?",
+    re.IGNORECASE,
+)
+
+
+def _strip_whisper_credits(text: str) -> str:
+    return _WHISPER_CREDIT.sub(" ", text)
+
 
 def contains_prompt_artifact(term: str) -> bool:
     return any(
@@ -306,6 +332,9 @@ class VocabMiner:
         rows: list[tuple[int, str]] = []
         used = 0
         for row_id, final in fetched:
+            # Credits are gone before the LLM or the occurrence check sees
+            # the row, so a credited name never literally occurs in a batch.
+            final = _strip_whisper_credits(final)
             cost = len(final) + 1
             if rows and used + cost > BATCH_CHAR_CAP:
                 break

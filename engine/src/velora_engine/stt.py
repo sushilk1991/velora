@@ -789,6 +789,14 @@ class ParakeetBackend:
 
 _COMPRESSION_RATIO_THRESHOLD = 2.4
 _LOGPROB_THRESHOLD = -1.2
+# mlx_whisper.transcribe's own fallback cut: a pass under this average log
+# probability is decoded again at the next temperature (stock default).
+_STOCK_LOGPROB_THRESHOLD = -1.0
+# ...unless its no-speech probability is over this: stock treats it as
+# silence and keeps it.
+_STOCK_NO_SPEECH_THRESHOLD = 0.6
+# One Whisper decode window (mlx_whisper.audio.N_SAMPLES, 30 s).
+_WHISPER_WINDOW_SAMPLES = 30 * SAMPLE_RATE
 _SPEECH_MODULATION_RATIO = 1.6
 _SPEECH_FRAME_SAMPLES = SAMPLE_RATE // 50  # 20 ms
 _SPEECH_ACTIVE_RMS = 0.003
@@ -934,6 +942,118 @@ def guard_whisper_result(result: dict[str, Any]) -> str:
     return _trim_repeated_tail(text)
 
 
+def _stock_would_resample(seg: dict[str, Any]) -> bool:
+    """True when mlx_whisper's default fallback would decode this segment's
+    window again (transcribe.py:226-241). Segments of one window share
+    that window's metadata, so any of them speaks for the window."""
+    nsp = seg.get("no_speech_prob")
+    if nsp is not None and nsp > _STOCK_NO_SPEECH_THRESHOLD:
+        return False
+
+    cr = seg.get("compression_ratio")
+    lp = seg.get("avg_logprob")
+    too_repetitive = cr is not None and cr > _COMPRESSION_RATIO_THRESHOLD
+    too_unlikely = lp is not None and lp < _STOCK_LOGPROB_THRESHOLD
+    return too_repetitive or too_unlikely
+
+
+def _read_pass(
+    result: dict[str, Any], prompt: str | None
+) -> tuple[str, bool, bool]:
+    """One decode pass as (text, prompt_failure, likely_speech).
+
+    `prompt_failure` is a glossary loop or prompt echo the guards removed;
+    `likely_speech` is any text segment under stock's no-speech cut."""
+    guarded_text = guard_whisper_result(result)
+    # Every segment/preview needs the leading-header guard, but applying the
+    # trailing-list guard independently at every seam creates many chances
+    # to delete a genuine spoken list. The trailing guard runs once on the
+    # assembled authoritative final in `finalize`.
+    text = strip_prompt_echo(guarded_text, prompt, allow_trailing=False)
+
+    segments = result.get("segments") or []
+    prompt_echo_removed = bool(guarded_text) and not text
+    quality_rejected = any(
+        (seg.get("text") or "").strip()
+        and (
+            (seg.get("compression_ratio") is not None
+             and seg["compression_ratio"] > _COMPRESSION_RATIO_THRESHOLD)
+            or (
+                seg.get("avg_logprob") is not None
+                and seg["avg_logprob"] < _LOGPROB_THRESHOLD
+                and seg.get("compression_ratio") is not None
+                and seg["compression_ratio"] > 2.0
+            )
+        )
+        for seg in segments
+    )
+    likely_speech = not segments or any(
+        (seg.get("text") or "").strip()
+        and (seg.get("no_speech_prob") is None or seg["no_speech_prob"] < 0.6)
+        for seg in segments
+    )
+    return text, prompt_echo_removed or quality_rejected, likely_speech
+
+
+def _glossary_terms_in(text: str, prompt: str | None) -> set[str]:
+    """The glossary terms `text` contains, lowercased. A term matches
+    case-insensitively on word boundaries: "Airlearn" matches "airlearn",
+    not "Airlearns" or "air learn"."""
+    if not prompt:
+        return set()
+
+    body = re.sub(r"^\s*Glossary:\s*", "", prompt, flags=re.IGNORECASE).strip()
+    terms = [term.strip() for term in body.rstrip(".").split(",") if term.strip()]
+    return {
+        term.lower()
+        for term in terms
+        if re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", text, re.IGNORECASE)
+    }
+
+
+def _retry_wins(
+    text: str,
+    text_score: float | None,
+    retry_text: str,
+    retry: dict[str, Any],
+    prompt: str | None,
+) -> bool:
+    """True when a prompt-free retry may replace clean glossary `text`: at
+    least as many words, every glossary term `text` carries, and a higher
+    weakest-segment logprob (a tie keeps the glossary spelling)."""
+    if len(retry_text.split()) < len(text.split()):
+        return False
+    if not _glossary_terms_in(text, prompt) <= _glossary_terms_in(retry_text, prompt):
+        return False
+
+    retry_score = _min_segment_logprob(retry)
+    if retry_score is None or text_score is None:
+        return False
+    return retry_score > text_score
+
+
+def _log_unsure(score: float | None, outcome: str) -> None:
+    # Numbers and the outcome only: engine.log is plaintext.
+    log.info(
+        "greedy glossary decode unsure (logprob=%.2f, %s)",
+        score if score is not None else float("nan"), outcome)
+
+
+def _min_segment_logprob(result: dict[str, Any]) -> float | None:
+    """The weakest text segment's avg_logprob; None when none is scored.
+
+    A pass is only as trustworthy as its least likely segment, e.g.
+    segments at -0.3 and -1.4 score -1.4."""
+    scores = [
+        seg["avg_logprob"]
+        for seg in result.get("segments") or []
+        if (seg.get("text") or "").strip() and seg.get("avg_logprob") is not None
+    ]
+    if not scores:
+        return None
+    return min(scores)
+
+
 def whisper_language(language: str | None) -> str | None:
     """Map config `language` to mlx-whisper's arg: "auto"/empty → None (autodetect)."""
     if not language:
@@ -1070,6 +1190,10 @@ class WhisperBackend:
     """Batch STT via mlx-whisper, with hallucination guard and in-session
     segmenting: pause-aligned spans are decoded DURING recording so the server
     can clean them concurrently (and the HUD finally gets whisper partials)."""
+
+    # One greedy glossary pass per one-window decode (see _decode). Catching
+    # an unsure pass needs per-segment avg_logprob in the result.
+    _greedy_glossary_pass = True
 
     def __init__(self, model_id: str, language: str = "auto") -> None:
         self.model_id = model_id
@@ -1221,80 +1345,153 @@ class WhisperBackend:
         # cannot change how this result is stripped or retried mid-decode.
         prompt = self.initial_prompt
 
-        result = self._transcribe(audio, prompt)
-        guarded_text = guard_whisper_result(result)
-        # Every segment/preview needs the leading-header guard, but applying the
-        # trailing-list guard independently at every seam creates many chances
-        # to delete a genuine spoken list. The trailing guard runs once on the
-        # assembled authoritative final in `finalize`.
-        text = strip_prompt_echo(guarded_text, prompt, allow_trailing=False)
-
-        segments = result.get("segments") or []
-        prompt_echo_removed = bool(guarded_text) and not text
-        quality_rejected = any(
-            (seg.get("text") or "").strip()
-            and (
-                (seg.get("compression_ratio") is not None
-                 and seg["compression_ratio"] > _COMPRESSION_RATIO_THRESHOLD)
-                or (
-                    seg.get("avg_logprob") is not None
-                    and seg["avg_logprob"] < _LOGPROB_THRESHOLD
-                    and seg.get("compression_ratio") is not None
-                    and seg["compression_ratio"] > 2.0
-                )
-            )
-            for seg in segments
-        )
-        likely_speech = not segments or any(
-            (seg.get("text") or "").strip()
-            and (seg.get("no_speech_prob") is None or seg["no_speech_prob"] < 0.6)
-            for seg in segments
-        )
-        retry_prompt_failure = prompt_echo_removed or quality_rejected
-
-        if (
-            not text
-            and prompt
-            and had_speech
-            and likely_speech
-            and retry_prompt_failure
-            and _has_speech_like_modulation(audio)
-        ):
-            # A glossary prompt can trap Whisper in a high-compression prompt
-            # loop or return a clean-looking prompt echo on short/quiet speech.
-            # Retry only those explicit failures; energy alone is too weak and
-            # could turn background noise into invented words.
-            log.warning("glossary-biased whisper decode rejected/empty — retrying without prompt")
-            try:
-                text = guard_whisper_result(
-                    self._transcribe(audio, None, temperature=0.0)
-                )
-            except Exception:  # noqa: BLE001 — optional recovery must not fail the session
-                log.exception("prompt-free whisper recovery decode failed")
         integrity_audio = (
             audio[:-_STOP_NOISE_SAMPLES]
             if ignore_stop_tail and len(audio) > _STOP_NOISE_SAMPLES
             else audio
         )
-        if text and (
-            not had_speech
-            or not _reaches_speech_level(
-                integrity_audio, self._speech_reference()
-            )
+        if not had_speech or not _reaches_speech_level(
+            integrity_audio, self._speech_reference()
         ):
-            # The dual of the empty-speech-span integrity rule below: text
-            # decoded from a span that never carried sustained, speaking-level
-            # audio is fabricated. This is where "Thank you." / "Closed
-            # Captioning by ..." credits enter — Whisper decoding a trailing
-            # pause or breath bump with confident metadata (nsp=0.00, clean
-            # logprob/compression), so no metadata threshold can catch it
-            # (field bug, 2026-08-04). Both gates are relative to the
-            # session's own adapted speech level, never absolute.
+            # The dual of the empty-speech-span integrity rule in feed_chunk:
+            # text decoded from a span that never carried sustained,
+            # speaking-level audio is fabricated. This is where "Thank you." /
+            # "Closed Captioning by ..." credits enter — Whisper decoding a
+            # trailing pause or breath bump with confident metadata
+            # (nsp=0.00, clean logprob/compression), so no metadata threshold
+            # can catch it (field bug, 2026-08-04). Both gates are relative
+            # to the session's own adapted speech level, never absolute.
+            #
+            # The verdict reads only the audio, so it runs before the model:
+            # room tone plus a stop-key click used to pay a glossary decode
+            # looping through every temperature fallback (7.4 s stop→text)
+            # just to have its text discarded here.
             log.info(
-                "whisper guard: dropped text decoded from a speechless span "
-                "(%d chars, %.1fs audio)", len(text), len(audio) / SAMPLE_RATE)
+                "whisper guard: skipped decode of a speechless span (%.1fs audio)",
+                len(audio) / SAMPLE_RATE)
             return ""
+
+        # Stock fallback re-decodes a failed window at five more
+        # temperatures, all still primed with the glossary. On short clips
+        # those passes loop on the glossary to the 224-token cap (~1 s
+        # each) and never supplied the kept text: the prompt-free retry
+        # below did (field trace, 2026-09-26). A one-window decode, which
+        # that retry covers whole, gets a single greedy glossary pass:
+        #
+        #   before: glossary t=0 → 0.2 → … → 1.0 ──────→ prompt-free t=0
+        #   after:  glossary t=0 ── failed or unsure? ─→ prompt-free t=0
+        #                          (stock ladder when that cannot settle it)
+        #
+        # Longer audio keeps the stock schedule: one looping window among
+        # several leaves text behind, so the retry would never run for it.
+        greedy_prompt = (
+            self._greedy_glossary_pass
+            and bool(prompt)
+            and len(audio) <= _WHISPER_WINDOW_SAMPLES
+        )
+        result = self._transcribe(
+            audio, prompt, temperature=0.0 if greedy_prompt else None
+        )
+
+        # Audio under 30 s can still decode as several windows: one with no
+        # closing timestamp restarts at its last timestamp (mlx_whisper
+        # transcribe.py:382-390). A window stock would have re-sampled beside
+        # a clean window with text goes back through the stock ladder (the
+        # 0.25.0 path) rather than cost that window's words. When every
+        # window failed there is no text to lose, and the ladder only
+        # re-sampled the loop (7-20 s on a 4.7 s bench clip, once as words
+        # in another language), so the clip is handled as one window below.
+        #
+        #   window 1 ok ─┬─ window 2 ok ─────→ keep greedy result
+        #                └─ window 2 failed ─→ glossary t=0 → 0.2 → … → 1.0
+        #   every window failed ─────────────→ as one window (retry below)
+        segments = result.get("segments") or []
+        failed = {seg.get("seek", 0) for seg in segments if _stock_would_resample(seg)}
+        clean = {
+            seg.get("seek", 0) for seg in segments if (seg.get("text") or "").strip()
+        } - failed
+        if greedy_prompt and failed and clean:
+            log.info(
+                "greedy glossary decode failed %d of %d windows — re-decoding on stock fallback",
+                len(failed), len(failed | clean))
+            greedy_prompt = False
+            result = self._transcribe(audio, prompt)
+        text, prompt_failure, likely_speech = _read_pass(result, prompt)
+        may_retry = bool(prompt) and had_speech
+        # At most one prompt-free retry per decode. `retry` is None when it
+        # has not run or failed; `retried` keeps a failed one from rerunning.
+        retried = False
+        retry: dict[str, Any] | None = None
+
+        # A greedy glossary pass stock fallback would have re-sampled is
+        # unsure: short speech scored -1.1 to -1.2 with the glossary and -0.2
+        # to -0.9 without it on the same audio, and steady hum scored -2.0
+        # (field trace). A logprob alone never empties it. The prompt-free
+        # retry may replace clean text only with at least as many words,
+        # every glossary term the text carries, and a higher score (mlx
+        # averages logprob per token, so a fragment can outscore the whole).
+        # Clean text at or above the guard's -1.2 floor then stands; a loop
+        # or echo the retry heard nothing in is silence; anything else goes
+        # back through the stock ladder, the 0.25.0 path.
+        #
+        #   unsure pass ─┬─ retry wins ─────────────────────→ retry text
+        #                ├─ clean text, logprob >= -1.2 ────→ glossary text
+        #                ├─ loop or echo, retry heard none ─→ ""
+        #                └─ otherwise ─→ glossary t=0 → 0.2 → … → 1.0
+        unsure = greedy_prompt and any(
+            (seg.get("text") or "").strip() and _stock_would_resample(seg)
+            for seg in result.get("segments") or []
+        )
+        if unsure:
+            score = _min_segment_logprob(result)
+            clean_text = bool(text) and not prompt_failure
+            if likely_speech and may_retry and _has_speech_like_modulation(audio):
+                retried = True
+                retry = self._retry_without_prompt(audio)
+            retry_text = guard_whisper_result(retry) if retry is not None else ""
+
+            if retry_text and (
+                not clean_text or _retry_wins(text, score, retry_text, retry, prompt)
+            ):
+                _log_unsure(score, "retry")
+                return retry_text
+            if clean_text and score is not None and score >= _LOGPROB_THRESHOLD:
+                _log_unsure(score, "kept")
+                return text
+            if not text and retry is not None:
+                _log_unsure(score, "dropped")
+                return ""
+
+            _log_unsure(score, "ladder")
+            result = self._transcribe(audio, prompt)
+            text, prompt_failure, likely_speech = _read_pass(result, prompt)
+
+        if (
+            not text
+            and may_retry
+            and likely_speech
+            and prompt_failure
+        ):
+            # A glossary prompt can trap Whisper in a high-compression prompt
+            # loop or return a clean-looking prompt echo on short/quiet speech.
+            # Retry only those explicit failures; energy alone is too weak and
+            # could turn background noise into invented words. A retry the
+            # unsure pass above already ran is reused, not decoded again.
+            if not retried and _has_speech_like_modulation(audio):
+                retried = True
+                retry = self._retry_without_prompt(audio)
+            if retry is not None:
+                text = guard_whisper_result(retry)
         return text
+
+    def _retry_without_prompt(self, audio: np.ndarray) -> dict[str, Any] | None:
+        """One greedy decode without the glossary; None when it fails."""
+        log.warning("glossary-biased whisper decode rejected/empty — retrying without prompt")
+        try:
+            return self._transcribe(audio, None, temperature=0.0)
+        except Exception:  # noqa: BLE001 — optional recovery must not fail the session
+            log.exception("prompt-free whisper recovery decode failed")
+            return None
 
     def _strip_final_prompt_echo(self, text: str) -> str:
         stripped = strip_prompt_echo(text, self.initial_prompt, allow_trailing=True)
@@ -1565,6 +1762,9 @@ class TranscribeCppWhisperBackend(WhisperBackend):
     """Whisper Q8 through transcribe.cpp, retaining Velora's session logic."""
 
     fallback_model_id = "mlx-community/whisper-large-v3-turbo"
+    # Results carry no avg_logprob, so an unsure greedy glossary pass could
+    # not be caught; keep transcribe.cpp's own fallback ladder.
+    _greedy_glossary_pass = False
 
     def __init__(self, model_id: str, language: str = "auto") -> None:
         super().__init__(model_id, language)
