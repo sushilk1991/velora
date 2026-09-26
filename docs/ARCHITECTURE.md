@@ -69,7 +69,8 @@ Types:
 - `0x02 AUDIO` — raw PCM chunk: 16kHz mono Float32 LE.
 
 Startup events are intentionally split: `ready` means the speech model can
-accept dictation and carries a `setup_complete` snapshot, while `loading`
+accept dictation and carries a `setup_complete` snapshot plus `audio_ext`
+(`flac` or `wav`), while `loading`
 carries first-run model download phase/fraction. If the snapshot is false, a
 later `setup_complete` event marks both speech and writing model setup done.
 The app uses this completion signal only to unlock onboarding's guided first
@@ -85,12 +86,44 @@ app → engine  AUDIO frames (streamed live during recording, ~100ms chunks)
 app → engine  {"cmd":"stop","session":"uuid",             # only already-ready context
                "entities":[{"type":"glossary","value":"authCheck.ts"}]}
 engine → app  {"event":"partial","session":"...","text":"..."}       # protocol-compatible telemetry; not rendered
-engine → app  {"event":"transcript","session":"...","raw":"...","ms":412}
+engine → app  {"event":"finalize_started","session":"...","mode":"chat","audio":"uuid.flac"}
+engine → app  {"event":"transcript","session":"...","raw":"...",
+               "deterministic":"...","mode":"chat","ms":412}
+engine → app  {"event":"finalize_progress","session":"...","stage":"stt",
+               "completed":1,"total":1}   # a decoded STT window
+engine → app  {"event":"finalize_progress","session":"...","stage":"stt",
+               "completed":1,"total":1}   # STT complete
+engine → app  {"event":"finalize_progress","session":"...","stage":"catchup",
+               "completed":16000,"total":32000}  # preserved PCM block fed and decoded
+engine → app  {"event":"finalize_progress","session":"...","stage":"cleanup",
+               "completed":2,"total":8}   # after each completed cleanup piece
+engine → app  {"event":"finalize_progress","session":"...","stage":"recovery",
+               "completed":2,"total":8}   # worker replacement completed
 engine → app  {"event":"final","session":"...","text":"...","raw":"...","mode":"chat",
                "cleanup_ms":389,"cleanup_wall_ms":402,"cleanup_applied":true,
                "total_ms":811,
                "audio":"uuid.flac"}   # audio present when archived
+app → engine  {"cmd":"abandon_finalize","session":"uuid"}
+engine → app  {"event":"final","session":"...","text":"...","raw":"...",
+               "mode":"chat","cleanup_applied":false,"audio":"uuid.flac"}
+engine → app  {"event":"finalize_recovered","session":"...","raw":"...",
+               "text":"...","mode":"chat"}   # late text updates History only
 ```
+`finalize_progress` re-arms the app's 100-second monotonic stall detector only
+after decoded audio, a finished cleanup piece, or completed worker recovery.
+The longest worker-recovery wait is 90 seconds. A wedged STT executor sends no
+progress. There is no whole-dictation deadline. Once the live STT queue fills,
+recording continues; its feeder catches up from the audio spool or a private
+temporary file during recording. Unspooled backlog spills past 4 MiB of RAM
+to an owner-only file, removed at session end and swept on engine startup.
+A failed feed re-decodes the preserved clip instead of counting failed samples.
+On a stall, `abandon_finalize` inserts the known deterministic transcript; if
+there is no transcript, it inserts nothing and records a History row. Late
+STT or cleanup updates that same row through `finalize_recovered` and never
+inserts later. The engine archives stalled audio only when the live setting is
+on at abandon time. Voice Edit releases its hotkey after the ack or a two-second
+wait. Esc still sends `cancel` and discards audio.
+
 Other commands: `cancel`, `ping`, `status`, `reload_config` (modes/vocab changed), `set_model`, `reprocess`.
 
 ## Action Mode
@@ -400,7 +433,8 @@ alphabet (Hindi → natural Hinglish; the words are kept, not translated). The
 length-ratio divergence guard is disabled for that pass since transliteration
 changes length.
 
-**Latency budget:** ordinary dictation does not run display-only preview decodes or render provisional transcript text. The separate Stream Typing shortcut opts into a coalesced preview lane. Exact Accessibility/plugin targets receive a replaceable in-field draft; known opaque terminal inputs receive a revisable HUD transcript and one final insertion, never blind Backspaces. The authoritative decode on `stop` covers every audio sample. Cleanup owns one immutable static prompt-cache snapshot and forks it for chunk/final generation. The writing model runs in a persistent child process: its adaptive soft deadline begins at the first output token, while the responsive speech-engine parent enforces a true wall deadline around stalled prefill or native generation. A hard stall kills and warm-restarts only the writing worker. If cleanup exceeds its budget, is cancelled, or fails, the engine emits `final` with `cleanup_applied:false` carrying the raw transcript. Raw and measured stop-to-final time are retained in history.
+**Latency budget:** ordinary dictation does not run display-only preview decodes or render provisional transcript text. The separate Stream Typing shortcut opts into a coalesced preview lane. Exact Accessibility/plugin targets receive a replaceable in-field draft; known opaque terminal inputs receive a revisable HUD transcript and one final insertion, never blind Backspaces. The authoritative decode on `stop` covers every audio sample. Cleanup owns one immutable static prompt-cache snapshot and forks it for chunk/final generation. Text within the single-call generation budget keeps its shipped prompt and reason. Longer text uses script-aware pieces: tokens containing CJK/Thai characters count every character, other whitespace tokens count once, sentence endings are preferred within the
+piece budget, and URLs/paths/emails stay intact. Gate-normalized STT text does not reliably retain raw segment boundaries, so the splitter uses token boundaries. Each piece receives a separate 50-word cleaned tail with the running list number; the shipped streaming path keeps its 15-word context and prompt. A failed piece receives deterministic cleanup, the worker may recover between pieces up to its recovery deadline, and a partly cleaned final reports `cleanup_applied:false`. Model-produced numbering is accepted without deterministic rewriting. Postprocess runs once on the joined text. The 6-second ceiling guards one generation, with no total cleanup deadline. Completed streaming chunks and file transcription pieces survive a fallback or foreground preemption. The writing model runs in a persistent child process: its adaptive soft deadline begins at the first output token, while the responsive speech-engine parent enforces a true wall deadline around stalled prefill or native generation. A hard stall kills and warm-restarts only the writing worker. Raw and measured stop-to-final time are retained in history. Dictation continues until the user stops it; the legacy `max_recording_s` value does not truncate capture.
 
 **Streaming segment pipeline (whisper, smartness-v2):** preview-only mechanics remain available to explicit diagnostic fixtures but are disabled in production. The backend commits a segment when ≥10s of un-decoded audio meets a ≥0.7s pause (energy VAD; hard cap 25s), and the server starts that segment's LLM cleanup while the user is speaking. Superseded chunk work receives cooperative cancellation. On `stop`, dictations ≤45s re-decode the whole clip and clean once; longer ones stitch committed segments and decode/clean the tail. Any failure falls back to the whole-text path, so the fast path cannot lose transcript content. Config: `streaming_cleanup` (default true).
 

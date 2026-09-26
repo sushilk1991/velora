@@ -124,6 +124,23 @@ class AudioStore:
                 with contextlib.suppress(OSError):
                     os.close(descriptor)
 
+    def promote_temp(self, session_id: str, temporary: ActiveAudioSpool) -> ActiveAudioSpool | None:
+        """Adopt private in-flight PCM when retention is enabled mid-session."""
+        temporary.close()
+        self._ensure_dir()
+        self.active_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(self.active_dir, 0o700)
+        target = self._active_path(session_id)
+        try:
+            os.link(temporary.path, target)
+            temporary.path.unlink()
+            descriptor = os.open(target, os.O_WRONLY | os.O_APPEND)
+            return ActiveAudioSpool(target, os.fdopen(descriptor, "wb", buffering=0))
+        except OSError:
+            log.exception("failed to adopt temporary dictation audio %s", session_id)
+            return None
+
     def pending_interrupted(self) -> tuple[str, ...]:
         """Snapshot safe stale-session names before a new live session starts."""
         try:
@@ -267,9 +284,13 @@ class AudioStore:
 
     # ---- retention ----
 
-    def prune(self, retention_days: float, max_bytes: int | None = None) -> int:
+    def prune(
+        self, retention_days: float, max_bytes: int | None = None,
+        protected_names: set[str] | None = None,
+    ) -> int:
         """Delete clips older than retention_days, then evict oldest-first until
-        the archive is under max_bytes. Returns the number of clips deleted."""
+        the archive is under max_bytes. A newly finalized clip stays available
+        for Retry even if it alone exceeds the quota. Returns deleted count."""
         if not self.dir.exists():
             return 0
         try:
@@ -277,6 +298,7 @@ class AudioStore:
         except OSError:
             return 0
         deleted = 0
+        protected_names = protected_names or set()
         now = time.time()
         cutoff = now - retention_days * 86400.0 if retention_days and retention_days > 0 else None
 
@@ -290,7 +312,7 @@ class AudioStore:
 
         survivors: list[tuple[float, int, Path]] = []
         for mtime, size, p in stats:
-            if cutoff is not None and mtime < cutoff:
+            if p.name not in protected_names and cutoff is not None and mtime < cutoff:
                 if self._unlink(p):
                     deleted += 1
                 continue
@@ -303,6 +325,8 @@ class AudioStore:
                 for mtime, size, p in sorted(survivors, key=lambda t: t[0]):
                     if total <= max_bytes:
                         break
+                    if p.name in protected_names:
+                        continue
                     if self._unlink(p):
                         deleted += 1
                         total -= size

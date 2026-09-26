@@ -194,6 +194,9 @@ enum Selftest {
         testDictationIntent()
         testHomeTakeHistoryRow()
         testRetryDelivery()
+        #if DEBUG
+        testFinalizationController()
+        #endif
         testOwnWindowFinal()
         #if DEBUG
         testWindowSnapshotHome()
@@ -2347,6 +2350,41 @@ enum Selftest {
                 == .cancel,
             "a released hold never starts an unlocked recording after capture")
 
+        // Drive the same watchdog state used by the controller with an
+        // explicit clock so progress and one-shot expiry are deterministic.
+        var stall = TranscribeStall()
+        let start: TimeInterval = 100
+        stall.arm(after: 30, now: start)
+        stall.arm(after: 30, now: start + 10)
+        expect(
+            stall.expire(now: start + 31, raw: "all spoken words")
+                == .waiting,
+            "finalize progress re-arms the stall timer")
+        let stalled = stall.expire(
+            now: start + 41, raw: "all spoken words")
+        expect(
+            stalled == .raw("all spoken words"),
+            "a stall requests audio-preserving finalization")
+        expect(
+            stall.expire(now: start + 42, raw: "all spoken words")
+                == .waiting,
+            "one stall cannot request two finals")
+        var preTranscript = TranscribeStall()
+        preTranscript.arm(after: 30, now: start)
+        expect(preTranscript.expire(now: start + 31, raw: nil) == .empty,
+               "pre-transcript stall also requests audio preservation")
+        if case .finalizeProgress(let session, let stage, let completed, let total) =
+            EngineEvent.parse([
+                "event": "finalize_progress", "session": "s",
+                "stage": "cleanup", "completed": 2, "total": 9
+            ]) {
+            expect(session == "s" && stage == "cleanup"
+                   && completed == 2 && total == 9,
+                   "cleanup progress is decoded for the watchdog")
+        } else {
+            expect(false, "cleanup progress is decoded for the watchdog")
+        }
+
         expect(
             HotkeyMonitor.resyncedComboLatch(
                 wasLatched: true, keyCurrentlyDown: true),
@@ -3881,7 +3919,7 @@ enum Selftest {
             "event": "ready", "setup_complete": true,
             "stt_model": "mlx-community/whisper-large-v3-turbo",
         ])
-        if case .ready(let setupComplete, let sttModel) = ready {
+        if case .ready(let setupComplete, let sttModel, _) = ready {
             expect(setupComplete, "ready event carries cached setup completion")
             expect(sttModel == "mlx-community/whisper-large-v3-turbo",
                    "ready event carries the engine's proven speech backend")
@@ -11404,11 +11442,11 @@ enum Selftest {
                 <= terminalHalfWidth - HUDGeometry.contentInsetH,
             "Terminal HUD leaves room for an intrinsic 24-hour custom timer")
         expect(
-            DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 20,
-            "short dictations retain the 20-second finalize watchdog")
+            DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 100,
+            "short dictations use the per-step stall watchdog")
         expect(
-            DictationController.transcribeTimeout(recordingDurationMs: 3_600_000) == 360,
-            "one-hour dictations receive a duration-scaled finalize watchdog")
+            DictationController.transcribeTimeout(recordingDurationMs: 3_600_000) == 100,
+            "one-hour dictations have no total finalize deadline")
         expect(
             DictationController.recordingLimitMessage(seconds: 720)
                 == "12-minute dictation limit reached",
@@ -12979,6 +13017,170 @@ enum Selftest {
                "the refused starts put no pill on the owner's screen (saw \(pillsSeen))")
     }
 
+    /// Route engine events through a real controller with an isolated History
+    /// database and pasteboard. No microphone, app activation, or live defaults.
+    #if DEBUG
+    private static func testFinalizationController() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-finalize-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove() }
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(
+            "com.velora.finalize-selftest.\(UUID().uuidString)"))
+        let history = HistoryStore(url: directory.appendingPathComponent("history.sqlite3"))
+        let defaults = UserDefaults(suiteName: "velora.finalize.\(UUID().uuidString)")!
+        let config = AppConfig(
+            defaults: defaults,
+            settingsFileURL: directory.appendingPathComponent("settings.json"),
+            engineConfigURL: directory.appendingPathComponent("engine.json"))
+        let hud = HUDPanel()
+        hud.selftestOrderOut()
+        let supervisor = EngineSupervisor()
+        supervisor.selftestSetAudioExt("flac")
+        let controller = DictationController(
+            supervisor: supervisor, contextTracker: AppContextTracker(), hud: hud,
+            history: history, sounds: SoundPlayer(cues: []),
+            dictionary: makeSyncRepository(fixture),
+            inserter: TextInserter(pasteboard: pasteboard), config: config)
+        defer { hud.selftestOrderOut() }
+
+        controller.selftestBeginFinalization(session: "stall-text", now: 100)
+        controller.handleEngineEvent(.finalizeStarted(
+            session: "stall-text", mode: "Email", audio: "stall-text.flac"))
+        controller.handleEngineEvent(.transcript(
+            session: "stall-text", raw: "um spoken words",
+            deterministic: "Spoken words.", mode: "Email", ms: 12))
+        controller.selftestArmStall(now: 100)
+        controller.handleEngineEvent(.finalizeProgress(
+            session: "old", stage: "stt", completed: 0, total: 1))
+        expect(controller.selftestStallOutcome(now: 201) == .raw("um spoken words"),
+               "stale-session heartbeat cannot postpone the active stall")
+        controller.selftestRequestAbandon()
+        expect(supervisor.selftestCommands.last?["cmd"] as? String == "abandon_finalize",
+               "stall sends abandon_finalize, not cancel")
+        waitUntil(timeout: 2) { history.recent(limit: 3).count == 1 }
+        expect(pasteboard.string(forType: .string) == "Spoken words.",
+               "the controller inserts deterministic text on a stall")
+        expect(history.recent(limit: 3).first?.audioPath == "stall-text.flac"
+               && history.recent(limit: 3).first?.mode == "Email",
+               "stall History retains audio and mode")
+        controller.handleEngineEvent(.final(
+            session: "stall-text", text: "late duplicate", raw: "um spoken words",
+            mode: "Email", cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: true, totalMs: nil, audio: "stall-text.flac",
+            autoStopped: false))
+        expect(history.recent(limit: 3).count == 1
+               && pasteboard.string(forType: .string) == "Spoken words.",
+               "a late final cannot insert or record a second result")
+        controller.handleEngineEvent(.finalizeRecovered(
+            session: "stall-text", raw: "um spoken words",
+            text: "Recovered words.", mode: "Email"))
+        expect(history.recent(limit: 3).first?.final == "Recovered words."
+               && history.recent(limit: 3).count == 1
+               && pasteboard.string(forType: .string) == "Spoken words.",
+               "late recovery updates one History row without another insertion")
+
+        controller.selftestBeginFinalization(session: "stall-empty", now: 200)
+        controller.handleEngineEvent(.finalizeStarted(
+            session: "stall-empty", mode: "Email", audio: "stall-empty.flac"))
+        controller.selftestArmStall(now: 200)
+        expect(controller.selftestStallOutcome(now: 301) == .empty,
+               "pre-transcript stall requests audio preservation")
+        controller.selftestRequestAbandon()
+        expect(supervisor.selftestCommands.last?["cmd"] as? String == "abandon_finalize",
+               "pre-transcript stall sends abandon_finalize")
+        waitUntil(timeout: 2) { history.recent(limit: 3).count == 2 }
+        expect(history.recent(limit: 3).first?.audioPath == "stall-empty.flac"
+               && history.recent(limit: 3).first?.mode == "Email",
+               "pre-transcript History keeps the clip for Retry")
+        controller.handleEngineEvent(.finalizeRecovered(
+            session: "stall-empty", raw: "late speech",
+            text: "Late speech.", mode: "Email"))
+        expect(history.recent(limit: 3).first?.final == "Late speech."
+               && pasteboard.string(forType: .string) == "Spoken words.",
+               "pre-transcript late words reach History without insertion")
+
+        controller.selftestBeginFinalization(session: "esc-pieces", now: 300)
+        controller.cancel()
+        controller.handleEngineEvent(.final(
+            session: "esc-pieces", text: "never insert", raw: "never insert",
+            mode: "Chat", cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil, autoStopped: false))
+        expect(history.recent(limit: 3).count == 2
+               && pasteboard.string(forType: .string) == "Spoken words.",
+               "Esc during piece cleanup discards its late final")
+
+        controller.selftestBeginFinalization(session: "legacy-raw", now: 400)
+        controller.handleEngineEvent(.finalizeStarted(
+            session: "legacy-raw", mode: "Chat", audio: "legacy-raw.flac"))
+        controller.handleEngineEvent(EngineEvent.parse([
+            "event": "transcript", "session": "legacy-raw", "raw": "legacy words", "ms": 12
+        ]))
+        controller.selftestRequestAbandon()
+        waitUntil(timeout: 2) { history.recent(limit: 4).count == 3 }
+        expect(pasteboard.string(forType: .string) == "legacy words",
+               "a missing deterministic field falls back to the raw transcript")
+
+        config.saveAudio = false
+        controller.selftestBeginFinalization(session: "privacy-off", now: 500)
+        controller.handleEngineEvent(.finalizeStarted(
+            session: "privacy-off", mode: "Chat", audio: "privacy-off.flac"))
+        controller.handleEngineEvent(.transcript(
+            session: "privacy-off", raw: "private words",
+            deterministic: "Private words.", mode: "Chat", ms: 12))
+        controller.selftestRequestAbandon()
+        waitUntil(timeout: 2) { history.recent(limit: 5).count == 4 }
+        expect(history.recent(limit: 5).first?.audioPath == nil,
+               "live retention-off setting discards stalled audio")
+
+        controller.selftestBeginFinalization(session: "retention-on-late", now: 550)
+        controller.handleEngineEvent(.finalizeStarted(
+            session: "retention-on-late", mode: "Chat", audio: nil))
+        controller.handleEngineEvent(.transcript(
+            session: "retention-on-late", raw: "saved words",
+            deterministic: "Saved words.", mode: "Chat", ms: 12))
+        config.saveAudio = true
+        controller.selftestRequestAbandon()
+        waitUntil(timeout: 2) { history.recent(limit: 6).count == 5 }
+        expect(history.recent(limit: 6).first?.audioPath == "retention-on-late.flac",
+               "live retention-on setting adopts audio started without retention")
+
+        let now = ProcessInfo.processInfo.systemUptime
+        controller.selftestBeginFinalization(session: "progress", now: now - 101)
+        controller.handleEngineEvent(.finalizeProgress(
+            session: "progress", stage: "catchup", completed: 1, total: 2))
+        expect(controller.selftestStallOutcome(now: now + 1) == .waiting,
+               "current-session progress re-arms the stall timer")
+
+        controller.selftestBeginFinalization(session: "voice-stall", now: 600)
+        let selected = ScreenTextSelection(
+            text: "draft", element: AXUIElementCreateApplication(1),
+            identity: .unavailable, isEditable: false)
+        controller.selftestSetVoiceEdit(selection: selected)
+        controller.selftestRequestAbandon()
+        expect(supervisor.selftestCommands.last?["cmd"] as? String == "abandon_finalize",
+               "Voice Edit stall sends abandon_finalize")
+        controller.handleEngineEvent(.error(
+            session: "voice-stall", message: "abandon_finalize: no matching finalization"))
+        expect(!controller.selftestVoiceEditReleased(),
+               "stale abandon error leaves Voice Edit waiting for its bounded ack")
+        controller.handleEngineEvent(.final(
+            session: "voice-stall", text: "", raw: "", mode: "Raw",
+            cleanupMs: nil, cleanupWallMs: nil, cleanupApplied: false,
+            totalMs: nil, audio: nil, autoStopped: false))
+        expect(controller.selftestVoiceEditReleased(),
+               "Voice Edit abandon ack restores the hotkey")
+
+        controller.selftestBeginFinalization(session: "voice-no-ack", now: 700)
+        controller.selftestSetVoiceEdit(selection: selected)
+        controller.selftestRequestAbandon()
+        expect(waitUntil(timeout: 3) { controller.selftestVoiceEditReleased() },
+               "Voice Edit stall releases the hotkey without an engine ack")
+    }
+
+    #endif
     /// A final that ends in Velora with no text field to take it. A Home
     /// take, or one started over Velora's window, is a plain copy: History
     /// once, the "Copied to clipboard" notice, and no inserted notification

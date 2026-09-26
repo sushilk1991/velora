@@ -5,7 +5,7 @@ import Foundation
 enum EngineEvent {
     /// Engine finished STT startup and is ready for `start`. `setupComplete`
     /// snapshots whether the later writing-model setup has also finished.
-    case ready(setupComplete: Bool, sttModel: String?)
+    case ready(setupComplete: Bool, sttModel: String?, audioExt: String? = nil)
 
     /// First-run setup progress ("Downloading the speech model (1.6 GB)",
     /// fraction 0…1 when measurable). `phase == nil` clears the status.
@@ -24,7 +24,15 @@ enum EngineEvent {
     case partial(session: String, text: String)
 
     /// Raw transcript available (before LLM cleanup).
-    case transcript(session: String, raw: String, ms: Int)
+    case transcript(session: String, raw: String, deterministic: String?, mode: String?, ms: Int)
+
+    /// Archive identity arrives before STT work can stall.
+    case finalizeStarted(session: String, mode: String?, audio: String?)
+
+
+    /// One STT or cleanup piece finished; refresh the finalization stall timer.
+    case finalizeProgress(session: String, stage: String, completed: Int, total: Int)
+    case finalizeRecovered(session: String, raw: String, text: String, mode: String?)
 
     /// The engine reached its configured capture limit and has begun
     /// finalizing. Sent before STT/cleanup so the app can stop the microphone
@@ -127,7 +135,8 @@ enum EngineEvent {
         case "ready":
             return .ready(
                 setupComplete: object["setup_complete"] as? Bool ?? false,
-                sttModel: object["stt_model"] as? String)
+                sttModel: object["stt_model"] as? String,
+                audioExt: object["audio_ext"] as? String)
         case "loading":
             return .loading(
                 phase: (object["phase"] as? String).flatMap { $0.isEmpty ? nil : $0 },
@@ -145,7 +154,26 @@ enum EngineEvent {
             return .transcript(
                 session: object["session"] as? String ?? "",
                 raw: object["raw"] as? String ?? "",
+                deterministic: object["deterministic"] as? String,
+                mode: object["mode"] as? String,
                 ms: object["ms"] as? Int ?? 0)
+        case "finalize_started":
+            return .finalizeStarted(
+                session: object["session"] as? String ?? "",
+                mode: object["mode"] as? String,
+                audio: object["audio"] as? String)
+        case "finalize_progress":
+            return .finalizeProgress(
+                session: object["session"] as? String ?? "",
+                stage: object["stage"] as? String ?? "",
+                completed: object["completed"] as? Int ?? 0,
+                total: object["total"] as? Int ?? 0)
+        case "finalize_recovered":
+            return .finalizeRecovered(
+                session: object["session"] as? String ?? "",
+                raw: object["raw"] as? String ?? "",
+                text: object["text"] as? String ?? "",
+                mode: object["mode"] as? String)
         case "recording_auto_stopped":
             return .recordingAutoStopped(
                 session: object["session"] as? String ?? "",
