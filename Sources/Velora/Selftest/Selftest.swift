@@ -12646,6 +12646,24 @@ enum Selftest {
         window.alphaValue = 0
         defer { window.close() }
 
+        // Control: the same show in a plain window selects the whole Name,
+        // so the checks below fail without ShellWindow's clearing. Where
+        // AppKit gives an ordered-in window no first responder (GitHub's
+        // macOS runners), they would pass for nothing, so skip instead.
+        let plain = NSWindow(contentViewController: NSHostingController(
+            rootView: WindowShell { Color.clear } detail: { Detail() }))
+        plain.isReleasedWhenClosed = false
+        plain.alphaValue = 0
+        defer { plain.close() }
+        plain.orderFrontRegardless()
+        waitUntil(timeout: 0.4) { false }
+        let controlSelected = (plain.firstResponder as? NSTextView)?.selectedRange()
+        plain.orderOut(nil)
+        guard controlSelected == NSRange(location: 0, length: "My Mode".utf16.count) else {
+            print("  skip: shell focus checks (a plain window's show selected \(String(describing: controlSelected)), not the whole field)")
+            return
+        }
+
         for show in ["first", "second"] {
             window.orderFrontRegardless()
             waitUntil(timeout: 0.4) { false }
@@ -12668,20 +12686,6 @@ enum Selftest {
         expect(window.firstResponder is NSTextView,
                "showing a visible shell window keeps the field being edited")
         window.orderOut(nil)
-
-        // Control: the same show in a plain window selects the whole Name,
-        // so the first checks fail without ShellWindow's clearing.
-        let plain = NSWindow(contentViewController: NSHostingController(
-            rootView: WindowShell { Color.clear } detail: { Detail() }))
-        plain.isReleasedWhenClosed = false
-        plain.alphaValue = 0
-        defer { plain.close() }
-        plain.orderFrontRegardless()
-        waitUntil(timeout: 0.4) { false }
-        let controlSelected = (plain.firstResponder as? NSTextView)?.selectedRange()
-        expect(controlSelected == NSRange(location: 0, length: "My Mode".utf16.count),
-               "control: a plain window's show selects the field's text (got \(String(describing: controlSelected)))")
-        plain.orderOut(nil)
     }
 
     /// Home's Start Dictation reads Stop while listening, the same toggle
