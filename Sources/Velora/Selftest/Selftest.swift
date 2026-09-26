@@ -122,7 +122,7 @@ enum Selftest {
         testGlossaryBudget()
         testContextLifetime()
         testGlossaryCorpus()
-        if ProcessInfo.processInfo.environment["VELORA_LIVE_CONTEXT_SELFTEST"] == "1" {
+        if liveOptIn("VELORA_LIVE_CONTEXT_SELFTEST", "live screen context") {
             testLiveContext()
         }
         testModeApplicationAssignments()
@@ -172,6 +172,19 @@ enum Selftest {
         testOnboardingReturn()
         testStatsAverageKey()
         testWindowShellGeometry()
+        testShellWindowKeepsSize()
+        testShellFocusStartsEmpty()
+        testHomeDictationButton()
+        testOwnWindowInsertTargets()
+        testDictationIntent()
+        testHomeTakeHistoryRow()
+        testRetryDelivery()
+        testOwnWindowFinal()
+        testEngineStatusCaption()
+        testEngineUpdateStatus()
+        testEngineStatusFollowsState()
+        testHomeMicrophoneChooser()
+        testHomeMicrophoneRows()
         testShellCopy()
         testAudioInputDeviceResolution()
         testMicrophoneCaptureDeviceSelection()
@@ -207,7 +220,7 @@ enum Selftest {
         testInsertionBoundary()
         testInsertionContinuation()
         testStreamSettle()
-        if ProcessInfo.processInfo.environment["VELORA_STREAM_TYPING_E2E"] == "1" {
+        if liveOptIn("VELORA_STREAM_TYPING_E2E", "live Stream Typing insertion") {
             testLiveStreamTypingInsertion()
         }
         testEngineRestartDelay()
@@ -361,6 +374,22 @@ enum Selftest {
         }
         expect(waitUntil(timeout: 2) { ranDuringSettle },
                "the main queue keeps running while a settle waits")
+    }
+
+    /// Live tests open TextEdit and bring it to the front, taking the
+    /// owner's focus, so a default run (`make test`) skips them.
+    /// `VELORA_SELFTEST_LIVE=1` runs all of them; each test's own variable
+    /// runs just that one.
+    private static let liveOptInKey = "VELORA_SELFTEST_LIVE"
+
+    private static func liveOptIn(_ key: String, _ name: String) -> Bool {
+        let environment = ProcessInfo.processInfo.environment
+        if environment[liveOptInKey] == "1" || environment[key] == "1" {
+            return true
+        }
+
+        print("  skip: \(name) (activates TextEdit; set \(liveOptInKey)=1 or \(key)=1)")
+        return false
     }
 
     /// Opt-in signed/install-surface proof against a real TextEdit AX target.
@@ -9902,6 +9931,722 @@ enum Selftest {
         expect(2 * WindowShellMetrics.railInset + WindowShellMetrics.sidebarTopClearance
                 == WindowShellMetrics.trafficLightClearance,
                "the first rail row starts at trafficLightClearance, below both rail insets")
+    }
+
+    /// A shell window keeps the size it was given and its own minimum,
+    /// whatever its panes ask for: switching panes never resizes it, and
+    /// every pane accepts a resize down to the shell minimum. The panes'
+    /// content reflows instead. A hosting controller allowed to size the
+    /// window grew it to Home's ideal width on every show (1180 → 1432 pt
+    /// on screen) and pinned the minimum there, so Home could never shrink.
+    private static func testShellWindowKeepsSize() {
+        final class PaneBox: ObservableObject { @Published var wide = false }
+        struct Detail: View {
+            @ObservedObject var pane: PaneBox
+            let gridColumns = 13
+            let wideSpan = 8
+            let gap: CGFloat = 12
+
+            var body: some View {
+                if pane.wide {
+                    // A pane whose content asks for more than the window has.
+                    Color.clear.frame(minWidth: 1400, minHeight: 900)
+                } else {
+                    // Home's old grid: columns sized against the scroll view.
+                    ScrollView {
+                        HStack(spacing: gap) {
+                            Color.clear.frame(height: 40)
+                                .containerRelativeFrame(
+                                    .horizontal, count: gridColumns, span: wideSpan, spacing: gap)
+                            Color.clear.frame(height: 40)
+                                .containerRelativeFrame(
+                                    .horizontal, count: gridColumns,
+                                    span: gridColumns - wideSpan, spacing: gap)
+                        }
+                    }
+                }
+            }
+        }
+        let pane = PaneBox()
+        let root = WindowShell {
+            Color.clear
+        } detail: {
+            Detail(pane: pane)
+        }
+        let size = NSSize(width: 1180, height: 760)
+        let minimum = NSSize(width: 960, height: 620)
+        let window = MainWindowController.makeShellWindow(
+            rootView: root, title: "Selftest", size: size, minimumSize: minimum)
+        defer { window.close() }
+
+        // Let SwiftUI finish every layout pass it schedules.
+        func settle() {
+            waitUntil(timeout: 0.3) { false }
+            window.layoutIfNeeded()
+        }
+        let tolerance: CGFloat = 1
+        func contentSize() -> NSSize {
+            window.contentRect(forFrameRect: window.frame).size
+        }
+        func matches(_ expected: NSSize) -> Bool {
+            let content = contentSize()
+            return abs(content.width - expected.width) <= tolerance
+                && abs(content.height - expected.height) <= tolerance
+        }
+
+        settle()
+        expect(matches(size),
+               "a shell window keeps its size after its content lays out (asked \(size), got \(contentSize()))")
+        expect(window.contentMinSize == minimum,
+               "a shell window keeps its own minimum size (asked \(minimum), got \(window.contentMinSize))")
+
+        for wide in [true, false] {
+            pane.wide = wide
+            settle()
+            expect(matches(size),
+                   "switching to the \(wide ? "wide" : "grid") pane keeps the window at \(size) (got \(contentSize()))")
+        }
+
+        for wide in [false, true] {
+            pane.wide = wide
+            window.setContentSize(minimum)
+            settle()
+            expect(matches(minimum),
+                   "the \(wide ? "wide" : "grid") pane lets the window shrink to the shell minimum \(minimum) (got \(contentSize()))")
+            window.setContentSize(size)
+            settle()
+        }
+    }
+
+    /// Showing a shell window selects no text. AppKit makes the first key
+    /// view first responder whenever a window orders in and selects all of
+    /// its text, so one keystroke replaced a mode's whole Name. The window
+    /// is transparent here: it orders in without anything showing.
+    private static func testShellFocusStartsEmpty() {
+        struct Detail: View {
+            @State var name = "My Mode"
+
+            var body: some View {
+                TextField("Name", text: $name)
+            }
+        }
+        let window = MainWindowController.makeShellWindow(
+            rootView: WindowShell { Color.clear } detail: { Detail() },
+            title: "Selftest", size: NSSize(width: 1180, height: 760),
+            minimumSize: NSSize(width: 960, height: 620))
+        window.alphaValue = 0
+        defer { window.close() }
+
+        for show in ["first", "second"] {
+            window.orderFrontRegardless()
+            waitUntil(timeout: 0.4) { false }
+            let selected = (window.firstResponder as? NSTextView)?.selectedRange()
+            expect(selected == nil,
+                   "the \(show) show of a shell window leaves text unselected (got \(String(describing: selected)))")
+            window.orderOut(nil)
+        }
+
+        // Tab still reaches the field, and showing a window that is already
+        // up leaves the user's editing alone.
+        window.orderFrontRegardless()
+        waitUntil(timeout: 0.4) { false }
+        window.selectNextKeyView(nil)
+        waitUntil(timeout: 0.2) { false }
+        expect(window.firstResponder is NSTextView,
+               "Tab moves into a shell window's first field (got \(String(describing: window.firstResponder)))")
+        window.orderFrontRegardless()
+        waitUntil(timeout: 0.2) { false }
+        expect(window.firstResponder is NSTextView,
+               "showing a visible shell window keeps the field being edited")
+        window.orderOut(nil)
+
+        // Control: the same show in a plain window selects the whole Name,
+        // so the first checks fail without ShellWindow's clearing.
+        let plain = NSWindow(contentViewController: NSHostingController(
+            rootView: WindowShell { Color.clear } detail: { Detail() }))
+        plain.isReleasedWhenClosed = false
+        plain.alphaValue = 0
+        defer { plain.close() }
+        plain.orderFrontRegardless()
+        waitUntil(timeout: 0.4) { false }
+        let controlSelected = (plain.firstResponder as? NSTextView)?.selectedRange()
+        expect(controlSelected == NSRange(location: 0, length: "My Mode".utf16.count),
+               "control: a plain window's show selects the field's text (got \(String(describing: controlSelected)))")
+        plain.orderOut(nil)
+    }
+
+    /// Home's Start Dictation reads Stop while listening, the same toggle
+    /// as the menubar item, and is disabled while a take is being written
+    /// up (the toggle does nothing then).
+    private static func testHomeDictationButton() {
+        let cases: [(DictationController.Phase, String, Bool)] = [
+            (.idle, "Start Dictation", true),
+            (.starting(locked: true), "Stop Dictation", true),
+            (.recording(locked: true), "Stop Dictation", true),
+            (.recording(locked: false), "Stop Dictation", true),
+            (.transcribing, "Start Dictation", false),
+            (.editing, "Start Dictation", false),
+        ]
+        for (phase, title, enabled) in cases {
+            expect(HomeDictation.title(for: phase) == title,
+                   "Home's dictation button reads \(title) in \(phase.label) (got \(HomeDictation.title(for: phase)))")
+            expect(HomeDictation.isEnabled(for: phase) == enabled,
+                   "Home's dictation button is \(enabled ? "enabled" : "disabled") in \(phase.label)")
+        }
+    }
+
+    /// Dictating into Velora's own window lands only in a text field. Any
+    /// NSResponder answers insertText:, so a window or a plain view used to
+    /// count as a text target: Home's Start Dictation showed a success
+    /// check while the words went nowhere but the clipboard.
+    private static func testOwnWindowInsertTargets() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled], backing: .buffered, defer: true)
+        expect(!TextInserter.insert("hello", mode: nil, into: window),
+               "a window with no field focused is not an own-window text target")
+        expect(!TextInserter.insert("hello", mode: nil, into: NSView()),
+               "a plain view is not an own-window text target")
+
+        let field = NSTextView()
+        expect(TextInserter.insert("hello", mode: nil, into: field),
+               "a focused text view takes an own-window insert")
+        expect(field.string == "hello",
+               "the own-window insert puts the words in the field (got \"\(field.string)\")")
+
+        // A read-only text view drops the words while insertText returns,
+        // and SwiftUI's hosting view (first responder after a click on a
+        // plain control) takes none.
+        let readOnly = NSTextView()
+        readOnly.string = "notes"
+        readOnly.isEditable = false
+        expect(!TextInserter.insert("hello", mode: nil, into: readOnly),
+               "a read-only text view is not an own-window text target")
+        expect(readOnly.string == "notes",
+               "a read-only text view keeps its text (got \"\(readOnly.string)\")")
+        expect(!TextInserter.insert("hello", mode: nil, into: NSHostingView(rootView: Text("Home"))),
+               "SwiftUI's hosting view is not an own-window text target")
+    }
+
+    /// Home's Start Dictation only copies. Its take is fixed as
+    /// clipboard-only when it starts, so switching to Slack before it
+    /// finishes neither pastes into Slack nor formats or logs it as Slack.
+    /// The hotkey and menubar keep typing into the app in front at start.
+    private static func testDictationIntent() {
+        let slack = "com.tinyspeck.slackmacgap"
+        let mail = "com.apple.mail"
+
+        let home = DictationIntent(delivery: .clipboardOnly, startedInVelora: true)
+        let homeTarget = home.targetApp(override: nil, liveExternal: slack, tracked: mail)
+        expect(homeTarget == nil,
+               "a Home take has no target app (got \(homeTarget ?? "nil"))")
+
+        // startRecording's context for no target: no bundle, app or mode,
+        // and no screen entities to refine a site mode, so the engine picks
+        // the default mode and no app name reaches the cleanup prompt.
+        let engineContext = AppContext(bundleID: homeTarget, appName: homeTarget)
+        let payload = engineContext.payload
+        expect(payload["bundle_id"] is NSNull && payload["app_name"] is NSNull,
+               "a Home take's engine context names no app")
+        expect(payload["mode"] is NSNull,
+               "a Home take asks for no mode, so the engine uses the default")
+        expect(ScreenContext.entities(for: nil, category: nil).isEmpty,
+               "a Home take reads no screen entities")
+        expect(ModeCategory.displayName(forBundleID: homeTarget) == "Text",
+               "a Home take's HUD chip names no app's mode")
+
+        // Fixed at start: whichever app is in front at the final, a Home
+        // take types nothing and copies with the neutral notice.
+        for veloraInFront in [false, true] {
+            let front = veloraInFront ? "Velora" : "Slack"
+            expect(!home.mayType,
+                   "a Home take ending with \(front) in front types nothing")
+            expect(home.copiesQuietly(veloraInFront: veloraInFront),
+                   "a Home take ending with \(front) in front is a plain copy")
+        }
+
+        let hotkey = DictationIntent(delivery: .frontApp, startedInVelora: false)
+        expect(hotkey.targetApp(override: nil, liveExternal: slack, tracked: mail) == slack,
+               "the hotkey targets the app in front at start")
+        expect(hotkey.targetApp(override: nil, liveExternal: nil, tracked: mail) == mail,
+               "over Velora the hotkey targets the last app tracked")
+        expect(hotkey.mayType, "a hotkey take may type")
+        expect(!hotkey.copiesQuietly(veloraInFront: true),
+               "a take started in another app that ends in Velora is not a plain copy")
+
+        let overVelora = DictationIntent(delivery: .frontApp, startedInVelora: true)
+        expect(overVelora.copiesQuietly(veloraInFront: true),
+               "a take started and ended over Velora's window is a plain copy")
+        expect(!overVelora.copiesQuietly(veloraInFront: false),
+               "a take started over Velora that ends in another app goes on to the paste path")
+
+        // Home's Stop on a take started in Slack: Velora is in front on
+        // purpose, so the take is a plain copy. Back in Slack by the final,
+        // it pastes there as usual.
+        var stoppedFromHome = hotkey
+        stoppedFromHome.stoppedInVelora = true
+        expect(stoppedFromHome.copiesQuietly(veloraInFront: true),
+               "a take stopped from Home with Velora in front is a plain copy")
+        expect(!stoppedFromHome.copiesQuietly(veloraInFront: false),
+               "a take stopped from Home that ends in its own app goes on to the paste path")
+
+        // Spoken commands: a Home take copies "new line" as words.
+        let said = "new line"
+        let homeCommand = home.voiceCommand(text: said, raw: said, enabled: true)
+        expect(homeCommand == nil,
+               "a Home take presses nothing for \"\(said)\" (got \(String(describing: homeCommand)))")
+        expect(hotkey.voiceCommand(text: said, raw: said, enabled: true) == .pressReturn,
+               "a hotkey take presses Return for \"\(said)\"")
+        expect(hotkey.voiceCommand(text: said, raw: said, enabled: false) == nil,
+               "with spoken commands off, a hotkey take presses nothing")
+
+        // History files a Home take under Velora; other takes keep their app.
+        let homeRow = home.historyContext(engineContext)
+        expect(homeRow?.bundleID == DictationRecord.ownBundleID && homeRow?.appName == "Velora",
+               "a Home take's History row names Velora (got \(homeRow?.appName ?? "nil"))")
+        let slackContext = AppContext(bundleID: slack, appName: "Slack")
+        let slackRow = hotkey.historyContext(slackContext)
+        expect(slackRow?.bundleID == slack && slackRow?.appName == "Slack",
+               "a hotkey take's History row names the app it went to")
+    }
+
+    /// A History row filed under Velora (a Home take) shows, filters and
+    /// counts in Stats as Velora, and has nowhere to paste back into and
+    /// no app to name to the engine. A Slack row keeps both.
+    private static func testHomeTakeHistoryRow() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-home-row-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let home = DictationIntent(delivery: .clipboardOnly, startedInVelora: true)
+        let app = home.historyContext(AppContext(bundleID: nil, appName: nil))
+        let homeRecord = DictationRecord(
+            timestamp: Date(), bundleID: app?.bundleID, appName: app?.appName,
+            raw: "note to self", final: "Note to self.", mode: nil, durationMs: 900, cleanupMs: nil)
+        let slackRecord = DictationRecord(
+            timestamp: Date(), bundleID: "com.tinyspeck.slackmacgap", appName: "Slack",
+            raw: "hi", final: "Hi.", mode: nil, durationMs: 900, cleanupMs: nil)
+
+        let store = HistoryStore(url: directory.appendingPathComponent("history.sqlite3"))
+        store.insert(homeRecord)
+        store.insert(slackRecord)
+        let rows = store.page(limit: 10, offset: 0, search: nil)
+        let names = Set(rows.compactMap(\.appName))
+        expect(names == ["Velora", "Slack"],
+               "History rows name Velora and Slack, never Unknown app (got \(names.sorted()))")
+
+        let found = store.page(limit: 10, offset: 0, search: "Velora")
+        expect(found.map(\.final) == ["Note to self."],
+               "searching History for Velora finds the Home take (got \(found.map(\.final)))")
+
+        let summary = store.rangeSummary(daysBack: nil)
+        let slices = summary.apps.map(\.name).sorted()
+        expect(slices == ["Slack", "Velora"],
+               "Stats counts the Home take under Velora (got \(slices))")
+        expect(summary.appBundles["Velora"] == DictationRecord.ownBundleID,
+               "Stats shows Velora's icon for the Home take")
+
+        expect(homeRecord.targetBundleID == nil && homeRecord.targetAppName == nil,
+               "a row filed under Velora has no app to paste into or name to the engine")
+        expect(slackRecord.targetBundleID == "com.tinyspeck.slackmacgap"
+                && slackRecord.targetAppName == "Slack",
+               "a Slack row pastes back into Slack and names it to the engine")
+    }
+
+    /// Retry replays the start the user asked for, including one a guard
+    /// refused before any take began: a refused Home start retries
+    /// clipboard-only, and a refused hotkey press after it retries into the
+    /// front app. Driven through the controller's own entry points; the
+    /// refusal comes before the microphone check, so nothing is captured
+    /// and no permission prompt can appear. The pill stays closed
+    /// throughout, so the owner's screen shows nothing.
+    private static func testRetryDelivery() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-retry-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove() }
+
+        // Windows this process has on screen, per the window server. Not
+        // matched by level: the pill's .floating is any floating panel's
+        // level. Anything on screen that wasn't before the test is the
+        // test's own, sampled while the run loop turns and once cleanup is
+        // done.
+        func windowsOnScreen() -> Set<Int> {
+            let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID)
+                as? [[String: Any]] ?? []
+            return Set(windows.compactMap { window -> Int? in
+                guard (window[kCGWindowOwnerPID as String] as? pid_t) == getpid() else {
+                    return nil
+                }
+
+                return window[kCGWindowNumber as String] as? Int
+            })
+        }
+        let before = windowsOnScreen()
+        var pillsSeen = 0
+        func samplePills() -> Bool {
+            pillsSeen = max(pillsSeen, windowsOnScreen().subtracting(before).count)
+            return false
+        }
+
+        let hud = HUDPanel()
+        let controller = DictationController(
+            supervisor: EngineSupervisor(), contextTracker: AppContextTracker(), hud: hud,
+            history: HistoryStore(url: directory.appendingPathComponent("history.sqlite3")),
+            sounds: SoundPlayer(cues: []), dictionary: makeSyncRepository(fixture))
+        var starts = 0
+        controller.recordingBlockReason = {
+            starts += 1
+            return "Selftest: start refused"
+        }
+
+        do {
+            // Closed, the pill never orders front: not for the error, and
+            // not for the standby a hidden pill falls back to when it is
+            // kept on screen.
+            let savedVisible = AppConfig.shared.hudVisible
+            defer { AppConfig.shared.hudVisible = savedVisible }
+            AppConfig.shared.hudVisible = false
+
+            // The error pill's Retry runs the start a quarter second later.
+            // Wait for that start, not a fixed time: under load the delayed
+            // start can land after any fixed wait, and then into the next
+            // step, where it overwrites that step's delivery.
+            // After the first start, a further 0.3 s (longer than the Retry
+            // delay) gives a second start time to land, so "once" can fail.
+            let retryTimeout: TimeInterval = 3
+            let secondStartWindow: TimeInterval = 0.3
+            func retry() {
+                let startsBefore = starts
+                hud.model.onRetry?()
+                waitUntil(timeout: retryTimeout) {
+                    _ = samplePills()
+                    return starts > startsBefore
+                }
+                waitUntil(timeout: secondStartWindow) {
+                    _ = samplePills()
+                    return starts > startsBefore + 1
+                }
+                expect(starts == startsBefore + 1,
+                       "Retry reaches startRecording once (got \(starts - startsBefore) starts)")
+            }
+
+            controller.toggleFromHome()
+            waitUntil(timeout: 0.1, samplePills)
+            expect(controller.retryDelivery == .clipboardOnly,
+                   "a refused Home start is remembered as clipboard-only (got \(controller.retryDelivery))")
+            retry()
+            expect(controller.retryDelivery == .clipboardOnly,
+                   "Retry after a refused Home start stays clipboard-only (got \(controller.retryDelivery))")
+
+            // A Home take copies "new line" as words rather than pressing Return.
+            let homeTake = DictationIntent(delivery: controller.retryDelivery, startedInVelora: true)
+            expect(homeTake.voiceCommand(text: "new line", raw: "new line", enabled: true) == nil,
+                   "a take from Home's button skips spoken commands")
+
+            controller.hotkeyDown()
+            controller.hotkeyUp()
+            waitUntil(timeout: 0.1, samplePills)
+            expect(controller.retryDelivery == .frontApp,
+                   "a refused hotkey press after a Home start targets the front app (got \(controller.retryDelivery))")
+            retry()
+            expect(controller.retryDelivery == .frontApp,
+                   "Retry after a refused hotkey press types into the front app (got \(controller.retryDelivery))")
+
+            hud.transition(to: .hidden(.cancel))
+            waitUntil(timeout: 0.1, samplePills)
+        }
+
+        // The owner's setting is back; the pill must not come back with it.
+        waitUntil(timeout: 0.4, samplePills)
+        expect(pillsSeen == 0,
+               "the refused starts put no pill on the owner's screen (saw \(pillsSeen))")
+    }
+
+    /// A final that ends in Velora with no text field to take it. A Home
+    /// take, or one started over Velora's window, is a plain copy: History
+    /// once, the "Copied to clipboard" notice, and no inserted notification
+    /// (onboarding's Finish stays locked). A take started in another app
+    /// with Velora brought forward mid-take goes on to the paste path, whose
+    /// focus check warns "Focus changed. Copied".
+    private static func testOwnWindowFinal() {
+        final class Tally {
+            var history = 0
+            var typed = 0
+            var copied = 0
+            var posted = 0
+        }
+
+        func deliver(
+            _ intent: DictationIntent, veloraInFront: Bool, into responder: NSResponder,
+            alreadyRecorded: Bool = false
+        ) -> (OwnWindowFinal.Outcome, Tally) {
+            let tally = Tally()
+            let observer = NotificationCenter.default.addObserver(
+                forName: .veloraDictationInserted, object: nil, queue: nil
+            ) { _ in tally.posted += 1 }
+            defer { NotificationCenter.default.removeObserver(observer) }
+
+            let outcome = OwnWindowFinal.deliver(
+                "hello", intent: intent, veloraInFront: veloraInFront,
+                historyAlreadyRecorded: alreadyRecorded,
+                typeIntoOwnWindow: { TextInserter.insert("hello", mode: nil, into: responder) },
+                recordHistory: { tally.history += 1 },
+                typed: { tally.typed += 1 },
+                copied: { tally.copied += 1 })
+            return (outcome, tally)
+        }
+
+        let home = DictationIntent(delivery: .clipboardOnly, startedInVelora: true)
+        let overVelora = DictationIntent(delivery: .frontApp, startedInVelora: true)
+        let fromSlack = DictationIntent(delivery: .frontApp, startedInVelora: false)
+        let readOnly = NSTextView()
+        readOnly.isEditable = false
+        let hosting = NSHostingView(rootView: Text("Home"))
+
+        let copies: [(String, DictationIntent, NSResponder)] = [
+            ("a Home take over a read-only text view", home, readOnly),
+            ("a Home take over SwiftUI's hosting view", home, hosting),
+            ("a take started over Velora on a read-only text view", overVelora, readOnly),
+            ("a take started over Velora on SwiftUI's hosting view", overVelora, hosting),
+        ]
+        for (name, intent, responder) in copies {
+            let (outcome, tally) = deliver(intent, veloraInFront: true, into: responder)
+            expect(outcome == .copied, "\(name) is a plain copy (got \(outcome))")
+            expect(tally.history == 1, "\(name) records History once (got \(tally.history))")
+            expect(tally.copied == 1 && tally.typed == 0,
+                   "\(name) shows the copied notice, not the inserted check")
+            expect(tally.posted == 0, "\(name) posts no inserted notification")
+        }
+
+        let (_, recorded) = deliver(home, veloraInFront: true, into: readOnly, alreadyRecorded: true)
+        expect(recorded.history == 0,
+               "a take History already holds is not recorded again (got \(recorded.history))")
+
+        // A Home take never types, not into Slack and not into a field of
+        // Velora's own.
+        let field = NSTextView()
+        for veloraInFront in [false, true] {
+            let (outcome, tally) = deliver(home, veloraInFront: veloraInFront, into: field)
+            expect(outcome == .copied && tally.posted == 0 && field.string.isEmpty,
+                   "a Home take ending \(veloraInFront ? "over Velora's field" : "in Slack") is only copied (got \(outcome), \"\(field.string)\")")
+        }
+
+        // Onboarding's try-it box still takes a take started over Velora.
+        let tryIt = NSTextView()
+        let (typed, typedTally) = deliver(overVelora, veloraInFront: true, into: tryIt)
+        expect(typed == .typed && tryIt.string == "hello",
+               "a take over Velora types into its focused field (got \(typed), \"\(tryIt.string)\")")
+        expect(typedTally.history == 1 && typedTally.posted == 1 && typedTally.copied == 0,
+               "a typed own-window take records History once and posts the inserted notification")
+
+        let (warned, warnedTally) = deliver(fromSlack, veloraInFront: true, into: readOnly)
+        expect(warned == .targetApp,
+               "a take started in Slack that ends in Velora goes on to the Focus changed warning (got \(warned))")
+        expect(warnedTally.history == 0 && warnedTally.copied == 0 && warnedTally.posted == 0,
+               "the paste path, not the own-window branch, records and reports that take")
+
+        // A take meant for Slack never types into a Velora field that
+        // happens to be focused when it ends.
+        let focusedField = NSTextView()
+        let (external, externalTally) = deliver(fromSlack, veloraInFront: true, into: focusedField)
+        expect(external == .targetApp && focusedField.string.isEmpty,
+               "a take started in Slack leaves Velora's focused field empty (got \(external), \"\(focusedField.string)\")")
+        expect(externalTally.history == 0 && externalTally.typed == 0 && externalTally.posted == 0,
+               "a take started in Slack goes on to the Focus changed warning, not the inserted check")
+
+        // Home's Stop on that take: a plain copy, still never typed there.
+        var stoppedFromHome = fromSlack
+        stoppedFromHome.stoppedInVelora = true
+        let (stopped, stoppedTally) = deliver(stoppedFromHome, veloraInFront: true, into: focusedField)
+        expect(stopped == .copied && focusedField.string.isEmpty,
+               "a Slack take stopped from Home is copied, not typed (got \(stopped), \"\(focusedField.string)\")")
+        expect(stoppedTally.history == 1 && stoppedTally.copied == 1 && stoppedTally.posted == 0,
+               "a Slack take stopped from Home records History once and shows Copied to clipboard")
+    }
+
+    /// The sidebar's engine line names the state, not the machinery:
+    /// "Starting…", "Loading models…" while setup reports progress, then
+    /// "Ready" with the version. An engine that reports a failure shows the
+    /// supervisor's own copy, which names the fix; a start that reports
+    /// nothing for `startupWait` says it is stuck and what to do, instead
+    /// of "Starting…" forever.
+    private static func testEngineStatusCaption() {
+        let wait = EngineStatusLine.startupWait
+        let stalled = "Engine hasn't started. Quit and reopen Velora."
+        let uvMissing = "uv not found. Install it from https://astral.sh/uv"
+        let model = "Loading the speech model…"
+        let cases: [(state: EngineSupervisor.State, loading: String?, waited: TimeInterval, caption: String)] = [
+            (.launching, nil, 0, "Starting…"),
+            (.connecting, nil, wait - 1, "Starting…"),
+            (.launching, model, wait * 10, "Loading models…"),
+            (.ready, nil, 0, "Ready · 9.9.9"),
+            (.ready, model, wait * 10, "Ready · 9.9.9"),
+            (.launching, nil, wait, stalled),
+            (.connecting, nil, wait * 10, stalled),
+            (.stopped, nil, wait, stalled),
+            (.degraded(uvMissing), nil, 0, uvMissing),
+            (.degraded(uvMissing), model, wait * 10, uvMissing),
+        ]
+        for item in cases {
+            let caption = EngineStatusLine.caption(
+                state: item.state, loading: item.loading, waited: item.waited, version: "9.9.9")
+            expect(caption == item.caption,
+                   "the engine line reads \(item.caption) (\(item.state), loading \(item.loading ?? "none"), "
+                   + "waited \(Int(item.waited)) s; got \(caption))")
+        }
+    }
+
+    /// An update copies the new engine over the old one but keeps its
+    /// `.venv`, so `uv run` re-syncs dependencies before the socket is up,
+    /// which can outlast `startupWait` on a slow network. The line says the
+    /// engine is updating, not that it is stuck: quitting, as the stuck
+    /// message says, would kill the sync.
+    private static func testEngineUpdateStatus() {
+        let pastWait = Date().addingTimeInterval(EngineStatusLine.startupWait + 1)
+        let stalled = "Engine hasn't started. Quit and reopen Velora."
+        func caption(firstBootstrap: Bool, engineRefreshed: Bool) -> (EngineSupervisor, String) {
+            let supervisor = EngineSupervisor()
+            supervisor.simulateSpawn(firstBootstrap: firstBootstrap, engineRefreshed: engineRefreshed)
+            let model = EngineStatusModel(supervisor: supervisor, version: "9.9.9")
+            model.refresh(now: pastWait)
+            return (supervisor, model.caption)
+        }
+
+        let (updated, updating) = caption(firstBootstrap: false, engineRefreshed: true)
+        expect(updating == EngineSupervisor.updatingStatus,
+               "an updated engine's start reads \(EngineSupervisor.updatingStatus) past startupWait (got \(updating))")
+
+        // First run keeps its setup message, which the line calls loading.
+        let (_, firstRun) = caption(firstBootstrap: true, engineRefreshed: true)
+        expect(firstRun == "Loading models…",
+               "a first-run start reads Loading models… past startupWait (got \(firstRun))")
+
+        // No update and no report: still a stall.
+        let (_, quiet) = caption(firstBootstrap: false, engineRefreshed: false)
+        expect(quiet == stalled, "a quiet start without an update reads as stuck (got \(quiet))")
+
+        // Ready ends the update, so a later respawn is a plain start again.
+        updated.engineClient(updated.client, didReceive: .ready(setupComplete: false, sttModel: nil))
+        updated.simulateSpawn(firstBootstrap: false, engineRefreshed: false)
+        expect(updated.loadingStatus == nil,
+               "a respawn after the updated engine was ready shows no update status "
+               + "(got \(updated.loadingStatus ?? "none"))")
+    }
+
+    /// A crash takes a ready engine to degraded with no loading or status
+    /// reply, so the supervisor posts its state change and the line leaves
+    /// "Ready" for the reason at once, without polling.
+    private static func testEngineStatusFollowsState() {
+        let supervisor = EngineSupervisor()
+        let model = EngineStatusModel(supervisor: supervisor, version: "9.9.9")
+        var posted: [EngineSupervisor.State] = []
+        let observer = NotificationCenter.default.addObserver(
+            forName: .veloraEngineStateChanged, object: supervisor, queue: .main
+        ) { note in
+            posted.append((note.object as? EngineSupervisor)?.state ?? .stopped)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        // Past the old one-second poll, so a poll can't pass for the post.
+        let settle: TimeInterval = 1.5
+        supervisor.simulateState(.ready)
+        waitUntil(timeout: settle) { model.caption == "Ready · 9.9.9" }
+        expect(model.caption == "Ready · 9.9.9", "the line reads Ready once ready (got \(model.caption))")
+
+        let reason = "Engine stopped (status 9). Restarting in 2s"
+        supervisor.simulateState(.degraded(reason))
+        waitUntil(timeout: settle) { model.caption == reason }
+        expect(posted == [.ready, .degraded(reason)],
+               "ready → degraded posts veloraEngineStateChanged (got \(posted))")
+        expect(model.caption == reason && model.state == .degraded(reason),
+               "a crash after ready turns the line to the reason (got \(model.caption))")
+    }
+
+    /// Home's microphone chooser names the chosen mic, and an unplugged
+    /// chosen mic keeps a checked row, worded as in Settings and the pill,
+    /// instead of a selection no row matches.
+    private static func testHomeMicrophoneChooser() {
+        let devices = [AudioInputDevices.Device(uid: "usb", name: "Studio Mic", id: 1)]
+        expect(HomeMicrophone.value(selected: nil, devices: devices) == "System Default",
+               "no chosen mic reads System Default")
+        expect(HomeMicrophone.value(selected: "usb", devices: devices) == "Studio Mic",
+               "a connected chosen mic reads its name")
+        expect(HomeMicrophone.unplugged(selected: "usb", devices: devices) == nil,
+               "a connected chosen mic needs no extra row")
+        expect(HomeMicrophone.unplugged(selected: nil, devices: devices) == nil,
+               "System Default needs no extra row")
+
+        let value = HomeMicrophone.value(selected: "gone", devices: devices)
+        expect(value == "Microphone Not Connected",
+               "an unplugged chosen mic reads Microphone Not Connected (got \(value))")
+        expect(HomeMicrophone.unplugged(selected: "gone", devices: devices) == "gone",
+               "an unplugged chosen mic keeps a row tagged with its id, so the menu checks it")
+    }
+
+    /// Home's microphone rows select through the chooser's own binding:
+    /// System Default, a connected mic, and the unplugged chosen one, which
+    /// keeps a checked row of its own. The rows' titles and ids are checked
+    /// on every macOS; from macOS 15, NSHostingMenu builds the NSMenu
+    /// SwiftUI shows for the chooser, and its items run the Picker's
+    /// selection.
+    private static func testHomeMicrophoneRows() {
+        let builtin = AudioInputDevices.Device(uid: "builtin", name: "MacBook Pro Microphone", id: 1)
+        typealias Row = HomeMicrophoneRows.Row
+        expect(HomeMicrophoneRows.systemDefault == Row(title: "System Default", uid: nil),
+               "the first row is System Default, selecting no microphone id")
+
+        let unpluggedRows = HomeMicrophoneRows.choices(selected: "usb-gone", devices: [builtin])
+        expect(unpluggedRows == [
+                   Row(title: "MacBook Pro Microphone", uid: "builtin"),
+                   Row(title: HomeMicrophone.unpluggedRowTitle, uid: "usb-gone"),
+               ],
+               "an unplugged chosen mic keeps its own row after the connected ones (got \(unpluggedRows))")
+        let connectedRows = HomeMicrophoneRows.choices(selected: "builtin", devices: [builtin])
+        expect(connectedRows == [Row(title: "MacBook Pro Microphone", uid: "builtin")],
+               "a connected chosen mic has no extra row (got \(connectedRows))")
+
+        guard #available(macOS 15, *) else {
+            return
+        }
+
+        final class Choice {
+            var uid: String? = "usb-gone"
+        }
+        let choice = Choice()
+        let binding = Binding<String?>(get: { choice.uid }, set: { choice.uid = $0 })
+        let devices = [AudioInputDevices.Device(uid: "builtin", name: "MacBook Pro Microphone", id: 1)]
+        let menu = NSHostingMenu(rootView: HeaderMenuChoices(
+            label: "Microphone", selection: binding,
+            options: HomeMicrophoneRows(selected: choice.uid, devices: devices)))
+        menu.update()
+
+        func index(of title: String) -> Int? {
+            menu.items.firstIndex { $0.title == title }
+        }
+        let unplugged = index(of: HomeMicrophone.unpluggedRowTitle)
+        expect(unplugged.map { menu.items[$0].state } == .on,
+               "the unplugged chosen mic's row is checked (items \(menu.items.map(\.title)))")
+
+        let picks: [(String, String?)] = [
+            ("MacBook Pro Microphone", "builtin"),
+            ("System Default", nil),
+            (HomeMicrophone.unpluggedRowTitle, "usb-gone"),
+        ]
+        for (title, uid) in picks {
+            guard let row = index(of: title) else {
+                expect(false, "the chooser lists \(title) (items \(menu.items.map(\.title)))")
+                continue
+            }
+
+            menu.performActionForItem(at: row)
+            waitUntil(timeout: 0.2) { choice.uid == uid }
+            expect(choice.uid == uid,
+                   "choosing \(title) sets the microphone to \(uid ?? "nil") (got \(choice.uid ?? "nil"))")
+        }
     }
 
     // MARK: - Shell copy

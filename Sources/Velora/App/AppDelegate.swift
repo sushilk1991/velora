@@ -126,6 +126,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Settings forms must agree without a notification round-trip.
     private var settingsModel: SettingsModel?
     private var mainController: MainWindowController?
+    /// The dictation phase for Home's Start/Stop button.
+    private let dictationActivity = DictationActivity()
     private var settingsController: SettingsWindowController?
     private var aboutController: AboutWindowController?
     private var meetingNotesController: MeetingNotesWindowController?
@@ -918,10 +920,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 meetingCoordinator: meetingCoordinator,
                 meetingProcessor: meetingProcessor,
                 actions: MainWindowActions(
-                    toggleDictation: { [weak self] in self?.dictation.toggleFromMenu() },
+                    toggleDictation: { [weak self] in self?.dictation.toggleFromHome() },
                     startMeeting: { [weak self] in self?.meetingCoordinator.startManual() },
                     openSettings: { [weak self] in self?.showSettings() },
-                    openMeetingNotes: { [weak self] id in self?.showMeetingNotes(meetingID: id) }))
+                    openMeetingNotes: { [weak self] id in self?.showMeetingNotes(meetingID: id) },
+                    dictation: dictationActivity))
         }
         mainController?.show(selecting: pane)
     }
@@ -1054,6 +1057,7 @@ extension AppDelegate: EngineSupervisorDelegate {
 
 extension AppDelegate: DictationControllerDelegate {
     func dictationController(_ controller: DictationController, didChangePhase phase: DictationController.Phase) {
+        dictationActivity.phase = phase
         switch phase {
         case .idle:
             statusController.setIconState(.idle)

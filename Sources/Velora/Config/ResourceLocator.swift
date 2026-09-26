@@ -50,6 +50,9 @@ enum ResourceLocator {
         /// then points uv's caches at Application Support too, so nothing is
         /// ever written into the signed bundle.
         let isBundled: Bool
+        /// True when this call copied the bundled engine in: after an update,
+        /// or on first run. A kept `.venv` then re-syncs its dependencies.
+        var refreshed = false
     }
 
     /// `~/Library/Application Support/Velora` — home for the synced engine
@@ -95,7 +98,8 @@ enum ResourceLocator {
         }
         if let bundled = bundledEngineDirectory,
            let synced = syncBundledEngine(from: bundled) {
-            return EngineLocation(directory: synced, isBundled: true)
+            return EngineLocation(
+                directory: synced.directory, isBundled: true, refreshed: synced.refreshed)
         }
         if let baked = Bundle.main.object(forInfoDictionaryKey: "VeloraEngineDir") as? String,
            !baked.isEmpty {
@@ -114,8 +118,9 @@ enum ResourceLocator {
     /// create the venv next to it (the signed bundle is never written to).
     /// Copies when the target is missing or its `.velora-build` stamp differs
     /// from the bundle's; the target's `.venv` is preserved across syncs so
-    /// upgrades don't re-download Python dependencies from scratch.
-    private static func syncBundledEngine(from bundled: URL) -> URL? {
+    /// upgrades don't re-download Python dependencies from scratch. Returns
+    /// the target and whether this call copied into it.
+    private static func syncBundledEngine(from bundled: URL) -> (directory: URL, refreshed: Bool)? {
         let fm = FileManager.default
         let target = applicationSupportDirectory.appendingPathComponent("engine", isDirectory: true)
         let stampName = ".velora-build"
@@ -127,7 +132,7 @@ enum ResourceLocator {
         let targetUsable = fm.fileExists(
             atPath: target.appendingPathComponent("pyproject.toml").path)
         if targetUsable, let stamp = bundledStamp, !stamp.isEmpty, readStamp(target) == stamp {
-            return target
+            return (target, false)
         }
         do {
             try fm.createDirectory(at: target, withIntermediateDirectories: true)
@@ -143,7 +148,7 @@ enum ResourceLocator {
             }
             NSLog("Velora: synced bundled engine (build %@) → %@",
                   bundledStamp ?? "unstamped", target.path)
-            return target
+            return (target, true)
         } catch {
             NSLog("Velora: failed to sync bundled engine: \(error)")
             return nil

@@ -660,20 +660,29 @@ struct CapsuleButtonStyle: ButtonStyle {
     private static var pressedOpacity: Double { 0.16 }
     private static var disabledOpacity: Double { 0.4 }
 
+    /// Circular, not continuous. At a radius of half the height, the
+    /// continuous shape (and Capsule) strokes a straight edge that stands
+    /// 1 pt off each end, which read as a stray native bezel on every
+    /// capsule and HeaderMenu. The circular one rounds cleanly into the
+    /// same stadium.
+    private static var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .circular)
+    }
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 12, weight: .medium))
             .padding(.horizontal, VeloraSpacing.m)
             .frame(height: Self.height)
             .background(
-                RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous)
+                Self.shape
                     .fill(Color.primary.opacity(
                         configuration.isPressed ? Self.pressedOpacity : Self.fillOpacity)))
             .overlay(
-                RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous)
+                Self.shape
                     .strokeBorder(VeloraPanel.hairline, lineWidth: 1))
             .opacity(isEnabled ? 1 : Self.disabledOpacity)
-            .contentShape(RoundedRectangle(cornerRadius: VeloraRadius.capsule, style: .continuous))
+            .contentShape(Self.shape)
     }
 }
 
@@ -711,4 +720,114 @@ extension ButtonStyle where Self == CapsuleButtonStyle {
 extension ButtonStyle where Self == PrimaryCapsuleButtonStyle {
     /// `.buttonStyle(.primaryCapsule)`
     static var primaryCapsule: PrimaryCapsuleButtonStyle { PrimaryCapsuleButtonStyle() }
+}
+
+/// Every pane-header menu, on the 28 pt glass capsule. A chooser shows its
+/// current value and a trailing chevron, like a pop-up button, and checks
+/// the current row; an actions menu is an ellipsis. One look for Home's
+/// microphone, History's app filter, and the Dictionary and Meetings menus.
+///
+///     [🎤 MacBook Mic ⌄]   chooser: rows are a Picker, current one checked
+///     [ ⋯ ]                actions: rows are Buttons
+///
+///     HeaderMenu("Microphone", value: name, systemImage: "mic",
+///                selection: $model.inputDeviceUID) {
+///         Text("System Default").tag(String?.none)
+///         ForEach(devices, id: \.uid) { Text($0.name).tag(Optional($0.uid)) }
+///     }
+///     HeaderMenu(actions: "Meeting actions") {
+///         Button("Export…") { … }
+///     }
+struct HeaderMenu<Content: View>: View {
+    private enum Kind {
+        case chooser(value: String, systemImage: String?)
+        case actions
+    }
+
+    private static var chevronSize: CGFloat { 9 }
+
+    private let label: String
+    private let kind: Kind
+    private let content: Content
+
+    /// An actions menu: an ellipsis capsule. `label` names it for VoiceOver
+    /// and the tooltip.
+    init(actions label: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.kind = .actions
+        self.content = content()
+    }
+
+    var body: some View {
+        Menu {
+            content
+        } label: {
+            menuLabel
+        }
+        .menuStyle(.button)
+        .buttonStyle(.capsule)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityValue(accessibilityValue)
+    }
+
+    @ViewBuilder private var menuLabel: some View {
+        switch kind {
+        case let .chooser(value, systemImage):
+            HStack(spacing: VeloraSpacing.xs) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                }
+                Text(value)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: Self.chevronSize, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        case .actions:
+            Image(systemName: "ellipsis.circle")
+        }
+    }
+
+    private var accessibilityValue: String {
+        guard case let .chooser(value, _) = kind else {
+            return ""
+        }
+
+        return value
+    }
+}
+
+/// A chooser's rows: an inline Picker, so the menu lists the options as
+/// items and checks the selected one.
+struct HeaderMenuChoices<Value: Hashable, Options: View>: View {
+    let label: String
+    let selection: Binding<Value>
+    let options: Options
+
+    var body: some View {
+        Picker(label, selection: selection) {
+            options
+        }
+        .pickerStyle(.inline)
+        .labelsHidden()
+    }
+}
+
+extension HeaderMenu {
+    /// A chooser: shows `value` (the current option's name) and a chevron;
+    /// its rows are `options`, each tagged with its `Value`.
+    init<Value: Hashable, Options: View>(
+        _ label: String,
+        value: String,
+        systemImage: String? = nil,
+        selection: Binding<Value>,
+        @ViewBuilder options: () -> Options
+    ) where Content == HeaderMenuChoices<Value, Options> {
+        self.label = label
+        self.kind = .chooser(value: value, systemImage: systemImage)
+        self.content = HeaderMenuChoices(label: label, selection: selection, options: options())
+    }
 }

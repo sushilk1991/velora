@@ -11,8 +11,9 @@ final class SoundPlayer {
 
     private var players: [Cue: AVAudioPlayer] = [:]
 
-    init() {
-        for cue in [Cue.start, .stop, .error] {
+    /// Loads `cues`; a player that loads none stays silent (selftest).
+    init(cues: [Cue] = [.start, .stop, .error]) {
+        for cue in cues {
             guard let url = ResourceLocator.resource(named: cue.rawValue, extension: "caf") else {
                 NSLog("Velora: missing sound asset %@.caf (run scripts/make-sounds.sh)", cue.rawValue)
                 continue

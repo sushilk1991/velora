@@ -42,6 +42,9 @@ struct HomeView: View {
     /// Recent : right column = 8 : 5 (1.6 : 1) of `gridColumns`.
     private static let gridColumns = 13
     private static let recentColumnSpan = 8
+    /// The narrowest right column whose "Ways to talk" titles stay on one
+    /// line (measured on screen); narrower, the grid stacks.
+    private static let minimumWaysWidth: CGFloat = 300
     private static let recentLimit = 5
     /// The week chart's height and bar corner radius.
     private static let weekChartHeight: CGFloat = 96
@@ -66,15 +69,9 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: VeloraSpacing.m) {
             PaneHeader(title: MainPane.home.title) {
                 microphoneMenu
-                Button(action: actions.toggleDictation) {
-                    HStack(spacing: VeloraSpacing.s) {
-                        Text("Start Dictation")
-                        Text(model.hotkey.displayLabel)
-                            .font(.system(size: 11))
-                            .opacity(0.8)
-                    }
-                }
-                .buttonStyle(.primaryCapsule)
+                DictationButton(
+                    activity: actions.dictation, hotkey: model.hotkey,
+                    toggle: actions.toggleDictation)
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: Self.sectionSpacing) {
@@ -104,24 +101,16 @@ struct HomeView: View {
     /// Current microphone as a capsule; the menu switches it (the same
     /// binding as Settings › Dictation and the pill's Microphone submenu).
     private var microphoneMenu: some View {
-        Menu {
-            Button("System Default") { model.inputDeviceUID = nil }
-            Divider()
-            ForEach(inputDevices, id: \.uid) { device in
-                Button(device.name) { model.inputDeviceUID = device.uid }
-            }
-        } label: {
-            Label(microphoneName, systemImage: "mic")
-                .lineLimit(1)
+        HeaderMenu(
+            "Microphone", value: microphoneName, systemImage: "mic",
+            selection: $model.inputDeviceUID
+        ) {
+            HomeMicrophoneRows(selected: model.inputDeviceUID, devices: inputDevices)
         }
-        .menuStyle(.button)
-        .buttonStyle(.capsule)
-        .fixedSize()
     }
 
     private var microphoneName: String {
-        guard let uid = model.inputDeviceUID else { return "System Default" }
-        return inputDevices.first { $0.uid == uid }?.name ?? "Microphone not connected"
+        HomeMicrophone.value(selected: model.inputDeviceUID, devices: inputDevices)
     }
 
     // MARK: Headline
@@ -152,25 +141,28 @@ struct HomeView: View {
                     weekMetric(HistoryJournal.grouped(stats.words), "Words")
                     weekMetric(
                         StatsFormat.clock(minutes: stats.minutesSaved(typingWPM: typingWPM)),
-                        "Saved vs typing", emphasis: .accent)
+                        "Time saved", emphasis: .accent)
                     weekMetric(HistoryJournal.grouped(stats.count), "Dictations")
                 }
-                .fixedSize()
                 weekChart
             }
-            .padding(14)
+            .padding(VeloraSpacing.l)
         }
     }
 
+    /// Label over value, as Stats' tiles read, so the same number carries
+    /// the same name in both panes.
     private func weekMetric(_ value: String, _ label: String, emphasis: StatEmphasis = .plain) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
             Text(value)
                 .font(.system(size: 26, weight: .bold))
                 .monospacedDigit()
                 .foregroundStyle(emphasis == .accent ? AnyShapeStyle(VeloraBrand.accent) : AnyShapeStyle(.primary))
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
         .accessibilityElement(children: .combine)
     }
@@ -197,22 +189,22 @@ struct HomeView: View {
 
     // MARK: Grid
 
-    /// Two columns sized against the scroll view's width (no GeometryReader,
-    /// so the grid keeps its natural height and never clips a tall column).
+    /// Two columns sized against the width the scroll view offers (no
+    /// GeometryReader, so the grid keeps its natural height and never clips
+    /// a tall column).
     private var grid: some View {
-        let gap = VeloraSpacing.m
-        return HStack(alignment: .top, spacing: gap) {
+        HomeColumns(
+            leadingShare: CGFloat(Self.recentColumnSpan) / CGFloat(Self.gridColumns),
+            spacing: VeloraSpacing.m,
+            stackSpacing: Self.sectionSpacing,
+            minimumTrailing: Self.minimumWaysWidth
+        ) {
             recentCard
-                .containerRelativeFrame(
-                    .horizontal, count: Self.gridColumns, span: Self.recentColumnSpan, spacing: gap)
             VStack(alignment: .leading, spacing: Self.sectionSpacing) {
                 waysToTalk
                 meetingsCard
                 learnedCard
             }
-            .containerRelativeFrame(
-                .horizontal, count: Self.gridColumns,
-                span: Self.gridColumns - Self.recentColumnSpan, spacing: gap)
         }
     }
 
@@ -289,7 +281,7 @@ struct HomeView: View {
             if let meeting = latestMeeting {
                 GroupDivider()
                 GroupRow(label: meeting.title, sub: HomeFormat.meetingMeta(meeting)) {
-                    Button("Open notes") { actions.openMeetingNotes(meeting.id) }
+                    Button("Open Notes") { actions.openMeetingNotes(meeting.id) }
                         .buttonStyle(.plain)
                         .font(.system(size: 12))
                         .foregroundStyle(VeloraBrand.link)
@@ -380,6 +372,103 @@ struct HomeView: View {
     }
 }
 
+/// Home's Start Dictation, which reads Stop while listening. Its own view so
+/// a phase change redraws the button, not the pane. Dictated from here, the
+/// words go to the clipboard (Velora has no field in front), and the
+/// tooltip says so before the pill does.
+private struct DictationButton: View {
+    @ObservedObject var activity: DictationActivity
+    let hotkey: Hotkey
+    let toggle: () -> Void
+
+    var body: some View {
+        Button(action: toggle) {
+            HStack(spacing: VeloraSpacing.s) {
+                // Both titles laid out, one shown: the capsule keeps the
+                // wider one's width, so the mic chooser beside it stays put
+                // when Start turns to Stop.
+                ZStack {
+                    Text(HomeDictation.startTitle).hidden()
+                    Text(HomeDictation.stopTitle).hidden()
+                    Text(HomeDictation.title(for: activity.phase))
+                }
+                Text(hotkey.displayLabel)
+                    .font(.system(size: 11))
+                    .opacity(0.8)
+            }
+        }
+        .buttonStyle(.primaryCapsule)
+        .disabled(!HomeDictation.isEnabled(for: activity.phase))
+        .help("Copies what you say to the clipboard. To type into an app, press \(hotkey.displayLabel) there.")
+    }
+}
+
+/// Home's two top-aligned columns: the offered width, less the gap, split
+/// `leadingShare : rest`. It reports the offered width as its own.
+/// containerRelativeFrame measured the scroll view instead: its full width,
+/// so a visible scroller covered the right card's edge, and before the
+/// scroll view had a size, the window's width, which pushed Home 252 pt
+/// (the rail and its insets) past the window. When the right column would
+/// get less than `minimumTrailing`, the columns stack at full width so a
+/// narrow window reflows instead of breaking the right column's titles.
+///
+///     wide:   ├──────────── offered width ────────────┤
+///             ┌ Recent ─────────────┐ gap ┌ Ways ─────┐
+///             │ leadingShare        │     │ rest      │
+///             └─────────────────────┘     └───────────┘
+///     narrow: ┌ Recent ───────────────────────────────┐
+///             └───────────────────────────────────────┘
+///             ┌ Ways, Meetings ───────────────────────┐
+///             └───────────────────────────────────────┘
+private struct HomeColumns: Layout {
+    let leadingShare: CGFloat
+    let spacing: CGFloat
+    let stackSpacing: CGFloat
+    let minimumTrailing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        // An ideal-size query (no width) gets the columns' own ideal widths.
+        let width = proposal.width
+            ?? subviews.map { $0.sizeThatFits(.unspecified).width }.reduce(spacing, +)
+        let height = columnFrames(width: width, subviews: subviews).map(\.maxY).max() ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        for (subview, frame) in zip(subviews, columnFrames(width: bounds.width, subviews: subviews)) {
+            subview.place(
+                at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                proposal: ProposedViewSize(width: frame.width, height: frame.height))
+        }
+    }
+
+    /// Each column's frame at its natural height: side by side, or stacked
+    /// at full width when the right column would be too narrow.
+    private func columnFrames(width: CGFloat, subviews: Subviews) -> [CGRect] {
+        let available = max(width - spacing, 0)
+        let leading = (available * leadingShare).rounded(.down)
+        let trailing = available - leading
+
+        guard trailing >= minimumTrailing else {
+            var y: CGFloat = 0
+            return subviews.map { subview in
+                let height = subview.sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+                defer { y += height + stackSpacing }
+                return CGRect(x: 0, y: y, width: width, height: height)
+            }
+        }
+
+        var x: CGFloat = 0
+        return zip(subviews, [leading, trailing]).map { subview, columnWidth in
+            let height = subview.sizeThatFits(ProposedViewSize(width: columnWidth, height: nil)).height
+            defer { x += columnWidth + spacing }
+            return CGRect(x: x, y: 0, width: columnWidth, height: height)
+        }
+    }
+}
+
 /// Meeting meta formatting for the Home pane.
 enum HomeFormat {
     /// "Yesterday · 42 min · 3 action items".
@@ -394,6 +483,96 @@ enum HomeFormat {
             "\(minutes) min",
             items == 1 ? "1 action item" : "\(items) action items",
         ].joined(separator: " · ")
+    }
+}
+
+/// Home's microphone chooser: the capsule's value, and the row that keeps
+/// an unplugged chosen mic selected. Without that row no menu item carries
+/// the selection's tag, so nothing is checked and SwiftUI logs an invalid
+/// selection; Settings › Dictation and the pill keep the same row.
+enum HomeMicrophone {
+    static let unpluggedRowTitle = "Chosen Microphone (Not Connected)"
+
+    static func value(selected uid: String?, devices: [AudioInputDevices.Device]) -> String {
+        guard let uid else {
+            return "System Default"
+        }
+
+        return devices.first { $0.uid == uid }?.name ?? "Microphone Not Connected"
+    }
+
+    /// The chosen mic's id when it is not connected, for its own row.
+    static func unplugged(selected uid: String?, devices: [AudioInputDevices.Device]) -> String? {
+        guard let uid, !devices.contains(where: { $0.uid == uid }) else {
+            return nil
+        }
+
+        return uid
+    }
+}
+
+/// The chooser's rows, each tagged with the `String?` its binding holds:
+/// System Default (nil), every connected mic, and the chosen one while it
+/// is unplugged. A tag of any other type never selects.
+struct HomeMicrophoneRows: View {
+    /// One row's title and the microphone id it selects.
+    struct Row: Equatable {
+        let title: String
+        let uid: String?
+    }
+
+    static let systemDefault = Row(title: "System Default", uid: nil)
+
+    let selected: String?
+    let devices: [AudioInputDevices.Device]
+
+    /// The rows below the divider: every connected mic, then the chosen
+    /// one while it is unplugged.
+    ///
+    ///     System Default                          nil
+    ///     ──────────────
+    ///     MacBook Pro Microphone                  "builtin"
+    ///     Chosen Microphone (Not Connected)       "usb-gone"
+    static func choices(selected: String?, devices: [AudioInputDevices.Device]) -> [Row] {
+        var rows = devices.map { Row(title: $0.name, uid: $0.uid) }
+        if let uid = HomeMicrophone.unplugged(selected: selected, devices: devices) {
+            rows.append(Row(title: HomeMicrophone.unpluggedRowTitle, uid: uid))
+        }
+        return rows
+    }
+
+    var body: some View {
+        Text(Self.systemDefault.title).tag(Self.systemDefault.uid)
+        Divider()
+        ForEach(Self.choices(selected: selected, devices: devices), id: \.uid) { row in
+            Text(row.title).tag(row.uid)
+        }
+    }
+}
+
+/// Home's Start Dictation button, which follows the dictation phase like
+/// the menubar item: Stop while listening, and disabled while a take is
+/// written up, when the toggle does nothing.
+enum HomeDictation {
+    static let startTitle = "Start Dictation"
+    static let stopTitle = "Stop Dictation"
+
+    static func title(for phase: DictationController.Phase) -> String {
+        switch phase {
+        case .starting, .recording:
+            return stopTitle
+        case .idle, .transcribing, .editing:
+            return startTitle
+        }
+    }
+
+    static func isEnabled(for phase: DictationController.Phase) -> Bool {
+        switch phase {
+        case .idle, .starting, .recording:
+            return true
+        case .transcribing, .editing:
+            return false
+        }
     }
 }
 

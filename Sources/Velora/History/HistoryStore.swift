@@ -46,6 +46,26 @@ struct DictationRecord {
     var cleanupApplied: Bool? = nil
 }
 
+/// Velora's own rows. A Home take has no target app, so History files it
+/// under Velora (`DictationIntent.historyContext`): the row, the app filter
+/// and Stats all name Velora. Such a row has nowhere to paste back into,
+/// and its name never reaches the engine, which puts the app name into
+/// the cleanup prompt.
+extension DictationRecord {
+    static let ownBundleID = Bundle.main.bundleIdentifier ?? "com.sushil.velora"
+    static let ownAppName = "Velora"
+
+    /// The app to paste back into and to name to the engine; nil on a row
+    /// filed under Velora.
+    var targetBundleID: String? {
+        bundleID == Self.ownBundleID ? nil : bundleID
+    }
+
+    var targetAppName: String? {
+        bundleID == Self.ownBundleID ? nil : appName
+    }
+}
+
 /// What the edit-learning loop honestly observed about a dictation after
 /// insertion. Rows it could not watch (no AX element, unreadable field,
 /// oversized text, ambiguous diff) stay NULL and never enter the zero-edit

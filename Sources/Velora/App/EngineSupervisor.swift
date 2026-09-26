@@ -17,6 +17,11 @@ extension Notification.Name {
     /// Onboarding observes this stricter signal; normal dictation still uses
     /// the earlier engine-ready state.
     static let veloraEngineSetupChanged = Notification.Name("VeloraEngineSetupChanged")
+    /// The supervisor's `state` changed. `object` is the supervisor; read
+    /// its `state`. Posted on main, after the delegate hears it. A drop
+    /// from ready (a crash) posts nothing else, so a status line that
+    /// shows "Ready" needs this to leave it.
+    static let veloraEngineStateChanged = Notification.Name("VeloraEngineStateChanged")
 }
 
 /// Observes supervisor health for UI (menubar state) and dictation gating.
@@ -60,13 +65,22 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             guard state != oldValue else { return }
             NSLog("Velora: engine state → \(state)")
             if state != .ready { setupComplete = false }
+            if state == .ready { engineUpdatePending = false }
+            quietSince = Date()
             let s = state
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.engineSupervisor(self, didChangeState: s)
+                NotificationCenter.default.post(name: .veloraEngineStateChanged, object: self)
             }
         }
     }
+
+    /// When the supervisor last reported anything: a state change or a
+    /// loading-status change. A start that stays quiet for long enough is
+    /// stuck (`EngineStatusLine.startupWait`); every report restarts the
+    /// clock, so a respawn after a crash gets a full wait of its own.
+    private(set) var quietSince = Date()
 
     var isReady: Bool { state == .ready }
 
@@ -93,6 +107,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private(set) var loadingStatus: String? {
         didSet {
             guard loadingStatus != oldValue else { return }
+            quietSince = Date()
             let status = loadingStatus
             Self.lastLoadingStatus = status
             Self.lastLoadingFraction = loadingFraction
@@ -115,6 +130,14 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private(set) static var lastLoadingStatus: String?
     private(set) static var lastLoadingFraction: Double?
     private(set) static var lastSetupComplete = false
+
+    /// Shown while `uv run` re-syncs an updated engine's dependencies.
+    static let updatingStatus = "Updating the speech engine…"
+
+    /// Set when this launch copied a new bundled engine over the old one,
+    /// until the engine is ready. A respawn after a crash mid-sync shows
+    /// the update status again, although the copy is then current.
+    private var engineUpdatePending = false
 
     private var process: Process?
     private var connectTimer: Timer?
@@ -193,6 +216,12 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         // progress goes to engine.log — so we just flag it for diagnosability.
         let firstBootstrap = !FileManager.default.fileExists(
             atPath: engine.directory.appendingPathComponent(".venv").path)
+        // An update copies the new engine over the old one but keeps its
+        // `.venv`, so `uv run` first re-syncs whatever dependencies changed,
+        // which can take minutes on a slow network.
+        if engine.refreshed {
+            engineUpdatePending = true
+        }
 
         // Engine logs go to a file so crashes are diagnosable. Append (never
         // truncate) so the evidence from a crash survives the restart spawn.
@@ -211,14 +240,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             proc.standardOutput = handle
             proc.standardError = handle
         }
-        if firstBootstrap {
-            NSLog("Velora: first-run engine bootstrap — venv creation may take several minutes")
-            // Pre-socket phase: the engine can't report progress yet, so the
-            // app owns the message until the first `loading`/`ready` event.
-            updateLoading(
-                phase: "Setting up the speech engine (one-time, a few minutes)…",
-                fraction: nil)
-        }
+        announceStartup(firstBootstrap: firstBootstrap)
 
         proc.terminationHandler = { [weak self] p in
             DispatchQueue.main.async {
@@ -234,6 +256,42 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         } catch {
             state = .degraded("Failed to launch engine: \(error.localizedDescription)")
         }
+    }
+
+    /// Pre-socket phase: the engine can't report progress yet, so the app
+    /// owns the message until the first `loading`/`ready` event. First-run
+    /// setup wins over an update, which a fresh venv makes moot.
+    private func announceStartup(firstBootstrap: Bool) {
+        if firstBootstrap {
+            NSLog("Velora: first-run engine bootstrap — venv creation may take several minutes")
+            updateLoading(
+                phase: "Setting up the speech engine (one-time, a few minutes)…",
+                fraction: nil)
+            return
+        }
+
+        if engineUpdatePending {
+            NSLog("Velora: engine updated — uv may re-sync its dependencies first")
+            updateLoading(phase: Self.updatingStatus, fraction: nil)
+        }
+    }
+
+    /// Test seam: what a spawn sets before the socket is up (the startup
+    /// status, then `.launching`). Never touches a real process, socket or
+    /// file: no engine lookup, no `uv`, no engine.log, no connect.
+    func simulateSpawn(firstBootstrap: Bool, engineRefreshed: Bool) {
+        if engineRefreshed {
+            engineUpdatePending = true
+        }
+        announceStartup(firstBootstrap: firstBootstrap)
+        state = .launching
+    }
+
+    /// Test seam: moves `state` as the process and socket paths do. Never
+    /// touches a real process, socket or file; the state change still
+    /// reaches the delegate and `.veloraEngineStateChanged` on main.
+    func simulateState(_ newState: State) {
+        state = newState
     }
 
     private func handleProcessExit(status: Int32) {

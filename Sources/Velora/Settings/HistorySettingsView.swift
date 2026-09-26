@@ -319,8 +319,8 @@ final class HistoryViewModel: ObservableObject {
         // Preserve the original mode unless the user explicitly picked another,
         // plus the app context that drives auto mode selection.
         if let effectiveMode = mode ?? record.mode { command["mode"] = effectiveMode }
-        if let bundleID = record.bundleID { command["bundle_id"] = bundleID }
-        if let appName = record.appName { command["app_name"] = appName }
+        if let bundleID = record.targetBundleID { command["bundle_id"] = bundleID }
+        if let appName = record.targetAppName { command["app_name"] = appName }
         return command
     }
 

@@ -50,6 +50,136 @@ enum LateFinalPolicy {
     }
 }
 
+/// Where a take's words go, fixed when the take starts: switching apps
+/// mid-take changes neither the app it is formatted for nor where it lands.
+///
+///     hotkey, menubar ──▶ .frontApp       type into the app in front at start
+///     Home's button   ──▶ .clipboardOnly  clipboard only: default mode,
+///                                         filed under Velora in History,
+///                                         never typed
+struct DictationIntent: Equatable {
+    enum Delivery: Equatable {
+        case frontApp
+        case clipboardOnly
+    }
+
+    let delivery: Delivery
+    /// Velora itself was in front when the take started (the hotkey pressed
+    /// over Velora's window), so there was no other app to type into.
+    let startedInVelora: Bool
+    /// Home's Stop ended the take, so Velora is in front on purpose rather
+    /// than because focus moved.
+    var stoppedInVelora = false
+
+    /// The app a take is formatted for, logged against and typed into: the
+    /// override, else the live front app, else the last one tracked. None
+    /// for a clipboard-only take, so its context carries no bundle and the
+    /// engine formats it with the default mode.
+    func targetApp<App>(override: App?, liveExternal: App?, tracked: App?) -> App? {
+        guard delivery == .frontApp else {
+            return nil
+        }
+
+        return override ?? liveExternal ?? tracked
+    }
+
+    /// Whether the final may type anything: into Velora's own text field,
+    /// into the target app, or as a spoken Return or undo.
+    var mayType: Bool {
+        delivery == .frontApp
+    }
+
+    /// Whether a final with nowhere to type is a plain copy with a neutral
+    /// notice. A take started in another app and finished with Velora in
+    /// front keeps the "Focus changed. Copied" warning, since the app it was
+    /// meant for is no longer there, unless Home's Stop brought Velora
+    /// forward.
+    func copiesQuietly(veloraInFront: Bool) -> Bool {
+        if delivery == .clipboardOnly {
+            return true
+        }
+
+        return (startedInVelora || stoppedInVelora) && veloraInFront
+    }
+
+    /// The spoken command a final carries, when the take may act on one.
+    /// A clipboard-only take presses nothing: "new line" is copied as said.
+    func voiceCommand(text: String, raw: String, enabled: Bool) -> VoiceCommand? {
+        guard enabled, mayType else {
+            return nil
+        }
+
+        return VoiceCommand.parse(text: text, raw: raw)
+    }
+
+    /// The app a History row names. A clipboard-only take has no target, so
+    /// its row names Velora: History shows and filters it, and Stats counts
+    /// it, under Velora rather than "Unknown app". Only History gets this;
+    /// the engine's context keeps no app, since its name reaches the
+    /// cleanup prompt.
+    func historyContext(_ context: AppContext?) -> AppContext? {
+        guard delivery == .clipboardOnly else {
+            return context
+        }
+
+        return AppContext(bundleID: DictationRecord.ownBundleID, appName: DictationRecord.ownAppName)
+    }
+}
+
+/// The finals that end in Velora rather than in another app: typed into
+/// Velora's own text field (onboarding's try-it box), or copied with a
+/// neutral notice. Anything else is `.targetApp`, for the paste path and
+/// its focus checks. The words are already on the clipboard. Only a take
+/// started over Velora types there: one meant for Slack never lands in a
+/// Velora field that happens to be focused when it ends.
+///
+///     may type, started and ended in Velora,
+///     text field takes it                   ──▶ .typed
+///     copiesQuietly                         ──▶ .copied
+///     otherwise                             ──▶ .targetApp
+enum OwnWindowFinal {
+    enum Outcome: Equatable {
+        case typed
+        case copied
+        case targetApp
+    }
+
+    /// Runs `recordHistory` once (unless the take already has a row), then
+    /// `typed` or `copied`. Only a typed final posts
+    /// `.veloraDictationInserted`, which onboarding's Finish waits for.
+    static func deliver(
+        _ text: String,
+        intent: DictationIntent,
+        veloraInFront: Bool,
+        historyAlreadyRecorded: Bool,
+        typeIntoOwnWindow: () -> Bool,
+        recordHistory: () -> Void,
+        typed: () -> Void,
+        copied: () -> Void
+    ) -> Outcome {
+        let outcome: Outcome
+        if intent.mayType, intent.startedInVelora, veloraInFront, typeIntoOwnWindow() {
+            outcome = .typed
+        } else if intent.copiesQuietly(veloraInFront: veloraInFront) {
+            outcome = .copied
+        } else {
+            return .targetApp
+        }
+
+        if StreamTypingFinalPolicy.shouldRecordHistory(alreadyRecorded: historyAlreadyRecorded) {
+            recordHistory()
+        }
+        guard outcome == .typed else {
+            copied()
+            return outcome
+        }
+
+        typed()
+        NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
+        return outcome
+    }
+}
+
 enum ErrorRetryIntent: Equatable {
     case dictation
     case voiceEdit
@@ -334,6 +464,15 @@ final class DictationController: NSObject {
     /// duplicate `final` re-inserting text now that the phase guard is loose.
     private var consumedSessionID: String?
     private var sessionContext: AppContext?
+    /// Captured by `startRecording`; the final reads this, never the apps
+    /// in front at the time.
+    private var sessionIntent = DictationIntent(delivery: .frontApp, startedInVelora: false)
+    /// The delivery Retry replays: the last start asked for, set before the
+    /// refusals that offer Retry. `sessionIntent` is set only once a take
+    /// passes them, so a refused Home start would otherwise retry into the
+    /// front app, and a refused hotkey press after a Home take clipboard-only.
+    // Test seam: readable so selftest can check what Retry replays.
+    private(set) var retryDelivery = DictationIntent.Delivery.frontApp
     private var recordingStart: Date?
     /// Speaking time is frozen when capture stops. History and time-saved
     /// metrics must not count STT/cleanup latency as time spent speaking.
@@ -543,6 +682,23 @@ final class DictationController: NSObject {
         case .transcribing, .editing:
             break
         }
+    }
+
+    /// Home's "Start/Stop Dictation": stops and cancels like the menubar
+    /// item, but a take it starts is clipboard-only (`DictationIntent`), as
+    /// its tooltip says. A take it stops ends with Velora in front on
+    /// purpose, so one started in another app is copied without the "Focus
+    /// changed" warning.
+    func toggleFromHome() {
+        guard phase == .idle else {
+            if isRecording {
+                sessionIntent.stoppedInVelora = true
+            }
+            toggleFromMenu()
+            return
+        }
+
+        startRecording(locked: true, delivery: .clipboardOnly)
     }
 
     // MARK: - Action Mode
@@ -1038,10 +1194,10 @@ final class DictationController: NSObject {
             showError("No recent dictation to reformat")
             return
         }
-        pendingReformat = (record.id, record.bundleID)
+        pendingReformat = (record.id, record.targetBundleID)
         var cmd: [String: Any] = ["cmd": "reprocess", "audio": audio, "id": record.id, "mode": mode]
-        if let bundleID = record.bundleID { cmd["bundle_id"] = bundleID }
-        if let appName = record.appName { cmd["app_name"] = appName }
+        if let bundleID = record.targetBundleID { cmd["bundle_id"] = bundleID }
+        if let appName = record.targetAppName { cmd["app_name"] = appName }
         supervisor.send(cmd)
         NSLog("Velora: reformat last id=%lld as %@", record.id, mode)
     }
@@ -1691,7 +1847,7 @@ final class DictationController: NSObject {
         }
         inserter.copyToClipboard(raw)
         NSLog("Velora: paste last as-heard id=%lld (%d chars)", record.id, raw.count)
-        guard let bundleID = record.bundleID,
+        guard let bundleID = record.targetBundleID,
               let app = NSRunningApplication.runningApplications(
                 withBundleIdentifier: bundleID).first
         else { return }
@@ -1969,8 +2125,11 @@ final class DictationController: NSObject {
         errorRetryIntent = .dictation
         intent.perform(
             dictation: {
+                // Retry the start as asked: a Home take stays clipboard-only,
+                // even one a guard refused before it began.
+                let delivery = retryDelivery
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-                    self?.startRecording(locked: true)
+                    self?.startRecording(locked: true, delivery: delivery)
                 }
             },
             voiceEdit: { [weak self] in
@@ -1989,7 +2148,8 @@ final class DictationController: NSObject {
         hudLabel: String? = nil, streamTyping: Bool = false,
         livePreview: Bool = false,
         targetAppOverride: NSRunningApplication? = nil,
-        contextPolicy: RecordingContextPolicy = .ordinary
+        contextPolicy: RecordingContextPolicy = .ordinary,
+        delivery: DictationIntent.Delivery = .frontApp
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
         guard pendingEdit == nil else {
@@ -2007,6 +2167,12 @@ final class DictationController: NSObject {
             NSLog("Velora: recording refused — an action is still running")
             return false
         }
+
+        // Recorded before the refusals below, whose error pill offers Retry.
+        // A press refused above shows no Retry and leaves it alone: a live
+        // take or an earlier error keeps its own.
+        retryDelivery = delivery
+
         if let reason = recordingBlockReason?() {
             showError(reason)
             return false
@@ -2067,9 +2233,12 @@ final class DictationController: NSObject {
         let liveAppIsExternal = liveApp?.processIdentifier
             != ProcessInfo.processInfo.processIdentifier
         let liveExternalApp = liveAppIsExternal ? liveApp : nil
+        sessionIntent = DictationIntent(delivery: delivery, startedInVelora: !liveAppIsExternal)
         let targetApp = external
             ? nil
-            : (targetAppOverride ?? liveExternalApp ?? contextTracker.frontmost)
+            : sessionIntent.targetApp(
+                override: targetAppOverride, liveExternal: liveExternalApp,
+                tracked: contextTracker.frontmost)
 
         // The heavy screen read runs once in the background, but `start` still
         // carries the cheap focused-window title/URL entities: the engine biases
@@ -2770,9 +2939,10 @@ final class DictationController: NSObject {
         // Commands are recognized before the late-final empty-text gate: a
         // cleanup model may intentionally remove the words "scratch that".
         // Once automatic delivery is disallowed, report the command without
-        // executing Return/Undo or copying its literal words.
-        if config.voiceCommands,
-           let command = VoiceCommand.parse(text: trimmed, raw: raw) {
+        // executing Return/Undo or copying its literal words. A clipboard-only
+        // take presses nothing: its words are copied as said.
+        if let command = sessionIntent.voiceCommand(
+            text: trimmed, raw: raw, enabled: config.voiceCommands) {
             if LateFinalPolicy.commandMayExecute(
                 allowAutomaticInsertion: allowAutomaticInsertion
             ) {
@@ -2842,26 +3012,39 @@ final class DictationController: NSObject {
         // ourselves are frontmost, insert straight into our key window's
         // focused text view via the responder chain (zero TCC), skip the
         // fallback, and still fire the inserted notification.
-        let ownBundleID = Bundle.main.bundleIdentifier ?? "com.sushil.velora"
-        if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == ownBundleID,
-           inserter.insertIntoOwnWindow(text, mode: mode) {
-            NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
-            errorRetryAction = nil
-            errorRetryIntent = .dictation
-            hud.model.retryTitle = "Retry"
-            hud.transition(to: .inserted)
-            phase = .idle
-            if StreamTypingFinalPolicy.shouldRecordHistory(
-                alreadyRecorded: historyAlreadyRecorded
-            ) {
+        //
+        // A Home take, or one started over Velora's window, with no text field
+        // to take it is a plain copy (staged above) with a neutral notice;
+        // the checks below would call it "Focus changed", a failure.
+        let ownWindowOutcome = OwnWindowFinal.deliver(
+            text,
+            intent: sessionIntent,
+            veloraInFront: NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+                == DictationRecord.ownBundleID,
+            historyAlreadyRecorded: historyAlreadyRecorded,
+            typeIntoOwnWindow: { inserter.insertIntoOwnWindow(text, mode: mode) },
+            recordHistory: {
                 recordHistory(
                     text: text, raw: raw, context: context, mode: mode,
                     cleanupMs: cleanupMs, cleanupApplied: cleanupApplied,
                     cleanupWallMs: cleanupWallMs,
                     finalizationMs: finalizationMs, audio: audio)
-            }
-            NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
-            scheduleInsertedHide()
+            },
+            typed: {
+                NSLog("Velora: insert method=own-window session=%@ chars=%ld", sessionID, text.count)
+                errorRetryAction = nil
+                errorRetryIntent = .dictation
+                hud.model.retryTitle = "Retry"
+                hud.transition(to: .inserted)
+                phase = .idle
+                scheduleInsertedHide()
+            },
+            copied: {
+                NSLog("Velora: insert method=clipboard (nowhere to type) session=%@", sessionID)
+                phase = .idle
+                showNotice(symbol: "doc.on.clipboard.fill", message: "Copied to clipboard")
+            })
+        guard ownWindowOutcome == .targetApp else {
             return
         }
 
@@ -3118,10 +3301,12 @@ final class DictationController: NSObject {
         cleanupMs: Int?, cleanupApplied: Bool?, cleanupWallMs: Int?,
         finalizationMs: Int?, audio: String?
     ) -> DictationRecord {
-        DictationRecord(
+        // A Home take's row names Velora; its engine context names no app.
+        let app = sessionIntent.historyContext(context)
+        return DictationRecord(
             timestamp: Date(),
-            bundleID: context?.bundleID,
-            appName: context?.appName,
+            bundleID: app?.bundleID,
+            appName: app?.appName,
             raw: raw,
             final: text,
             mode: mode,

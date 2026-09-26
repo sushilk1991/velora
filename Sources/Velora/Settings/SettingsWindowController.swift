@@ -24,6 +24,7 @@ final class SettingsWindowSelection: ObservableObject {
 ///     └────────────────────────────────────┘
 final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     private static let contentSize = NSSize(width: 780, height: 640)
+    private static let frameAutosaveName = "VeloraSettings"
 
     private let model: SettingsModel
     private let selection = SettingsWindowSelection()
@@ -43,11 +44,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             meetingCoordinator: meetingCoordinator,
             openSetupAssistant: openSetupAssistant)
 
-        let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-        MainWindowController.applyShellChrome(to: window, title: "Settings")
-        window.setContentSize(Self.contentSize)
-        window.contentMinSize = Self.contentSize
-        window.center()
+        let window = MainWindowController.makeShellWindow(
+            rootView: root, title: "Settings", size: Self.contentSize, minimumSize: Self.contentSize)
+        // Reopens where the user left it: AppKit restores the saved frame
+        // here and saves each move or resize.
+        window.setFrameAutosaveName(Self.frameAutosaveName)
 
         super.init(window: window)
         window.delegate = self

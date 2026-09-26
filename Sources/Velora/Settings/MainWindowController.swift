@@ -45,7 +45,8 @@ final class MainWindowSelection: ObservableObject {
 /// App actions the main window triggers but does not own. Injected by the
 /// AppDelegate so the window never reaches for a global.
 struct MainWindowActions {
-    /// The same toggle the menubar "Start Dictation" uses.
+    /// Home's Start/Stop Dictation: the menubar's toggle, except that a take
+    /// it starts only copies (`DictationController.toggleFromHome`).
     var toggleDictation: () -> Void
     /// The same action as the menubar "Start Meeting Notes…".
     var startMeeting: () -> Void
@@ -53,6 +54,44 @@ struct MainWindowActions {
     var openSettings: () -> Void
     /// Opens the focused notes window for one meeting.
     var openMeetingNotes: (String) -> Void
+    /// The dictation phase behind `toggleDictation`, for Home's button.
+    var dictation = DictationActivity()
+}
+
+/// The dictation phase as the main window sees it. The AppDelegate mirrors
+/// the controller's phase in here, as it does for the menubar icon, so
+/// Home's Start Dictation reads Stop while listening.
+final class DictationActivity: ObservableObject {
+    @Published var phase: DictationController.Phase = .idle
+}
+
+/// A shell window that opens with nothing focused. On every order-in AppKit
+/// makes a responder-less window's first text field first responder and
+/// selects all its text, so one keystroke replaced a mode's whole Name.
+/// Clearing the responder right after a hidden window orders in undoes
+/// that; Tab still reaches the fields, and re-showing a visible window keeps
+/// whatever the user is editing.
+private final class ShellWindow: NSWindow {
+    override func orderFrontRegardless() {
+        clearingFocus { super.orderFrontRegardless() }
+    }
+
+    override func orderFront(_ sender: Any?) {
+        clearingFocus { super.orderFront(sender) }
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        clearingFocus { super.makeKeyAndOrderFront(sender) }
+    }
+
+    private func clearingFocus(_ orderIn: () -> Void) {
+        // A window coming back from the Dock keeps the field being edited.
+        let wasVisible = isVisible || isMiniaturized
+        orderIn()
+        if !wasVisible {
+            makeFirstResponder(nil)
+        }
+    }
 }
 
 /// The main window: a floating glass sidebar (Home, History, Stats, Meetings,
@@ -70,6 +109,7 @@ struct MainWindowActions {
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     private static let contentSize = NSSize(width: 1180, height: 760)
     private static let minimumSize = NSSize(width: 960, height: 620)
+    private static let frameAutosaveName = "VeloraMain"
     private static let shellToolbarID = NSToolbar.Identifier("VeloraShell")
 
     private let selection = MainWindowSelection()
@@ -99,11 +139,12 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             meetingProcessor: meetingProcessor,
             actions: actions)
 
-        let window = NSWindow(contentViewController: NSHostingController(rootView: root))
-        Self.applyShellChrome(to: window, title: "Velora")
-        window.setContentSize(Self.contentSize)
-        window.contentMinSize = Self.minimumSize
-        window.center()
+        let window = Self.makeShellWindow(
+            rootView: root, title: "Velora", size: Self.contentSize, minimumSize: Self.minimumSize)
+        // Reopens at the size and place the user left it: AppKit restores
+        // the saved frame here and saves each move or resize. Not in
+        // makeShellWindow, so selftest and harness windows never save one.
+        window.setFrameAutosaveName(Self.frameAutosaveName)
 
         super.init(window: window)
         window.delegate = self
@@ -138,6 +179,32 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         window.isMovableByWindowBackground = true
         window.backgroundColor = VeloraPanel.canvasColor
         window.title = title
+    }
+
+    /// A shell window around SwiftUI content, centred at `size` and never
+    /// smaller than `minimumSize`.
+    static func makeShellWindow<Root: View>(
+        rootView: Root, title: String, size: NSSize, minimumSize: NSSize
+    ) -> NSWindow {
+        // The window owns its size. By default the hosting controller grows
+        // the window to the content's ideal width and pins the minimum to the
+        // content's, and Home's grid reports the window's own width as both,
+        // so every Home layout widened the window (1180 → 1432 pt) and it
+        // could never shrink back. With sizing off the controller rewrites
+        // contentMinSize from its view's constraints, so the minimum lives
+        // there; the view spans the whole window (full-size content).
+        let hosting = NSHostingController(rootView: rootView)
+        hosting.sizingOptions = []
+        let window = ShellWindow(contentViewController: hosting)
+        NSLayoutConstraint.activate([
+            hosting.view.widthAnchor.constraint(greaterThanOrEqualToConstant: minimumSize.width),
+            hosting.view.heightAnchor.constraint(greaterThanOrEqualToConstant: minimumSize.height),
+        ])
+        applyShellChrome(to: window, title: title)
+        window.setContentSize(size)
+        window.contentMinSize = minimumSize
+        window.center()
+        return window
     }
 
     /// Shared show sequence for the main, Settings, and About windows.
@@ -309,33 +376,144 @@ struct MainSidebar: View {
     }
 }
 
-/// "● Engine ready · 0.23.0" — a 6 pt dot and an 11 pt caption. Green once
-/// the supervisor's ready handshake landed; the amber "Engine starting…"
-/// otherwise. Refreshes on the engine's status notifications.
+/// "● Ready · 0.23.0" — a 6 pt dot and an 11 pt caption. Green once the
+/// supervisor's ready handshake landed; amber "Starting…", "Loading
+/// models…", "Updating the speech engine…" or what went wrong otherwise.
+/// `EngineStatusModel` keeps it current. A failure wraps rather than
+/// losing its fix to truncation, with the dot on its first line:
+///
+///     ● Ready · 0.25.0
+///     ● uv not found. Install it
+///       from https://astral.sh/uv
 struct EngineStatusLine: View {
-    let supervisor: EngineSupervisor?
-    @State private var ready = false
+    @StateObject private var status: EngineStatusModel
 
+    init(supervisor: EngineSupervisor?) {
+        _status = StateObject(wrappedValue: EngineStatusModel(supervisor: supervisor))
+    }
+
+    /// How long "Starting…" shows before the line calls the start stuck.
+    /// The supervisor keeps no launch deadline, and the slow startup work
+    /// (first-run setup, an update's dependency sync, model downloads, the
+    /// speech-model load) reports a loading status, so a minute with no
+    /// report is a stall.
+    static let startupWait: TimeInterval = 60
     private static let dotDiameter: CGFloat = 6
+    private static let captionSize: CGFloat = 11
+    /// The dot's centre above the caption's first baseline: the middle of
+    /// the font's line box, where centring put it beside one line.
+    private static let dotLift: CGFloat = {
+        let font = NSFont.systemFont(ofSize: captionSize)
+        return (font.ascender + font.descender) / 2
+    }()
 
     var body: some View {
-        HStack(spacing: VeloraSpacing.s) {
+        HStack(alignment: .firstTextBaseline, spacing: VeloraSpacing.s) {
             Circle()
-                .fill(ready ? VeloraStatus.success : VeloraStatus.warning)
+                .fill(status.state == .ready ? VeloraStatus.success : VeloraStatus.warning)
                 .frame(width: Self.dotDiameter, height: Self.dotDiameter)
-            Text(ready ? "Engine ready · \(VeloraAppInfo.shortVersion)" : "Engine starting…")
-                .font(.system(size: 11))
+                .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + Self.dotLift }
+            Text(status.caption)
+                .font(.system(size: Self.captionSize))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .onAppear(perform: refresh)
-        .onReceive(NotificationCenter.default.publisher(for: .veloraEngineStatus)) { _ in refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .veloraEngineSetupChanged)) { _ in refresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .veloraEngineLoading)) { _ in refresh() }
+        .onAppear { status.refresh() }
         .accessibilityElement(children: .combine)
     }
 
-    private func refresh() {
-        ready = supervisor?.isReady ?? false
+    /// The state in plain words, the version once ready. "Loading models…"
+    /// while startup reports progress, so a long download does not read as
+    /// a stuck start; an update's dependency sync reads as itself. A failure
+    /// the supervisor reports reads in its own words, which name the fix
+    /// ("uv not found. Install it from …"); a start with no report for
+    /// `startupWait` says so and what to do.
+    static func caption(
+        state: EngineSupervisor.State, loading: String?, waited: TimeInterval, version: String
+    ) -> String {
+        if state == .ready {
+            return "Ready · \(version)"
+        }
+
+        if case .degraded(let reason) = state {
+            return reason
+        }
+
+        if let loading {
+            return loading == EngineSupervisor.updatingStatus ? loading : "Loading models…"
+        }
+
+        return waited < startupWait ? "Starting…" : "Engine hasn't started. Quit and reopen Velora."
+    }
+}
+
+/// What the sidebar's engine line says, kept current by the supervisor's
+/// notifications rather than a poll: a state change, a loading change, a
+/// status reply. The one timer fires when a quiet start reaches
+/// `startupWait`, to say it is stuck.
+///
+///     launching ──(quiet 60 s)──▶ timer ──▶ "Engine hasn't started…"
+///     any report ──▶ refresh, timer rescheduled from `quietSince`
+final class EngineStatusModel: ObservableObject {
+    @Published private(set) var state = EngineSupervisor.State.stopped
+    @Published private(set) var caption = ""
+
+    private let supervisor: EngineSupervisor?
+    private let version: String
+    private var observers: [NSObjectProtocol] = []
+    private var stallTimer: Timer?
+
+    init(supervisor: EngineSupervisor?, version: String = VeloraAppInfo.shortVersion) {
+        self.supervisor = supervisor
+        self.version = version
+        let names: [Notification.Name] = [
+            .veloraEngineStateChanged, .veloraEngineLoading,
+            .veloraEngineStatus, .veloraEngineSetupChanged,
+        ]
+        for name in names {
+            observers.append(NotificationCenter.default.addObserver(
+                forName: name, object: nil, queue: .main
+            ) { [weak self] _ in
+                self?.refresh()
+            })
+        }
+        refresh()
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        stallTimer?.invalidate()
+    }
+
+    /// Re-reads the supervisor. `now` is a test seam for the stall clock.
+    func refresh(now: Date = Date()) {
+        state = supervisor?.state ?? .stopped
+        let loading = supervisor?.loadingStatus
+        let quietSince = supervisor?.quietSince
+        let waited = quietSince.map { now.timeIntervalSince($0) } ?? 0
+        caption = EngineStatusLine.caption(
+            state: state, loading: loading, waited: waited, version: version)
+
+        // Only a quiet start can turn into a stall; anything else waits for
+        // the supervisor's next report. Without a supervisor (the snapshot
+        // harnesses) there is no clock to run.
+        stallTimer?.invalidate()
+        stallTimer = nil
+        var starting = state != .ready && loading == nil
+        if case .degraded = state {
+            starting = false
+        }
+        guard starting, let quietSince, waited < EngineStatusLine.startupWait else {
+            return
+        }
+
+        let timer = Timer(
+            fire: quietSince.addingTimeInterval(EngineStatusLine.startupWait),
+            interval: 0, repeats: false
+        ) { [weak self] _ in
+            self?.refresh()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        stallTimer = timer
     }
 }

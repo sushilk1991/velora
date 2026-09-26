@@ -169,7 +169,7 @@ final class TextInserter {
         NotificationCenter.default.post(name: .veloraExternalTextInsertion, object: nil)
         let inserter = TextInserter()
         inserter.copyToClipboard(record.final)
-        guard let bundleID = record.bundleID,
+        guard let bundleID = record.targetBundleID,
               let app = NSRunningApplication.runningApplications(
                 withBundleIdentifier: bundleID).first
         else { return }
@@ -283,9 +283,21 @@ final class TextInserter {
             NSLog("Velora: own-window insert — no key window / first responder")
             return false
         }
+        return Self.insert(text, mode: mode, into: responder)
+    }
+
+    /// Inserts `text` at one responder of Velora's own window. Returns false
+    /// when the responder is not a text target.
+    static func insert(_ text: String, mode: String?, into responder: NSResponder) -> Bool {
         // SwiftUI TextEditor / NSTextField field editors are backed by an
         // NSTextView; insertText(_:replacementRange:) respects the selection.
         if let textView = responder as? NSTextView {
+            // A read-only view drops the words but insertText still returns.
+            guard textView.isEditable else {
+                NSLog("Velora: own-window insert — text view is read-only")
+                return false
+            }
+
             let selectedRange = textView.selectedRange()
             let boundary = TextSelectionBoundary(text: textView.string, utf16Range: selectedRange)
             let deliveryText = TextInsertionBoundary.adjusted(
@@ -294,10 +306,13 @@ final class TextInserter {
             NSLog("Velora: own-window insert via NSTextView chars=%ld", deliveryText.count)
             return true
         }
-        // Any other responder that accepts insertText: (e.g. NSText).
-        if responder.responds(to: #selector(NSText.insertText(_:))) {
-            _ = NSApp.sendAction(#selector(NSText.insertText(_:)), to: responder, from: text)
-            NSLog("Velora: own-window insert via responder insertText chars=%ld", text.count)
+        // Any other text input client. Not "responds to insertText:": every
+        // NSResponder does, a window included, and passes it up the chain
+        // into nothing, so Home's Start Dictation reported words that
+        // landed nowhere.
+        if let client = responder as? NSTextInputClient {
+            client.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            NSLog("Velora: own-window insert via text input client chars=%ld", text.count)
             return true
         }
         NSLog("Velora: own-window insert — first responder is not a text target")
