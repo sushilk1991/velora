@@ -6,9 +6,56 @@ import AppKit
 
 // Headless test mode: CommandLineTools ships neither XCTest nor swift-testing,
 // so the pure-logic tests are compiled in and run with
-// `.build/release/Velora --selftest` (exits non-zero on failure).
+// `.build/release/Velora --selftest` (exits non-zero on failure). Runs in
+// the snapshot harnesses' scratch home and defaults suite, debug and release
+// alike: tests that write AppConfig.shared (the pill's visibility) must never
+// reach the owner's settings.json, even when a run is killed mid-test. The
+// gate re-execs in place, so the launched pid is the run: its signals and
+// exit status are the tests'.
 if CommandLine.arguments.contains("--selftest") {
+    WindowSnapshot.enterScratchHome(label: "selftest")
     exit(Selftest.run())
+}
+
+// Real-window design QA: shows the shell windows, onboarding and the pill on
+// screen without activating, and captures each one. Debug builds only; runs
+// in a scratch home before any path below can touch preferences. A missing
+// directory exits with usage rather than launching the app, and a release
+// build refuses the flag rather than launching the app on the user's data.
+// See WindowSnapshot.
+if let windowSnapshotIndex = CommandLine.arguments.firstIndex(of: "--window-snapshot") {
+    #if DEBUG
+    guard CommandLine.arguments.count > windowSnapshotIndex + 1 else {
+        print("usage: Velora --window-snapshot <output-dir>")
+        exit(EX_USAGE)
+    }
+
+    WindowSnapshot.run(outputDir: CommandLine.arguments[windowSnapshotIndex + 1])
+    #else
+    FileHandle.standardError.write(Data(
+        "Velora: --window-snapshot needs a debug build; run .build/debug/Velora --window-snapshot <output-dir>\n".utf8))
+    exit(EX_USAGE)
+    #endif
+}
+
+// Headless UI snapshots: renders HUD states + Settings panes to PNGs in the
+// given directory (offscreen — nothing appears on the user's display). Debug
+// builds only, in --window-snapshot's scratch home, before any path below can
+// touch preferences. A release build refuses the flag rather than launching
+// the app on the user's data. See SnapshotRenderer.
+if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot") {
+    #if DEBUG
+    guard CommandLine.arguments.count > snapshotIndex + 1 else {
+        print("usage: Velora --snapshot <output-dir>")
+        exit(EX_USAGE)
+    }
+
+    SnapshotRenderer.run(outputDir: CommandLine.arguments[snapshotIndex + 1])
+    #else
+    FileHandle.standardError.write(Data(
+        "Velora: --snapshot needs a debug build; run .build/debug/Velora --snapshot <output-dir>\n".utf8))
+    exit(EX_USAGE)
+    #endif
 }
 
 // Migrate before any headless path can instantiate AppConfig.shared and create
@@ -33,13 +80,6 @@ if CommandLine.arguments.contains("--update-e2e") {
 if let streamIndex = CommandLine.arguments.firstIndex(of: "--stream-e2e") {
     exit(StreamE2E.run(
         arguments: Array(CommandLine.arguments.dropFirst(streamIndex + 1))))
-}
-
-// Headless UI snapshots: renders HUD states + Settings panes to PNGs in the
-// given directory (offscreen — nothing appears on the user's display).
-if let snapshotIndex = CommandLine.arguments.firstIndex(of: "--snapshot"),
-   CommandLine.arguments.count > snapshotIndex + 1 {
-    SnapshotRenderer.run(outputDir: CommandLine.arguments[snapshotIndex + 1])
 }
 
 // The app binary doubles as the bundled headless CLI through its exact

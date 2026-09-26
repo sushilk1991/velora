@@ -79,7 +79,9 @@ enum Selftest {
     }
 
     static func run() -> Int32 {
-        removeLeakedScratchDomains()
+        // Read-only: the isolation check at the end flags only scratch
+        // plists this run adds to the owner's Preferences.
+        let preferencesBaseline = Set(scratchPreferenceFiles().map(\.lastPathComponent))
         testEditDistance()
         testMishearingShapes()
         testLearningThresholds()
@@ -193,6 +195,9 @@ enum Selftest {
         testHomeTakeHistoryRow()
         testRetryDelivery()
         testOwnWindowFinal()
+        #if DEBUG
+        testWindowSnapshotHome()
+        #endif
         testSidebarFocus()
         testSidebarArrowKeys()
         testMeetingListWindowKeys()
@@ -252,7 +257,8 @@ enum Selftest {
             testLiveSystemAudioCapture()
             testLiveMeetingCapture()
         }
-        testSelftestIsolation()
+        testScratchPreferenceCheck()
+        testSelftestIsolation(preferencesBaseline: preferencesBaseline)
         testNothingLeftOnScreen()
         print(failures == 0
             ? "selftest OK — \(checks) checks"
@@ -278,21 +284,55 @@ enum Selftest {
     }
 
     /// `--selftest` must leave the machine as it found it: no lines in the
-    /// live ~/.velora/velora-app.log and no scratch preference plists.
-    private static func testSelftestIsolation() {
+    /// live ~/.velora/velora-app.log and no scratch preference plists beyond
+    /// `preferencesBaseline`, the ones there before the run.
+    private static func testSelftestIsolation(preferencesBaseline: Set<String>) {
         let probe = "selftest isolation probe \(UUID().uuidString)"
         veloraLog(probe)
         // The file logger writes asynchronously; give a line time to land.
         waitUntil(timeout: 0.5) { false }
-        let liveLog = FileManager.default.homeDirectoryForCurrentUser
+        let liveLog = WindowSnapshot.realHome
             .appendingPathComponent(".velora/velora-app.log")
         let logText = (try? String(contentsOf: liveLog, encoding: .utf8)) ?? ""
         expect(!logText.contains(probe),
                "selftest log lines never reach the live app log")
 
-        let leaked = scratchPreferenceFiles()
-        expect(leaked.isEmpty,
-               "selftest removes its scratch preference domains (\(leaked.count) left)")
+        // The run itself sits in a scratch home (main.swift), so these
+        // checks must look at the owner's home, not the process's `~`.
+        let runHome = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path + "/"
+        expect(!liveLog.standardizedFileURL.path.hasPrefix(runHome),
+               "the isolation check reads the owner's app log, not the scratch home's")
+        expect(!preferencesDirectory.standardizedFileURL.path.hasPrefix(runHome),
+               "the isolation check scans the owner's Preferences, not the scratch home's")
+
+        let added = newScratchPreferences(since: preferencesBaseline)
+        expect(added.isEmpty,
+               "selftest adds no preference plists to the owner's Library/Preferences (\(added.count) new)")
+    }
+
+    /// The isolation check flags only plists a run added: one already in
+    /// Preferences before the run (a leak from an older build) passes, and
+    /// a new one fails. It runs on a temporary directory, so nothing is
+    /// written to the owner's Preferences.
+    private static func testScratchPreferenceCheck() {
+        let fm = FileManager.default
+        let directory = fm.temporaryDirectory
+            .appendingPathComponent("velora-selftest-prefcheck-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: directory) }
+        try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        let existing = "com.velora.selftest.\(UUID().uuidString).plist"
+        fm.createFile(atPath: directory.appendingPathComponent(existing).path, contents: Data())
+        fm.createFile(atPath: directory.appendingPathComponent("com.sushil.velora.plist").path, contents: Data())
+        let baseline = Set(scratchPreferenceFiles(in: directory).map(\.lastPathComponent))
+        expect(baseline == [existing], "the scan matches scratch plists only (got \(baseline.count))")
+        expect(newScratchPreferences(since: baseline, in: directory).isEmpty,
+               "a scratch plist present before the run is not the run's leak")
+
+        let added = "com.sushil.velora.selftest.\(UUID().uuidString).plist"
+        fm.createFile(atPath: directory.appendingPathComponent(added).path, contents: Data())
+        expect(newScratchPreferences(since: baseline, in: directory) == [added],
+               "a scratch plist the run added is flagged")
     }
 
     /// Earlier selftest builds named scratch domains with these exact
@@ -301,8 +341,9 @@ enum Selftest {
         "com.sushil.velora.selftest.", "com.velora.selftest.",
     ]
 
+    /// The owner's, via getpwuid: `~` is the run's scratch home.
     private static var preferencesDirectory: URL {
-        FileManager.default.homeDirectoryForCurrentUser
+        WindowSnapshot.realHome
             .appendingPathComponent("Library/Preferences", isDirectory: true)
     }
 
@@ -327,17 +368,18 @@ enum Selftest {
         try? FileManager.default.removeItem(atPath: "\(name).plist")
     }
 
-    /// Deletes plists leaked by earlier selftest builds. Files only: going
-    /// through cfprefsd would make it write each emptied domain back.
-    private static func removeLeakedScratchDomains() {
-        for file in scratchPreferenceFiles() {
-            try? FileManager.default.removeItem(at: file)
-        }
+    /// Scratch plists in `directory` that `baseline` did not hold, by name.
+    private static func newScratchPreferences(
+        since baseline: Set<String>, in directory: URL = preferencesDirectory
+    ) -> [String] {
+        scratchPreferenceFiles(in: directory).map(\.lastPathComponent)
+            .filter { !baseline.contains($0) }
+            .sorted()
     }
 
-    private static func scratchPreferenceFiles() -> [URL] {
+    private static func scratchPreferenceFiles(in directory: URL = preferencesDirectory) -> [URL] {
         let files = (try? FileManager.default.contentsOfDirectory(
-            at: preferencesDirectory, includingPropertiesForKeys: nil)) ?? []
+            at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.filter { file in
             let name = file.lastPathComponent
             return name.hasSuffix(".plist")
@@ -13034,6 +13076,58 @@ enum Selftest {
         expect(stoppedTally.history == 1 && stoppedTally.copied == 1 && stoppedTally.posted == 0,
                "a Slack take stopped from Home records History once and shows Copied to clipboard")
     }
+
+    #if DEBUG
+    /// The window harness seeds fixtures only into a fresh scratch home it
+    /// made itself. A caller-set home naming the real home, an unmarked or
+    /// nested directory, a home another run made, or one holding stores is
+    /// refused.
+    private static func testWindowSnapshotHome() {
+        let fm = FileManager.default
+        let temporary = URL(fileURLWithPath: NSTemporaryDirectory())
+        let realHome = WindowSnapshot.realHome
+        let me = getpid()
+        func scratch() -> URL {
+            temporary.appendingPathComponent("velora-window-snapshot-selftest-\(UUID().uuidString)")
+        }
+        let home = scratch()
+        let unmarked = scratch()
+        let outer = temporary.appendingPathComponent("velora-selftest-\(UUID().uuidString)")
+        let nested = outer.appendingPathComponent("velora-window-snapshot-nested")
+        defer {
+            for url in [home, unmarked, outer] {
+                try? fm.removeItem(at: url)
+            }
+        }
+
+        func accepts(_ url: URL, parent: pid_t = getpid()) -> Bool {
+            WindowSnapshot.isHarnessHome(
+                url, realHome: realHome, temporaryDirectory: temporary, ownerPID: parent)
+        }
+
+        do {
+            try WindowSnapshot.makeScratchHome(at: home)
+            try fm.createDirectory(at: unmarked, withIntermediateDirectories: false)
+            try fm.createDirectory(at: outer, withIntermediateDirectories: false)
+            try WindowSnapshot.makeScratchHome(at: nested)
+        } catch {
+            expect(false, "the harness makes its scratch homes (\(error))")
+            return
+        }
+
+        expect(accepts(home), "a fresh home the harness made is accepted")
+        expect(!accepts(realHome), "the real home is refused")
+        expect(!accepts(home, parent: me + 1), "a home another run made is refused")
+        expect(!accepts(unmarked), "an unmarked directory is refused")
+        expect(!accepts(nested), "a home below the top of the temporary directory is refused")
+
+        let modes = home.appendingPathComponent(".velora/modes")
+        try? fm.createDirectory(at: modes, withIntermediateDirectories: true)
+        expect(accepts(home), "seeded built-in modes keep a home fresh")
+        fm.createFile(atPath: home.appendingPathComponent(".velora/history.sqlite").path, contents: Data())
+        expect(!accepts(home), "a home that already holds stores is refused")
+    }
+    #endif
 
     /// The selected sidebar row turns accent only while its list has focus
     /// in the key window, as in Finder: grey in an inactive window, and in

@@ -1,3 +1,4 @@
+#if DEBUG
 import AppKit
 import SwiftUI
 
@@ -6,8 +7,17 @@ import SwiftUI
 /// the CLI-era answer to "open the screenshot before calling it done".
 /// Windows are created but never ordered onto the screen; rendering goes
 /// through `NSView.cacheDisplay`, so nothing flashes in front of the user.
+/// Debug builds only. It runs in `--window-snapshot`'s scratch home, so its
+/// stores, settings, modes, log and defaults are fixtures, never the
+/// owner's ~/.velora or defaults domain.
 enum SnapshotRenderer {
     static func run(outputDir: String) -> Never {
+        WindowSnapshot.enterScratchHome(label: "snapshot")
+
+        // Lands in the scratch home's velora-app.log, never the live one; the
+        // output path makes the run findable there.
+        veloraLog("Velora: snapshot rendering to \(outputDir)")
+
         let app = NSApplication.shared
         app.setActivationPolicy(.prohibited)
         // VELORA_SNAPSHOT_APPEARANCE=light|dark forces both themes to be
@@ -265,6 +275,27 @@ enum SnapshotRenderer {
         .background(VeloraPanel.canvas)
         let view = NSHostingView(rootView: rows)
         snapshot(view, size: NSSize(width: 215, height: 240), name: "settings-sidebar-rows", dir: dir)
+
+        // The main sidebar's rows with History selected, without and with
+        // keyboard focus: grey, then accent, as Finder shows it.
+        for (focus, name) in [
+            (SidebarFocus.inactive, "main-sidebar-rows"),
+            (SidebarFocus.focused, "main-sidebar-rows-focused"),
+        ] {
+            let mainRows = VStack(alignment: .leading, spacing: WindowShellMetrics.rowSpacing) {
+                ForEach(MainPane.allCases) { pane in
+                    SidebarRow(
+                        symbol: pane.symbol, title: pane.title,
+                        selected: pane == .history, focus: focus)
+                }
+            }
+            .padding(VeloraSpacing.m)
+            .frame(width: 215)
+            .background(VeloraPanel.canvas)
+            snapshot(
+                NSHostingView(rootView: mainRows), size: NSSize(width: 215, height: 240),
+                name: name, dir: dir)
+        }
     }
 
     // MARK: - Main + Settings windows
@@ -274,10 +305,16 @@ enum SnapshotRenderer {
     /// both in production-sized windows with the shell's own chrome.
     @MainActor
     private static func renderShellWindows(into dir: URL) {
+        // The scratch home's stores start empty; seed what `--window-snapshot`
+        // seeds so the panes draw content.
         let history = HistoryStore()
-        let dictionary = DictionaryRepository()
+        seedFixtureHistory(history)
+        // An explicit device id: the default one lives in `.standard`.
+        let dictionary = DictionaryRepository(deviceID: "snapshot")
+        seedFixtureDictionary(dictionary)
         let sync = ICloudDictionarySync(repository: dictionary)
         let meetings = MeetingStore()
+        seedFixtureMeeting(meetings)
         let supervisor = EngineSupervisor()  // never started — status stays idle
         let processor = MeetingProcessor(supervisor: supervisor, store: meetings)
         let coordinator = MeetingCoordinator(
@@ -322,6 +359,12 @@ enum SnapshotRenderer {
         mainSelection.pane = .stats
         mainWindow.setContentSize(NSSize(width: 960, height: 620))
         writeShell(mainWindow, name: "main-stats-min", into: dir)
+        // Home at the minimum: the week card's three numbers stay whole.
+        mainSelection.pane = .home
+        writeShell(mainWindow, name: "main-home-min", into: dir)
+        renderBusyHome(
+            model: model, meetings: meetings, coordinator: coordinator,
+            processor: processor, into: dir)
 
         let settingsSelection = SettingsWindowSelection()
         let settingsRoot = SettingsRootView(
@@ -440,6 +483,74 @@ enum SnapshotRenderer {
             url: fixtureRoot.appendingPathComponent("history.sqlite3"),
             removeArchivedClip: { _ in })
 
+        seedFixtureHistory(store)
+
+        // Preload insights on this thread (serial history queue, so it sees
+        // every row) instead of trusting `.onAppear`'s async reload to finish
+        // inside the snapshot's runloop budget.
+        let vm = IntelligenceViewModel(history: store)
+        vm.reloadNow()
+
+        // Standalone view, no window: paint the canvas so dark text has a
+        // dark page behind it instead of a transparent PNG.
+        let view = NSHostingView(
+            rootView: IntelligenceSettingsView(model: model, viewModel: vm)
+                .background(VeloraPanel.canvas))
+        snapshot(
+            view, size: NSSize(width: 960, height: 1560),
+            name: "settings-stats-seeded", dir: dir)
+        try? FileManager.default.removeItem(at: fixtureRoot)
+    }
+
+    /// Home at the window's minimum after a very busy week
+    /// (`main-home-min-busy.png`): the week card's widest numbers, six
+    /// digits of words and hours of time saved, must stay whole beside the
+    /// chart.
+    @MainActor
+    private static func renderBusyHome(
+        model: SettingsModel, meetings: MeetingStore, coordinator: MeetingCoordinator,
+        processor: MeetingProcessor, into dir: URL
+    ) {
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-home-snapshot-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: fixtureRoot, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: fixtureRoot) }
+        let store = HistoryStore(
+            url: fixtureRoot.appendingPathComponent("history.sqlite3"),
+            removeArchivedClip: { _ in })
+
+        // 7 days × 60 dictations × 330 words: 138,600 words, 420 dictations.
+        let busyDays = 7
+        let dictationsPerDay = 60
+        let wordsPerDictation = 330
+        let text = Array(repeating: "word", count: wordsPerDictation).joined(separator: " ")
+        let today = Calendar.current.startOfDay(for: Date())
+        for daysAgo in 0..<busyDays {
+            let day = Calendar.current.date(byAdding: .day, value: -daysAgo, to: today) ?? today
+            for slot in 0..<dictationsPerDay {
+                store.insert(DictationRecord(
+                    timestamp: day.addingTimeInterval(TimeInterval(slot * 60)),
+                    bundleID: "com.apple.Notes", appName: "Notes",
+                    raw: text, final: text, mode: "Notes",
+                    durationMs: wordsPerDictation * 380, cleanupMs: 250))
+            }
+        }
+
+        let root = MainRootView(
+            model: model, selection: MainWindowSelection(), supervisor: nil,
+            history: store, meetings: meetings,
+            meetingCoordinator: coordinator, meetingProcessor: processor,
+            actions: MainWindowActions(
+                toggleDictation: {}, startMeeting: {}, openSettings: {},
+                openMeetingNotes: { _ in }))
+        let window = shellWindow(root: root, size: NSSize(width: 960, height: 620))
+        writeShell(window, name: "main-home-min-busy", into: dir)
+    }
+
+    /// Twelve weeks of deterministic dictations across five apps. Shared
+    /// with `--window-snapshot` so both harnesses draw the same data.
+    @MainActor
+    static func seedFixtureHistory(_ store: HistoryStore) {
         let apps: [(name: String, bundle: String, mode: String)] = [
             ("Slack", "com.tinyspeck.slackmacgap", "Message"),
             ("Notes", "com.apple.Notes", "Notes"),
@@ -485,33 +596,21 @@ enum SnapshotRenderer {
         let drained = DispatchSemaphore(value: 0)
         store.drain { drained.signal() }
         drained.wait()
-
-        // Preload insights on this thread (serial history queue, so it sees
-        // every row) instead of trusting `.onAppear`'s async reload to finish
-        // inside the snapshot's runloop budget.
-        let vm = IntelligenceViewModel(history: store)
-        vm.reloadNow()
-
-        // Standalone view, no window: paint the canvas so dark text has a
-        // dark page behind it instead of a transparent PNG.
-        let view = NSHostingView(
-            rootView: IntelligenceSettingsView(model: model, viewModel: vm)
-                .background(VeloraPanel.canvas))
-        snapshot(
-            view, size: NSSize(width: 960, height: 1560),
-            name: "settings-stats-seeded", dir: dir)
-        try? FileManager.default.removeItem(at: fixtureRoot)
     }
 
+    /// Three dictionary words. Shared with `--window-snapshot`.
     @MainActor
-    private static func renderMeetingNotes(
-        into dir: URL, completion: @escaping () -> Void
-    ) {
-        let fixtureRoot = FileManager.default.temporaryDirectory
-            .appendingPathComponent("velora-meeting-snapshot-\(UUID().uuidString)", isDirectory: true)
-        let store = MeetingStore(
-            url: fixtureRoot.appendingPathComponent("meetings.sqlite3"),
-            filesRoot: fixtureRoot)
+    static func seedFixtureDictionary(_ dictionary: DictionaryRepository) {
+        for term in ["Velora", "Kubernetes", "Harshi"] {
+            _ = try? dictionary.add(writeAs: term)
+        }
+    }
+
+    /// One finished "Product review" meeting with notes and two speakers.
+    /// Shared with `--window-snapshot`. Returns the meeting's id.
+    @MainActor
+    @discardableResult
+    static func seedFixtureMeeting(_ store: MeetingStore) -> String {
         let id = UUID().uuidString
         let started = Date(timeIntervalSince1970: 1_700_000_000)
         store.insertProcessing(MeetingRecord(
@@ -530,6 +629,19 @@ enum SnapshotRenderer {
             summary: "The review aligned on a focused implementation plan and clear acceptance criteria.",
             decisions: ["Keep the experience local and single-player"],
             actionItems: ["Me: prepare the implementation plan"]))
+        return id
+    }
+
+    @MainActor
+    private static func renderMeetingNotes(
+        into dir: URL, completion: @escaping () -> Void
+    ) {
+        let fixtureRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-meeting-snapshot-\(UUID().uuidString)", isDirectory: true)
+        let store = MeetingStore(
+            url: fixtureRoot.appendingPathComponent("meetings.sqlite3"),
+            filesRoot: fixtureRoot)
+        let id = seedFixtureMeeting(store)
 
         let model = MeetingNotesWindowModel(store: store)
         model.show(meetingID: id)
@@ -579,3 +691,4 @@ enum SnapshotRenderer {
         NSLog("Velora: snapshot wrote %@", url.path)
     }
 }
+#endif

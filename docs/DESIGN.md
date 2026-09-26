@@ -305,7 +305,7 @@ The pill by the cursor is the product's face. Rules:
 2. Copy follows §5: casing, canonical names, ellipsis, shortcut glyphs.
 3. Symbol is the one from §7's table.
 4. Works in light and dark, and in `prefers-reduced-motion`.
-5. Screenshot both themes (`.build/release/Velora --snapshot` for the app;
+5. Screenshot both themes (`.build/debug/Velora --snapshot` for the app;
    the local server for the site) and look at them before claiming done.
 6. `make test` is green; for site changes `make test-site` specifically.
 7. Icon or brand change ⇒ re-run `scripts/make-icon.py` and commit every

@@ -83,9 +83,32 @@ struct STTModel: Identifiable, Equatable {
 /// to `~/.velora/config.json`, followed by a `reload_config` push from callers.
 final class AppConfig {
     static let shared = AppConfig(
-        defaults: .standard,
+        defaults: sharedDefaults,
         settingsFileURL: settingsFileURL,
         engineConfigURL: configFileURL)
+
+    /// `.standard`, or the harness's scratch suite: in any debug build, and in
+    /// a release build only under `--selftest`, so a variable leaking in from
+    /// a shell never redirects a release app launch.
+    private static var sharedDefaults: UserDefaults {
+        #if !DEBUG
+        guard CommandLine.arguments.contains("--selftest") else {
+            return .standard
+        }
+        #endif
+
+        if let suite = ProcessInfo.processInfo.environment[scratchDefaultsKey]
+            .flatMap(UserDefaults.init(suiteName:)) {
+            return suite
+        }
+        return .standard
+    }
+
+    /// Names an absolute-path defaults suite that replaces `.standard` for a
+    /// harness (`--window-snapshot`, `--snapshot`, `--selftest`). The bare
+    /// binary embeds the app's Info.plist, so its `.standard` IS the
+    /// installed app's domain. Release builds read it under `--selftest` only.
+    static let scratchDefaultsKey = "VELORA_SCRATCH_DEFAULTS"
 
     struct ManualDictionarySnapshot: Codable, Equatable {
         var vocabulary: [String]
