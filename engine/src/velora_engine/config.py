@@ -616,9 +616,14 @@ class Config:
             if not res.name.endswith(".json"):
                 continue
             dest = self.modes_dir / res.name
-            if not dest.exists():
-                dest.write_text(res.read_text())
-                log.info("installed built-in mode %s", dest.name)
+            # Create exclusively: Velora renames its own mode file into
+            # place at any moment, and a check-then-write would truncate it.
+            try:
+                with dest.open("x") as out:
+                    out.write(res.read_text())
+            except FileExistsError:
+                continue
+            log.info("installed built-in mode %s", dest.name)
 
     # The exact `apps` list the old default Code mode shipped with. Migration
     # only fires when the on-disk file matches this set (plus empty prompt/vocab/

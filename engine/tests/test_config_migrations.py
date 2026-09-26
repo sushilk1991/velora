@@ -121,3 +121,28 @@ def test_deliberate_unbind_is_not_recaptured_by_the_fallback(home):
         assert Config().unbound_builtin_apps == frozenset()
     finally:
         os.environ["VELORA_HOME"] = str(home)
+
+
+def test_install_leaves_a_file_that_lands_after_the_check(home, fake_stt, monkeypatch):
+    """Velora renames its own mode file into place at any moment, so one
+    can land between the install's existence check and its write. The
+    install creates exclusively and leaves that file byte for byte."""
+    import pathlib
+
+    cfg = Config()
+    code = cfg.modes_dir / "code.json"
+    mine = b'{"name": "Code", "prompt": "mine"}\n'
+    code.write_bytes(mine)
+    real_exists = pathlib.Path.exists
+    monkeypatch.setattr(
+        pathlib.Path, "exists",
+        lambda self, *args, **kwargs: False if self == code else real_exists(self, *args, **kwargs))
+    cfg._ensure_builtin_modes()
+    assert code.read_bytes() == mine
+
+    # The refresh still replaces a superseded built-in on purpose.
+    note = cfg.modes_dir / "note.json"
+    note.write_text(json.dumps(OLD_NOTE, indent=2))
+    cfg.data["builtin_modes_rev"] = 0
+    cfg._refresh_builtin_modes()
+    assert json.loads(note.read_text()) == _packaged("note.json")
