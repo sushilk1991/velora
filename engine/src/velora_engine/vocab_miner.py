@@ -60,6 +60,92 @@ _STOPWORDS = frozenset(
 )
 PROMPT_ARTIFACT_WORDS = frozenset({"glossary"})
 
+# Whisper fills silence with subtitle credits memorised from captioned video:
+#   "Closed Captioning by Kris Brandhagen.com."
+#   "Subtitles by the Amara.org community"
+# A credit-only sentence can prime another hallucination if mined. A credit
+# phrase inside real speech may be dictated, so every word there stays.
+_WHISPER_CREDIT_DOMAINS = (
+    "Amara.org",  # Whisper's best-known subtitle credit
+    "Brandhagen.com",  # seen in owner history
+    "GetTranscribed.com",  # seen in owner history
+)
+# Credit sentence: "<credit word> [provided|made] by <domain> [community]."
+_WHISPER_CREDIT = re.compile(
+    r"^[^\w]*(?:Closed Caption(?:s|ing|ed)|Caption(?:ing|ed|s)|Subtitles|Subtitled"
+    r"|Transcription|Transcribed|Translation|Translated)"
+    r"(?:\s+(?:provided|made))?\s+by\s+(?:[\w'-]+\s+){0,3}(?:www\.)?"
+    r"(?:" + "|".join(re.escape(d) for d in _WHISPER_CREDIT_DOMAINS) + r")"
+    r"(?:\s+community)?[^\w]*$",
+    re.IGNORECASE,
+)
+
+
+# Quotes and brackets that close (or open) a sentence, in English, German
+# and CJK punctuation. German closes with “ ‘ « ‹, so those are closers too.
+_CLOSING_MARKS = "\"'”’“‘»«›‹)]}」』》〉】〕）"
+_OPENING_MARKS = "\"'“‘„‚«»‹›([{「『《〈【〔（"
+# Sentence end: ASCII .!? before whitespace, or CJK 。！？ with or without
+# whitespace after it, either optionally closed by a quote or bracket.
+#   'He said "Ship Friday." Closed…'  ->  'He said "Ship Friday."' | 'Closed…'
+#   '彼は「はい。」Closed…'           ->  '彼は「はい。」' | 'Closed…'
+_CLOSERS = f"[{re.escape(_CLOSING_MARKS)}]*"
+_SENTENCE_END = re.compile(rf"[.!?]{_CLOSERS}\s+|[。！？]{_CLOSERS}\s*")
+# A bare period after an abbreviation is inside the sentence, not its end:
+# "e.g. Translation by … Amara.org." is one dictated sentence, so its
+# credit-shaped phrase keeps every word.
+_ABBREVIATIONS = frozenset({"vs", "etc", "cf", "dr", "mr", "mrs", "ms", "st", "jr", "sr"})
+# Dotted abbreviation before its final period: "e.g", "i.e", "U.S", "a.m".
+_DOTTED_ABBREVIATION = re.compile(r"(?:\w\.)+\w")
+
+
+def _is_abbreviation(word: str) -> bool:
+    # A quoted or bracketed abbreviation is still one: '("e.g.' -> 'e.g'.
+    word = word.lstrip(_OPENING_MARKS)
+    lowered = word.lower()
+    if lowered in _ABBREVIATIONS or _DOTTED_ABBREVIATION.fullmatch(word):
+        return True
+
+    # A single letter is an initial ("John F. Kennedy"), except the
+    # pronoun, which ends sentences: "So do I."
+    return len(word) == 1 and word.isalpha() and lowered != "i"
+
+
+def _split_sentences(line: str) -> list[str]:
+    sentences = []
+    start = 0
+    scanned = 0
+    for end in _SENTENCE_END.finditer(line):
+        # The last word lies after the previous sentence-end match, so each
+        # character is split once even across a run of skipped
+        # abbreviations: "Dr. Dr. Dr. …" stays linear.
+        words = line[scanned:end.start()].split()
+        scanned = end.end()
+
+        # Only a bare period can be an abbreviation's. A closing quote or
+        # bracket after it ends the sentence: 'She wrote "Ask the Dr." Sub…'.
+        mark = end.group()
+        bare_period = mark[0] == "." and mark[1:2].isspace()
+        if bare_period and words and _is_abbreviation(words[-1]):
+            continue
+
+        sentences.append(line[start:end.end()].strip())
+        start = end.end()
+    sentences.append(line[start:].strip())
+    return [sentence for sentence in sentences if sentence]
+
+
+def _strip_whisper_credits(text: str) -> str:
+    lines = []
+    for line in text.splitlines():
+        # Each line can mix real speech and a credit sentence. Split at
+        # sentence ends so only a complete credit leaves the batch.
+        sentences = _split_sentences(line.strip())
+        kept = [sentence for sentence in sentences if not _WHISPER_CREDIT.fullmatch(sentence)]
+        if kept:
+            lines.append(" ".join(kept))
+    return "\n".join(lines)
+
 
 def contains_prompt_artifact(term: str) -> bool:
     return any(
@@ -306,6 +392,9 @@ class VocabMiner:
         rows: list[tuple[int, str]] = []
         used = 0
         for row_id, final in fetched:
+            # Only standalone credits leave the mining batch; a sentence
+            # containing the same phrase remains intact for occurrence checks.
+            final = _strip_whisper_credits(final)
             cost = len(final) + 1
             if rows and used + cost > BATCH_CHAR_CAP:
                 break

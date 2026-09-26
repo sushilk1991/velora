@@ -4,6 +4,7 @@ nominations, ≥2-dictation promotion, checkpointing, banned-term handling
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,10 @@ from velora_engine.vocab_miner import (
     clean_line,
     validate_term,
 )
+
+# Linear splitting of a 200k-character row takes milliseconds; the old
+# quadratic scan took over ten seconds.
+LINEAR_SPLIT_BUDGET_S = 1.0
 
 
 def seed_history(home: Path, texts: list[str]) -> None:
@@ -187,6 +192,218 @@ async def test_banned_term_never_readded(tmp_path):
     state = read_state(home)
     assert state["terms"] == []
     assert state["banned"] == ["Velora"]
+
+
+async def test_whisper_credit_hallucination_never_learned(tmp_path):
+    # A whole-utterance caption credit must not enter the glossary and prime
+    # another hallucination; ordinary dictated prose remains available.
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "Closed Captioning by Kris Brandhagen.com.",
+        "Closed Captioning by GetTranscribed.com.",
+        "Subtitles by the Amara.org community",
+        "the notes were transcribed by Velora",
+        "Velora shipped",
+    ])
+    miner = VocabMiner(home, make_generate([
+        "Kris Brandhagen", "Kris", "Brandhagen.com", "GetTranscribed.com",
+        "Amara.org", "Closed Captioning", "Velora",
+    ]))
+    await miner.step()
+    state = read_state(home)
+    assert state["terms"] == ["Velora"]
+    assert state["candidates"] == {}
+
+
+async def test_captioned_credit_never_learned(tmp_path):
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "Closed Captioned by Kris Brandhagen.com.",
+        "Captioned by GetTranscribed.com.",
+        "Velora shipped",
+    ])
+    credited = ["Kris Brandhagen", "Brandhagen.com", "GetTranscribed.com"]
+    miner = VocabMiner(home, make_generate(credited + ["Velora"]))
+    await miner.step()
+    state = read_state(home)
+    learned = set(state["terms"]) | set(state["candidates"])
+    assert learned & set(credited) == set()
+    assert "Velora" in learned
+
+
+async def test_punctuated_whole_credit_is_removed(tmp_path):
+    # Quotes and sentence punctuation still leave the credit as one utterance.
+    home = tmp_path / "vh"
+    seed_history(home, ['  "Subtitles by the Amara.org community"?!  ', "Velora shipped"])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == ["Velora shipped"]
+
+
+async def test_credit_shaped_speech_reaches_the_miner(tmp_path):
+    # A known credit phrase inside real prose is still a dictated sentence.
+    home = tmp_path / "vh"
+    spoken = [
+        "Transcribed by Velora for the release.",
+        "Captions by Alice explain the feature.",
+        "Translation by Friday is fine.",
+        "Subtitles by the Amara.org community are accurate.",
+    ]
+    seed_history(home, spoken)
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+    await miner.step()
+    assert calls == ["\n".join(spoken)]
+
+
+@pytest.mark.parametrize("credit", [
+    "Closed captions by Kris Brandhagen.com.",
+    "Closed captioning by Kris Brandhagen.com.",
+    "Subtitles\u00a0by\t the\u2003Amara.org\u00a0community.",
+])
+async def test_credit_variants_removed(tmp_path, credit):
+    # Whole-credit variants cannot become mining evidence.
+    home = tmp_path / "vh"
+    seed_history(home, [credit, "Velora shipped"])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == ["Velora shipped"]
+
+
+async def test_appended_credit_removed(tmp_path):
+    # A credit after a real sentence is a separate utterance.
+    home = tmp_path / "vh"
+    seed_history(home, ["We ship it Friday. Closed Captioning by Kris Brandhagen.com."])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == ["We ship it Friday."]
+
+
+async def test_multiline_credit_removed(tmp_path):
+    # Strip credit lines and sentences while preserving each real line.
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "First line.\nClosed captions by Kris Brandhagen.com.\n"
+        "Second line. Subtitles by the Amara.org community."
+    ])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == ["First line.\nSecond line."]
+
+
+async def test_credit_phrase_inside_sentence_kept(tmp_path):
+    # A credit-shaped phrase embedded in speech keeps every word.
+    home = tmp_path / "vh"
+    spoken = "I quoted Closed Captioning by Kris Brandhagen.com during review."
+    seed_history(home, [spoken])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == [spoken]
+
+
+async def test_three_word_credit_name_bound(tmp_path):
+    # The known contributor-name shape is stripped only as a full utterance.
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "Translation by Friday for Amara.org",
+        "Translation by Ana Maria Lopez Amara.org",
+        "Translation by One Two Three Four Amara.org",
+    ])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == ["Translation by One Two Three Four Amara.org"]
+
+
+@pytest.mark.parametrize(("row", "kept"), [
+    ('He said "Ship Friday." Closed Captioning by Kris Brandhagen.com.',
+     'He said "Ship Friday."'),
+    ("金曜日に出荷します。Closed Captioning by Kris Brandhagen.com.",
+     "金曜日に出荷します。"),
+    ("Ready? Subtitles by the Amara.org community.", "Ready?"),
+    ("No. Closed Captioning by Kris Brandhagen.com.", "No."),
+    ('He said "No." Closed Captioning by Kris Brandhagen.com.', 'He said "No."'),
+    ('She wrote "Ask the Dr." Subtitles by the Amara.org community.',
+     'She wrote "Ask the Dr."'),
+    ("So do I. Subtitles by the Amara.org community.", "So do I."),
+    ("Is it Dr? Subtitles by the Amara.org community.", "Is it Dr?"),
+    ("He said 「No.」 Closed Captioning by Kris Brandhagen.com.", "He said 「No.」"),
+    ("Er sagte »Nein.« Subtitles by the Amara.org community.", "Er sagte »Nein.«"),
+    ("Er sagte „Nein.“ Subtitles by the Amara.org community.", "Er sagte „Nein.“"),
+    ("Er sagte ‚Nein.‘ Subtitles by the Amara.org community.", "Er sagte ‚Nein.‘"),
+    ("彼は「はい。」Closed Captioning by Kris Brandhagen.com.", "彼は「はい。」"),
+    ("Wait... Subtitles by the Amara.org community.", "Wait..."),
+])
+async def test_credit_after_any_sentence_end(tmp_path, row, kept):
+    # A closing quote, CJK punctuation or "?" still ends the real sentence,
+    # so the credit after it is its own utterance.
+    home = tmp_path / "vh"
+    seed_history(home, [row])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == [kept]
+
+
+@pytest.mark.parametrize("spoken", [
+    "This is one sentence, e.g. Translation by Friday for Amara.org.",
+    "We compared Rev vs. Transcribed by GetTranscribed.com.",
+    "I reviewed the U.S. Translation by Friday for Amara.org.",
+    "Call at 9 a.m. Transcribed by GetTranscribed.com.",
+    "A letter from John F. Translation by Friday for Amara.org.",
+    'The note said ("e.g. Translation by Friday for Amara.org.")',
+])
+async def test_abbreviation_keeps_sentence(tmp_path, spoken):
+    # An abbreviation's period is not a sentence end, so a credit-shaped
+    # phrase after it is still inside real speech and keeps every word.
+    home = tmp_path / "vh"
+    seed_history(home, [spoken])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == [spoken]
+
+
+async def test_back_to_back_credits_both_removed(tmp_path):
+    # A credit's domain ends in a dotted word, but it is not an
+    # abbreviation, so a second credit after it is its own sentence too.
+    home = tmp_path / "vh"
+    seed_history(home, [
+        "Closed Captioning by Kris Brandhagen.com. Subtitles by the Amara.org community."
+    ])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    await miner.step()
+    assert calls == []
+
+
+async def test_abbreviation_run_splits_in_linear_time(tmp_path):
+    # A repetition loop of abbreviations is one long sentence. Splitting it
+    # must stay linear: re-scanning the growing sentence per period took
+    # seconds on a 64k-character row.
+    home = tmp_path / "vh"
+    seed_history(home, ["Dr. " * 50_000])
+    calls: list[str] = []
+    miner = VocabMiner(home, make_generate([], calls))
+
+    started = time.perf_counter()
+    await miner.step()
+    assert time.perf_counter() - started < LINEAR_SPLIT_BUDGET_S
+    assert calls and calls[0].startswith("Dr. Dr. ")
 
 
 async def test_user_corrected_wrong_side_never_promotes(tmp_path):
