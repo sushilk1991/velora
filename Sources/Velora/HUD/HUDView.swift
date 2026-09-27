@@ -248,11 +248,25 @@ struct HUDView: View {
     // MARK: - Listening and transcribing
 
     @ViewBuilder private var recordingContent: some View {
-        if model.sessionContext?.livePreview == true {
+        if model.state == .transcribing && model.showsMultiStepProgress {
+            transcribeContent
+        } else if model.sessionContext?.livePreview == true {
             livePreviewContent
         } else {
             recordingControls
         }
+    }
+
+    private var transcribeContent: some View {
+        HStack(spacing: VeloraSpacing.s) {
+            Image(systemName: "waveform")
+                .foregroundStyle(VeloraBrand.iconGradient)
+            Text(model.transcribeProgress)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(hudPrimaryText)
+                .lineLimit(1)
+        }
+        .frame(width: desiredListeningWidth, height: HUDGeometry.height)
     }
 
     private var livePreviewContent: some View {
@@ -863,10 +877,16 @@ struct HUDView: View {
         case .listening:
             return "Listening"
         case .transcribing:
-            return "Transcribing"
+            return Self.accessibilityStatus(for: model)
         default:
             return "Velora dictation"
         }
+    }
+
+    static func accessibilityStatus(for model: HUDModel) -> String {
+        // Ordinary transcription keeps the shipped VoiceOver name. Only the
+        // visible multistep pill has a progress phrase to announce.
+        return model.showsMultiStepProgress ? model.transcribeProgress : "Transcribing"
     }
 
     private var isRecordingActive: Bool {

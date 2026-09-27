@@ -109,6 +109,9 @@ final class FileTranscriber {
     private var agentRequestID: UUID?
     private var agentCompletion: ((Result<FileTranscriptionResult, FileTranscriptionError>) -> Void)?
     private var queuedFromFinder = false
+    private var seenStallRestarts = 0
+    private var retryAfterRestart = false
+    private var restartRetries = 0
     /// Terminal lifecycle gate: no picker callback or broker dispatch can
     /// create a new engine job once application termination has started.
     private var terminating = false
@@ -222,14 +225,25 @@ final class FileTranscriber {
         self.agentRequestID = agentRequestID
         agentCompletion = completion
         self.queuedFromFinder = queuedFromFinder
+        seenStallRestarts = supervisor.stallRestartCount
+        retryAfterRestart = false
+        restartRetries = 0
         progressLabel = "Preparing…"
         onStateChange?()
         veloraLog("Velora: transcribe_file requested (\(url.pathExtension), \((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0) bytes)")
-        var command: [String: Any] = ["cmd": "transcribe_file", "path": url.path, "id": id]
-        if let mode { command["mode"] = mode }
+        sendRequest()
+    }
+
+    private func sendRequest() {
+        guard let sourceURL, let jobID else { return }
+        var command: [String: Any] = [
+            "cmd": "transcribe_file", "path": sourceURL.path, "id": jobID,
+        ]
+        if let requestedMode { command["mode"] = requestedMode }
         supervisor.send(command)
         // The engine acks immediately (before decoding); no ack = the command
         // was lost in a reconnect window.
+        ackTimer?.invalidate()
         ackTimer = Timer.scheduledTimer(withTimeInterval: 10, repeats: false) { [weak self] _ in
             guard let self, self.isTranscribing else { return }
             veloraLog("Velora: transcribe_file never acknowledged — clearing")
@@ -324,10 +338,33 @@ final class FileTranscriber {
     func handleEngineStateChange(_ state: EngineSupervisor.State) {
         guard isTranscribing else { return }
         switch state {
-        case .ready, .connecting:
+        case .ready:
+            if retryAfterRestart {
+                retryAfterRestart = false
+                progressLabel = "Preparing…"
+                onStateChange?()
+                sendRequest()
+            }
+        case .connecting:
             break
-        case .stopped, .launching, .degraded:
+        case .degraded:
+            // No ready event can rescue this replacement; free its file slot.
+            retryAfterRestart = false
             fail("engine restarted")
+        case .stopped, .launching:
+            if supervisor.stallRestartCount > seenStallRestarts && restartRetries == 0 {
+                seenStallRestarts = supervisor.stallRestartCount
+                restartRetries = 1
+                retryAfterRestart = true
+                ackTimer?.invalidate()
+                ackTimer = nil
+                progressLabel = "Engine restarting…"
+                onStateChange?()
+                return
+            }
+            if !retryAfterRestart {
+                fail("engine restarted")
+            }
         }
     }
 
@@ -408,6 +445,8 @@ final class FileTranscriber {
         agentRequestID = nil
         agentCompletion = nil
         queuedFromFinder = false
+        retryAfterRestart = false
+        restartRetries = 0
         if notify { onStateChange?() }
     }
 

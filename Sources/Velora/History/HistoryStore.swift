@@ -44,6 +44,8 @@ struct DictationRecord {
     /// Whether LLM cleanup produced `final` (`final.cleanup_applied`). Nil =
     /// unknown (legacy row) — distinct from false (cleanup skipped/failed).
     var cleanupApplied: Bool? = nil
+    var failedWindowCount = 0
+    var failedWindowS = 0.0
 }
 
 /// Velora's own rows. A Home take has no target app, so History files it
@@ -171,6 +173,8 @@ final class HistoryStore {
             ("quality_state", "INTEGER"),
             ("finalization_ms", "INTEGER"),
             ("cleanup_wall_ms", "INTEGER"),
+            ("failed_window_count", "INTEGER"),
+            ("failed_window_s", "REAL"),
         ]
         for (name, declaration) in additions where !existing.contains(name) {
             if sqlite3_exec(
@@ -260,7 +264,7 @@ final class HistoryStore {
     ) {
         beginWrite()
         queue.async { [self] in
-            let persisted = insertRecord(record)
+            let persisted = writeRecord(record)
             endWrite()
             completion?(persisted)
         }
@@ -276,9 +280,66 @@ final class HistoryStore {
     /// exit. Session identity makes a repeated lifecycle callback harmless.
     func insertForTermination(_ record: DictationRecord) -> Bool {
         queue.sync { [self] in
-            if let session = record.sessionID, hasSession(session) { return true }
-            return insertRecord(record)
+            // A finalized row already owns its cleaned text. A late quit
+            // callback can fill an audio-only row, but cannot replace it.
+            if let session = record.sessionID, hasCompletedSession(session) {
+                return true
+            }
+            return writeRecord(record)
         }
+    }
+
+    private func hasCompletedSession(_ session: String) -> Bool {
+        guard db != nil, !session.isEmpty else { return false }
+        let sql = "SELECT 1 FROM dictations WHERE session_id = ? AND final != '' LIMIT 1;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, session)
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    private func writeRecord(_ record: DictationRecord) -> Bool {
+        // A reconnect can create an audio-only row while the old engine still
+        // finalizes. Complete that row instead of adding a second session.
+        if let session = record.sessionID, hasSession(session) {
+            return updateRecord(record, session: session)
+        }
+        return insertRecord(record)
+    }
+
+    private func updateRecord(_ record: DictationRecord, session: String) -> Bool {
+        guard db != nil else { return false }
+        let sql = """
+            UPDATE dictations SET bundle_id = ?, app_name = ?, raw = ?, final = ?,
+                mode = ?, duration_ms = ?, cleanup_ms = ?, audio_path = ?,
+                stt_ms = ?, cleanup_applied = ?, finalization_ms = ?,
+                cleanup_wall_ms = ?, failed_window_count = ?,
+                failed_window_s = ? WHERE session_id = ?;
+            """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            return false
+        }
+        defer { sqlite3_finalize(stmt) }
+        bindText(stmt, 1, record.bundleID)
+        bindText(stmt, 2, record.appName)
+        bindText(stmt, 3, record.raw)
+        bindText(stmt, 4, record.final)
+        bindText(stmt, 5, record.mode)
+        sqlite3_bind_int64(stmt, 6, Int64(record.durationMs))
+        if let value = record.cleanupMs { sqlite3_bind_int64(stmt, 7, Int64(value)) }
+        bindText(stmt, 8, record.audioPath)
+        if let value = record.sttMs { sqlite3_bind_int64(stmt, 9, Int64(value)) }
+        if let value = record.cleanupApplied { sqlite3_bind_int(stmt, 10, value ? 1 : 0) }
+        if let value = record.finalizationMs { sqlite3_bind_int64(stmt, 11, Int64(value)) }
+        if let value = record.cleanupWallMs { sqlite3_bind_int64(stmt, 12, Int64(value)) }
+        sqlite3_bind_int64(stmt, 13, Int64(record.failedWindowCount))
+        sqlite3_bind_double(stmt, 14, record.failedWindowS)
+        bindText(stmt, 15, session)
+        return sqlite3_step(stmt) == SQLITE_DONE
     }
 
     private func hasSession(_ session: String) -> Bool {
@@ -299,8 +360,8 @@ final class HistoryStore {
             INSERT INTO dictations
                 (ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms,
                  audio_path, session_id, stt_ms, cleanup_applied, finalization_ms,
-                 cleanup_wall_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                 cleanup_wall_ms, failed_window_count, failed_window_s)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
@@ -343,6 +404,8 @@ final class HistoryStore {
         } else {
             sqlite3_bind_null(stmt, 14)
         }
+        sqlite3_bind_int64(stmt, 15, Int64(record.failedWindowCount))
+        sqlite3_bind_double(stmt, 16, record.failedWindowS)
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             NSLog("Velora: history insert failed: %@", lastError)
@@ -393,7 +456,8 @@ final class HistoryStore {
                 UPDATE dictations
                 SET raw = ?, final = ?, mode = ?, stt_ms = ?, cleanup_ms = ?,
                     cleanup_applied = ?, cleanup_wall_ms = ?,
-                    finalization_ms = NULL, quality_state = NULL
+                    finalization_ms = NULL, quality_state = NULL,
+                    failed_window_count = 0, failed_window_s = 0
                 WHERE id = ?;
                 """
             var stmt: OpaquePointer?
@@ -526,7 +590,8 @@ final class HistoryStore {
     /// Column list shared by every read so decode offsets stay in lockstep.
     private static let selectColumns =
         "id, ts, bundle_id, app_name, raw, final, mode, duration_ms, cleanup_ms, audio_path, " +
-        "session_id, stt_ms, cleanup_applied, finalization_ms, cleanup_wall_ms"
+        "session_id, stt_ms, cleanup_applied, finalization_ms, cleanup_wall_ms, " +
+        "failed_window_count, failed_window_s"
 
     /// Most recent dictations, newest first. Synchronous — called on menu
     /// open with tiny result sets.
@@ -1154,6 +1219,8 @@ final class HistoryStore {
                     ? nil : Int(sqlite3_column_int64(stmt, 11)),
                 cleanupApplied: sqlite3_column_type(stmt, 12) == SQLITE_NULL
                     ? nil : sqlite3_column_int(stmt, 12) != 0)
+            record.failedWindowCount = Int(sqlite3_column_int64(stmt, 15))
+            record.failedWindowS = sqlite3_column_double(stmt, 16)
             record.id = sqlite3_column_int64(stmt, 0)
             records.append(record)
         }

@@ -3,9 +3,18 @@ import AVFoundation
 import Carbon.HIToolbox
 import CoreAudio
 import Foundation
+import ObjectiveC
 import SQLite3
 import SwiftUI
 import UniformTypeIdentifiers
+
+private var selftestFrontmost: NSRunningApplication?
+
+extension NSWorkspace {
+    @objc fileprivate func veloraTestFrontmost() -> NSRunningApplication? {
+        selftestFrontmost ?? veloraTestFrontmost()
+    }
+}
 
 final class HotkeySelftestDelegate: HotkeyMonitorDelegate {
     var hotkeyDownCount = 0
@@ -194,6 +203,8 @@ enum Selftest {
         testDictationIntent()
         testHomeTakeHistoryRow()
         testRetryDelivery()
+        testFinalizationFlow()
+        testFileRestart()
         testOwnWindowFinal()
         #if DEBUG
         testWindowSnapshotHome()
@@ -212,6 +223,7 @@ enum Selftest {
         testAudioCaptureRequiresPCM()
         testAudioCaptureQuickReleasePreservesFirstPCM()
         testAudioCaptureStopPreservesConvertedTail()
+        testAudioCaptureSampleLimit()
         testAudioCaptureRapidRestart()
         testMediaPlaybackNoop()
         testMediaPlaybackUnknownStateFailsClosed()
@@ -3892,16 +3904,18 @@ enum Selftest {
         let final = EngineEvent.parse([
             "event": "final", "session": "s1", "text": "Hello.",
             "cleanup_applied": true, "cleanup_wall_ms": 123, "total_ms": 321,
-            "auto_stopped": true,
+            "auto_stopped": true, "failed_window_count": 1,
+            "failed_window_s": 37.5,
         ])
         if case .final(
             let session, let text, let raw, _, _, let cleanupWallMs,
-            let applied, let totalMs, let audio, let autoStopped
+            let applied, let totalMs, let audio, let autoStopped,
+            let failedCount, let failedSeconds
         ) = final {
             expect(session == "s1" && text == "Hello." && raw == "Hello.", "final fields parse")
             expect(
                 applied && cleanupWallMs == 123 && totalMs == 321 && audio == nil
-                    && autoStopped,
+                    && autoStopped && failedCount == 1 && failedSeconds == 37.5,
                 "final flags parse")
         } else {
             expect(false, "expected .final, got \(final)")
@@ -3919,6 +3933,30 @@ enum Selftest {
                 "recording_auto_stopped fields parse")
         } else {
             expect(false, "expected .recordingAutoStopped, got \(autoStop)")
+        }
+
+        let progress = EngineEvent.parse([
+            "event": "finalize_progress", "session": "current",
+            "stage": "cleanup", "completed": 2, "total": 4,
+            "stall_after_s": 25.0,
+        ])
+        if case .finalizeProgress(let session, let stage, let done, let total,
+                                  let bound) = progress {
+            expect(session == "current" && stage == "cleanup" && done == 2
+                   && total == 4 && bound == 25,
+                   "progress keeps its exact session and next-step bound")
+        } else {
+            expect(false, "expected .finalizeProgress, got \(progress)")
+        }
+
+        let finalizing = EngineEvent.parse([
+            "event": "finalize_started", "session": "current", "stall_after_s": 90.0,
+        ])
+        if case .finalizeStarted(let session, let bound) = finalizing {
+            expect(session == "current" && bound == 90,
+                   "finalize start carries its exact session and first-step bound")
+        } else {
+            expect(false, "expected .finalizeStarted, got \(finalizing)")
         }
 
         let started = EngineEvent.parse(
@@ -4129,6 +4167,18 @@ enum Selftest {
             expect(rows.count == 1 && rows[0].final.isEmpty
                    && rows[0].audioPath == "recovered-session.flac",
                    "interrupted recovery stores audio without inventing transcript text")
+            let persisted = DispatchSemaphore(value: 0)
+            let completed = dictation(
+                daysAgo: 0, words: 2, final: "Recovered words",
+                session: "recovered-session")
+            store.insert(completed) { _ in persisted.signal() }
+            expect(persisted.wait(timeout: .now() + 2) == .success,
+                   "completed session insert reaches durable History")
+            let finishedRows = store.recent(limit: 10).filter {
+                $0.sessionID == "recovered-session"
+            }
+            expect(finishedRows.count == 1 && finishedRows[0].final == "Recovered words",
+                   "a completed final updates its interrupted row")
         }
     }
 
@@ -4140,11 +4190,16 @@ enum Selftest {
                    "termination history persists before exit")
             expect(store.insertForTermination(record),
                    "termination history replay is idempotent")
+            let rawReplay = dictation(
+                daysAgo: 0, words: 2, raw: "raw words", final: "raw words",
+                session: "terminating-session")
+            expect(store.insertForTermination(rawReplay),
+                   "termination accepts a late replay")
             let rows = store.recent(limit: 10).filter {
                 $0.sessionID == "terminating-session"
             }
             expect(rows.count == 1 && rows[0].final == record.final,
-                   "termination history creates one completed row per session")
+                   "termination cannot replace cleaned text with raw replay")
         }
     }
 
@@ -11404,11 +11459,11 @@ enum Selftest {
                 <= terminalHalfWidth - HUDGeometry.contentInsetH,
             "Terminal HUD leaves room for an intrinsic 24-hour custom timer")
         expect(
-            DictationController.transcribeTimeout(recordingDurationMs: 15_000) == 20,
-            "short dictations retain the 20-second finalize watchdog")
-        expect(
-            DictationController.transcribeTimeout(recordingDurationMs: 3_600_000) == 360,
-            "one-hour dictations receive a duration-scaled finalize watchdog")
+            DictationController.progressLabel(stage: "stt", completed: 50, total: 100)
+                == "Transcribing 50%"
+                && DictationController.progressLabel(
+                    stage: "cleanup", completed: 2, total: 4) == "Cleaning 2 of 4",
+            "the pill shows completed STT and cleanup work")
         expect(
             DictationController.recordingLimitMessage(seconds: 720)
                 == "12-minute dictation limit reached",
@@ -11972,7 +12027,8 @@ enum Selftest {
         // front, and closes after them. Ordered out, it still came back
         // on screen once testHUDAccessibilityTree finished launching.
         let windowsBeforePill = Set(NSApplication.shared.windows.map(ObjectIdentifier.init))
-        let pillPanel = HUDPanel()
+        var pillVisible = true
+        let pillPanel = HUDPanel(pillEnabled: { pillVisible })
         let pillWindows = NSApplication.shared.windows.filter {
             !windowsBeforePill.contains(ObjectIdentifier($0))
         }
@@ -12012,16 +12068,15 @@ enum Selftest {
 
         // The guarantee behind "Hide Pill": no state change orders the
         // panel front while closed, and "Show Pill" mid-session restores it.
-        let savedVisible = AppConfig.shared.hudVisible
-        defer { AppConfig.shared.hudVisible = savedVisible }
-        AppConfig.shared.hudVisible = false
+        pillVisible = false
+        pillPanel.applyPreferences()
         pillPanel.transition(to: .listening)
         expect(!pillPanel.isOnScreen, "a closed pill stays hidden while listening")
         pillPanel.transition(to: .hidden(.cancel))
         pillPanel.transition(to: .standby)
         expect(!pillPanel.isOnScreen, "a closed pill stays hidden in standby")
         pillPanel.transition(to: .listening)
-        AppConfig.shared.hudVisible = true
+        pillVisible = true
         pillPanel.applyPreferences()
         expect(pillPanel.isOnScreen, "Show Pill restores a session that was closed mid-way")
         pillPanel.transition(to: .hidden(.cancel))
@@ -12029,7 +12084,8 @@ enum Selftest {
         // The standby tooltip lives on the AppKit view, only in standby.
         // (SwiftUI `.help` would also overwrite the capsule's VoiceOver
         // hint; testHUDAccessibilityTree reads those.)
-        AppConfig.shared.hudVisible = false
+        pillVisible = false
+        pillPanel.applyPreferences()
         pillPanel.transition(to: .standby)
         expect(pillPanel.toolTip == "Click to dictate. Right-click for more.",
                "the standby pill's tooltip says what a click and a right-click do")
@@ -12905,11 +12961,16 @@ enum Selftest {
             return false
         }
 
-        let hud = HUDPanel()
+        let hud = HUDPanel(pillEnabled: { false })
+        let supervisor = EngineSupervisor()
+        let history = HistoryStore(url: directory.appendingPathComponent("history.sqlite3"))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(
+            "com.velora.selftest.final.\(UUID().uuidString)"))
         let controller = DictationController(
-            supervisor: EngineSupervisor(), contextTracker: AppContextTracker(), hud: hud,
-            history: HistoryStore(url: directory.appendingPathComponent("history.sqlite3")),
-            sounds: SoundPlayer(cues: []), dictionary: makeSyncRepository(fixture))
+            supervisor: supervisor, contextTracker: AppContextTracker(), hud: hud,
+            history: history,
+            sounds: SoundPlayer(cues: []), dictionary: makeSyncRepository(fixture),
+            pasteboard: pasteboard)
         var starts = 0
         controller.recordingBlockReason = {
             starts += 1
@@ -12920,9 +12981,6 @@ enum Selftest {
             // Closed, the pill never orders front: not for the error, and
             // not for the standby a hidden pill falls back to when it is
             // kept on screen.
-            let savedVisible = AppConfig.shared.hudVisible
-            defer { AppConfig.shared.hudVisible = savedVisible }
-            AppConfig.shared.hudVisible = false
 
             // The error pill's Retry runs the start a quarter second later.
             // Wait for that start, not a fixed time: under load the delayed
@@ -12973,10 +13031,422 @@ enum Selftest {
             waitUntil(timeout: 0.1, samplePills)
         }
 
+
         // The owner's setting is back; the pill must not come back with it.
         waitUntil(timeout: 0.4, samplePills)
         expect(pillsSeen == 0,
                "the refused starts put no pill on the owner's screen (saw \(pillsSeen))")
+    }
+
+    private static func testFileRestart() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-file-restart-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("speech.wav")
+        try! Data("wave".utf8).write(to: source)
+        var commands: [[String: Any]] = []
+        var completions = 0
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) },
+            readyOverride: { true }, restartSink: {})
+        let transcriber = FileTranscriber(
+            supervisor: supervisor, hud: HUDPanel(pillEnabled: { false }),
+            hudIsFree: { false })
+        transcriber.transcribeForAgent(
+            url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
+        expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 1,
+               "a file job sends its first request")
+        supervisor.restartForStall()
+        transcriber.handleEngineStateChange(.launching)
+        expect(completions == 0, "stall restart retains the file request")
+        transcriber.handleEngineStateChange(.ready)
+        expect(commands.filter { $0["cmd"] as? String == "transcribe_file" }.count == 2,
+               "the ready engine receives the file request once more")
+        transcriber.handleEngineStateChange(.degraded("crash"))
+        expect(completions == 1 && !transcriber.isTranscribing,
+               "a later ordinary crash retains the existing file failure behavior")
+        // A replacement that degrades before ready must release the file slot.
+        transcriber.transcribeForAgent(
+            url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
+        supervisor.restartForStall()
+        transcriber.handleEngineStateChange(.launching)
+        transcriber.handleEngineStateChange(.degraded("load failed"))
+        expect(completions == 2 && !transcriber.isTranscribing,
+               "a degraded replacement fails the waiting file job")
+        transcriber.transcribeForAgent(
+            url: source, mode: nil, requestID: UUID()) { _ in completions += 1 }
+        expect(transcriber.isTranscribing,
+               "a new file job starts after replacement failure")
+    }
+
+    /// Drive finalization through capture and engine events. The fake source
+    /// emits PCM but never opens a microphone or sends a socket command.
+    private static func testFinalizationFlow() {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("velora-final-\(UUID().uuidString)")
+        try! FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove() }
+        let source = FakeMicrophoneSource()
+        let capture = AudioCapture(source: source, scheduleStartupCheck: { _, _ in })
+        let playback = MediaPlaybackCoordinator(
+            snapshot: { .init(processes: [], playing: []) },
+            postToggle: { false }, schedule: { _, _ in })
+        var commands: [[String: Any]] = []
+        var restarts = 0
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) },
+            readyOverride: { true }, restartSink: { restarts += 1 })
+        let history = HistoryStore(url: directory.appendingPathComponent("history.sqlite3"))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name(
+            "com.velora.selftest.final.\(UUID().uuidString)"))
+        var clock = Date()
+        var maxSeconds = 3_600.0
+        var graceActions: [() -> Void] = []
+        var graceTimers: [Timer] = []
+        defer { graceTimers.forEach { $0.invalidate() } }
+        let hud = HUDPanel(pillEnabled: { false })
+        let controller = DictationController(
+            supervisor: supervisor, contextTracker: AppContextTracker(), hud: hud,
+            history: history, sounds: SoundPlayer(cues: []),
+            dictionary: makeSyncRepository(fixture), pasteboard: pasteboard,
+            capture: capture, mediaPlayback: playback, micAuthorized: { true },
+            recordingLimit: { maxSeconds }, now: { clock },
+            scheduleGrace: { delay, action in
+                graceActions.append(action)
+                let timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) {
+                    _ in action()
+                }
+                graceTimers.append(timer)
+                return timer
+            })
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: 16_000,
+            channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        buffer.frameLength = 1600
+        for index in 0..<1600 { buffer.floatChannelData![0][index] = 0.1 }
+
+        func startTake() -> String {
+            let before = source.starts.count
+            controller.toggleFromHome()
+            expect(source.starts.count == before + 1, "Home starts fake capture")
+            guard source.starts.count > before else { return "" }
+            source.starts[before].completion(.success(()))
+            source.starts[before].onBuffer(buffer)
+            expect(waitUntil(timeout: 2) { controller.phase == .recording(locked: true) },
+                   "PCM makes capture ready")
+            return commands.last { $0["cmd"] as? String == "start" }?["session"] as? String ?? ""
+        }
+
+        func stopTake(_ session: String) {
+            let before = source.stops.count
+            controller.toggleFromHome()
+            expect(source.stops.count == before + 1, "Home stops capture")
+            if source.stops.count > before { source.stops[before]() }
+            expect(waitUntil(timeout: 2) {
+                commands.last { $0["cmd"] as? String == "stop" }?["session"] as? String == session
+            }, "capture drain sends stop")
+        }
+
+        let first = startTake()
+        stopTake(first)
+        let stopCount = commands.count
+        controller.handleEngineEvent(.finalizeProgress(
+            session: "foreign", stage: "cleanup", completed: 1, total: 2, stallAfterS: 80))
+        expect(hud.model.transcribeProgress == "Transcribing…",
+               "foreign progress does not change this take")
+        clock.addTimeInterval(21)
+        controller.hotkeyDown()
+        expect(graceActions.count == 1 && commands.count == stopCount,
+               "silent stop expires at the 20-second floor without deleting audio")
+        controller.handleEngineEvent(.final(
+            session: first, text: "Final words", raw: "Final words",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil,
+            autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+        expect(waitUntil(timeout: 2) {
+            history.recent(limit: 1).first?.sessionID == first
+        }, "a final inside grace reaches History")
+        let deliveredCount = pasteboard.changeCount
+        controller.handleEngineEvent(.final(
+            session: first, text: "Duplicate", raw: "Duplicate",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil,
+            autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+        expect(pasteboard.changeCount == deliveredCount
+               && history.recent(limit: 10).filter { $0.sessionID == first }.count == 1,
+               "replayed final inserts once and keeps one History row")
+        if !graceActions.isEmpty { graceActions[0]() }
+        expect(restarts == 0, "a final inside grace prevents restart")
+
+        let frozen = startTake()
+        let hourStops = source.stops.count
+        controller.handleEngineEvent(.recordingAutoStopped(
+            session: frozen, durationS: 3_600, limitS: 3_600))
+        expect(controller.phase == .transcribing && source.stops.count == hourStops + 1,
+               "one-hour engine stop moves capture into finalization")
+        if source.stops.count > hourStops { source.stops[hourStops]() }
+        clock.addTimeInterval(21)
+        controller.hotkeyDown()
+        expect(graceActions.count == 2,
+               "a one-hour take with no engine progress expires at 20 seconds")
+        if graceActions.count > 1 { graceActions[1]() }
+        expect(restarts == 1, "an unconfirmed freeze restarts the engine")
+        controller.handleEngineEvent(.interruptedDictation(
+            session: frozen, audio: "frozen.flac", durationS: 3_600))
+        expect(waitUntil(timeout: 2) {
+            history.recent(limit: 2).contains { $0.sessionID == frozen && $0.final.isEmpty }
+        }, "the restarted engine's spool enters History once")
+        expect(commands.last?["cmd"] as? String == "reprocess",
+               "the interrupted row asks the new engine to reprocess")
+
+        let next = startTake()
+        expect(!next.isEmpty && next != frozen, "new dictation starts after recovery")
+        stopTake(next)
+        controller.handleEngineEvent(.finalizeProgress(
+            session: next, stage: "stt", completed: 100, total: 200,
+            stallAfterS: 20))
+        expect(!hud.model.showsMultiStepProgress
+               && HUDView.accessibilityStatus(for: hud.model) == "Transcribing",
+               "50-second take keeps its live preview and VoiceOver label")
+        for stage in ["cleanup_load", "recovery"] {
+            controller.handleEngineEvent(.finalizeProgress(
+                session: next, stage: stage, completed: 0, total: 1,
+                stallAfterS: 80))
+            expect(!hud.model.showsMultiStepProgress
+                   && hud.model.transcribeProgress == "Transcribing…"
+                   && HUDView.accessibilityStatus(for: hud.model) == "Transcribing",
+                   "\(stage) leaves short dictation's pill and VoiceOver unchanged")
+        }
+        let graceBeforeRetry = graceActions.count
+        controller.handleEngineEvent(.finalizeProgress(
+            session: next, stage: "stt_retry", completed: 1, total: 2,
+            stallAfterS: 80))
+        clock.addTimeInterval(50)
+        controller.hotkeyDown()
+        expect(graceActions.count == graceBeforeRetry,
+               "retry progress re-arms the app watchdog for a slow healthy retry")
+        controller.handleEngineEvent(.final(
+            session: next, text: "New words", raw: "New words",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: "next.flac",
+            autoStopped: false, failedWindowCount: 1, failedWindowS: 37.5))
+        expect(waitUntil(timeout: 2) {
+            history.recent(limit: 3).contains { $0.sessionID == next }
+        }, "new dictation completes after engine replacement")
+        let gapRow = history.recent(limit: 3).first { $0.sessionID == next }
+        expect(gapRow?.failedWindowCount == 1 && gapRow?.failedWindowS == 37.5
+               && gapRow?.audioPath == "next.flac"
+               && gapRow.map { HistoryJournal.gapNote($0)?.contains("Retry from saved audio") == true } == true,
+               "a partial final keeps its gap in History for Retry")
+        if case .notice(_, let message) = hud.model.state {
+            expect(message.contains("Copied to clipboard") && message.contains("38 seconds"),
+                   "the clipboard notice names the missing audio")
+        } else {
+            expect(false, "a partial final shows the missing audio in the pill")
+        }
+
+        let sleepy = startTake()
+        stopTake(sleepy)
+        let sleepGrace = graceActions.count
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.post(name: NSWorkspace.willSleepNotification, object: nil)
+        clock.addTimeInterval(21)
+        controller.hotkeyDown()
+        expect(graceActions.count == sleepGrace,
+               "the real sleep notification suspends the watchdog")
+        workspaceCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        clock.addTimeInterval(21)
+        controller.hotkeyDown()
+        expect(graceActions.count == sleepGrace + 1,
+               "the real wake notification re-arms the watchdog")
+        controller.handleEngineEvent(.final(
+            session: sleepy, text: "After wake", raw: "After wake",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil,
+            autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+
+        let cancelled = startTake()
+        stopTake(cancelled)
+        let beforeCancel = commands.count
+        controller.cancel()
+        expect(commands.count == beforeCancel + 1
+               && commands.last?["cmd"] as? String == "cancel",
+               "Esc sends cancel for the finalizing session")
+        let startsDuringGrace = source.starts.count
+        controller.toggleFromHome()
+        expect(source.starts.count == startsDuringGrace,
+               "a cancel grace refuses a new microphone start")
+        expect(graceTimers.last?.isValid == true,
+               "the cancel grace arms a real timer")
+        supervisor.simulateSpawn(firstBootstrap: false, engineRefreshed: false)
+        controller.handleEngineStateChange(.launching)
+        expect(graceTimers.last?.isValid == false,
+               "an engine exit invalidates the armed cancel timer")
+        let afterExit = startTake()
+        stopTake(afterExit)
+        graceActions.last?()
+        expect(restarts == 1, "an old cancel grace cannot restart a new engine")
+        controller.handleEngineEvent(.final(
+            session: afterExit, text: "After exit", raw: "After exit",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil,
+            autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+        expect(waitUntil(timeout: 2) {
+            history.recent(limit: 10).contains { $0.sessionID == afterExit }
+        }, "the take after an engine exit reaches History")
+        controller.handleEngineEvent(.final(
+            session: cancelled, text: "Must not land", raw: "Must not land",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil,
+            autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+        expect(!history.recent(limit: 10).contains { $0.sessionID == cancelled },
+               "Esc prevents a late final from inserting or creating a row")
+
+        let graceCancelled = startTake()
+        stopTake(graceCancelled)
+        clock.addTimeInterval(21)
+        controller.hotkeyDown()
+        let beforeGraceEsc = commands.count
+        controller.cancel()
+        expect(commands.count == beforeGraceEsc + 1
+               && commands.last?["cmd"] as? String == "cancel",
+               "Esc during late-final grace deletes the spool")
+        graceActions.last?()
+        expect(restarts == 2, "unconfirmed grace Esc restarts the engine")
+        controller.handleEngineEvent(.final(
+            session: graceCancelled, text: "Must not land", raw: "Must not land",
+            mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+            cleanupApplied: false, totalMs: nil, audio: nil,
+            autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+        expect(!history.recent(limit: 10).contains { $0.sessionID == graceCancelled },
+               "Esc during grace cannot insert a late final")
+
+        // The sample cap can fire before AudioCapture reports PCM readiness.
+        // Its start callback must still stop this exact take once ready.
+        maxSeconds = 0.05
+        let startsBeforeLimit = source.starts.count
+        let stopsBeforeLimit = source.stops.count
+        controller.toggleFromHome()
+        expect(source.starts.count == startsBeforeLimit + 1,
+               "short cap starts fake capture")
+        if source.starts.count > startsBeforeLimit {
+            source.starts[startsBeforeLimit].completion(.success(()))
+            source.starts[startsBeforeLimit].onBuffer(buffer)
+        }
+        expect(waitUntil(timeout: 2) { source.stops.count > stopsBeforeLimit },
+               "limit firing during startup stops capture after PCM readiness")
+        if source.stops.count > stopsBeforeLimit { source.stops[stopsBeforeLimit]() }
+        let limited = commands.last { $0["cmd"] as? String == "start" }?["session"] as? String
+        expect(waitUntil(timeout: 2) {
+            commands.last { $0["cmd"] as? String == "stop" }?["session"] as? String == limited
+        }, "limit callback sends stop for the original session")
+        controller.cancel()
+        controller.handleEngineStateChange(.launching)
+        let recoveredID = history.recent(limit: 10).first { $0.sessionID == frozen }?.id
+        maxSeconds = 3_600
+        if recoveredID != nil {
+            controller.handleEngineEvent(.interruptedDictation(
+                session: frozen, audio: "frozen.flac", durationS: 3_600))
+            let peer = "frozen-peer"
+            controller.handleEngineEvent(.interruptedDictation(
+                session: peer, audio: "frozen-peer.flac", durationS: 3_600))
+            for attempt in 1...2 {
+                let waiting = startTake()
+                stopTake(waiting)
+                let beforeRestart = restarts
+                if attempt == 1 {
+                    controller.handleEngineEvent(.recoveryBusy(
+                        session: waiting, id: recoveredID))
+                } else {
+                    let beforeGrace = graceActions.count
+                    clock.addTimeInterval(21)
+                    controller.hotkeyDown()
+                    expect(graceActions.count == beforeGrace + 1,
+                           "recovery attempt \(attempt) arms the real stall grace")
+                    graceActions.last?()
+                }
+                expect(restarts == beforeRestart + 1,
+                       "recovery stall \(attempt) replaces the engine")
+                controller.handleEngineStateChange(.launching)
+                let beforeRecovery = commands.filter {
+                    $0["cmd"] as? String == "reprocess"
+                }.count
+                controller.handleEngineEvent(.interruptedDictation(
+                    session: frozen, audio: "frozen.flac", durationS: 3_600))
+                controller.handleEngineEvent(.interruptedDictation(
+                    session: peer, audio: "frozen-peer.flac", durationS: 3_600))
+                let afterRecovery = commands.filter {
+                    $0["cmd"] as? String == "reprocess"
+                }.count
+                expect(afterRecovery == beforeRecovery + (attempt == 1 ? 2 : 0),
+                       "both rows stop auto recovery after two stalled engines")
+            }
+            maxSeconds = 3_600
+            let live = startTake()
+            expect(!live.isEmpty, "live dictation starts after the recovery cap")
+            stopTake(live)
+            controller.handleEngineEvent(.final(
+                session: live, text: "Live still works", raw: "Live still works",
+                mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+                cleanupApplied: false, totalMs: nil, audio: nil,
+                autoStopped: false, failedWindowCount: 0, failedWindowS: 0))
+        }
+
+        // Simulate a focus handoff without activating either real app.
+        let target = NSWorkspace.shared.runningApplications.first {
+            $0.bundleIdentifier != nil
+                && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        }
+        let realGetter = class_getInstanceMethod(
+            NSWorkspace.self, #selector(getter: NSWorkspace.frontmostApplication))
+        let fakeGetter = class_getInstanceMethod(
+            NSWorkspace.self, #selector(NSWorkspace.veloraTestFrontmost))
+        if let target, let realGetter, let fakeGetter {
+            selftestFrontmost = target
+            method_exchangeImplementations(realGetter, fakeGetter)
+            defer {
+                method_exchangeImplementations(realGetter, fakeGetter)
+                selftestFrontmost = nil
+            }
+            let before = source.starts.count
+            controller.toggleFromMenu()
+            expect(source.starts.count == before + 1, "focus take starts fake capture")
+            if source.starts.count > before {
+                source.starts[before].completion(.success(()))
+                source.starts[before].onBuffer(buffer)
+            }
+            expect(waitUntil(timeout: 2) { controller.phase == .recording(locked: true) },
+                   "focus take captures PCM")
+            let focusSession = commands.last { $0["cmd"] as? String == "start" }?["session"] as? String ?? ""
+            let stoppedBefore = source.stops.count
+            controller.toggleFromMenu()
+            if source.stops.count > stoppedBefore { source.stops[stoppedBefore]() }
+            selftestFrontmost = NSRunningApplication.current
+            controller.handleEngineEvent(.final(
+                session: focusSession, text: "Partial words", raw: "Partial words",
+                mode: nil, cleanupMs: nil, cleanupWallMs: nil,
+                cleanupApplied: false, totalMs: nil, audio: nil,
+                autoStopped: false, failedWindowCount: 1, failedWindowS: 12.5))
+            if case .error(let message) = hud.model.state {
+                let fallback = Permissions.accessibilityGranted && TextInserter.canPostEvents
+                    ? "Focus changed. Copied" : "Needs Accessibility. Copied"
+                expect(message.contains(fallback) && message.contains("13 seconds"),
+                       "focus or permission fallback also names the missing speech")
+            } else {
+                expect(false, "partial final shows a fallback and gap warning")
+            }
+            expect(waitUntil(timeout: 2) {
+                history.recent(limit: 10).contains { $0.sessionID == focusSession }
+            }, "partial focus final reaches History")
+            let focusRow = history.recent(limit: 10).first { $0.sessionID == focusSession }
+            expect(focusRow.map { HistoryJournal.gapNote($0)?.contains("13 seconds") == true } == true,
+                   "focus fallback keeps the gap in History")
+        }
+        pasteboard.clearContents()
     }
 
     /// A final that ends in Velora with no text field to take it. A Home
@@ -14145,6 +14615,39 @@ enum Selftest {
 
         expect(bytes == 2400 * MemoryLayout<Float>.size,
                "ordinary stop flushes converted tail PCM queued before source teardown")
+    }
+
+    private static func testAudioCaptureSampleLimit() {
+        let source = FakeMicrophoneSource()
+        let capture = AudioCapture(source: source)
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32, sampleRate: AudioCapture.sampleRate,
+            channels: 1, interleaved: false)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600)!
+        buffer.frameLength = 1600
+        var bytes = 0
+        var limits = 0
+        var started = false
+
+        // Three source buffers exceed 150 ms; a blocked socket would retain
+        // only the first 2400 samples and receive one stop request.
+        capture.start(
+            onChunk: { bytes += $0.count }, onLevel: { _ in },
+            maxRecordingSeconds: 0.15, onLimit: { limits += 1 },
+            completion: { result in
+                if case .success = result { started = true }
+            })
+        source.starts[0].completion(.success(()))
+        source.starts[0].onBuffer(buffer)
+        expect(waitUntil { started }, "the capped microphone becomes ready")
+        source.starts[0].onBuffer(buffer)
+        source.starts[0].onBuffer(buffer)
+        expect(waitUntil { limits == 1 }, "the microphone asks to stop at its sample cap")
+        expect(bytes == 2400 * MemoryLayout<Float>.size,
+               "the socket write queue receives no audio beyond the sample cap")
+
+        capture.stop()
+        source.stops[0]()
     }
 
     /// A coordinator on a scripted Core Audio snapshot. `toggles` counts the

@@ -29,6 +29,8 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from .media import quietest_cut
+
 log = logging.getLogger("velora.stt")
 
 SAMPLE_RATE = 16_000
@@ -66,6 +68,8 @@ _HARD_CUT_QUIET_S = 0.2
 # decode time). Parakeet runs about 110x real time (p50 over the owner's
 # clips), so a 10 s open span costs about 0.1 s.
 _PARAKEET_PREVIEW_INTERVAL_S = 0.5
+PARAKEET_SPAN_CAP_S = 90.0
+_PARAKEET_SEAM_SEARCH_S = 15.0
 
 # --- in-session segmenting (whisper; parakeet reuses the pause rules) ---------
 # Whisper decodes ~97x realtime but the cleanup LLM does not; segments decoded
@@ -95,6 +99,7 @@ PREVIEW_BACKOFF = 1.5
 # unchanged; above it, the stitched segments become the final text (those
 # dictations previously blew the cleanup budget and fell back to raw anyway).
 LONG_DICTATION_S = 45.0
+WINDOWED_FINALIZE_S = 90.0
 
 
 @dataclass(frozen=True)
@@ -200,6 +205,12 @@ class STTBackend(Protocol):
     def take_new_segments(self) -> list[str]:
         """Raw segment texts finalized since the last call (may be empty)."""
         ...
+
+    def decoded_samples(self) -> int: ...
+
+    def pending_decode_samples(self) -> int: ...
+
+    def finalize_decode_samples(self) -> int: ...
 
     def finalize(self) -> str:
         """End the session and return the full transcript."""
@@ -463,6 +474,18 @@ def _chunk_span(chunks: list[np.ndarray], start_sample: int, end_sample: int) ->
     return np.concatenate(pieces)
 
 
+def _tail_chunks(chunks: list[np.ndarray], start_sample: int) -> list[np.ndarray]:
+    """Keep views after a committed cursor without joining the full clip."""
+    tail: list[np.ndarray] = []
+    cursor = 0
+    for chunk in chunks:
+        end = cursor + len(chunk)
+        if end > start_sample:
+            tail.append(chunk[max(0, start_sample - cursor):])
+        cursor = end
+    return tail
+
+
 def _has_tracked_speech(audio: np.ndarray) -> bool:
     """Whether a fresh SilenceTracker, fed the app's 100 ms chunks, flags at
     least _MIN_SPAN_SPEECH_SAMPLES of this audio as speech."""
@@ -486,11 +509,12 @@ def _clear_mlx_cache() -> None:
 
 
 class ParakeetBackend:
-    """Parakeet-mlx STT that decodes each pause-bounded segment whole.
+    """Parakeet-mlx STT that decodes each bounded segment whole.
 
     Segments close on whisper's pause rule (MIN_SEGMENT_S of audio, then a
     SEGMENT_SILENCE_S pause), and past HARD_SEGMENT_S at the first 200 ms of
-    quiet (see _segment_due). Audio with no quiet at all is never cut. The
+    quiet (see _segment_due). Continuous speech is cut at a quietest seam
+    by PARAKEET_SPAN_CAP_S, so model attention cannot grow without bound. The
     server cleans each segment while the user keeps talking; at stop only the
     tail is decoded. With Stream Typing on, previews decode the last
     PREVIEW_WINDOW_S of the open span about every 0.5 s.
@@ -516,6 +540,8 @@ class ParakeetBackend:
         # All PCM stays buffered: after a failed segment decode, finalize
         # recovers every word with one whole-clip decode.
         self._chunks: list[np.ndarray] = []
+        self.windowed_finalize = False
+        self.needs_windowed_fallback = False
         self._samples = 0
         self._decoded_samples = 0  # offset of the first un-decoded sample
         self._segments: list[str] = []
@@ -557,6 +583,28 @@ class ParakeetBackend:
 
     def start_session(self) -> None:
         self.reset()
+        self.needs_windowed_fallback = False
+
+    def take_fallback_chunks(self) -> tuple[str, list[np.ndarray]]:
+        """Transfer only uncommitted PCM and its committed text."""
+        prefix = " ".join(self._segments)
+        chunks = _tail_chunks(self._chunks, self._decoded_samples if self._segments else 0)
+        self.reset()
+        return prefix, chunks
+
+    def decoded_samples(self) -> int:
+        return self._decoded_samples
+
+    def pending_decode_samples(self) -> int:
+        return self._samples - self._decoded_samples
+
+    def finalize_decode_samples(self) -> int:
+        pending = self.pending_decode_samples()
+        if not self._segments or (self._segment_decode_failed
+                                  and self._samples <= WINDOWED_FINALIZE_S * SAMPLE_RATE):
+            pending = self._samples
+        return min(pending, int(WINDOWED_FINALIZE_S * SAMPLE_RATE)) \
+            if self.windowed_finalize else pending
 
     def feed_chunk(self, chunk: np.ndarray) -> str | None:
         self._chunks.append(chunk)
@@ -573,7 +621,13 @@ class ParakeetBackend:
 
         # The segment decode supersedes any preview of the same open span.
         self._pending_preview = None
-        end = self._samples
+        capped = self.pending_decode_samples() >= int(PARAKEET_SPAN_CAP_S * SAMPLE_RATE)
+        end = (
+            quietest_cut(
+                self._samples, self._audio_span,
+                _PARAKEET_SEAM_SEARCH_S, SAMPLE_RATE,
+            ) if capped else self._samples
+        )
         try:
             text = self._transcribe(self._audio_span(self._decoded_samples, end))
         except Exception:  # noqa: BLE001 — a failed decode must not kill the feed loop
@@ -589,7 +643,9 @@ class ParakeetBackend:
             return None
 
         self._decoded_samples = end
-        self._span_speech_samples = 0
+        # A forced seam leaves speech after it. Keep that tail marked as
+        # speech so an empty later decode cannot silently discard it.
+        self._span_speech_samples = self._samples - end if capped else 0
         self._retry_wait_s = _EMPTY_SPAN_RETRY_S
         self._silence.consume_pause()  # the pause that closed this segment
         self._last_preview_samples = self._samples
@@ -611,6 +667,8 @@ class ParakeetBackend:
         undecoded_s = (self._samples - self._decoded_samples) / SAMPLE_RATE
         silence_s = self._silence.trailing_silence_s
         if undecoded_s >= MIN_SEGMENT_S and silence_s >= SEGMENT_SILENCE_S:
+            return True
+        if undecoded_s >= PARAKEET_SPAN_CAP_S:
             return True
         return undecoded_s >= HARD_SEGMENT_S and silence_s >= _HARD_CUT_QUIET_S
 
@@ -676,7 +734,8 @@ class ParakeetBackend:
         try:
             return self._final_text()
         finally:
-            self.reset()
+            if not self.needs_windowed_fallback:
+                self.reset()
 
     def _final_text(self) -> str:
         """Committed segments plus the decoded tail, or one whole-clip decode
@@ -692,6 +751,10 @@ class ParakeetBackend:
         """
         if not self._decoded_samples or self._segment_decode_failed:
             return self._decode_whole_clip()
+        if self.windowed_finalize \
+                and self._samples - self._decoded_samples > WINDOWED_FINALIZE_S * SAMPLE_RATE:
+            self.needs_windowed_fallback = True
+            return ""
 
         try:
             tail = self._transcribe(self._audio_span(self._decoded_samples, self._samples))
@@ -709,6 +772,11 @@ class ParakeetBackend:
         return " ".join(self._segments + ([tail] if tail else []))
 
     def _decode_whole_clip(self) -> str:
+        if self.windowed_finalize and self._samples > WINDOWED_FINALIZE_S * SAMPLE_RATE:
+            # The server reads preserved PCM in meeting-plan windows and
+            # reports each decoded window before this can become one long call.
+            self.needs_windowed_fallback = True
+            return ""
         return self._transcribe(self._audio_span(0, self._samples))
 
     def _transcribe(self, audio: np.ndarray) -> str:
@@ -1123,6 +1191,8 @@ class WhisperBackend:
         self.language = language
         self._model_path = model_id  # resolved to a local path in load()
         self._chunks: list[np.ndarray] = []
+        self.windowed_finalize = False
+        self.needs_windowed_fallback = False
         self._loaded = False
         # Glossary biasing (set by the server per session; smartness-v2 §4).
         self.initial_prompt: str | None = None
@@ -1176,8 +1246,34 @@ class WhisperBackend:
 
     def start_session(self) -> None:
         self.reset()
+        self.needs_windowed_fallback = False
         self.segments_used_for_final = False
         self.final_tail = ""
+
+    def take_fallback_chunks(self) -> tuple[str, list[np.ndarray]]:
+        """Transfer only uncommitted PCM and its committed text."""
+        prefix = " ".join(self._segments)
+        chunks = _tail_chunks(self._chunks, self._decoded_samples if self._segments else 0)
+        self.reset()
+        return prefix, chunks
+
+    def decoded_samples(self) -> int:
+        return self._decoded_samples
+
+    def pending_decode_samples(self) -> int:
+        return self._samples - self._decoded_samples
+
+    def finalize_decode_samples(self) -> int:
+        if not self._session_had_speech and not self._segments:
+            return 0
+        if self._samples <= LONG_DICTATION_S * SAMPLE_RATE:
+            return self._samples
+        pending = self.pending_decode_samples()
+        if not self._segments or (self._segment_decode_failed
+                                  and self._samples <= WINDOWED_FINALIZE_S * SAMPLE_RATE):
+            pending = self._samples
+        return min(pending, int(WINDOWED_FINALIZE_S * SAMPLE_RATE)) \
+            if self.windowed_finalize else pending
 
     @property
     def _span_had_speech(self) -> bool:
@@ -1544,6 +1640,10 @@ class WhisperBackend:
         # and medium clips re-decode WHOLE, exactly like the pre-segmenting
         # code, so their quality is unchanged (segments were preview-only).
         if duration_s > LONG_DICTATION_S and self._segments and not self._segment_decode_failed:
+            if self.windowed_finalize \
+                    and self._samples - self._decoded_samples > WINDOWED_FINALIZE_S * SAMPLE_RATE:
+                self.needs_windowed_fallback = True
+                return ""
             try:
                 tail_audio = self._audio_span(self._decoded_samples, self._samples)
                 # A tail without real speech evidence is the pause the user
@@ -1573,6 +1673,11 @@ class WhisperBackend:
                 log.warning("empty speech-bearing whisper tail — re-decoding the whole clip")
         if duration_s > 60:
             log.warning("whisper batch transcribe of %.0fs of audio — expect high stop→final latency", duration_s)
+        if self.windowed_finalize and duration_s > WINDOWED_FINALIZE_S:
+            # Avoid a duration-sized concatenate and hand fallback decoding
+            # to the server's bounded, progress-reporting window planner.
+            self.needs_windowed_fallback = True
+            return ""
         audio = np.concatenate(self._chunks)
         try:
             text = self._strip_final_prompt_echo(
@@ -1749,6 +1854,15 @@ class FakeBackend:
         self._new_segments.append(seg)
         return " ".join(self._emitted_segments)
 
+    def decoded_samples(self) -> int:
+        return self.samples - self._samples_since_segment
+
+    def pending_decode_samples(self) -> int:
+        return self._samples_since_segment
+
+    def finalize_decode_samples(self) -> int:
+        return self.samples
+
     def take_new_segments(self) -> list[str]:
         out = self._new_segments
         self._new_segments = []
@@ -1807,8 +1921,11 @@ def transcribe_clip(backend: STTBackend, pcm: np.ndarray, chunk_samples: int = S
     latency; a reprocessed clip should stay one whole-clip decode.
     """
     segmenting = getattr(backend, "segmenting_enabled", None)
+    windowed = getattr(backend, "windowed_finalize", None)
     if segmenting is not None:
         backend.segmenting_enabled = False  # type: ignore[attr-defined]
+    if windowed is not None:
+        backend.windowed_finalize = False  # type: ignore[attr-defined]
     try:
         backend.start_session()
         for i in range(0, len(pcm), chunk_samples):
@@ -1817,6 +1934,8 @@ def transcribe_clip(backend: STTBackend, pcm: np.ndarray, chunk_samples: int = S
     finally:
         if segmenting is not None:
             backend.segmenting_enabled = segmenting  # type: ignore[attr-defined]
+        if windowed is not None:
+            backend.windowed_finalize = windowed  # type: ignore[attr-defined]
 
 
 def pcm_from_payload(payload: bytes) -> np.ndarray:

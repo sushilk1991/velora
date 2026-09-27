@@ -82,7 +82,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     /// clock, so a respawn after a crash gets a full wait of its own.
     private(set) var quietSince = Date()
 
-    var isReady: Bool { state == .ready }
+    var isReady: Bool { readyOverride?() ?? (state == .ready) }
 
     /// True only after the engine confirms that both startup models have
     /// finished their first-run download/load path. This is intentionally
@@ -142,7 +142,57 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     private var process: Process?
     private var connectTimer: Timer?
     private var restartAttempts = 0
+    private(set) var processGeneration = 0
+    private(set) var stallRestartCount = 0
     private var isQuitting = false
+    private let commandSink: (([String: Any]) -> Void)?
+    private let readyOverride: (() -> Bool)?
+    private let restartSink: (() -> Void)?
+
+    private init(
+        commandSink: (([String: Any]) -> Void)? = nil,
+        readyOverride: (() -> Bool)? = nil,
+        restartSink: (() -> Void)? = nil
+    ) {
+        self.commandSink = commandSink
+        self.readyOverride = readyOverride
+        self.restartSink = restartSink
+        super.init()
+    }
+
+    override convenience init() {
+        self.init(commandSink: nil, readyOverride: nil, restartSink: nil)
+    }
+
+    /// Isolated selftest driver; production callers use the empty initializer.
+    static func forSelftest(
+        commandSink: @escaping ([String: Any]) -> Void,
+        readyOverride: @escaping () -> Bool,
+        restartSink: @escaping () -> Void
+    ) -> EngineSupervisor {
+        EngineSupervisor(
+            commandSink: commandSink, readyOverride: readyOverride,
+            restartSink: restartSink)
+    }
+
+    /// Replace an unresponsive process while keeping normal crash recovery.
+    /// The termination handler owns respawn and its connection handshake.
+    func restartForStall() {
+        if let restartSink {
+            stallRestartCount += 1
+            restartSink()
+            return
+        }
+        guard !isQuitting, let proc = process, proc.isRunning else { return }
+        stallRestartCount += 1
+        client.disconnect(notify: false)
+        state = .launching
+        proc.terminate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self, weak proc] in
+            guard let self, let proc, self.process === proc, proc.isRunning else { return }
+            kill(proc.processIdentifier, SIGKILL)
+        }
+    }
 
     // MARK: - Lifecycle
 
@@ -168,6 +218,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     /// Sends a command if connected (fire-and-forget; events come back via
     /// the delegate).
     func send(_ command: [String: Any]) {
+        if let commandSink {
+            commandSink(command)
+            return
+        }
         client.send(json: command)
     }
 
@@ -251,6 +305,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         do {
             try proc.run()
             process = proc
+            processGeneration += 1
             state = .launching
             NSLog("Velora: engine spawned (pid %d)", proc.processIdentifier)
         } catch {
@@ -276,20 +331,17 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         }
     }
 
-    /// Test seam: what a spawn sets before the socket is up (the startup
-    /// status, then `.launching`). Never touches a real process, socket or
-    /// file: no engine lookup, no `uv`, no engine.log, no connect.
+    /// Test seam for spawn status and process-generation fencing.
     func simulateSpawn(firstBootstrap: Bool, engineRefreshed: Bool) {
         if engineRefreshed {
             engineUpdatePending = true
         }
         announceStartup(firstBootstrap: firstBootstrap)
+        processGeneration += 1
         state = .launching
     }
 
-    /// Test seam: moves `state` as the process and socket paths do. Never
-    /// touches a real process, socket or file; the state change still
-    /// reaches the delegate and `.veloraEngineStateChanged` on main.
+    /// Test seam for the state notification sent by a process exit.
     func simulateState(_ newState: State) {
         state = newState
     }

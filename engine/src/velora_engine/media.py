@@ -893,6 +893,22 @@ def plan_meeting_slices(
         _MEETING_TARGET_S, _MEETING_SEARCH_S, sample_rate, cancel=cancel)
 
 
+def batch_ranges(
+    sample_count: int,
+    read_span: Callable[[int, int], np.ndarray],
+    target_s: float = 60.0,
+    search_s: float = 15.0,
+    sample_rate: int = SAMPLE_RATE,
+) -> list[tuple[int, int]]:
+    """Plan quiet-boundary windows using only a short span around each seam."""
+    # Short clips stay whole, matching split_for_batch's identity contract.
+    if sample_count <= int(target_s * sample_rate) + _MEETING_TAIL_S * sample_rate:
+        return [(0, sample_count)]
+    return _plan_spans(
+        sample_count, read_span, target_s, search_s, sample_rate,
+        cancel=lambda: False)
+
+
 def _plan_spans(
     total: int, read: Callable[[int, int], np.ndarray],
     target_s: float, search_s: float, sample_rate: int,
@@ -900,27 +916,35 @@ def _plan_spans(
 ) -> list[tuple[int, int]]:
     """Choose each quiet cut once for in-memory and file-backed audio."""
     step = int(target_s * sample_rate)
-    search = int(search_s * sample_rate)
     tail = _MEETING_TAIL_S * sample_rate
-    win = int(_MEETING_ENERGY_WINDOW_S * sample_rate)
     spans = []
     start = 0
     _check_cancel(cancel)
     while total - start > step + tail:
         _check_cancel(cancel)
         end = start + step
-        segment = read(end - search, end).astype(np.float64)
-        # Preserve base's float64 rolling-energy arithmetic and tie order.
-        squared = segment * segment
-        cumulative = np.empty(len(squared) + 1, dtype=np.float64)
-        cumulative[0] = 0
-        np.cumsum(squared, out=cumulative[1:])
-        energy = cumulative[win:] - cumulative[:-win]
-        cut = end - search + int(np.argmin(energy)) + win // 2
+        cut = quietest_cut(end, read, search_s, sample_rate)
         spans.append((start, cut))
         start = cut
     spans.append((start, total))
     return spans
+
+
+def quietest_cut(
+    end: int, read_span: Callable[[int, int], np.ndarray],
+    search_s: float, sample_rate: int,
+) -> int:
+    """Pick the lowest-energy 0.3 s seam in the search window before `end`."""
+    search = int(search_s * sample_rate)
+    win = int(_MEETING_ENERGY_WINDOW_S * sample_rate)
+    segment = read_span(end - search, end).astype(np.float64)
+    # Preserve base's float64 rolling-energy arithmetic and tie order.
+    squared = segment * segment
+    cumulative = np.empty(len(squared) + 1, dtype=np.float64)
+    cumulative[0] = 0
+    np.cumsum(squared, out=cumulative[1:])
+    energy = cumulative[win:] - cumulative[:-win]
+    return end - search + int(np.argmin(energy)) + win // 2
 
 
 def split_for_batch(
@@ -935,8 +959,6 @@ def split_for_batch(
     """
     if len(pcm) <= int(target_s * sample_rate) + _MEETING_TAIL_S * sample_rate:
         return [pcm]
-    # A shared plan keeps v3 cursor seams byte-identical for both callers.
-    spans = _plan_spans(
-        len(pcm), lambda a, b: pcm[a:b], target_s, search_s, sample_rate,
-        cancel=lambda: False)
-    return [pcm[start:end] for start, end in spans]
+    # A shared plan keeps v3 cursor seams and dictation windows identical.
+    return [pcm[start:end] for start, end in batch_ranges(
+        len(pcm), lambda a, b: pcm[a:b], target_s, search_s, sample_rate)]

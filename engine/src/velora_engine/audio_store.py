@@ -29,6 +29,7 @@ import numpy as np
 log = logging.getLogger("velora.audio_store")
 
 SAMPLE_RATE = 16_000
+_ARCHIVE_BLOCK_SAMPLES = 60 * SAMPLE_RATE
 
 # A basename we are willing to read/write: our own session ids (uuid4 or the
 # client-supplied session string) plus the extension. Anything with a path
@@ -66,6 +67,37 @@ class ActiveAudioSpool:
     def close(self) -> None:
         with contextlib.suppress(OSError):
             self._handle.close()
+
+
+class ClipReader:
+    """Read one saved clip span without materializing its full duration."""
+
+    def __init__(self, path: Path, sf) -> None:
+        self._soundfile = sf.SoundFile(str(path)) if path.suffix == ".flac" else None
+        self._wave = wave.open(str(path), "rb") if self._soundfile is None else None
+        handle = self._soundfile or self._wave
+        self.sample_count = len(handle) if self._soundfile is not None else handle.getnframes()
+
+    def __enter__(self) -> ClipReader:
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        (self._soundfile or self._wave).close()
+
+    def read_span(self, start: int, end: int) -> np.ndarray:
+        if start < 0 or end < start or end > self.sample_count:
+            raise ValueError("clip span out of bounds")
+        if self._soundfile is not None:
+            self._soundfile.seek(start)
+            pcm = self._soundfile.read(end - start, dtype="float32", always_2d=True)
+            return pcm.mean(axis=1, dtype=np.float32)
+        self._wave.setpos(start)
+        data = self._wave.readframes(end - start)
+        pcm16 = np.frombuffer(data, dtype="<i2")
+        channels = self._wave.getnchannels()
+        if channels > 1:
+            pcm16 = pcm16.reshape(-1, channels).mean(axis=1)
+        return pcm16.astype(np.float32) / 32768.0
 
 
 def _soundfile():
@@ -149,29 +181,56 @@ class AudioStore:
             if match is None or path.is_symlink():
                 continue
             try:
-                byte_count = path.stat().st_size
-                if byte_count == 0:
-                    self._unlink(path)
-                    continue
-                pcm16 = np.fromfile(path, dtype="<i2", count=byte_count // 2)
+                sample_count = path.stat().st_size // 2
             except OSError:
                 continue
-            if pcm16.size == 0:
+            if sample_count == 0:
+                self._unlink(path)
                 continue
             session = match.group(1)
             audio = self.name_for(session)
             archived = self.path_for(audio)
             if archived is None or not archived.is_file():
-                pcm = (pcm16.astype(np.float32) / 32768.0).astype(np.float32)
-                audio = self.save(session, pcm) or ""
+                audio = self._archive_active(path, session) or ""
             if not audio:
                 continue
             recovered.append(InterruptedAudio(
                 session=session,
                 audio=audio,
-                duration_s=float(pcm16.size) / SAMPLE_RATE,
+                duration_s=float(sample_count) / SAMPLE_RATE,
             ))
         return recovered
+
+    def _archive_active(self, source: Path, session: str) -> str | None:
+        """Encode the crash spool in fixed blocks; keep it until app ack."""
+        self._ensure_dir()
+        name = self.name_for(session)
+        target = self.dir / name
+        temporary = target.with_name(f".{name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with source.open("rb") as spool:
+                if self._sf is not None:
+                    with self._sf.SoundFile(
+                        str(temporary), mode="w", samplerate=SAMPLE_RATE,
+                        channels=1, subtype="PCM_16", format="FLAC",
+                    ) as output:
+                        while data := spool.read(_ARCHIVE_BLOCK_SAMPLES * 2):
+                            usable = len(data) - len(data) % 2
+                            output.write(np.frombuffer(data[:usable], dtype="<i2"))
+                else:
+                    with wave.open(str(temporary), "wb") as output:
+                        output.setnchannels(1)
+                        output.setsampwidth(2)
+                        output.setframerate(SAMPLE_RATE)
+                        while data := spool.read(_ARCHIVE_BLOCK_SAMPLES * 2):
+                            output.writeframesraw(data[:len(data) - len(data) % 2])
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+            return name
+        except (OSError, RuntimeError, ValueError):
+            log.exception("failed to archive interrupted audio %s", source.name)
+            temporary.unlink(missing_ok=True)
+            return None
 
     def ack_interrupted(self, session_id: str) -> bool:
         """Remove only the acknowledged session's retained crash spool."""
@@ -187,6 +246,13 @@ class AudioStore:
         if not name or not _SAFE_NAME_RE.match(name):
             return None
         return self.dir / name
+
+    def open_clip(self, name: str) -> ClipReader:
+        """Open a saved WAV or FLAC for planner-window reads."""
+        path = self.path_for(name)
+        if path is None or not path.is_file():
+            raise FileNotFoundError(name)
+        return ClipReader(path, self._sf)
 
     # ---- write ----
 

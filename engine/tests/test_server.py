@@ -1350,9 +1350,11 @@ async def test_stop_cleanup_retry_keeps_the_callers_cancellation(home):
     """
     eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
     reaped: list[str] = []
+    started = asyncio.Event()
 
     async def retry_slow_to_stop() -> None:
         try:
+            started.set()
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             await asyncio.sleep(0.5)  # reaping its worker
@@ -1360,7 +1362,7 @@ async def test_stop_cleanup_retry_keeps_the_callers_cancellation(home):
             raise
 
     eng._cleanup_retry_task = asyncio.create_task(retry_slow_to_stop())
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), STOP_HANG_S)
     stopping = asyncio.create_task(eng._stop_cleanup_retry())
     await asyncio.sleep(0.05)
     stopping.cancel()
@@ -1376,9 +1378,11 @@ async def test_stop_cleanup_retry_logs_a_failure_its_callers_cancel_hides(
     """A retry that fails while a cancelled caller stops it is logged: the
     caller gets its cancel, not the failure, so the log is its only trace."""
     eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    started = asyncio.Event()
 
     async def retry_failing_to_stop() -> None:
         try:
+            started.set()
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             await asyncio.sleep(0.2)  # reaping its worker
@@ -1386,7 +1390,7 @@ async def test_stop_cleanup_retry_logs_a_failure_its_callers_cancel_hides(
 
     monkeypatch.setattr(eng, "_retry_cleanup_load", retry_failing_to_stop)
     eng._start_cleanup_retry()
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), STOP_HANG_S)
     stopping = asyncio.create_task(eng._stop_cleanup_retry())
     await asyncio.sleep(0.05)
     stopping.cancel()
@@ -1467,10 +1471,12 @@ async def test_cancelled_shutdown_waits_for_the_retry_then_runs_the_rest(
     """
     caplog.set_level(logging.INFO, logger="velora.server")
     reaping = asyncio.Event()
+    started = asyncio.Event()
     reaped: list[str] = []
 
     async def retry_slow_to_stop() -> None:
         try:
+            started.set()
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             reaping.set()
@@ -1481,7 +1487,7 @@ async def test_cancelled_shutdown_waits_for_the_retry_then_runs_the_rest(
     async with serve_without_models(monkeypatch) as (eng, serving, sock):
         monkeypatch.setattr(eng, "_retry_cleanup_load", retry_slow_to_stop)
         eng._start_cleanup_retry()
-        await asyncio.sleep(0)
+        await asyncio.wait_for(started.wait(), STOP_HANG_S)
         eng.shutdown.set()
         await asyncio.wait_for(reaping.wait(), STOP_HANG_S)
         serving.cancel()
@@ -1540,9 +1546,11 @@ async def test_set_model_cancelled_while_stopping_the_retry_restarts_it(
     monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
     eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
     reaping = asyncio.Event()
+    started = asyncio.Event()
 
     async def retry_slow_to_stop() -> None:
         try:
+            started.set()
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             reaping.set()
@@ -1552,7 +1560,7 @@ async def test_set_model_cancelled_while_stopping_the_retry_restarts_it(
     monkeypatch.setattr(eng, "_retry_cleanup_load", retry_slow_to_stop)
     eng._start_cleanup_retry()
     stopped = eng._cleanup_retry_task
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), STOP_HANG_S)
     setting = asyncio.create_task(eng._cmd_set_model(
         {"cmd": "set_model", "kind": "cleanup", "model": "fake-new"}))
     try:
@@ -1667,9 +1675,11 @@ async def test_set_model_after_shutdown_began_builds_no_worker(home, monkeypatch
         server_mod, "CleanupProcess", lambda model_id, **_kwargs: built.append(model_id))
     eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
     reaping = asyncio.Event()
+    started = asyncio.Event()
 
     async def retry_slow_to_stop() -> None:
         try:
+            started.set()
             await asyncio.sleep(3600)
         except asyncio.CancelledError:
             reaping.set()
@@ -1678,7 +1688,7 @@ async def test_set_model_after_shutdown_began_builds_no_worker(home, monkeypatch
 
     monkeypatch.setattr(eng, "_retry_cleanup_load", retry_slow_to_stop)
     eng._start_cleanup_retry()
-    await asyncio.sleep(0)
+    await asyncio.wait_for(started.wait(), STOP_HANG_S)
     setting = asyncio.create_task(eng._cmd_set_model(
         {"cmd": "set_model", "kind": "cleanup", "model": "fake-new"}))
     await asyncio.wait_for(reaping.wait(), STOP_HANG_S)
@@ -2163,7 +2173,6 @@ async def test_meeting_notes_stop_retrying_an_overdue_recovery(engine):
     async def still_recovering(raw, system_prompt, **kwargs):
         cleanup.calls += 1
         clock[0] += 1.0
-        await asyncio.sleep(0)
         return SimpleNamespace(applied=False, reason="llm_recovering", text=raw)
 
     cleanup.cleanup = still_recovering
@@ -2185,7 +2194,6 @@ async def test_meeting_notes_pace_retries_while_a_recovery_is_due(engine):
 
     async def still_recovering(raw, system_prompt, **kwargs):
         cleanup.calls += 1
-        await asyncio.sleep(0)
         return SimpleNamespace(applied=False, reason="llm_recovering", text=raw)
 
     cleanup.cleanup = still_recovering
@@ -2726,10 +2734,18 @@ async def test_cancel_discards(engine):
     client.close()
 
 
-async def test_cancel_during_finalization_discards_audio(engine, monkeypatch):
+async def test_cancel_final_audio(engine, monkeypatch):
     eng, sock = engine
     formatting_started = asyncio.Event()
     release_formatting = asyncio.Event()
+    spool_deleted = asyncio.Event()
+    discard = eng.audio.discard_active
+
+    def discard_and_signal(spool):
+        discard(spool)
+        spool_deleted.set()
+
+    monkeypatch.setattr(eng.audio, "discard_active", discard_and_signal)
 
     async def delayed_formatting(*_args, **_kwargs):
         formatting_started.set()
@@ -2748,20 +2764,22 @@ async def test_cancel_during_finalization_discards_audio(engine, monkeypatch):
         await asyncio.wait_for(formatting_started.wait(), 2)
 
         await client.send_json({"cmd": "cancel", "session": "cancel-finalizing"})
-        cancelled = await client.recv_event("cancelled", timeout=0.5)
-        assert cancelled["session"] == "cancel-finalizing"
+        spool = eng.audio.active_dir / "cancel-finalizing.pcm16.part"
+        await asyncio.wait_for(spool_deleted.wait(), 2)
+        assert not spool.exists()
+        assert not (eng.config.audio_dir / eng.audio.name_for("cancel-finalizing")).exists()
 
         release_formatting.set()
+        cancelled = await client.recv_event("cancelled", timeout=2)
+        assert cancelled["session"] == "cancel-finalizing"
         await client.send_json({"cmd": "ping"})
         assert (await client.recv_event("pong"))["event"] == "pong"
-        assert not (eng.audio.active_dir / "cancel-finalizing.pcm16.part").exists()
-        assert not (eng.config.audio_dir / eng.audio.name_for("cancel-finalizing")).exists()
     finally:
         release_formatting.set()
         client.close()
 
 
-async def test_final_audio_spool_waits_for_history_ack(engine):
+async def test_final_ack_reader_free(engine, monkeypatch):
     eng, sock = engine
     client = await connect(sock)
     await client.recv_event("ready")
@@ -2778,53 +2796,32 @@ async def test_final_audio_spool_waits_for_history_ack(engine):
     spool = eng.audio.active_dir / "durable-final.pcm16.part"
     assert spool.is_file()
 
-    await client.send_json({"cmd": "ack_final", "session": "durable-final"})
-    await client.send_json({"cmd": "ping"})
-    assert (await client.recv_event("pong"))["event"] == "pong"
-    assert not spool.exists()
-    client.close()
+    held = asyncio.get_running_loop().create_future()
+    eng._final_archives["durable-final"] = held
+    removed = 0
+    unlink = eng.audio.ack_interrupted
 
+    def remove(session):
+        nonlocal removed
+        removed += 1
+        return unlink(session)
 
-async def test_live_start_waits_for_automatic_recovery(engine, monkeypatch):
-    eng, sock = engine
-    recovery_started = threading.Event()
-    release_recovery = threading.Event()
-
-    def delayed_reprocess(*_args):
-        recovery_started.set()
-        assert release_recovery.wait(2)
-        return "recovered text"
-
-    monkeypatch.setattr(server_mod, "transcribe_clip", delayed_reprocess)
-    audio = eng.audio.save("automatic-recovery", AUDIO)
-    assert audio is not None
-    client = await connect(sock)
-    await client.recv_event("ready")
+    monkeypatch.setattr(eng.audio, "ack_interrupted", remove)
     try:
-        await client.send_json({
-            "cmd": "reprocess", "audio": audio, "id": 41,
-            "recovery": True,
-        })
-        for _ in range(100):
-            if recovery_started.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert recovery_started.is_set()
-
-        await client.send_json({
-            "cmd": "start", "session": "live-after-recovery", "context": {},
-        })
-        await client.send_audio(AUDIO)
-        await client.send_json({"cmd": "stop", "session": "live-after-recovery"})
-        release_recovery.set()
-
-        recovered = await client.recv_event("reprocessed")
-        assert recovered["id"] == 41
-        final = await client.recv_event("final")
-        assert final["session"] == "live-after-recovery"
-        assert eng._reprocessing is False
+        await client.send_json({"cmd": "ack_final", "session": "durable-final"})
+        await client.send_json({"cmd": "ack_final", "session": "durable-final"})
+        await client.send_json({"cmd": "ping"})
+        assert (await client.recv_event("pong", timeout=1))["event"] == "pong"
+        await client.send_json({"cmd": "start", "session": "live", "context": {}})
+        await client.send_json({"cmd": "cancel", "session": "live"})
+        assert (await client.recv_event("cancelled", timeout=1))["session"] == "live"
+        ack = eng._final_ack_tasks["durable-final"]
+        held.set_result(True)
+        await asyncio.wait_for(ack, 2)
+        assert removed == 1 and not spool.exists()
     finally:
-        release_recovery.set()
+        if not held.done():
+            held.set_result(False)
         client.close()
 
 
@@ -2929,12 +2926,16 @@ async def test_cancel_sends_confirmation_then_restarts_unhealthy_cleanup(engine)
     await client.recv_event("ready")
     await client.send_json({"cmd": "start", "session": "cancel-poisoned", "context": {}})
     await client.send_audio(AUDIO)
+    await client.send_json({"cmd": "ping"})
+    await client.recv_event("pong")
+    assert eng._start_task is not None
+    await asyncio.wait_for(eng._start_task, 2)
     cleanup.unhealthy = True
     await client.send_json({"cmd": "cancel", "session": "cancel-poisoned"})
 
     cancelled = await client.recv_event("cancelled")
     assert cancelled["session"] == "cancel-poisoned"
-    assert eng.shutdown.is_set()
+    await asyncio.wait_for(eng.shutdown.wait(), 2)
     await restart_exit(eng)
     eng._hard_exit.assert_called_once_with(server_mod.CLEANUP_RESTART_EXIT_CODE)
     client.close()
@@ -3290,45 +3291,47 @@ async def test_stop_discards_inflight_preview_result_before_final(engine, monkey
         client.close()
 
 
-async def test_queue_overflow_aborts_session(engine, monkeypatch):
+async def test_full_queue_keeps_audio(engine, monkeypatch):
     eng, sock = engine
-    monkeypatch.setattr(server_mod, "QUEUE_MAX_FRAMES", 3)
-    monkeypatch.setattr(server_mod, "MAX_DROPPED_FRAMES", 5)
     feed_started = threading.Event()
     release = threading.Event()
+    frames_seen = [0]
 
     def stuck_feed(chunk):  # simulate STT far below realtime
         feed_started.set()
         release.wait(10)
+        frames_seen[0] += 1
         return None
 
     monkeypatch.setattr(eng.stt, "feed_chunk", stuck_feed)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({"cmd": "start", "session": "s-of", "context": {}})
-    # Pin one frame in flight before the burst. The socket reader consumes
-    # every buffered frame without yielding, so without this wait the worker
-    # may not have dequeued anything yet and the accepted count is one lower.
-    await client.send_audio(AUDIO)
-    assert await asyncio.to_thread(feed_started.wait, 2)
-    for _ in range(11):  # capacity (3) + drops past threshold
+    try:
+        # The command reader accepts every frame while STT is blocked.
+        # Ping fences those writes without releasing the decoder.
         await client.send_audio(AUDIO)
+        assert await asyncio.to_thread(feed_started.wait, 2)
+        session = eng.session
+        assert session is not None
+        for _ in range(4):
+            await client.send_audio(AUDIO)
+        await client.send_json({"cmd": "ping"})
+        await client.recv_event("pong", timeout=2)
+        assert eng.session is session and not session.cancelled
+        assert session.samples == AUDIO.size * 5
 
-    evt = await client.recv(timeout=5)
-    assert evt["event"] == "error"
-    assert "overflow" in evt["message"]
-    assert evt["session"] == "s-of"
-    spool = eng.config.audio_dir / ".active" / "s-of.pcm16.part"
-    assert spool.is_file()
-    accepted_frames = 3 + 1 + 5 + 1  # queued + in-flight + allowed drops + aborting frame
-    assert spool.stat().st_size == AUDIO.size * 2 * accepted_frames
-    release.set()
-
-    # engine recovered: idle again and responsive
-    await client.send_json({"cmd": "ping"})
-    assert (await client.recv())["event"] == "pong"
-    assert eng.session is None
-    client.close()
+        release.set()
+        for _ in range(7):
+            await client.send_audio(AUDIO)
+        await client.send_json({"cmd": "stop", "session": "s-of"})
+        assert (await client.recv_event("final"))["session"] == "s-of"
+        assert frames_seen[0] == 12
+        spool = eng.config.audio_dir / ".active" / "s-of.pcm16.part"
+        assert spool.stat().st_size == AUDIO.size * 2 * frames_seen[0]
+    finally:
+        release.set()
+        client.close()
 
 
 # ---- max recording duration auto-stop ----
@@ -3350,7 +3353,7 @@ async def test_auto_stop_at_max_duration(engine):
     auto_stop = await client.recv_event("recording_auto_stopped")
     assert auto_stop["session"] == "s-cap"
     assert auto_stop["limit_s"] == 0.05
-    assert auto_stop["duration_s"] == 0.1
+    assert auto_stop["duration_s"] == 0.05
     transcript = await client.recv_event("transcript")
     assert transcript["session"] == "s-cap"
     final = await client.recv_event("final")

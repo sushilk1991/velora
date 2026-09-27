@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from bisect import bisect_right
 import contextlib
 import ctypes
 import json
@@ -40,6 +41,10 @@ from . import (
 )
 from .audio_store import ActiveAudioSpool, AudioStore
 from .cleanup import (
+    BASE_WORDS,
+    MS_PER_WORD,
+    TIMEOUT_CEILING_MS,
+    TIMEOUT_MS,
     HARD_TIMEOUT_GRACE_S,
     QUEUE_TIMEOUT_S,
     _RETRACTION_RE,
@@ -50,7 +55,7 @@ from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import (
     MEETING_FAILURE_SUFFIX, MEETING_SLICE_S, MeetingAudio, MeetingTrackTooShort,
-    TransientMediaError, load_media, load_meeting_media,
+    TransientMediaError, batch_ranges, load_media, load_meeting_media,
     plan_meeting_slices, split_for_batch,
     sweep_meeting_failures, sweep_meeting_temp,
 )
@@ -58,6 +63,7 @@ from .meeting_notes import chunk_transcript, merge_notes, parse_notes_json
 from .stt import (
     SAMPLE_RATE,
     STTBackend,
+    WINDOWED_FINALIZE_S,
     build_glossary_prompt,
     create_backend,
     fake_stt_enabled,
@@ -110,6 +116,11 @@ class _FastReply:
 class SpoolDisposition(Enum):
     preserve = "preserve"
     discard = "discard"
+
+
+class _InputStage(Enum):
+    raw = "raw"
+    gated = "gated"
 
 
 class _NotesFailure(Enum):
@@ -184,11 +195,14 @@ PARENT_POLL_S = 2.0
 _DIARIZATION_DENSE_ACTIVITY_FRACTION = 0.43
 _DIARIZATION_MAX_TRACK_S = 30 * 60
 
-# Bound the per-session audio queue: ~60s of backlog at 100ms chunks. If STT
-# falls that far behind realtime, frames are dropped; past MAX_DROPPED_FRAMES
-# the session is aborted with an error event (fail loudly instead of OOM).
-QUEUE_MAX_FRAMES = 600
-MAX_DROPPED_FRAMES = 50
+# Admission stops at max_recording_s, so queued Float32 PCM is duration-bounded
+# without blocking the socket reader behind STT. At 60 min it is 230.4 MB.
+# The app's shipped short-dictation watchdog is 20s. A backend step taking
+# four times its audio span has stopped making useful real-time progress.
+STALL_FLOOR_S = 20.0
+_STALL_REALTIME_MARGIN = 4.0
+STALL_MARGIN_S = 5.0
+CLEANUP_RESPONSE_GRACE_S = 0.2
 
 # Streaming-cleanup finalize: chunk cleanups run DURING recording and are
 # nearly always done at stop; this bound only catches a wedged task (each has
@@ -296,12 +310,48 @@ ACTION_MODEL_RECOVERY_WAIT_MAX_S = 90.0
 # remained idle for this grace period.
 ACTION_HIBERNATE_IDLE_S = 8.0
 
-# Seam context for per-segment cleanup: the tail of the previous cleaned chunk
-# rides along in the system prompt so seams punctuate/capitalize correctly.
+# The shipped streaming prompt keeps its 15-word tail. New whole-text pieces
+# receive two base-budget spans for list, tone, and correction context.
 CHUNK_CONTEXT_WORDS = 15
+PIECE_CONTEXT_WORDS = BASE_WORDS * 2
 # A retraction marker within a segment's first few words refers back across
 # the segment boundary — merge with the previous segment and re-clean.
 RETRACTION_HEAD_WORDS = 4
+# These failures can come from copying the preceding context rather than the
+# new transcript. One retry without context can still clean this exact piece.
+SEAM_RETRY_REASONS = frozenset({"length", "context_limit"})
+# Keep half the ceiling's extra-word budget in reserve. A cached 100-word
+# generation measured 3.2–5.4 s here; shorter pieces leave room for slower
+# modes and prompt extensions while the 6 s ceiling still guards ONE call.
+CLEANUP_PIECE_BUDGET_FRACTION = 0.5
+CLEANUP_PIECE_WORDS = BASE_WORDS + int(
+    (TIMEOUT_CEILING_MS - TIMEOUT_MS) / MS_PER_WORD
+    * CLEANUP_PIECE_BUDGET_FRACTION
+)
+CLEANUP_SENTENCE_MIN_UNITS = CLEANUP_PIECE_WORDS // 2
+CLEANUP_PIECE_RESERVE_MS = int(
+    (TIMEOUT_CEILING_MS - TIMEOUT_MS) * (1 - CLEANUP_PIECE_BUDGET_FRACTION)
+)
+CLEANUP_SINGLE_CALL_UNITS = BASE_WORDS + (
+    TIMEOUT_CEILING_MS - TIMEOUT_MS
+) // MS_PER_WORD
+NATIVE_SINGLE_CALL_CHARS = CLEANUP_PIECE_WORDS * 2
+SEAM_LOOKBACK_CHARS = 32
+SEAM_LOOKAHEAD_CHARS = 64
+PIECE_RECOVERY_POLL_S = 0.25
+PIECE_RECOVERY_WAIT_MAX_S = ACTION_MODEL_RECOVERY_WAIT_MAX_S
+_SCRIPT_CHAR_RE = re.compile(
+    r"[\u0e00-\u0eff\u0f00-\u0fff\u1000-\u109f\u1780-\u17ff"
+    r"\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
+)
+_UNBREAKABLE_RE = re.compile(
+    r"^(?:[\w+.-]+@[\w.-]+|[a-z]+://\S+|[/~]\S+|[A-Za-z]:[/\\]\S+)$",
+    re.IGNORECASE,
+)
+_EMAIL_GREETING_RE = re.compile(r"(?i)^(?:dear|hello|hi)\b[^\n]*,\n")
+_EMAIL_SIGNOFF_RE = re.compile(
+    r"(?i)\n(?:best regards|regards|sincerely),?[ \t]*(?:\n[^\n]*)?$"
+)
 
 _LIST_ITEM_START_RE = re.compile(r"^(?:\d+[.)]|[-*])\s+")
 _NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*(\d+)[.)]\s+")
@@ -315,6 +365,113 @@ class _ChunkResult:
     text: str
     ms: int
     applied: bool = False
+    partial: bool = False
+
+
+@dataclass
+class _CleanupContext:
+    """The same sticky prompt fields used by live streaming chunks."""
+
+    stream_prompt: str
+    stream_allowed_terms: list[str]
+    stream_prefix_candidates: list[tuple[str, str]]
+
+
+def _cleanup_units(raw: str) -> int:
+    """Count every character in native-script tokens, other tokens as words."""
+    return sum(
+        len(token) if _SCRIPT_CHAR_RE.search(token) else 1
+        for token in raw.split()
+    )
+
+
+def _split_cleanup_pieces(raw: str) -> list[str]:
+    """Bound model work while retaining every source character and token."""
+    spans: list[tuple[int, int, int]] = []
+    for match in re.finditer(r"\S+", raw):
+        token = match.group()
+        if not _SCRIPT_CHAR_RE.search(token) or _UNBREAKABLE_RE.search(token):
+            spans.append((
+                match.start(), match.end(),
+                len(token) if _SCRIPT_CHAR_RE.search(token) else 1,
+            ))
+            continue
+        start = match.start()
+        for offset, char in enumerate(token):
+            end = match.start() + offset + 1
+            spans.append((start, end, 1))
+            start = end
+
+    if not spans:
+        return []
+    pieces: list[str] = []
+    start_index = 0
+    while start_index < len(spans):
+        end_index = start_index
+        units = 0
+        while end_index < len(spans) \
+                and units + spans[end_index][2] <= CLEANUP_PIECE_WORDS:
+            units += spans[end_index][2]
+            end_index += 1
+        if end_index == start_index:
+            end_index += 1  # one protected URL/path/email cannot be split
+        if end_index < len(spans):
+            # Prefer a sentence ending in the latter half of this budget.
+            # The remaining text is packed afresh, so no piece grows past it.
+            for candidate in range(end_index - 1,
+                                   start_index + CLEANUP_SENTENCE_MIN_UNITS - 2, -1):
+                if raw[spans[candidate][0]:spans[candidate][1]].endswith(
+                    (".", "?", "!", "。", "？", "！")
+                ):
+                    end_index = candidate + 1
+                    break
+            # Put a correction and its preceding sentence in the next call.
+            # Moving a seam never enlarges either call beyond the budget.
+            seam = spans[end_index - 1][1]
+            nearby = [match for match in _RETRACTION_RE.finditer(raw)
+                      if seam - SEAM_LOOKBACK_CHARS <= match.start()
+                      <= seam + SEAM_LOOKAHEAD_CHARS]
+            for marker in reversed(nearby):
+                prior_sentence = max(
+                    raw.rfind(".", spans[start_index][0], marker.start()),
+                    raw.rfind("?", spans[start_index][0], marker.start()),
+                    raw.rfind("!", spans[start_index][0], marker.start()),
+                )
+                sentence_start = prior_sentence + 1 if prior_sentence >= 0 else marker.start()
+                if not raw[sentence_start:marker.start()].strip() and prior_sentence >= 0:
+                    # A sentence-initial correction retracts the sentence
+                    # before the marker, not the empty prefix before itself.
+                    earlier = max(
+                        raw.rfind(".", spans[start_index][0], prior_sentence),
+                        raw.rfind("?", spans[start_index][0], prior_sentence),
+                        raw.rfind("!", spans[start_index][0], prior_sentence),
+                    )
+                    if earlier < 0:
+                        # No earlier sentence edge exists. Keep a useful
+                        # preceding span with the correction, not one word.
+                        sentence_start = spans[max(
+                            start_index + 1,
+                            end_index - CLEANUP_SENTENCE_MIN_UNITS,
+                        )][0]
+                    else:
+                        sentence_start = earlier + 1
+                elif prior_sentence < 0:
+                    # A run-on has no sentence seam. Move back within the
+                    # prior piece budget so the correction keeps its target.
+                    sentence_start = spans[max(
+                        start_index + 1,
+                        end_index - CLEANUP_SENTENCE_MIN_UNITS,
+                    )][0]
+                target = next(
+                    (index for index in range(start_index + 1, end_index)
+                     if spans[index][0] >= sentence_start), None
+                )
+                if target is not None:
+                    end_index = target
+                    break
+        pieces.append(raw[spans[start_index][0]:spans[end_index - 1][1]])
+        start_index = end_index
+    return pieces
 
 
 def _join_chunks(parts: list[str]) -> str:
@@ -392,6 +549,25 @@ def _numbering_restarts(parts: list[str]) -> bool:
     return False
 
 
+def _continue_numbering(text: str, previous: list[str]) -> str:
+    """Continue a numbered list when one piece restarted it at one."""
+    current = list(_NUMBERED_ITEM_RE.finditer(text))
+    if not current or int(current[0].group(1)) != 1 \
+            or current[0].start() != 0 or not previous:
+        return text
+    # Only an open list at the previous piece's end can continue. A later
+    # independent list begins again at one.
+    prior = list(_NUMBERED_ITEM_RE.finditer(previous[-1]))
+    last_line = previous[-1].rstrip().splitlines()[-1]
+    if not prior or _NUMBERED_ITEM_RE.match(last_line) is None:
+        return text
+    offset = int(prior[-1].group(1))
+    return _NUMBERED_ITEM_RE.sub(
+        lambda match: match.group().replace(match.group(1),
+                                            str(int(match.group(1)) + offset), 1),
+        text)
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -406,20 +582,25 @@ class Session:
     def __init__(self, session_id: str, context: dict[str, Any], owner: asyncio.StreamWriter | None = None) -> None:
         self.id = session_id
         self.context = context or {}
-        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=QUEUE_MAX_FRAMES)
+        self.queue: asyncio.Queue[Any] = asyncio.Queue()
         self.feeder: asyncio.Task[None] | None = None
         self.preview_task: asyncio.Task[None] | None = None
         self.last_partial = ""
         self.last_raw_partial = ""
         self.cancelled = False
         self.samples = 0
-        self.dropped = 0  # frames dropped because the queue was full
+        self.stt_time_s = 0.0
+        self.stt_decoded_samples = 0
+        self.failed_window_count = 0
+        self.failed_window_s = 0.0
+        self.stt_processed_samples = 0
+        self.current_feed_samples = 0
         self.started = time.perf_counter()
         # The connection that started this session. A displaced client's
         # cleanup must only abort a session it still owns (reconnect race).
         self.owner = owner
-        # Crash-readable audio archive source. Appended before the bounded STT
-        # queue so frames dropped for decode latency remain recoverable.
+        # Crash-readable audio archive source. Appended before admission to the
+        # duration-bounded STT queue so a freeze can recover all accepted PCM.
         self.spool: ActiveAudioSpool | None = None
         # Streaming-cleanup state (smartness-v2 §2): raw segment texts taken
         # from the backend during recording, and the cleanup task per chunk
@@ -483,8 +664,18 @@ class Engine:
         self._reprocess_task: asyncio.Task[None] | None = None
         self._reprocess_recovery = False
         self._reprocess_audio: str | None = None
+        self._reprocess_id: Any = None
         self._recovery_queue: list[tuple[dict[str, Any], str]] = []
         self._recovery_paused = False
+        self._reprocess_preempt = threading.Event()
+        self._reprocess_window_bound_s: float | None = None
+        self._start_wait_deadline: float | None = None
+        self._start_task: asyncio.Task[None] | None = None
+        self._start_session_id: str | None = None
+        self._start_audio: list[bytes] = []
+        self._start_audio_samples = 0
+        self._start_stop: dict[str, Any] | None = None
+        self._start_spool: ActiveAudioSpool | None = None
         # File transcription (background job). Unlike reprocess it does NOT
         # block dictation: the job yields between chunks whenever a live
         # session is active, so the hotkey always wins.
@@ -574,12 +765,15 @@ class Engine:
         self._cleanup_recovery_deferred = False
         self._cleanup_unhealthy_watch_task: asyncio.Task[None] | None = None
         self._cancelling_session = False
+        self._cancel_active_task: asyncio.Task[None] | None = None
         self._archive_tasks: set[asyncio.Task[Any]] = set()
         # A completed final keeps its active spool until Swift confirms the
         # History row is durable. A crash between those events is recoverable.
         self._final_archives: dict[str, asyncio.Task[bool]] = {}
         self._pending_final_sessions: set[str] = set()
-        self._interrupted_task: asyncio.Task[None] | None = None
+        self._final_ack_tasks: dict[str, asyncio.Task[None]] = {}
+        self._cancel_confirm_tasks: set[asyncio.Task[None]] = set()
+        self._interrupted_tasks: set[asyncio.Task[None]] = set()
         self._recoverable_sessions: set[str] = set()
         self._server: asyncio.Server | None = None
         self._client_gen = 0
@@ -1221,6 +1415,18 @@ class Engine:
                 self._finalize_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await self._finalize_task
+            # Every socket recovery and in-flight abort belongs to this
+            # engine. Join them before the audio store and models close.
+            pending_jobs = [task for task in (
+                self._cancel_active_task, self._reprocess_task,
+                *self._interrupted_tasks, *self._cancel_confirm_tasks,
+            ) if task is not None]
+            for task in pending_jobs:
+                task.cancel()
+            if pending_jobs:
+                await asyncio.gather(*pending_jobs, return_exceptions=True)
+            if self._final_ack_tasks:
+                await asyncio.gather(*self._final_ack_tasks.values(), return_exceptions=True)
             # Stop warm-ups before their worker closes below; a wedged one
             # ends when that close kills the worker.
             warming = list(self._warming_sessions)
@@ -1341,9 +1547,15 @@ class Engine:
                 await self._send({"event": "loading", **self.loading})
             await self._send_setup_complete_if_ready(gen)
             pending = self.audio.pending_interrupted() if self.config.save_audio else ()
+            if self._finalizing_session_id is not None:
+                # The old socket may have gone away while finalization still
+                # owns this spool. Only a process crash makes it interrupted.
+                pending = tuple(session for session in pending
+                                if session != self._finalizing_session_id)
             if pending:
-                self._interrupted_task = asyncio.create_task(
-                    self._emit_interrupted(pending, gen, writer))
+                task = asyncio.create_task(self._emit_interrupted(pending, gen, writer))
+                self._interrupted_tasks.add(task)
+                task.add_done_callback(self._interrupted_tasks.discard)
             while True:
                 try:
                     frame_type, payload = await protocol.read_frame(reader)
@@ -1371,6 +1583,14 @@ class Engine:
         started (reconnect race)."""
         if self.writer is writer:
             self.writer = None
+            # An admitted start may still be waiting for STT. Stop that task
+            # before it can publish a session owned by a closed connection.
+            if self._start_task is not None:
+                self._start_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._start_task
+                self._start_task = None
+                self._start_session_id = None
         with contextlib.suppress(Exception):
             writer.close()
         session = self.session
@@ -1425,6 +1645,24 @@ class Engine:
         if frame_type == protocol.FRAME_AUDIO:
             if self.shutdown.is_set():
                 return
+            if self._start_task is not None:
+                # Start can wait for one recovery window. Keep incoming PCM
+                # behind that admission fence, capped by recording duration.
+                try:
+                    chunk = pcm_from_payload(payload)
+                except ValueError as exc:
+                    await self._error(f"bad audio frame: {exc}", self._start_session_id)
+                    return
+                limit = int(self.config.max_recording_s * SAMPLE_RATE)
+                if self._start_stop is None and self._start_audio_samples < limit:
+                    # Store only admitted samples; the spool and drain must see the same cap.
+                    chunk = chunk[:limit - self._start_audio_samples]
+                    self._start_audio.append(chunk.tobytes())
+                    self._start_audio_samples += len(chunk)
+                    if self._start_spool is not None and not self._start_spool.append(chunk):
+                        self._start_spool.close()
+                        self._start_spool = None
+                return
             await self._on_audio(payload)
             return
         if frame_type != protocol.FRAME_JSON:
@@ -1443,11 +1681,51 @@ class Engine:
         cmd = msg.get("cmd")
         try:
             if cmd == "start":
-                await self._cmd_start(msg)
+                if self._start_task is not None:
+                    await self._error("busy starting a dictation", msg.get("session"))
+                else:
+                    self._start_session_id = str(msg.get("session") or uuid.uuid4())
+                    msg["session"] = self._start_session_id
+                    if self.config.save_audio:
+                        self._start_spool = self.audio.begin_active(self._start_session_id)
+                    self._start_task = asyncio.create_task(self._start_and_drain(msg))
             elif cmd == "stop":
-                await self._cmd_stop(msg)
+                if self._start_task is not None and msg.get("session") == self._start_session_id:
+                    self._start_stop = msg
+                    bound = self._reprocess_window_bound_s if self._reprocessing else None
+                    if self._start_wait_deadline is not None or bound is not None:
+                        # Give the app longer than the engine's remaining wait.
+                        remaining = (max(0.0, self._start_wait_deadline - time.monotonic())
+                                     if self._start_wait_deadline is not None else bound)
+                        await self._send({
+                            "event": "finalize_started", "session": self._start_session_id,
+                            "stall_after_s": remaining + STALL_MARGIN_S,
+                        })
+                else:
+                    await self._cmd_stop(msg)
             elif cmd == "cancel":
-                await self._cmd_cancel(msg)
+                if self._start_task is not None and msg.get("session") == self._start_session_id:
+                    self._start_task.cancel()
+                    self._start_audio.clear()
+                    self._start_audio_samples = 0
+                    self._start_stop = None
+                    self._start_wait_deadline = None
+                    if self._start_spool is not None:
+                        self.audio.discard_active(self._start_spool)
+                        self._start_spool = None
+                    self._start_task = None
+                    self._start_session_id = None
+                    self._recovery_paused = False
+                    self._start_next_recovery()
+                    if self.session is not None and self.session.id == msg.get("session"):
+                        asyncio.create_task(self._cmd_cancel(msg))
+                    else:
+                        await self._send({"event": "cancelled", "session": msg.get("session")})
+                elif self._start_task is not None:
+                    log.debug("ignored cancel for %r while %r is active",
+                              msg.get("session"), self._start_session_id)
+                else:
+                    await self._cmd_cancel(msg)
             elif cmd == "interrupt":
                 await self._cmd_interrupt(msg)
             elif cmd == "ack_interrupted":
@@ -1531,17 +1809,75 @@ class Engine:
 
     # ---------------- session state machine ----------------
 
-    async def _cmd_start(self, msg: dict[str, Any]) -> None:
+    async def _start_and_drain(self, msg: dict[str, Any]) -> None:
+        keep_spool = False
+        try:
+            keep_spool = await self._cmd_start(msg)
+            while self._start_audio and self.session is not None:
+                frames, self._start_audio = self._start_audio, []
+                for payload in frames:
+                    await self._on_audio(payload, already_archived=True)
+            if self._start_stop is not None and self.session is not None:
+                await self._cmd_stop(self._start_stop)
+        except asyncio.CancelledError:
+            # A disconnected client may have spoken while admission waited.
+            keep_spool = True
+            raise
+        except Exception:
+            log.exception("deferred start failed")
+            await self._error("start failed", msg.get("session"))
+        finally:
+            if self._start_task is asyncio.current_task():
+                # A cancelled older start cannot dispose a newer take's state.
+                if self._start_spool is not None:
+                    if keep_spool:
+                        # Recovery refusal survives the app's engine restart.
+                        self._start_spool.close()
+                    else:
+                        # Every other refusal owns no recoverable dictation.
+                        self.audio.discard_active(self._start_spool)
+                    self._start_spool = None
+                self._start_audio.clear()
+                self._start_audio_samples = 0
+                self._start_stop = None
+                self._start_wait_deadline = None
+                self._start_task = None
+                self._start_session_id = None
+
+    async def _cmd_start(self, msg: dict[str, Any]) -> bool:
+        # An acknowledged Esc may still be draining a slow STT call. Reset
+        # that backend before admitting a new session onto its one thread.
+        if self._cancel_active_task is not None:
+            await asyncio.shield(self._cancel_active_task)
         await self._await_cancelled_finalize()
         if self._finalizing:
             await self._error(
                 "busy finalizing the previous dictation", msg.get("session"))
-            return
-        if self._reprocessing and self._reprocess_recovery:
+            return False
+        if self._reprocessing:
+            bound = self._reprocess_window_bound_s
+            if bound is None:
+                await self._error(
+                    "busy reprocessing a clip — try again in a moment",
+                    msg.get("session"))
+                return False
             self._recovery_paused = True
+            self._reprocess_preempt.set()
             task = self._reprocess_task
             if task is not None:
-                await task
+                self._start_wait_deadline = time.monotonic() + bound
+                try:
+                    await asyncio.wait_for(asyncio.shield(task), bound)
+                except asyncio.TimeoutError:
+                    await self._send({
+                        "event": "error", "message": "busy recovering",
+                        "session": msg.get("session"),
+                        "recovering_id": self._reprocess_id,
+                    })
+                    return True
+                finally:
+                    if self._start_task is asyncio.current_task():
+                        self._start_wait_deadline = None
         self._cancel_action_cleanup()
         # Explicit-mode file cleanup uses the same writing model as foreground
         # dictation. Stop it between tokens and retry the exact chunk later.
@@ -1569,15 +1905,6 @@ class Engine:
                 await asyncio.sleep(0.1)
             if self._planning:
                 log.warning("action plan did not yield within 2s of a dictation start")
-        if self._reprocessing:
-            # A manual History reprocess has no recovery-priority contract. Its
-            # refusal must still carry the attempted live session so Swift stops
-            # the microphone instead of ignoring an unscoped error.
-            await self._error(
-                "busy reprocessing a clip — try again in a moment",
-                msg.get("session"),
-            )
-            return
         # Fence the transcribe-file job out for the WHOLE start sequence:
         # start_session below queues behind any in-flight file chunk on the
         # single STT executor, and self.session isn't published until it
@@ -1614,8 +1941,10 @@ class Engine:
             if not isinstance(context, dict):
                 context = {}
             session = Session(session_id, context, owner=self.writer)
-            if self.config.save_audio:
+            if self._start_task is None and self.config.save_audio:
                 session.spool = self.audio.begin_active(session_id)
+            if hasattr(self.stt, "windowed_finalize"):
+                self.stt.windowed_finalize = True
             # STT contextual biasing: bias whisper toward the user's vocabulary and
             # the NAMES on screen right now (person/file/channel/subject entities
             # only — nearby free text is cleanup-prompt material, not glossary).
@@ -1626,6 +1955,9 @@ class Engine:
             if hasattr(self.stt, "preview_enabled"):
                 self.stt.preview_enabled = context.get("stream_typing") is True
             await self._stt_call(self.stt.start_session)
+            if self._start_spool is not None:
+                session.spool = self._start_spool
+                self._start_spool = None
             session.feeder = asyncio.create_task(self._feed_loop(session))
             self.session = session
         finally:
@@ -1641,6 +1973,40 @@ class Engine:
             context.get("app_name"),
             context.get("mode"),
         )
+        return False
+
+    @staticmethod
+    def _cleanup_stall_s() -> float:
+        # A seam may retry once without context. Count both queue waits,
+        # hard watchdog graces, response grace, and warm-up before one piece.
+        attempt = (QUEUE_TIMEOUT_S + TIMEOUT_CEILING_MS / 1000.0
+                   + HARD_TIMEOUT_GRACE_S + CLEANUP_RESPONSE_GRACE_S)
+        return max(STALL_FLOOR_S, CLEANUP_WARMUP_WAIT_S + 2 * attempt + STALL_MARGIN_S)
+
+    @staticmethod
+    def _cleanup_load_stall_s() -> float:
+        # A cold worker may time out during load and retry before the first
+        # bounded cleanup call. Announce that complete path before it starts.
+        return CleanupProcess.load_bound_s() + Engine._cleanup_stall_s()
+
+    @staticmethod
+    def _recovery_stall_s() -> float:
+        return max(STALL_FLOOR_S, PIECE_RECOVERY_WAIT_MAX_S + STALL_MARGIN_S)
+
+    @staticmethod
+    def _stt_stall_s(samples: int) -> float:
+        # One heavy call owns this much audio; slow hardware gets the full
+        # margin regardless of previews or speechless spans before it.
+        step_s = max(0, samples) / SAMPLE_RATE
+        return max(STALL_FLOOR_S, _STALL_REALTIME_MARGIN * step_s)
+
+    def _next_stt_samples(self, session: Session) -> int:
+        # The backend owns the authoritative span for its next heavy call.
+        if session.current_feed_samples:
+            return session.current_feed_samples
+        if session.stt_processed_samples < session.samples:
+            return self.stt.pending_decode_samples()
+        return self.stt.finalize_decode_samples()
 
     async def _emit_partial(self, session: Session, partial: str | None) -> None:
         """Send one current-session partial, shared by stream and preview lanes."""
@@ -1681,11 +2047,36 @@ class Engine:
     async def _feed_one(self, session: Session, chunk: np.ndarray) -> None:
         if session.cancelled:  # aborted: drain frames without touching STT
             return
+        # Announce the exact next feed span before a quiet boundary triggers
+        # a potentially long decode; stop can arrive during that same call.
+        session.current_feed_samples = self.stt.pending_decode_samples() + len(chunk)
+        if self._finalizing_session is session:
+            await self._send({
+                "event": "finalize_progress", "session": session.id,
+                "stage": "stt", "completed": session.stt_processed_samples,
+                "total": session.samples,
+                "stall_after_s": self._stt_stall_s(session.current_feed_samples),
+            })
         try:
+            started = time.perf_counter()
             partial = await self._stt_call(self.stt.feed_chunk, chunk)
+            session.stt_time_s += time.perf_counter() - started
+            session.stt_processed_samples += len(chunk)
+            session.stt_decoded_samples = max(
+                session.stt_decoded_samples, self.stt.decoded_samples())
         except Exception:
             log.exception("feed_chunk failed")
             return
+        finally:
+            session.current_feed_samples = 0
+        if self._finalizing_session is session:
+            await self._send({
+                "event": "finalize_progress", "session": session.id,
+                "stage": "stt", "completed": session.stt_processed_samples,
+                "total": session.samples,
+                "stall_after_s": self._stt_stall_s(
+                    self._next_stt_samples(session)),
+            })
         await self._emit_partial(session, partial)
         # Segment streaming: clean freshly-decoded segments WHILE the user
         # speaks. Any failure only costs the streaming fast path; finalization
@@ -1781,7 +2172,7 @@ class Engine:
             with contextlib.suppress(Exception):
                 await self._stt_call(discard)
 
-    async def _on_audio(self, payload: bytes) -> None:
+    async def _on_audio(self, payload: bytes, already_archived: bool = False) -> None:
         session = self.session
         if session is None or session.cancelled:
             log.debug("audio frame while idle — dropped (%d bytes)", len(payload))
@@ -1791,36 +2182,22 @@ class Engine:
         except ValueError as exc:
             await self._error(f"bad audio frame: {exc}", session.id)
             return
-        # Count every received frame, including one dropped from the bounded
-        # STT queue below. Duration enforcement is about microphone capture,
-        # not only what the decoder managed to ingest under pressure.
+        # Accept at most the configured duration. AudioCapture separately
+        # caps app-side PCM when socket backpressure delays this reader.
+        remaining = max(0, int(self.config.max_recording_s * SAMPLE_RATE) - session.samples)
+        chunk = chunk[:remaining]
+        if not len(chunk):
+            await self._auto_finalize_at_limit(session)
+            return
         session.samples += len(chunk)
-        # Archive before queueing for STT: a frame dropped below for latency
-        # reasons must still make it into the saved or interrupted clip.
-        if session.spool is not None and not session.spool.append(chunk):
+        # Archive under main's retention policy, then admit the frame without
+        # waiting for STT so stop, cancel, and ping stay readable.
+        if (session.spool is not None and not already_archived
+                and not session.spool.append(chunk)):
             session.spool.close()
             session.spool = None
-        try:
-            session.queue.put_nowait(chunk)
-        except asyncio.QueueFull:
-            session.dropped += 1
-            if session.dropped == 1 or session.dropped % 25 == 0:
-                log.warning(
-                    "session %s: audio queue full — dropping frames (%d dropped)",
-                    session.id,
-                    session.dropped,
-                )
-            if session.dropped > MAX_DROPPED_FRAMES:
-                await self._error(
-                    "audio queue overflow: transcription can't keep up — session aborted",
-                    session.id,
-                )
-                await self._abort_session("audio queue overflow")
-                return
-            if session.samples > self.config.max_recording_s * SAMPLE_RATE:
-                await self._auto_finalize_at_limit(session)
-            return
-        if session.samples > self.config.max_recording_s * SAMPLE_RATE:
+        session.queue.put_nowait(chunk)
+        if session.samples >= self.config.max_recording_s * SAMPLE_RATE:
             await self._auto_finalize_at_limit(session)
 
     async def _auto_finalize_at_limit(self, session: Session) -> None:
@@ -1846,19 +2223,92 @@ class Engine:
         self._begin_finalize(session, auto_stopped=True)
 
     async def _drain_feeder(self, session: Session) -> None:
-        try:
-            session.queue.put_nowait(None)
-        except asyncio.QueueFull:
-            # Queue jammed (STT stalled). Cancel the feeder instead of blocking
-            # the dispatch loop behind a wedged backend.
-            if session.feeder is not None:
-                session.feeder.cancel()
+        # Stop is a lossless fence: the sentinel waits behind every accepted
+        # frame, including frames queued while Whisper decoded a segment.
+        session.queue.put_nowait(None)
         if session.feeder is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await session.feeder
 
+    async def _decode_windows(
+        self, session: Session, chunks: list[np.ndarray], prefix: str = "",
+    ) -> str:
+        """Decode detached live PCM one quiet-boundary window at a time."""
+        ends: list[int] = []
+        for chunk in chunks:
+            ends.append((ends[-1] if ends else 0) + len(chunk))
+
+        def read_span(start: int, end: int) -> np.ndarray:
+            # Copy only the planner's search span or one decode window. The
+            # original chunks remain the sole duration-sized audio buffer.
+            pcm = np.empty(end - start, dtype=np.float32)
+            index = bisect_right(ends, start)
+            cursor = start
+            while cursor < end:
+                chunk_start = ends[index - 1] if index else 0
+                take = min(end - cursor, ends[index] - cursor)
+                offset = cursor - chunk_start
+                pcm[cursor - start:cursor - start + take] = \
+                    chunks[index][offset:offset + take]
+                cursor += take
+                index += 1
+            return pcm
+
+        ranges = batch_ranges(ends[-1] if ends else 0, read_span)
+        parts: list[str] = []
+        for index, (start, end) in enumerate(ranges):
+            if session.cancelled:
+                break
+            try:
+                pcm = read_span(start, end)
+                for attempt in range(2):
+                    try:
+                        started = time.perf_counter()
+                        text = await self._stt_call(transcribe_clip, self.stt, pcm)
+                        session.stt_time_s += time.perf_counter() - started
+                        break
+                    except Exception:
+                        if attempt == 0:
+                            log.exception("window %d decode failed; retrying", index + 1)
+                            # A failed heavy call consumed its old watchdog
+                            # allowance. The retry gets a fresh full bound.
+                            await self._send({
+                                "event": "finalize_progress", "session": session.id,
+                                "stage": "stt_retry", "completed": index,
+                                "total": len(ranges),
+                                "stall_after_s": self._stt_stall_s(end - start),
+                            })
+                            continue
+                        log.exception("window %d decode failed twice; keeping gap", index + 1)
+                        session.failed_window_count += 1
+                        session.failed_window_s += (end - start) / SAMPLE_RATE
+                        text = ""
+                session.stt_decoded_samples += end - start
+                if text.strip():
+                    parts.append(text.strip())
+                    await self._send({
+                        "event": "transcript", "session": session.id,
+                        "raw": " ".join(([prefix] if prefix else []) + parts),
+                        "ms": int(session.stt_time_s * 1000),
+                    })
+            finally:
+                next_samples = (ranges[index + 1][1] - ranges[index + 1][0]
+                                if index + 1 < len(ranges) else 0)
+                await self._send({
+                    "event": "finalize_progress", "session": session.id,
+                    "stage": "stt_window", "completed": index + 1,
+                    "total": len(ranges),
+                    "stall_after_s": (self._stt_stall_s(next_samples)
+                                      if next_samples else self._cleanup_stall_s()),
+                })
+        tail = " ".join(parts)
+        self.stt.segments_used_for_final = bool(prefix)
+        self.stt.final_tail = tail if prefix else ""
+        return " ".join(([prefix] if prefix else []) + parts)
+
     async def _abort_session(
         self, why: str, disposition: SpoolDisposition = SpoolDisposition.preserve,
+        detached: asyncio.Event | None = None,
     ) -> None:
         session = self.session
         if session is None:
@@ -1872,10 +2322,16 @@ class Engine:
                 self.audio.discard_active(spool)
             else:
                 spool.close()
+        if hasattr(self.stt, "preview_enabled"):
+            self.stt.preview_enabled = False
+        if detached is not None:
+            detached.set()
         await self._cancel_chunk_tasks_and_wait(session)
         await self._drain_feeder(session)
         await self._drain_preview(session)
         await self._stt_call(self.stt.reset)
+        if hasattr(self.stt, "windowed_finalize"):
+            self.stt.windowed_finalize = False
         if hasattr(self.stt, "preview_enabled"):
             self.stt.preview_enabled = False
         outcome = "discarded" if disposition is SpoolDisposition.discard else "interrupted"
@@ -1886,6 +2342,7 @@ class Engine:
         # (review finding).
         self._recovery_paused = False
         self._schedule_mining()
+        self._start_next_recovery()
 
     @staticmethod
     def _cancel_chunk_tasks(session: Session) -> None:
@@ -1914,14 +2371,42 @@ class Engine:
 
     async def _cmd_cancel(self, msg: dict[str, Any]) -> None:
         session = self.session
+        requested = msg.get("session")
+        if session is not None and requested != session.id:
+            log.debug("ignored cancel for %r while %r is active", requested, session.id)
+            return
+        if session is not None and self._cancelling_session:
+            log.debug("ignored duplicate cancel for %r", requested)
+            return
+        # A late cancel for an acknowledged final cannot touch another
+        # dictation while it owns finalization.
+        if self._finalizing_session is not None \
+                and requested != self._finalizing_session_id:
+            log.debug("ignored cancel for %r while %r finalizes",
+                      requested, self._finalizing_session_id)
+            return
+        if session is None and requested != self._finalizing_session_id \
+                and requested not in self._pending_final_sessions:
+            log.debug("ignored cancel for unknown session %r", requested)
+            return
         if session is None:
             if msg.get("session") == self._finalizing_session_id:
                 finalizing = self._finalizing_session
                 if finalizing is None:
                     await self._error("cancel: finalizing session is unavailable")
                     return
-                await self._cancel_finalizing(finalizing)
-                await self._send({"event": "cancelled", "session": finalizing.id})
+                # Set the cancellation fence and delete the active spool on
+                # this turn. Confirmation follows from a separate task after
+                # the finalizer unwinds; socket control remains readable.
+                finalizing.cancelled = True
+                finalizing.finalize_cancel.set()
+                if finalizing.spool is not None:
+                    self.audio.discard_active(finalizing.spool)
+                    finalizing.spool = None
+                task = asyncio.create_task(self._finish_final_cancel(
+                    finalizing, self._finalize_task))
+                self._cancel_confirm_tasks.add(task)
+                task.add_done_callback(self._cancel_confirm_tasks.discard)
                 return
             requested = msg.get("session")
             if requested in self._pending_final_sessions:
@@ -1931,15 +2416,48 @@ class Engine:
             await self._error("cancel: no active session", msg.get("session"))
             return
         self._cancelling_session = True
-        try:
-            await self._abort_session("cancel", SpoolDisposition.discard)
-            await self._send({"event": "cancelled", "session": session.id})
-        finally:
-            self._cancelling_session = False
-        # Chunk cleanup may have hit the hard watchdog before the user
-        # cancelled. Confirm cancellation first, then restart instead of
-        # leaving the poisoned single-worker executor for the next dictation.
+        detached = asyncio.Event()
+
+        async def settle() -> None:
+            try:
+                await self._abort_session(
+                    "cancel", SpoolDisposition.discard, detached)
+            finally:
+                self._cancelling_session = False
+                # A hard cleanup timeout can poison the worker. Retire it
+                # after the old session releases its model operations.
+                self._restart_if_cleanup_unhealthy()
+
+        self._cancel_active_task = asyncio.create_task(settle())
+
+        def consume_abort(done: asyncio.Task[None]) -> None:
+            if self._cancel_active_task is done:
+                self._cancel_active_task = None
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                log.exception("cancelled session cleanup failed")
+
+        self._cancel_active_task.add_done_callback(consume_abort)
+        task = asyncio.create_task(self._finish_active_cancel(session.id, detached))
+        self._cancel_confirm_tasks.add(task)
+        task.add_done_callback(self._cancel_confirm_tasks.discard)
+
+    async def _finish_active_cancel(self, session: str, detached: asyncio.Event) -> None:
+        await detached.wait()
+        await self._send({"event": "cancelled", "session": session})
         self._restart_if_cleanup_unhealthy()
+
+    async def _finish_final_cancel(
+        self, session: Session, task: asyncio.Task[None] | None,
+    ) -> None:
+        await self._cancel_finalizing(session)
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        await self._send({"event": "cancelled", "session": session.id})
 
     async def _await_cancelled_finalize(self) -> None:
         """Let a cancelled finalize unwind before refusing a new start.
@@ -1956,17 +2474,28 @@ class Engine:
         while self._finalizing and time.monotonic() < deadline:
             await asyncio.sleep(FINALIZE_CANCEL_POLL_S)
 
-    async def _cancel_finalizing(self, session: Session) -> None:
-        """Cancel one exact finalization and delete every audio representation."""
+    async def _cancel_finalizing(
+        self, session: Session,
+        disposition: SpoolDisposition = SpoolDisposition.discard,
+    ) -> None:
+        """Cancel one exact finalization under its audio disposition."""
         session.cancelled = True
         session.finalize_cancel.set()
         self._cancel_chunk_tasks(session)
+        if session.feeder is not None:
+            session.feeder.cancel()
+        while not session.queue.empty():
+            session.queue.get_nowait()
         spool = session.spool
         session.spool = None
         if spool is not None:
-            self.audio.discard_active(spool)
+            if disposition is SpoolDisposition.preserve:
+                spool.close()
+            else:
+                self.audio.discard_active(spool)
 
-        await self._discard_final_audio(session.id)
+        if disposition is SpoolDisposition.discard:
+            await self._discard_final_audio(session.id)
 
     async def _discard_final_audio(self, session: str) -> None:
         """Delete a cancelled final's active spool and completed archive."""
@@ -2026,6 +2555,15 @@ class Engine:
         if session not in self._pending_final_sessions:
             log.info("duplicate or stale final acknowledgement for %s", session)
             return
+        if session in self._final_ack_tasks:
+            return
+        # Keep the reader free while archiving and unlinking run in one owned task.
+        task = asyncio.create_task(self._finish_final_ack(session))
+        self._final_ack_tasks[session] = task
+        task.add_done_callback(lambda done: self._final_ack_tasks.pop(session, None)
+                               if self._final_ack_tasks.get(session) is done else None)
+
+    async def _finish_final_ack(self, session: str) -> None:
         archive = self._final_archives.get(session)
         if archive is None or not await archive:
             log.warning(
@@ -2094,6 +2632,8 @@ class Engine:
                 session.spool = None
             if hasattr(self.stt, "preview_enabled"):
                 self.stt.preview_enabled = False
+            if hasattr(self.stt, "windowed_finalize"):
+                self.stt.windowed_finalize = False
             if self._finalizing_session is session:
                 self._finalizing = False
                 self._finalizing_session_id = None
@@ -2101,6 +2641,7 @@ class Engine:
             self._resume_cleanup_recovery()
             self._recovery_paused = False
             self._schedule_mining()
+            self._start_next_recovery()
             if session.cancelled:
                 self._restart_if_cleanup_unhealthy()
             # After `_finalizing` clears, so the next start is never refused
@@ -2109,6 +2650,10 @@ class Engine:
 
     async def _finalize_session_inner(self, session: Session, auto_stopped: bool = False) -> None:
         t_stop = time.perf_counter()
+        await self._send({
+            "event": "finalize_started", "session": session.id,
+            "stall_after_s": self._stt_stall_s(self._next_stt_samples(session)),
+        })
         await self._drain_feeder(session)
         await self._drain_preview(session)
         if session.cancelled:
@@ -2116,7 +2661,29 @@ class Engine:
             return
         self._start_cleanup_warmup(session)
         try:
+            started = time.perf_counter()
             raw = await self._stt_call(self.stt.finalize)
+            if getattr(self.stt, "needs_windowed_fallback", False):
+                prefix, chunks = await self._stt_call(self.stt.take_fallback_chunks)
+                await self._send({
+                    "event": "finalize_progress", "session": session.id,
+                    "stage": "stt", "completed": session.stt_decoded_samples,
+                    "total": session.samples,
+                    "stall_after_s": self._stt_stall_s(
+                        min(sum(map(len, chunks)), int(WINDOWED_FINALIZE_S * SAMPLE_RATE))),
+                })
+                raw = await self._decode_windows(session, chunks, prefix)
+            else:
+                session.stt_time_s += time.perf_counter() - started
+                await self._send({
+                    "event": "finalize_progress", "session": session.id,
+                    "stage": "stt", "completed": session.samples,
+                    "total": session.samples,
+                    "stall_after_s": (self._cleanup_load_stall_s()
+                                      if self.cleanup is not None
+                                      and not self.cleanup.loaded
+                                      else self._cleanup_stall_s()),
+                })
         except Exception as exc:
             log.exception("finalize failed")
             await self._cancel_chunk_tasks_and_wait(session)
@@ -2192,6 +2759,8 @@ class Engine:
             # history continues to verify the contract through its residual.
             "cleanup_recovery_wait_ms": 0,
             "total_ms": total_ms,
+            "failed_window_count": session.failed_window_count,
+            "failed_window_s": session.failed_window_s,
         }
         if audio_name:
             final_evt["audio"] = audio_name
@@ -2371,51 +2940,254 @@ class Engine:
 
     async def _clean_chunk_text(
         self,
-        session: Session,
+        session: Session | _CleanupContext,
         seg_raw: str,
         prev_text: str | None,
         cancel_event: threading.Event | None = None,
+        *,
+        romanize: bool = False,
+        queue_timeout_s: float | None = None,
+        timeout_ms: int | None = None,
+        input_stage: _InputStage = _InputStage.raw,
     ) -> _ChunkResult:
-        """Clean ONE raw chunk (segment or tail) under the session's single
-        stream prompt. Never raises: any failure degrades to the deterministic
-        cleanup for this chunk only. Replacements/tags/category rules run ONCE
-        over the assembled text in `_streaming_result`'s postprocess — never
-        per chunk (mid-text chunks are not utterances)."""
+        """Clean one streaming chunk or bounded whole-text piece.
+
+        Replacements and mode postprocessing run once after assembly. A failed
+        call keeps this chunk's raw words through deterministic cleanup.
+        """
+        def fallback() -> str:
+            if input_stage is _InputStage.gated:
+                return formatting.normalize_spoken_punctuation(
+                    formatting.decode_breaks(seg_raw))
+            return self._deterministic_cleanup(seg_raw)
+
         try:
             system_prompt = session.stream_prompt
             cleanup = self.cleanup
             if system_prompt is None or cleanup is None:
-                return _ChunkResult(self._deterministic_cleanup(seg_raw), 0)
+                return _ChunkResult(fallback(), 0)
+            piece = timeout_ms is not None
             if prev_text:
-                # Seam context: previous cleaned tail, fenced as context-only.
-                # Appended AFTER the static prompt so the KV prefix still hits.
-                tail_words = " ".join(prev_text.split()[-CHUNK_CONTEXT_WORDS:])
+                # Context follows the stable prefix. Bounded pieces need more
+                # context to carry corrections, list numbers and email tone.
+                context_words = PIECE_CONTEXT_WORDS if piece else CHUNK_CONTEXT_WORDS
+                tail_words = " ".join(prev_text.split()[-context_words:])
+                if piece and len(prev_text.split()) == 1:
+                    tail_words = prev_text[-context_words:]
                 system_prompt += (
-                    "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "». "
-                    "If it ends in a numbered list, continue with the next number; "
-                    "never restart at 1."
+                    "\n\nPrevious text (context only, do NOT repeat it): «" + tail_words + "»."
                 )
+                # Continue numbering only when the previous output ends on
+                # a numbered item. Separate lists must be free to start at 1.
+                last_line = prev_text.rstrip().splitlines()[-1]
+                list_open = _NUMBERED_ITEM_RE.match(last_line) is not None
+                if list_open:
+                    system_prompt += (
+                        " If it ends in a numbered list, continue with the next number; "
+                        "never restart at 1."
+                    )
+                if piece:
+                    numbered = list(_NUMBERED_ITEM_RE.finditer(prev_text))
+                    if list_open and numbered:
+                        system_prompt += f" Last list item number: {numbered[-1].group(1)}."
+                    system_prompt += (
+                        " Continue the same message without repeating its "
+                        "greeting or sign-off. Preserve its tone."
+                    )
             # Same deterministic prep the whole-text gate gives the model
             # (formatting.run_gate): spoken break commands become real line
             # breaks before the LLM ever sees the chunk.
-            seg_input = formatting.apply_spoken_commands(formatting.scrub_fillers(seg_raw))
+            seg_input = (
+                seg_raw if romanize or input_stage is _InputStage.gated else
+                formatting.apply_spoken_commands(formatting.scrub_fillers(seg_raw))
+            )
             if not seg_input.strip():
                 # A chunk that was ONLY a break command must keep its break.
                 return _ChunkResult(seg_input, 0)
-            result = await cleanup.cleanup(
-                formatting.encode_breaks(seg_input),
-                system_prompt,
-                cancel_event=cancel_event,
-                allowed_terms=session.stream_allowed_terms,
-                prefix_candidates=session.stream_prefix_candidates,
-                copy_draft=True,
+            cleanup_input = (
+                seg_input if romanize or input_stage is _InputStage.gated
+                else formatting.encode_breaks(seg_input)
             )
+            kwargs: dict[str, Any] = {
+                "cancel_event": cancel_event,
+                "prefix_candidates": session.stream_prefix_candidates,
+            }
+            if romanize:
+                kwargs["check_ratio"] = False
+            else:
+                kwargs["allowed_terms"] = session.stream_allowed_terms
+                kwargs["copy_draft"] = True
+            if timeout_ms is not None:
+                kwargs["timeout_ms"] = timeout_ms
+            if queue_timeout_s is not None:
+                kwargs["queue_timeout_s"] = queue_timeout_s
+            result = await cleanup.cleanup(cleanup_input, system_prompt, **kwargs)
+            elapsed_ms = result.ms
+            if (piece and prev_text and not result.applied
+                    and result.reason in SEAM_RETRY_REASONS
+                    and (cancel_event is None or not cancel_event.is_set())):
+                # A model that copied context can hit its output ceiling.
+                # Retry only this piece with the stable mode prompt; the
+                # surrounding pieces retain their original cleanup.
+                result = await cleanup.cleanup(
+                    cleanup_input, session.stream_prompt, **kwargs)
+                elapsed_ms += result.ms
             if result.applied:
-                return _ChunkResult(result.text, result.ms, applied=True)
-            return _ChunkResult(self._deterministic_cleanup(seg_raw), result.ms)
+                return _ChunkResult(result.text, elapsed_ms, applied=True)
+            return _ChunkResult(fallback(), elapsed_ms)
         except Exception:  # noqa: BLE001 — one bad chunk must not sink the session
             log.exception("chunk cleanup failed — deterministic fallback for this chunk")
-            return _ChunkResult(self._deterministic_cleanup(seg_raw), 0)
+            return _ChunkResult(fallback(), 0)
+
+    async def _clean_piece_sequence(
+        self,
+        raw: str,
+        context: Session | _CleanupContext,
+        *,
+        cancel_event: threading.Event | None = None,
+        romanize: bool = False,
+        queue_timeout_s: float | None = None,
+        progress_session: Session | None = None,
+        previous_text: str | None = None,
+        email_envelope: bool = False,
+        input_stage: _InputStage = _InputStage.raw,
+    ) -> _ChunkResult:
+        """Reuse streaming's per-chunk cleanup and seam prompt in raw order."""
+        pieces = _split_cleanup_pieces(raw)
+        cleaned: list[str] = []
+        elapsed_ms = 0
+        applied_count = 0
+        for index, piece in enumerate(pieces):
+            if cancel_event is not None and cancel_event.is_set():
+                # Explicit cancellation discards this partial result; stop
+                # model work without formatting pieces the caller will drop.
+                break
+            previous = cleaned[-1] if cleaned else previous_text
+            if _cleanup_units(piece) > CLEANUP_SINGLE_CALL_UNITS \
+                    and _UNBREAKABLE_RE.match(piece):
+                # A single protected token can exceed any prompt budget.
+                # Preserve it verbatim; splitting an address loses content.
+                result = _ChunkResult(piece, 0)
+                cleaned.append(result.text)
+                if progress_session is not None:
+                    await self._send({
+                        "event": "finalize_progress", "session": progress_session.id,
+                        "stage": "cleanup", "completed": index + 1,
+                        "total": len(pieces),
+                        "stall_after_s": self._cleanup_stall_s(),
+                    })
+                continue
+            piece_timeout_ms = None
+            if len(pieces) > 1 or _cleanup_units(piece) > CLEANUP_SINGLE_CALL_UNITS:
+                # Spend the reserved half of the per-call budget on variance
+                # between modes/devices. Use the same script-aware units as
+                # splitting; space-joined CJK is not a few short words.
+                base = (ROMANIZE_TIMEOUT_MS if romanize else
+                        TIMEOUT_MS + CLEANUP_PIECE_RESERVE_MS)
+                piece_timeout_ms = min(
+                    base + max(0, _cleanup_units(piece) - BASE_WORDS) * MS_PER_WORD,
+                    TIMEOUT_CEILING_MS,
+                )
+            result = await self._clean_chunk_text(
+                context, piece, previous, cancel_event,
+                romanize=romanize, queue_timeout_s=queue_timeout_s,
+                timeout_ms=piece_timeout_ms,
+                input_stage=input_stage,
+            )
+            if cancel_event is not None and cancel_event.is_set() and not result.applied:
+                break
+            # Normalize the prompt's protected break marker before envelope
+            # and list matching; final postprocess accepts real newlines.
+            cleaned.append(_continue_numbering(
+                formatting.decode_breaks(result.text), cleaned))
+            elapsed_ms += result.ms
+            applied_count += result.applied
+            # The piece has finished even when it failed. Announce recovery's
+            # separate bound before waiting for a replacement worker.
+            needs_recovery = (index < len(pieces) - 1 and not result.applied
+                              and self.cleanup is not None
+                              and not getattr(self.cleanup, "loaded", True))
+            if progress_session is not None:
+                await self._send({
+                    "event": "finalize_progress", "session": progress_session.id,
+                    "stage": "cleanup", "completed": index + 1,
+                    "total": len(pieces),
+                    "stall_after_s": (self._recovery_stall_s() if needs_recovery
+                                      else self._cleanup_stall_s()),
+                })
+            # A retired worker cannot serve the next piece until its bounded
+            # replacement completes. Lift dictation's recovery deferral here.
+            if needs_recovery:
+                self._resume_cleanup_recovery()
+                latest_deadline = time.monotonic() + PIECE_RECOVERY_WAIT_MAX_S
+                deadline = min(
+                    self._recovery_deadline(self.cleanup) or latest_deadline,
+                    latest_deadline,
+                )
+                while not self.cleanup.loaded \
+                        and time.monotonic() < deadline \
+                        and not getattr(self.cleanup, "unhealthy", False) \
+                        and (cancel_event is None or not cancel_event.is_set()):
+                    await asyncio.sleep(PIECE_RECOVERY_POLL_S)
+                    proxy_deadline = self._recovery_deadline(self.cleanup)
+                    if proxy_deadline:
+                        deadline = min(max(deadline, proxy_deadline), latest_deadline)
+                if progress_session is not None:
+                    await self._send({
+                        "event": "finalize_progress", "session": progress_session.id,
+                        "stage": "recovery", "completed": index + 1,
+                        "total": len(pieces),
+                        "stall_after_s": self._cleanup_stall_s(),
+                    })
+                queue_timeout_s = None
+        if email_envelope and cleaned:
+            # A model can vary its salutation or sign-off per piece. Keep the
+            # first greeting and last sign-off, regardless of exact wording.
+            first_greeting = next(
+                (index for index, part in enumerate(cleaned)
+                 if _EMAIL_GREETING_RE.match(part)), None
+            )
+            last_signoff = next(
+                (index for index in range(len(cleaned) - 1, -1, -1)
+                 if _EMAIL_SIGNOFF_RE.search(cleaned[index])), None
+            )
+            for index, part in enumerate(cleaned):
+                if index != first_greeting:
+                    part = _EMAIL_GREETING_RE.sub("", part, count=1)
+                if index != last_signoff:
+                    part = _EMAIL_SIGNOFF_RE.sub("", part, count=1)
+                cleaned[index] = part
+        # The source seam determines whether a space belongs between pieces.
+        # Splitting inside one CJK token has no separator; adjacent STT tokens do.
+        joined = ""
+        source_end = 0
+        for piece, result in zip(pieces, cleaned):
+            source_start = raw.find(piece, source_end)
+            separator = raw[source_end:source_start] if source_start >= 0 else " "
+            if joined and _LIST_ITEM_START_RE.match(result.lstrip("\n")):
+                joined += "\n"
+            elif joined and separator:
+                joined += " " if "\n" not in separator else "\n"
+            joined += result
+            source_end = source_start + len(piece) if source_start >= 0 else source_end
+        partial = 0 < applied_count < len(pieces)
+        return _ChunkResult(joined, elapsed_ms, applied_count == len(pieces), partial)
+
+    async def _clean_bounded_tail(
+        self, session: Session, raw: str, previous: str | None,
+        cancel_event: threading.Event | None = None,
+    ) -> _ChunkResult:
+        """Keep either final-tail seam within the same per-call budget."""
+        if _cleanup_units(raw) <= CLEANUP_SINGLE_CALL_UNITS:
+            return await self._clean_chunk_text(session, raw, previous, cancel_event)
+        context = _CleanupContext(
+            session.stream_prompt or STATIC_SYSTEM_PROMPT,
+            session.stream_allowed_terms,
+            session.stream_prefix_candidates,
+        )
+        return await self._clean_piece_sequence(
+            raw, context, cancel_event=cancel_event,
+            progress_session=session, previous_text=previous)
 
     async def _streaming_result(self, session: Session, raw: str) -> tuple[str, str, int, bool, str] | None:
         """Assemble the final text from the per-segment cleanups. Returns the
@@ -2492,23 +3264,20 @@ class Engine:
             )
             merged = session.chunk_raws[-1] + " " + tail
             priority_cancel = threading.Event()
-            priority_task = asyncio.create_task(
-                self._clean_chunk_text(
-                    session,
-                    merged,
-                    prev_text,
-                    priority_cancel,
-                )
-            )
+            multi_call = _cleanup_units(merged) > CLEANUP_SINGLE_CALL_UNITS
+            priority_task = asyncio.create_task(self._clean_bounded_tail(
+                session, merged, prev_text, priority_cancel))
             log.info("final tail replaced one unfinished chunk cleanup")
             # The old 1.5-second gather limit is for a nearly-finished chunk,
             # not this brand-new authoritative generation. Give the merged
             # request its own production queue + hard-watchdog budget.
             priority_timeout_s = (
+                len(_split_cleanup_pieces(merged)) * (
+                    TIMEOUT_CEILING_MS / 1000.0 + HARD_TIMEOUT_GRACE_S
+                    + QUEUE_TIMEOUT_S + CLEANUP_RESPONSE_GRACE_S)
+                if multi_call else
                 adaptive_timeout_ms(merged) / 1000.0
-                + HARD_TIMEOUT_GRACE_S
-                + QUEUE_TIMEOUT_S
-                + 0.25
+                + HARD_TIMEOUT_GRACE_S + QUEUE_TIMEOUT_S + 0.25
             )
             try:
                 _done, priority_pending = await asyncio.wait(
@@ -2605,12 +3374,14 @@ class Engine:
                 # LLM does the edit, the marker only picked the scope.
                 merged = session.chunk_raws[-1] + " " + tail
                 prev_text = cleaned[-2] if len(cleaned) >= 2 else None
-                merged_result = await self._clean_chunk_text(session, merged, prev_text)
+                merged_result = await self._clean_bounded_tail(
+                    session, merged, prev_text)
                 cleaned[-1] = merged_result.text
                 tail_ms = merged_result.ms
                 applied_any = applied_any or merged_result.applied
             else:
-                tail_result = await self._clean_chunk_text(session, tail, cleaned[-1] if cleaned else None)
+                tail_result = await self._clean_bounded_tail(
+                    session, tail, cleaned[-1] if cleaned else None)
                 cleaned.append(tail_result.text)
                 tail_ms = tail_result.ms
                 applied_any = applied_any or tail_result.applied
@@ -2792,8 +3563,22 @@ class Engine:
         )
         if not raw.strip():
             return "", gate.mode.name, 0, False, "empty_transcript"
+        load_needed = (session is not None and gate.use_llm
+                       and self.cleanup is not None and not self.cleanup.loaded)
+        if load_needed:
+            await self._send({
+                "event": "finalize_progress", "session": session.id,
+                "stage": "cleanup_load", "completed": 0, "total": 1,
+                "stall_after_s": self._cleanup_load_stall_s(),
+            })
         cleanup_ready = (
-            await self._ensure_cleanup_loaded() if gate.use_llm else False)
+            await self._ensure_cleanup_loaded(cancel_event) if gate.use_llm else False)
+        if load_needed and cleanup_ready:
+            await self._send({
+                "event": "finalize_progress", "session": session.id,
+                "stage": "cleanup_load", "completed": 1, "total": 1,
+                "stall_after_s": self._cleanup_stall_s(),
+            })
         if gate.use_llm and self.cleanup is not None and cleanup_ready:
             prefix_candidates = formatting.build_prefill_prompt_candidates(
                 self.config,
@@ -2803,16 +3588,44 @@ class Engine:
                 entities=entities,
                 romanize=gate.romanize,
             )
+            # The one-call path below is unchanged for short dictations. Long
+            # text uses streaming's cleanup call and one final postprocess.
+            source = gate.text if gate.romanize else formatting.encode_breaks(gate.text)
+            long_text = _cleanup_units(gate.text) > CLEANUP_SINGLE_CALL_UNITS
+            if (len(gate.text) <= NATIVE_SINGLE_CALL_CHARS
+                    and _SCRIPT_CHAR_RE.search(gate.text)):
+                # Main sends a short native-script take through one prompt;
+                # character-based splitting is only for long recordings.
+                long_text = False
             # Romanization cannot use the warm-up's prompt, so it cancels the
             # warm-up at once. The budget is the cleanup's own hard wall.
-            timeout_ms = (
-                ROMANIZE_TIMEOUT_MS if gate.romanize
-                else adaptive_timeout_ms(formatting.encode_breaks(gate.text)))
+            timeout_ms = ROMANIZE_TIMEOUT_MS if gate.romanize else adaptive_timeout_ms(source)
             queue_timeout_s = await self._finish_cleanup_warmup(
                 session,
                 budget_s=timeout_ms / 1000.0 + HARD_TIMEOUT_GRACE_S,
                 wait_s=0.0 if gate.romanize else CLEANUP_WARMUP_WAIT_S,
             )
+            if long_text:
+                context = _CleanupContext(
+                    gate.system_prompt or STATIC_SYSTEM_PROMPT,
+                    self._allowed_terms(gate.mode),
+                    prefix_candidates,
+                )
+                result = await self._clean_piece_sequence(
+                    source, context,
+                    cancel_event=cancel_event,
+                    romanize=gate.romanize,
+                    queue_timeout_s=queue_timeout_s,
+                    progress_session=session,
+                    email_envelope=gate.mode.name == "Email",
+                    input_stage=_InputStage.gated,
+                )
+                text = formatting.postprocess(result.text, gate)
+                reason = (
+                    "chunked" if result.applied else
+                    "partial_cleanup" if result.partial else "cleanup_unavailable"
+                )
+                return text, gate.mode.name, result.ms, result.applied, reason
             # The model gets gate.text, NOT raw: the gate already converted
             # spoken break commands ("now a new line") into real line breaks
             # and scrubbed fillers. Passing raw here (the original bug) showed
@@ -2836,6 +3649,14 @@ class Engine:
                     copy_draft=True,
                     queue_timeout_s=queue_timeout_s,
                 )
+            if session is not None:
+                # A one-piece dictation uses the unchanged model call above;
+                # its completion still advances the same app stall detector.
+                await self._send({
+                    "event": "finalize_progress", "session": session.id,
+                    "stage": "cleanup", "completed": 1, "total": 1,
+                    "stall_after_s": STALL_FLOOR_S,
+                })
             if result.applied:
                 text = formatting.postprocess(result.text, gate)
             else:
@@ -4194,7 +5015,7 @@ class Engine:
             await self._reprocess_failed(
                 msg, "reprocess: busy (dictation in progress)", "busy")
             return
-        if (self._reprocessing or self._transcribing
+        if (self._finalizing or self._reprocessing or self._transcribing
                 or self._meeting_notes_running or self._editing):
             await self._reprocess_failed(
                 msg, "reprocess: busy (another job in progress)", "busy")
@@ -4215,6 +5036,9 @@ class Engine:
         self._reprocessing = True
         self._reprocess_recovery = recovery
         self._reprocess_audio = name
+        self._reprocess_id = msg.get("id")
+        self._reprocess_preempt.clear()
+        self._reprocess_window_bound_s = None
         task = asyncio.create_task(self._run_reprocess(dict(msg), name))
         self._reprocess_task = task
 
@@ -4232,7 +5056,7 @@ class Engine:
         ):
             return
         msg, name = self._recovery_queue.pop(0)
-        self._start_reprocess(msg, name, recovery=True)
+        self._start_reprocess(msg, name, recovery=msg.get("recovery") is True)
 
     async def _run_reprocess(self, msg: dict[str, Any], name: str) -> None:
         model_id = str(msg.get("stt_model") or self.stt.model_id)
@@ -4242,30 +5066,60 @@ class Engine:
         saved_language = getattr(self.stt, "language", None)
         try:
             try:
-                pcm = await asyncio.to_thread(self.audio.load, name)
+                clip = self.audio.open_clip(name)
             except (FileNotFoundError, ValueError, OSError) as exc:
                 await self._reprocess_failed(
                     msg, f"reprocess: audio unavailable: {exc}", "invalid_file")
                 return
             t0 = time.perf_counter()
             try:
-                backend = await self._stt_for_reprocess(model_id, language)
-                # Reprocess biases from the LIVE config vocab, same as a fresh
-                # session (there is no screen context for an archived clip).
-                backend.initial_prompt = self._glossary()
-                raw = await self._stt_call(transcribe_clip, backend, pcm)
+                with clip:
+                    backend = await self._stt_for_reprocess(model_id, language)
+                    # Reprocess biases from the LIVE config vocab, same as a fresh
+                    # session (there is no screen context for an archived clip).
+                    backend.initial_prompt = self._glossary()
+                    # Plan from small seam probes, then decode only one span
+                    # at a time. A live start waits for the active span and
+                    # restarts this recovery from its durable clip later.
+                    ranges = await asyncio.to_thread(
+                        batch_ranges, clip.sample_count, clip.read_span)
+                    parts: list[str] = []
+                    for start, end in ranges:
+                        if self._reprocess_preempt.is_set():
+                            self._recovery_queue.insert(0, (dict(msg), name))
+                            return
+                        pcm = await asyncio.to_thread(clip.read_span, start, end)
+                        self._reprocess_window_bound_s = self._stt_stall_s(end - start)
+                        try:
+                            piece = await self._stt_call(transcribe_clip, backend, pcm)
+                        finally:
+                            self._reprocess_window_bound_s = None
+                        if piece.strip():
+                            parts.append(piece.strip())
+                    raw = " ".join(parts)
             except Exception as exc:  # noqa: BLE001
                 log.exception("reprocess transcription failed")
                 await self._reprocess_failed(msg, f"reprocess failed: {exc}")
                 return
+            if self._reprocess_preempt.is_set():
+                self._recovery_queue.insert(0, (dict(msg), name))
+                return
             stt_ms = int((time.perf_counter() - t0) * 1000)
             format_started = time.perf_counter()
-            text, mode_name, cleanup_ms, cleanup_applied, _reason = await self._apply_formatting(
-                raw,
-                bundle_id=msg.get("bundle_id"),
-                app_name=msg.get("app_name"),
-                explicit_mode=msg.get("mode"),
-            )
+            self._reprocess_window_bound_s = self._cleanup_load_stall_s()
+            try:
+                text, mode_name, cleanup_ms, cleanup_applied, _reason = await self._apply_formatting(
+                    raw,
+                    bundle_id=msg.get("bundle_id"),
+                    app_name=msg.get("app_name"),
+                    explicit_mode=msg.get("mode"),
+                    cancel_event=self._reprocess_preempt,
+                )
+            finally:
+                self._reprocess_window_bound_s = None
+            if self._reprocess_preempt.is_set():
+                self._recovery_queue.insert(0, (dict(msg), name))
+                return
             cleanup_wall_ms = int((time.perf_counter() - format_started) * 1000)
             evt: dict[str, Any] = {
                 "event": "reprocessed",
@@ -4296,6 +5150,7 @@ class Engine:
             log.exception("reprocess failed")
             await self._reprocess_failed(msg, f"reprocess failed: {exc}")
         finally:
+            self._reprocess_window_bound_s = None
             if saved_language is not None and hasattr(self.stt, "language"):
                 self.stt.language = saved_language
             current = asyncio.current_task()
@@ -4304,12 +5159,14 @@ class Engine:
             self._reprocessing = False
             self._reprocess_recovery = False
             self._reprocess_audio = None
+            self._reprocess_id = None
             with contextlib.suppress(RuntimeError):  # executor gone at shutdown
                 await self._stt_call(self._release_stt_memory)
             # Idle again — without this, a reprocess that landed during the
             # mining delay window left mining dead until the next dictation
             # (review finding).
             self._schedule_mining()
+            self._start_next_recovery()
 
     # ---------------- file transcription ----------------
 

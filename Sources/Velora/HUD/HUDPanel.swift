@@ -43,6 +43,10 @@ final class HUDPanel: NSObject {
     var menuHooks: MenuHooks?
 
     private let panel: NSPanel
+    private let visibility: () -> Bool
+    private var pillEnabled: Bool {
+        visibility()
+    }
     /// Selftest hook: whether the panel is ordered on screen right now.
     var isOnScreen: Bool { panel.isVisible }
     /// Selftest hook: the panel's window level.
@@ -79,7 +83,8 @@ final class HUDPanel: NSObject {
     /// invalidation step to forget.
     private let hitRectCache = HUDHitRectCache()
 
-    override init() {
+    init(pillEnabled: @escaping () -> Bool = { AppConfig.shared.hudVisible }) {
+        visibility = pillEnabled
         panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: Self.panelSize),
             styleMask: [.borderless, .nonactivatingPanel],
@@ -431,7 +436,7 @@ final class HUDPanel: NSObject {
         // "Hide Pill" is honoured immediately, session or not: the user
         // asked for the surface to go away, so the mid-session deferral
         // below (which protects placement, not visibility) does not apply.
-        guard AppConfig.shared.hudVisible else {
+        guard pillEnabled else {
             hideWorkItem?.cancel()
             hideWorkItem = nil
             stopMouseSync()
@@ -486,7 +491,7 @@ final class HUDPanel: NSObject {
         //
         //     state → transition ─┬─ hudVisible ── position + orderFront
         //                         └─ closed ───── orderOut, no mouse sync
-        let pillClosed = !AppConfig.shared.hudVisible
+        let pillClosed = !pillEnabled
         if !target.isHidden, !pillClosed {
             let promptShouldFollowMainDisplay: Bool = {
                 guard AppConfig.shared.hudPosition != .custom,

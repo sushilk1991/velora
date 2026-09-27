@@ -329,19 +329,28 @@ final class DictationController: NSObject {
     ) -> DelayedEditCaptureRelease {
         heldFor < tapThreshold ? .lockRecording : .cancel
     }
-    /// Short dictations keep the existing 20-second watchdog. A recovery
-    /// whole-clip decode after a long recording needs a duration-scaled budget;
-    /// otherwise the app reports a false timeout while the engine is still
-    /// preserving the transcript.
+    /// Stop gets the shipped 20-second floor until the engine reports work.
     private static let minimumTranscribeTimeout: TimeInterval = 20
-    private static let maximumTranscribeTimeout: TimeInterval = 600
+    private static let multiStepSTTSamples = 45 * 16_000
     private static let actionResultTimeout: TimeInterval = 6
     private static let actionOpenTimeout: TimeInterval = 3
-    static func transcribeTimeout(recordingDurationMs: Int?) -> TimeInterval {
-        let recordingSeconds = Double(max(0, recordingDurationMs ?? 0)) / 1_000
-        return min(
-            maximumTranscribeTimeout,
-            max(minimumTranscribeTimeout, recordingSeconds * 0.1))
+    static func progressLabel(stage: String, completed: Int, total: Int) -> String {
+        guard total > 0 else { return "Transcribing…" }
+        switch stage {
+        case "stt":
+            let percent = min(100, max(0, Int(Double(completed) / Double(total) * 100)))
+            return "Transcribing \(percent)%"
+        case "stt_window":
+            return "Transcribing \(completed) of \(total)"
+        case "cleanup":
+            return "Cleaning \(completed) of \(total)"
+        case "cleanup_load":
+            return "Loading writing model…"
+        case "recovery":
+            return "Restoring writing model…"
+        default:
+            return "Transcribing…"
+        }
     }
 
     static func recordingLimitMessage(seconds: Double) -> String {
@@ -368,15 +377,19 @@ final class DictationController: NSObject {
     var recordingBlockReason: (() -> String?)?
 
     private let config = AppConfig.shared
-    private let capture = AudioCapture()
-    private let mediaPlayback = MediaPlaybackCoordinator()
+    private let capture: AudioCapture
+    private let mediaPlayback: MediaPlaybackCoordinator
     private let contextTracker: AppContextTracker
     private let hud: HUDPanel
-    private let inserter = TextInserter()
+    private let inserter: TextInserter
     private let history: HistoryStore
     private let sounds: SoundPlayer
     private let supervisor: EngineSupervisor
     private let dictionary: DictionaryRepository
+    private let micAuthorized: () -> Bool
+    private let recordingLimit: () -> Double
+    private let now: () -> Date
+    private let scheduleGrace: (TimeInterval, @escaping () -> Void) -> Timer
     private var externalInsertionObserver: NSObjectProtocol?
 
     /// Action Mode stays uninitialized until an action actually starts. Plain
@@ -454,6 +467,10 @@ final class DictationController: NSObject {
     /// preserved in History + clipboard without a surprise paste.
     private var timeoutErrorAt: Date?
     private static let lateFinalGrace: TimeInterval = 15
+    private var graceSessionID: String?
+    private var graceTimer: Timer?
+    private var cancelGraceSessionID: String?
+    private var cancelGraceTimer: Timer?
     /// The session the user explicitly cancelled (Esc / stuck-transcribe / error).
     /// A late `final` for this id must be ignored; a `final` for the current
     /// `sessionID` that is NOT this one is always honored, even if `phase`
@@ -479,7 +496,13 @@ final class DictationController: NSObject {
     private var recordingDurationMs: Int?
     private var transcribeStartedAt: Date?
     private var activeTranscribeTimeout = minimumTranscribeTimeout
+    private var transcribeSleeping = false
+    private var lastSTTProgressPercent = 0
+    private var sleepObserver: NSObjectProtocol?
+    private var wakeObserver: NSObjectProtocol?
     private var autoStopLimitSeconds: Double?
+    private var recordingLimitTimer: Timer?
+    private var recordingLimitStoppedSessionID: String?
     private var pendingRecordingLimitNoticeSeconds: Double?
     private var recordingLimitNoticeScheduled = false
     private var hotkeyDownAt: Date?
@@ -490,6 +513,8 @@ final class DictationController: NSObject {
     /// STT decode latency from this session's `transcript` event, persisted
     /// with the history row (the live `final` event doesn't carry it).
     private var sttMs: Int?
+    private var failedWindowCount = 0
+    private var failedWindowS = 0.0
     private var transcribeTimer: Timer?
     private var captureStartTimer: Timer?
     /// When set, the error HUD's action button runs this instead of retrying
@@ -503,6 +528,8 @@ final class DictationController: NSObject {
     /// Audio-only crash recoveries being reprocessed into their durable
     /// History rows. They never enter the live final or insertion path.
     private var interruptedRows: [Int64: String] = [:]
+    private var recoveryStallRestarts: [Int64: Int] = [:]
+    private static let maxRecoveryRestarts = 2
     private var terminationSession: String?
     private var terminationCompletion: (() -> Void)?
     private var terminationTimer: Timer?
@@ -603,7 +630,22 @@ final class DictationController: NSObject {
         hud: HUDPanel,
         history: HistoryStore,
         sounds: SoundPlayer,
-        dictionary: DictionaryRepository
+        dictionary: DictionaryRepository,
+        pasteboard: NSPasteboard = .general,
+        capture: AudioCapture = AudioCapture(),
+        mediaPlayback: MediaPlaybackCoordinator = MediaPlaybackCoordinator(),
+        micAuthorized: @escaping () -> Bool = {
+            AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        },
+        recordingLimit: @escaping () -> Double = {
+            AppConfig.shared.portableEngineSettings.maximumRecordingSeconds
+        },
+        now: @escaping () -> Date = Date.init,
+        scheduleGrace: @escaping (TimeInterval, @escaping () -> Void) -> Timer = {
+            delay, action in Timer.scheduledTimer(withTimeInterval: delay, repeats: false) {
+                _ in action()
+            }
+        }
     ) {
         self.supervisor = supervisor
         self.contextTracker = contextTracker
@@ -611,12 +653,32 @@ final class DictationController: NSObject {
         self.history = history
         self.sounds = sounds
         self.dictionary = dictionary
+        self.capture = capture
+        self.mediaPlayback = mediaPlayback
+        self.micAuthorized = micAuthorized
+        self.recordingLimit = recordingLimit
+        self.now = now
+        self.scheduleGrace = scheduleGrace
+        self.inserter = TextInserter(pasteboard: pasteboard)
         super.init()
         ModeApplicationIndex.shared.reload()
         externalInsertionObserver = NotificationCenter.default.addObserver(
             forName: .veloraExternalTextInsertion, object: nil, queue: .main
         ) { [weak self] _ in
             self?.inserter.resetContinuationContext()
+        }
+        // Sleep is not decode time. Resume from the last engine-announced
+        // bound so a long job does not time out as soon as the Mac wakes.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        sleepObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.suspendTranscribeWatchdog()
+        }
+        wakeObserver = workspaceCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.resumeTranscribeWatchdog()
         }
         hud.model.onRetry = { [weak self] in self?.retryFromError() }
         hud.model.onActionTargetOpen = { [weak self] id in
@@ -643,6 +705,12 @@ final class DictationController: NSObject {
         glossarySession.cancel()
         if let externalInsertionObserver {
             NotificationCenter.default.removeObserver(externalInsertionObserver)
+        }
+        if let sleepObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver)
+        }
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
     }
 
@@ -1167,6 +1235,11 @@ final class DictationController: NSObject {
         }
         if !record.final.isEmpty {
             supervisor.send(["cmd": "ack_interrupted", "session": session])
+            return
+        }
+        if recoveryStallRestarts[record.id, default: 0] >= Self.maxRecoveryRestarts {
+            showNotice(symbol: "waveform.badge.exclamationmark",
+                       message: "Audio saved. Retry in History")
             return
         }
         guard interruptedRows[record.id] == nil else { return }
@@ -2152,6 +2225,10 @@ final class DictationController: NSObject {
         delivery: DictationIntent.Delivery = .frontApp
     ) -> Bool {
         guard !terminating, phase == .idle else { return false }
+        if graceSessionID != nil || cancelGraceSessionID != nil {
+            showNotice(symbol: "hourglass", message: "Finishing dictation…")
+            return false
+        }
         guard pendingEdit == nil else {
             showNotice(symbol: "hourglass", message: "Current edit is still finishing")
             return false
@@ -2191,9 +2268,8 @@ final class DictationController: NSObject {
             showError("Secure field. Can't dictate")
             return false
         }
-        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
-        guard micStatus == .authorized else {
-            NSLog("Velora: recording refused — mic auth status=%ld", micStatus.rawValue)
+        guard micAuthorized() else {
+            NSLog("Velora: recording refused — microphone authorization missing")
             AVCaptureDevice.requestAccess(for: .audio) { _ in }
             showError("Microphone access needed")
             return false
@@ -2216,16 +2292,26 @@ final class DictationController: NSObject {
         stopEnqueuedSession = nil
         rawTranscript = nil
         sttMs = nil
+        failedWindowCount = 0
+        failedWindowS = 0
         recordingStart = nil
         recordingDurationMs = nil
         activeTranscribeTimeout = Self.minimumTranscribeTimeout
+        transcribeSleeping = false
+        lastSTTProgressPercent = 0
         autoStopLimitSeconds = nil
+        recordingLimitStoppedSessionID = nil
+        recordingLimitTimer?.invalidate()
+        recordingLimitTimer = nil
         pendingRecordingLimitNoticeSeconds = nil
         recordingLimitNoticeScheduled = false
         stopAfterCaptureStarts = false
         captureStartTimer?.invalidate()
         captureStartTimer = nil
         timeoutErrorAt = nil  // a stale timeout must never drop THIS session's final
+        graceTimer?.invalidate()
+        graceTimer = nil
+        graceSessionID = nil
 
         // Context chip: the target app's actual icon + the client-side
         // detected mode label (ModeCategory mirrors the engine's map).
@@ -2314,9 +2400,15 @@ final class DictationController: NSObject {
         // starts, and a capture failure shows the error HUD immediately.
         let client = supervisor.client
         let requestedSession = sessionID
+        let recordingLimit = recordingLimit()
         capture.start(
             onChunk: { data in client.send(audio: data) },
-            onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) }
+            onLevel: { [weak self] bands in self?.hud.model.levels.push(bands) },
+            maxRecordingSeconds: recordingLimit,
+            onLimit: { [weak self] in
+                self?.stopAtRecordingLimit(
+                    session: requestedSession, seconds: recordingLimit)
+            }
         ) { [weak self] result in
             guard let self, self.sessionID == requestedSession,
                   case .starting(let currentLocked) = self.phase else { return }
@@ -2333,6 +2425,14 @@ final class DictationController: NSObject {
                 self.hud.transition(to: .listening)
                 self.sounds.play(.start)
                 self.phase = .recording(locked: currentLocked)
+                // A wall-clock stop covers pauses or dropped input buffers;
+                // AudioCapture separately caps the PCM sent to the socket.
+                self.recordingLimitTimer = Timer.scheduledTimer(
+                    withTimeInterval: recordingLimit, repeats: false
+                ) { [weak self] _ in
+                    self?.stopAtRecordingLimit(
+                        session: requestedSession, seconds: recordingLimit)
+                }
                 if self.stopAfterCaptureStarts {
                     self.stopAfterCaptureStarts = false
                     self.stopAndTranscribe()
@@ -2351,8 +2451,26 @@ final class DictationController: NSObject {
         return true
     }
 
+    private func stopAtRecordingLimit(session: String, seconds: Double) {
+        guard sessionID == session else { return }
+        // The sample cap may fire before the first PCM readiness callback
+        // changes phase; finish as soon as capture reports it has started.
+        if case .starting = phase {
+            recordingLimitStoppedSessionID = session
+            autoStopLimitSeconds = seconds
+            stopAfterCaptureStarts = true
+            return
+        }
+        guard isRecording else { return }
+        recordingLimitStoppedSessionID = session
+        autoStopLimitSeconds = seconds
+        stopAndTranscribe()
+    }
+
     private func stopAndTranscribe() {
         guard isRecording else { return }
+        recordingLimitTimer?.invalidate()
+        recordingLimitTimer = nil
 
         if editSession != nil {
             editStopGeneration = UserInputActivity.selectionSnapshot()
@@ -2375,58 +2493,96 @@ final class DictationController: NSObject {
                   self.phase == .transcribing,
                   self.cancelledSessionID != stoppedSession else { return }
             NSLog("Velora: engine stop session=%@", stoppedSession)
-
-            self.supervisor.send(stopCmd)
-            self.stopEnqueuedSession = stoppedSession
-            self.armTranscribeTimeout()
+            self.sendStopIfNeeded(session: stoppedSession, command: stopCmd)
             if self.terminationSession == stoppedSession {
                 self.armTerminationTimer()
             }
         }
     }
 
-    /// (Re)arms the stop→final watchdog. Reset on `transcript` progress so a
-    /// slow LLM cleanup after a long batch (whisper) decode doesn't trip it.
-    /// A late `final` that arrives after this fires is still honored (see the
-    /// `.final` handler) unless the user explicitly cancelled.
+    private func sendStopIfNeeded(session: String, command: [String: Any]) {
+        // Engine auto-stop may win the race with capture's stop callback.
+        // Preserve a newer engine-announced bound instead of re-arming here.
+        guard stopEnqueuedSession != session else { return }
+        supervisor.send(command)
+        stopEnqueuedSession = session
+        armTranscribeTimeout()
+    }
+
+    /// (Re)arms the stop→final watchdog from each engine step bound. The
+    /// initial timer uses main's duration floor until the first event arrives.
+    /// A final racing expiry keeps main's late-final grace; Esc remains final.
     private func armTranscribeTimeout(after explicitTimeout: TimeInterval? = nil) {
-        activeTranscribeTimeout = explicitTimeout
-            ?? Self.transcribeTimeout(recordingDurationMs: recordingDurationMs)
-        transcribeStartedAt = Date()
+        activeTranscribeTimeout = max(
+            Self.minimumTranscribeTimeout,
+            explicitTimeout ?? Self.minimumTranscribeTimeout)
+        transcribeStartedAt = now()
         transcribeTimer?.invalidate()
+        if transcribeSleeping {
+            transcribeTimer = nil
+            return
+        }
         transcribeTimer = Timer.scheduledTimer(
             withTimeInterval: activeTranscribeTimeout, repeats: false
         ) { [weak self] _ in
-            guard let self, self.phase == .transcribing else { return }
-            NSLog("Velora: transcribe timeout — session=%@", self.sessionID)
-            self.timeoutErrorAt = Date()
-            self.supervisor.send(["cmd": "cancel", "session": self.sessionID])
-            self.showError("Transcription timed out")
+            self?.finishStalledTranscribe()
         }
     }
 
-    /// If we've been stuck in `.transcribing` past the timeout with no engine
-    /// result, cancel the wedged session and return to `.idle` so the hotkey
-    /// works again. Returns true when a reset happened.
-    @discardableResult
-    private func resetIfStuckTranscribing() -> Bool {
-        guard phase == .transcribing else { return false }
-        let elapsed = transcribeStartedAt.map { -$0.timeIntervalSinceNow } ?? 0
-        guard elapsed >= activeTranscribeTimeout else { return false }
-        NSLog("Velora: hotkey while stuck transcribing %.1fs — self-resetting", elapsed)
+    private func suspendTranscribeWatchdog() {
+        guard phase == .transcribing else { return }
+        transcribeSleeping = true
         transcribeTimer?.invalidate()
         transcribeTimer = nil
-        supervisor.send(["cmd": "cancel", "session": sessionID])
-        cancelledSessionID = sessionID
-        cancelStreamDraft()
-        hud.model.recordingStart = nil
-        phase = .idle
-        // HUDPanel publishes availability synchronously. Release dictation's
-        // phase first so a retained meeting failure can claim that callback.
-        hud.transition(to: .hidden(.cancel))
-        editSession?.selection.discardMutableIdentity()
-        editSession = nil
-        failExternalRequest(for: sessionID, error: .cancelled)
+    }
+
+    private func resumeTranscribeWatchdog() {
+        guard transcribeSleeping else { return }
+        transcribeSleeping = false
+        if phase == .transcribing {
+            armTranscribeTimeout(after: activeTranscribeTimeout)
+        }
+    }
+
+    private func finishStalledTranscribe() {
+        guard phase == .transcribing else { return }
+        let stalledSession = sessionID
+        transcribeTimer?.invalidate()
+        transcribeTimer = nil
+        timeoutErrorAt = now()
+        graceSessionID = stalledSession
+        let generation = supervisor.processGeneration
+        graceTimer?.invalidate()
+        // The old engine owns its spool through the grace. A late final may
+        // still insert; replacing the process afterwards uses crash recovery.
+        graceTimer = scheduleGrace(Self.lateFinalGrace) { [weak self] in
+            guard let self, self.graceSessionID == stalledSession,
+                  self.supervisor.processGeneration == generation else { return }
+            self.graceSessionID = nil
+            self.graceTimer = nil
+            self.cancelledSessionID = stalledSession
+            self.countRecoveryRestart()
+            self.supervisor.restartForStall()
+        }
+        showError("Transcription timed out")
+    }
+
+    private func countRecoveryRestart() {
+        // A process restart consumes one attempt for every pending recovery row.
+        for id in interruptedRows.keys {
+            recoveryStallRestarts[id, default: 0] += 1
+        }
+    }
+
+    /// A hotkey can detect the same expired step if its timer callback has
+    /// not run. Sleep never counts toward the elapsed step time.
+    @discardableResult
+    private func resetIfStuckTranscribing() -> Bool {
+        guard phase == .transcribing, !transcribeSleeping else { return false }
+        let elapsed = transcribeStartedAt.map { now().timeIntervalSince($0) } ?? 0
+        guard elapsed >= activeTranscribeTimeout else { return false }
+        NSLog("Velora: hotkey found stalled transcription after %.1fs", elapsed)
+        finishStalledTranscribe()
         return true
     }
 
@@ -2454,7 +2610,21 @@ final class DictationController: NSObject {
             hud.transition(to: .hidden(.cancel))
             return
         }
+        if phase == .idle, let stalled = graceSessionID {
+            // Escape during the late-final grace still means discard. Clear
+            // insertion eligibility before asking the engine to delete audio.
+            graceTimer?.invalidate()
+            graceTimer = nil
+            graceSessionID = nil
+            timeoutErrorAt = nil
+            cancelledSessionID = stalled
+            supervisor.send(["cmd": "cancel", "session": stalled])
+            armCancelGrace(for: stalled)
+            hud.transition(to: .hidden(.cancel))
+            return
+        }
         guard phase != .idle else { return }
+        let awaitingFinal = phase == .transcribing
         captureStartTimer?.invalidate()
         captureStartTimer = nil
         transcribeTimer?.invalidate()
@@ -2477,10 +2647,28 @@ final class DictationController: NSObject {
         stopCaptureAndRestoreMedia()
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
+        if awaitingFinal {
+            armCancelGrace(for: sessionID)
+        }
         hud.model.recordingStart = nil
         phase = .idle
         hud.transition(to: .hidden(.cancel))
         failExternalRequest(for: sessionID, error: .cancelled)
+    }
+
+    private func armCancelGrace(for session: String) {
+        cancelGraceSessionID = session
+        let generation = supervisor.processGeneration
+        cancelGraceTimer?.invalidate()
+        // Acknowledgement arrives only after finalization ends. Replace an
+        // executor that cannot confirm Esc within the same bounded grace.
+        cancelGraceTimer = scheduleGrace(Self.lateFinalGrace) { [weak self] in
+            guard let self, self.cancelGraceSessionID == session,
+                  self.supervisor.processGeneration == generation else { return }
+            self.cancelGraceSessionID = nil
+            self.cancelGraceTimer = nil
+            self.supervisor.restartForStall()
+        }
     }
 
     private func showError(
@@ -2550,6 +2738,35 @@ final class DictationController: NSObject {
             break
         }
         switch event {
+        case .finalizeStarted(let session, let stallAfterS):
+            guard session == sessionID, phase == .transcribing,
+                  session != cancelledSessionID else { return }
+            hud.model.transcribeProgress = "Transcribing…"
+            armTranscribeTimeout(after: stallAfterS)
+
+        case .finalizeProgress(let session, let stage, let completed, let total,
+                               let stallAfterS):
+            guard session == sessionID, phase == .transcribing,
+                  session != cancelledSessionID else { return }
+            if (stage == "cleanup_load" || stage == "recovery")
+                && !hud.model.showsMultiStepProgress {
+                hud.model.transcribeProgress = "Transcribing…"
+            } else if stage == "stt", total > 0 {
+                let percent = min(100, max(0, Int(Double(completed) / Double(total) * 100)))
+                lastSTTProgressPercent = max(lastSTTProgressPercent, percent)
+                hud.model.transcribeProgress = Self.progressLabel(
+                    stage: stage, completed: lastSTTProgressPercent, total: 100)
+            } else {
+                hud.model.transcribeProgress = Self.progressLabel(
+                    stage: stage, completed: completed, total: total)
+            }
+            if (stage == "stt" && total - completed > Self.multiStepSTTSamples)
+                || stage == "stt_window"
+                || (stage == "cleanup" && total > 1) {
+                hud.model.showsMultiStepProgress = true
+            }
+            armTranscribeTimeout(after: stallAfterS)
+
         case .partial(let session, let text):
             guard session == sessionID, phase != .idle else { return }
             // Ordinary dictation keeps provisional Whisper output out of the
@@ -2563,15 +2780,10 @@ final class DictationController: NSObject {
             guard session == sessionID else { return }
             rawTranscript = raw
             sttMs = ms > 0 ? ms : nil
-            // Progress signal: the engine has decoded and is now formatting.
-            // Refresh the timeout so a slow LLM cleanup after a long batch
-            // transcription doesn't trip the stop→final deadline.
-            if phase == .transcribing {
-                armTranscribeTimeout(after: Self.minimumTranscribeTimeout)
-            }
 
         case .recordingAutoStopped(let session, let durationS, let limitS):
             guard session == sessionID, phase != .idle else { return }
+            let alreadyStopping = stopEnqueuedSession == session
             recordingDurationMs = max(
                 recordingDurationMs ?? 0,
                 Int(max(0, durationS) * 1_000))
@@ -2585,12 +2797,14 @@ final class DictationController: NSObject {
             }
             hud.transition(to: .transcribing)
             phase = .transcribing
-            armTranscribeTimeout()
+            if !alreadyStopping {
+                armTranscribeTimeout()
+            }
 
         case .final(
             let session, let text, let raw, let mode, let cleanupMs,
             let cleanupWallMs, let cleanupApplied, let totalMs, let audio,
-            let autoStopped
+            let autoStopped, let gapCount, let gapSeconds
         ):
             // Honor a valid final for the CURRENT session even if phase drifted
             // from .transcribing — a missed hotkeyUp can leave us in .recording,
@@ -2604,6 +2818,13 @@ final class DictationController: NSObject {
                 NSLog("Velora: ignoring final for session=%@ (current=%@ cancelled=%@ consumed=%@)",
                       session, sessionID, cancelledSessionID ?? "none", consumedSessionID ?? "none")
                 return
+            }
+            failedWindowCount = gapCount
+            failedWindowS = gapSeconds
+            if graceSessionID == session {
+                graceSessionID = nil
+                graceTimer?.invalidate()
+                graceTimer = nil
             }
             // Engine auto-stop can finish without the ordinary stop callback.
             glossarySession.cancel()
@@ -2657,7 +2878,7 @@ final class DictationController: NSObject {
             // in whatever the user is doing now, but it must not disappear.
             // Preserve it in History + clipboard and show a compact notice.
             let arrivedTooLate = timeoutErrorAt.map {
-                -$0.timeIntervalSinceNow > Self.lateFinalGrace
+                now().timeIntervalSince($0) > Self.lateFinalGrace
             } ?? false
             if arrivedTooLate {
                 NSLog("Velora: preserving late final without auto-paste — session=%@", session)
@@ -2676,10 +2897,11 @@ final class DictationController: NSObject {
             let recordingLimitSeconds = autoStopLimitSeconds
                 ?? config.portableEngineSettings.maximumRecordingSeconds
             autoStopLimitSeconds = nil
-            if autoStopped {
+            if autoStopped || recordingLimitStoppedSessionID == session {
                 pendingRecordingLimitNoticeSeconds = recordingLimitSeconds
                 recordingLimitNoticeScheduled = false
             }
+            recordingLimitStoppedSessionID = nil
             // Safe Voice Edit: this session's transcript is an INSTRUCTION for
             // the captured selection, never text to paste.
             if StreamTypingFinalPolicy.shouldDeferFinal(
@@ -2769,6 +2991,12 @@ final class DictationController: NSObject {
             pendingReformat = nil
             showError("Reformat failed: \(error)")
 
+        case .recoveryBusy(let session, _):
+            guard session == sessionID else { break }
+            countRecoveryRestart()
+            showError("Recovery stalled. Engine restarting")
+            supervisor.restartForStall()
+
         case .interrupted(let session, _):
             guard session == terminationSession else { break }
             finishTermination()
@@ -2778,6 +3006,12 @@ final class DictationController: NSObject {
 
         case .interruptedAck:
             break
+
+        case .cancelled(let session):
+            guard cancelGraceSessionID == session else { break }
+            cancelGraceSessionID = nil
+            cancelGraceTimer?.invalidate()
+            cancelGraceTimer = nil
 
         case .edited(let id, let text, let applied, let ms, let reason):
             guard let pending = pendingEdit, pending.id == id else { break }
@@ -2834,11 +3068,18 @@ final class DictationController: NSObject {
     /// crash or disconnect mid-dictation fails fast instead of leaving the
     /// user hanging until the transcribe timeout.
     func handleEngineStateChange(_ state: EngineSupervisor.State) {
-        guard phase != .idle else { return }
         switch state {
         case .ready, .connecting:
-            break
+            return
         case .stopped, .launching, .degraded:
+            graceSessionID = nil
+            graceTimer?.invalidate()
+            graceTimer = nil
+            cancelGraceSessionID = nil
+            cancelGraceTimer?.invalidate()
+            cancelGraceTimer = nil
+            interruptedRows.removeAll()
+            guard phase != .idle else { return }
             if pendingEdit != nil {
                 cancelPendingEditForError("Engine restarting")
             } else {
@@ -2891,8 +3132,8 @@ final class DictationController: NSObject {
                 }
                 externalRequest = nil
                 phase = .idle
-                showError(message)
-                request.completion(.failure(.unavailable(message)))
+                showError(finalNotice(message))
+                request.completion(.failure(.unavailable(finalNotice(message))))
             } else {
                 recordHistory(
                     text: text, raw: raw, context: context, mode: mode,
@@ -2901,7 +3142,8 @@ final class DictationController: NSObject {
                     finalizationMs: finalizationMs, audio: audio)
                 externalRequest = nil
                 phase = .idle
-                showNotice(symbol: "waveform.badge.checkmark", message: "Sent to local agent")
+                showNotice(symbol: "waveform.badge.checkmark",
+                           message: finalNotice("Sent to local agent"))
                 request.completion(.success(ExternalDictationResult(
                     text: text, mode: mode, durationMs: durationMs)))
             }
@@ -2951,7 +3193,7 @@ final class DictationController: NSObject {
                 phase = .idle
                 showNotice(
                     symbol: "exclamationmark.arrow.triangle.2.circlepath",
-                    message: "Too late. Command skipped")
+                    message: finalNotice("Too late. Command skipped"))
             }
             ackFinalAudio(audio, session: sessionID)
             return
@@ -2966,7 +3208,7 @@ final class DictationController: NSObject {
                         cleanupWallMs: cleanupWallMs,
                         finalizationMs: finalizationMs, audio: audio)
                 }
-                showError(message)
+                showError(finalNotice(message))
             } else {
                 inserter.stageFinalOutput(text)
                 recordHistory(
@@ -2975,7 +3217,10 @@ final class DictationController: NSObject {
                     cleanupWallMs: cleanupWallMs,
                     finalizationMs: finalizationMs, audio: audio)
                 phase = .idle
-                showNotice(symbol: "doc.on.clipboard.fill", message: "Too late. Copied instead")
+                showNotice(
+                    symbol: failedWindowCount > 0
+                        ? "exclamationmark.triangle.fill" : "doc.on.clipboard.fill",
+                    message: finalNotice("Too late. Copied instead"))
             }
             return
         }
@@ -2991,7 +3236,7 @@ final class DictationController: NSObject {
                     cleanupWallMs: cleanupWallMs,
                     finalizationMs: finalizationMs, audio: audio)
             }
-            showError(message)
+            showError(finalNotice(message))
             return
         }
 
@@ -3035,14 +3280,24 @@ final class DictationController: NSObject {
                 errorRetryAction = nil
                 errorRetryIntent = .dictation
                 hud.model.retryTitle = "Retry"
-                hud.transition(to: .inserted)
+                if failedWindowCount > 0 {
+                    showNotice(symbol: "exclamationmark.triangle.fill",
+                               message: finalNotice("Inserted"))
+                } else {
+                    hud.transition(to: .inserted)
+                }
                 phase = .idle
-                scheduleInsertedHide()
+                if failedWindowCount == 0 {
+                    scheduleInsertedHide()
+                }
             },
             copied: {
                 NSLog("Velora: insert method=clipboard (nowhere to type) session=%@", sessionID)
                 phase = .idle
-                showNotice(symbol: "doc.on.clipboard.fill", message: "Copied to clipboard")
+                showNotice(
+                    symbol: failedWindowCount > 0
+                        ? "exclamationmark.triangle.fill" : "doc.on.clipboard.fill",
+                    message: finalNotice("Copied to clipboard"))
             })
         guard ownWindowOutcome == .targetApp else {
             return
@@ -3085,7 +3340,7 @@ final class DictationController: NSObject {
                 }
             }
             sounds.play(.error)
-            hud.transition(to: .error(fallbackMessage))
+            hud.transition(to: .error(finalNotice(fallbackMessage)))
             phase = .idle
             if StreamTypingFinalPolicy.shouldRecordHistory(
                 alreadyRecorded: historyAlreadyRecorded
@@ -3122,16 +3377,24 @@ final class DictationController: NSObject {
                 self.sounds.play(.error)
                 self.showNotice(
                     symbol: "doc.on.clipboard.fill",
-                    message: "Interrupted. Copied")
+                    message: self.finalNotice("Interrupted. Copied"))
                 return
             }
-            self.hud.transition(to: .inserted)
+            if self.failedWindowCount > 0 {
+                self.showNotice(
+                    symbol: "exclamationmark.triangle.fill",
+                    message: self.finalNotice("Inserted"))
+            } else {
+                self.hud.transition(to: .inserted)
+            }
             self.phase = .idle
             self.lastInsertion = (bundleID: context?.bundleID, at: Date())
             self.captureLearningBaseline(
                 text: text, bundleID: context?.bundleID, session: session)
             NotificationCenter.default.post(name: .veloraDictationInserted, object: text)
-            self.scheduleInsertedHide()
+            if self.failedWindowCount == 0 {
+                self.scheduleInsertedHide()
+            }
         }
     }
 
@@ -3220,10 +3483,16 @@ final class DictationController: NSObject {
                 self.phase = .idle
                 self.showNotice(
                     symbol: "doc.on.clipboard.fill",
-                    message: "Cursor moved. Copied")
+                    message: self.finalNotice("Cursor moved. Copied"))
             case .applied:
                 self.inserter.resetContinuationContext()
-                self.hud.transition(to: .inserted)
+                if self.failedWindowCount > 0 {
+                    self.showNotice(
+                        symbol: "exclamationmark.triangle.fill",
+                        message: self.finalNotice("Inserted"))
+                } else {
+                    self.hud.transition(to: .inserted)
+                }
                 self.phase = .idle
                 self.lastInsertion = (
                     bundleID: self.sessionContext?.bundleID, at: Date())
@@ -3233,7 +3502,9 @@ final class DictationController: NSObject {
                     session: session)
                 NotificationCenter.default.post(
                     name: .veloraDictationInserted, object: text)
-                self.scheduleInsertedHide()
+                if self.failedWindowCount == 0 {
+                    self.scheduleInsertedHide()
+                }
             }
             self.schedulePendingRecordingLimitNotice()
         }
@@ -3303,7 +3574,7 @@ final class DictationController: NSObject {
     ) -> DictationRecord {
         // A Home take's row names Velora; its engine context names no app.
         let app = sessionIntent.historyContext(context)
-        return DictationRecord(
+        var record = DictationRecord(
             timestamp: Date(),
             bundleID: app?.bundleID,
             appName: app?.appName,
@@ -3318,6 +3589,20 @@ final class DictationController: NSObject {
             sessionID: sessionID.isEmpty ? nil : sessionID,
             sttMs: sttMs,
             cleanupApplied: cleanupApplied)
+        record.failedWindowCount = failedWindowCount
+        record.failedWindowS = failedWindowS
+        return record
+    }
+
+    private var gapMessage: String {
+        let seconds = Int(ceil(failedWindowS))
+        return "Part of this dictation couldn't be transcribed (\(seconds) seconds)"
+    }
+
+    private func finalNotice(_ message: String) -> String {
+        // A delivery fallback still needs to disclose missing speech.
+        guard failedWindowCount > 0 else { return message }
+        return "\(message). \(gapMessage)"
     }
 
     private var elapsedRecordingMs: Int {
@@ -3325,6 +3610,8 @@ final class DictationController: NSObject {
     }
 
     private func stopCaptureAndRestoreMedia() {
+        recordingLimitTimer?.invalidate()
+        recordingLimitTimer = nil
         capture.stop()
         mediaPlayback.restoreAfterDictation()
     }

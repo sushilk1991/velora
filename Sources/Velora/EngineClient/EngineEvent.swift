@@ -3,6 +3,7 @@ import Foundation
 /// Events emitted by velora-engine over the control channel.
 /// See docs/ARCHITECTURE.md "Wire protocol".
 enum EngineEvent {
+    private static let defaultStallAfterS: Double = 20
     /// Engine finished STT startup and is ready for `start`. `setupComplete`
     /// snapshots whether the later writing-model setup has also finished.
     case ready(setupComplete: Bool, sttModel: String?)
@@ -26,6 +27,12 @@ enum EngineEvent {
     /// Raw transcript available (before LLM cleanup).
     case transcript(session: String, raw: String, ms: Int)
 
+    /// A finalization step begins or finishes; its bound applies to the next step.
+    case finalizeStarted(session: String, stallAfterS: Double)
+    case finalizeProgress(
+        session: String, stage: String, completed: Int, total: Int,
+        stallAfterS: Double)
+
     /// The engine reached its configured capture limit and has begun
     /// finalizing. Sent before STT/cleanup so the app can stop the microphone
     /// and freeze the timer immediately.
@@ -38,7 +45,8 @@ enum EngineEvent {
     case final(
         session: String, text: String, raw: String, mode: String?,
         cleanupMs: Int?, cleanupWallMs: Int?, cleanupApplied: Bool,
-        totalMs: Int?, audio: String?, autoStopped: Bool)
+        totalMs: Int?, audio: String?, autoStopped: Bool,
+        failedWindowCount: Int, failedWindowS: Double)
 
     /// Graceful-termination acknowledgement after the engine sealed the
     /// active spool. This never carries text and is never inserted.
@@ -48,6 +56,7 @@ enum EngineEvent {
     /// into History only; it never enters the live final/insertion path.
     case interruptedDictation(session: String, audio: String, durationS: Double)
     case interruptedAck(session: String)
+    case cancelled(session: String)
 
     /// Result of a History `reprocess` command: a re-run of an archived clip
     /// through a (possibly different) STT model / mode. Routed to the History
@@ -110,6 +119,7 @@ enum EngineEvent {
 
     /// Engine-reported error, optionally scoped to a session.
     case error(session: String?, message: String)
+    case recoveryBusy(session: String, id: Int64?)
 
     /// Response to `ping`.
     case pong
@@ -146,6 +156,19 @@ enum EngineEvent {
                 session: object["session"] as? String ?? "",
                 raw: object["raw"] as? String ?? "",
                 ms: object["ms"] as? Int ?? 0)
+        case "finalize_started":
+            return .finalizeStarted(
+                session: object["session"] as? String ?? "",
+                stallAfterS: (object["stall_after_s"] as? NSNumber)?.doubleValue
+                    ?? Self.defaultStallAfterS)
+        case "finalize_progress":
+            return .finalizeProgress(
+                session: object["session"] as? String ?? "",
+                stage: object["stage"] as? String ?? "",
+                completed: (object["completed"] as? NSNumber)?.intValue ?? 0,
+                total: (object["total"] as? NSNumber)?.intValue ?? 0,
+                stallAfterS: (object["stall_after_s"] as? NSNumber)?.doubleValue
+                    ?? Self.defaultStallAfterS)
         case "recording_auto_stopped":
             return .recordingAutoStopped(
                 session: object["session"] as? String ?? "",
@@ -162,7 +185,9 @@ enum EngineEvent {
                 cleanupApplied: object["cleanup_applied"] as? Bool ?? false,
                 totalMs: object["total_ms"] as? Int,
                 audio: object["audio"] as? String,
-                autoStopped: object["auto_stopped"] as? Bool ?? false)
+                autoStopped: object["auto_stopped"] as? Bool ?? false,
+                failedWindowCount: object["failed_window_count"] as? Int ?? 0,
+                failedWindowS: (object["failed_window_s"] as? NSNumber)?.doubleValue ?? 0)
         case "interrupted":
             return .interrupted(
                 session: object["session"] as? String ?? "",
@@ -174,6 +199,8 @@ enum EngineEvent {
                 durationS: (object["duration_s"] as? NSNumber)?.doubleValue ?? 0)
         case "interrupted_ack":
             return .interruptedAck(session: object["session"] as? String ?? "")
+        case "cancelled":
+            return .cancelled(session: object["session"] as? String ?? "")
         case "reprocessed":
             return .reprocessed(
                 id: (object["id"] as? Int).map(Int64.init),
@@ -312,6 +339,11 @@ enum EngineEvent {
                 error: object["error"] as? String ?? "meeting note generation failed",
                 code: object["code"] as? String)
         case "error":
+            if object["message"] as? String == "busy recovering" {
+                return .recoveryBusy(
+                    session: object["session"] as? String ?? "",
+                    id: (object["recovering_id"] as? NSNumber)?.int64Value)
+            }
             return .error(
                 session: object["session"] as? String,
                 message: object["message"] as? String

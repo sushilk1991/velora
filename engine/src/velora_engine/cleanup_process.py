@@ -983,6 +983,14 @@ class CleanupProcess:
         finally:
             self._operation_lock.release()
 
+    @staticmethod
+    def load_bound_s() -> float:
+        """Worst hibernation reload including timeouts, reaps, and retries."""
+        attempts = RECOVERY_ATTEMPTS
+        reap = 2 * EXIT_WAIT_S + KILL_REAP_TIMEOUT_S
+        backoffs = RECOVERY_BACKOFF_S * sum(range(1, attempts))
+        return RETIRED_EXIT_TIMEOUT_S + attempts * (LOAD_TIMEOUT_S + reap) + backoffs
+
     async def ensure_loaded(
         self,
         cancel_event: threading.Event | None = None,

@@ -146,6 +146,9 @@ final class HUDModel: ObservableObject {
     /// Provisional text shown only for opaque Stream targets. It never enters
     /// the target field until the authoritative final is ready.
     @Published var liveTranscript = ""
+    /// Completed engine steps shown while the one dictation is finalizing.
+    @Published var transcribeProgress = "Transcribing…"
+    @Published var showsMultiStepProgress = false
     /// Waveform levels (not @Published — the Canvas polls it every frame via
     /// TimelineView; publishing per audio buffer would churn SwiftUI).
     let levels = WaveformLevelStore()
@@ -171,6 +174,8 @@ final class HUDModel: ObservableObject {
     func beginSession(context: HUDSessionContext?) {
         sessionContext = context
         liveTranscript = ""
+        transcribeProgress = "Transcribing…"
+        showsMultiStepProgress = false
     }
 
     private func resetElapsedTimer() {

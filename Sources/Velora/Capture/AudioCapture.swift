@@ -58,6 +58,10 @@ final class AudioCapture {
     private var pending: [Float] = []
     private var chunkHandler: ((Data) -> Void)?
     private var levelHandler: (([Float]) -> Void)?
+    private var maxSamples: Int?
+    private var receivedSamples = 0
+    private var limitReached = false
+    private var limitHandler: (() -> Void)?
 
     /// FFT window fed the spectrum analyzer; a ~1024-sample rolling buffer with
     /// a short hop so the HUD updates ~30x/s (lively) instead of ~10x/s.
@@ -83,6 +87,8 @@ final class AudioCapture {
     func start(
         onChunk: @escaping (Data) -> Void,
         onLevel: @escaping ([Float]) -> Void,
+        maxRecordingSeconds: Double? = nil,
+        onLimit: (() -> Void)? = nil,
         completion: @escaping (Result<Void, Error>) -> Void
     ) {
         guard !isRunning, !isStarting else {
@@ -111,6 +117,10 @@ final class AudioCapture {
             sinceLastSpectrum = 0
             chunkHandler = onChunk
             levelHandler = onLevel
+            maxSamples = maxRecordingSeconds.map { max(1, Int($0 * Self.sampleRate)) }
+            receivedSamples = 0
+            limitReached = false
+            limitHandler = onLimit
         }
         source.start(
             persistedUID: AppConfig.shared.inputDeviceUID,
@@ -178,6 +188,7 @@ final class AudioCapture {
                 self.spectrumBuffer.removeAll()
                 self.chunkHandler = nil
                 self.levelHandler = nil
+                self.limitHandler = nil
             }
             completion()
         }
@@ -189,6 +200,7 @@ final class AudioCapture {
             spectrumBuffer.removeAll()
             chunkHandler = nil
             levelHandler = nil
+            limitHandler = nil
         }
     }
 
@@ -277,8 +289,13 @@ final class AudioCapture {
     /// Appends converted samples, emits fixed ~100 ms chunks to the engine, and
     /// emits a frequency spectrum for the HUD on a short (~32 ms) hop.
     private func accumulate(_ samples: [Float]) {
-        guard chunkHandler != nil else { return }  // stopped; drop stragglers
-        pending.append(contentsOf: samples)
+        guard chunkHandler != nil, !limitReached else { return }
+        // Cap PCM before it reaches the socket queue. A blocked writer cannot
+        // make the queued audio exceed the user's recording limit.
+        let allowed = maxSamples.map { max(0, $0 - receivedSamples) } ?? samples.count
+        let accepted = samples.prefix(allowed)
+        receivedSamples += accepted.count
+        pending.append(contentsOf: accepted)
         while pending.count >= Self.chunkFrames {
             let chunk = Array(pending.prefix(Self.chunkFrames))
             pending.removeFirst(Self.chunkFrames)
@@ -286,14 +303,28 @@ final class AudioCapture {
             chunkHandler?(data)
         }
 
+        // Send a partial final chunk when the limit falls between 100 ms
+        // chunks, then ask the main queue to stop the microphone once.
+        if let maxSamples, receivedSamples >= maxSamples {
+            if !pending.isEmpty {
+                let data = pending.withUnsafeBufferPointer { Data(buffer: $0) }
+                pending.removeAll()
+                chunkHandler?(data)
+            }
+            limitReached = true
+            if let limitHandler {
+                DispatchQueue.main.async(execute: limitHandler)
+            }
+        }
+
         // Rolling FFT window for the HUD waveform: keep the last ~1024 samples,
         // recompute the spectrum every ~512 samples so the bars react to pitch
         // and loudness ~30x/s.
-        spectrumBuffer.append(contentsOf: samples)
+        spectrumBuffer.append(contentsOf: accepted)
         if spectrumBuffer.count > Self.spectrumWindow {
             spectrumBuffer.removeFirst(spectrumBuffer.count - Self.spectrumWindow)
         }
-        sinceLastSpectrum += samples.count
+        sinceLastSpectrum += accepted.count
         if sinceLastSpectrum >= Self.spectrumHop, spectrumBuffer.count >= Self.spectrumWindow / 2 {
             sinceLastSpectrum = 0
             let bands = spectrum.process(spectrumBuffer)

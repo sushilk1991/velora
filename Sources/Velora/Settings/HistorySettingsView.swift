@@ -442,6 +442,13 @@ enum HistoryJournal {
         return parts.joined(separator: " · ")
     }
 
+    static func gapNote(_ record: DictationRecord) -> String? {
+        guard record.failedWindowCount > 0 else { return nil }
+        let seconds = Int(ceil(record.failedWindowS))
+        let note = "Part of this dictation couldn't be transcribed (\(seconds) seconds)."
+        return record.audioPath == nil ? note : note + " Retry from saved audio."
+    }
+
     /// Mode label shown in meta lines: the stored name, "Default" when unset.
     static func modeName(_ mode: String?) -> String {
         guard let mode, !mode.isEmpty else { return "Default" }
@@ -893,6 +900,11 @@ private struct JournalEntry: View {
             VStack(alignment: .leading, spacing: VeloraSpacing.xs) {
                 appLine
                 transcript(size: Self.textSize, lineLimit: Self.collapsedLines)
+                if let gap = HistoryJournal.gapNote(record) {
+                    Text(gap)
+                        .font(.caption)
+                        .foregroundStyle(VeloraStatus.warningText)
+                }
             }
         }
         .padding(.vertical, VeloraSpacing.s)
@@ -924,6 +936,13 @@ private struct JournalEntry: View {
 
             transcript(size: Self.expandedTextSize, lineLimit: nil)
                 .padding(.leading, Self.timeColumn)
+
+            if let gap = HistoryJournal.gapNote(record) {
+                Label(gap, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(VeloraStatus.warningText)
+                    .padding(.leading, Self.timeColumn)
+            }
 
             if HistoryJournal.hasDistinctRaw(record) {
                 rawDisclosure
