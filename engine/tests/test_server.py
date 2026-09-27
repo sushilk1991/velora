@@ -1691,9 +1691,7 @@ async def test_set_model_after_shutdown_began_builds_no_worker(home, monkeypatch
     assert eng._cleanup_retry_task.done()  # shutdown: no restart either
 
 
-async def test_set_model_whose_load_ends_in_shutdown_closes_its_worker(
-    home, monkeypatch
-):
+async def test_set_model_load_shutdown(home, monkeypatch):
     """set_model whose load ends after shutdown began closes the worker it
     loaded rather than publish it: serve()'s close sweep may have run during
     the load, and nothing would close that worker after it.
@@ -1741,9 +1739,7 @@ async def test_set_model_whose_load_ends_in_shutdown_closes_its_worker(
         kill_workers(pid for pid in spawned if not process_gone(pid))
 
 
-async def test_shutdown_closes_every_cleanup_engine_when_one_close_fails(
-    home, monkeypatch, caplog
-):
+async def test_sweep_survives_a_failure(home, monkeypatch, caplog):
     """A cleanup close that fails during shutdown is logged, and shutdown
     still closes the other engine and runs to its end.
 
@@ -1842,6 +1838,126 @@ async def test_set_model_commits_first(home, fake_stt, monkeypatch, caplog):
         assert exited_or_retired(old_pid)
         assert len(retry_failures(caplog, "recovery failed")) == 1
         client.close()
+
+
+def _fail_model_saves(monkeypatch, config: Config, key: str) -> None:
+    """Make `config` fail every save of `key` alone, as set_model saves its
+    choice, the way a full disk does."""
+    save = config.save
+
+    def save_unless_the_model(*, keys: set[str] | None = None) -> None:
+        if keys == {key}:
+            raise OSError("disk full")
+        save(keys=keys)
+
+    monkeypatch.setattr(config, "save", save_unless_the_model)
+
+
+async def test_set_model_save_fails(home, fake_stt, monkeypatch):
+    """set_model whose config save fails replies with an error and changes
+    nothing live: the old engine keeps serving, the config still names the
+    old model, and the new engine's worker is reaped.
+
+    Before: the new engine served and the old one was closed, while the
+    reply said the switch failed and the saved config named the old model.
+    """
+    monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
+    async with serve_with_startup_worker(
+        monkeypatch, load_then_swap=True,
+    ) as (eng, sock, _workers, spawned):
+        client = await ready_client(sock)
+        await wait_for(lambda: eng.cleanup is not None and eng.cleanup.loaded)
+        old = eng.cleanup
+        old_model = eng.config.cleanup_model
+        _fail_model_saves(monkeypatch, eng.config, "cleanup_model")
+
+        await client.send_json({
+            "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        # The engine reads the EOF, and so closes, once set_model is done.
+        client.writer.write_eof()
+        events = await events_until_eof(client)
+
+        replies = [evt["event"] for evt in events if evt["event"] in {"model_set", "error"}]
+        assert replies == ["error"]
+        assert eng.cleanup is old and old.loaded
+        assert not process_gone(old.pid)
+        assert eng.config.cleanup_model == old_model
+        assert Config().cleanup_model == old_model  # as saved
+        assert len(spawned) == 2 and exited_or_retired(spawned[1])
+        client.close()
+
+
+async def test_stt_save_fails(home, fake_stt, monkeypatch):
+    """An STT switch whose config save fails raises, and changes nothing
+    live: the old backend keeps serving and the new one is closed.
+
+    Before: the new backend served and the old one was closed, while the
+    reply said the switch failed and the saved config named the old model.
+    """
+    eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    old = eng.stt
+    old_model = eng.config.stt_model
+    closed: list[str] = []
+    monkeypatch.setattr(
+        server_mod, "create_backend",
+        lambda model_id, _language: SimpleNamespace(
+            model_id=model_id, load=lambda: None,
+            close=lambda: closed.append(model_id)))
+    _fail_model_saves(monkeypatch, eng.config, "stt_model")
+
+    with pytest.raises(OSError, match="disk full"):
+        await eng._cmd_set_model({"cmd": "set_model", "kind": "stt", "model": "fake-stt-new"})
+
+    assert eng.stt is old
+    assert closed == ["fake-stt-new"]
+    assert eng.config.stt_model == old_model
+    assert Config().stt_model == old_model  # as saved
+
+
+async def test_shutdown_after_publish(home, fake_stt, monkeypatch):
+    """set_model whose new engine shutdown's sweep takes while the old one
+    closes does not report the switch: it replies that the engine is
+    shutting down.
+
+    Before: it replied model_set for an engine the sweep had closed.
+    """
+    closing_old = asyncio.Event()
+    release_old = asyncio.Event()
+    closed: list[str] = []
+
+    async def old_slow_to_close() -> None:
+        closing_old.set()
+        await release_old.wait()  # reaping the old worker
+        closed.append("old")
+
+    async def close_new() -> None:
+        closed.append("new")
+
+    monkeypatch.setattr(
+        server_mod, "CleanupProcess",
+        lambda model_id, **_kwargs: SimpleNamespace(model_id=model_id, aclose=close_new))
+    async with serve_without_models(monkeypatch) as (eng, serving, _sock):
+        eng.cleanup = SimpleNamespace(model_id="fake-old", aclose=old_slow_to_close)
+        client = await attach_client(eng)
+        setting = asyncio.create_task(eng._cmd_set_model(
+            {"cmd": "set_model", "kind": "cleanup", "model": "fake-new"}))
+        try:
+            await asyncio.wait_for(closing_old.wait(), STOP_HANG_S)
+            eng.shutdown.set()
+            done, _ = await asyncio.wait({serving}, timeout=SERVE_SHUTDOWN_MAX_S)
+            assert serving in done, f"serve() still running {SERVE_SHUTDOWN_MAX_S:.0f} s after shutdown"
+            assert closed == ["new"]  # the sweep took the published engine
+            release_old.set()
+            await asyncio.wait_for(setting, STOP_HANG_S)
+            eng.writer.close()
+
+            assert await events_until_eof(client) == [
+                {"event": "error", "message": server_mod.SET_MODEL_SHUTTING_DOWN}]
+            assert closed == ["new", "old"]
+            assert eng.cleanup is None
+        finally:
+            release_old.set()
+            client.close()
 
 
 def frozen_clock(eng: Engine, now: float = 100.0) -> list[float]:

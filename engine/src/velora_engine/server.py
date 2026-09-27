@@ -1186,6 +1186,12 @@ class Engine:
         try:
             await self.shutdown.wait()
         finally:
+            # A cancel of serve() is held to the end of this shutdown only
+            # at the retry stop and the close sweep, where ending early would
+            # strand a worker. At another await below it may end shutdown
+            # early. Production never cancels serve(): SIGTERM and SIGINT set
+            # `shutdown`, and asyncio.run cancels only what is left once
+            # serve() has returned.
             watchdog.cancel()
             loader.cancel()
             # Cancellation owns cleanup too: wait until _load_models has
@@ -3067,11 +3073,15 @@ class Engine:
         if kind == "stt":
             backend = create_backend(model_id, self.config.language)
             await self._stt_call(backend.load)
+            # Save before publishing, so a failed save changes nothing live.
+            try:
+                self._save_model_choice("stt_model", model_id)
+            except Exception:
+                await self._close_stt_backend(backend)
+                raise
             old = self.stt
             self.stt = backend
-            self.config.data["stt_model"] = model_id
             await self._close_stt_backend(old)
-            self.config.save(keys={"stt_model"})
         else:
             try:
                 # A startup retry would load beside this model: stop it first,
@@ -3105,17 +3115,27 @@ class Engine:
                         await engine.aclose()
                         await self._error(SET_MODEL_SHUTTING_DOWN)
                         return
+                    # Save before publishing: a failed save leaves the old
+                    # engine serving and the config naming it.
+                    try:
+                        self._save_model_choice("cleanup_model", model_id)
+                    except Exception:
+                        await engine.aclose()
+                        raise
+                    # The switch is done once the new engine serves, so a
+                    # failure of the old one's close, which still reaps the
+                    # old worker, is not the switch's.
                     old = self.cleanup
                     self.cleanup = engine
-                    self.config.data["cleanup_model"] = model_id
-                    # The switch is done once the new engine serves: save it
-                    # before the old one closes, so a failure of that close,
-                    # which still reaps the old worker, is not the switch's.
-                    try:
-                        self.config.save(keys={"cleanup_model"})
-                    finally:
-                        if old is not None:
-                            await self._close_replaced(old)
+                    if old is not None:
+                        await self._close_replaced(old)
+                    # Shutdown's sweep takes `self.cleanup` without this lock,
+                    # so it may have taken and closed the new engine while the
+                    # old one closed. The switch did not outlive it, so do not
+                    # report one.
+                    if self.cleanup is not engine:
+                        await self._error(SET_MODEL_SHUTTING_DOWN)
+                        return
             except BaseException:
                 # No engine to keep serving: retry in the background, whether
                 # or not a retry ran before, so cleanup does not stay absent
@@ -3126,6 +3146,20 @@ class Engine:
                 raise
         await self._send({"event": "model_set", "model": model_id, "kind": kind})
         log.info("switched %s model to %s", kind, model_id)
+
+    def _save_model_choice(self, key: str, model_id: str) -> None:
+        """Save `model_id` as the config's `key`.
+
+        A save that fails, on a full disk say, leaves the in-memory config
+        as it was, so it never names a model the switch did not put in place.
+        """
+        previous = self.config.data.get(key)
+        self.config.data[key] = model_id
+        try:
+            self.config.save(keys={key})
+        except Exception:
+            self.config.data[key] = previous
+            raise
 
     async def _close_replaced(self, old: CleanupProcess) -> None:
         """Close the cleanup engine a switch replaced.

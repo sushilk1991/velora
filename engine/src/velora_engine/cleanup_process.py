@@ -152,6 +152,30 @@ async def _forget_on_exit(process: asyncio.subprocess.Process) -> None:
         )
 
 
+async def _wait_out(task: asyncio.Task[None] | None) -> asyncio.CancelledError | None:
+    """Wait until `task` ends, and return a cancel of the waiter meanwhile.
+
+    The cancel is neither forwarded nor raised here: `await task` would
+    forward it and cut a reap in `task` short, and raising it would skip
+    the waiter's own stop. The waiter raises it once that stop has run.
+    """
+    waiter_cancel: asyncio.CancelledError | None = None
+    while task is not None and not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            waiter_cancel = exc
+    return waiter_cancel
+
+
+def _failure_of(task: asyncio.Task[None] | None) -> BaseException | None:
+    """What an ended `task` failed with: None if it returned or was
+    cancelled, or if there is no task."""
+    if task is None or task.cancelled():
+        return None
+    return task.exception()
+
+
 class CleanupProcess:
     """Async proxy with the public surface used by :class:`CleanupEngine`."""
 
@@ -1347,17 +1371,18 @@ class CleanupProcess:
                 caller_cancel = exc
                 continue
             # A cancel of the teardown itself, as the loop's shutdown sends,
-            # is not this caller's to raise: a caller not cancelled runs a
-            # fresh teardown, and so still returns only once nothing is
-            # left to reap.
-            if teardown.cancelled() and caller_cancel is None:
+            # is not this caller's to raise. One that landed before the
+            # teardown's first step skipped the whole reap, so every caller,
+            # cancelled or not, runs a fresh teardown, and still returns
+            # only once nothing is left to reap.
+            if teardown.cancelled():
                 teardown = self._join_teardown()
                 continue
             break
         if caller_cancel is not None:
             # The caller gets its cancel, so log a failure it would hide:
             # once, however many cancelled callers joined this teardown.
-            error = None if teardown.cancelled() else teardown.exception()
+            error = teardown.exception()
             if error is not None and self._logged_teardown is not teardown:
                 self._logged_teardown = teardown
                 log.warning("cleanup worker teardown failed", exc_info=error)
@@ -1380,41 +1405,53 @@ class CleanupProcess:
     async def _teardown(self) -> None:
         """Stop the replacement, recovery and worker for aclose().
 
-        aclose() never forwards its caller's cancel here. A task awaited here
-        that failed is raised once the rest has run: aclose() promises the
-        reap either way, and a recovery left running could spawn a worker
-        after it. A cancel of this task itself, as the loop's shutdown sends,
-        does not skip the reap either.
+        aclose() never forwards its caller's cancel here. A task waited on
+        here that failed is raised once the rest has run: aclose() promises
+        the reap either way, and a recovery left running could spawn a worker
+        after it.
+
+        A cancel of this task itself, as the loop's shutdown sends, cuts no
+        stage before the stop short and skips none. It is held until the stop
+        has run, then raised, and a failure it hides from aclose() is logged.
+        A cancel that lands inside the stop's own reap SIGKILLs and retires
+        the worker at once, as on 0d6c3d3; retirement still gates respawns.
+
+            cancel ··· held ···▶ replacement ─▶ recovery ─▶ _load_lock ─▶ stop
+                                 waited out     cancelled,               │
+                                                waited out               ▼
+                                                               raise the cancel
         """
         replacement_task = self._replacement_task
         self._replacement_task = None
-        try:
-            if replacement_task is not None:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await replacement_task
-        finally:
-            await self._stop_recovery_then_worker()
-
-    async def _stop_recovery_then_worker(self) -> None:
-        """Cancel and wait out the recovery, then reap the worker, even when
-        the recovery failed."""
+        teardown_cancel = await _wait_out(replacement_task)
         recovery_task = self._recovery_task
         self._recovery_task = None
+        if recovery_task is not None:
+            recovery_task.cancel()
+        teardown_cancel = await _wait_out(recovery_task) or teardown_cancel
+        failures = [
+            failure
+            for failure in (_failure_of(replacement_task), _failure_of(recovery_task))
+            if failure is not None
+        ]
         try:
-            if recovery_task is not None:
-                recovery_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await recovery_task
+            teardown_cancel = await self._stop_worker_locked() or teardown_cancel
+            if teardown_cancel is not None:
+                raise teardown_cancel
+            if failures:
+                raise failures.pop(0)
         finally:
-            await self._stop_worker_locked()
+            # A failure not raised above never reaches aclose(): log it.
+            for failure in failures:
+                log.warning("cleanup worker teardown failed", exc_info=failure)
 
-    async def _stop_worker_locked(self) -> None:
-        """Reap the worker under `_load_lock`, then wait out a replacement
-        that detached it first.
+    async def _stop_worker_locked(self) -> asyncio.CancelledError | None:
+        """Reap the worker under `_load_lock`, and return a cancel of the
+        teardown that landed while it waited for the lock.
 
-        A cancel of the teardown while it waits for the lock is raised only
-        once the stop has run. Raised at the lock, it skipped the reap, and
-        every close joined to the teardown returned with the worker alive.
+        Raised at the lock, that cancel skipped the reap, and every close
+        joined to the teardown returned with the worker alive. The teardown
+        raises it once the stop has run.
         """
         teardown_cancel: asyncio.CancelledError | None = None
         while True:
@@ -1427,13 +1464,4 @@ class CleanupProcess:
             await self._stop_worker()
         finally:
             self._load_lock.release()
-        # No replacement starts once `_closed` is set, and the teardown
-        # waited out any begun before. Should one have begun anyway, the
-        # stop above found the worker gone while that one still reaps it.
-        late = self._replacement_task
-        self._replacement_task = None
-        if late is not None:
-            with contextlib.suppress(asyncio.CancelledError):
-                await late
-        if teardown_cancel is not None:
-            raise teardown_cancel
+        return teardown_cancel
