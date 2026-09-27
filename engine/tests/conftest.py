@@ -1,8 +1,10 @@
 import pytest
+from types import SimpleNamespace
 from fixtures.fake_cleanup_worker import PID_DIR_ENV, kill_leaked
 
 import velora_engine.cleanup_process as cleanup_process_mod
 from velora_engine import batch_priority, diarization
+from velora_engine import media
 from velora_engine.config import Config
 
 
@@ -61,6 +63,18 @@ def home(tmp_path, monkeypatch):
     """Isolated ~/.velora for tests."""
     monkeypatch.setenv("VELORA_HOME", str(tmp_path / "velora-home"))
     return tmp_path / "velora-home"
+
+
+@pytest.fixture(autouse=True)
+def meeting_temp_root(tmp_path, monkeypatch):
+    """Keep meeting conversions out of the user's real temp directory."""
+    directory = tmp_path / "tool-temp"
+    directory.mkdir(mode=0o700)
+    monkeypatch.setattr(media, "_meeting_temp_root", lambda: directory)
+    monkeypatch.setattr(media.shutil, "disk_usage",
+                        lambda _path: SimpleNamespace(free=10**12))
+    monkeypatch.setattr(media, "_meeting_fallback", None)
+    return directory
 
 
 @pytest.fixture

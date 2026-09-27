@@ -48,7 +48,12 @@ from .cleanup import (
 from .cleanup_process import CleanupProcess, respawn_backoff_s
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
-from .media import TransientMediaError, load_media, load_meeting_media, split_for_batch
+from .media import (
+    MEETING_FAILURE_SUFFIX, MEETING_SLICE_S, MeetingAudio, MeetingTrackTooShort,
+    TransientMediaError, load_media, load_meeting_media,
+    plan_meeting_slices, split_for_batch,
+    sweep_meeting_failures, sweep_meeting_temp,
+)
 from .meeting_notes import chunk_transcript, merge_notes, parse_notes_json
 from .stt import (
     SAMPLE_RATE,
@@ -223,6 +228,7 @@ MINE_STARTUP_DELAY_S = 60.0
 # semantics change so an upgraded app restarts the track instead of mixing old
 # fragmented labels with the corrected plan.
 MEETING_PLAN_VERSION = 3
+_MEETING_PLANS_PATH = Path("cache") / "meeting-plans"
 # A track whose loudest sample stays within one 16-bit step is digital
 # silence: the device delivered zeros (lid-closed built-in mic, a muted
 # interface). A quiet room still has a noise floor well above this. The
@@ -487,6 +493,7 @@ class Engine:
         self._transcribe_preempt = threading.Event()
         self._file_transcribe_job_id: Any = None
         self._meeting_transcribe_cancel = False
+        self._meeting_convert_cancel = threading.Event()
         self._meeting_transcribe_job_id: Any = None
         # Safe Voice Edit: sub-second cleanup-model job. A dictation start
         # PREEMPTS it (cancel event → cleanup returns between tokens) rather
@@ -1479,6 +1486,7 @@ class Engine:
                     requested is None or requested == self._meeting_transcribe_job_id
                 ):
                     self._meeting_transcribe_cancel = True
+                    self._meeting_convert_cancel.set()
             elif cmd == "edit_text":
                 await self._cmd_edit_text(msg)
             elif cmd == "edit_cancel":
@@ -4519,6 +4527,7 @@ class Engine:
         await self._cancel_idle_mining()
         self._transcribing = True
         self._meeting_transcribe_cancel = False
+        self._meeting_convert_cancel = threading.Event()
         self._meeting_transcribe_job_id = msg.get("id")
         asyncio.create_task(self._run_meeting_transcribe(dict(msg)))
         await self._send({
@@ -4528,7 +4537,7 @@ class Engine:
 
     def _meeting_plan_path(self, meeting_id: str, speaker: str) -> Path:
         safe = "".join(c for c in f"{meeting_id}.{speaker}" if c.isalnum() or c in "._-")
-        return velora_home() / "cache" / "meeting-plans" / f"{safe}.json"
+        return velora_home() / _MEETING_PLANS_PATH / f"{safe}.json"
 
     @staticmethod
     def _load_meeting_plan(path: Path, total_samples: int) -> list[tuple[int, int, str]] | None:
@@ -4581,7 +4590,8 @@ class Engine:
             log.warning("meeting plan cache write failed", exc_info=True)
 
     async def _diarize_spans(
-        self, pcm: Any, meeting_id: str
+        self, pcm: MeetingAudio, meeting_id: str,
+        *, cancelled: Callable[[], bool],
     ) -> list[tuple[int, int, str]] | None:
         """Diarized transcription plan for a system-audio track, or None.
 
@@ -4590,7 +4600,12 @@ class Engine:
         has no participant identity to validate against, so every result uses
         its useful speech regions but keeps the honest, stable "Them" label.
         """
+        def check_cancel() -> None:
+            if cancelled():
+                raise TransientMediaError("meeting audio cancelled")
+
         try:
+            check_cancel()
             if not diarization.available():
                 log.info("diarization: sherpa-onnx not importable — skipping")
                 return None
@@ -4602,9 +4617,26 @@ class Engine:
                     duration_s,
                 )
                 return None
+            # Diarization remains a short-track feature. Materialize at most
+            # its 30-minute allowance through bounded reads; long tracks stay
+            # entirely slice-backed and never enter this branch.
+            def read_short_track() -> np.ndarray:
+                audio = np.empty(len(pcm), dtype=np.float32)
+                block = MEETING_SLICE_S * SAMPLE_RATE
+                for start in range(0, len(pcm), block):
+                    check_cancel()
+                    end = min(start + block, len(pcm))
+                    audio[start:end] = pcm.read(
+                        start, end, cancel=cancelled)
+                    check_cancel()
+                return audio
+
+            pcm_data = await asyncio.to_thread(read_short_track)
+            check_cancel()
             active_fraction = await asyncio.to_thread(
-                speech_window_fraction, pcm
+                speech_window_fraction, pcm_data
             )
+            check_cancel()
             if (
                 active_fraction == 0
                 or active_fraction >= _DIARIZATION_DENSE_ACTIVITY_FRACTION
@@ -4615,30 +4647,28 @@ class Engine:
                     active_fraction * 100,
                 )
                 return None
-            if self._meeting_transcribe_cancel:
-                return None
             # Always runs the pinned-hash verification: existence alone must
             # not bless a file truncated by a mid-download kill. The download
             # and the diarize() call are each seconds+; check cancel around
             # them so cancelling a long meeting bites promptly.
             await asyncio.to_thread(diarization.ensure_models)
-            if self._meeting_transcribe_cancel:
-                return None
-            turns = await asyncio.to_thread(diarization.diarize, pcm)
-            if self._meeting_transcribe_cancel:
-                return None
+            check_cancel()
+            turns = await asyncio.to_thread(diarization.diarize, pcm_data)
+            check_cancel()
             speakers = {t.speaker for t in turns}
             speaker_count = len(speakers)
             if speaker_count == 0:
                 return None
             spans = diarization.plain_speaker_plan(
-                turns, total_samples=len(pcm))
+                turns, total_samples=len(pcm_data))
             log.info(
                 "diarization: %s detected %d audio cluster(s); using %d "
                 "speech-region chunks with stable Them labels",
                 meeting_id, speaker_count, len(spans))
             return spans or None
-        except Exception:  # noqa: BLE001 — diarization must never sink a meeting
+        except TransientMediaError:
+            raise
+        except Exception:  # noqa: BLE001 — genuine diarization errors fall back
             log.exception("diarization failed — falling back to single speaker")
             return None
 
@@ -4649,13 +4679,21 @@ class Engine:
         job_id = msg.get("id")
         start_chunk = int(msg.get("start_chunk", 0))
         track_started = time.perf_counter()
+        pcm: MeetingAudio | None = None
+        completed: dict[str, Any] | None = None
+        failure: dict[str, Any] | None = None
+        convert_cancel = self._meeting_convert_cancel
+        plan_path = self._meeting_plan_path(meeting_id, speaker)
+        failure_path = plan_path.with_suffix(MEETING_FAILURE_SUFFIX)
+        cancelled = lambda: convert_cancel.is_set() or self.shutdown.is_set()
 
         async def fail(error: str, code: str = "failed") -> None:
-            await self._send({
+            nonlocal failure
+            failure = {
                 "event": "meeting_transcribe_failed", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
                 "code": code, "error": error,
-            })
+            }
 
         # The user explicitly asked for notes and is waiting for the result.
         # Foreground dictation still preempts between chunks, but Darwin
@@ -4664,10 +4702,18 @@ class Engine:
         try:
             try:
                 load_started = time.perf_counter()
-                pcm = await asyncio.to_thread(
+                loading = asyncio.create_task(asyncio.to_thread(
                     load_meeting_media, path,
                     meeting_root=velora_home() / "meetings",
-                )
+                    cancel=cancelled, failure_path=failure_path,
+                ))
+                try:
+                    pcm = await asyncio.shield(loading)
+                except asyncio.CancelledError:
+                    convert_cancel.set()
+                    with contextlib.suppress(Exception):
+                        pcm = await loading
+                    raise
                 load_ms = int((time.perf_counter() - load_started) * 1000)
             except TransientMediaError as exc:
                 log.warning(
@@ -4676,6 +4722,9 @@ class Engine:
                 )
                 await fail(str(exc), MEETING_AUDIO_LOAD_FAILED)
                 return
+            except MeetingTrackTooShort as exc:
+                await fail(str(exc), MEETING_TRACK_TOO_SHORT)
+                return
             except ValueError as exc:
                 log.warning(
                     "meeting transcription rejected %s/%s: %s",
@@ -4683,19 +4732,15 @@ class Engine:
                 )
                 await fail(str(exc), MEETING_UNSUPPORTED_AUDIO)
                 return
-            if self.shutdown.is_set():
-                await fail("engine shutting down", "engine_shutdown")
-                return
-            if self._meeting_transcribe_cancel:
-                await fail("cancelled", "cancelled")
+            if cancelled():
                 return
             duration_s = len(pcm) / SAMPLE_RATE
             if duration_s < MEETING_MIN_TRACK_S:
                 await fail("audio is too short to transcribe", MEETING_TRACK_TOO_SHORT)
                 return
-            # max/min instead of abs(): an hour-long track would otherwise
-            # allocate a second full-size copy just to find its peak.
-            peak = max(float(pcm.max()), -float(pcm.min()))
+            # Scan bounded reads; even an hours-long track never becomes one
+            # Float32 allocation just to classify digital silence.
+            peak = await asyncio.to_thread(pcm.peak, cancel=cancelled)
             silent = peak <= MEETING_SILENT_TRACK_MAX_PEAK
             if silent:
                 # Whisper turns digital silence into "Thank you." lines that
@@ -4708,12 +4753,12 @@ class Engine:
                     "duration_s": round(duration_s, 1), "chunks": 0,
                     "start_chunk": 0, "restarted": False,
                 })
-                await self._send({
+                completed = {
                     "event": "meeting_transcribed", "id": job_id,
                     "meeting_id": meeting_id, "speaker": speaker,
                     "duration_s": round(duration_s, 1), "chunks": 0,
                     "silent": True,
-                })
+                }
                 log.info(
                     "meeting transcription skipped %s/%s: %.0fs digitally "
                     "silent audio, peak=%.6f load=%dms",
@@ -4732,7 +4777,6 @@ class Engine:
             # flipped diarization toggle or a failing model download would
             # silently skip or duplicate audio. No cached plan on resume →
             # restart from zero and tell the app to drop its stale rows.
-            plan_path = self._meeting_plan_path(meeting_id, speaker)
             plan_started = time.perf_counter()
             restarted = False
             spans: list[tuple[int, int, str]] | None = None
@@ -4747,14 +4791,12 @@ class Engine:
                     start_chunk = 0
             if spans is None:
                 if speaker == "them" and self.config.meeting_diarization:
-                    spans = await self._diarize_spans(pcm, meeting_id)
+                    spans = await self._diarize_spans(
+                        pcm, meeting_id, cancelled=cancelled)
                 if spans is None:
-                    chunks = split_for_batch(pcm)
-                    spans = []
-                    cursor = 0
-                    for chunk in chunks:
-                        spans.append((cursor, cursor + len(chunk), speaker))
-                        cursor += len(chunk)
+                    windows = await asyncio.to_thread(
+                        plan_meeting_slices, pcm, SAMPLE_RATE, cancel=cancelled)
+                    spans = [(a, b, speaker) for a, b in windows]
                 self._save_meeting_plan(plan_path, spans)
             plan_ms = int((time.perf_counter() - plan_started) * 1000)
             await self._send({
@@ -4772,11 +4814,9 @@ class Engine:
                     self.session is not None or self._finalizing or self._starting
                 ) and not self._meeting_transcribe_cancel:
                     if self.shutdown.is_set():
-                        await fail("engine shutting down", "engine_shutdown")
                         return
                     await asyncio.sleep(0.25)
                 if self._meeting_transcribe_cancel:
-                    await fail("cancelled", "cancelled")
                     return
                 # Re-demote after a dictation released the machine (the wait
                 # loop above), and pick up a respawned cleanup child.
@@ -4784,17 +4824,14 @@ class Engine:
                 sample_a, sample_b, chunk_speaker = spans[index]
                 self.stt.initial_prompt = self._meeting_glossary()
                 decode_started = time.perf_counter()
-                text = await self._stt_call(
-                    transcribe_clip, self.stt, pcm[sample_a:sample_b])
+                audio = await asyncio.to_thread(
+                    pcm.read, sample_a, sample_b, cancel=cancelled)
+                text = await self._stt_call(transcribe_clip, self.stt, audio)
                 decode_ms += int((time.perf_counter() - decode_started) * 1000)
                 cleaned_text = (text or "").strip()
                 nonempty_chunks += bool(cleaned_text)
                 processed_chunks += 1
-                if self.shutdown.is_set():
-                    await fail("engine shutting down", "engine_shutdown")
-                    return
-                if self._meeting_transcribe_cancel:
-                    await fail("cancelled", "cancelled")
+                if cancelled():
                     return
                 await self._send({
                     "event": "meeting_segment", "id": job_id,
@@ -4809,20 +4846,19 @@ class Engine:
                     "meeting_id": meeting_id, "speaker": speaker,
                     "fraction": round((index + 1) / len(spans), 3),
                 })
-            if self.shutdown.is_set():
-                await fail("engine shutting down", "engine_shutdown")
+            if cancelled():
                 return
             # The plan file deliberately OUTLIVES completion: a crash between
             # transcribe-done and notes-done re-enqueues this track with
             # start_chunk == len(spans), and only the cached plan proves that
             # cursor means "already finished" rather than "plan changed".
             # The 7-day prune in _save_meeting_plan retires it.
-            await self._send({
+            completed = {
                 "event": "meeting_transcribed", "id": job_id,
                 "meeting_id": meeting_id, "speaker": speaker,
                 "duration_s": round(duration_s, 1), "chunks": len(spans),
                 "silent": silent,
-            })
+            }
             log.info(
                 "meeting transcription done %s/%s: %.0fs audio, "
                 "%d/%d chunks processed this attempt, %d nonempty this attempt, "
@@ -4831,17 +4867,39 @@ class Engine:
                 nonempty_chunks, peak, silent, load_ms, plan_ms, decode_ms,
                 int((time.perf_counter() - track_started) * 1000),
             )
+        except TransientMediaError as exc:
+            log.warning("meeting audio became unreadable %s/%s: %s", meeting_id, speaker, exc)
+            await fail(str(exc), MEETING_AUDIO_LOAD_FAILED)
         except Exception as exc:  # noqa: BLE001
             log.exception("meeting transcription failed")
             await fail(f"transcription failed: {exc}")
         finally:
+            convert_cancel.set()
+            if self.shutdown.is_set():
+                completed = None
+                await fail("engine shutting down", "engine_shutdown")
+            elif self._meeting_transcribe_cancel:
+                completed = None
+                await fail("cancelled", "cancelled")
             self._transcribing = False
             self._meeting_transcribe_cancel = False
             self._meeting_transcribe_job_id = None
             self._end_batch_job(lower_priority=False)
-            with contextlib.suppress(RuntimeError):  # executor gone at shutdown
-                await self._stt_call(self._release_stt_memory)
-            self._schedule_mining()
+            if completed is not None:
+                await self._send(completed)
+            if failure is not None:
+                await self._send(failure)
+            if pcm is not None:
+                # A wedged local-disk read holds its executor thread and the
+                # reader lock; Python cannot interrupt that syscall here.
+                with contextlib.suppress(Exception):
+                    await asyncio.to_thread(pcm.close)
+            if not self._transcribing:
+                with contextlib.suppress(RuntimeError):  # executor gone at shutdown
+                    await self._stt_call(
+                        lambda: None if self._transcribing
+                        else self._release_stt_memory())
+                self._schedule_mining()
 
     async def _cmd_meeting_notes(self, msg: dict[str, Any]) -> None:
         meeting_id = msg.get("meeting_id")
@@ -5229,6 +5287,13 @@ class Engine:
 
 
 async def _amain(args: argparse.Namespace) -> None:
+    # A prior converter kill can leave only its partial output named. Sweep
+    # those files before any retry allocates another copy.
+    try:
+        sweep_meeting_temp()
+        sweep_meeting_failures(velora_home() / _MEETING_PLANS_PATH)
+    except OSError:
+        log.warning("meeting temp sweep failed", exc_info=True)
     config = Config()
     socket_path = Path(args.socket) if args.socket else config.socket_path
     engine = Engine(config, parent_pid=args.parent_pid)

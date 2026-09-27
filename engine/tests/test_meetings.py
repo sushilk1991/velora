@@ -6,9 +6,13 @@
 import asyncio
 import contextlib
 import json
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
-import wave
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -18,7 +22,8 @@ import pytest
 
 from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
 
-from velora_engine.media import SAMPLE_RATE, load_media
+from velora_engine import media
+from velora_engine.media import MeetingAudio, SAMPLE_RATE
 from velora_engine.meeting_notes import (
     chunk_transcript,
     merge_notes,
@@ -26,35 +31,52 @@ from velora_engine.meeting_notes import (
 )
 from velora_engine.config import Config
 from velora_engine.server import Engine
+from velora_engine import server as server_mod
+
+_REAL_CONVERT_MEETING = media._convert_meeting
+
+
+def _fixture_track(pcm: np.ndarray, directory: Path) -> MeetingAudio:
+    """Return the same converted-file type that production meeting jobs own."""
+    import soundfile as sf
+
+    path = directory / f"converted-{os.urandom(8).hex()}.caf"
+    sf.write(str(path), pcm, SAMPLE_RATE, format="CAF", subtype="PCM_16")
+    return MeetingAudio(path)
 
 
 @pytest.fixture(autouse=True)
-def decode_protocol_fixtures_with_generic_media(monkeypatch):
-    """Keep protocol tests independent from the production CAF trust boundary."""
-    from velora_engine import server as server_mod
+def convert_protocol_caf(monkeypatch, tmp_path):
+    """Exercise real meeting validation and reads with a local CAF converter."""
+    import soundfile as sf
 
-    monkeypatch.setattr(
-        server_mod,
-        "load_meeting_media",
-        lambda path, *, meeting_root: load_media(path),
-    )
+    def convert(src, _duration, *, cancel, timeout_s=None):
+        if cancel():
+            raise media.TransientMediaError("meeting audio cancelled")
+        pcm, rate = sf.read(str(src), dtype="float32")
+        assert rate == SAMPLE_RATE
+        return _fixture_track(pcm, tmp_path)
+
+    monkeypatch.setattr(media, "_convert_meeting", convert)
 
 
-def _write_wav(path, seconds: float = 2.0) -> None:
+def _write_caf(path, seconds: float = 2.0) -> Path:
+    """Write a Velora-owned 16 kHz track under the test meeting root."""
+    import soundfile as sf
+
+    root = Path(os.environ["VELORA_HOME"]) / "meetings"
+    root.mkdir(parents=True, exist_ok=True)
+    source = root / Path(path).with_suffix(".caf").name
     t = np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
     pcm16 = (0.2 * np.sin(2 * np.pi * 330 * t) * 32767.0).astype("<i2")
-    with wave.open(str(path), "wb") as output:
-        output.setnchannels(1)
-        output.setsampwidth(2)
-        output.setframerate(SAMPLE_RATE)
-        output.writeframes(pcm16.tobytes())
+    sf.write(str(source), pcm16, SAMPLE_RATE, format="CAF", subtype="PCM_16")
+    return source
 
 
 async def test_meeting_transcribe_emits_durable_segment_cursor(engine, tmp_path, monkeypatch):
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "my meeting update")
     eng, sock = engine
-    clip = tmp_path / "me.wav"
-    _write_wav(clip)
+    clip = _write_caf("me.wav")
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -96,15 +118,15 @@ async def test_meeting_transcribe_emits_durable_segment_cursor(engine, tmp_path,
     assert done["id"] == "resume"
 
 
-async def test_meeting_transcribe_uses_app_owned_source_limit(engine, monkeypatch):
+async def test_meeting_transcribe_uses_app_owned_source_limit(engine, tmp_path, monkeypatch):
     from velora_engine import server as server_mod
 
     seen = {}
 
-    def fake_load(path, *, meeting_root):
+    def fake_load(path, *, meeting_root, cancel=None, failure_path=None, **_kwargs):
         seen["path"] = path
         seen["meeting_root"] = meeting_root
-        return np.tile(AUDIO, 3)
+        return _fixture_track(np.tile(AUDIO, 3), tmp_path)
 
     monkeypatch.setattr(server_mod, "load_meeting_media", fake_load)
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "meeting words")
@@ -143,8 +165,7 @@ async def test_dense_remote_track_skips_expensive_diarization(
     monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.43)
     caplog.set_level("INFO", logger="velora.server")
     _eng, sock = engine
-    clip = tmp_path / "dense-them.wav"
-    _write_wav(clip, seconds=10.0)
+    clip = _write_caf("dense-them.wav", seconds=10.0)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -187,8 +208,7 @@ async def test_long_remote_track_skips_diarization_before_activity_scan(
     )
     caplog.set_level("INFO", logger="velora.server")
     _eng, sock = engine
-    clip = tmp_path / "long-them.wav"
-    _write_wav(clip, seconds=10.0)
+    clip = _write_caf("long-them.wav", seconds=10.0)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -226,8 +246,7 @@ async def test_meeting_transcribe_keeps_audio_only_clusters_labeled_them(
         diar_mod, "diarize",
         lambda pcm: [Turn(0.0, 4.0, "s1"), Turn(4.6, 9.5, "s2")])
     _eng, sock = engine
-    clip = tmp_path / "them.wav"
-    _write_wav(clip, seconds=10.0)
+    clip = _write_caf("them.wav", seconds=10.0)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -262,8 +281,7 @@ async def test_meeting_transcribe_single_speaker_falls_back_to_them(
     monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(diar_mod, "diarize", lambda pcm: [Turn(0.0, 2.0, "s1")])
     _eng, sock = engine
-    clip = tmp_path / "them.wav"
-    _write_wav(clip)
+    clip = _write_caf("them.wav")
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -297,8 +315,7 @@ async def test_meeting_transcribe_five_clusters_still_uses_stable_them(
         ],
     )
     _eng, sock = engine
-    clip = tmp_path / "five-clusters.wav"
-    _write_wav(clip, seconds=10.0)
+    clip = _write_caf("five-clusters.wav", seconds=10.0)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -334,8 +351,7 @@ async def test_meeting_transcribe_implausible_clusters_fall_back_to_them(
         ],
     )
     _eng, sock = engine
-    clip = tmp_path / "clustered.wav"
-    _write_wav(clip, seconds=12.0)
+    clip = _write_caf("clustered.wav", seconds=12.0)
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -365,8 +381,7 @@ async def test_meeting_transcribe_diarization_failure_falls_back(
     monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _pcm: 0.4)
     monkeypatch.setattr(diar_mod, "diarize", boom)
     _eng, sock = engine
-    clip = tmp_path / "them.wav"
-    _write_wav(clip)
+    clip = _write_caf("them.wav")
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -401,6 +416,109 @@ async def test_old_meeting_plan_version_is_rejected(engine, tmp_path) -> None:
     assert eng._load_meeting_plan(plan, 32_000) is None
 
 
+async def test_v3_plan_resumes_exactly(
+    engine, tmp_path, monkeypatch
+):
+    """A mid-track v3 cursor decodes each remaining sample range once."""
+    import soundfile as sf
+
+    eng, sock = engine
+    clip = _write_caf("resume-v3.caf", seconds=6)
+    source_pcm, _rate = sf.read(str(clip), dtype="float32")
+    converted = tmp_path / "v3-converted.caf"
+    sf.write(str(converted), source_pcm, SAMPLE_RATE,
+             format="CAF", subtype="PCM_16")
+    expected_pcm, _rate = sf.read(str(converted), dtype="float32")
+    ranges = []
+    reader_threads = []
+    decoded = []
+
+    class TrackingAudio(MeetingAudio):
+        def read(self, start, end, *, cancel=None):
+            ranges.append((start, end))
+            reader_threads.append(threading.current_thread())
+            return super().read(start, end, cancel=cancel)
+
+    track = TrackingAudio(converted)
+    monkeypatch.setattr(
+        __import__("velora_engine.server", fromlist=["load_meeting_media"]),
+        "load_meeting_media", lambda *_args, **_kwargs: track)
+
+    def decode(_stt, chunk):
+        decoded.append(chunk.copy())
+        return f"chunk-{len(decoded)}"
+
+    monkeypatch.setattr(
+        __import__("velora_engine.server", fromlist=["transcribe_clip"]),
+        "transcribe_clip", decode)
+    spans = [
+        (0, 2 * SAMPLE_RATE),
+        (2 * SAMPLE_RATE, 4 * SAMPLE_RATE),
+        (4 * SAMPLE_RATE, 6 * SAMPLE_RATE),
+    ]
+    plan = eng._meeting_plan_path("resume-v3", "me")
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(json.dumps({
+        "version": 3,
+        "spans": [[a, b, "me"] for a, b in spans],
+    }))
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "v3", "meeting_id": "resume-v3",
+        "speaker": "me", "path": str(clip), "start_chunk": 1,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    started = await client.recv_event("meeting_transcribe_started")
+    assert started["restarted"] is False
+    assert started["start_chunk"] == 1
+    segments = [await client.recv_event("meeting_segment") for _ in spans[1:]]
+    assert [event["chunk_index"] for event in segments] == [1, 2]
+    done = await client.recv_event("meeting_transcribed")
+    assert done["chunks"] == len(spans)
+    assert ranges[-2:] == spans[1:]
+    assert all(thread is not threading.main_thread() for thread in reader_threads[-2:])
+    assert len(decoded) == 2
+    for chunk, (start, end) in zip(decoded, spans[1:], strict=True):
+        assert np.array_equal(chunk, expected_pcm[start:end])
+    assert np.array_equal(np.concatenate(decoded), expected_pcm[spans[1][0]:])
+    client.close()
+
+
+async def test_cancel_stops_conversion(engine, monkeypatch):
+    """The existing cancel command reaches a converter running in a worker."""
+    _eng, sock = engine
+    clip = _write_caf("cancel-convert.caf")
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def stalled_convert(_source, _duration, *, cancel):
+        started.set()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if cancel():
+                stopped.set()
+                raise media.TransientMediaError("meeting audio conversion cancelled")
+            time.sleep(0.01)
+        raise AssertionError("cancel did not reach converter")
+
+    monkeypatch.setattr(media, "_convert_meeting", stalled_convert)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "convert-cancel",
+        "meeting_id": "convert-cancel", "speaker": "me",
+        "path": str(clip), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    assert await asyncio.to_thread(started.wait, 2)
+    await client.send_json({"cmd": "meeting_transcribe_cancel", "id": "convert-cancel"})
+    failed = await client.recv_event("meeting_transcribe_failed", timeout=3)
+    assert failed["code"] == "cancelled"
+    assert stopped.is_set()
+    client.close()
+
+
 async def test_meeting_resume_without_cached_plan_restarts_track(
     engine, tmp_path, monkeypatch, caplog
 ):
@@ -411,8 +529,7 @@ async def test_meeting_resume_without_cached_plan_restarts_track(
     caplog.set_level("INFO", logger="velora.server")
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "recovered words")
     _eng, sock = engine
-    clip = tmp_path / "them.wav"
-    _write_wav(clip)
+    clip = _write_caf("them.wav")
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -453,8 +570,7 @@ async def test_meeting_transcribe_rejects_invalid_channel(engine, tmp_path):
     """An argument error names the job: MeetingProcessor only settles work on
     an id-matched event, so a bare `error` left the track waiting forever."""
     _eng, sock = engine
-    clip = tmp_path / "clip.wav"
-    _write_wav(clip)
+    clip = _write_caf("clip.wav")
     client = await connect(sock)
     await client.recv_event("ready")
     await client.send_json({
@@ -474,7 +590,7 @@ async def test_meeting_transcribe_names_unusable_audio(engine, tmp_path, monkeyp
     rejected or empty file needs its own code."""
     from velora_engine import server as server_mod
 
-    def rejecting_load(path, *, meeting_root):
+    def rejecting_load(path, *, meeting_root, cancel=None, failure_path=None, **_kwargs):
         raise ValueError("unsupported meeting audio format")
 
     _eng, sock = engine
@@ -490,7 +606,7 @@ async def test_meeting_transcribe_names_unusable_audio(engine, tmp_path, monkeyp
 
     # A file that could not be read this time (converter timeout, full
     # disk, still being written) is retried by the app, never skipped.
-    def unreadable_now(path, *, meeting_root):
+    def unreadable_now(path, *, meeting_root, cancel=None, failure_path=None, **_kwargs):
         raise server_mod.TransientMediaError("meeting audio conversion timed out")
 
     monkeypatch.setattr(server_mod, "load_meeting_media", unreadable_now)
@@ -505,7 +621,8 @@ async def test_meeting_transcribe_names_unusable_audio(engine, tmp_path, monkeyp
     # A blip of audio is valid but holds no speech; it has its own issue.
     monkeypatch.setattr(
         server_mod, "load_meeting_media",
-        lambda path, *, meeting_root: np.zeros(SAMPLE_RATE // 10, dtype=np.float32))
+                lambda path, *, meeting_root, cancel=None, failure_path=None, **_kwargs: _fixture_track(
+            np.zeros(SAMPLE_RATE // 10, dtype=np.float32), tmp_path))
     await client.send_json({
         "cmd": "meeting_transcribe", "id": "short", "meeting_id": "m",
         "speaker": "them", "path": str(tmp_path / "them.caf"),
@@ -542,12 +659,15 @@ async def test_meeting_transcribed_flags_digitally_silent_track(
     Whisper hallucinates on digital silence ("Thank you."), so the fake
     returns text too: a silent track must never reach STT or emit lines."""
     monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "Thank you.")
-    silent = tmp_path / "me.wav"
-    with wave.open(str(silent), "wb") as output:
-        output.setnchannels(1)
-        output.setsampwidth(2)
-        output.setframerate(SAMPLE_RATE)
-        output.writeframes(frame_pair * SAMPLE_RATE)
+    import soundfile as sf
+
+    root = Path(os.environ["VELORA_HOME"]) / "meetings"
+    root.mkdir(parents=True, exist_ok=True)
+    silent = root / "me.caf"
+    sf.write(
+        str(silent), np.frombuffer(frame_pair * SAMPLE_RATE, dtype="<i2"),
+        SAMPLE_RATE, format="CAF", subtype="PCM_16",
+    )
     _eng, sock = engine
     client = await connect(sock)
     await client.recv_event("ready")
@@ -564,8 +684,7 @@ async def test_meeting_transcribed_flags_digitally_silent_track(
 
 async def test_meeting_busy_failures_have_stable_codes(engine, tmp_path):
     eng, sock = engine
-    clip = tmp_path / "clip.wav"
-    _write_wav(clip)
+    clip = _write_caf("clip.wav")
     client = await connect(sock)
     await client.recv_event("ready")
     eng._reprocessing = True
@@ -1813,12 +1932,21 @@ def test_meeting_note_helpers_bound_and_validate_generation():
     assert merged["action_items"] == ["Test", "Deploy"]
 
 
-async def test_engine_shutdown_emits_terminal_meeting_failures(engine, tmp_path):
+async def test_engine_shutdown_emits_terminal_meeting_failures(engine, tmp_path, monkeypatch):
     eng, sock = engine
-    clip = tmp_path / "shutdown.wav"
-    _write_wav(clip)
+    clip = _write_caf("shutdown.wav")
     client = await connect(sock)
     await client.recv_event("ready")
+
+    cancel_observed = threading.Event()
+
+    def cancelled_convert(_src, _duration, *, cancel):
+        if cancel():
+            cancel_observed.set()
+            raise media.TransientMediaError("meeting audio cancelled")
+        return _fixture_track(np.tile(AUDIO, 3), tmp_path)
+
+    monkeypatch.setattr(media, "_convert_meeting", cancelled_convert)
 
     eng._send = AsyncMock()
     eng.shutdown.set()
@@ -1850,3 +1978,354 @@ async def test_engine_shutdown_emits_terminal_meeting_failures(engine, tmp_path)
     ]
     assert not eng._transcribing
     assert not eng._meeting_notes_running
+    assert cancel_observed.is_set()
+
+
+async def test_terminal_releases_job(engine, monkeypatch):
+    """The next meeting can start at the terminal event without busy or eviction."""
+    eng, _sock = engine
+    clip = _write_caf("release-before-event.caf")
+    ended = Mock(wraps=eng._end_batch_job)
+    release = Mock(wraps=eng._release_stt_memory)
+    monkeypatch.setattr(eng, "_end_batch_job", ended)
+    monkeypatch.setattr(eng, "_release_stt_memory", release)
+    eng._transcribing = True
+    eng._meeting_transcribe_job_id = "first"
+
+    async def send(payload):
+        if payload["event"] != "meeting_transcribed":
+            return
+        assert not eng._transcribing
+        assert eng._meeting_transcribe_job_id is None
+        assert not eng._meeting_transcribe_cancel
+        ended.assert_called_once_with(lower_priority=False)
+        eng._transcribing = True
+
+    monkeypatch.setattr(eng, "_send", send)
+    await eng._run_meeting_transcribe({
+        "path": str(clip), "id": "first", "meeting_id": "release",
+        "speaker": "me", "start_chunk": 0,
+    })
+    release.assert_not_called()
+    eng._transcribing = False
+
+
+async def test_wedged_close_frees_job(engine, monkeypatch, tmp_path):
+    """A blocked reader close cannot keep the next track busy."""
+    eng, _sock = engine
+    track = _fixture_track(np.full(2 * SAMPLE_RATE, 0.2, dtype=np.float32), tmp_path)
+    monkeypatch.setattr(server_mod, "load_meeting_media", lambda *_a, **_k: track)
+    delivered = asyncio.Event()
+    release = threading.Event()
+    real_close = track.close
+
+    def close():
+        release.wait(3)
+        real_close()
+
+    async def send(payload):
+        if payload["event"] == "meeting_transcribed":
+            assert not eng._transcribing
+            assert eng._meeting_transcribe_job_id is None
+            delivered.set()
+
+    monkeypatch.setattr(track, "close", close)
+    monkeypatch.setattr(eng, "_send", send)
+    eng._transcribing = True
+    eng._meeting_transcribe_job_id = "wedged"
+    task = asyncio.create_task(eng._run_meeting_transcribe({
+        "path": "/synthetic/track.caf", "id": "wedged",
+        "meeting_id": "wedged", "speaker": "me", "start_chunk": 0,
+    }))
+    try:
+        await asyncio.wait_for(delivered.wait(), 1)
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.parametrize("stop,code", [
+    ("cancel", "cancelled"), ("shutdown", "engine_shutdown"),
+])
+async def test_stop_wins_load_race(engine, monkeypatch, stop, code):
+    """A decoder verdict returned after stop cannot skip the source."""
+    eng, _sock = engine
+    eng._send = AsyncMock()
+
+    def reject(*_args, **_kwargs):
+        if stop == "shutdown":
+            eng.shutdown.set()
+        else:
+            eng._meeting_transcribe_cancel = True
+        raise ValueError("input rejected")
+
+    monkeypatch.setattr(server_mod, "load_meeting_media", reject)
+    await eng._run_meeting_transcribe({
+        "path": "/synthetic/bad.caf", "id": "race", "meeting_id": "race",
+        "speaker": "me", "start_chunk": 0,
+    })
+    events = [call.args[0] for call in eng._send.await_args_list]
+    assert events[-1]["code"] == code
+
+
+@pytest.mark.parametrize("stop_at", ["models", "diarize"])
+async def test_shutdown_stops_diarize(engine, tmp_path, monkeypatch, stop_at):
+    """A shutdown during model work or diarization ends the job."""
+    eng, _sock = engine
+    eng._send = AsyncMock()
+    track = _fixture_track(np.full(2 * SAMPLE_RATE, 0.2, dtype=np.float32), tmp_path)
+    monkeypatch.setattr(server_mod, "load_meeting_media", lambda *_a, **_k: track)
+    monkeypatch.setattr(server_mod.diarization, "available", lambda: True)
+    monkeypatch.setattr(server_mod, "speech_window_fraction", lambda _a: 0.3)
+    monkeypatch.setattr(server_mod.diarization, "ensure_models",
+                        eng.shutdown.set if stop_at == "models" else lambda: None)
+    calls = []
+
+    def diarize(_audio):
+        calls.append(True)
+        if stop_at == "models":
+            pytest.fail("diarization ran after shutdown")
+        eng.shutdown.set()
+        return []
+
+    monkeypatch.setattr(server_mod.diarization, "diarize", diarize)
+
+    await eng._run_meeting_transcribe({
+        "path": "/synthetic/track.caf", "id": "stop", "meeting_id": "stop",
+        "speaker": "them", "start_chunk": 0,
+    })
+    events = [call.args[0] for call in eng._send.await_args_list]
+    assert events[-1]["code"] == "engine_shutdown"
+    assert len(calls) == (stop_at == "diarize")
+    assert not eng._meeting_plan_path("stop", "them").exists()
+
+
+async def test_diarization_read_retries(engine, tmp_path, monkeypatch):
+    """A read fault never pins a plan without diarization."""
+    eng, _sock = engine
+    eng._send = AsyncMock()
+    track = _fixture_track(np.full(2 * SAMPLE_RATE, 0.2, dtype=np.float32), tmp_path)
+    monkeypatch.setattr(track, "peak", lambda *, cancel: 0.2)
+
+    def fail_read(_start, _end, *, cancel):
+        raise media.TransientMediaError("read fault")
+
+    monkeypatch.setattr(track, "read", fail_read)
+    monkeypatch.setattr(server_mod, "load_meeting_media", lambda *_a, **_k: track)
+    monkeypatch.setattr(server_mod.diarization, "available", lambda: True)
+    await eng._run_meeting_transcribe({
+        "path": "/synthetic/track.caf", "id": "read", "meeting_id": "read",
+        "speaker": "them", "start_chunk": 0,
+    })
+    events = [call.args[0] for call in eng._send.await_args_list]
+    assert events[-1]["code"] == server_mod.MEETING_AUDIO_LOAD_FAILED
+    assert not eng._meeting_plan_path("read", "them").exists()
+
+
+async def test_shutdown_mid_slice_read(engine, tmp_path, monkeypatch):
+    """A server read stopped by shutdown ends as engine_shutdown."""
+    eng, _sock = engine
+    eng._send = AsyncMock()
+    track = _fixture_track(np.full(2 * SAMPLE_RATE, 0.2, dtype=np.float32), tmp_path)
+    original = track.read
+    reads = 0
+
+    def read(start, end, *, cancel):
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            eng.shutdown.set()
+            raise media.TransientMediaError("read stopped")
+        return original(start, end, cancel=cancel)
+
+    monkeypatch.setattr(track, "read", read)
+    monkeypatch.setattr(server_mod, "load_meeting_media", lambda *_a, **_k: track)
+    await eng._run_meeting_transcribe({
+        "path": "/synthetic/track.caf", "id": "slice", "meeting_id": "slice",
+        "speaker": "me", "start_chunk": 0,
+    })
+    events = [call.args[0] for call in eng._send.await_args_list]
+    assert reads > 1
+    assert events[-1]["code"] == "engine_shutdown"
+
+
+async def test_skip_then_manual_retry(engine, monkeypatch):
+    """A permanent skip consumes its strike so Retry starts fresh."""
+    eng, sock = engine
+    clip = _write_caf("manual-retry.caf")
+    monkeypatch.setattr(media, "_convert_meeting", lambda *_a, **_k: (_ for _ in ()).throw(
+        media._CoreAudioFailure("afconvert", 1, "Error: Couldn't open input file ('typ?')")))
+    client = await connect(sock)
+    await client.recv_event("ready")
+    failure_path = eng._meeting_plan_path("manual-retry", "me").with_suffix(
+        media.MEETING_FAILURE_SUFFIX)
+
+    for attempt, code in enumerate((server_mod.MEETING_AUDIO_LOAD_FAILED,
+                                    server_mod.MEETING_UNSUPPORTED_AUDIO,
+                                    server_mod.MEETING_AUDIO_LOAD_FAILED)):
+        await client.send_json({
+            "cmd": "meeting_transcribe", "id": f"retry-{attempt}",
+            "meeting_id": "manual-retry", "speaker": "me", "path": str(clip),
+            "start_chunk": 0,
+        })
+        await client.recv_event("meeting_transcribe_accepted")
+        failed = await client.recv_event("meeting_transcribe_failed")
+        assert failed["code"] == code
+        assert failure_path.exists() is (attempt != 1)
+    client.close()
+
+
+@pytest.mark.skipif(shutil.which("afconvert") is None or shutil.which("afinfo") is None,
+                    reason="Core Audio tools missing")
+@pytest.mark.parametrize("empty,codes", [
+    (False, (server_mod.MEETING_AUDIO_LOAD_FAILED, server_mod.MEETING_UNSUPPORTED_AUDIO)),
+    (True, (server_mod.MEETING_TRACK_TOO_SHORT,)),
+])
+async def test_corrupt_them_keeps_notes(engine, monkeypatch, empty, codes):
+    """A bad legacy track is skipped while the good mic track makes notes."""
+    eng, sock = engine
+    monkeypatch.setenv("VELORA_FAKE_STT_TEXT", "The release is approved")
+    me = _write_caf("me-for-notes.caf")
+    them = me.parent / "them.m4a"
+    source = me
+    if empty:
+        import soundfile as sf
+        source = me.parent / "zero.wav"
+        sf.write(str(source), np.empty(0, dtype=np.float32), 48_000)
+    subprocess.run(["afconvert", "-f", "m4af", "-d", "aac", str(source), str(them)],
+                   check=True, capture_output=True, timeout=30)
+    if not empty:
+        raw = them.read_bytes()
+        them.write_bytes(raw[:raw.index(b"moov") - 4])
+    originals = [(path.read_bytes(), path.stat().st_mtime_ns) for path in (them, me)]
+
+    class Cleanup:
+        loaded = True
+        unhealthy = False
+
+        async def cleanup(self, _raw, _prompt, **_kwargs):
+            return SimpleNamespace(applied=True, text=json.dumps({
+                "summary": "The release is approved.",
+                "decisions": ["Release approved"], "action_items": [],
+            }))
+
+    eng.cleanup = Cleanup()
+    failure_path = eng._meeting_plan_path("two-track", "them").with_suffix(
+        media.MEETING_FAILURE_SUFFIX)
+    client = await connect(sock)
+    await client.recv_event("ready")
+    for attempt, code in enumerate(codes):
+        await client.send_json({
+            "cmd": "meeting_transcribe", "id": f"them-{attempt}",
+            "meeting_id": "two-track", "speaker": "them", "path": str(them),
+            "start_chunk": 0,
+        })
+        await client.recv_event("meeting_transcribe_accepted")
+        failed = await client.recv_event("meeting_transcribe_failed")
+        assert failed["code"] == code
+        if empty:
+            assert not failure_path.exists()
+
+    await client.send_json({
+        "cmd": "meeting_transcribe", "id": "me", "meeting_id": "two-track",
+        "speaker": "me", "path": str(me), "start_chunk": 0,
+    })
+    await client.recv_event("meeting_transcribe_accepted")
+    await client.recv_event("meeting_transcribe_started")
+    segment = await client.recv_event("meeting_segment")
+    assert segment["text"] == "The release is approved"
+    await client.recv_event("meeting_transcribed")
+
+    await client.send_json({
+        "cmd": "meeting_notes", "id": "notes", "meeting_id": "two-track",
+        "transcript": f"[00:00] Me: {segment['text']}",
+    })
+    await client.recv_event("meeting_notes_accepted")
+    ready = await client.recv_event("meeting_notes_ready")
+    assert ready["summary"] == "The release is approved."
+    assert [(path.read_bytes(), path.stat().st_mtime_ns) for path in (them, me)] == originals
+    client.close()
+
+
+@pytest.mark.skipif(shutil.which("afconvert") is None, reason="afconvert missing")
+async def test_restart_sweeps_converter(home, fake_stt, tmp_path,
+                                        meeting_temp_root, monkeypatch):
+    """SIGKILL during the real converter leaves a sweepable partial file."""
+    clip = _write_caf("restart-conversion.caf")
+    marker = tmp_path / "converter-started"
+    child = r"""
+import asyncio
+import os
+from pathlib import Path
+import subprocess
+import time
+from types import SimpleNamespace
+from velora_engine import media
+from velora_engine.config import Config
+from velora_engine.server import Engine
+
+media._meeting_temp_root = lambda: Path(os.environ["TEST_TEMP_ROOT"])
+media.shutil.disk_usage = lambda _path: SimpleNamespace(free=10**12)
+marker = Path(os.environ["TEST_MARKER"])
+class Process:
+    returncode = None
+    def __init__(self, args, **_kwargs):
+        self.args = args
+        output = Path(args[-1])
+        output.write_bytes(b"partial converter output")
+        marker.write_text(str(output))
+    def communicate(self, timeout=None):
+        time.sleep(0.02)
+        raise subprocess.TimeoutExpired(self.args, timeout)
+    def kill(self):
+        pass
+original_popen = subprocess.Popen
+def popen(args, **kwargs):
+    if args[0] == "afconvert":
+        return Process(args, **kwargs)
+    return original_popen(args, **kwargs)
+media.subprocess.Popen = popen
+async def send(_payload):
+    pass
+async def run():
+    eng = Engine(Config())
+    eng._send = send
+    await eng._run_meeting_transcribe({
+        "path": os.environ["TEST_CLIP"], "id": "restart",
+        "meeting_id": "restart", "speaker": "me", "start_chunk": 0,
+    })
+asyncio.run(run())
+"""
+    env = {**os.environ, "TEST_TEMP_ROOT": str(meeting_temp_root),
+           "TEST_MARKER": str(marker), "TEST_CLIP": str(clip),
+           "VELORA_FAKE_STT": "1"}
+    process = subprocess.Popen([sys.executable, "-c", child], env=env)
+    try:
+        async with asyncio.timeout(20):
+            while not marker.exists():
+                await asyncio.sleep(0.01)
+        orphan = Path(marker.read_text())
+        assert orphan.exists()
+    finally:
+        process.kill()
+        await asyncio.to_thread(process.wait, 5)
+
+    restarted = Engine(Config(), hard_exit=Mock())
+    restarted._send = AsyncMock()
+    monkeypatch.setattr(media, "_convert_meeting", _REAL_CONVERT_MEETING)
+    msg = {"path": str(clip), "id": "retry", "meeting_id": "restart",
+           "speaker": "me", "start_chunk": 0}
+
+    async def serve(_socket_path):
+        assert not orphan.exists()
+        await restarted._run_meeting_transcribe(msg)
+
+    monkeypatch.setattr(restarted, "serve", serve)
+    monkeypatch.setattr(server_mod, "Engine", lambda _config, parent_pid: restarted)
+    monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler",
+                        lambda *_args: None)
+    await server_mod._amain(SimpleNamespace(socket=None, parent_pid=None))
+    events = [call.args[0]["event"] for call in restarted._send.await_args_list]
+    assert events[-1] == "meeting_transcribed"
+    assert list((meeting_temp_root / media._MEETING_TEMP_DIR).iterdir()) == []
+    assert list((home / "cache" / "meeting-plans").glob("*.failure*")) == []

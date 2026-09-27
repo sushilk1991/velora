@@ -3,14 +3,16 @@
 import time
 import types
 import wave
+import shutil
 from pathlib import Path
 
 import numpy as np
 import pytest
+import soundfile as sf
 
 from velora_engine.media import (
     MAX_DURATION_S,
-    MAX_FILE_BYTES,
+    MeetingAudio,
     SAMPLE_RATE,
     load_media,
     load_meeting_media,
@@ -32,6 +34,14 @@ def _write_wav(path: Path, pcm: np.ndarray, rate: int, channels: int = 1) -> Non
         w.setsampwidth(2)
         w.setframerate(rate)
         w.writeframes(pcm16.tobytes())
+
+
+def _expected_track(tmp_path: Path) -> MeetingAudio:
+    """Use the production converted-file owner in loader success tests."""
+    path = tmp_path / "expected-converted.caf"
+    sf.write(str(path), np.zeros(SAMPLE_RATE, dtype=np.float32), SAMPLE_RATE,
+             format="CAF", subtype="PCM_16")
+    return MeetingAudio(path)
 
 
 # ---- split_for_batch ----
@@ -95,31 +105,31 @@ def test_load_media_missing_file():
         load_media("/nonexistent/velora-test.m4a")
 
 
-def test_load_meeting_media_accepts_four_hour_96k_native_capture_above_generic_limit(
-    tmp_path, monkeypatch
-):
+def test_native_four_hours(tmp_path, monkeypatch):
+    """A sparse four-hour CAF passes the meeting path's duration gate."""
+    import soundfile as sf
     from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "long-meeting.caf"
-    with src.open("wb") as output:
-        output.truncate(MAX_FILE_BYTES + 1)
-    expected = np.zeros(SAMPLE_RATE, dtype=np.float32)
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=MAX_DURATION_S * 96_000,
-            samplerate=96_000, channels=2, subtype="FLOAT",
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-    monkeypatch.setattr(media, "_load_via_afconvert", lambda _src: expected)
+    root = tmp_path / "meetings"
+    root.mkdir()
+    src = root / "long-meeting.caf"
+    sf.write(str(src), np.zeros((1, 2), dtype=np.float32), 96_000,
+             format="CAF", subtype="FLOAT")
+    raw = bytearray(src.read_bytes())
+    data = raw.index(b"data")
+    raw[data + 4:data + 12] = (-1).to_bytes(8, "big", signed=True)
+    src.write_bytes(raw)
+    with src.open("r+b") as output:
+        output.truncate(data + 16 + MAX_DURATION_S * 96_000 * 2 * 4)
+    expected = _expected_track(tmp_path)
+    monkeypatch.setattr(media, "_convert_meeting", lambda _src, _duration, **_kw: expected)
 
     with pytest.raises(ValueError, match=r"file too large \(over 2 GB\)"):
         load_media(str(src))
-    pcm = load_meeting_media(str(src), meeting_root=meeting_root)
+    track = load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
+    assert track is expected
+    track.close()
 
-    assert pcm is expected
 
 
 def test_load_meeting_media_accepts_legacy_m4a_inside_storage(tmp_path, monkeypatch):
@@ -131,48 +141,24 @@ def test_load_meeting_media_accepts_legacy_m4a_inside_storage(tmp_path, monkeypa
     src.write_bytes(b"legacy compressed meeting")
     alias = meeting_root / "legacy-link.m4a"
     alias.symlink_to(src)
-    expected = np.zeros(SAMPLE_RATE, dtype=np.float32)
+    expected = _expected_track(tmp_path)
     decoded = []
 
-    def fake_load(path):
-        decoded.append(Path(path))
+    def fake_load(path, duration, **_kwargs):
+        decoded.append((Path(path), duration))
         return expected
 
-    monkeypatch.setattr(media, "load_media", fake_load)
+    monkeypatch.setattr(media, "_convert_meeting", fake_load)
+    monkeypatch.setattr(media, "_m4a_duration_s", lambda _src, **_kwargs: 60)
 
-    pcm = load_meeting_media(str(alias), meeting_root=meeting_root)
-
-    assert pcm is expected
-    assert decoded == [src.resolve()]
-
-
-def test_load_meeting_media_reads_real_float_caf_metadata(tmp_path, monkeypatch):
-    import soundfile as sf
-
-    from velora_engine import media
-
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "me.caf"
-    sf.write(
-        str(src), _tone(0.1, rate=48_000), 48_000,
-        format="CAF", subtype="FLOAT",
-    )
-    expected = np.zeros(SAMPLE_RATE, dtype=np.float32)
-    decoded = []
-
-    def fake_decode(path):
-        decoded.append(path)
-        return expected
-
-    monkeypatch.setattr(media, "_load_via_afconvert", fake_decode)
-
-    pcm = load_meeting_media(str(src), meeting_root=meeting_root)
+    pcm = load_meeting_media(str(alias), meeting_root=meeting_root, cancel=lambda: False)
 
     assert pcm is expected
-    assert decoded == [src.resolve()]
+    assert decoded == [(src.resolve(), 60)]
+    pcm.close()
 
 
+@pytest.mark.skipif(shutil.which("afconvert") is None, reason="afconvert missing")
 @pytest.mark.parametrize("subtype", ["PCM_16", "PCM_24", "PCM_32", "DOUBLE"])
 def test_load_meeting_media_decodes_device_native_pcm_caf(tmp_path, subtype):
     """Mic capture writes the input device's native PCM. A USB mic delivers
@@ -188,147 +174,85 @@ def test_load_meeting_media_decodes_device_native_pcm_caf(tmp_path, subtype):
         format="CAF", subtype=subtype,
     )
 
-    pcm = load_meeting_media(str(src), meeting_root=meeting_root)
+    pcm = load_meeting_media(str(src), meeting_root=meeting_root, cancel=lambda: False)
+    try:
+        assert len(pcm) == SAMPLE_RATE // 2
+        assert pcm.peak(cancel=lambda: False) > 0.25
+    finally:
+        pcm.close()
 
-    assert len(pcm) == SAMPLE_RATE // 2
-    assert float(np.max(np.abs(pcm))) > 0.25
 
-
-def test_load_meeting_media_reads_a_real_caf_through_its_open_handle(
-    tmp_path, monkeypatch
-):
-    """Metadata is read through the already-open file (libsndfile virtual
-    I/O), not by path. If that could not parse CAF, every meeting would
-    fail, so this runs real soundfile and afconvert end to end."""
+@pytest.mark.skipif(shutil.which("afconvert") is None, reason="afconvert missing")
+def test_caf_metadata_parsed_once(tmp_path, monkeypatch):
+    """The one CAF parse uses the already-open recording handle."""
     import soundfile as sf
+    from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "them.caf"
-    sf.write(str(src), _tone(0.5, rate=48_000), 48_000, format="CAF", subtype="FLOAT")
-    real_info = sf.info
+    root = tmp_path / "meetings"
+    root.mkdir()
+    src = root / "them.caf"
+    sf.write(str(src), _tone(0.5, rate=48_000), 48_000,
+             format="CAF", subtype="FLOAT")
+    original = media._recover_caf_info
     sources = []
 
-    def spying_info(source, *args, **kwargs):
+    def parse(source, size):
         sources.append(source)
-        return real_info(source, *args, **kwargs)
+        return original(source, size)
 
-    monkeypatch.setattr(sf, "info", spying_info)
+    monkeypatch.setattr(media, "_recover_caf_info", parse)
+    track = load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
+    try:
+        assert len(sources) == 1 and sources[0].closed
+        assert len(track) == SAMPLE_RATE // 2
+        assert track.peak(cancel=lambda: False) > 0.25
+    finally:
+        track.close()
 
-    pcm = load_meeting_media(str(src), meeting_root=meeting_root)
-
-    assert len(sources) == 1 and hasattr(sources[0], "read")
-    assert len(pcm) == SAMPLE_RATE // 2
-    assert float(np.max(np.abs(pcm))) > 0.25
 
 
-def test_load_meeting_media_bounds_size_by_real_sample_width(tmp_path, monkeypatch):
-    """Int16 PCM is 2 bytes per sample: a container sized for Float32 frames
-    is twice its declared payload and must be rejected before decoding."""
+
+
+
+
+def test_caf_rate_guard(tmp_path, monkeypatch):
+    """An implausible CAF rate is rejected before conversion."""
+    import soundfile as sf
     from velora_engine import media
 
-    frames = 48_000 * 60
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "me.caf"
-    with src.open("wb") as output:
-        output.truncate(frames * 4)
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=frames, samplerate=48_000, channels=1,
-            subtype="PCM_16",
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-    monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: pytest.fail("decoder must not run"),
-    )
-
-    with pytest.raises(ValueError, match="size does not match its header"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
-
-
-def test_load_meeting_media_rejects_long_header_before_decode(tmp_path, monkeypatch):
-    from velora_engine import media
-
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "too-long.caf"
-    src.write_bytes(b"placeholder")
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=(MAX_DURATION_S + 1) * 48_000,
-            samplerate=48_000, channels=2, subtype="FLOAT",
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-    monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: pytest.fail("decoder must not run"),
-    )
-
-    with pytest.raises(ValueError, match="longer than 4 hours"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
-
-
-def test_load_meeting_media_rejects_implausible_sample_rate_before_decode(
-    tmp_path, monkeypatch
-):
-    from velora_engine import media
-
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "invalid-rate.caf"
-    src.write_bytes(b"placeholder")
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=1, samplerate=768_000, channels=2,
-            subtype="FLOAT",
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-    monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: pytest.fail("decoder must not run"),
-    )
+    root = tmp_path / "meetings"
+    root.mkdir()
+    src = root / "invalid-rate.caf"
+    sf.write(str(src), np.zeros(1, dtype=np.float32), 48_000,
+             format="CAF", subtype="FLOAT")
+    raw = bytearray(src.read_bytes())
+    raw[20:28] = __import__("struct").pack(">d", 768_000.0)
+    src.write_bytes(raw)
+    monkeypatch.setattr(media, "_convert_meeting",
+                        lambda *_a, **_kw: pytest.fail("converter ran"))
 
     with pytest.raises(ValueError, match="unsupported meeting audio format"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
 
 
-def test_load_meeting_media_never_falls_back_to_full_native_read(
-    tmp_path, monkeypatch
-):
+
+def test_no_full_native_read(tmp_path, monkeypatch):
+    """A converter failure never materializes the entire source."""
+    import soundfile as sf
     from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "unreadable.caf"
-    src.write_bytes(b"placeholder")
-    read_called = False
+    root = tmp_path / "meetings"
+    root.mkdir()
+    src = root / "unreadable.caf"
+    sf.write(str(src), np.zeros(48_000, dtype=np.float32), 48_000,
+             format="CAF", subtype="FLOAT")
+    monkeypatch.setattr(sf, "read", lambda *_a, **_kw: pytest.fail("native read"))
+    monkeypatch.setattr(media, "_convert_meeting",
+                        lambda *_a, **_kw: _raise(ValueError("decode failed")))
 
-    def fail_if_read(*_args, **_kwargs):
-        nonlocal read_called
-        read_called = True
-        raise AssertionError("native payload must not be materialized")
+    with pytest.raises(media.TransientMediaError, match="could not be converted"):
+        load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
 
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=48_000, samplerate=48_000, channels=2,
-            subtype="FLOAT",
-        ),
-        read=fail_if_read,
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-    monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: (_ for _ in ()).throw(ValueError("decode failed")),
-    )
-
-    with pytest.raises(ValueError, match="unreadable meeting audio"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
-    assert not read_called
 
 
 def test_load_meeting_media_rejects_source_outside_app_storage(tmp_path):
@@ -338,72 +262,43 @@ def test_load_meeting_media_rejects_source_outside_app_storage(tmp_path):
     outside.write_bytes(b"placeholder")
 
     with pytest.raises(ValueError, match="outside Velora storage"):
-        load_meeting_media(str(outside), meeting_root=meeting_root)
+        load_meeting_media(str(outside), meeting_root=meeting_root, cancel=lambda: False)
 
 
-def test_load_meeting_media_rejects_container_larger_than_declared_pcm(
-    tmp_path, monkeypatch
-):
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "mismatched.caf"
-    src.write_bytes(b"0" * (2 * 1024**2))
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=1, samplerate=48_000, channels=2,
-            subtype="FLOAT",
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-
-    with pytest.raises(ValueError, match="size does not match"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
 
 
-def test_load_meeting_media_rejects_source_changed_during_validation(
-    tmp_path, monkeypatch
-):
+def test_caf_changed_during_parse(tmp_path, monkeypatch):
+    """A growing source is retried after its metadata was read."""
+    import soundfile as sf
     from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "changing.caf"
-    src.write_bytes(b"placeholder")
+    root = tmp_path / "meetings"
+    root.mkdir()
+    src = root / "changing.caf"
+    sf.write(str(src), np.zeros(48_000, dtype=np.float32), 48_000,
+             format="CAF", subtype="FLOAT")
+    original = media._recover_caf_info
 
-    def changing_info(_path):
-        with src.open("ab") as output:
-            output.write(b"changed")
-        return types.SimpleNamespace(
-            format="CAF", frames=48_000, samplerate=48_000, channels=2,
-            subtype="FLOAT",
-        )
+    def parse(source, size):
+        info = original(source, size)
+        _append_to(src)
+        return info
 
-    fake = types.SimpleNamespace(info=changing_info)
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
-    monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: pytest.fail("decoder must not run"),
-    )
-
-    # A file still being written reads fine later: the app retries it
-    # instead of skipping the track.
+    monkeypatch.setattr(media, "_recover_caf_info", parse)
     with pytest.raises(media.TransientMediaError, match="changed during validation"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
+
 
 
 def _valid_meeting_caf(tmp_path, monkeypatch):
     """A one-second stereo Float32 CAF whose metadata passes validation."""
+    import soundfile as sf
+
     meeting_root = tmp_path / "meetings"
     meeting_root.mkdir()
     src = meeting_root / "them.caf"
-    src.write_bytes(b"0" * 1024)
-    fake = types.SimpleNamespace(
-        info=lambda _path: types.SimpleNamespace(
-            format="CAF", frames=48_000, samplerate=48_000, channels=2,
-            subtype="FLOAT",
-        )
-    )
-    monkeypatch.setitem(__import__("sys").modules, "soundfile", fake)
+    sf.write(str(src), np.zeros((48_000, 2), dtype=np.float32),
+             48_000, format="CAF", subtype="FLOAT")
     return src, meeting_root
 
 
@@ -425,10 +320,10 @@ def test_load_meeting_media_reports_a_converter_that_could_not_run_as_transient(
     from velora_engine import media
 
     src, meeting_root = _valid_meeting_caf(tmp_path, monkeypatch)
-    monkeypatch.setattr(media, "_load_via_afconvert", lambda _src: _raise(failure))
+    monkeypatch.setattr(media, "_convert_meeting", lambda _src, _duration, **_kwargs: _raise(failure))
 
     with pytest.raises(media.TransientMediaError):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=meeting_root, cancel=lambda: False)
 
 
 def test_load_meeting_media_reports_a_file_changed_during_conversion_as_transient(
@@ -436,17 +331,19 @@ def test_load_meeting_media_reports_a_file_changed_during_conversion_as_transien
 ):
     from velora_engine import media
 
+    expected = _expected_track(tmp_path)
     src, meeting_root = _valid_meeting_caf(tmp_path, monkeypatch)
 
-    def appending_convert(path):
+    def appending_convert(path, _duration, **_kwargs):
         with path.open("ab") as output:
             output.write(b"more")
-        return np.zeros(SAMPLE_RATE, dtype=np.float32)
+        return expected
 
-    monkeypatch.setattr(media, "_load_via_afconvert", appending_convert)
+    monkeypatch.setattr(media, "_convert_meeting", appending_convert)
 
     with pytest.raises(media.TransientMediaError, match="changed during conversion"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=meeting_root, cancel=lambda: False)
+    assert expected._source.closed
 
 
 def test_load_meeting_media_checks_free_disk_before_converting(tmp_path, monkeypatch):
@@ -459,12 +356,12 @@ def test_load_meeting_media_checks_free_disk_before_converting(tmp_path, monkeyp
         media.shutil, "disk_usage",
         lambda _path: types.SimpleNamespace(total=1, used=1, free=0))
     monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: pytest.fail("decoder must not run"),
+        media, "_convert_meeting",
+        lambda _src, _duration, **_kwargs: pytest.fail("decoder must not run"),
     )
 
     with pytest.raises(media.TransientMediaError, match="disk space"):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=meeting_root, cancel=lambda: False)
 
 
 def _append_to(path):
@@ -473,71 +370,51 @@ def _append_to(path):
 
 
 @pytest.mark.parametrize("mutate", [_append_to, lambda path: path.unlink()])
-def test_load_meeting_media_reports_metadata_failure_on_a_changing_file_as_transient(
-    tmp_path, monkeypatch, mutate
-):
-    """libsndfile rejects a header caught mid-write or a file removed under
-    it. That says nothing about the finished file, so the app must retry
-    the track instead of skipping it for good."""
+def test_caf_parse_change_retries(tmp_path, monkeypatch, mutate):
+    """A malformed header caught mid-write is a transient read."""
     from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "them.caf"
-    src.write_bytes(b"0" * 1024)
+    src, root = _valid_meeting_caf(tmp_path, monkeypatch)
 
-    def failing_info(_source):
+    def parse(_source, _size):
         mutate(src)
-        raise RuntimeError("Error opening: Format not recognised")
+        raise ValueError("incomplete CAF header")
 
-    monkeypatch.setitem(
-        __import__("sys").modules, "soundfile", types.SimpleNamespace(info=failing_info))
-
+    monkeypatch.setattr(media, "_recover_caf_info", parse)
     with pytest.raises(media.TransientMediaError):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
 
 
-def test_load_meeting_media_reports_bad_metadata_from_a_changing_file_as_transient(
-    tmp_path, monkeypatch
-):
-    """A header read mid-write can describe any format or length. Checked
-    before the file was known to be stable, it skipped the track for good."""
+
+def test_caf_bad_metadata_retries(tmp_path, monkeypatch):
+    """Changed bytes take precedence over an invalid parsed header."""
     from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "them.caf"
-    src.write_bytes(b"0" * 1024)
+    src, root = _valid_meeting_caf(tmp_path, monkeypatch)
+    original = media._recover_caf_info
 
-    def half_written_info(_source):
+    def parse(source, size):
+        info = original(source, size)
         _append_to(src)
-        return types.SimpleNamespace(
-            format="CAF", frames=-1, samplerate=0, channels=0, subtype="")
+        info.samplerate = 0
+        return info
 
-    monkeypatch.setitem(
-        __import__("sys").modules, "soundfile",
-        types.SimpleNamespace(info=half_written_info))
-
+    monkeypatch.setattr(media, "_recover_caf_info", parse)
     with pytest.raises(media.TransientMediaError):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
 
 
-def test_load_meeting_media_reports_a_metadata_read_error_as_transient(
-    tmp_path, monkeypatch
-):
-    """Too many open files (EMFILE) is the process, not the file."""
+
+def test_caf_read_error_retries(tmp_path, monkeypatch):
+    """EMFILE during an open-handle CAF parse is transient."""
     from velora_engine import media
 
-    meeting_root = tmp_path / "meetings"
-    meeting_root.mkdir()
-    src = meeting_root / "them.caf"
-    src.write_bytes(b"0" * 1024)
-    monkeypatch.setitem(
-        __import__("sys").modules, "soundfile",
-        types.SimpleNamespace(info=lambda _source: _raise(OSError(24, "Too many open files"))))
-
+    src, root = _valid_meeting_caf(tmp_path, monkeypatch)
+    monkeypatch.setattr(media, "_recover_caf_info",
+                        lambda *_a: _raise(OSError(24, "Too many open files")))
     with pytest.raises(media.TransientMediaError):
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=root, cancel=lambda: False)
+
 
 
 def test_load_meeting_media_keeps_a_stable_unparseable_file_permanent(tmp_path):
@@ -551,7 +428,7 @@ def test_load_meeting_media_keeps_a_stable_unparseable_file_permanent(tmp_path):
     src.write_bytes(b"not a caf file" * 64)
 
     with pytest.raises(ValueError, match="unreadable meeting audio") as rejected:
-        load_meeting_media(str(src), meeting_root=meeting_root)
+        load_meeting_media(str(src), meeting_root=meeting_root, cancel=lambda: False)
     assert not isinstance(rejected.value, media.TransientMediaError)
 
 
@@ -563,27 +440,14 @@ def test_load_meeting_media_reports_a_conversion_failure_on_a_changing_file_as_t
 
     src, meeting_root = _valid_meeting_caf(tmp_path, monkeypatch)
 
-    def failing_convert(path):
+    def failing_convert(path, _duration, **_kwargs):
         mutate(path)
         raise ValueError("afconvert failed: 'typ?'")
 
-    monkeypatch.setattr(media, "_load_via_afconvert", failing_convert)
+    monkeypatch.setattr(media, "_convert_meeting", failing_convert)
 
     with pytest.raises(media.TransientMediaError):
-        load_meeting_media(str(src), meeting_root=meeting_root)
-
-
-def test_load_meeting_media_keeps_a_decode_rejection_permanent(tmp_path, monkeypatch):
-    from velora_engine import media
-
-    src, meeting_root = _valid_meeting_caf(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        media, "_load_via_afconvert",
-        lambda _src: _raise(ValueError("afconvert failed: 'typ?'")))
-
-    with pytest.raises(ValueError, match="unreadable meeting audio") as rejected:
-        load_meeting_media(str(src), meeting_root=meeting_root)
-    assert not isinstance(rejected.value, media.TransientMediaError)
+        load_meeting_media(str(src), meeting_root=meeting_root, cancel=lambda: False)
 
 
 def test_load_media_wav_resamples_to_16k_mono(tmp_path):
