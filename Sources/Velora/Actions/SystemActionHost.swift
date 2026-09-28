@@ -237,6 +237,46 @@ final class SystemActionHost: ActionHost {
             urls, withApplicationAt: appURL, configuration: configuration)
     }
 
+    /// Seconds the results page gets, after `open_url`, to load and list a
+    /// video; seconds the pressed video gets to become a watch page.
+    private static let videoResultsTimeoutSeconds: TimeInterval = 10
+    private static let videoWatchTimeoutSeconds: TimeInterval = 5
+    private static let videoPollMs = 250
+
+    /// The YouTube skill's press. `open_url` returns before the page loads,
+    /// so poll the frontmost browser until its results page lists a video,
+    /// then press it and wait for the watch page.
+    func playFirstVideo(
+        from resultsURL: URL, isCancelled: () -> Bool
+    ) -> ActionVideoReceipt? {
+        guard Permissions.accessibilityGranted else { return nil }
+
+        let deadline = now() + Self.videoResultsTimeoutSeconds
+        while now() < deadline, !isCancelled() {
+            guard let app = onMain({ NSWorkspace.shared.frontmostApplication }),
+                  let bundleID = app.bundleIdentifier,
+                  ActionRuntimePolicy.isBrowserBundle(bundleID),
+                  let result = ScreenContext.firstYouTubeResult(
+                    of: app, resultsURL: resultsURL, isCancelled: isCancelled)
+            else {
+                sleep(ms: Self.videoPollMs)
+                continue
+            }
+
+            // Last chance to stop before the press starts the video.
+            guard !isCancelled() else { return nil }
+            clearActionTextState()
+            guard let watchURL = ScreenContext.playYouTubeResult(
+                result, timeout: Self.videoWatchTimeoutSeconds,
+                isCancelled: isCancelled)
+            else { return nil }
+            return ActionVideoReceipt(
+                appName: app.localizedName ?? bundleID, bundleID: bundleID,
+                watchURL: watchURL)
+        }
+        return nil
+    }
+
     /// The last-used copy of the app that opens `url`, only when more than
     /// one copy runs; nil leaves the choice to LaunchServices.
     private func latestBrowserCopy(for url: URL) -> NSRunningApplication? {

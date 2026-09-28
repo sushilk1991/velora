@@ -1850,6 +1850,16 @@ final class BackgroundRoutingActionHost: ActionHost {
         return system.openURL(url)
     }
 
+    /// The results page it plays from was opened in the foreground by the
+    /// `open_url` before it, so the foreground host presses.
+    func playFirstVideo(
+        from resultsURL: URL, isCancelled: () -> Bool
+    ) -> ActionVideoReceipt? {
+        guard terminalFailureReason == nil else { return nil }
+        unroute()
+        return system.playFirstVideo(from: resultsURL, isCancelled: isCancelled)
+    }
+
     /// Drops the background route. The draft is dropped with the target: text
     /// delivered to the old
     /// window must never authorize a commit in the new one.

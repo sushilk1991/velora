@@ -2737,6 +2737,148 @@ enum ScreenContext {
     }
 }
 
+// MARK: - YouTube play skill
+
+extension ScreenContext {
+    /// The first video link on a YouTube results page, with the web area
+    /// and window it was found in (both re-read after the press).
+    struct YouTubeResult {
+        let link: AXUIElement
+        let webArea: AXUIElement
+        let window: AXUIElement
+    }
+
+    /// AX nodes one search may visit. The first video sat at node 509 in
+    /// document order on a live Chrome results page (2026-09-28).
+    private static let youTubeNodeBudget = 6_000
+    private static let urlAttribute = "AXURL"
+    private static let webAreaRole = "AXWebArea"
+    private static let linkRole = "AXLink"
+
+    /// The first `/watch` link in the frontmost window's web area, when that
+    /// web area shows the search `resultsURL` asked for. Depth-first
+    /// pre-order is document order, so "first" is the first card a reader
+    /// sees, not the shallowest node:
+    ///
+    ///     AXWindow ─ … ─ AXWebArea (results?search_query=lofi)
+    ///                       ├─ AXLink /shorts/…      skipped
+    ///                       ├─ AXLink /watch?v=A     ← this one
+    ///                       └─ AXLink /watch?v=B
+    static func firstYouTubeResult(
+        of app: NSRunningApplication, resultsURL: URL,
+        isCancelled: () -> Bool
+    ) -> YouTubeResult? {
+        let pid = app.processIdentifier
+        guard pid > 0 else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, axTimeout)
+        enableChromiumAccessibility(appElement, pid: pid)
+        guard let window = focusedOrFirstWindow(appElement, pid: pid) else {
+            return nil
+        }
+
+        // Another page's web area (a stale tab, a devtools pane) is skipped
+        // whole: its nodes would only spend the budget and the wait.
+        var budget = youTubeNodeBudget
+        let webArea = firstDescendant(
+            of: window, budget: &budget, isCancelled: isCancelled
+        ) { element, role in
+            guard role == webAreaRole else { return .descend }
+            let shown = elementURL(element).map {
+                YouTubeSkill.sameSearch($0, resultsURL)
+            } == true
+            return shown ? .match : .skip
+        }
+        guard let webArea else { return nil }
+
+        let link = firstDescendant(
+            of: webArea, budget: &budget, isCancelled: isCancelled
+        ) { element, role in
+            let watch = role == linkRole
+                && elementURL(element).map(YouTubeSkill.isWatchURL) == true
+            return watch ? .match : .descend
+        }
+        guard let link else { return nil }
+        return YouTubeResult(link: link, webArea: webArea, window: window)
+    }
+
+    /// Press `result` and wait up to `timeout` for a watch page. YouTube
+    /// navigates in place, so the same web area's `AXURL` changes (230 ms
+    /// live); a full reload replaces the web area, so the window is
+    /// searched again when the old one stops answering.
+    static func playYouTubeResult(
+        _ result: YouTubeResult, timeout: TimeInterval,
+        isCancelled: () -> Bool
+    ) -> URL? {
+        AXUIElementSetMessagingTimeout(result.link, axTimeout)
+        let pressed = AXUIElementPerformAction(
+            result.link, kAXPressAction as CFString)
+        guard pressed == .success else { return nil }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let url = currentPageURL(result, isCancelled: isCancelled),
+               YouTubeSkill.isWatchURL(url) {
+                return url
+            }
+            Thread.sleep(forTimeInterval: youTubePollSeconds)
+        } while Date() < deadline && !isCancelled()
+        return nil
+    }
+
+    private static let youTubePollSeconds: TimeInterval = 0.1
+    /// Nodes a re-search for a replaced web area may visit: it sits near
+    /// the top (node 32 in Chrome).
+    private static let webAreaNodeBudget = 400
+
+    private static func currentPageURL(
+        _ result: YouTubeResult, isCancelled: () -> Bool
+    ) -> URL? {
+        if let url = elementURL(result.webArea) {
+            return url
+        }
+        var budget = webAreaNodeBudget
+        let webArea = firstDescendant(
+            of: result.window, budget: &budget, isCancelled: isCancelled
+        ) { _, role in role == webAreaRole ? .match : .descend }
+        return webArea.flatMap(elementURL)
+    }
+
+    private static func elementURL(_ element: AXUIElement) -> URL? {
+        axURLString(element, urlAttribute).flatMap(URL.init(string:))
+    }
+
+    /// What a search does with one node: return it, pass over it and its
+    /// subtree, or look inside it.
+    private enum AXVisit {
+        case match, skip, descend
+    }
+
+    /// Depth-first, pre-order search under `root`, visiting at most
+    /// `budget` nodes (shared across calls through `inout`). Stops as soon
+    /// as `isCancelled` says so; each node costs up to two AX round trips.
+    private static func firstDescendant(
+        of root: AXUIElement, budget: inout Int,
+        isCancelled: () -> Bool,
+        visit: (AXUIElement, String) -> AXVisit
+    ) -> AXUIElement? {
+        var stack = [root]
+        while budget > 0, !isCancelled(), let element = stack.popLast() {
+            budget -= 1
+            let role = axString(element, kAXRoleAttribute) ?? ""
+            switch visit(element, role) {
+            case .match:
+                return element
+            case .skip:
+                continue
+            case .descend:
+                stack.append(contentsOf: (axChildren(element) ?? []).reversed())
+            }
+        }
+        return nil
+    }
+}
+
 // MARK: - Diagnostics
 
 extension ScreenContext {

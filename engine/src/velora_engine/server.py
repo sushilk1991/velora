@@ -36,8 +36,8 @@ from typing import Any, Callable, TypeVar
 import numpy as np
 
 from . import (
-    __version__, action_fastpath, actions, batch_priority, diarization,
-    editing, formatting, models, protocol,
+    __version__, action_fastpath, action_skills, actions, batch_priority,
+    diarization, editing, formatting, models, protocol,
 )
 from .audio_store import ActiveAudioSpool, AudioStore
 from .cleanup import (
@@ -4949,6 +4949,14 @@ class Engine:
         own failure is also None: an optimisation must never fail an action.
         """
         try:
+            # A skill is a rule, not a model read: it needs no calibrated
+            # model and goes first ("play X on YouTube").
+            skill = action_skills.reply_for(session)
+            if skill is not None:
+                log.info("action skill %s", skill["steps"][-1]["do"])
+                return json.dumps(
+                    skill, ensure_ascii=False, separators=(",", ":"))
+
             return await self._decide_action_reply(session)
         except Exception:  # noqa: BLE001 — the controller is the fallback
             log.exception("action fast path failed; controller runs")

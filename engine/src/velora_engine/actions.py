@@ -43,6 +43,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from urllib.parse import unquote_plus
 
+from .action_skills import (
+    PLAY_FIRST_VIDEO,
+    is_youtube_results_url,
+    youtube_play_query,
+)
 from .cleanup import neutralize_control_tokens
 from .formatting import category_for_bundle
 
@@ -317,7 +322,7 @@ VERBS = (
     "open_app", "open_url", "wait_frontmost", "verify_context",
     "type_text", "replace_text", "search_text", "key", "pause", "paste_text",
     "press_element", "press_ui", "verify_ui", "present_ui",
-    "media_control", "verify_state",
+    "media_control", "verify_state", PLAY_FIRST_VIDEO,
 )
 
 # Steps that put characters or keystrokes into another app. Each one requires a
@@ -332,7 +337,7 @@ INPUT_VERBS = ("type_text", "replace_text", "search_text", "paste_text", "key")
 # because Music is in front.
 EFFECTIVE_VERBS = ("open_app", "open_url", "type_text", "replace_text", "paste_text",
                    "search_text", "key", "press_element", "press_ui",
-                   "present_ui", "media_control")
+                   "present_ui", "media_control", PLAY_FIRST_VIDEO)
 # press_element also acts on the frontmost app, so it needs the same checkpoint
 # — but it is not an input verb: it performs an AX action, not a keystroke.
 FOCUS_REQUIRED_VERBS = INPUT_VERBS + (
@@ -2320,6 +2325,34 @@ def _validate_verify_state(step: dict,
     return normalized
 
 
+def _validate_play_first_video(step: dict, index: int, count: int,
+                               steps: list[dict],
+                               state: "SessionState | None") -> dict:
+    """The YouTube play skill's second step (`action_skills`): press the
+    first video on the results page the step before opened. The step names
+    no element, so nothing on screen can steer it; Swift finds the video and
+    proves the watch page loaded.
+
+        open_url https://www.youtube.com/results?search_query=lofi
+        play_first_video                                   ← last, bare
+    """
+    if set(step) != {"do"}:
+        raise PlanError(
+            f"{PLAY_FIRST_VIDEO}: planner supplied unsupported mechanics")
+    if index != count - 1:
+        raise PlanError(f"{PLAY_FIRST_VIDEO}: must be the last step")
+    previous = steps[-1] if steps else {}
+    if (previous.get("do") != "open_url"
+            or not is_youtube_results_url(previous["url"])):
+        raise PlanError(
+            f"{PLAY_FIRST_VIDEO}: must follow open_url of YouTube results")
+    if state is not None and youtube_play_query(state.spoken_command) is None:
+        raise PlanError(
+            f"{PLAY_FIRST_VIDEO}: the spoken command is not "
+            "'play … on YouTube'")
+    return {"do": PLAY_FIRST_VIDEO}
+
+
 def _validate_present_ui(step: dict, state: "SessionState | None",
                          declared_sends: object) -> dict:
     del step, state, declared_sends
@@ -2757,6 +2790,18 @@ def validate_plan(plan: dict, state: SessionState | None = None) -> dict:
                     f"step {index}: 'press_ui' requires a fresh observation "
                     "before any later step")
             steps.append(_validate_press_ui(raw, state))
+            focus_established = False
+            ui_target_verified = False
+            if pending_text:
+                unverified_text = True
+                pending_value = ""
+                pending_ui_index = None
+                pending_ui_role = ""
+                pending_ui_label = ""
+        elif verb == PLAY_FIRST_VIDEO:
+            steps.append(_validate_play_first_video(
+                raw, index, len(raw_steps), steps, state))
+            # The page navigates: no checkpoint or pending text survives it.
             focus_established = False
             ui_target_verified = False
             if pending_text:

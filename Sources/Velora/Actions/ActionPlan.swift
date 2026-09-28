@@ -96,6 +96,9 @@ enum ActionStep: Equatable {
     /// Closed positive postcondition. Swift, not the planner, supplies the
     /// exact PID/window predicates and expected action-owned value.
     case verifyState(ActionStateCheck)
+    /// The YouTube skill's second step: press the first video on the
+    /// results page `resultsURL` opened, then prove the watch page loaded.
+    case playFirstVideo(resultsURL: URL)
 
     /// Steps that put characters or keystrokes into another app.
     var isInput: Bool {
@@ -142,6 +145,8 @@ struct ActionPlan: Equatable {
 enum ActionLocalProof: Equatable {
     case media(state: ActionMediaState, appName: String)
     case state(expectedValue: String?, appName: String)
+    /// A watch page loaded in `appName` after `play_first_video`.
+    case video(appName: String)
 
     func covers(_ command: String) -> Bool {
         switch self {
@@ -162,6 +167,11 @@ enum ActionLocalProof: Equatable {
             return ActionPlan.replaceCovers(
                 command, expectedValue: expectedValue,
                 appName: appName)
+
+        case .video:
+            // The skill runs only for a whole "play X on YouTube" command;
+            // anything more ("… and share it") is not covered by playing.
+            return YouTubeSkill.playQuery(in: command) != nil
         }
     }
 
@@ -219,6 +229,7 @@ enum ActionPlanError: Error, Equatable {
     case urlCarriesUnspokenData(token: String)
     case urlEmbedsCredentials
     case mediaNativeRequired(step: Int)
+    case skillStepOutOfPlace(step: Int)
 
     var message: String {
         switch self {
@@ -279,6 +290,8 @@ enum ActionPlanError: Error, Equatable {
             return "URLs with embedded credentials are not allowed"
         case .mediaNativeRequired(let step):
             return "step \(step): a play or pause command requires app-native media control"
+        case .skillStepOutOfPlace(let step):
+            return "step \(step): play_first_video must end a spoken \"play … on YouTube\" right after its results page"
         case .bareSpace:
             return "bare Space can activate ambient controls; use type_text to enter spaces"
         case .unsafeBareKey(let key):
@@ -1189,6 +1202,24 @@ extension ActionPlan {
                 pendingValue = ""
                 clearPendingTarget()
 
+            case YouTubeSkill.playVerb:
+                // The YouTube skill's second step: bare, last, right after
+                // the results page it plays from, and only for a spoken
+                // "play X on YouTube" (engine: `_validate_play_first_video`).
+                guard Set(step.keys) == ["do"],
+                      index == rawSteps.count - 1,
+                      case .openURL(let resultsURL)? = steps.last,
+                      YouTubeSkill.isResultsURL(resultsURL),
+                      YouTubeSkill.playQuery(in: state.spokenCommand) != nil
+                else { throw ActionPlanError.skillStepOutOfPlace(step: index) }
+                steps.append(.playFirstVideo(resultsURL: resultsURL))
+                // The page navigates: no checkpoint or pending text survives.
+                focusEstablished = false
+                uiTargetVerified = false
+                if pendingText { unverifiedText = true }
+                pendingValue = ""
+                clearPendingTarget()
+
             case "wait_frontmost":
                 let requested = step["timeout_ms"] as? Int ?? Limits.defaultWaitMs
                 let timeout = min(max(requested, 1), Limits.maxWaitMs)
@@ -1736,6 +1767,10 @@ extension ActionPlan {
                 next.currentApp = app
             case .openURL:
                 next.currentApp = ""
+                if next.pendingText { next.unverifiedText = true }
+                next.pendingValue = ""
+                clearPendingTarget()
+            case .playFirstVideo:
                 if next.pendingText { next.unverifiedText = true }
                 next.pendingValue = ""
                 clearPendingTarget()

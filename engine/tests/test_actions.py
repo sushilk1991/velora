@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from test_server import connect, engine  # noqa: F401 — fixture reuse
 
-from velora_engine import actions, server as server_module
+from velora_engine import action_skills, actions, server as server_module
 
 
 def ctx(**over):
@@ -2941,9 +2941,13 @@ def test_session_prompt_describes_the_loop_not_recipes():
     assert "press_element" in prompt
     assert "done" in prompt
     assert "Follow them step for step" not in prompt
-    for verb in set(actions.VERBS) - {"present_ui"}:
+    # Internal verbs the planner never writes: present_ui, and the steps
+    # only a skill emits.
+    internal = {"present_ui", action_skills.PLAY_FIRST_VIDEO}
+    for verb in set(actions.VERBS) - internal:
         assert verb in prompt
-    assert "present_ui" not in prompt
+    for verb in internal:
+        assert verb not in prompt
 
 
 # ============ audited bypasses (2026-08-04) — regression tests ============

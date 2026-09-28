@@ -192,6 +192,13 @@ protocol ActionHost: AnyObject {
     /// predicate; the plan cannot supply process/window or polling mechanics.
     func verifyState(_ check: ActionStateCheck,
                      expecting bundleID: String?) -> ActionStateReceipt?
+    /// YouTube skill: in the frontmost browser showing `resultsURL`'s
+    /// search, press the first video and prove the watch page loaded.
+    /// Returns nil as soon as `isCancelled` says so: the wait can run
+    /// ~15 s, and the executor only sees a cancel between steps.
+    func playFirstVideo(
+        from resultsURL: URL, isCancelled: () -> Bool
+    ) -> ActionVideoReceipt?
     func typeText(_ text: String, expecting bundleID: String?) -> Bool
     func pasteText(_ text: String, expecting bundleID: String?) -> Bool
     /// `expecting` is the bundle id the plan established focus on. The Return
@@ -264,6 +271,9 @@ extension ActionHost {
                     expecting bundleID: String?) -> ActionStateReceipt? { nil }
     func verifyState(_ check: ActionStateCheck,
                      expecting bundleID: String?) -> ActionStateReceipt? { nil }
+    func playFirstVideo(
+        from resultsURL: URL, isCancelled: () -> Bool
+    ) -> ActionVideoReceipt? { nil }
 }
 
 enum ActionOutcome: Equatable {
@@ -931,6 +941,33 @@ final class ActionExecutor {
                         index, "the media command did not reach the target app",
                         recoverable: false)
                 }
+
+            case .playFirstVideo(let resultsURL):
+                // No planner turn can do better: the results page is past
+                // its snapshot. A miss ends the action.
+                let receipt = host.playFirstVideo(
+                    from: resultsURL, isCancelled: { self.cancelled })
+                // A cancel during the wait wins over whatever the host
+                // managed: the user asked to stop, not for a report of done.
+                if cancelled {
+                    note("play_first_video: cancelled")
+                    return ActionRunResult(outcome: .cancelled(step: index),
+                                           trace: trace,
+                                           observationTrace: observationTrace,
+                                           executedSteps: index,
+                                           evidence: evidence)
+                }
+                guard let receipt else {
+                    note("play_first_video: no video played")
+                    return failed(
+                        index, "couldn't start the first YouTube result",
+                        recoverable: false)
+                }
+                evidence.append(.targetResolved(ActionCompletionTarget(
+                    appName: receipt.appName, bundleID: receipt.bundleID)))
+                evidence.append(.localGoalVerified(.video(
+                    appName: receipt.appName)))
+                note("play_first_video \(receipt.appName): watch page")
             }
         }
         return ActionRunResult(outcome: .completed, trace: trace,
@@ -957,6 +994,7 @@ final class ActionExecutor {
         case .mediaControl(let control):
             return control.state == .play ? "Starting playback" : "Pausing playback"
         case .verifyState: return "Verifying completion"
+        case .playFirstVideo: return "Playing the first video"
         case .typeTextAt(_, let operation, _):
             switch operation {
             case .replace: return "Replacing text"
@@ -969,7 +1007,7 @@ final class ActionExecutor {
     private static func mutatesUI(_ step: ActionStep) -> Bool {
         switch step {
         case .typeText, .typeTextAt, .searchText, .pasteText, .key,
-             .pressElement, .pressUI, .mediaControl:
+             .pressElement, .pressUI, .mediaControl, .playFirstVideo:
             return true
         default:
             return false

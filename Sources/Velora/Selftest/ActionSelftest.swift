@@ -58,6 +58,13 @@ final class FakeActionHost: ActionHost {
     /// The plan's own key vocabulary, as the hosts now receive it.
     private(set) var keysByName: [(name: String, mods: [String])] = []
     private(set) var openedURLs: [URL] = []
+    /// What `playFirstVideo` proves; nil plays nothing.
+    var videoReceipt: ActionVideoReceipt?
+    private(set) var playedFrom: [URL] = []
+    /// Runs inside `playFirstVideo`, as a user's cancel would mid-wait.
+    var duringPlay: (() -> Void)?
+    /// What the host's cancel check said after `duringPlay` ran.
+    private(set) var sawCancelDuringPlay: Bool?
     private(set) var pressedLabels: [String] = []
     private(set) var pressedUIIndices: [Int] = []
     private(set) var sleepCalls: [Int] = []
@@ -99,6 +106,16 @@ final class FakeActionHost: ActionHost {
         log.append("openURL(\(url.absoluteString))")
         openedURLs.append(url)
         return true
+    }
+
+    func playFirstVideo(
+        from resultsURL: URL, isCancelled: () -> Bool
+    ) -> ActionVideoReceipt? {
+        log.append("playFirstVideo")
+        playedFrom.append(resultsURL)
+        duringPlay?()
+        sawCancelDuringPlay = isCancelled()
+        return videoReceipt
     }
 
     func actionProcess() -> ActionProcessIdentity? { actionProcessValue }
@@ -5599,6 +5616,7 @@ extension Selftest {
         testBackgroundActionGate()
         testBackgroundWebHandoff()
         testBrowserResolution()
+        testYouTubeSkill()
         testWindowlessRouting()
         testRoutedMediaControl()
         testPoisonedNativeReady()
@@ -6984,6 +7002,198 @@ extension Selftest {
             ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
              "--profile-directory=Default", "--remote-debugging-portal"]),
                "a user's launch is not automation")
+    }
+
+    /// "Play X on YouTube" is a fixed skill (owner decision, 2026-09-28).
+    /// Field failure it replaces: after Chrome came forward the planner typed
+    /// into the page 4×, which the foreground host cannot do, and the first
+    /// video sat ~940 AX nodes deep, past the 500-node snapshot.
+    private static func testYouTubeSkill() {
+        let lofi = "Can you open YouTube and play Bollywood Lo-Fi music for me?"
+        let lofiURL = URL(string: "https://www.youtube.com/results"
+            + "?search_query=Bollywood+Lo-Fi+music")!
+
+        // Which commands are "play X on YouTube" (same table as the engine).
+        let queries: [(String, String)] = [
+            (lofi, "Bollywood Lo-Fi music"),
+            ("Play Arijit Singh songs on YouTube", "Arijit Singh songs"),
+            ("play lofi beats on youtube please", "lofi beats"),
+            ("YouTube, play Despacito", "Despacito"),
+            ("Open YouTube and play some jazz", "some jazz"),
+            ("please play Kishore Kumar hits on YouTube.", "Kishore Kumar hits"),
+            ("Go to YouTube and play Coke Studio", "Coke Studio"),
+            // "then" between the halves: the 2026-09-28 17:13 live failure.
+            ("Can you open YouTube and then play any pop song latest 2026 pop songs?",
+             "any pop song latest 2026 pop songs"),
+            ("Open YouTube, then play Despacito", "Despacito"),
+            ("open YouTube then play lofi", "lofi"),
+            // A hyphen inside a word is not a clause break.
+            ("play Lo-Fi beats on YouTube", "Lo-Fi beats"),
+        ]
+        for (command, query) in queries {
+            expect(YouTubeSkill.playQuery(in: command) == query,
+                   "'\(command)' plays '\(query)'")
+        }
+        let others = [
+            "Open YouTube", "search YouTube for cat videos",
+            "play Despacito on YouTube and send it to Priya",
+            "open YouTube and play Despacito and share it with Rahul",
+            "play Despacito on YouTube Music", "play Despacito",
+            "pause YouTube", "play this video on YouTube",
+            "play it on YouTube", "open YouTube and play the first video",
+            "open YouTube and then play it",
+            // A comma-joined second task is still compound (review, 0.28).
+            "YouTube, play lofi, text it to Priya",
+            "Open YouTube and play lofi, WhatsApp it to Priya",
+            "play lofi on YouTube; delete my watch history",
+            "YouTube, play lofi, subscribe to the channel",
+            "play lofi then subscribe on YouTube",
+            // So is one after a sentence break or spaced dash (review, 0.28).
+            "Open YouTube and play lofi. Text it to Priya.",
+            "YouTube, play lofi. Delete my watch history.",
+            "YouTube, play lofi? Text it to Priya",
+            "YouTube, play lofi - text it to Priya",
+            "YouTube, play lofi — text it to Priya",
+        ]
+        for command in others {
+            expect(YouTubeSkill.playQuery(in: command) == nil,
+                   "'\(command)' is left to the planner")
+        }
+
+        // URLs: the page Chrome shows may re-encode the query.
+        let reencoded = URL(string: "https://www.youtube.com/results"
+            + "?search_query=bollywood%20lo-fi%20music")!
+        let watch = URL(string: "https://www.youtube.com/watch?v=KRA26LhuTP4"
+            + "&list=RDKRA26LhuTP4")!
+        expect(YouTubeSkill.sameSearch(reencoded, lofiURL),
+               "a re-encoded results page is the same search")
+        expect(!YouTubeSkill.sameSearch(URL(string: "https://www.youtube.com/"
+            + "results?search_query=jazz")!, lofiURL),
+               "another search is not the one the plan opened")
+        expect(YouTubeSkill.isWatchURL(watch), "a /watch?v= page is a video")
+        expect(!YouTubeSkill.isWatchURL(URL(string:
+            "https://www.youtube.com/shorts/abc")!), "a Short is not /watch")
+        expect(!YouTubeSkill.isResultsURL(URL(string:
+            "https://evil.example/results?search_query=lofi")!),
+               "another host's results page is not YouTube")
+
+        // Decode: bare, last, right after its results page, spoken command.
+        func state(_ command: String) -> ActionPlan.BatchState {
+            var state = ActionPlan.BatchState()
+            state.spokenCommand = command
+            return state
+        }
+        let skillPlan = """
+        {"goal":"g","sends":false,"steps":[
+         {"do":"open_url","url":"\(lofiURL.absoluteString)"},
+         {"do":"play_first_video"}]}
+        """
+        var accepted = state(lofi)
+        expect(decodeBatch(skillPlan, state: &accepted)?.steps
+               == [.openURL(lofiURL), .playFirstVideo(resultsURL: lofiURL)],
+               "the skill's plan decodes")
+        let misplaced = [
+            """
+            {"goal":"g","sends":false,"steps":[{"do":"play_first_video"}]}
+            """,
+            """
+            {"goal":"g","sends":false,"steps":[
+             {"do":"open_url","url":"https://www.google.com/search?q=lofi"},
+             {"do":"play_first_video"}]}
+            """,
+            """
+            {"goal":"g","sends":false,"steps":[
+             {"do":"open_url","url":"\(lofiURL.absoluteString)"},
+             {"do":"play_first_video"},{"do":"pause","ms":100}]}
+            """,
+            """
+            {"goal":"g","sends":false,"steps":[
+             {"do":"open_url","url":"\(lofiURL.absoluteString)"},
+             {"do":"play_first_video","index":3}]}
+            """,
+        ]
+        for json in misplaced {
+            var refused = state(lofi)
+            if case .skillStepOutOfPlace? = decodeBatchError(json, state: &refused) {
+                continue
+            }
+            expect(false, "play_first_video out of place is refused: \(json)")
+        }
+        var searchOnly = state("search YouTube for lofi")
+        expect(decodeBatchError(skillPlan, state: &searchOnly)
+               == .skillStepOutOfPlace(step: 1),
+               "play_first_video needs a spoken play command")
+
+        // The loop: a proven watch page completes the command.
+        func run(_ receipt: ActionVideoReceipt?)
+            -> (ActionResult, FakeActionHost) {
+            let host = FakeActionHost()
+            host.frontmost = ("Google Chrome", "com.google.Chrome")
+            host.videoReceipt = receipt
+            let planner = FakeTurnPlanner(turns: [
+                .turn(sends: false, goal: lofi, steps: jsonSteps("""
+                [{"do":"open_url","url":"\(lofiURL.absoluteString)"},
+                 {"do":"play_first_video"}]
+                """), done: true),
+            ])
+            let runner = ActionLoopRunner(host: host, planner: planner,
+                                          execute: true, allowSend: false)
+            return (runner.run(transcript: lofi, context: loopContext()), host)
+        }
+        let played = ActionVideoReceipt(
+            appName: "Google Chrome", bundleID: "com.google.Chrome",
+            watchURL: watch)
+        let (success, host) = run(played)
+        if case .completed = success {
+        } else {
+            expect(false, "a proven watch page completes the action, got \(success)")
+        }
+        expect(host.openedURLs == [lofiURL] && host.playedFrom == [lofiURL],
+               "the video plays from the results page the plan opened")
+
+        let (miss, _) = run(nil)
+        if case .failed(let reason, _) = miss {
+            expect(reason.contains("first YouTube result"),
+                   "a miss says what failed, got \(reason)")
+        } else {
+            expect(false, "no video played fails the action, got \(miss)")
+        }
+
+        // Cancel lands while the host waits for the page (review, 0.28): the
+        // host sees it, and the run ends cancelled, never "completed".
+        var cancelState = state(lofi)
+        if let plan = decodeBatch(skillPlan, state: &cancelState) {
+            let host = FakeActionHost()
+            host.frontmost = ("Google Chrome", "com.google.Chrome")
+            host.videoReceipt = played
+            let executor = ActionExecutor(host: host)
+            host.duringPlay = { executor.cancel() }
+            let result = executor.run(plan)
+            expect(host.sawCancelDuringPlay == true,
+                   "the video wait can see a cancel")
+            expect(result.outcome == .cancelled(step: 1),
+                   "a cancel during the video wait ends cancelled, got \(result.outcome)")
+        } else {
+            expect(false, "fixture: the skill plan decodes")
+        }
+
+        // Playing covers only the whole play command.
+        let proof = ActionLocalProof.video(appName: "Google Chrome")
+        expect(proof.covers(lofi), "playing covers 'play X on YouTube'")
+        expect(!proof.covers("play Despacito on YouTube and send it to Priya"),
+               "playing does not cover a compound command")
+
+        // Background mode: the press runs in the foreground browser.
+        let system = FakeActionHost()
+        system.frontmost = ("Google Chrome", "com.google.Chrome")
+        system.videoReceipt = played
+        let routed = makeRoutedHost(system: system, transport: FakeCuaTransport())
+        expect(routed.playFirstVideo(from: lofiURL, isCancelled: { false })
+               == played && system.playedFrom == [lofiURL],
+               "the routing host hands the press to the foreground host")
+        _ = routed.playFirstVideo(from: lofiURL, isCancelled: { true })
+        expect(system.sawCancelDuringPlay == true,
+               "the routing host passes the cancel check through")
     }
 
     /// Counts daemon starts, so a test can prove a non-routable action never

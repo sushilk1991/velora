@@ -259,6 +259,8 @@ extension ActionPlan {
                 return "set media playback to \(control.state.rawValue)"
             case .verifyState(let check):
                 return "verify \(check.assertion.rawValue)"
+            case .playFirstVideo:
+                return "play the first video on the results page"
             }
         }
     }
