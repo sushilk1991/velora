@@ -5597,6 +5597,8 @@ extension Selftest {
         testActionResultHandoff()
         testCuaSnapshotParsing()
         testBackgroundActionGate()
+        testBackgroundWebHandoff()
+        testBrowserResolution()
         testWindowlessRouting()
         testRoutedMediaControl()
         testPoisonedNativeReady()
@@ -6805,6 +6807,185 @@ extension Selftest {
                "an unreadable frontmost app blocks routing")
     }
 
+    /// Web commands leave the background route. A browser page cannot be
+    /// driven in the background, so a URL, or a browser the user is not in,
+    /// opens in the foreground (owner decision, 2026-09-28). Background mode
+    /// used to refuse both, and every web command failed after identical
+    /// retries (field failure: "open YouTube and play Bollywood lo-fi").
+    private static func testBackgroundWebHandoff() {
+        let url = URL(string:
+            "https://www.youtube.com/results?search_query=bollywood+lofi")!
+        let browsers = ["Google Chrome": "com.google.Chrome",
+                        "Notes": "com.apple.Notes"]
+
+        // From the app the user is in, straight to the web.
+        let system = FakeActionHost()
+        system.frontmost = ("Orca", "com.stablyai.orca")
+        system.appsByName["Google Chrome"] = ("Google Chrome", "com.google.Chrome")
+        let starter = FakeDaemonStarter()
+        let host = makeRoutedHost(
+            system: system, transport: FakeCuaTransport(),
+            starter: starter, localApps: browsers)
+        expect(host.openURL(url),
+               "background mode opens a URL in the foreground")
+        expect(system.openedURLs == [url],
+               "the URL goes to the foreground host unchanged")
+        expect(host.openApp(named: "Google Chrome") == "Google Chrome"
+               && system.log.contains("openApp(Google Chrome)"),
+               "a browser the user is not in comes forward")
+        expect(starter.starts == 0,
+               "web handoff never starts the background driver")
+
+        // Mid-action: a URL ends an existing background route.
+        let routedSystem = FakeActionHost()
+        routedSystem.frontmost = ("Ghostty", "com.mitchellh.ghostty")
+        let transport = FakeCuaTransport()
+        scriptNotesWorld(transport)
+        let routed = makeRoutedHost(
+            system: routedSystem, transport: transport, localApps: browsers)
+        _ = routed.openApp(named: "Notes")
+        expect(routed.isDrivingInBackground,
+               "fixture: Notes is driven in the background")
+        expect(routed.openURL(url) && routedSystem.openedURLs == [url],
+               "a URL opens in the foreground mid-action")
+        expect(!routed.isDrivingInBackground,
+               "a URL leaves the background route")
+
+        // Only a browser's web page comes forward. Another app's link still
+        // refuses, as before the handoff (review, 0.28): Slack or Messages
+        // must not take the screen.
+        let appLinks = FakeActionHost()
+        appLinks.frontmost = ("Orca", "com.stablyai.orca")
+        let linkHost = makeRoutedHost(
+            system: appLinks, transport: FakeCuaTransport(),
+            localApps: browsers,
+            urlHandlers: ["https": "com.apple.Notes",
+                          "slack": "com.tinyspeck.slackmacgap",
+                          "sms": "com.apple.MobileSMS"])
+        for link in ["slack://open", "sms:+15551234567",
+                     "https://www.icloud.com/notes"] {
+            expect(!linkHost.openURL(URL(string: link)!),
+                   "background mode refuses \(link)")
+        }
+        expect(appLinks.openedURLs.isEmpty,
+               "a refused link never reaches the foreground host")
+    }
+
+    /// A browser is recognised however many copies run, and before it runs.
+    /// Field failure (2026-09-28, after the handoff fix): two Chrome
+    /// processes (the user's and an automation profile) made the name
+    /// "ambiguous", and "open_app Google Chrome" failed as "not found".
+    private static func testBrowserResolution() {
+        let chrome = (name: "Google Chrome", bundleID: "com.google.Chrome")
+        let orca = (name: "Orca", bundleID: "com.stablyai.orca")
+
+        // One bundle in two processes is one app; two bundles stay ambiguous.
+        expect(BackgroundRoutingActionHost.uniqueApp(
+            for: "Google Chrome", in: [chrome, orca, chrome])?.bundleID
+               == "com.google.Chrome",
+               "two processes of one bundle resolve to that app")
+        expect(BackgroundRoutingActionHost.uniqueApp(
+            for: "Notes", in: [("Notes", "com.apple.Notes"),
+                               ("Notes", "com.example.notes")]) == nil,
+               "two different apps with one name stay ambiguous")
+        expect(BackgroundRoutingActionHost.uniqueApp(
+            for: "Google Chrome", in: [orca]) == nil,
+               "an app that is not running does not resolve")
+
+        // Two running copies of Chrome, the user in Orca.
+        let twice = FakeActionHost()
+        twice.frontmost = orca
+        twice.appsByName["Google Chrome"] = chrome
+        let twiceStarter = FakeDaemonStarter()
+        let twiceHost = makeRoutedHost(
+            system: twice, transport: FakeCuaTransport(),
+            starter: twiceStarter, runningApps: [orca, chrome, chrome])
+        expect(twiceHost.openApp(named: "Google Chrome") == "Google Chrome"
+               && twice.log.contains("openApp(Google Chrome)"),
+               "Chrome running twice still comes forward")
+        expect(twiceStarter.starts == 0,
+               "two Chrome copies never start the background driver")
+
+        // Chrome installed but not running.
+        let cold = FakeActionHost()
+        cold.frontmost = orca
+        cold.appsByName["Google Chrome"] = chrome
+        let coldStarter = FakeDaemonStarter()
+        let coldHost = makeRoutedHost(
+            system: cold, transport: FakeCuaTransport(),
+            starter: coldStarter, runningApps: [orca],
+            installedApps: ["Google Chrome": "com.google.Chrome",
+                            "Notes": "com.apple.Notes"])
+        expect(coldHost.openApp(named: "Google Chrome") == "Google Chrome"
+               && cold.log.contains("openApp(Google Chrome)"),
+               "a browser that is not running launches in the foreground")
+        expect(coldStarter.starts == 0,
+               "launching a browser never starts the background driver")
+
+        // Several copies: the one the user touched last.
+        let old = Date(timeIntervalSince1970: 1_000)
+        let new = Date(timeIntervalSince1970: 2_000)
+        let newer = Date(timeIntervalSince1970: 3_000)
+        expect(AppCopies.latestUsed(
+            [(7066, old, false), (16137, new, false)],
+            windowOwners: [700, 7066, 16137]) == 16137,
+               "the copy activated last wins, even behind another's window")
+        expect(AppCopies.latestUsed(
+            [(7066, new, false), (16137, nil, false)],
+            windowOwners: [700, 16137]) == 7066,
+               "activation wins when its windows are on another Space")
+        expect(AppCopies.latestUsed(
+            [(7066, nil, false), (16137, nil, false)],
+            windowOwners: [700, 16137, 7066]) == 16137,
+               "with no activation seen, the front-most window decides")
+        // Review, 0.28: the newest launch is usually the automation copy.
+        expect(AppCopies.latestUsed(
+            [(7066, nil, false), (16137, nil, false)],
+            windowOwners: [700]) == nil,
+               "with no signal, no pick: LaunchServices decides")
+        expect(AppCopies.latestUsed([], windowOwners: [700]) == nil,
+               "no copies, no pick")
+
+        // An automation tool's copy (live, 2026-09-28: Mobius Chrome with
+        // --remote-debugging-port, Puppeteer with --enable-automation) is
+        // never the user's, however recently a script brought it forward.
+        expect(AppCopies.latestUsed(
+            [(7066, nil, false), (16137, newer, true)],
+            windowOwners: [16137, 7066]) == 7066,
+               "the only user copy wins over an automation copy")
+        expect(AppCopies.latestUsed(
+            [(7066, old, false), (8000, new, false), (16137, newer, true)],
+            windowOwners: [16137]) == 8000,
+               "among user copies, the one activated last")
+        // Review, 0.28: with the user's Chrome quit, a link must not land in
+        // an agent's copy; the action starts the user's own instead.
+        expect(AppCopies.latestUsed(
+            [(10541, nil, true), (16137, new, true)],
+            windowOwners: [16137]) == nil,
+               "an automation copy is never picked")
+        expect(AppCopies.onlyAutomation([true, true])
+               && AppCopies.onlyAutomation([true]),
+               "only automation copies running: start the user's own")
+        expect(!AppCopies.onlyAutomation([true, false])
+               && !AppCopies.onlyAutomation([]),
+               "a user copy running, or none: no new copy")
+        let automation = [
+            ["--remote-debugging-port=54357", "--user-data-dir=/p"],
+            ["--enable-automation", "--headless=new"],
+            ["--remote-debugging-pipe"], ["--headless"],
+        ]
+        for arguments in automation {
+            expect(AppCopies.isAutomationLaunch(
+                ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"]
+                    + arguments),
+                   "\(arguments) marks an automation copy")
+        }
+        expect(!AppCopies.isAutomationLaunch(
+            ["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+             "--profile-directory=Default", "--remote-debugging-portal"]),
+               "a user's launch is not automation")
+    }
+
     /// Counts daemon starts, so a test can prove a non-routable action never
     /// brings the automation surface up.
     final class FakeDaemonStarter {
@@ -6847,7 +7028,13 @@ extension Selftest {
         ) -> Bool = { _, _ in false },
         userFocusForWindow: @escaping (Int) -> ActionWindowIdentity? = { _ in nil },
         localApps: [String: String] = ["Notes": "com.apple.Notes",
-                                       "Slack": "com.tinyspeck.slackmacgap"]
+                                       "Slack": "com.tinyspeck.slackmacgap"],
+        runningApps: [(name: String, bundleID: String)]? = nil,
+        installedApps: [String: String] = [:],
+        urlHandlers: [String: String] = [
+            "https": "com.google.Chrome", "http": "com.google.Chrome",
+            "slack": "com.tinyspeck.slackmacgap", "sms": "com.apple.MobileSMS",
+        ]
     ) -> BackgroundRoutingActionHost {
         if system.foregroundWindowValue == nil, let front = system.frontmost {
             system.foregroundWindowValue = ActionWindowIdentity(
@@ -6874,11 +7061,24 @@ extension Selftest {
             restoreForeground: restoreForeground,
             userFocusForWindow: userFocusForWindow,
             localResolve: { name in
+                // A running-process list goes through the production rule.
+                if let runningApps {
+                    return BackgroundRoutingActionHost.uniqueApp(
+                        for: name, in: runningApps)
+                }
                 guard let index = AppMatcher.bestMatch(
                     for: name, in: Array(localApps.keys)) else { return nil }
                 let key = Array(localApps.keys)[index]
                 return (key, localApps[key] ?? "")
-            })
+            },
+            installedResolve: { name in
+                // Same matcher as InstalledApps.url(forName:).
+                let names = Array(installedApps.keys)
+                guard let index = AppMatcher.bestMatch(for: name, in: names)
+                else { return nil }
+                return (names[index], installedApps[names[index]] ?? "")
+            },
+            urlHandler: { urlHandlers[$0.scheme?.lowercased() ?? ""] })
     }
 
     private static func fakeBundleID(

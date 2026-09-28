@@ -538,6 +538,14 @@ final class BackgroundRoutingActionHost: ActionHost {
     /// can be ruled out before a daemon is ever started. Returning nil just
     /// means "can't tell from here" — the driver decides.
     private let localResolve: (String) -> (name: String, bundleID: String)?
+    /// Resolves a spoken app name among installed apps, running or not, the
+    /// way the foreground host would open it. Only used to recognise a
+    /// browser the user has not started yet.
+    private let installedResolve: (String) -> (name: String, bundleID: String)?
+    /// Bundle ID of the app that opens a URL (LaunchServices' default
+    /// handler). Only a browser's web page may be handed to the foreground.
+    private let urlHandler: (URL) -> String?
+    private static let webSchemes: Set<String> = ["http", "https"]
     // Routed-target state, reset every action.
     private var routed = false
     private var sessionCommand = ""
@@ -723,7 +731,11 @@ final class BackgroundRoutingActionHost: ActionHost {
          userFocusForWindow: @escaping (Int) -> ActionWindowIdentity?
             = BackgroundRoutingActionHost.resolveUserWindow,
          localResolve: @escaping (String) -> (name: String, bundleID: String)?
-            = BackgroundRoutingActionHost.resolveRunningApp) {
+            = BackgroundRoutingActionHost.resolveRunningApp,
+         installedResolve: @escaping (String) -> (name: String, bundleID: String)?
+            = BackgroundRoutingActionHost.resolveInstalledApp,
+         urlHandler: @escaping (URL) -> String?
+            = BackgroundRoutingActionHost.urlHandlerBundle) {
         self.system = system
         self.transport = transport
         self.backgroundEnabled = backgroundEnabled
@@ -742,6 +754,15 @@ final class BackgroundRoutingActionHost: ActionHost {
         self.restoreForeground = restoreForeground
         self.userFocusForWindow = userFocusForWindow
         self.localResolve = localResolve
+        self.installedResolve = installedResolve
+        self.urlHandler = urlHandler
+    }
+
+    private static func urlHandlerBundle(_ url: URL) -> String? {
+        guard let app = NSWorkspace.shared.urlForApplication(toOpen: url) else {
+            return nil
+        }
+        return Bundle(url: app)?.bundleIdentifier
     }
 
     private static func resolveUserWindow(
@@ -814,23 +835,48 @@ final class BackgroundRoutingActionHost: ActionHost {
             let running = NSWorkspace.shared.runningApplications.filter {
                 $0.activationPolicy == .regular && $0.localizedName != nil
             }
-            guard let index = uniqueIndex(
-                for: name, in: running.map { $0.localizedName ?? "" }),
-                  let bundleID = running[index].bundleIdentifier else { return nil }
-            return (running[index].localizedName ?? name, bundleID)
+            return uniqueApp(for: name, in: running.map {
+                ($0.localizedName ?? "", $0.bundleIdentifier ?? "")
+            })
         }
         return Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
     }
 
-    private static func uniqueIndex(
+    /// The one app `name` names among running `candidates`, or nil when
+    /// none or several different apps match. Several processes of one
+    /// bundle (a second Chrome profile) are still one app.
+    ///
+    ///     "Google Chrome" in [Chrome, Orca, Chrome]  →  Chrome
+    ///     "Notes" in [Notes (Apple), Notes (other)]  →  nil
+    static func uniqueApp(
         for name: String,
-        in candidates: [String]
-    ) -> Int? {
-        let matches = candidates.indices.filter {
-            AppMatcher.namesSameApp(name, candidates[$0])
+        in candidates: [(name: String, bundleID: String)]
+    ) -> (name: String, bundleID: String)? {
+        let matches = candidates.filter {
+            AppMatcher.namesSameApp(name, $0.name)
         }
-        guard matches.count == 1 else { return nil }
-        return matches[0]
+        guard let first = matches.first, !first.bundleID.isEmpty else {
+            return nil
+        }
+        let oneBundle = matches.allSatisfy {
+            $0.bundleID.caseInsensitiveCompare(first.bundleID) == .orderedSame
+        }
+        return oneBundle ? first : nil
+    }
+
+    /// An installed app `name` names, running or not, resolved exactly as
+    /// the foreground host resolves it before a launch.
+    static func resolveInstalledApp(named name: String)
+        -> (name: String, bundleID: String)? {
+        let work: () -> (name: String, bundleID: String)? = {
+            guard let url = InstalledApps.shared.url(forName: name),
+                  let bundleID = Bundle(url: url)?.bundleIdentifier
+            else { return nil }
+            return (url.deletingPathExtension().lastPathComponent, bundleID)
+        }
+        // InstalledApps caches without a lock; the foreground host reads it
+        // on the main thread too.
+        return Thread.isMainThread ? work() : DispatchQueue.main.sync(execute: work)
     }
 
     func beginActionInputSession(command: String) {
@@ -884,6 +930,15 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func openApp(named name: String) -> String? {
         guard terminalFailureReason == nil else { return nil }
+        // Browsers have no background path (see `openURL`). Bring the browser
+        // forward exactly as the classic host would, rather than reporting an
+        // installed browser as "not found" (field failure, 2026-09-28). A
+        // browser that is not running yet is still a browser.
+        if let local = localResolve(name) ?? installedResolve(name),
+           ActionRuntimePolicy.isBrowserBundle(local.bundleID) {
+            unroute()
+            return system.openApp(named: name)
+        }
         guard !routed else { return openTargetApp(named: name) }
         guard backgroundEnabled() else {
             guard let local = localResolve(name),
@@ -1780,9 +1835,19 @@ final class BackgroundRoutingActionHost: ActionHost {
 
     func openURL(_ url: URL) -> Bool {
         guard terminalFailureReason == nil else { return false }
-        // Opening a URL can activate its handler. Action Mode has no exact
-        // background browser capability, so it refuses on every route.
-        return false
+        // Only a web page may take the screen (owner decision, 2026-09-28:
+        // the browser comes forward). Any other app's link (slack:, sms:,
+        // mailto:) still refuses: it would bring that app forward.
+        guard Self.webSchemes.contains(url.scheme?.lowercased() ?? ""),
+              ActionRuntimePolicy.isBrowserBundle(urlHandler(url))
+        else { return false }
+
+        // A browser page cannot be driven in the background, so it opens in
+        // the foreground. Routing ends first: later observations must
+        // describe the page the plan now means, and a draft left in the old
+        // window must never authorize a commit here.
+        unroute()
+        return system.openURL(url)
     }
 
     /// Drops the background route. The draft is dropped with the target: text

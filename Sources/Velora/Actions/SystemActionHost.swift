@@ -92,6 +92,8 @@ struct ActionTextTargetState {
 ///   check — never branch on its error code.
 final class SystemActionHost: ActionHost {
     private static let mayAskForBrowserAutomation = false
+    /// Seconds a get-URL Apple Event may wait for the browser to accept it.
+    private static let urlEventTimeout: TimeInterval = 2
 
     private let inserter: TextInserter
     private let browserPageOverride: ((Bool) -> BrowserPageCache.Entry?)?
@@ -166,7 +168,17 @@ final class SystemActionHost: ActionHost {
             }
             if let index = AppMatcher.bestMatch(
                 for: name, in: running.map { $0.localizedName ?? "" }) {
-                let app = running[index]
+                let found = running[index]
+                // Only an automation tool's copies run: start the user's own.
+                if let bundleID = found.bundleIdentifier,
+                   let bundleURL = found.bundleURL,
+                   AppCopies.onlyAutomation(bundleID: bundleID) {
+                    self.openNewCopy(at: bundleURL, opening: [])
+                    return found.localizedName
+                }
+
+                // Several copies of one app: the one the user touched last.
+                let app = AppCopies.latest(of: found)
                 self.activate(app)
                 self.enableAccessibility(for: app)
                 return app.localizedName
@@ -189,7 +201,86 @@ final class SystemActionHost: ActionHost {
 
     func openURL(_ url: URL) -> Bool {
         clearActionTextState()
-        return onMain { NSWorkspace.shared.open(url) }
+        return onMain {
+            // LaunchServices hands a URL to any running copy of the browser,
+            // which may be an automation profile. With only such copies,
+            // start the user's own; with several, send it to the one the
+            // user touched last (owner rule, 2026-09-28).
+            if let handler = NSWorkspace.shared.urlForApplication(toOpen: url),
+               let bundleID = Bundle(url: handler)?.bundleIdentifier,
+               AppCopies.onlyAutomation(bundleID: bundleID) {
+                self.openNewCopy(at: handler, opening: [url])
+                return true
+            }
+            if let copy = self.latestBrowserCopy(for: url),
+               self.sendURL(url, to: copy) {
+                self.activate(copy)
+                return true
+            }
+            return NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Starts a new copy of the app at `appURL` in front, opening `urls` in
+    /// it. Without `createsNewApplicationInstance`, LaunchServices would hand
+    /// the work to the running automation copy.
+    private func openNewCopy(at appURL: URL, opening urls: [URL]) {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        configuration.createsNewApplicationInstance = true
+        guard !urls.isEmpty else {
+            NSWorkspace.shared.openApplication(
+                at: appURL, configuration: configuration)
+            return
+        }
+        NSWorkspace.shared.open(
+            urls, withApplicationAt: appURL, configuration: configuration)
+    }
+
+    /// The last-used copy of the app that opens `url`, only when more than
+    /// one copy runs; nil leaves the choice to LaunchServices.
+    private func latestBrowserCopy(for url: URL) -> NSRunningApplication? {
+        guard let handler = NSWorkspace.shared.urlForApplication(toOpen: url),
+              let bundleID = Bundle(url: handler)?.bundleIdentifier
+        else { return nil }
+        let copies = NSWorkspace.shared.runningApplications.filter {
+            $0.activationPolicy == .regular && $0.bundleIdentifier == bundleID
+        }
+        guard copies.count > 1 else { return nil }
+        return AppCopies.latest(bundleID: bundleID)
+    }
+
+    /// Hands `url` to one process with the standard get-URL Apple Event
+    /// (the event LaunchServices itself sends). It needs the Automation
+    /// consent page-aware dictation already asks for; without it, or when
+    /// the browser does not accept the event, this returns false.
+    private func sendURL(_ url: URL, to app: NSRunningApplication) -> Bool {
+        let target = NSAppleEventDescriptor(processIdentifier: app.processIdentifier)
+        let eventClass = AEEventClass(kInternetEventClass)
+        let eventID = AEEventID(kAEGetURL)
+        let permission = AEDeterminePermissionToAutomateTarget(
+            target.aeDesc, eventClass, eventID, false)
+        guard permission == noErr else {
+            veloraLog("Velora: action has no Automation consent for \(app.bundleIdentifier ?? "?") (\(permission)); LaunchServices picks the copy")
+            return false
+        }
+
+        let event = NSAppleEventDescriptor(
+            eventClass: eventClass, eventID: eventID,
+            targetDescriptor: target,
+            returnID: AEReturnID(kAutoGenerateReturnID),
+            transactionID: AETransactionID(kAnyTransactionID))
+        event.setParam(
+            NSAppleEventDescriptor(string: url.absoluteString),
+            forKeyword: AEKeyword(keyDirectObject))
+        do {
+            _ = try event.sendEvent(
+                options: [.noReply], timeout: Self.urlEventTimeout)
+            return true
+        } catch {
+            veloraLog("Velora: action could not hand the URL to pid \(app.processIdentifier): \(error)")
+            return false
+        }
     }
 
     func frontmostApp() -> (name: String, bundleID: String)? {
