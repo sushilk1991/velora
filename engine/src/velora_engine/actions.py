@@ -706,6 +706,26 @@ def _repeated_collection_member_indices(snapshot: dict) -> set[int]:
     content is open. This structural veto is app-independent and intentionally
     applies only to verification; the same elements remain pressable.
     """
+    by_index, children = _tree_maps(snapshot)
+    return {index for index, item in by_index.items()
+            if _peer_group(item, by_index, children)}
+
+
+def _is_repeated_collection_member(snapshot: dict, index: int) -> bool:
+    return index in _repeated_collection_member_indices(snapshot)
+
+
+def _collection_peers(snapshot: dict, index: int) -> list[dict]:
+    """The repeated peers that make element `index` a collection member, in
+    tree order, or [] when it is not one. The peer that holds the element
+    (itself, or the row it sits in) is part of the list."""
+    by_index, children = _tree_maps(snapshot)
+    item = by_index.get(index)
+    return [] if item is None else _peer_group(item, by_index, children)
+
+
+def _tree_maps(snapshot: dict) -> tuple[dict[int, dict], dict[int, list[dict]]]:
+    """Elements by index, and each parent's children in tree order."""
     elements = snapshot.get("elements") or []
     by_index = {item["index"]: item for item in elements
                 if isinstance(item, dict) and isinstance(item.get("index"), int)}
@@ -714,30 +734,35 @@ def _repeated_collection_member_indices(snapshot: dict) -> set[int]:
         parent = item.get("parent_index")
         if isinstance(parent, int):
             children.setdefault(parent, []).append(item)
-    members: set[int] = set()
-    for original_index, original in by_index.items():
-        candidate = original
-        for _ in range(COLLECTION_ANCESTOR_LEVELS):
-            parent = candidate.get("parent_index")
-            if not isinstance(parent, int):
-                break
-            peers = [
-                peer for peer in children.get(parent, [])
-                if str(peer.get("label") or "").strip()
-                and _frames_are_repeated_peers(candidate, peer)
-            ]
-            if len(peers) >= COLLECTION_MINIMUM_PEERS:
-                members.add(original_index)
-                break
-            ancestor = by_index.get(parent)
-            if ancestor is None:
-                break
-            candidate = ancestor
-    return members
+    return by_index, children
 
 
-def _is_repeated_collection_member(snapshot: dict, index: int) -> bool:
-    return index in _repeated_collection_member_indices(snapshot)
+def _peer_group(item: dict, by_index: dict[int, dict],
+                children: dict[int, list[dict]]) -> list[dict]:
+    """Climb from `item` until a level has enough labelled, same-shaped
+    siblings to be a list; [] when no level within reach does.
+
+        group ─┬─ row "Mom"         ◄ peers at this level
+               ├─ row "Rahul"
+               └─ row ─ text "Shivangi"   ◄ `item`: climbs one level
+    """
+    candidate = item
+    for _ in range(COLLECTION_ANCESTOR_LEVELS):
+        parent = candidate.get("parent_index")
+        if not isinstance(parent, int):
+            break
+        peers = [
+            peer for peer in children.get(parent, [])
+            if str(peer.get("label") or "").strip()
+            and _frames_are_repeated_peers(candidate, peer)
+        ]
+        if len(peers) >= COLLECTION_MINIMUM_PEERS:
+            return peers
+        ancestor = by_index.get(parent)
+        if ancestor is None:
+            break
+        candidate = ancestor
+    return []
 
 PLANNER_RULES = """You are the action agent of a macOS dictation app. The user spoke one command. You control this Mac in TURNS: reply with a short batch of steps, the app carries them out for real, then it shows you what the screen actually says, and you choose the next steps from what you see. Reply with ONE JSON object and nothing else — no prose, no markdown fences, no explanation.
 
@@ -3043,6 +3068,16 @@ class ActionSession:
         # action prompt's cold prefill on whatever turn it lands: a decided
         # turn 1 never warms that prefix.
         self.controller_calls = 0
+        # Normalized labels the decision fast path already pressed. It never
+        # proposes one twice, so a press that did not help goes back to the
+        # controller instead of looping.
+        self.fast_press_labels: set[str] = set()
+        # Labels of fast presses the reviewer or validator refused. They are
+        # never proposed again and spend none of the fast-press budget.
+        self.fast_refused_labels: set[str] = set()
+        # Whether the latest observation reported a failed step. The fast
+        # path's questions carry no history, so it leaves such turns alone.
+        self.last_step_failed = False
         self._last_rejected_reply = ""
         self._repeated_rejected_replies = 0
 
@@ -3131,6 +3166,7 @@ class ActionSession:
                 lines.append("- " + _clip(line, _MAX_EXECUTED_CHARS))
             lines.append("")
         failed = obs.get("failed_step")
+        self.last_step_failed = isinstance(failed, str) and bool(failed.strip())
         if isinstance(failed, str) and failed.strip():
             lines.append("LAST STEP FAILED: " + _clip(failed, _MAX_FAILED_CHARS))
         else:

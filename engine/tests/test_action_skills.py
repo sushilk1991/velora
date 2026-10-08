@@ -165,3 +165,24 @@ async def test_a_youtube_play_command_needs_no_model(engine):
     assert event["sends"] is False
     assert eng.cleanup.calls == []
     assert eng.cleanup.decided == []
+
+
+async def test_a_turn_that_already_ran_long_still_takes_the_skill(
+        engine, monkeypatch):
+    """The elapsed gate bounds the DECISION's cost. A skill costs nothing,
+    and the controller cannot play the first video: a reload that took
+    over the gate (a hibernated model) must not fail the command."""
+    from velora_engine import server
+    monkeypatch.setattr(server, "_FAST_ATTEMPT_MAX_ELAPSED_S", 0.0)
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner()
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client, transcript=LOFI,
+                     context={"frontmost_app": "Orca",
+                              "running_apps": ["Google Chrome", "Orca"]})
+
+    event = await client.recv_event("action_turn")
+
+    assert event["steps"][-1] == {"do": "play_first_video"}
+    assert eng.cleanup.calls == []

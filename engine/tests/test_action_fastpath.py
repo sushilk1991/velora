@@ -312,19 +312,218 @@ def test_open_mail_is_not_a_delivery_but_mailing_someone_is():
         session_for("open Mail and mail Sam the report", "Mail")) is None
 
 
-def test_later_turns_stay_with_the_controller():
-    """A decided chat-row press skips the UI reviewer exactly like a poll
-    option the command names ("Friday"): later turns wait for a gate that
-    can tell navigation from an answer."""
-    session = session_for(WHATSAPP_CHAT, "WhatsApp")
-    session.accept_reply(turn([{"do": "open_app", "app": "WhatsApp"}],
-                              goal=WHATSAPP_CHAT, sends=False))
+# ---- later turns: the press a command points at --------------------------
+
+def _chat_list_ui(*, selected: str = "Someone Else") -> dict:
+    """WhatsApp with its chat list: four rows, `selected` one open."""
+    raw = _structured_ui(active=selected)
+    rows = [item for item in raw["elements"] if item.get("parent_index") == 10]
+    for item in rows:
+        item.pop("focused", None)
+        item["selected"] = item["label"] == selected
+    return raw
+
+
+def _poll_ui() -> dict:
+    """WhatsApp with a four-option poll open in the conversation pane. Each
+    option is a pressable row exactly like a chat row: only where it sits
+    and what sits beside it say that pressing it votes."""
+    raw = _chat_list_ui(selected="Design team")
+    raw["elements"] += [
+        {"index": 40, "parent_index": 26, "depth": 2, "role": "AXGroup",
+         "label": "Poll: Which day works for the offsite?",
+         "frame": {"x": 400, "y": 200, "w": 300, "h": 260}},
+        *[
+            {"index": 41 + offset, "parent_index": 40, "depth": 3,
+             "role": "AXButton", "label": day, "actions": ["AXPress"],
+             "frame": {"x": 410, "y": 240 + offset * 50, "w": 280, "h": 44}}
+            for offset, day in enumerate(
+                ("Friday", "Saturday", "Sunday", "Monday"))
+        ],
+    ]
+    return raw
+
+
+def session_on(transcript: str, ui: dict, *,
+               turn_one: list[dict] | None = None,
+               failed_step: str | None = None) -> actions.ActionSession:
+    """A session past its controller-written turn 1 (`sends: false`), now
+    looking at `ui`."""
+    session = session_for(transcript, "WhatsApp")
+    session.accept_reply(turn(
+        turn_one or [{"do": "open_app", "app": "WhatsApp"}],
+        goal=transcript, sends=False))
     session.observation_message(observation(
         frontmost_app="WhatsApp", frontmost_bundle="net.whatsapp.WhatsApp",
-        ui_snapshot=_structured_ui(active="Someone Else"),
-        executed=["open_app WhatsApp"]))
+        ui_snapshot=ui, executed=["open_app WhatsApp"],
+        failed_step=failed_step))
+    return session
 
-    assert action_fastpath.propose(session) is None
+
+def press(index: int, label: str, role: str = "AXButton") -> dict:
+    return actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "index": index, "role": role, "label": label},
+    ]))
+
+
+def test_a_press_on_a_named_list_row_is_checked_with_its_neighbours():
+    """The check sees where the target sits and what sits beside it: a chat
+    row among chats, a poll option under its question."""
+    session = session_on(WHATSAPP_CHAT, _chat_list_ui())
+
+    check = action_fastpath.press_check(press(14, "Shivangi Gupta"), session)
+
+    assert check.shape == action_fastpath.SHAPE_PRESS_CHECK
+    assert [question.key for question in check.questions] == ["effect"]
+    assert 'target control: Button "Shivangi Gupta"' in check.state
+    assert 'inside: Group "List of chats"' in check.state
+    assert '"Chat 15"' in check.state
+    assert WHATSAPP_CHAT in check.state
+
+    poll = session_on("pick Friday", _poll_ui())
+    vote = action_fastpath.press_check(press(41, "Friday"), poll)
+
+    assert ('inside: Group "Conversation" > '
+            'Group "Poll: Which day works for the offsite?"') in vote.state
+    assert '"Saturday"' in vote.state
+    assert '"Chat 15"' not in vote.state
+
+
+def test_only_presses_the_shared_exemption_would_wave_through_are_checked():
+    """Every other press already goes to the UI reviewer."""
+    session = session_on(WHATSAPP_CHAT, _chat_list_ui())
+
+    # The header is one control, not a list row.
+    assert action_fastpath.press_check(
+        press(28, "Someone Else"), session) is None
+    # A row the command does not name.
+    assert action_fastpath.press_check(press(15, "Chat 15"), session) is None
+    # No press at all.
+    assert action_fastpath.press_check(actions.parse_turn(turn([
+        {"do": "wait_frontmost", "app": "WhatsApp"}])), session) is None
+
+
+def test_a_parent_cycle_ends_the_walks_above_a_press():
+    """Snapshots arrive over IPC; a malformed one may link parents in a
+    loop. The walks for the check's STATE must still end."""
+    by_index = {
+        1: {"index": 1, "parent_index": 2, "role": "AXGroup", "label": "A"},
+        2: {"index": 2, "parent_index": 1, "role": "AXGroup", "label": "B"},
+        3: {"index": 3, "parent_index": 1, "role": "AXButton", "label": "C"},
+    }
+
+    ancestors = action_fastpath._labelled_ancestors(by_index[3], by_index)
+    holder = action_fastpath._row_holding(by_index[3], [], by_index)
+
+    assert [item["label"] for item in ancestors] == ["A", "B"]
+    assert holder is None
+
+
+@pytest.mark.parametrize(("effect", "goes_somewhere"), [
+    (answer("navigate"), True),
+    (answer("navigate", p=0.60), False),
+    (answer("navigate", mass=0.30), False),
+    (answer("answer"), False),
+    (None, False),
+])
+def test_only_a_confident_navigate_skips_the_reviewer(effect, goes_somewhere):
+    answers = {} if effect is None else {"effect": effect}
+
+    assert action_fastpath.press_goes_somewhere(answers) is goes_somewhere
+
+
+def test_a_later_turn_proposes_the_row_the_command_names():
+    session = session_on(WHATSAPP_CHAT, _chat_list_ui())
+
+    proposal = action_fastpath.propose(session)
+
+    assert proposal.shape == action_fastpath.SHAPE_PRESS
+    assert [question.key for question in proposal.questions] == [
+        "next", "target"]
+    assert 'Button "Shivangi Gupta"' in proposal.state
+    # The selected row is where the app already is: pressing it moves
+    # nothing forward, so it is never a candidate.
+    assert 'Button "Someone Else"' not in proposal.state
+
+
+def test_a_confident_press_answer_becomes_a_checked_press_turn():
+    session = session_on(WHATSAPP_CHAT, _chat_list_ui())
+    proposal = action_fastpath.propose(session)
+
+    reply = action_fastpath.reply_for(
+        session, proposal, decided(next="press", target="14").answers)
+
+    assert reply == {"steps": [
+        {"do": "wait_frontmost", "app": "WhatsApp"},
+        {"do": "press_ui", "index": 14, "role": "AXButton",
+         "label": "Shivangi Gupta"},
+    ]}
+    accepted = session.accept_reply(json.dumps(reply))
+    assert accepted["steps"][-1]["index"] == 14
+
+
+@pytest.mark.parametrize("answers", [
+    {"next": answer("press", p=0.79), "target": answer("14")},
+    {"next": answer("type"), "target": answer("14")},
+    {"next": answer("press"), "target": answer("14", p=0.89)},
+    {"next": answer("press"), "target": answer("none")},
+    {"next": answer("press"), "target": answer("99")},
+    {"next": answer("press")},
+])
+def test_an_unsure_or_unlisted_press_answer_falls_back(answers):
+    session = session_on(WHATSAPP_CHAT, _chat_list_ui())
+    proposal = action_fastpath.propose(session)
+
+    assert action_fastpath.reply_for(session, proposal, answers) is None
+
+
+@pytest.mark.parametrize("label", [
+    "Heart", "Thumbs up", "Maybe", "Join", "Reply", "Vote", "Call",
+    # Committing words are refused by the validator; never propose them.
+    "Send", "Delete chat",
+])
+def test_reactions_answers_and_commits_are_never_candidates(label):
+    ui = _chat_list_ui()
+    ui["elements"].append(
+        {"index": 50, "parent_index": 26, "depth": 2, "role": "AXButton",
+         "label": label, "actions": ["AXPress"],
+         "frame": {"x": 700, "y": 620, "w": 60, "h": 30}})
+    session = session_on(f"{label} Shivangi Gupta", ui)
+
+    proposal = action_fastpath.propose(session)
+
+    assert f'"{label}"' not in proposal.state
+
+
+def test_a_press_is_never_proposed_where_the_controller_must_read_history():
+    """The questions carry no history: after a failed step, with `sends`
+    true, or once two fast presses ran, the controller decides."""
+    failed = session_on(WHATSAPP_CHAT, _chat_list_ui(),
+                        failed_step="press_ui Shivangi Gupta: no change")
+    assert action_fastpath.propose(failed) is None
+
+    sending = session_for("send hi to Shivangi Gupta on WhatsApp", "WhatsApp")
+    sending.accept_reply(turn([{"do": "open_app", "app": "WhatsApp"}],
+                              goal="send hi", sends=True))
+    sending.observation_message(observation(
+        frontmost_app="WhatsApp", frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=_chat_list_ui(), executed=["open_app WhatsApp"]))
+    assert action_fastpath.propose(sending) is None
+
+    spent = session_on(WHATSAPP_CHAT, _chat_list_ui())
+    spent.fast_press_labels.update({"chat 15", "chat 16"})
+    assert action_fastpath.propose(spent) is None
+
+
+def test_a_refused_press_is_never_proposed_again():
+    session = session_on(WHATSAPP_CHAT, _chat_list_ui())
+    action_fastpath.record_refused(session, press(14, "Shivangi Gupta"))
+
+    proposal = action_fastpath.propose(session)
+
+    assert proposal is None or '"Shivangi Gupta"' not in proposal.state
+    assert session.fast_press_labels == set(), "a refused press never ran"
 
 
 # ---- server: the fast turn rides the controller's pipeline ---------------
@@ -339,16 +538,18 @@ class DecidingPlanner(FakePlanner):
         self.decided: list[list[str]] = []
         self.model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
         self.timeouts: list[int | None] = []
+        self.decision_timeouts: list[int | None] = []
 
     async def cleanup(self, raw, system_prompt, timeout_ms=None, **kwargs):
         self.timeouts.append(timeout_ms)
         return await super().cleanup(raw, system_prompt, timeout_ms, **kwargs)
 
     async def decide(self, state, questions, *, cancel_event=None,
-                     max_input_tokens=None, **_kwargs):
+                     max_input_tokens=None, timeout_ms=None, **_kwargs):
         assert max_input_tokens == actions.ACTION_MAX_INPUT_TOKENS
         assert cancel_event is not None
         self.decided.append([question.key for question in questions])
+        self.decision_timeouts.append(timeout_ms)
         if not self.decisions:
             return DecisionResult(STATUS_UNAVAILABLE, reason="unscripted")
         return self.decisions.pop(0)
@@ -580,3 +781,265 @@ async def test_a_fast_path_bug_never_fails_the_action(engine, monkeypatch):
 
     assert event["steps"] == [{"do": "open_app", "app": "Calculator"}]
     assert len(eng.cleanup.calls) == 1
+
+
+# ---- server: presses on later turns --------------------------------------
+
+REVIEWER = "independent UI-action reviewer"
+
+
+async def start_on(client, transcript: str, ui: dict) -> None:
+    """Start `transcript`, take the controller's turn 1 (open WhatsApp,
+    `sends: false`), and show `ui` for turn 2."""
+    await client.recv_event("ready")
+    await send_start(client, transcript=transcript,
+                     context={"frontmost_app": "Sublime Text",
+                              "frontmost_bundle": "com.sublimetext.4",
+                              "running_apps": ["WhatsApp", "Sublime Text"]})
+    await client.recv_event("action_turn")
+    await send_observe(client, observation=observation(
+        frontmost_app="WhatsApp", frontmost_bundle="net.whatsapp.WhatsApp",
+        ui_snapshot=ui, executed=["open_app WhatsApp"]))
+
+
+def open_whatsapp(transcript: str) -> str:
+    return turn([{"do": "open_app", "app": "WhatsApp"}],
+                goal=transcript, sends=False)
+
+
+def controller_press(index: int, label: str) -> str:
+    return turn([{"do": "wait_frontmost", "app": "WhatsApp"},
+                 {"do": "press_ui", "index": index, "role": "AXButton",
+                  "label": label}])
+
+
+POLL_COMMAND = "In WhatsApp, pick Friday in the offsite poll"
+
+
+async def test_a_poll_option_the_command_names_goes_to_the_reviewer(engine):
+    """A poll option is a list row like a chat row, and the command names
+    it. Only the press check tells that pressing it votes."""
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(POLL_COMMAND), controller_press(41, "Friday"),
+        json.dumps({"safe": True}),
+        decisions=[decided(next="other"), decided(effect="answer")])
+    client = await connect(sock)
+    await start_on(client, POLL_COMMAND, _poll_ui())
+
+    await client.recv_event("action_turn")
+
+    assert eng.cleanup.decided == [["next", "target"], ["effect"]]
+    assert REVIEWER in eng.cleanup.calls[2][1]
+
+
+async def test_a_chat_row_checked_as_navigation_skips_the_reviewer(engine):
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(WHATSAPP_CHAT), controller_press(14, "Shivangi Gupta"),
+        decisions=[decided(next="other"), decided(effect="navigate")])
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    event = await client.recv_event("action_turn")
+
+    assert event["steps"][-1]["label"] == "Shivangi Gupta"
+    assert len(eng.cleanup.calls) == 2
+    assert all(REVIEWER not in prompt for _, prompt in eng.cleanup.calls)
+    # Every controller attempt can run one: its deadline is part of the
+    # turn's worst case under the app's 150 s backstop.
+    assert eng.cleanup.decision_timeouts[-1] == (
+        action_fastpath.PRESS_CHECK_TIMEOUT_MS)
+
+
+async def test_a_press_check_bug_sends_the_press_to_the_reviewer(
+        engine, monkeypatch):
+    """The check is a gate on an exemption: its own failure costs the
+    exemption, never the action."""
+    eng, sock = engine
+
+    def broken(_parsed, _session):
+        raise RuntimeError("press check bug")
+
+    monkeypatch.setattr(action_fastpath, "press_check", broken)
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(WHATSAPP_CHAT), controller_press(14, "Shivangi Gupta"),
+        json.dumps({"safe": True}),
+        decisions=[decided(next="other")])
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    event = await client.recv_event("action_turn")
+
+    assert event["steps"][-1]["label"] == "Shivangi Gupta"
+    assert REVIEWER in eng.cleanup.calls[2][1]
+
+
+async def test_an_unavailable_press_check_goes_to_the_reviewer(engine):
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(WHATSAPP_CHAT), controller_press(14, "Shivangi Gupta"),
+        json.dumps({"safe": True}),
+        decisions=[decided(next="other"),
+                   DecisionResult(STATUS_UNAVAILABLE, reason="timeout")])
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    await client.recv_event("action_turn")
+
+    assert REVIEWER in eng.cleanup.calls[2][1]
+
+
+@pytest.mark.parametrize("model_id", [
+    "mlx-community/Qwen3.5-4B-MLX-8bit",
+    # No check runs on an uncalibrated tier, and this rule needs none.
+    "mlx-community/Qwen3.5-2B-MLX-4bit",
+])
+async def test_a_row_in_a_calling_app_always_goes_to_the_reviewer(
+        engine, model_id):
+    """In FaceTime a person's row may place the call. The check's options
+    name votes, RSVPs and reactions, not calls, so its "navigate" is no
+    proof there."""
+    eng, sock = engine
+    command = "In FaceTime, open Shivangi Gupta"
+    ui = _chat_list_ui()
+    ui.update(app_name="FaceTime", bundle_id="com.apple.FaceTime",
+              window_title="FaceTime")
+    eng.cleanup = DecidingPlanner(
+        turn([{"do": "open_app", "app": "FaceTime"}], goal=command,
+             sends=False),
+        turn([{"do": "wait_frontmost", "app": "FaceTime"},
+              {"do": "press_ui", "index": 14, "role": "AXButton",
+               "label": "Shivangi Gupta"}]),
+        json.dumps({"safe": True}),
+        decisions=[decided(effect="navigate")])
+    eng.cleanup.model_id = model_id
+    client = await connect(sock)
+    await client.recv_event("ready")
+    await send_start(client, transcript=command,
+                     context={"frontmost_app": "Sublime Text",
+                              "frontmost_bundle": "com.sublimetext.4",
+                              "running_apps": ["FaceTime", "Sublime Text"]})
+    await client.recv_event("action_turn")
+    await send_observe(client, observation=observation(
+        frontmost_app="FaceTime", frontmost_bundle="com.apple.FaceTime",
+        ui_snapshot=ui, executed=["open_app FaceTime"]))
+
+    await client.recv_event("action_turn")
+
+    assert eng.cleanup.decided == []
+    assert REVIEWER in eng.cleanup.calls[2][1]
+
+
+async def test_an_uncalibrated_model_keeps_the_collection_exemption(engine):
+    """Smaller tiers were never measured on the check. Sending them to the
+    reviewer would break chat opening, which it refused 3 of 3 times."""
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(WHATSAPP_CHAT), controller_press(14, "Shivangi Gupta"))
+    eng.cleanup.model_id = "mlx-community/Qwen3.5-2B-MLX-4bit"
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    await client.recv_event("action_turn")
+
+    assert eng.cleanup.decided == []
+    assert len(eng.cleanup.calls) == 2
+
+
+async def test_a_decided_chat_press_needs_no_generation(engine):
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(WHATSAPP_CHAT),
+        decisions=[decided(next="press", target="14"),
+                   decided(effect="navigate")])
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    event = await client.recv_event("action_turn")
+
+    assert [step["do"] for step in event["steps"]] == [
+        "wait_frontmost", "press_ui"]
+    assert event["steps"][1] == {
+        "do": "press_ui", "snapshot": "snap-1", "index": 14,
+        "role": "AXButton", "label": "Shivangi Gupta"}
+    assert len(eng.cleanup.calls) == 1, "only turn 1 was generated"
+    assert eng.cleanup.decided == [["next", "target"], ["effect"]]
+    assert eng._action_session.fast_press_labels == {
+        actions.normalized_term("Shivangi Gupta")}
+
+
+PAUSE = turn([{"do": "wait_frontmost", "app": "WhatsApp"},
+              {"do": "pause", "ms": 300}])
+
+
+async def test_a_doubted_fast_press_runs_the_controller(engine):
+    """A decided press the check doubts goes to the controller without a
+    review: the guess was not obvious, so the controller reads the screen."""
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(WHATSAPP_CHAT), PAUSE,
+        decisions=[decided(next="press", target="14"),
+                   decided(effect="answer")])
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    event = await client.recv_event("action_turn")
+
+    assert [step["do"] for step in event["steps"]] == [
+        "wait_frontmost", "pause"]
+    assert all(REVIEWER not in prompt for _, prompt in eng.cleanup.calls)
+    assert "You are the action agent" in eng.cleanup.calls[1][1]
+    assert "Your previous reply was rejected" not in eng.cleanup.calls[1][1]
+    session = eng._action_session
+    assert session.fast_refused_labels == {
+        actions.normalized_term("Shivangi Gupta")}
+    assert session.fast_press_labels == set()
+
+
+async def test_a_refused_fast_press_runs_the_controller(engine):
+    """A decided press the reviewer refuses goes to the controller, never to
+    the reviewer-refusal path that ends the action: no model has yet
+    concluded the command cannot go on."""
+    eng, sock = engine
+    command = "show the Archived chats on WhatsApp"
+    ui = _chat_list_ui()
+    # One toolbar button, not a list row: its press is always reviewed.
+    ui["elements"].append({
+        "index": 50, "parent_index": 0, "depth": 1, "role": "AXButton",
+        "label": "Archived", "actions": ["AXPress"],
+        "frame": {"x": 10, "y": 60, "w": 280, "h": 30}})
+    eng.cleanup = DecidingPlanner(
+        open_whatsapp(command),
+        json.dumps({"safe": False, "reason": "not navigation"}), PAUSE,
+        decisions=[decided(next="press", target="50")])
+    client = await connect(sock)
+    await start_on(client, command, ui)
+
+    event = await client.recv_event("action_turn")
+
+    assert [step["do"] for step in event["steps"]] == [
+        "wait_frontmost", "pause"]
+    assert eng.cleanup.decided == [["next", "target"]]
+    assert REVIEWER in eng.cleanup.calls[1][1]
+    assert "You are the action agent" in eng.cleanup.calls[2][1]
+    assert "Your previous reply was rejected" not in eng.cleanup.calls[2][1]
+    session = eng._action_session
+    assert session.fast_refused_labels == {actions.normalized_term("Archived")}
+    assert session.fast_press_labels == set()
+
+
+async def test_a_turn_that_already_ran_long_skips_the_fast_press(
+        engine, monkeypatch):
+    """A decision and its review on top of the controller's worst case must
+    fit the app's 150 s backstop."""
+    from velora_engine import server
+    monkeypatch.setattr(server, "_FAST_ATTEMPT_MAX_ELAPSED_S", 0.0)
+    eng, sock = engine
+    eng.cleanup = DecidingPlanner(open_whatsapp(WHATSAPP_CHAT), PAUSE)
+    client = await connect(sock)
+    await start_on(client, WHATSAPP_CHAT, _chat_list_ui())
+
+    await client.recv_event("action_turn")
+
+    assert eng.cleanup.decided == []

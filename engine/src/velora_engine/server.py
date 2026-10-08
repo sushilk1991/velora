@@ -90,6 +90,16 @@ class _ActionContextTooLarge(Exception):
 # controller's attempts 0 and 1 and never counts as one of them.
 _FAST_ATTEMPT = -1
 
+# A decided turn can add a decision and then its review (6 + 12 s at their
+# deadlines) ahead of the controller's own worst case: a cold call and a
+# repair, each with a 3 s press check, a review and a goal verifier, plus
+# one 12 s recovery wait and hard-timeout graces (~124 s). Only a turn
+# still under this many seconds decides one (3 + 18 + 124 ≈ 145 s); after
+# a slow completion check or model reload the sum would outrun the app's
+# 150 s backstop (ActionCoordinator.turnTimeout). Skills cost no decision
+# and always run.
+_FAST_ATTEMPT_MAX_ELAPSED_S = 3.0
+
 # Controller results refused before any worker ran them: the model was
 # loading, being replaced, unhealthy, or the queue wait ran out, or the
 # worker's pipe was already gone (CleanupProcess raises before writing).
@@ -111,6 +121,16 @@ class _FastReply:
     applied: bool = True
     reason: str = ""
     input_tokens: int = 0
+
+
+def _verdicts(answers: dict) -> str:
+    """Decision choices and their confidence for the log, never the state:
+    it holds the spoken command and screen labels.
+    Example: "next=press:0.97/0.99 target=14:0.99/0.98"."""
+    return " ".join(
+        f"{key}={answer.choice}:{answer.confidence:.2f}"
+        f"/{answer.label_mass:.2f}"
+        for key, answer in answers.items())
 
 
 class SpoolDisposition(Enum):
@@ -4568,7 +4588,7 @@ class Engine:
             #               └ refused: no repair note, no rejection count
             fast_reply = None
             if turn is None:
-                fast_reply = await self._fast_action_reply(session)
+                fast_reply = await self._fast_action_reply(session, t0)
             controller_attempts = [0, 1] if turn is None else []
             if fast_reply is not None:
                 controller_attempts.insert(0, _FAST_ATTEMPT)
@@ -4647,7 +4667,18 @@ class Engine:
                         reply_text = json.dumps(
                             parsed, ensure_ascii=False, separators=(",", ":"))
                     review_refusal_reason = ""
-                    if actions.turn_requires_ui_action_review(parsed, session):
+                    needs_review = actions.turn_requires_ui_action_review(
+                        parsed, session)
+                    if (not needs_review
+                            and await self._press_needs_review(parsed, session)):
+                        # A decided press the check doubts is not an obvious
+                        # turn: the controller reads the screen, rather than
+                        # a reviewer second-guessing the guess.
+                        if attempt == _FAST_ATTEMPT:
+                            raise actions.PlanError(
+                                "press check: not surely navigation")
+                        needs_review = True
+                    if needs_review:
                         review_prompt = actions.build_ui_action_review_prompt(
                             session.current_ui_snapshot)
                         review_message = actions.ui_action_review_message(
@@ -4701,7 +4732,12 @@ class Engine:
                                 declared_sends = parsed.get("sends")
                             reason = str(review.get("reason") or
                                          "the selected control is not navigation")
-                            if declared_sends is False and session.turns_used > 0:
+                            # A refused DECIDED press goes to the controller,
+                            # not to the done-proof path below: nothing has
+                            # asked the controller yet, so no model has
+                            # concluded the command cannot proceed.
+                            if (declared_sends is False and session.turns_used > 0
+                                    and attempt != _FAST_ATTEMPT):
                                 # Do not execute the refused press. Give the
                                 # independent completion verifier the current
                                 # tree; it can replace the press only with
@@ -4842,9 +4878,26 @@ class Engine:
                             parsed, ensure_ascii=False, separators=(",", ":"))
                     turn = session.accept_reply(reply_text)
                     fast_accepted = attempt == _FAST_ATTEMPT
+                    if fast_accepted:
+                        action_fastpath.record_accepted(session, turn)
                     break
+                except _ActionContextTooLarge as exc:
+                    # Only the decided turn's own review overflowed; the
+                    # controller has not been asked, so it gets the turn.
+                    if attempt != _FAST_ATTEMPT:
+                        raise
+                    session.state.allowed_ui_attestation = None
+                    action_fastpath.record_refused(
+                        session, json.loads(result.text))
+                    log.info("action fast turn fell back: %s", exc)
+                    continue
                 except _ActionModelUnavailable as exc:
                     session.state.allowed_ui_attestation = None
+                    if attempt == _FAST_ATTEMPT:
+                        action_fastpath.record_refused(
+                            session, json.loads(result.text))
+                        log.info("action fast turn fell back: %s", exc)
+                        continue
                     last_error = str(exc)
                     model_unavailable_error = last_error
                     if attempt == 0:
@@ -4855,6 +4908,8 @@ class Engine:
                     # it must neither feed the repair note nor count as a
                     # repeated rejection.
                     if attempt == _FAST_ATTEMPT:
+                        action_fastpath.record_refused(
+                            session, json.loads(result.text))
                         log.info("action fast turn fell back: %s", exc)
                         continue
                     had_plan_error = True
@@ -4941,22 +4996,28 @@ class Engine:
             self._schedule_mining()
 
     async def _fast_action_reply(
-            self, session: actions.ActionSession) -> str | None:
+            self, session: actions.ActionSession,
+            turn_started: float) -> str | None:
         """A decided reply for an obvious Action turn, or None.
 
         None whenever the turn is not a known shape, the loaded engine cannot
         decide, or the model is not confident; the controller then runs. Its
         own failure is also None: an optimisation must never fail an action.
+        `turn_started` is the turn's `perf_counter` start.
         """
         try:
             # A skill is a rule, not a model read: it needs no calibrated
-            # model and goes first ("play X on YouTube").
+            # model and goes first ("play X on YouTube"). It costs no
+            # decision, so the elapsed gate below never turns it off.
             skill = action_skills.reply_for(session)
             if skill is not None:
                 log.info("action skill %s", skill["steps"][-1]["do"])
                 return json.dumps(
                     skill, ensure_ascii=False, separators=(",", ":"))
 
+            if (time.perf_counter() - turn_started
+                    >= _FAST_ATTEMPT_MAX_ELAPSED_S):
+                return None
             return await self._decide_action_reply(session)
         except Exception:  # noqa: BLE001 — the controller is the fallback
             log.exception("action fast path failed; controller runs")
@@ -4983,19 +5044,67 @@ class Engine:
                      proposal.shape, result.status, result.reason)
             return None
 
-        # Log the choices and their confidence, never the state: it holds
-        # the spoken command and screen labels.
-        verdicts = " ".join(
-            f"{key}={answer.choice}:{answer.confidence:.2f}"
-            f"/{answer.label_mass:.2f}"
-            for key, answer in result.answers.items())
         reply = action_fastpath.reply_for(session, proposal, result.answers)
         log.info("action fast path %s %s ms=%d %s", proposal.shape,
                  "proposed" if reply is not None else "declined",
-                 result.ms, verdicts)
+                 result.ms, _verdicts(result.answers))
         if reply is None:
             return None
         return json.dumps(reply, ensure_ascii=False, separators=(",", ":"))
+
+    async def _press_needs_review(
+            self, parsed: dict, session: actions.ActionSession) -> bool:
+        """Whether a press the collection exemption waves through must
+        still go to the UI reviewer.
+
+        The exemption passes any list row the command names, and a poll
+        option is one too. On the calibrated model, one decision keeps it
+        only for a confident "goes somewhere"; any doubt or failure sends
+        the press to the reviewer. Other tiers keep the exemption unchanged
+        until the check is measured on them, except in a calling app.
+        """
+        # Only an exempt press is in question: a failure below then costs
+        # that exemption and never sends a plain open or wait to review.
+        if not actions.turn_is_self_evident_collection_navigation(
+                parsed, session):
+            return False
+
+        # A person's row in a calling app may place the call, and the
+        # check's options name no calls: its "navigate" proves nothing
+        # here. A rule, not a decision, so it holds on every tier.
+        if action_fastpath.presses_may_call(session):
+            log.info("action press in a calling app; reviewer runs")
+            return True
+
+        decide = getattr(self.cleanup, "decide", None)
+        model_id = getattr(self.cleanup, "model_id", None)
+        if (decide is None
+                or model_id not in action_fastpath.CALIBRATED_MODEL_IDS):
+            return False
+
+        try:
+            check = action_fastpath.press_check(parsed, session)
+            if check is None:
+                return False
+            result = await decide(
+                check.state, list(check.questions),
+                cancel_event=self._action_cancel,
+                max_input_tokens=actions.ACTION_MAX_INPUT_TOKENS,
+                timeout_ms=action_fastpath.PRESS_CHECK_TIMEOUT_MS,
+            )
+        except Exception:  # noqa: BLE001 — the reviewer is the fallback
+            log.exception("action press check failed; reviewer runs")
+            return True
+        if not result.ok:
+            log.info("action press check unavailable: %s %s; reviewer runs",
+                     result.status, result.reason)
+            return True
+
+        goes_somewhere = action_fastpath.press_goes_somewhere(result.answers)
+        log.info("action press check %s ms=%d %s",
+                 "skips review" if goes_somewhere else "needs review",
+                 result.ms, _verdicts(result.answers))
+        return not goes_somewhere
 
     async def _cmd_reprocess(self, msg: dict[str, Any]) -> None:
         """Re-transcribe a saved audio clip, optionally with a different model,
