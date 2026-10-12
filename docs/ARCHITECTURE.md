@@ -69,7 +69,9 @@ Types:
 - `0x02 AUDIO` — raw PCM chunk: 16kHz mono Float32 LE.
 
 Startup events are split: `ready` means the speech model can accept
-dictation; `setup_complete` still reports both configured models loaded.
+dictation; legacy `setup_complete` reports that startup preparation ended,
+even if writing-model acquisition failed. Use authoritative download snapshots
+to determine each model's readiness.
 Onboarding's guided first try and Finish need only speech readiness. A failed
 writing model leaves dictation available and shows its own recovery controls.
 Legacy `loading` events remain telemetry; the app uses `download_status` for

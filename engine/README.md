@@ -102,8 +102,10 @@ once the STT model is loaded.
 `download_status` reports full schema-1 model snapshots, including byte totals,
 attempt identity, verification/loading, errors and recovery controls. The
 server answers status and recovery commands before speech is ready. Legacy
-`loading` events remain telemetry; `setup_complete` still means both configured
-models loaded, while onboarding and dictation require only speech.
+`loading` events remain telemetry; legacy `setup_complete` means startup
+preparation ended, even after writing-model failure. Authoritative download
+snapshots determine each model's readiness; onboarding and dictation need only
+speech.
 
 Retry/Restart require the exact model/kind/attempt. Transient transfers retry
 after 2, 5 and 15 seconds; manual recovery waits for the old worker to exit.
