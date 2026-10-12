@@ -5,6 +5,9 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
+import json
+import struct
+import zipfile
 import re
 import shutil
 import time
@@ -220,6 +223,156 @@ def _single_file_is_valid(model_id: str, path: str) -> bool:
         return False
 
 
+# Bound legacy tensor-header JSON parsing before reading data.
+_MAX_SAFE_HEADER = 100_000_000
+_SAFE_LENGTH_BYTES = 8
+_WHISPER_DIMENSIONS = (
+    "n_mels", "n_audio_ctx", "n_audio_state", "n_audio_head", "n_audio_layer",
+    "n_vocab", "n_text_ctx", "n_text_state", "n_text_head", "n_text_layer",
+)
+
+
+def _blob_valid(path: Path) -> bool:
+    """Verify Hub symlink identities when available; plain legacy files lack digests."""
+    from .download_cache import _File, _file_valid
+
+    if not path.is_file() or path.stat().st_size == 0:
+        return False
+    if not path.is_symlink():
+        return True
+    digest = path.resolve().name
+    if re.fullmatch(r"[0-9a-f]{64}", digest):
+        return _file_valid(path, _File(path.name, path.stat().st_size, digest, "sha256"))
+    if re.fullmatch(r"[0-9a-f]{40}", digest):
+        return _file_valid(path, _File(path.name, path.stat().st_size, digest, "git-sha1"))
+    return False
+
+
+def _weights_valid(path: Path) -> bool:
+    # Legacy cache checks format/extent plus available blob digests, not model
+    # tensor semantics. The live backend load remains the adoption gate.
+    if not _blob_valid(path):
+        return False
+    if path.suffix == ".npz":
+        with zipfile.ZipFile(path) as archive:
+            return bool(archive.namelist()) and archive.testzip() is None
+    with path.open("rb") as handle:
+        length_bytes = handle.read(_SAFE_LENGTH_BYTES)
+        if len(length_bytes) != _SAFE_LENGTH_BYTES:
+            return False
+        length = struct.unpack("<Q", length_bytes)[0]
+        if not 0 < length <= min(_MAX_SAFE_HEADER, path.stat().st_size - _SAFE_LENGTH_BYTES):
+            return False
+        header = json.loads(handle.read(length))
+    data_size = path.stat().st_size - length - _SAFE_LENGTH_BYTES
+    end = 0
+    tensors = []
+    for name, tensor in header.items():
+        if name == "__metadata__":
+            continue
+        start, stop = tensor["data_offsets"]
+        if not isinstance(tensor["shape"], list) or not tensor["dtype"]:
+            return False
+        if not isinstance(start, int) or not isinstance(stop, int) or start < 0 or stop < start:
+            return False
+        tensors.append((start, stop))
+    for start, stop in sorted(tensors):
+        if start != end:
+            return False
+        end = stop
+    return bool(tensors) and end == data_size
+
+
+def _json_valid(path: Path) -> bool:
+    return _blob_valid(path) and isinstance(json.loads(path.read_text()), dict)
+
+
+def _legacy_valid(model_id: str, path: str) -> bool:
+    """Backend-required artifact check for pre-manifest installed snapshots."""
+    root = Path(path)
+    info = lookup(model_id)
+    backend = info.backend if info else "mlx-lm"
+    try:
+        if not _json_valid(root / "config.json"):
+            return False
+        config = json.loads((root / "config.json").read_text())
+        if backend == "whisper":
+            if any(not isinstance(config.get(key), int) or config[key] <= 0 for key in _WHISPER_DIMENSIONS):
+                return False
+            weights = root / "weights.safetensors"
+            if not weights.exists():
+                weights = root / "weights.npz"
+            return _weights_valid(weights)
+        if backend == "parakeet":
+            if not config.get("target") or not config.get("encoder") or not config.get("preprocessor"):
+                return False
+            return _weights_valid(root / "model.safetensors")
+        if not config.get("model_type"):
+            return False
+        if not _json_valid(root / "tokenizer_config.json"):
+            return False
+        tokenizer = root / "tokenizer.json"
+        if tokenizer.exists():
+            if not _json_valid(tokenizer):
+                return False
+        elif not _blob_valid(root / "tokenizer.model"):
+            return False
+        index = root / "model.safetensors.index.json"
+        if index.exists():
+            if not _json_valid(index):
+                return False
+            mapping = json.loads(index.read_text())["weight_map"]
+            names = set(mapping.values())
+            if not names:
+                return False
+            weights = []
+            for name in names:
+                candidate = Path(name)
+                if candidate.is_absolute() or ".." in candidate.parts:
+                    return False
+                weights.append(root / candidate)
+        else:
+            weights = list(root.glob("model*.safetensors"))
+            # Shard numbering provides a completeness check even without an index.
+            for weight in weights:
+                match = re.fullmatch(r"model-(\d+)-of-(\d+)\.safetensors", weight.name)
+                if match and len(weights) != int(match.group(2)):
+                    return False
+        return bool(weights) and all(_weights_valid(weight) for weight in weights)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, zipfile.BadZipFile):
+        return False
+
+
+def _owned_cached(model_id: str) -> str | None:
+    from .download_cache import _Cache, _cache_root
+
+    try:
+        cached = _Cache(_cache_root(), model_id)._cached()
+        return cached[0] if cached else None
+    except (OSError, ValueError):
+        return None
+
+
+def _legacy_cached(model_id: str) -> str | None:
+    from huggingface_hub import hf_hub_download, snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        filename = _SINGLE_FILE_MODELS.get(model_id)
+        if filename:
+            path = hf_hub_download(repo_id=model_id, filename=filename,
+                                   revision=_SINGLE_FILE_REVISIONS[model_id], local_files_only=True)
+            if not _single_file_is_valid(model_id, path):
+                raise ValueError("legacy pinned artifact integrity failed")
+            return path
+        path = snapshot_download(repo_id=model_id, local_files_only=True)
+        if not _legacy_valid(model_id, path):
+            raise ValueError("legacy required artifact integrity failed")
+        return path
+    except LocalEntryNotFoundError:
+        return None
+
+
 def ensure_downloaded(model_id: str) -> str:
     """Return the local snapshot path, downloading only when not cached.
 
@@ -231,6 +384,11 @@ def ensure_downloaded(model_id: str) -> str:
         resolved = str(local_path.resolve())
         log.info("model loaded from pinned local path %s", resolved)
         return resolved
+
+    # Recovery downloads remain usable through existing synchronous model APIs.
+    owned = _owned_cached(model_id)
+    if owned is not None:
+        return owned
 
     from huggingface_hub import hf_hub_download, snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
@@ -264,37 +422,26 @@ def ensure_downloaded(model_id: str) -> str:
 
     try:
         path = snapshot_download(repo_id=model_id, local_files_only=True)
-        log.info("model %s found in local cache at %s", model_id, path)
-        return path
+        if _legacy_valid(model_id, path):
+            log.info("model %s found in local cache at %s", model_id, path)
+            return path
+        log.warning("model %s has an incomplete or corrupt legacy cache", model_id)
     except LocalEntryNotFoundError:
         pass
 
     log.info("downloading model %s ...", model_id)
     t0 = time.perf_counter()
     path = snapshot_download(repo_id=model_id)
+    if not _legacy_valid(model_id, path):
+        raise OSError("Model cache integrity failed. Required model files are missing or corrupt.")
     log.info("model %s ready at %s (%.1fs)", model_id, path, time.perf_counter() - t0)
     return path
 
 
 def is_cached(model_id: str) -> bool:
-    """True when a complete snapshot exists locally (no network touched)."""
-    from huggingface_hub import hf_hub_download, snapshot_download
-    from huggingface_hub.errors import LocalEntryNotFoundError
-
+    """Probe owned manifests or backend-required legacy files without network."""
     try:
-        filename = _SINGLE_FILE_MODELS.get(model_id)
-        if filename is not None:
-            path = hf_hub_download(
-                repo_id=model_id,
-                filename=filename,
-                revision=_SINGLE_FILE_REVISIONS[model_id],
-                local_files_only=True,
-            )
-            return _single_file_is_valid(model_id, path)
-        snapshot_download(repo_id=model_id, local_files_only=True)
-        return True
-    except LocalEntryNotFoundError:
-        return False
+        return _owned_cached(model_id) is not None or _legacy_cached(model_id) is not None
     except Exception:  # noqa: BLE001 — probe must never raise
         return False
 
@@ -348,11 +495,17 @@ def cached_bytes(model_id: str) -> int:
     if repo_dir is None:
         return 0
     total = 0
+    seen = set()
     if repo_dir.is_dir():
         for p in repo_dir.rglob("*"):
             try:
                 if p.is_file():
-                    total += p.stat().st_size
+                    stat = p.stat()
+                    identity = (stat.st_dev, stat.st_ino)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    total += stat.st_size
             except OSError:  # pragma: no cover — racing the downloader
                 pass
     return total

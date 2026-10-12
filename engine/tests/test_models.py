@@ -158,19 +158,21 @@ def test_transcribe_cpp_rejects_a_corrupt_download(monkeypatch, tmp_path):
         models.ensure_downloaded(models.TRANSCRIBE_CPP_Q8_MODEL)
 
 
-def test_snapshot_model_download_is_offline_first(monkeypatch):
+def test_snapshot_model_download_is_offline_first(monkeypatch, tmp_path):
     model_id = "mlx-community/whisper-large-v3-turbo"
+    _legacy_config(tmp_path)
+    _legacy_weights(tmp_path / "weights.safetensors")
     calls: list[dict] = []
 
     def fake_snapshot_download(**kwargs):
         calls.append(kwargs)
         if kwargs.get("local_files_only"):
             raise LocalEntryNotFoundError("not cached")
-        return "/models/whisper"
+        return str(tmp_path)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", fake_snapshot_download)
 
-    assert models.ensure_downloaded(model_id) == "/models/whisper"
+    assert models.ensure_downloaded(model_id) == str(tmp_path)
     assert calls == [
         {"repo_id": model_id, "local_files_only": True},
         {"repo_id": model_id},
@@ -271,3 +273,83 @@ def test_registry_payload_carries_the_display_name():
     payload = models.registry_payload()
 
     assert [entry["name"] for entry in payload] == [m.name for m in models.REGISTRY]
+
+
+def _legacy_weights(path, payload=b"x"):
+    import json
+    import struct
+
+    header = json.dumps({"weight": {"dtype": "U8", "shape": [len(payload)],
+                                      "data_offsets": [0, len(payload)]}}).encode()
+    path.write_bytes(struct.pack("<Q", len(header)) + header + payload)
+
+
+def test_legacy_whisper_offline(tmp_path, monkeypatch):
+    import mlx.core as mx
+    from mlx.utils import tree_flatten
+    from mlx_whisper.whisper import Whisper, ModelDimensions
+    from mlx_whisper.load_models import load_model
+    import json
+
+    _legacy_config(tmp_path)
+    dimensions = ModelDimensions(**json.loads((tmp_path / "config.json").read_text()))
+    tiny_model = Whisper(dimensions)
+    mx.save_safetensors(str(tmp_path / "weights.safetensors"), dict(tree_flatten(tiny_model.parameters())))
+    calls = []
+
+    def offline(**kwargs):
+        calls.append(kwargs)
+        assert kwargs.get("local_files_only"), "usable legacy cache went online"
+        return str(tmp_path)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", offline)
+    assert models.is_cached("mlx-community/whisper-large-v3-turbo")
+    assert models.ensure_downloaded("mlx-community/whisper-large-v3-turbo") == str(tmp_path)
+    assert len(calls) == 2
+    # A real backend load proves this legacy fixture is usable, not just nonempty.
+    assert load_model(str(tmp_path)).dims == dimensions
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "digest"])
+def test_legacy_shard_integrity(tmp_path, monkeypatch, damage):
+    import json
+
+    (tmp_path / "config.json").write_text('{"model_type":"qwen"}')
+    (tmp_path / "tokenizer_config.json").write_text('{}')
+    (tmp_path / "tokenizer.json").write_text('{"model":{}}')
+    (tmp_path / "model.safetensors.index.json").write_text(json.dumps({
+        "weight_map": {"first": "model-00001.safetensors", "second": "model-00002.safetensors"}}))
+    _legacy_weights(tmp_path / "model-00001.safetensors")
+    second = tmp_path / "model-00002.safetensors"
+    if damage == "corrupt":
+        second.write_bytes(b"broken")
+    if damage == "digest":
+        blob = tmp_path / ("0" * 64)
+        _legacy_weights(blob)
+        second.symlink_to(blob)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **_: str(tmp_path))
+    assert not models.is_cached("mlx-community/Qwen3.5-2B-MLX-4bit")
+
+
+def test_cache_bytes_unique(tmp_path, monkeypatch):
+    monkeypatch.setattr(models, "_repo_cache_dir", lambda _: tmp_path)
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"12345")
+    (tmp_path / "snapshot").symlink_to(blob)
+    assert models.cached_bytes("example/model") == 5
+
+
+def test_legacy_config_incomplete(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text('{}')
+    _legacy_weights(tmp_path / "weights.safetensors")
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **_: str(tmp_path))
+    assert not models.is_cached("mlx-community/whisper-large-v3-turbo")
+
+
+def _legacy_config(path):
+    import json
+
+    values = {"n_mels": 2, "n_audio_ctx": 2, "n_audio_state": 4,
+              "n_audio_head": 2, "n_audio_layer": 1, "n_vocab": 10,
+              "n_text_ctx": 2, "n_text_state": 4, "n_text_head": 2, "n_text_layer": 1}
+    (path / "config.json").write_text(json.dumps(values))
