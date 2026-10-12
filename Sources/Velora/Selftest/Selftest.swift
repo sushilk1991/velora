@@ -2426,6 +2426,9 @@ enum Selftest {
         let initialChecks = checks
         let initialFailures = failures
         defer { print("download recovery — \(checks - initialChecks) checks, \(failures - initialFailures) failures") }
+        testCachedSelection()
+        testImportAdmission()
+        testRecoveryReapFence()
         var commands: [[String: Any]] = []
         let supervisor = EngineSupervisor.forSelftest(
             commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
@@ -2577,6 +2580,197 @@ enum Selftest {
         testRecoveryStorage()
     }
 
+    // Local UI notifications and repeated serving snapshots cannot acknowledge a newer request.
+    private static func testCachedSelection() {
+        let config = AppConfig.shared
+        let original = config.sttModel
+        defer { config.sttModel = original }
+        var commands: [[String: Any]] = []
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+        supervisor.simulateState(.connecting)
+        var ready = recoveryItem(state: "ready", model: original)
+        ready["active_model"] = original
+        let serving = DownloadSnapshot.parse(recoveryWire([ready], boot: "cached-serving"))!
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(serving))
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove(); supervisor.downloads.disconnect() }
+        let repository = makeSyncRepository(fixture)
+        let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                        identityURL: fixture.directory.appendingPathComponent("identity"))
+        let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+        settings.setSpeechModel("example/candidate-B")
+        settings.setSpeechModel(original)
+        let requestID = commands.last?["request_id"] as? String
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(settings.downloads.pending[.stt] == original,
+               "cached ready A cannot settle A to B to A after local queue reconciliation")
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(serving))
+        supervisor.engineClient(supervisor.client, didReceive: .status([
+            "stt_model": original, "stt_ready": true,
+        ]))
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(settings.downloads.pending[.stt] == original,
+               "unchanged serving snapshot/status cannot acknowledge newer A request")
+        supervisor.engineClient(supervisor.client, didReceive: .selectionRejected(
+            model: original, kind: .stt, requestID: requestID!, message: "set_model: busy"))
+        expect(settings.downloads.pending[.stt] == nil
+               && settings.downloads.selectionErrors[.stt] == "set_model: busy",
+               "matching rejection remains visible after cached A reconciliation")
+        settings.setSpeechModel("example/candidate-B")
+        settings.setSpeechModel(original)
+        let latestID = commands.last?["request_id"] as? String
+        supervisor.engineClient(supervisor.client, didReceive: .selectionRejected(
+            model: original, kind: .stt, requestID: requestID!, message: "old rejection"))
+        expect(settings.downloads.pending[.stt] == original,
+               "stale A rejection cannot clear the new A request")
+        supervisor.engineClient(supervisor.client, didReceive: .modelSet(
+            model: original, kind: .stt, requestID: latestID))
+        expect(settings.downloads.pending[.stt] == nil && config.sttModel == original,
+               "matching engine model_set settles already-serving A")
+        settings.setSpeechModel("example/candidate-B")
+        var adopted = recoveryItem(state: "ready", model: "example/candidate-B")
+        adopted["active_model"] = "example/candidate-B"
+        supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse(recoveryWire(
+            [adopted], boot: "cached-serving", sequence: 7)))
+        expect(waitUntil { settings.sttModel == "example/candidate-B" }
+               && settings.downloads.pending[.stt] == nil,
+               "new live adoption snapshot still settles and persists B")
+    }
+
+    // Import must reject an unavailable speech request before changing any other preference or file.
+    private static func testImportAdmission() {
+        let app = NSApplication.shared
+        let appearance = app.appearance
+        let config = AppConfig.shared
+        let original = try! AppConfig.portableSettings(from: config.exportSettingsData())
+        defer { try! config.applyPortableSettings(original); app.appearance = appearance }
+        for invalidated in [false, true] {
+            try! config.applyPortableSettings(original)
+            var commands: [[String: Any]] = []
+            let supervisor = EngineSupervisor.forSelftest(
+                commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+            supervisor.simulateState(.connecting)
+            _ = supervisor.downloads.apply(DownloadSnapshot.parse(recoveryWire([]))!)
+            if invalidated {
+                supervisor.downloads.invalidate()
+            } else {
+                supervisor.downloads.disconnect()
+            }
+            let fixture = DictionaryRepositoryFixture()
+            let repository = makeSyncRepository(fixture)
+            let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                            identityURL: fixture.directory.appendingPathComponent("identity"))
+            let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+            let settingsBefore = try! Data(contentsOf: AppConfig.settingsFileURL)
+            let engineBefore = try? Data(contentsOf: AppConfig.configFileURL)
+            let sendsBefore = commands.count
+            var imported = original
+            imported.models.speech = "example/import-speech"
+            imported.general.soundsEnabled = !original.general.soundsEnabled
+            var rejected = false
+            do {
+                try settings.importSettings(imported)
+            } catch {
+                rejected = true
+                expect(error.localizedDescription.contains("model"), "import rejection explains model admission")
+            }
+            expect(rejected, "disconnected/invalidated model-changing import is rejected atomically")
+            expect((try? Data(contentsOf: AppConfig.settingsFileURL)) == settingsBefore
+                   && (try? Data(contentsOf: AppConfig.configFileURL)) == engineBefore,
+                   "rejected import leaves settings and engine config bytes unchanged")
+            expect(config.soundsEnabled == original.general.soundsEnabled
+                   && settings.soundsEnabled == original.general.soundsEnabled
+                   && settings.sttModel == original.models.speech,
+                   "rejected import preserves non-model and model preferences")
+            expect(commands.count == sendsBefore && settings.downloads.pending.isEmpty
+                   && settings.settingsTransferResult != "Settings imported",
+                   "rejected import has no request side effects or false success")
+
+            // An unchanged speech choice needs no admission and remains safe to import offline.
+            var preferencesOnly = original
+            preferencesOnly.general.soundsEnabled = !original.general.soundsEnabled
+            try! settings.importSettings(preferencesOnly)
+            expect(config.soundsEnabled == preferencesOnly.general.soundsEnabled
+                   && config.sttModel == original.models.speech
+                   && settings.downloads.pending.isEmpty
+                   && !commands.contains { $0["cmd"] as? String == "set_model" },
+                   "offline unchanged-model import commits preferences without losing model intent")
+            fixture.remove()
+        }
+        var commands: [[String: Any]] = []
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+        supervisor.simulateState(.connecting)
+        _ = supervisor.downloads.apply(DownloadSnapshot.parse(recoveryWire([]))!)
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove(); supervisor.downloads.disconnect() }
+        let repository = makeSyncRepository(fixture)
+        let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                        identityURL: fixture.directory.appendingPathComponent("identity"))
+        let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+        var imported = original
+        imported.models.speech = "example/import-speech"
+        imported.general.soundsEnabled = !original.general.soundsEnabled
+        try! settings.importSettings(imported)
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(settings.downloads.pending[.stt] == imported.models.speech
+               && config.sttModel == original.models.speech
+               && config.soundsEnabled == imported.general.soundsEnabled,
+               "admitted import retains model intent without prematurely persisting it")
+        supervisor.engineClient(supervisor.client, didReceive: .modelSet(
+            model: imported.models.speech, kind: .stt,
+            requestID: commands.last { $0["cmd"] as? String == "set_model" }?["request_id"] as? String))
+        expect(config.sttModel == imported.models.speech && settings.downloads.pending[.stt] == nil,
+               "imported speech commits only on actual acceptance")
+    }
+
+    // Detached recovery cannot generate a status read while the engine's reaper is gated.
+    private static func testRecoveryReapFence() {
+        for action in [DownloadAction.retry, .restart] {
+            var commands: [[String: Any]] = []
+            var automaticRead: DownloadSnapshot?
+            var reaping = false
+            let state = DownloadState()
+            let failed = DownloadSnapshot.parse(recoveryWire([recoveryItem()]))!
+            state.bind { command in
+                commands.append(command)
+                if command["cmd"] as? String == action.rawValue { reaping = true }
+                if command["cmd"] as? String == "download_status", reaping {
+                    automaticRead = failed
+                }
+            }
+            state.connect()
+            _ = state.apply(failed)
+            commands = []
+            state.request(failed.downloads[0], action)
+            if let automaticRead { _ = state.apply(automaticRead) }
+            expect(automaticRead == nil && commands.count == 1,
+                   "recovery does not poll unchanged status during gated worker reap")
+            expect(!state.canAct(failed.downloads[0], .retry)
+                   && !state.canAct(failed.downloads[0], .restart),
+                   "gated reap keeps both recovery actions disabled without generated early snapshot")
+            let sent = commands.count
+            state.request(failed.downloads[0], action)
+            expect(commands.count == sent, "second recovery action cannot bypass pending decision fence")
+            reaping = false
+            var accepted = recoveryItem(state: "queued")
+            accepted["attempt"] = "accepted-attempt"
+            _ = state.apply(DownloadSnapshot.parse(recoveryWire([accepted], sequence: 7))!)
+            expect(state.isCurrent && state.downloads[0].attempt == "accepted-attempt",
+                   "accepted snapshot releases the recovery decision fence")
+            state.disconnect()
+            state.connect()
+            let rejected = DownloadSnapshot.parse(recoveryWire([recoveryItem()], boot: "rejected-boot"))!
+            _ = state.apply(rejected)
+            state.request(rejected.downloads[0], action)
+            // An unchanged forced snapshot is also the server's legitimate rejected-decision reply.
+            _ = state.apply(rejected)
+            expect(state.canAct(rejected.downloads[0], action),
+                   "unchanged authoritative rejection can release the fence")
+        }
+    }
+
     private static func testRecoverySelection(_ supervisor: EngineSupervisor) {
         let config = AppConfig.shared
         let oldSpeech = config.sttModel
@@ -2641,7 +2835,9 @@ enum Selftest {
         ], boot: "new-boot", sequence: 5)))
         _ = waitUntil(timeout: 0.1) { false }
         expect(!settings.cleanupLoaded, "unrelated transfer does not claim idle-unloaded writing is loaded")
-        testQueuedEngineFrames(supervisor, settings: settings)
+        for _ in 0..<5 {
+            testQueuedEngineFrames(supervisor, settings: settings)
+        }
         supervisor.simulateState(.connecting)
         if let output = ProcessInfo.processInfo.environment["VELORA_RECOVERY_SNAPSHOTS"] {
             renderRecoveryShots(settings: settings, supervisor: supervisor, into: output)
@@ -2727,6 +2923,31 @@ enum Selftest {
                "natural EOF preserves terminal frames and delivers disconnect once")
         expect(settings.sttModel == "example/live" && AppConfig.shared.sttModel == "example/live",
                "genuine terminal acceptance commits before current disconnect")
+        let failedPeer = openPeer()
+        guard failedPeer >= 0 else { expect(false, "failed reconnect fixture peer accepted"); return }
+        supervisor.simulateState(.connecting)
+        UnixSocket.disableSigpipe(failedPeer)
+        writeFrame(["event": "model_set", "model": "example/failed-reconnect", "kind": "stt"], to: failedPeer)
+        shutdown(failedPeer, SHUT_RDWR)
+        close(failedPeer)
+        expect(waitForEOF(), "failed reconnect fixture reaches terminal EOF")
+        expect(!client.connect(path: path + ".missing"), "replacement connection fails without a socket")
+        expect(waitUntil { probe.events == 3 && probe.disconnections == 2 },
+               "failed reconnect preserves queued terminal event and disconnect exactly once")
+        expect(settings.sttModel == "example/failed-reconnect",
+               "terminal model acceptance survives a failed reconnect")
+        let invalidatedPeer = openPeer()
+        guard invalidatedPeer >= 0 else { expect(false, "invalidation fixture peer accepted"); return }
+        UnixSocket.disableSigpipe(invalidatedPeer)
+        writeFrame(["event": "model_set", "model": "example/invalidated", "kind": "stt"], to: invalidatedPeer)
+        shutdown(invalidatedPeer, SHUT_RDWR)
+        close(invalidatedPeer)
+        expect(waitForEOF(), "explicit invalidation fixture reaches EOF")
+        client.disconnect(notify: false)
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(probe.events == 3 && probe.disconnections == 2
+               && settings.sttModel == "example/failed-reconnect",
+               "explicit invalidation discards queued terminal delivery")
     }
 
     private static func testEditPhaseTimeline() {
@@ -2860,6 +3081,39 @@ enum Selftest {
                     window.orderOut(nil)
                 }
             }
+        }
+    }
+
+    // Capture the actual controller-driven warm/cold HUD labels without showing a window.
+    private static func renderWritingLoadShots(_ model: HUDModel, stage: String) {
+        guard let path = ProcessInfo.processInfo.environment["VELORA_RECOVERY_SNAPSHOTS"] else { return }
+        let app = NSApplication.shared
+        let appearance = app.appearance
+        defer { app.appearance = appearance }
+        for theme in ["light", "dark"] {
+            app.appearance = NSAppearance(named: theme == "light" ? .aqua : .darkAqua)
+            let size = HUDPanel.panelSize
+            let hosting = NSHostingView(rootView: ZStack {
+                theme == "light" ? Color(red: 0.95, green: 0.94, blue: 0.91)
+                    : Color(red: 0.10, green: 0.11, blue: 0.13)
+                HUDView(model: model)
+            }.environment(\.colorScheme, theme == "light" ? .light : .dark))
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.appearance = app.appearance
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.contentView = hosting
+            hosting.frame = NSRect(origin: .zero, size: size)
+            _ = waitUntil(timeout: 0.1) { false }
+            hosting.layoutSubtreeIfNeeded()
+            guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                expect(false, "writing HUD bitmap unavailable"); continue
+            }
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            let png = bitmap.representation(using: .png, properties: [:])
+            try! png?.write(to: URL(fileURLWithPath: path).appendingPathComponent("\(theme)-hud-\(stage).png"))
+            window.orderOut(nil)
         }
     }
 
@@ -13682,6 +13936,7 @@ enum Selftest {
                    && hud.model.transcribeProgress == "Transcribing…"
                    && HUDView.accessibilityStatus(for: hud.model) == "Transcribing",
                    "\(stage) leaves short dictation's pill and VoiceOver unchanged")
+            if stage == "cleanup_load" { renderWritingLoadShots(hud.model, stage: "warm-writing") }
         }
         controller.handleEngineEvent(.finalizeProgress(
             session: next, stage: "cleanup_load", completed: 0, total: 1,
@@ -13689,6 +13944,7 @@ enum Selftest {
         expect(waitUntil(timeout: 2) {
             hud.model.showsMultiStepProgress && hud.model.transcribeProgress == "Loading writing model…"
         }, "short dictation names a cold writing load after the delay")
+        renderWritingLoadShots(hud.model, stage: "cold-writing")
         let graceBeforeRetry = graceActions.count
         controller.handleEngineEvent(.finalizeProgress(
             session: next, stage: "stt_retry", completed: 1, total: 2,

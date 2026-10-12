@@ -40,8 +40,6 @@ final class EngineClient {
     /// success and starts the background read loop. Safe to call repeatedly.
     @discardableResult
     func connect(path: String) -> Bool {
-        disconnect(notify: false)
-
         let sock = socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else { return false }
 
@@ -69,6 +67,8 @@ final class EngineClient {
         var one: Int32 = 1
         setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
 
+        // Only a successful replacement invalidates the previous socket's queued terminal frames.
+        disconnect(notify: false)
         stateLock.lock()
         fd = sock
         generation += 1

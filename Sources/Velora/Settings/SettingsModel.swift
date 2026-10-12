@@ -242,15 +242,32 @@ final class SettingsModel: ObservableObject {
                 confirmation.addButton(withTitle: "Cancel")
                 guard confirmation.runModal() == .alertFirstButtonReturn else { return }
 
-                // Import preferences now, but speech selection is still an engine adoption request.
-                var durable = imported
-                durable.models.speech = self.sttModel
-                try self.config.applyPortableSettings(durable)
-                self.applyImportedSettings(imported)
-                self.settingsTransferResult = "Settings imported"
+                try self.importSettings(imported)
             } catch {
                 self.settingsTransferResult = "Import failed: \(error.localizedDescription)"
             }
+        }
+    }
+
+    // Internal transaction entry lets the panel and isolated selftests exercise the same commit path.
+    func importSettings(_ imported: SettingsDocument.PortableSettings) throws {
+        // Reject before disk/UI mutation if a changed speech model cannot enter the selection transaction.
+        guard imported.models.speech == sttModel || downloads.isCurrent else {
+            throw ImportFailure.speechUnavailable
+        }
+
+        var durable = imported
+        durable.models.speech = sttModel
+        try config.applyPortableSettings(durable)
+        applyImportedSettings(imported)
+        settingsTransferResult = "Settings imported"
+    }
+
+    private enum ImportFailure: LocalizedError {
+        case speechUnavailable
+
+        var errorDescription: String? {
+            "Speech model selection is unavailable. Reconnect and wait for current model status, then import again."
         }
     }
 
@@ -469,8 +486,8 @@ final class SettingsModel: ObservableObject {
         }
     }
 
-    private func adoptModel(_ model: String, kind: DownloadKind, requestID: String? = nil) {
-        downloads.accept(model: model, kind: kind, requestID: requestID)
+    // Persistence never settles selection: cached/local reconciliation is not an engine acknowledgement.
+    private func adoptModel(_ model: String, kind: DownloadKind) {
         if kind == .cleanup {
             if cleanupModel != model || config.cleanupModel != model {
                 cleanupModel = model
@@ -572,7 +589,7 @@ final class SettingsModel: ObservableObject {
         }
         if let accepted = payload["accepted_model"] as? String,
            let kind = (payload["accepted_kind"] as? String).flatMap(DownloadKind.init(rawValue:)) {
-            adoptModel(accepted, kind: kind, requestID: payload["accepted_request_id"] as? String)
+            adoptModel(accepted, kind: kind)
         }
         if let rec = payload["recommended_cleanup_model"] as? String {
             recommendedCleanupModel = rec

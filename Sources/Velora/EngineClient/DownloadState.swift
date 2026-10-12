@@ -119,6 +119,7 @@ final class DownloadState: ObservableObject {
         if let old = snapshot, old.engineID == value.engineID, value.sequence < old.sequence {
             return false
         }
+        let previous = snapshot
         if snapshot?.engineID != value.engineID {
             speechReady = false
             writingReady = false
@@ -139,6 +140,10 @@ final class DownloadState: ObservableObject {
         }
         writingReady = writingLoadedStatus ?? (primaryWritingKey(value) != nil)
         for item in value.downloads where item.state == .ready && item.model == item.activeModel {
+            // Repeated serving A cannot acknowledge a later A request; require a live adoption transition.
+            let prior = previous?.downloads.first { $0.model == item.model && $0.kind == item.kind }
+            guard prior?.state != .ready || prior?.activeModel != item.activeModel
+                    || prior?.attempt != item.attempt else { continue }
             accept(model: item.model, kind: item.kind)
         }
         return true
@@ -194,11 +199,10 @@ final class DownloadState: ObservableObject {
 
     func request(_ item: ModelDownload, _ action: DownloadAction) {
         guard canAct(item, action) else { return }
-        // Invalidate until the accepted/rejected authoritative snapshot arrives.
+        // The detached decision publishes after reaping; an immediate read can precede its reply.
         isCurrent = false
         send?(["cmd": action.rawValue, "model": item.model,
                "kind": item.kind.rawValue, "attempt": item.attempt])
-        send?(["cmd": "download_status"])
     }
 }
 

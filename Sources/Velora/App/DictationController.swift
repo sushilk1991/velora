@@ -2776,6 +2776,7 @@ final class DictationController: NSObject {
             cleanupLabelWork = nil
             if stage == "cleanup_load", completed < total, !hud.model.showsMultiStepProgress {
                 // Keep quick warm loads quiet; a cold load must name what is actually waiting.
+                hud.model.transcribeProgress = "Transcribing…"
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, self.sessionID == session, self.phase == .transcribing,
                           self.cancelledSessionID != session else { return }
