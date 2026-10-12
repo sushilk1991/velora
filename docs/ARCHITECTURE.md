@@ -68,12 +68,85 @@ Types:
 - `0x01 JSON` — control, newline-free JSON object.
 - `0x02 AUDIO` — raw PCM chunk: 16kHz mono Float32 LE.
 
-Startup events are intentionally split: `ready` means the speech model can
-accept dictation and carries a `setup_complete` snapshot, while `loading`
-carries first-run model download phase/fraction. If the snapshot is false, a
-later `setup_complete` event marks both speech and writing model setup done.
-The app uses this completion signal only to unlock onboarding's guided first
-try; normal dictation remains available at `ready`.
+Startup events are split: `ready` means the speech model can accept
+dictation; `setup_complete` still reports both configured models loaded.
+Onboarding's guided first try and Finish need only speech readiness. A failed
+writing model leaves dictation available and shows its own recovery controls.
+Legacy `loading` events remain telemetry; the app uses `download_status` for
+model acquisition and adoption.
+
+### Model acquisition and recovery
+
+The server accepts `ping`, `status`, `download_status`, model selection and
+recovery before speech is ready. Capture requests fail with a preparation
+error until speech adoption. Changing a model retains the serving model and
+saved choice until verified replacement weights load successfully.
+
+```
+app -> engine  {"cmd":"download_status"}
+engine -> app  {"event":"download_status","schema":1,"engine_id":"boot-id",
+                 "sequence":3,"snapshot":true,"downloads":[
+                   {"model":"repo/model","kind":"stt","revision":null,
+                    "attempt":"attempt-id","state":"downloading",
+                    "bytes_received":4096,"bytes_total":null,"retry_index":0,
+                    "retry_at":null,"error":null,"resume":"none",
+                    "retry_allowed":false,"restart_allowed":false,
+                    "active_model":null}]}
+app -> engine  {"cmd":"retry_download","model":"repo/model","kind":"stt",
+                 "attempt":"attempt-id"}
+app -> engine  {"cmd":"restart_download","model":"repo/model","kind":"stt",
+                 "attempt":"attempt-id"}
+```
+
+Snapshots contain the full list, scoped to an engine boot. Clients reject
+older sequences and accept equal authoritative snapshots after reconnect.
+States are `queued`, `downloading`, `verifying`, `loading`, `retry_wait`,
+`ready` and `failed`. `ready` requires successful adoption, not just downloaded
+bytes. Auxiliary readiness does not replace the primary `active_model`.
+`error` is null or `{category,code,message,retryable}`; `retry_at` is a Unix
+retry deadline or null. Unknown byte totals remain null.
+
+Transient transfer failures retry after 2, 5 and 15 seconds. Recovery requires
+the exact model/kind/attempt. The coordinator cancels and reaps the previous
+worker before starting another; stale attempts return the current snapshot.
+Restart discards only owned incomplete files. Verified completed files and
+usable legacy caches survive. Partial file continuation requires matching
+revision/file identity and validated Range responses; otherwise that file
+restarts. `resume` reports `none`, `completed_files`, `partial` or
+`file_restarted`. Installed STT and cleanup load verified local paths without
+Hub access; cleanup subprocess respawn retains that source.
+
+Settings and onboarding share the supervisor's snapshots. Recovery actions
+stay disabled until a reply snapshot. The wire has no recovery-command
+correlation: an unrelated equal-sequence read can reenable controls before the
+decision completes. Engine serialization still prevents competing workers.
+Direct UI cache deletion is unavailable until removal is engine-coordinated;
+Settings counts owned and legacy model storage without deleting locks.
+
+Selection accepts an optional nonempty `request_id` of at most 128 characters.
+`model_set` echoes it; selection errors include `command:"set_model"`, model,
+kind and validated nullable request ID. At most 64 distinct request entries
+share a generation. Identical IDs deduplicate; distinct coalesced IDs settle
+with the same established outcome. Superseded identified requests receive
+`model_selection_superseded`; legacy supersession stays silent. Clients settle
+only matching replies or new authoritative adoption, never cached serving
+state. Disconnected model-changing imports reject before any settings writes.
+
+A generation's terminal outcome is immutable. Its shielded reply drain has
+one two-second transport budget and advances its cursor before writing, so
+cancellation cannot replay a potentially delivered frame or change acceptance
+to rejection. Timeout fences only the captured still-current writer without
+waiting on `wait_closed()`. Reconnect uses new generations and authoritative
+state; old unsent IDs are not replayed. Model adoption survives transport loss.
+
+Voice Edit emits `edit_phase` with its request `id`, `phase` (`loading` or
+`inference`) and `stall_after_s`. The app rearms the matching edit watchdog
+from receipt of each phase. Cleanup worker loading allows 45 seconds; cold
+recovery and inference have separate bounds. Cancelling an await does not
+stop a running inference thread: executor work stays quarantined until it
+finishes and owned cleanup subprocesses are reaped. Action recovery retains
+its absolute 90-second budget; notes startup waits within its existing shared
+15-second readiness budget.
 
 Control flow for one dictation:
 ```

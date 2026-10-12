@@ -99,9 +99,18 @@ type   = 0x01 JSON control | 0x02 raw PCM audio (16kHz mono Float32 LE)
 The engine accepts a single client. On connect it sends
 `{"event":"ready","stt_model":...,"version":...,"setup_complete":true|false}`
 once the STT model is loaded.
-First-run model work is reported as `{"event":"loading","phase":...,"fraction":...}`;
-when the ready snapshot was false, `{"event":"setup_complete"}` follows after
-both speech and writing model setup.
+`download_status` reports full schema-1 model snapshots, including byte totals,
+attempt identity, verification/loading, errors and recovery controls. The
+server answers status and recovery commands before speech is ready. Legacy
+`loading` events remain telemetry; `setup_complete` still means both configured
+models loaded, while onboarding and dictation require only speech.
+
+Retry/Restart require the exact model/kind/attempt. Transient transfers retry
+after 2, 5 and 15 seconds; manual recovery waits for the old worker to exit.
+Verified completed files survive restart. Partial continuation needs validated
+file identity and Range responses; otherwise that file restarts. Local usable
+models work offline, including cleanup subprocess respawns. Direct app-side
+cache deletion is disabled to preserve acquisition ownership and locks.
 
 One dictation:
 
@@ -126,8 +135,12 @@ dictation working without these hints.
 
 Other commands: `cancel` (discards the session → `cancelled`), `ping` → `pong`,
 `status` → `status` (state + model registry), `reload_config` →
-`config_reloaded`, `set_model {"model":id,"kind":"stt"|"cleanup"}` →
-`model_set` (downloads if needed). Malformed frames or commands produce
+`config_reloaded`, `set_model {"model":id,"kind":"stt"|"cleanup","request_id":...}`
+→ `model_set` after successful adoption (downloads if needed). Optional request
+IDs correlate acceptance and scoped errors; the old serving model and saved
+choice survive replacement failure. `download_status`, `retry_download` and
+`restart_download` expose acquisition recovery. Voice Edit `edit_phase` events
+separate cold loading from inference watchdogs. Malformed frames or commands produce
 `{"event":"error","message":...}` — the engine never crashes on bad input.
 
 ## Module map
@@ -139,7 +152,10 @@ Other commands: `cancel` (discards the session → `cancelled`), `ping` → `pon
 | `stt.py` | `ParakeetBackend` (streaming), `WhisperBackend` (batch + hallucination guard), `FakeBackend` (tests, `VELORA_FAKE_STT=1`) |
 | `cleanup.py` | mlx-lm wrapper: prompt cache, token cap, temp 0, divergence guard, 1500ms hard timeout |
 | `formatting.py` | deterministic gate, mode resolution, app-category mapping, prompt assembly, replacements |
-| `models.py` | model registry + `snapshot_download` |
+| `models.py` | model registry, backend-required artifact validation and local source discovery |
+| `downloads.py` | shared acquisition/adoption coordinator, attempt identity and bounded recovery |
+| `download_worker.py` | owned transfer subprocess, identity-checked file continuation and progress |
+| `download_cache.py` | owned manifests, locks, verified files and safe incomplete-file restart |
 | `config.py` | `~/.velora/config.json` + `~/.velora/modes/*.json` (built-ins installed on first run) |
 
 ## Formatting policy (docs/SPEC.md P0)
