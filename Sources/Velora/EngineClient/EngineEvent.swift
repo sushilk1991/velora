@@ -12,9 +12,7 @@ enum EngineEvent {
     /// fraction 0…1 when measurable). `phase == nil` clears the status.
     case loading(phase: String?, fraction: Double?)
 
-    /// Speech and writing model setup finished. Onboarding uses this stricter
-    /// signal instead of the earlier `ready` event, which intentionally makes
-    /// raw dictation available while the writing model is still downloading.
+    /// Legacy setup completion; does not independently prove speech readiness.
     case setupComplete
 
     /// The idle miner promoted confirmed vocabulary. Carries a count only;
@@ -122,6 +120,10 @@ enum EngineEvent {
     case recoveryBusy(session: String, id: Int64?)
 
     /// Response to `ping`.
+    case downloadStatus(DownloadSnapshot)
+    case modelSet(model: String, kind: DownloadKind, requestID: String?)
+    case selectionRejected(model: String, kind: DownloadKind, requestID: String, message: String)
+    case editPhase(id: String?, phase: EditPhase, stallAfterS: Double)
     case pong
 
     /// Response to `status`.
@@ -134,6 +136,19 @@ enum EngineEvent {
     static func parse(_ object: [String: Any]) -> EngineEvent {
         let name = (object["event"] as? String) ?? (object["reply"] as? String) ?? ""
         switch name {
+        case "download_status":
+            guard let snapshot = DownloadSnapshot.parse(object) else { return .unknown(object) }
+            return .downloadStatus(snapshot)
+        case "model_set":
+            guard let model = object["model"] as? String, !model.isEmpty,
+                  let kind = (object["kind"] as? String).flatMap(DownloadKind.init(rawValue:))
+            else { return .unknown(object) }
+            return .modelSet(model: model, kind: kind, requestID: object["request_id"] as? String)
+        case "edit_phase":
+            guard let phase = (object["phase"] as? String).flatMap(EditPhase.init(rawValue:)),
+                  let budget = (object["stall_after_s"] as? NSNumber)?.doubleValue,
+                  budget.isFinite, budget > 0 else { return .unknown(object) }
+            return .editPhase(id: object["id"] as? String, phase: phase, stallAfterS: budget)
         case "ready":
             return .ready(
                 setupComplete: object["setup_complete"] as? Bool ?? false,
@@ -339,6 +354,13 @@ enum EngineEvent {
                 error: object["error"] as? String ?? "meeting note generation failed",
                 code: object["code"] as? String)
         case "error":
+            if object["command"] as? String == "set_model",
+               let model = object["model"] as? String,
+               let kind = (object["kind"] as? String).flatMap(DownloadKind.init(rawValue:)),
+               let requestID = object["request_id"] as? String {
+                return .selectionRejected(model: model, kind: kind, requestID: requestID,
+                                          message: object["message"] as? String ?? "Model selection rejected")
+            }
             if object["message"] as? String == "busy recovering" {
                 return .recoveryBusy(
                     session: object["session"] as? String ?? "",

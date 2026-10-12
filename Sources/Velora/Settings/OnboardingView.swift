@@ -2,16 +2,13 @@ import Combine
 import Foundation
 import SwiftUI
 
-/// User-visible readiness for onboarding's first dictation. The engine can
-/// accept raw dictation before its writing model finishes, but onboarding
-/// waits for the explicit first-run setup completion signal so the guided
-/// attempt never competes with an active model download.
+/// Only adopted speech gates the first dictation; optional writing work does not.
 struct OnboardingSetupState: Equatable {
     let isComplete: Bool
     let status: String?
     let fraction: Double?
 
-    var canTryIt: Bool { isComplete && status == nil }
+    var canTryIt: Bool { isComplete }
     var progressFraction: Double? { fraction.map { min(0.99, max(0, $0)) } }
     var primaryActionTitle: String {
         canTryIt ? "Finish" : "Continue in the Background"
@@ -26,6 +23,9 @@ final class OnboardingModel: ObservableObject {
         case welcome, privacy, microphone, inputMonitoring, accessibility, hotkey, tryIt
     }
 
+    let downloads: DownloadState
+    private var downloadObserver: AnyCancellable?
+    @Published private var speechReady = false
     @Published var step: Step = .welcome
     @Published var microphoneGranted = Permissions.microphoneGranted
     @Published var microphoneDenied = Permissions.microphoneDenied
@@ -57,7 +57,7 @@ final class OnboardingModel: ObservableObject {
 
     var setupState: OnboardingSetupState {
         OnboardingSetupState(
-            isComplete: setupComplete,
+            isComplete: speechReady,
             status: setupStatus,
             fraction: setupFraction)
     }
@@ -68,6 +68,14 @@ final class OnboardingModel: ObservableObject {
 
     init(now: @escaping () -> Date = Date.init) {
         self.now = now
+        downloads = EngineSupervisor.latestDownloads ?? DownloadState()
+        speechReady = downloads.speechReady
+        downloadObserver = downloads.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.speechReady = self.downloads.speechReady
+            }
+        }
         // 1 s live-poll: cards flip to granted with no "I did it" button.
         pollTimer = Timer.publish(every: 1.0, on: .main, in: .common)
             .autoconnect()
@@ -261,6 +269,7 @@ struct OnboardingView: View {
     /// pinned primary button (see `OnboardingLayout`).
     private func stepLayout(
         title: String,
+        contentSpacing: CGFloat = VeloraSpacing.xl,
         @ViewBuilder content: () -> some View,
         @ViewBuilder button: () -> some View
     ) -> some View {
@@ -270,7 +279,7 @@ struct OnboardingView: View {
                 .multilineTextAlignment(.center)
                 .padding(.top, OnboardingLayout.titleTop)
 
-            VStack(spacing: VeloraSpacing.xl) {
+            VStack(spacing: contentSpacing) {
                 content()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -438,7 +447,8 @@ struct OnboardingView: View {
 
     private var tryItStep: some View {
         let setup = model.setupState
-        return stepLayout(title: setup.canTryIt ? "Try it" : "Downloading models") {
+        return stepLayout(title: setup.canTryIt ? "Try it" : "Set up speech",
+                          contentSpacing: VeloraSpacing.s) {
             if setup.canTryIt {
                 Text("Click the box, hold \(model.hotkey.displayLabel), and say anything.")
                     .font(.body)
@@ -446,7 +456,14 @@ struct OnboardingView: View {
                     .multilineTextAlignment(.center)
 
                 TryItEditor(text: $model.tryItText)
-                    .frame(width: 480, height: 160)
+                    .frame(width: 480, height: model.downloads.downloads.contains { $0.kind == .cleanup && $0.state != .ready } ? 90 : 160)
+
+                if model.downloads.downloads.contains(where: { $0.kind == .cleanup && $0.state != .ready }) {
+                    ScrollView {
+                        DownloadRecoveryView(state: model.downloads, kind: .cleanup)
+                    }
+                    .frame(width: 480, height: 150)
+                }
 
                 // Fixed-height slot so the success label never shifts the layout.
                 Group {
@@ -465,8 +482,22 @@ struct OnboardingView: View {
                 }
                 .frame(height: VeloraSpacing.xl)
             } else {
-                ModelSetupCard(state: setup)
-                    .transition(.opacity)
+                VStack(spacing: VeloraSpacing.m) {
+                    if model.downloads.downloads.isEmpty, let status = setup.status {
+                        Text(status).font(.callout).foregroundStyle(.secondary)
+                    }
+                    ScrollView {
+                        DownloadRecoveryView(state: model.downloads)
+                    }
+                    .frame(maxHeight: 220)
+                    Text("You can close setup. Recovery stays in Settings › Models.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(VeloraSpacing.l)
+                .frame(width: 480)
+                .background(VeloraPanel.groupFill,
+                            in: RoundedRectangle(cornerRadius: VeloraRadius.card))
             }
         } button: {
             // No Return here: in the try-it box Return is a newline, and
@@ -505,49 +536,6 @@ struct OnboardingView: View {
         }
         .frame(height: 44)
         .padding(.bottom, VeloraSpacing.s)
-    }
-}
-
-// MARK: - First-run model setup
-
-private struct ModelSetupCard: View {
-    let state: OnboardingSetupState
-
-    var body: some View {
-        VStack(spacing: VeloraSpacing.l) {
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.system(size: 46))
-                .foregroundStyle(VeloraBrand.sky.color)
-
-            VStack(spacing: VeloraSpacing.s) {
-                Text(state.status ?? "Starting the downloads…")
-                    .font(.system(size: 15, weight: .semibold))
-                    .multilineTextAlignment(.center)
-
-                Group {
-                    if let fraction = state.progressFraction {
-                        ProgressView(value: fraction, total: 1)
-                            .progressViewStyle(.linear)
-                    } else {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                }
-                .frame(width: 360)
-            }
-
-            Text("Velora downloads the speech and writing models once. You can continue; the download keeps going.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .frame(width: 400)
-        }
-        .padding(VeloraSpacing.xl)
-        .frame(width: 480)
-        // The one card style (GroupCard): grouped-Form fill, no border.
-        .background(
-            VeloraPanel.groupFill,
-            in: RoundedRectangle(cornerRadius: VeloraRadius.card, style: .continuous))
     }
 }
 

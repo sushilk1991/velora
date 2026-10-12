@@ -117,6 +117,10 @@ enum PillVisibility: CaseIterable, Identifiable {
 final class SettingsModel: ObservableObject {
     private let config = AppConfig.shared
     private weak var supervisor: EngineSupervisor?
+    let downloads: DownloadState
+    private var downloadObserver: AnyCancellable?
+    @Published private(set) var cleanupLoaded = false
+
     private var statusObserver: NSObjectProtocol?
     private var hudPrefsObserver: NSObjectProtocol?
     private var updateStateObserver: NSObjectProtocol?
@@ -238,7 +242,10 @@ final class SettingsModel: ObservableObject {
                 confirmation.addButton(withTitle: "Cancel")
                 guard confirmation.runModal() == .alertFirstButtonReturn else { return }
 
-                try self.config.applyPortableSettings(imported)
+                // Import preferences now, but speech selection is still an engine adoption request.
+                var durable = imported
+                durable.models.speech = self.sttModel
+                try self.config.applyPortableSettings(durable)
                 self.applyImportedSettings(imported)
                 self.settingsTransferResult = "Settings imported"
             } catch {
@@ -321,10 +328,9 @@ final class SettingsModel: ObservableObject {
 
     /// Switches the cleanup LLM (engine downloads on demand, persists the choice).
     func setCleanupModel(_ id: String) {
-        guard !id.isEmpty, id != cleanupModel else { return }
-        cleanupModel = id
-        config.cleanupModel = id
-        supervisor?.send(["cmd": "set_model", "model": id, "kind": "cleanup"])
+        guard !id.isEmpty else { return }
+        guard id != cleanupModel || downloads.pending[.cleanup] != nil else { return }
+        downloads.select(model: id, kind: .cleanup)
     }
 
     init(
@@ -333,6 +339,7 @@ final class SettingsModel: ObservableObject {
         dictionarySync: ICloudDictionarySync
     ) {
         self.supervisor = supervisor
+        downloads = supervisor?.downloads ?? DownloadState()
         self.dictionary = dictionary
         self.dictionarySync = dictionarySync
         dictionaryRows = dictionary.rows
@@ -446,7 +453,39 @@ final class SettingsModel: ObservableObject {
                 availableUpdate: available,
                 currentVersion: VeloraAppInfo.shortVersion)
         }
+        downloadObserver = downloads.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.reconcileDownloads() }
+        }
         requestStatus()
+    }
+
+    // Persist only live adoption, never the requested picker value.
+    private func reconcileDownloads() {
+        objectWillChange.send()
+        cleanupLoaded = downloads.writingReady
+        guard downloads.isCurrent else { return }
+        for item in downloads.downloads where item.state == .ready && item.model == item.activeModel {
+            adoptModel(item.model, kind: item.kind)
+        }
+    }
+
+    private func adoptModel(_ model: String, kind: DownloadKind, requestID: String? = nil) {
+        downloads.accept(model: model, kind: kind, requestID: requestID)
+        if kind == .cleanup {
+            if cleanupModel != model || config.cleanupModel != model {
+                cleanupModel = model
+                config.cleanupModel = model
+            }
+            return
+        }
+        syncingFromEngine = true
+        sttModel = model
+        syncingFromEngine = false
+    }
+
+    func setSpeechModel(_ id: String) {
+        guard id != sttModel || downloads.pending[.stt] != nil else { return }
+        downloads.select(model: id, kind: .stt)
     }
 
     deinit {
@@ -460,6 +499,7 @@ final class SettingsModel: ObservableObject {
     /// safe to call whenever a settings surface appears.
     func requestStatus() {
         supervisor?.send(["cmd": "status"])
+        supervisor?.send(["cmd": "download_status"])
     }
 
     /// Refreshes every live setting surface after the validated document has
@@ -505,7 +545,6 @@ final class SettingsModel: ObservableObject {
         updateChecks = imported.updates.checkAutomatically
         autoInstallUpdates = imported.updates.installAutomatically
 
-        sttModel = imported.models.speech
         applyingImportedSettings = false
 
         // The custom HUD origin/edge and typing fallback list have no published
@@ -514,10 +553,7 @@ final class SettingsModel: ObservableObject {
         NotificationCenter.default.post(name: .veloraHUDPrefsChanged, object: nil)
         NotificationCenter.default.post(name: .veloraHotkeyChanged, object: nil)
         if imported.models.speech != previousSTTModel {
-            supervisor?.send(["cmd": "set_model", "model": imported.models.speech])
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                self?.requestStatus()
-            }
+            downloads.select(model: imported.models.speech, kind: .stt)
         }
         supervisor?.send(["cmd": "reload_config"])
     }
@@ -529,9 +565,14 @@ final class SettingsModel: ObservableObject {
         if let days = payload["audio_retention_days"] as? NSNumber {
             audioRetentionDays = days.doubleValue
         }
-        if let active = payload["cleanup_model"] as? String, !active.isEmpty {
-            cleanupModel = active
-            config.cleanupModel = active
+        if let loaded = payload["cleanup_loaded"] as? Bool { cleanupLoaded = loaded }
+        if let active = payload["cleanup_model"] as? String, !active.isEmpty,
+           payload["cleanup_loaded"] as? Bool == true {
+            adoptModel(active, kind: .cleanup)
+        }
+        if let accepted = payload["accepted_model"] as? String,
+           let kind = (payload["accepted_kind"] as? String).flatMap(DownloadKind.init(rawValue:)) {
+            adoptModel(accepted, kind: kind, requestID: payload["accepted_request_id"] as? String)
         }
         if let rec = payload["recommended_cleanup_model"] as? String {
             recommendedCleanupModel = rec
@@ -540,10 +581,9 @@ final class SettingsModel: ObservableObject {
         // refused (busy dictating/reprocessing) must not leave the picker and
         // config claiming a switch that never happened (review finding). The
         // sync path skips the engine send but reconciles config.json too.
-        if let stt = payload["stt_model"] as? String, !stt.isEmpty, stt != sttModel {
-            syncingFromEngine = true
-            sttModel = stt
-            syncingFromEngine = false
+        if let stt = payload["stt_model"] as? String, !stt.isEmpty,
+           payload["stt_ready"] as? Bool == true {
+            adoptModel(stt, kind: .stt)
         }
     }
 
@@ -929,16 +969,16 @@ final class SettingsModel: ObservableObject {
     @Published var sttModel: String {
         didSet {
             guard !applyingImportedSettings, sttModel != oldValue else { return }
-            config.sttModel = sttModel
-            guard !syncingFromEngine else { return }
-            supervisor?.send(["cmd": "set_model", "model": sttModel])
-            // Re-read the authoritative state: if the engine refused (busy),
-            // the status reply reverts the picker instead of drifting. A slow
-            // model download queues the status reply behind it, so this can't
-            // race an in-progress accepted switch.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                self?.requestStatus()
+            if syncingFromEngine {
+                config.sttModel = sttModel
+                return
             }
+            // Legacy bindings are requests too; leave the serving selection visible.
+            let requested = sttModel
+            syncingFromEngine = true
+            sttModel = oldValue
+            syncingFromEngine = false
+            downloads.select(model: requested, kind: .stt)
         }
     }
 
