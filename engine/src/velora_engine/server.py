@@ -147,6 +147,18 @@ class _ModelJobOrigin(Enum):
     recovery = "recovery"
 
 
+@dataclass
+class _ModelReplies:
+    # A generation owns one terminal outcome and cursor, independent of the
+    # caller's cancellation: outcome -> cursor -> captured-connection drain.
+    requests: list[str | None]
+    client_generation: int
+    writer: asyncio.StreamWriter | None
+    event: dict[str, Any] | None = None
+    next_request: int = 0
+    drain: asyncio.Task[None] | None = None
+
+
 class _ModelSuperseded(Exception):
     """A newer selection owns adoption, not a transfer or backend failure."""
 
@@ -334,6 +346,8 @@ MEETING_NOTES_MODEL_READY_WAIT_S = 15.0
 # Bound request metadata while duplicate selections share one adoption job.
 _MODEL_REQUESTS_MAX = 64
 _MODEL_REQUEST_ID_MAX = 128
+# Terminal replies get one fixed transport budget, including shutdown drains.
+_MODEL_REPLY_DRAIN_S = 2.0
 
 # CleanupProcess replaces a wedged model child asynchronously. Action Mode is
 # already inside a 150-second app-side turn backstop, so wait for that bounded
@@ -781,7 +795,7 @@ class Engine:
         self._model_generation: dict[str, int] = {}
         self._model_targets: dict[str, str] = {}
         self._model_origins: dict[str, _ModelJobOrigin] = {}
-        self._model_notifications: dict[tuple[str, int], list[str | None]] = {}
+        self._model_notifications: dict[tuple[str, int], _ModelReplies] = {}
         self._adoption_lock = asyncio.Lock()
         self._adopting = False
         self._stt_pending: set[asyncio.Future] = set()
@@ -1096,12 +1110,16 @@ class Engine:
             await asyncio.sleep(_DOWNLOAD_POLL_S)
 
     def _queue_model_job(self, model: str, kind: str, *,
-                         origin: _ModelJobOrigin = _ModelJobOrigin.selection) -> asyncio.Task:
+                         origin: _ModelJobOrigin = _ModelJobOrigin.selection,
+                         client_generation: int | None = None) -> asyncio.Task:
         key = (model, kind)
         previous = self._model_jobs.get(key)
+        replies = self._model_notifications.get((kind, self._model_generation.get(kind, 0)))
         if (origin is not _ModelJobOrigin.recovery and self._model_targets.get(kind) == model
                 and self._model_origins.get(kind) is origin
-                and previous is not None and not previous.done()):
+                and previous is not None and not previous.done()
+                and (client_generation is None or (replies is not None
+                     and replies.client_generation == client_generation))):
             return previous
         self._model_targets[kind] = model
         self._model_origins[kind] = origin
@@ -1126,32 +1144,62 @@ class Engine:
     async def _reply_model_selection(self, model: str, kind: str, generation: int,
                                      message: str | None = None,
                                      error: dict | None = None) -> None:
-        # One terminal reply per distinct ID in this generation. An old
-        # generation can reject its own IDs, but never accept a newer request.
+        # Establish the outcome once; caller cancellation cannot turn an
+        # already adopted/failed selection into a different terminal result.
         key = (kind, generation)
-        while True:
-            requests = self._model_notifications.get(key)
-            if requests is None:
-                return
-            client_generation = self._client_gen
-            for request_id in requests:
-                if self._client_gen != client_generation:
-                    break
-                if error is not None and error["category"] == "cancelled" and request_id is None:
-                    continue
-                if message is not None:
-                    await self._set_model_error(model, kind, request_id, message, error)
-                    continue
-                event = {"event": "model_set", "model": model, "kind": kind}
-                if request_id is not None:
-                    event["request_id"] = request_id
-                await self._send(event)
-            # Keep the live list through sends: duplicates admitted during a
-            # drain append distinct IDs, but cannot re-add an already replied ID.
-            # Reconnect replaces the list; never discard that client's requests.
-            if self._model_notifications.get(key) is requests:
+        replies = self._model_notifications.get(key)
+        if replies is None:
+            return
+        if replies.event is None:
+            if message is None:
+                replies.event = {"event": "model_set", "model": model, "kind": kind}
+            else:
+                replies.event = {"event": "error", "message": message, "command": "set_model",
+                                 "model": model, "kind": kind}
+                if error is not None:
+                    replies.event["error"] = error
+        if replies.drain is None:
+            replies.drain = asyncio.create_task(self._drain_model_replies(key, replies))
+        cancelled: asyncio.CancelledError | None = None
+        while not replies.drain.done():
+            try:
+                await asyncio.shield(replies.drain)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        replies.drain.result()
+        if cancelled is not None:
+            raise cancelled
+
+    async def _drain_model_replies(self, key: tuple[str, int], replies: _ModelReplies) -> None:
+        # Advance before a send: its frame may already have reached the socket
+        # when drain blocks. Keep settled IDs for deduplication, never replay them.
+        try:
+            async with asyncio.timeout(_MODEL_REPLY_DRAIN_S):
+                while replies.next_request < len(replies.requests):
+                    if (self._model_notifications.get(key) is not replies
+                            or self._client_gen != replies.client_generation
+                            or self.writer is not replies.writer):
+                        return
+                    request_id = replies.requests[replies.next_request]
+                    replies.next_request += 1
+                    event = dict(replies.event)
+                    error = event.get("error")
+                    if error is not None and error["category"] == "cancelled" and request_id is None:
+                        continue
+                    if request_id is not None or event["event"] == "error":
+                        event["request_id"] = request_id
+                    await self._send(event)
+        except TimeoutError:
+            # Fence only the original blocked connection. Abort is nonblocking;
+            # wait_closed could otherwise add an unbounded shutdown wait.
+            if (self._client_gen == replies.client_generation
+                    and self.writer is replies.writer and replies.writer is not None):
+                replies.writer.close()
+                replies.writer.transport.abort()
+            log.warning("model selection reply drain timed out")
+        finally:
+            if self._model_notifications.get(key) is replies:
                 self._model_notifications.pop(key, None)
-                return
 
     def _model_job_done(self, task: asyncio.Task) -> None:
         self._adoption_jobs.discard(task)
@@ -4239,15 +4287,17 @@ class Engine:
         if (self._model_targets.get(kind) == model
                 and self._model_origins.get(kind) is _ModelJobOrigin.selection
                 and previous is not None and not previous.done()):
-            requests = self._model_notifications.get((kind, self._model_generation[kind]), [])
+            replies = self._model_notifications.get((kind, self._model_generation[kind]))
+            requests = replies.requests if replies is not None else []
             if request_id not in requests and len(requests) >= _MODEL_REQUESTS_MAX:
                 await self._set_model_error(model, kind, request_id,
                     "set_model: too many pending selection requests")
                 return
-        task = self._queue_model_job(model, kind)
-        requests = self._model_notifications.setdefault((kind, self._model_generation[kind]), [])
-        if request_id not in requests:
-            requests.append(request_id)
+        task = self._queue_model_job(model, kind, client_generation=self._client_gen)
+        replies = self._model_notifications.setdefault((kind, self._model_generation[kind]),
+            _ModelReplies([], self._client_gen, self.writer))
+        if request_id not in replies.requests:
+            replies.requests.append(request_id)
         if wait:
             try:
                 error = await asyncio.shield(task)

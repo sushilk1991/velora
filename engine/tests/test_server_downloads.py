@@ -1344,3 +1344,194 @@ async def test_selection_cancel_before_acquire(recovery, socket_engine):
     finally:
         recovery.transfer.set()
         client.writer.close()
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "failed"])
+@pytest.mark.parametrize("stop", ["cancel", "repeated", "shutdown"])
+async def test_selection_cancel_drain(
+    recovery, socket_engine, monkeypatch, outcome, stop,
+):
+    # Pause after the first terminal frame, coalesce another ID, then cancel.
+    # Cancellation must not replay first or change the already established result.
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    target = "example/draining"
+    primary = recovery.engine.stt
+    if outcome == "failed":
+        recovery.failures.add(target)
+    send = recovery.engine._send
+    replying, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed(event):
+        await send(event)
+        if event.get("request_id") == "first":
+            replying.set()
+            await release.wait()
+
+    monkeypatch.setattr(recovery.engine, "_send", delayed)
+    try:
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="first")
+        first = await client.event("model_set" if outcome == "accepted" else "error")
+        await asyncio.wait_for(replying.wait(), 1)
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="second")
+        await client.send(cmd="ping")
+        await client.event("pong")
+        task = recovery.engine._model_jobs[(target, "stt")]
+        if stop == "shutdown":
+            recovery.engine.shutdown.set()
+        else:
+            task.cancel()
+        if stop == "repeated":
+            for _ in range(3):
+                await asyncio.sleep(.01)
+                task.cancel()
+        release.set()
+        second = await client.recv()
+        while second["event"] == "download_status":
+            second = await client.recv()
+        assert second == {**first, "request_id": "second"}
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 1)
+        assert recovery.engine._model_notifications == {}
+        if stop != "shutdown":
+            if outcome == "accepted":
+                assert recovery.engine.stt.model_id == target
+            else:
+                assert recovery.engine.stt is primary
+            await client.send(cmd="ping")
+            assert (await client.recv())["event"] == "pong"  # No duplicate first reply.
+    finally:
+        release.set()
+        client.writer.close()
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "failed"])
+@pytest.mark.parametrize("stop", ["repeated", "shutdown"])
+async def test_selection_blocked_transport(
+    recovery, socket_engine, monkeypatch, outcome, stop,
+):
+    # Block the real captured writer after write(), including wait_closed.
+    # Repeated cancellation/shutdown must end within the fixed transport bound.
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    engine = recovery.engine
+    target = "example/blocked"
+    primary = engine.stt
+    if outcome == "failed":
+        recovery.failures.add(target)
+    writer = engine.writer
+    blocked = asyncio.Event()
+
+    async def stall():
+        blocked.set()
+        await asyncio.Event().wait()
+
+    send = engine._send
+
+    async def terminal_send(event):
+        if event.get("request_id") == "first":
+            monkeypatch.setattr(writer, "drain", stall)
+        await send(event)
+
+    monkeypatch.setattr(engine, "_send", terminal_send)
+    monkeypatch.setattr(writer, "wait_closed", stall)
+    try:
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="first")
+        first = await client.event("model_set" if outcome == "accepted" else "error")
+        assert first["request_id"] == "first"
+        await asyncio.wait_for(blocked.wait(), 1)
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="second")
+        async with asyncio.timeout(1):
+            while not any(len(item.requests) == 2 for item in engine._model_notifications.values()):
+                await asyncio.sleep(.001)
+        task = engine._model_jobs[(target, "stt")]
+        if stop == "shutdown":
+            engine.shutdown.set()
+        else:
+            for _ in range(3):
+                task.cancel()
+                await asyncio.sleep(.01)
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True),
+                               server._MODEL_REPLY_DRAIN_S + 1)
+        assert engine._model_notifications == {}
+        assert writer.is_closing()
+        if stop != "shutdown":
+            if outcome == "accepted":
+                assert engine.stt.model_id == target
+            else:
+                assert engine.stt is primary
+        # The first possibly-written frame is never replayed; second cannot be
+        # written after the connection is fenced. EOF is transport failure, not
+        # a different model outcome attributed to either request.
+        while True:
+            try:
+                event = await client.recv()
+            except asyncio.IncompleteReadError:
+                break
+            assert event["event"] == "download_status"
+    finally:
+        client.writer.close()
+
+
+@pytest.mark.parametrize("stop", ["cancel", "shutdown"])
+async def test_selection_drain_reconnect(recovery, socket_engine, monkeypatch, stop):
+    # A new client can arrive before the old writer's timeout. Its same-target
+    # request gets a new generation, not the old drain's cursor or cancellation.
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    engine = recovery.engine
+    send = engine._send
+    replying = asyncio.Event()
+    target = "example/reconnected"
+
+    async def delayed(event):
+        await send(event)
+        if event.get("request_id") == "old-first":
+            replying.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(engine, "_send", delayed)
+    try:
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="old-first")
+        await client.event("model_set")
+        await asyncio.wait_for(replying.wait(), 1)
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="old-second")
+        await client.send(cmd="ping")
+        await client.event("pong")
+        old_task = engine._model_jobs[(target, "stt")]
+        old_generation = engine._model_generation["stt"]
+        client.writer.close()
+        await client.writer.wait_closed()
+        async with asyncio.timeout(1):
+            while engine.writer is not None:
+                await asyncio.sleep(.001)
+        client = await _connect(socket_engine)
+        await client.event("ready")
+        new_writer = engine.writer
+        await client.send(cmd="set_model", model=target, kind="stt", request_id="new-client")
+        await client.send(cmd="ping")
+        await client.event("pong")
+        assert engine._model_generation["stt"] > old_generation
+        if stop == "shutdown":
+            engine.shutdown.set()
+        else:
+            for _ in range(3):
+                old_task.cancel()
+                await asyncio.sleep(.01)
+        terminal = await client.recv(timeout=server._MODEL_REPLY_DRAIN_S + 1)
+        while terminal["event"] == "download_status":
+            terminal = await client.recv(timeout=server._MODEL_REPLY_DRAIN_S + 1)
+        assert terminal["request_id"] == "new-client"
+        assert terminal["event"] == ("error" if stop == "shutdown" else "model_set")
+        await asyncio.wait_for(asyncio.gather(old_task, return_exceptions=True),
+                               server._MODEL_REPLY_DRAIN_S + 1)
+        assert not new_writer.is_closing()
+        assert engine._model_notifications == {}
+        if stop == "cancel":
+            assert engine.stt.model_id == target
+            await client.send(cmd="ping")
+            assert (await client.recv())["event"] == "pong"
+    finally:
+        client.writer.close()
