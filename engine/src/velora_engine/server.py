@@ -792,10 +792,8 @@ class Engine:
         # soon as the speech model is usable.
         self.setup_complete = False
         self.cleanup: CleanupProcess | None = None
-        # The writing worker exists before it is ready. Keep that cold-start
-        # identity visible so durable meeting notes restored as soon as STT is
-        # ready can wait for the same worker instead of failing in the brief
-        # self.cleanup == nil publication window.
+        # Publish the writing worker only after acquisition verifies its local
+        # source. Notes can wait on this proxy while its offline load runs.
         self._cleanup_loading: CleanupProcess | None = None
         # Background retry of a startup cleanup load that failed or timed out.
         self._cleanup_retry_task: asyncio.Task[None] | None = None
@@ -947,9 +945,13 @@ class Engine:
         if callable(resume):
             resume()
 
-    def _new_cleanup_process(self, model_id: str) -> CleanupProcess:
+    def _new_cleanup_process(self, model_id: str, *,
+                             local_model_path: str | None = None) -> CleanupProcess:
+        # Keep logical identity public; every real load/respawn uses the
+        # coordinator's verified source rather than acquiring inside a child.
         return CleanupProcess(
             model_id,
+            local_model_path=local_model_path,
             on_unhealthy=self._queue_cleanup_unhealthy_restart,
         )
 
@@ -1153,9 +1155,6 @@ class Engine:
         cleanup_stop_started = False
         notification = (kind, generation)
         startup_cleanup = kind == "cleanup" and origin is _ModelJobOrigin.startup
-        if startup_cleanup:
-            candidate = self._cleanup_loading
-            loading_candidate = candidate
         try:
             if not fake_stt_enabled():
                 result = await self._downloads.ensure(model, kind)
@@ -1178,9 +1177,6 @@ class Engine:
                 self._adopting = kind == "stt" or origin is not _ModelJobOrigin.startup
                 try:
                     if result is not None:
-                        # Cleanup still loads by logical ID; this guard prevents
-                        # known missing caches. Offline-only respawns require
-                        # the separate loader contract, not a server patch.
                         await self._downloads.mark_loading(model, kind, result.attempt)
                         await self._publish_downloads()
                     self.config.reload()
@@ -1189,7 +1185,10 @@ class Engine:
                         await self._load_stt_local(candidate, result.path if result else None)
                     else:
                         if candidate is None:
-                            candidate = self._new_cleanup_process(model)
+                            # Fake-STT fixtures have no acquisition result;
+                            # production proxies always receive a verified source.
+                            candidate = (self._new_cleanup_process(model, local_model_path=result.path)
+                                         if result is not None else self._new_cleanup_process(model))
                         self._cleanup_loading = candidate
                         loading_candidate = candidate
                         async with self._cleanup_load_lock:
@@ -1216,15 +1215,6 @@ class Engine:
                         await self._downloads.mark_ready(model, kind, result.attempt)
                         await self._publish_downloads()
                     if kind == "stt":
-                        # Publish the cold writing-worker identity before ready:
-                        # restored notes can wait for this same startup proxy.
-                        if (not self.stt_ready.is_set() and self.config.cleanup_enabled
-                                and not fake_stt_enabled() and self.cleanup is None
-                                and self._cleanup_loading is None
-                                and self._model_origins.get("cleanup") not in (
-                                    _ModelJobOrigin.selection, _ModelJobOrigin.recovery)):
-                            with contextlib.suppress(Exception):
-                                self._cleanup_loading = self._new_cleanup_process(self.config.cleanup_model)
                         self.stt_ready.set()
                     if old is not None and old is not (self.stt if kind == "stt" else self.cleanup):
                         if kind == "stt":
@@ -1503,7 +1493,8 @@ class Engine:
                     result = await self._downloads.ensure(model_id, "cleanup")
                     await self._downloads.mark_loading(model_id, "cleanup", result.attempt)
                     await self._publish_downloads()
-                engine = self._new_cleanup_process(model_id)
+                engine = (self._new_cleanup_process(model_id, local_model_path=result.path)
+                          if result is not None else self._new_cleanup_process(model_id))
                 self._cleanup_loading = engine
                 try:
                     loaded = await self._load_unless_busy(engine)
@@ -4239,8 +4230,11 @@ class Engine:
             result = await self._downloads.ensure(model_id, "stt")
             await self._downloads.mark_loading(model_id, "stt", result.attempt)
             await self._publish_downloads()
-        backend = create_backend(model_id, language)
+        backend = None
         try:
+            # Construction and loading both belong to auxiliary adoption;
+            # either failure must leave the verified item out of loading.
+            backend = create_backend(model_id, language)
             await self._load_stt_local(backend, result.path if result else None)
         except BaseException:
             if result is not None:
@@ -4248,10 +4242,15 @@ class Engine:
                     "category": "loading", "code": "model_load_failed",
                     "message": "Reprocessing model could not be loaded.", "retryable": False})
                 await self._publish_downloads()
-            await self._close_stt_backend(backend)
+            if backend is not None:
+                await self._close_stt_backend(backend)
             raise
         old = self._reprocess_backend
         self._reprocess_backend = backend
+        if result is not None:
+            # Auxiliary ready does not replace the primary serving model.
+            await self._downloads.mark_aux_ready(model_id, "stt", result.attempt)
+            await self._publish_downloads()
         if old is not None:
             await self._close_stt_backend(old)
         return backend

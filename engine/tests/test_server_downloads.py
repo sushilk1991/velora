@@ -2,6 +2,7 @@
 import asyncio
 import json
 import shutil
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -38,6 +39,7 @@ async def recovery(home, monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DownloadCoordinator", lambda: coordinator)
     monkeypatch.setattr(server, "fake_stt_enabled", lambda: False)
     monkeypatch.setattr(server.models, "is_cached", lambda model: True)
+    monkeypatch.setattr(server.models, "remove_from_cache", lambda model: 0)
     backends = []
 
     def backend(model, language):
@@ -70,14 +72,14 @@ class _Client:
         self.writer.write(protocol.encode_json(msg))
         await self.writer.drain()
 
-    async def recv(self):
-        kind, payload = await asyncio.wait_for(protocol.read_frame(self.reader), 1)
+    async def recv(self, timeout=1):
+        kind, payload = await asyncio.wait_for(protocol.read_frame(self.reader), timeout)
         assert kind == protocol.FRAME_JSON
         return json.loads(payload)
 
-    async def event(self, name):
+    async def event(self, name, timeout=1):
         while True:
-            event = await self.recv()
+            event = await self.recv(timeout)
             if event["event"] == name:
                 return event
 
@@ -620,7 +622,7 @@ async def test_cleanup_switch_recovery(recovery, monkeypatch, command, failure):
                           load_async=AsyncMock(), aclose=AsyncMock())
     attempts = []
 
-    def candidate(model):
+    def candidate(model, **kwargs):
         if model == old.model_id:
             return old
 
@@ -788,9 +790,214 @@ async def test_pre_ready_cleanup_selection(recovery, socket_engine, monkeypatch,
         await asyncio.sleep(.001)
     assert engine.cleanup is selected
     assert engine.config.cleanup_model == "example/cleanup-b"
-    factory.assert_called_once_with("example/cleanup-b")
+    factory.assert_called_once_with("example/cleanup-b",
+                                    local_model_path=str(recovery.coordinator._root))
     selected.load_async.assert_awaited_once()
     selected.aclose.assert_not_awaited()
     items = [item for item in recovery.coordinator.snapshot()["downloads"] if item["kind"] == "cleanup"]
     assert [(item["model"], item["state"]) for item in items] == [("example/cleanup-b", "ready")]
     client.writer.close()
+
+
+@pytest.fixture
+def cleanup_sources(recovery, monkeypatch):
+    # Capture the production constructor seam, keeping loads small and local.
+    workers = []
+
+    def construct(model, **kwargs):
+        item = SimpleNamespace(model_id=model, loaded=True, kwargs=kwargs,
+                               load_async=AsyncMock(), aclose=AsyncMock())
+        workers.append(item)
+        return item
+
+    monkeypatch.setattr(server, "CleanupProcess", construct)
+    monkeypatch.setattr(server.models, "remove_from_cache", lambda model: 0)
+    recovery.engine.config.data.update(cleanup_enabled=True, cleanup_model="example/cleanup-a")
+    recovery.engine.config.save()
+    return workers
+
+
+async def test_cleanup_verified_startup(recovery, cleanup_sources, socket_engine, monkeypatch):
+    # STT ready -> cleanup transfer pending -> verified source -> proxy -> ready.
+    gate = asyncio.Event()
+    once = recovery.coordinator._once
+
+    async def gated(entry, restart):
+        if entry.item["kind"] == "cleanup":
+            await gate.wait()
+        return await once(entry, restart)
+
+    monkeypatch.setattr(recovery.coordinator, "_once", gated)
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    try:
+        await client.event("ready")
+        assert cleanup_sources == []  # No unverified ID-only placeholder.
+        gate.set()
+        await client.event("setup_complete")
+        assert len(cleanup_sources) == 1
+        worker = cleanup_sources[0]
+        assert worker.kwargs["local_model_path"] == str(recovery.coordinator._root)
+        assert worker.model_id == recovery.engine.config.cleanup_model
+        snapshot = recovery.coordinator.snapshot()
+        assert snapshot["downloads"][-1]["active_model"] == worker.model_id
+    finally:
+        gate.set()
+        client.writer.close()
+
+
+async def test_cleanup_verified_switch_retry(recovery, cleanup_sources, socket_engine):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    try:
+        await client.event("ready")
+        await client.event("setup_complete")
+        await client.send(cmd="set_model", model="example/cleanup-b", kind="cleanup")
+        accepted = await client.event("model_set")
+        assert accepted == {"event": "model_set", "model": "example/cleanup-b", "kind": "cleanup"}
+        assert all(worker.kwargs["local_model_path"] == str(recovery.coordinator._root)
+                   for worker in cleanup_sources)
+        recovery.engine.cleanup = None
+        await recovery.engine._retry_cleanup_attempt(1)
+        assert cleanup_sources[-1].kwargs["local_model_path"] == str(recovery.coordinator._root)
+        assert recovery.engine.cleanup is cleanup_sources[-1]
+    finally:
+        client.writer.close()
+
+
+@pytest.mark.parametrize("failure", [None, "load", "construct"])
+async def test_aux_adoption_snapshot(recovery, socket_engine, monkeypatch, failure):
+    # Auxiliary adoption publishes ready/failed without replacing the primary.
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    engine = recovery.engine
+    primary = engine.stt
+    factory = server.create_backend
+
+    def auxiliary(model, language):
+        if failure == "construct":
+            raise RuntimeError("backend construction failed")
+        backend = factory(model, language)
+        if failure == "load":
+            backend.load.side_effect = RuntimeError("backend load failed")
+        return backend
+
+    monkeypatch.setattr(server, "create_backend", auxiliary)
+    try:
+        if failure:
+            with pytest.raises(RuntimeError):
+                await engine._stt_for_reprocess("example/aux", "en")
+        else:
+            backend = await engine._stt_for_reprocess("example/aux", "en")
+            assert engine._reprocess_backend is backend
+            assert backend.model_id == "example/aux"
+        snapshot = await client.event("download_status")
+        while snapshot["downloads"][-1]["state"] not in ("ready", "failed"):
+            snapshot = await client.event("download_status")
+        assert snapshot["downloads"][-1]["state"] == ("failed" if failure else "ready")
+        assert all(item["active_model"] == primary.model_id for item in snapshot["downloads"])
+        assert engine.stt is primary
+        assert engine.config.stt_model == primary.model_id
+        if failure:
+            assert engine._reprocess_backend is None
+        client.writer.close()
+        await client.writer.wait_closed()
+        while engine.writer is not None:
+            await asyncio.sleep(.001)
+        client = await _connect(socket_engine)
+        reconnect = await client.recv()
+        assert reconnect["downloads"] == snapshot["downloads"]
+        await client.send(cmd="ping")
+        await client.event("pong")
+    finally:
+        client.writer.close()
+
+
+async def test_cleanup_verified_retry(recovery, cleanup_sources):
+    # Background retry must use the same verified source as explicit selection.
+    recovery.transfer.set()
+    assert await recovery.engine._retry_cleanup_attempt(1)
+    assert cleanup_sources[-1].kwargs["local_model_path"] == str(recovery.coordinator._root)
+
+
+@pytest.mark.parametrize("entrypoint", ["switch", "hibernate", "recovery"])
+async def test_cleanup_source_removed(
+    recovery, monkeypatch, tmp_path, socket_engine, capfd, entrypoint,
+):
+    # Server -> production proxy/CLI/worker -> local loader; acquisition trips fail.
+    from velora_engine.cleanup_process import CleanupProcess
+    import velora_engine.cleanup_process as process_module
+
+    source = tmp_path / "verified-model"
+    source.mkdir()
+    (source / "config.json").write_text('{"eos_token_id": 7}')
+    record = tmp_path / "loads.jsonl"
+    workers = []
+    cache_checks = []
+
+    async def once(entry, restart):
+        return DownloadResult(str(source), None, entry.item["attempt"])
+
+    def construct(model, **kwargs):
+        worker = CleanupProcess(model, worker_command=[
+            sys.executable, str(Path(__file__).parent / "fixtures" / "offline_cleanup_worker.py"),
+            str(record)], **kwargs)
+        workers.append(worker)
+        return worker
+
+    def cached(model):
+        cache_checks.append(model)
+        return True
+
+    monkeypatch.setattr(recovery.coordinator, "_once", once)
+    monkeypatch.setattr(server, "CleanupProcess", construct)
+    monkeypatch.setattr(server.models, "is_cached", cached)
+    monkeypatch.setattr(server.models, "remove_from_cache", lambda model: 0)
+    monkeypatch.setattr(process_module, "RECOVERY_BACKOFF_S", .01)
+    monkeypatch.setattr(recovery.engine, "_queue_cleanup_unhealthy_restart", Mock())
+    recovery.engine.config.data.update(cleanup_enabled=True, cleanup_model="example/cleanup-a")
+    recovery.engine.config.save()
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    try:
+        await client.event("ready")
+        await client.event("setup_complete", timeout=15)
+        primary = recovery.engine.cleanup
+        assert primary is not None
+        assert json.loads(record.read_text().splitlines()[0]) == {
+            "model_id": "example/cleanup-a", "source": str(source)}
+        if entrypoint == "hibernate":
+            assert await primary.hibernate()
+        (source / "config.json").unlink()
+        source.rmdir()
+        if entrypoint == "switch":
+            await client.send(cmd="set_model", model="example/cleanup-b", kind="cleanup")
+            await client.event("error", timeout=15)
+            snapshot = recovery.coordinator.snapshot()
+            assert snapshot["downloads"][-1]["state"] == "failed"
+            assert snapshot["downloads"][-1]["error"]["code"] == "model_load_failed"
+            assert snapshot["downloads"][-1]["active_model"] == primary.model_id
+            assert "example/cleanup-b" in cache_checks  # Disappeared after a positive cache check.
+            assert recovery.engine.cleanup is primary
+        elif entrypoint == "hibernate":
+            assert not await primary.ensure_loaded()
+            assert not primary.loaded and primary.pid is None
+        else:
+            primary._process.kill()
+            async with asyncio.timeout(15):
+                while not primary.unhealthy:
+                    await asyncio.sleep(.01)
+            assert not primary.loaded and primary.pid is None
+        # No missing-source load reached the model double or any acquisition helper.
+        assert len(record.read_text().splitlines()) == 2
+        stderr = capfd.readouterr().err
+        assert "offline cleanup attempted acquisition" not in stderr
+        assert "Offline cleanup load failed for" in stderr
+        assert "Reacquire the model" in stderr
+        await client.send(cmd="ping")
+        await client.event("pong")
+    finally:
+        client.writer.close()
+        for worker in workers:
+            await worker.aclose()

@@ -724,6 +724,16 @@ async def test_meeting_notes_fail_honestly_without_cleanup_model(engine):
     assert not eng._meeting_notes_running
 
 
+def _local_cleanup(cleanup, source):
+    # Lifecycle doubles must accept and verify the coordinator's local source.
+    def construct(model_id, *, local_model_path):
+        assert model_id == cleanup.model_id
+        assert local_model_path == str(source)
+        return cleanup
+
+    return construct
+
+
 async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
     home, monkeypatch
 ):
@@ -731,6 +741,7 @@ async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
     from velora_engine import server as server_mod
 
     allow_model_ready = asyncio.Event()
+    load_started = asyncio.Event()
 
     class LoadingCleanup:
         loaded = False
@@ -739,6 +750,7 @@ async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
         model_id = "test/meeting-notes"
 
         async def load_async(self, _prompt):
+            load_started.set()
             await allow_model_ready.wait()
             self.loaded = True
 
@@ -769,7 +781,7 @@ async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
     eng._prune_superseded_models = AsyncMock(return_value=None)
     monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
     monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
-    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: cleanup)
+    monkeypatch.setattr(eng, "_new_cleanup_process", _local_cleanup(cleanup, home))
 
     sock_dir = Path(tempfile.mkdtemp(prefix="velora-meeting-startup-"))
     sock = sock_dir / "e.sock"
@@ -781,6 +793,7 @@ async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
             await asyncio.sleep(0.01)
         client = await connect(sock)
         await client.recv_event("ready")
+        await asyncio.wait_for(load_started.wait(), 2)
         assert eng.cleanup is None
         assert eng._cleanup_loading is cleanup
 
@@ -848,7 +861,7 @@ async def test_cleanup_startup_replacement_and_failure_close_only_their_worker(
         eng = Engine(config, parent_pid=None, hard_exit=Mock())
         eng._stt_call = AsyncMock(return_value=None)
         eng._prune_superseded_models = AsyncMock(return_value=None)
-        monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: cleanup)
+        monkeypatch.setattr(eng, "_new_cleanup_process", _local_cleanup(cleanup, home))
         return eng
 
     monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
@@ -916,7 +929,7 @@ async def test_serve_waits_for_loading_cleanup_to_close_on_shutdown(home, monkey
     eng._stt_call = AsyncMock(return_value=None)
     monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
     monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
-    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: cleanup)
+    monkeypatch.setattr(eng, "_new_cleanup_process", _local_cleanup(cleanup, home))
 
     sock_dir = Path(tempfile.mkdtemp(prefix="velora-cleanup-shutdown-"))
     task = asyncio.create_task(eng.serve(sock_dir / "e.sock"))
@@ -992,7 +1005,7 @@ async def test_replaced_startup_cleanup_closes_once_when_shutdown_interrupts_clo
     eng._stt_call = AsyncMock(return_value=None)
     monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: False)
     monkeypatch.setattr(models, "is_cached", lambda _model_id: True)
-    monkeypatch.setattr(eng, "_new_cleanup_process", lambda _model_id: startup)
+    monkeypatch.setattr(eng, "_new_cleanup_process", _local_cleanup(startup, home))
 
     sock_dir = Path(tempfile.mkdtemp(prefix="velora-cleanup-replaced-shutdown-"))
     task = asyncio.create_task(eng.serve(sock_dir / "e.sock"))

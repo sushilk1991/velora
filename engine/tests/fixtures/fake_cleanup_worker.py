@@ -329,6 +329,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fd", required=True, type=int)
     parser.add_argument("--model", required=True)
+    # Server fixtures receive verified sources but never load native weights.
+    parser.add_argument("--local-model-path", type=Path)
     parser.add_argument("--fail-next-replacement", type=Path)
     parser.add_argument("--fail-all-replacements", type=Path)
     parser.add_argument("--exit-after-load", action="store_true")
