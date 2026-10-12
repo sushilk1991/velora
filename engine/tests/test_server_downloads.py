@@ -608,3 +608,189 @@ async def test_explicit_local_model(recovery, monkeypatch, tmp_path):
     await recovery.engine._queue_model_job(str(local), "stt")
     assert recovery.engine.stt_ready.is_set()
     assert recovery.engine.stt.model_id == str(local)
+
+
+@pytest.mark.parametrize("command", ["retry_download", "restart_download"])
+@pytest.mark.parametrize("failure", ["transfer", "load"])
+async def test_cleanup_switch_recovery(recovery, monkeypatch, command, failure):
+    engine = recovery.engine
+    engine.config.data.update(cleanup_enabled=True, cleanup_model="example/cleanup-a")
+    engine.config.save()
+    old = SimpleNamespace(model_id="example/cleanup-a", loaded=True,
+                          load_async=AsyncMock(), aclose=AsyncMock())
+    attempts = []
+
+    def candidate(model):
+        if model == old.model_id:
+            return old
+
+        async def load(prompt):
+            if failure == "load" and len(attempts) == 1:
+                raise RuntimeError("first load failed")
+
+        item = SimpleNamespace(model_id=model, loaded=True,
+                               load_async=load, aclose=AsyncMock())
+        attempts.append(item)
+        return item
+
+    monkeypatch.setattr(engine, "_new_cleanup_process", candidate)
+    recovery.transfer.set()
+    await engine._cmd_set_model({"model": old.model_id, "kind": "cleanup"})
+    if failure == "transfer":
+        recovery.failures.add("example/cleanup-b")
+    error = DownloadError if failure == "transfer" else RuntimeError
+    with pytest.raises(error):
+        await engine._cmd_set_model({"model": "example/cleanup-b", "kind": "cleanup"})
+    assert engine.cleanup is old
+    assert engine.config.cleanup_model == "example/cleanup-a"
+    item = recovery.coordinator.snapshot()["downloads"][-1]
+    assert item["active_model"] == old.model_id
+    recovery.failures.clear()
+    await engine._cmd_download_retry({"cmd": command, "model": item["model"],
+                                      "kind": "cleanup", "attempt": item["attempt"]})
+    await engine._model_jobs[(item["model"], "cleanup")]
+    assert engine.cleanup is attempts[-1]
+    assert engine.config.cleanup_model == "example/cleanup-b"
+    item = recovery.coordinator.snapshot()["downloads"][-1]
+    assert item["state"] == "ready"
+    assert item["active_model"] == "example/cleanup-b"
+    old.aclose.assert_awaited_once()
+    assert recovery.calls == [("example/cleanup-a", False), ("example/cleanup-b", False),
+                              ("example/cleanup-b", command == "restart_download")]
+
+
+@pytest.mark.parametrize("phase", ["transfer", "loading"])
+async def test_same_model_latest_selection(recovery, monkeypatch, phase):
+    engine = recovery.engine
+    events = []
+    engine._send = AsyncMock(side_effect=events.append)
+    entered, finish = threading.Event(), threading.Event()
+    factory = server.create_backend
+    candidates = []
+
+    def slow(model, language):
+        backend = factory(model, language)
+        if not candidates and model == "example/a":
+            backend.load.side_effect = lambda: (entered.set(), finish.wait(2))
+        candidates.append(backend)
+        return backend
+
+    if phase == "loading":
+        monkeypatch.setattr(server, "create_backend", slow)
+        recovery.transfer.set()
+    try:
+        for index, model in enumerate(("example/a", "example/b", "example/a")):
+            await engine._cmd_set_model({"model": model, "kind": "stt"}, wait=False)
+            if phase == "loading" and index == 0:
+                while not entered.is_set():
+                    await asyncio.sleep(.001)
+            await asyncio.sleep(.001)
+    finally:
+        finish.set()
+        recovery.transfer.set()
+    await asyncio.gather(*engine._adoption_jobs)
+    assert engine.stt.model_id == "example/a"
+    assert engine.config.stt_model == "example/a"
+    assert [event for event in events if event["event"] == "model_set"] == [
+        {"event": "model_set", "model": "example/a", "kind": "stt"}]
+    assert not [event for event in events if event["event"] == "error"]
+    assert recovery.calls.count(("example/a", False)) == 1
+    assert recovery.coordinator.snapshot()["downloads"][0]["state"] == "ready"
+
+
+@pytest.mark.parametrize("command,event", [
+    ("meeting_transcribe", "meeting_transcribe_failed"),
+    ("meeting_notes", "meeting_notes_failed"),
+    ("transcribe_file", "transcribe_failed"),
+    ("reprocess", "reprocess_failed"),
+    ("edit_text", "edit_failed"),
+    ("action_start", "action_failed"),
+    ("action_observe", "action_failed"),
+    ("start", "error"),
+])
+async def test_adoption_terminal_events(recovery, socket_engine, monkeypatch, command, event):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    ready = await client.event("ready")
+    if not ready["setup_complete"]:
+        await client.event("setup_complete")
+    entered, finish = threading.Event(), threading.Event()
+    factory = server.create_backend
+
+    def slow(model, language):
+        backend = factory(model, language)
+        backend.load.side_effect = lambda: (entered.set(), finish.wait(2))
+        return backend
+
+    monkeypatch.setattr(server, "create_backend", slow)
+    await client.send(cmd="set_model", model="example/switch", kind="stt")
+    try:
+        while not entered.is_set():
+            await asyncio.sleep(.001)
+        await client.send(cmd=command, id="busy-job", meeting_id="meeting-1",
+                          speaker="them", session="busy-session")
+        rejected = await client.recv()
+        while rejected["event"] == "download_status":
+            rejected = await client.recv()
+        assert rejected["event"] == event
+        if command == "start":
+            assert rejected["session"] == "busy-session"
+        else:
+            assert rejected["id"] == "busy-job"
+            assert "busy" in rejected["error"]
+        if command != "start" and command != "transcribe_file":
+            assert rejected["code"] == "busy"
+        if command.startswith("meeting_"):
+            assert rejected["meeting_id"] == "meeting-1"
+        if command == "meeting_transcribe":
+            assert rejected["speaker"] == "them"
+        await client.send(cmd="ping")
+        await client.event("pong")
+    finally:
+        finish.set()
+        client.writer.close()
+
+
+@pytest.mark.parametrize("pending", [False, True])
+async def test_pre_ready_cleanup_selection(recovery, socket_engine, monkeypatch, pending):
+    engine = recovery.engine
+    engine.config.data.update(cleanup_enabled=True, cleanup_model="example/cleanup-a")
+    engine.config.save()
+    selected = SimpleNamespace(model_id="example/cleanup-b", loaded=True,
+                               load_async=AsyncMock(), aclose=AsyncMock())
+    factory = Mock(return_value=selected)
+    monkeypatch.setattr(engine, "_new_cleanup_process", factory)
+    cleanup_transfer = asyncio.Event()
+    if not pending:
+        cleanup_transfer.set()
+    once = recovery.coordinator._once
+
+    async def gated(entry, restart):
+        if entry.item["kind"] == "cleanup":
+            await cleanup_transfer.wait()
+            return DownloadResult(str(recovery.coordinator._root), None, entry.item["attempt"])
+        return await once(entry, restart)
+
+    monkeypatch.setattr(recovery.coordinator, "_once", gated)
+    client = await _connect(socket_engine)
+    await client.send(cmd="set_model", model="example/cleanup-b", kind="cleanup")
+    if not pending:
+        await client.event("model_set")
+    else:
+        while ("example/cleanup-b", "cleanup") not in recovery.coordinator._entries:
+            await asyncio.sleep(.001)
+    recovery.transfer.set()
+    await client.event("ready")
+    cleanup_transfer.set()
+    if pending:
+        await client.event("model_set")
+    while not engine.setup_complete:
+        await asyncio.sleep(.001)
+    assert engine.cleanup is selected
+    assert engine.config.cleanup_model == "example/cleanup-b"
+    factory.assert_called_once_with("example/cleanup-b")
+    selected.load_async.assert_awaited_once()
+    selected.aclose.assert_not_awaited()
+    items = [item for item in recovery.coordinator.snapshot()["downloads"] if item["kind"] == "cleanup"]
+    assert [(item["model"], item["state"]) for item in items] == [("example/cleanup-b", "ready")]
+    client.writer.close()

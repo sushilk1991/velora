@@ -139,6 +139,18 @@ class SpoolDisposition(Enum):
     discard = "discard"
 
 
+class _ModelJobOrigin(Enum):
+    # Startup may yield to a user pick; selection/recovery must adopt their
+    # candidate even when an older working cleanup model remains installed.
+    startup = "startup"
+    selection = "selection"
+    recovery = "recovery"
+
+
+class _ModelSuperseded(Exception):
+    """A newer selection owns adoption, not a transfer or backend failure."""
+
+
 class _InputStage(Enum):
     raw = "raw"
     gated = "gated"
@@ -764,7 +776,8 @@ class Engine:
         self._adoption_jobs: set[asyncio.Task] = set()
         self._model_generation: dict[str, int] = {}
         self._model_targets: dict[str, str] = {}
-        self._model_notifications: set[tuple[str, str]] = set()
+        self._model_origins: dict[str, _ModelJobOrigin] = {}
+        self._model_notifications: set[tuple[str, int]] = set()
         self._adoption_lock = asyncio.Lock()
         self._adopting = False
         self._stt_pending: set[asyncio.Future] = set()
@@ -1076,16 +1089,19 @@ class Engine:
             await self._publish_downloads()
             await asyncio.sleep(_DOWNLOAD_POLL_S)
 
-    def _queue_model_job(self, model: str, kind: str, *, recovery: bool = False) -> asyncio.Task:
+    def _queue_model_job(self, model: str, kind: str, *,
+                         origin: _ModelJobOrigin = _ModelJobOrigin.selection) -> asyncio.Task:
         key = (model, kind)
         previous = self._model_jobs.get(key)
-        if (not recovery and self._model_targets.get(kind) == model
+        if (origin is not _ModelJobOrigin.recovery and self._model_targets.get(kind) == model
+                and self._model_origins.get(kind) is origin
                 and previous is not None and not previous.done()):
             return previous
         self._model_targets[kind] = model
+        self._model_origins[kind] = origin
         generation = self._model_generation.get(kind, 0) + 1
         self._model_generation[kind] = generation
-        task = asyncio.create_task(self._follow_model(previous, model, kind, generation))
+        task = asyncio.create_task(self._follow_model(previous, model, kind, generation, origin))
         self._model_jobs[key] = task
         self._adoption_jobs.add(task)
         task.add_done_callback(self._model_job_done)
@@ -1097,10 +1113,10 @@ class Engine:
             task.exception()
 
     async def _follow_model(self, previous: asyncio.Task | None, model: str,
-                            kind: str, generation: int) -> Exception | None:
+                            kind: str, generation: int, origin: _ModelJobOrigin) -> Exception | None:
         if previous is not None and not previous.done():
             await asyncio.gather(asyncio.shield(previous), return_exceptions=True)
-        return await self._acquire_model(model, kind, generation)
+        return await self._acquire_model(model, kind, generation, origin)
 
     def _model_idle(self, kind: str) -> bool:
         return (self._idle_but_for_notes() and (not self._meeting_notes_running
@@ -1127,13 +1143,17 @@ class Engine:
             self._stt_quarantined = bool(self._stt_pending)
             raise
 
-    async def _acquire_model(self, model: str, kind: str, generation: int) -> Exception | None:
+    async def _acquire_model(self, model: str, kind: str, generation: int,
+                             origin: _ModelJobOrigin) -> Exception | None:
         result: DownloadResult | None = None
         candidate: Any = None
         retry_cleanup = False
         loading_candidate = None
         failure = None
-        if kind == "cleanup" and (model, kind) not in self._model_notifications:
+        cleanup_stop_started = False
+        notification = (kind, generation)
+        startup_cleanup = kind == "cleanup" and origin is _ModelJobOrigin.startup
+        if startup_cleanup:
             candidate = self._cleanup_loading
             loading_candidate = candidate
         try:
@@ -1144,13 +1164,18 @@ class Engine:
                     and not await asyncio.to_thread(models.is_cached, model)):
                 raise RuntimeError("verified model cache is no longer available")
             if kind == "cleanup":
+                # Retry cancellation belongs to the stop/load operation even
+                # in fake-STT mode, where there is no DownloadResult.
+                cleanup_stop_started = True
                 await self._stop_cleanup_retry()
             async with self._adoption_lock:
                 while not self.shutdown.is_set() and not self._model_idle(kind):
                     await asyncio.sleep(_DOWNLOAD_POLL_S)
-                if self.shutdown.is_set() or self._model_generation.get(kind) != generation:
-                    raise RuntimeError("model selection superseded")
-                self._adopting = kind == "stt" or (model, kind) in self._model_notifications
+                if self.shutdown.is_set():
+                    raise RuntimeError(SET_MODEL_SHUTTING_DOWN)
+                if self._model_generation.get(kind) != generation:
+                    raise _ModelSuperseded("model selection superseded")
+                self._adopting = kind == "stt" or origin is not _ModelJobOrigin.startup
                 try:
                     if result is not None:
                         # Cleanup still loads by logical ID; this guard prevents
@@ -1171,12 +1196,12 @@ class Engine:
                             if not fake_stt_enabled():
                                 await candidate.load_async(STATIC_SYSTEM_PROMPT)
                     # A newer request or shutdown can arrive during a load.
-                    startup_cleanup = kind == "cleanup" and (model, kind) not in self._model_notifications
                     if startup_cleanup and self.cleanup is not None:
-                        raise RuntimeError("startup writing model already replaced")
-                    if (self.shutdown.is_set() or (self._model_generation.get(kind) != generation
-                                                  and not startup_cleanup)):
-                        raise RuntimeError("model selection superseded")
+                        raise _ModelSuperseded("startup writing model already replaced")
+                    if self.shutdown.is_set():
+                        raise RuntimeError(SET_MODEL_SHUTTING_DOWN)
+                    if self._model_generation.get(kind) != generation and not startup_cleanup:
+                        raise _ModelSuperseded("model selection superseded")
                     self.config.reload()
                     if kind == "stt":
                         candidate.language = self.config.language
@@ -1194,7 +1219,10 @@ class Engine:
                         # Publish the cold writing-worker identity before ready:
                         # restored notes can wait for this same startup proxy.
                         if (not self.stt_ready.is_set() and self.config.cleanup_enabled
-                                and not fake_stt_enabled() and self.cleanup is None):
+                                and not fake_stt_enabled() and self.cleanup is None
+                                and self._cleanup_loading is None
+                                and self._model_origins.get("cleanup") not in (
+                                    _ModelJobOrigin.selection, _ModelJobOrigin.recovery)):
                             with contextlib.suppress(Exception):
                                 self._cleanup_loading = self._new_cleanup_process(self.config.cleanup_model)
                         self.stt_ready.set()
@@ -1205,15 +1233,26 @@ class Engine:
                             await self._close_replaced(old)
                     if startup_cleanup:
                         await self._prune_superseded_models()
-                    if (model, kind) in self._model_notifications:
-                        self._model_notifications.discard((model, kind))
+                    if notification in self._model_notifications:
+                        self._model_notifications.discard(notification)
                         await self._send({"event": "model_set", "model": model, "kind": kind})
                 finally:
                     self._adopting = False
         except asyncio.CancelledError:
-            retry_cleanup = (result is not None and kind == "cleanup" and self.cleanup is None
-                             and self.config.cleanup_enabled)
+            retry_cleanup = ((result is not None or cleanup_stop_started) and kind == "cleanup"
+                             and self.cleanup is None and self.config.cleanup_enabled)
             raise
+        except _ModelSuperseded:
+            # A -> B -> A shares A's verified result. Only fail an inactive
+            # superseded entry; an obsolete job cannot poison the latest A.
+            if result is not None and self._model_targets.get(kind) != model:
+                with contextlib.suppress(DownloadError):
+                    await self._downloads.mark_failed(model, kind, result.attempt, {
+                        "category": "cancelled", "code": "model_selection_superseded",
+                        "message": "Model selection changed before adoption. Retry to select it again.",
+                        "retryable": False})
+                await self._publish_downloads()
+            return None
         except Exception as error:
             # Do not publish backend exception text: it can contain signed URLs.
             if result is not None:
@@ -1241,10 +1280,11 @@ class Engine:
                     await self._close_replaced(candidate)
             if retry_cleanup and not self.shutdown.is_set():
                 self._start_cleanup_retry()
-            if failure is not None and (model, kind) in self._model_notifications:
-                self._model_notifications.discard((model, kind))
+            if failure is not None and notification in self._model_notifications:
+                self._model_notifications.discard(notification)
                 await self._error(SET_MODEL_SHUTTING_DOWN if self.shutdown.is_set()
                                   else "set_model: Model could not be loaded. Retry or choose another model.")
+            self._model_notifications.discard(notification)
 
     async def _cmd_download_retry(self, msg: dict[str, Any]) -> None:
         model, kind, attempt = (msg.get(key) for key in ("model", "kind", "attempt"))
@@ -1275,7 +1315,7 @@ class Engine:
         item = next(item for item in accepted["downloads"]
                     if item["model"] == model and item["kind"] == kind)
         if item["attempt"] != attempt:
-            self._queue_model_job(model, kind, recovery=True)
+            self._queue_model_job(model, kind, origin=_ModelJobOrigin.recovery)
 
     async def _prune_superseded_models(self) -> None:
         """Reclaim disk from writing models an upgrade replaced.
@@ -1301,11 +1341,11 @@ class Engine:
 
     async def _load_models(self) -> None:
         model = self.stt.model_id
-        await asyncio.shield(self._queue_model_job(model, "stt"))
+        await asyncio.shield(self._queue_model_job(model, "stt", origin=_ModelJobOrigin.startup))
         if not self.stt_ready.is_set():
             fallback = getattr(self.stt, "fallback_model_id", None)
             if isinstance(fallback, str) and fallback:
-                await asyncio.shield(self._queue_model_job(fallback, "stt"))
+                await asyncio.shield(self._queue_model_job(fallback, "stt", origin=_ModelJobOrigin.startup))
         # A failed speech acquisition leaves control traffic connected. A
         # later successful manual recovery resumes optional startup work.
         await self.stt_ready.wait()
@@ -1318,8 +1358,19 @@ class Engine:
             with contextlib.suppress(Exception):
                 await asyncio.to_thread(self.audio.prune, self.config.audio_retention_days,
                                         self.config.audio_max_bytes)
-        if self.config.cleanup_enabled and not fake_stt_enabled():
-            await asyncio.shield(self._queue_model_job(self.config.cleanup_model, "cleanup"))
+        if self.config.cleanup_enabled and not fake_stt_enabled() and self.cleanup is None:
+            # Speech finishing cannot create a newer writing selection. Await
+            # a pre-ready user job, even on failure, instead of queuing the old
+            # durable model and superseding that user's pending candidate.
+            model = self._model_targets.get("cleanup")
+            if self._model_origins.get("cleanup") in (
+                    _ModelJobOrigin.selection, _ModelJobOrigin.recovery):
+                job = self._model_jobs.get((model, "cleanup"))
+                if job is not None:
+                    await asyncio.shield(job)
+            else:
+                await asyncio.shield(self._queue_model_job(
+                    self.config.cleanup_model, "cleanup", origin=_ModelJobOrigin.startup))
         self.setup_complete = True
         await self._send_setup_complete_if_ready()
         self._schedule_mining(delay=MINE_STARTUP_DELAY_S)
@@ -1826,6 +1877,31 @@ class Engine:
             evt["id"] = msg.get("id")
         await self._send(evt)
 
+    async def _reject_adoption(self, msg: dict[str, Any]) -> None:
+        # A bare error leaves job consumers pending. Echo the existing job or
+        # session identity so each caller can settle its rejected request.
+        command = msg["cmd"]
+        error = "busy adopting a model"
+        if command == "start":
+            await self._error(error, msg.get("session"))
+            return
+        if command == "reprocess":
+            await self._reprocess_failed(msg, error, "busy")
+            return
+        events = {"transcribe_file": "transcribe_failed", "edit_text": "edit_failed",
+                  "action_start": "action_failed", "action_observe": "action_failed",
+                  "meeting_transcribe": "meeting_transcribe_failed",
+                  "meeting_notes": "meeting_notes_failed"}
+        event = {"event": events[command], "id": msg.get("id"), "error": error}
+        if command != "transcribe_file":
+            event["code"] = "busy"
+        if command in ("meeting_transcribe", "meeting_notes"):
+            meeting = msg.get("meeting_id")
+            event["meeting_id"] = meeting if isinstance(meeting, str) else ""
+        if command == "meeting_transcribe":
+            event["speaker"] = msg.get("speaker")
+        await self._send(event)
+
     # ---------------- dispatch ----------------
 
     async def _dispatch(self, frame_type: int, payload: bytes) -> None:
@@ -1869,7 +1945,7 @@ class Engine:
         if self._adopting and cmd in (
                 "start", "reprocess", "transcribe_file", "meeting_transcribe",
                 "edit_text", "action_start", "action_observe", "meeting_notes"):
-            await self._error("busy adopting a model", msg.get("session"))
+            await self._reject_adoption(msg)
             return
         try:
             if cmd == "start":
@@ -4097,8 +4173,8 @@ class Engine:
         if self.shutdown.is_set():
             await self._error(SET_MODEL_SHUTTING_DOWN)
             return
-        self._model_notifications.add((model, kind))
         task = self._queue_model_job(model, kind)
+        self._model_notifications.add((kind, self._model_generation[kind]))
         if wait:
             try:
                 error = await asyncio.shield(task)

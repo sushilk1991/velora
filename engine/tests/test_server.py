@@ -1555,8 +1555,9 @@ async def test_a_failed_retry_is_logged_and_shutdown_runs_to_its_end(
         assert len(retry_failures(caplog, "retry failed")) == 1
 
 
+@pytest.mark.parametrize("fake_enabled", [False, True])
 async def test_set_model_cancelled_while_stopping_the_retry_restarts_it(
-    home, monkeypatch
+    home, monkeypatch, fake_enabled
 ):
     """set_model cancelled while it stops the retry starts the retry again,
     so cleanup does not stay absent until the next launch.
@@ -1566,6 +1567,8 @@ async def test_set_model_cancelled_while_stopping_the_retry_restarts_it(
     """
     monkeypatch.setattr(server_mod.models, "ensure_downloaded", lambda _model_id: None)
     eng = Engine(Config(), parent_pid=None, hard_exit=Mock())
+    # Cancellation ownership is identical with and without a transfer result.
+    monkeypatch.setattr(server_mod, "fake_stt_enabled", lambda: fake_enabled)
     reaping = asyncio.Event()
     started = asyncio.Event()
 
