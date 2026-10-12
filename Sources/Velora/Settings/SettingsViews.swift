@@ -426,9 +426,7 @@ struct DictationSettingsView: View {
 struct ModelSettingsView: View {
     @ObservedObject var model: SettingsModel
     @State private var storageUsed: String = Self.calculating
-    @State private var unusedSize: String = Self.calculating
     @State private var cachedModels: [ModelStorage.CachedModel] = []
-    @State private var confirmRemoveUnused = false
     @State private var changing: Slot?
 
     /// Which "Change…" is unfolded (at most one at a time).
@@ -473,7 +471,8 @@ struct ModelSettingsView: View {
 
     /// The set of currently-active model ids (never offered for deletion).
     private var activeModelIDs: Set<String> {
-        [model.sttModel, model.cleanupModel].filter { !$0.isEmpty }.reduce(into: Set()) { $0.insert($1) }
+        Set([model.sttModel, model.cleanupModel].filter { !$0.isEmpty })
+            .union(model.downloads.protectedModels)
     }
 
     private var unusedModels: [ModelStorage.CachedModel] {
@@ -485,7 +484,7 @@ struct ModelSettingsView: View {
             Section {
                 slotRow(
                     title: "Speech to text", slot: .speech, choices: speechChoices,
-                    selection: $model.sttModel)
+                    selection: speechBinding)
                 if !cleanupChoices.isEmpty {
                     slotRow(
                         title: "Cleanup", slot: .cleanup, choices: cleanupChoices,
@@ -496,7 +495,25 @@ struct ModelSettingsView: View {
             } footer: {
                 SettingsFooter("Models download once, then run on this Mac. Your voice never leaves this Mac.")
             }
-            Section("Storage") {
+            Section("Download status") {
+                DownloadRecoveryView(state: model.downloads)
+                if let pending = model.downloads.pending[.stt] {
+                    Text("Requested speech model: \(shortName(pending)); not adopted yet.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let pending = model.downloads.pending[.cleanup] {
+                    Text("Requested writing model: \(shortName(pending)); not adopted yet.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                ForEach([DownloadKind.stt, .cleanup], id: \.rawValue) { kind in
+                    if let error = model.downloads.selectionErrors[kind] {
+                        Text(error).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Text(model.cleanupLoaded ? "Writing model is loaded." : "Writing model is not loaded. Dictation needs only speech.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section {
                 LabeledContent("On disk") {
                     HStack(spacing: VeloraSpacing.m) {
                         Text(storageUsed)
@@ -508,26 +525,23 @@ struct ModelSettingsView: View {
                 }
                 LabeledContent("Unused downloads") {
                     HStack(spacing: VeloraSpacing.m) {
-                        Text(unusedSize)
+                        Text(Self.sizeLabel(unusedModels, empty: "None"))
                             .foregroundStyle(.secondary)
-                        Button("Remove…") { confirmRemoveUnused = true }
-                            .disabled(unusedModels.isEmpty)
+                        Text("Removal unavailable")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                 }
+            } header: {
+                Text("Storage")
+            } footer: {
+                SettingsFooter("Cache removal is unavailable while the engine manages model acquisition. Restart Download discards only owned incomplete files, not completed models.")
             }
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .task { await refreshStorage() }
         .onAppear { model.requestStatus() }
-        .alert("Remove unused models?", isPresented: $confirmRemoveUnused) {
-            Button("Remove", role: .destructive) {
-                Task { await removeUnused() }
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Frees \(unusedSize) from the on-device model cache. Velora re-downloads a model automatically if you select it again.")
-        }
     }
 
     // MARK: Slot rows
@@ -578,6 +592,7 @@ struct ModelSettingsView: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(!model.downloads.isCurrent)
                 .padding(.leading, VeloraSpacing.l)
             }
         }
@@ -590,6 +605,10 @@ struct ModelSettingsView: View {
         return [choice.name, choice.size]
             .filter { !$0.isEmpty }
             .joined(separator: " · ")
+    }
+
+    private var speechBinding: Binding<String> {
+        Binding(get: { model.sttModel }, set: { model.setSpeechModel($0) })
     }
 
     private var cleanupBinding: Binding<String> {
@@ -606,20 +625,12 @@ struct ModelSettingsView: View {
         let scanned = await ModelStorage.scan()
         cachedModels = scanned
         storageUsed = Self.sizeLabel(scanned, empty: "No models downloaded")
-        unusedSize = Self.sizeLabel(unusedModels, empty: "None")
     }
 
     private static func sizeLabel(_ models: [ModelStorage.CachedModel], empty: String) -> String {
         let total = models.reduce(Int64(0)) { $0 + $1.bytes }
         if total == 0 { return empty }
         return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
-    }
-
-    private func removeUnused() async {
-        for cached in unusedModels {
-            _ = await ModelStorage.delete(cached)
-        }
-        await refreshStorage()
     }
 }
 

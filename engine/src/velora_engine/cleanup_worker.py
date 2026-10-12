@@ -16,6 +16,7 @@ import os
 import socket
 import threading
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
 from .cleanup import CleanupEngine
@@ -35,8 +36,11 @@ class Worker:
         model_id: str,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
+        *,
+        local_model_path: str | Path | None = None,
     ) -> None:
-        self.engine = CleanupEngine(model_id)
+        # Keep source selection separate from the logical model's behavior key.
+        self.engine = CleanupEngine(model_id, local_model_path=local_model_path)
         self.reader = reader
         self.writer = writer
         self._write_lock = asyncio.Lock()
@@ -180,7 +184,9 @@ async def _amain(args: argparse.Namespace) -> None:
         sock=sock,
         limit=CLEANUP_IPC_STREAM_LIMIT_BYTES,
     )
-    worker = Worker(args.model, reader, writer)
+    worker = Worker(
+        args.model, reader, writer, local_model_path=args.local_model_path,
+    )
     try:
         await worker.serve()
     finally:
@@ -194,6 +200,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--fd", required=True, type=int)
     parser.add_argument("--model", required=True)
+    # Omitting the source preserves legacy acquisition for non-coordinator users.
+    parser.add_argument("--local-model-path", type=Path)
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO,

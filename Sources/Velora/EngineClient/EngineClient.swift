@@ -28,6 +28,8 @@ final class EngineClient {
     private let writeQueue = DispatchQueue(label: "com.velora.engine.write")
     private let readQueue = DispatchQueue(label: "com.velora.engine.read")
     private var generation = 0
+    // Natural EOF preserves its queued terminal frames until a newer connection supersedes it.
+    private var terminalGeneration: Int?
 
     var isConnected: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
@@ -38,8 +40,6 @@ final class EngineClient {
     /// success and starts the background read loop. Safe to call repeatedly.
     @discardableResult
     func connect(path: String) -> Bool {
-        disconnect(notify: false)
-
         let sock = socket(AF_UNIX, SOCK_STREAM, 0)
         guard sock >= 0 else { return false }
 
@@ -67,6 +67,8 @@ final class EngineClient {
         var one: Int32 = 1
         setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
 
+        // Only a successful replacement invalidates the previous socket's queued terminal frames.
+        disconnect(notify: false)
         stateLock.lock()
         fd = sock
         generation += 1
@@ -89,6 +91,8 @@ final class EngineClient {
             return
         }
         let sock = fd
+        let closedGeneration = generation
+        terminalGeneration = notify && sock >= 0 ? closedGeneration : nil
         fd = -1
         generation += 1  // invalidate any running read loop
         stateLock.unlock()
@@ -99,10 +103,23 @@ final class EngineClient {
         close(sock)
         if notify {
             DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
+                guard let self, self.canDeliverEOF(closedGeneration) else { return }
                 self.delegate?.engineClientDidDisconnect(self)
             }
         }
+    }
+
+    // Read loop -> main queue; recheck under the same lock after the queue delay.
+    private func canDeliver(_ captured: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return generation == captured || (fd < 0 && terminalGeneration == captured)
+    }
+
+    private func canDeliverEOF(_ captured: Int) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return fd < 0 && terminalGeneration == captured
     }
 
     // MARK: - Sending
@@ -203,7 +220,7 @@ final class EngineClient {
                 }
                 let event = EngineEvent.parse(object)
                 DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
+                    guard let self, self.canDeliver(gen) else { return }
                     self.delegate?.engineClient(self, didReceive: event)
                 }
             }

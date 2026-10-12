@@ -1,8 +1,8 @@
 """velora-engine: asyncio unix-socket server (single client).
 
 Lifecycle:
-- STT model warm-loads at startup; `{"event":"ready",...}` is sent to a client
-  once the model is loaded. The cleanup LLM warms in the background.
+- Control commands stay available before speech loads. Authoritative download
+  snapshots precede `ready`; writing acquisition is independent of dictation.
 - start → audio frames stream into the STT backend during recording →
   stop → finalize transcript → formatting pipeline → `transcript` then `final`.
 - cancel discards. Malformed frames/commands produce an `error` event, never a
@@ -50,7 +50,8 @@ from .cleanup import (
     _RETRACTION_RE,
     adaptive_timeout_ms,
 )
-from .cleanup_process import CleanupProcess, respawn_backoff_s
+from .cleanup_process import CleanupProcess, LOAD_TIMEOUT_S, respawn_backoff_s
+from .downloads import DownloadCoordinator, DownloadError, DownloadResult
 from .config import Config, velora_home
 from .formatting import STATIC_SYSTEM_PROMPT
 from .media import (
@@ -138,6 +139,30 @@ class SpoolDisposition(Enum):
     discard = "discard"
 
 
+class _ModelJobOrigin(Enum):
+    # Startup may yield to a user pick; selection/recovery must adopt their
+    # candidate even when an older working cleanup model remains installed.
+    startup = "startup"
+    selection = "selection"
+    recovery = "recovery"
+
+
+@dataclass
+class _ModelReplies:
+    # A generation owns one terminal outcome and cursor, independent of the
+    # caller's cancellation: outcome -> cursor -> captured-connection drain.
+    requests: list[str | None]
+    client_generation: int
+    writer: asyncio.StreamWriter | None
+    event: dict[str, Any] | None = None
+    next_request: int = 0
+    drain: asyncio.Task[None] | None = None
+
+
+class _ModelSuperseded(Exception):
+    """A newer selection owns adoption, not a transfer or backend failure."""
+
+
 class _InputStage(Enum):
     raw = "raw"
     gated = "gated"
@@ -205,6 +230,9 @@ CLEANUP_RETRY_IDLE_S = 2.0
 SET_MODEL_SHUTTING_DOWN = "set_model: engine is shutting down"
 
 PARENT_POLL_S = 2.0
+_DOWNLOAD_POLL_S = 0.1
+_STT_LOAD_S = 60.0
+_MODEL_LOAD_RETRIES = 3
 
 # Full CPU diarization costs roughly two seconds per audio-minute, while the
 # measured Whisper path costs about 3.5 seconds per minute. It can repay that
@@ -314,6 +342,12 @@ MEETING_NOTES_SECTION_RETRY_REASONS = MEETING_NOTES_SECTION_TIMEOUT_REASONS | {"
 # few seconds before Qwen is usable. Wait only for an existing, healthy worker;
 # an absent or unhealthy model still fails honestly instead of hanging.
 MEETING_NOTES_MODEL_READY_WAIT_S = 15.0
+
+# Bound request metadata while duplicate selections share one adoption job.
+_MODEL_REQUESTS_MAX = 64
+_MODEL_REQUEST_ID_MAX = 128
+# Terminal replies get one fixed transport budget, including shutdown drains.
+_MODEL_REPLY_DRAIN_S = 2.0
 
 # CleanupProcess replaces a wedged model child asynchronously. Action Mode is
 # already inside a 150-second app-side turn backstop, so wait for that bounded
@@ -753,6 +787,20 @@ class Engine:
         self._starting = False
         self.audio = AudioStore(config.audio_dir)
         self.stt_ready = asyncio.Event()
+        # Transfers remain shared across clients; adoption jobs own candidates.
+        # socket -> job -> coordinator -> verified cache -> live adoption
+        self._downloads = DownloadCoordinator()
+        self._model_jobs: dict[tuple[str, str], asyncio.Task] = {}
+        self._adoption_jobs: set[asyncio.Task] = set()
+        self._model_generation: dict[str, int] = {}
+        self._model_targets: dict[str, str] = {}
+        self._model_origins: dict[str, _ModelJobOrigin] = {}
+        self._model_notifications: dict[tuple[str, int], _ModelReplies] = {}
+        self._adoption_lock = asyncio.Lock()
+        self._adopting = False
+        self._stt_pending: set[asyncio.Future] = set()
+        self._stt_quarantined = False
+        self._download_sequence: int | None = None
         # First-run setup progress ({"phase": str, "fraction": float|None}),
         # broadcast to the app so model downloads have visible UI. None when
         # nothing is loading.
@@ -762,10 +810,8 @@ class Engine:
         # soon as the speech model is usable.
         self.setup_complete = False
         self.cleanup: CleanupProcess | None = None
-        # The writing worker exists before it is ready. Keep that cold-start
-        # identity visible so durable meeting notes restored as soon as STT is
-        # ready can wait for the same worker instead of failing in the brief
-        # self.cleanup == nil publication window.
+        # Publish the writing worker only after acquisition verifies its local
+        # source. Notes can wait on this proxy while its offline load runs.
         self._cleanup_loading: CleanupProcess | None = None
         # Background retry of a startup cleanup load that failed or timed out.
         self._cleanup_retry_task: asyncio.Task[None] | None = None
@@ -817,7 +863,19 @@ class Engine:
         self._backgrounded_pids: set[int] = set()
 
     async def _stt_call(self, fn: Callable[..., T], *args: Any) -> T:
-        return await asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
+        # Cancellation cannot stop executor work. Keep its real future until it
+        # settles so a timed-out load cannot overlap or be adopted later.
+        future = asyncio.get_running_loop().run_in_executor(self._stt_executor, fn, *args)
+        self._stt_pending.add(future)
+        future.add_done_callback(self._stt_settled)
+        return await asyncio.shield(future)
+
+    def _stt_settled(self, future: asyncio.Future) -> None:
+        self._stt_pending.discard(future)
+        if not self._stt_pending:
+            self._stt_quarantined = False
+        if not future.cancelled():
+            future.exception()
 
     # ---------------- batch scheduling + memory ----------------
 
@@ -905,9 +963,13 @@ class Engine:
         if callable(resume):
             resume()
 
-    def _new_cleanup_process(self, model_id: str) -> CleanupProcess:
+    def _new_cleanup_process(self, model_id: str, *,
+                             local_model_path: str | None = None) -> CleanupProcess:
+        # Keep logical identity public; every real load/respawn uses the
+        # coordinator's verified source rather than acquiring inside a child.
         return CleanupProcess(
             model_id,
+            local_model_path=local_model_path,
             on_unhealthy=self._queue_cleanup_unhealthy_restart,
         )
 
@@ -1034,24 +1096,317 @@ class Engine:
         self._setup_complete_sent_gen = gen
         await self._send({"event": "setup_complete"})
 
-    async def _download_with_progress(self, model_id: str, what: str) -> None:
-        """Run ensure_downloaded off-loop while broadcasting cache-growth
-        progress every second ("Downloading speech model (1.6 GB) — 42%")."""
-        info = models.lookup(model_id)
-        size_note = f" ({info.size})" if info and info.size else ""
-        phase = f"Downloading the {what} model{size_note}"
-        expected = models.expected_bytes(model_id)
-        task = asyncio.create_task(asyncio.to_thread(models.ensure_downloaded, model_id))
-        best = 0.0  # hub renames finished blobs, so raw cache size can dip —
-        while not task.done():  # a progress bar must never move backwards
-            fraction = None
-            if expected:
-                done = await asyncio.to_thread(models.cached_bytes, model_id)
-                best = max(best, min(0.999, done / expected))
-                fraction = best
-            await self._set_loading(phase, fraction)
-            await asyncio.wait([task], timeout=1.0)
-        await task  # propagate download errors
+    async def _publish_downloads(self, *, force: bool = False) -> None:
+        snapshot = self._downloads.snapshot()
+        if not force and snapshot["sequence"] == self._download_sequence:
+            return
+        self._download_sequence = snapshot["sequence"]
+        await self._send({"event": "download_status", **snapshot})
+
+    async def _watch_downloads(self) -> None:
+        # Poll only authoritative mutations, never estimates or cache growth.
+        while True:
+            await self._publish_downloads()
+            await asyncio.sleep(_DOWNLOAD_POLL_S)
+
+    def _queue_model_job(self, model: str, kind: str, *,
+                         origin: _ModelJobOrigin = _ModelJobOrigin.selection,
+                         client_generation: int | None = None) -> asyncio.Task:
+        key = (model, kind)
+        previous = self._model_jobs.get(key)
+        replies = self._model_notifications.get((kind, self._model_generation.get(kind, 0)))
+        if (origin is not _ModelJobOrigin.recovery and self._model_targets.get(kind) == model
+                and self._model_origins.get(kind) is origin
+                and previous is not None and not previous.done()
+                and (client_generation is None or (replies is not None
+                     and replies.client_generation == client_generation))):
+            return previous
+        self._model_targets[kind] = model
+        self._model_origins[kind] = origin
+        generation = self._model_generation.get(kind, 0) + 1
+        self._model_generation[kind] = generation
+        task = asyncio.create_task(self._follow_model(previous, model, kind, generation, origin))
+        self._model_jobs[key] = task
+        self._adoption_jobs.add(task)
+        task.add_done_callback(self._model_job_done)
+        return task
+
+    async def _set_model_error(self, model: str | None, kind: str | None,
+                               request_id: str | None, message: str,
+                               error: dict | None = None) -> None:
+        # Attribute only validated selection metadata, never arbitrary JSON IDs.
+        event = {"event": "error", "message": message, "command": "set_model",
+                 "model": model, "kind": kind, "request_id": request_id}
+        if error is not None:
+            event["error"] = error
+        await self._send(event)
+
+    async def _reply_model_selection(self, model: str, kind: str, generation: int,
+                                     message: str | None = None,
+                                     error: dict | None = None) -> None:
+        # Establish the outcome once; caller cancellation cannot turn an
+        # already adopted/failed selection into a different terminal result.
+        key = (kind, generation)
+        replies = self._model_notifications.get(key)
+        if replies is None:
+            return
+        if replies.event is None:
+            if message is None:
+                replies.event = {"event": "model_set", "model": model, "kind": kind}
+            else:
+                replies.event = {"event": "error", "message": message, "command": "set_model",
+                                 "model": model, "kind": kind}
+                if error is not None:
+                    replies.event["error"] = error
+        if replies.drain is None:
+            replies.drain = asyncio.create_task(self._drain_model_replies(key, replies))
+        cancelled: asyncio.CancelledError | None = None
+        while not replies.drain.done():
+            try:
+                await asyncio.shield(replies.drain)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        replies.drain.result()
+        if cancelled is not None:
+            raise cancelled
+
+    async def _drain_model_replies(self, key: tuple[str, int], replies: _ModelReplies) -> None:
+        # Advance before a send: its frame may already have reached the socket
+        # when drain blocks. Keep settled IDs for deduplication, never replay them.
+        try:
+            async with asyncio.timeout(_MODEL_REPLY_DRAIN_S):
+                while replies.next_request < len(replies.requests):
+                    if (self._model_notifications.get(key) is not replies
+                            or self._client_gen != replies.client_generation
+                            or self.writer is not replies.writer):
+                        return
+                    request_id = replies.requests[replies.next_request]
+                    replies.next_request += 1
+                    event = dict(replies.event)
+                    error = event.get("error")
+                    if error is not None and error["category"] == "cancelled" and request_id is None:
+                        continue
+                    if request_id is not None or event["event"] == "error":
+                        event["request_id"] = request_id
+                    await self._send(event)
+        except TimeoutError:
+            # Fence only the original blocked connection. Abort is nonblocking;
+            # wait_closed could otherwise add an unbounded shutdown wait.
+            if (self._client_gen == replies.client_generation
+                    and self.writer is replies.writer and replies.writer is not None):
+                replies.writer.close()
+                replies.writer.transport.abort()
+            log.warning("model selection reply drain timed out")
+        finally:
+            if self._model_notifications.get(key) is replies:
+                self._model_notifications.pop(key, None)
+
+    def _model_job_done(self, task: asyncio.Task) -> None:
+        self._adoption_jobs.discard(task)
+        if not task.cancelled():
+            task.exception()
+
+    async def _follow_model(self, previous: asyncio.Task | None, model: str,
+                            kind: str, generation: int, origin: _ModelJobOrigin) -> Exception | None:
+        try:
+            if previous is not None and not previous.done():
+                await asyncio.gather(asyncio.shield(previous), return_exceptions=True)
+            return await self._acquire_model(model, kind, generation, origin)
+        except asyncio.CancelledError:
+            # Cancellation can arrive before acquisition starts, while a shared
+            # predecessor settles. That request still needs its terminal reply.
+            await self._reply_model_selection(model, kind, generation,
+                "Model selection was cancelled.", {
+                    "category": "cancelled", "code": "model_selection_cancelled",
+                    "message": "Model selection was cancelled.", "retryable": False})
+            raise
+
+    def _model_idle(self, kind: str) -> bool:
+        return (self._idle_but_for_notes() and (not self._meeting_notes_running
+                or (kind == "cleanup" and self.cleanup is None))
+                and not self._starting and not self._finalizing
+                and not self._transcribing and not self._stt_pending
+                and (kind == "cleanup" or not self._cleanup_load_lock.locked()))
+
+    async def _load_stt_local(self, backend: STTBackend, path: str | None) -> None:
+        # Retain the registered backend type, but resolve only the verified
+        # local path during load. Restore the logical ID even on timeout.
+        def load() -> None:
+            model = backend.model_id
+            try:
+                if path is not None:
+                    backend.model_id = path
+                backend.load()
+            finally:
+                backend.model_id = model
+
+        try:
+            await asyncio.wait_for(self._stt_call(load), _STT_LOAD_S)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            self._stt_quarantined = bool(self._stt_pending)
+            raise
+
+    async def _acquire_model(self, model: str, kind: str, generation: int,
+                             origin: _ModelJobOrigin) -> Exception | None:
+        result: DownloadResult | None = None
+        candidate: Any = None
+        retry_cleanup = False
+        loading_candidate = None
+        failure = None
+        cleanup_stop_started = False
+        startup_cleanup = kind == "cleanup" and origin is _ModelJobOrigin.startup
+        try:
+            if not fake_stt_enabled():
+                result = await self._downloads.ensure(model, kind)
+                await self._publish_downloads()
+            if (result is not None and not Path(model).expanduser().exists()
+                    and not await asyncio.to_thread(models.is_cached, model)):
+                raise RuntimeError("verified model cache is no longer available")
+            if kind == "cleanup":
+                # Retry cancellation belongs to the stop/load operation even
+                # in fake-STT mode, where there is no DownloadResult.
+                cleanup_stop_started = True
+                await self._stop_cleanup_retry()
+            async with self._adoption_lock:
+                while not self.shutdown.is_set() and not self._model_idle(kind):
+                    await asyncio.sleep(_DOWNLOAD_POLL_S)
+                if self.shutdown.is_set():
+                    raise RuntimeError(SET_MODEL_SHUTTING_DOWN)
+                if self._model_generation.get(kind) != generation:
+                    raise _ModelSuperseded("model selection superseded")
+                self._adopting = kind == "stt" or origin is not _ModelJobOrigin.startup
+                try:
+                    if result is not None:
+                        await self._downloads.mark_loading(model, kind, result.attempt)
+                        await self._publish_downloads()
+                    self.config.reload()
+                    if kind == "stt":
+                        candidate = create_backend(model, self.config.language)
+                        await self._load_stt_local(candidate, result.path if result else None)
+                    else:
+                        if candidate is None:
+                            # Fake-STT fixtures have no acquisition result;
+                            # production proxies always receive a verified source.
+                            candidate = (self._new_cleanup_process(model, local_model_path=result.path)
+                                         if result is not None else self._new_cleanup_process(model))
+                        self._cleanup_loading = candidate
+                        loading_candidate = candidate
+                        async with self._cleanup_load_lock:
+                            if not fake_stt_enabled():
+                                await candidate.load_async(STATIC_SYSTEM_PROMPT)
+                    # A newer request or shutdown can arrive during a load.
+                    if startup_cleanup and self.cleanup is not None:
+                        raise _ModelSuperseded("startup writing model already replaced")
+                    if self.shutdown.is_set():
+                        raise RuntimeError(SET_MODEL_SHUTTING_DOWN)
+                    if self._model_generation.get(kind) != generation and not startup_cleanup:
+                        raise _ModelSuperseded("model selection superseded")
+                    self.config.reload()
+                    if kind == "stt":
+                        candidate.language = self.config.language
+                    self._save_model_choice("stt_model" if kind == "stt" else "cleanup_model", model)
+                    old = self.stt if kind == "stt" else self.cleanup
+                    if kind == "stt":
+                        self.stt = candidate
+                    else:
+                        self.cleanup = candidate
+                    candidate = None
+                    if result is not None:
+                        await self._downloads.mark_ready(model, kind, result.attempt)
+                        await self._publish_downloads()
+                    if kind == "stt":
+                        self.stt_ready.set()
+                    if old is not None and old is not (self.stt if kind == "stt" else self.cleanup):
+                        if kind == "stt":
+                            await self._close_stt_backend(old)
+                        else:
+                            await self._close_replaced(old)
+                    if startup_cleanup:
+                        await self._prune_superseded_models()
+                    await self._reply_model_selection(model, kind, generation)
+                finally:
+                    self._adopting = False
+        except asyncio.CancelledError:
+            retry_cleanup = ((result is not None or cleanup_stop_started) and kind == "cleanup"
+                             and self.cleanup is None and self.config.cleanup_enabled)
+            raise
+        except _ModelSuperseded:
+            await self._reply_model_selection(model, kind, generation,
+                "Model selection changed before adoption.", {
+                    "category": "cancelled", "code": "model_selection_superseded",
+                    "message": "Model selection changed before adoption.", "retryable": False})
+            # A -> B -> A shares A's verified result. Only fail an inactive
+            # superseded entry; an obsolete job cannot poison the latest A.
+            if result is not None and self._model_targets.get(kind) != model:
+                with contextlib.suppress(DownloadError):
+                    await self._downloads.mark_failed(model, kind, result.attempt, {
+                        "category": "cancelled", "code": "model_selection_superseded",
+                        "message": "Model selection changed before adoption. Retry to select it again.",
+                        "retryable": False})
+                await self._publish_downloads()
+            return None
+        except Exception as error:
+            # Do not publish backend exception text: it can contain signed URLs.
+            if result is not None:
+                with contextlib.suppress(DownloadError):
+                    await self._downloads.mark_failed(model, kind, result.attempt, {
+                        "category": "loading", "code": "model_load_failed",
+                        "message": "Model could not be loaded. Retry or choose another model.",
+                        "retryable": False})
+            await self._publish_downloads()
+            log.warning("%s model acquisition failed: %s (%s)", kind, model, type(error).__name__)
+            if (result is not None and kind == "cleanup" and self.cleanup is None
+                    and self.config.cleanup_enabled and not self.shutdown.is_set()):
+                retry_cleanup = True
+            failure = error
+            return None if self.shutdown.is_set() else error
+        finally:
+            if self._cleanup_loading is loading_candidate:
+                self._cleanup_loading = None
+            if candidate is not None:
+                if kind == "stt":
+                    # Queue close behind the actual thread completion. Retry
+                    # cannot load while _stt_pending still contains that work.
+                    await self._close_stt_backend(candidate)
+                else:
+                    await self._close_replaced(candidate)
+            if retry_cleanup and not self.shutdown.is_set():
+                self._start_cleanup_retry()
+            if failure is not None:
+                await self._reply_model_selection(model, kind, generation,
+                    SET_MODEL_SHUTTING_DOWN if self.shutdown.is_set()
+                    else "set_model: Model could not be loaded. Retry or choose another model.")
+
+    async def _cmd_download_retry(self, msg: dict[str, Any]) -> None:
+        model, kind, attempt = (msg.get(key) for key in ("model", "kind", "attempt"))
+        if (not isinstance(model, str) or not model or kind not in ("stt", "cleanup")
+                or not isinstance(attempt, str) or not attempt):
+            await self._error("download recovery requires model, kind and attempt")
+            return
+        item = next((item for item in self._downloads.snapshot()["downloads"]
+                     if item["model"] == model and item["kind"] == kind), None)
+        if (kind == "stt" and self._stt_pending and item is not None
+                and item["attempt"] == attempt and item["state"] == "failed"):
+            # A timed-out Python thread still owns its weights. Do not launch
+            # a recovery transfer/load until that executor work really settles.
+            error = {"category": "loading", "code": "stt_load_settling",
+                     "message": "Speech model load is still stopping. Retry after it settles.",
+                     "retryable": False}
+            await self._send({"event": "error", "message": error["message"], "error": error})
+            await self._publish_downloads(force=True)
+            return
+        try:
+            accepted = await self._downloads.retry(model, kind, attempt,
+                                        restart=msg["cmd"] == "restart_download")
+        except DownloadError as error:
+            await self._send({"event": "error", "message": str(error), "error": error.error})
+            await self._publish_downloads(force=True)
+            return
+        await self._publish_downloads(force=True)
+        item = next(item for item in accepted["downloads"]
+                    if item["model"] == model and item["kind"] == kind)
+        if item["attempt"] != attempt:
+            self._queue_model_job(model, kind, origin=_ModelJobOrigin.recovery)
 
     async def _prune_superseded_models(self) -> None:
         """Reclaim disk from writing models an upgrade replaced.
@@ -1076,127 +1431,39 @@ class Engine:
                          old_id, freed / 1024**3)
 
     async def _load_models(self) -> None:
-        try:
-            t0 = time.perf_counter()
-            if not fake_stt_enabled() and not await asyncio.to_thread(
-                models.is_cached, self.stt.model_id
-            ):
-                await self._download_with_progress(self.stt.model_id, "speech")
-            await self._set_loading("Loading the speech model…")
-            await self._stt_call(self.stt.load)
-            await self._set_loading(None)
-            log.info("stt ready (%s) in %.2fs", self.stt.model_id, time.perf_counter() - t0)
-        except Exception:
-            fallback_id = getattr(self.stt, "fallback_model_id", None)
-            if not isinstance(fallback_id, str) or not fallback_id:
-                log.exception("FATAL: STT model failed to load")
-                with contextlib.suppress(Exception):
-                    await self._set_loading(None)  # never strand a stale phase
-                self.shutdown.set()
-                return
-            log.exception(
-                "experimental STT backend failed to load; falling back to %s",
-                fallback_id,
-            )
-            try:
-                await self._close_stt_backend(self.stt)
-                fallback = create_backend(fallback_id, self.config.language)
-                if not fake_stt_enabled() and not await asyncio.to_thread(
-                    models.is_cached, fallback.model_id
-                ):
-                    await self._download_with_progress(fallback.model_id, "fallback speech")
-                await self._set_loading("Loading the fallback speech model…")
-                await self._stt_call(fallback.load)
-                # Persist the proven backend so a broken experimental install
-                # cannot put every subsequent launch into the same failure loop.
-                # Setup can take minutes and the app writes this file directly;
-                # preserve any newer, unrelated settings before the full save.
-                self.config.reload()
-                fallback.language = self.config.language
-                self.stt = fallback
-                self.config.data["stt_model"] = fallback.model_id
-                self.config.save(keys={"stt_model"})
-                await self._set_loading(None)
-                log.info("fallback stt ready (%s)", fallback.model_id)
-            except Exception:
-                log.exception("FATAL: fallback STT model failed to load")
-                with contextlib.suppress(Exception):
-                    await self._set_loading(None)
-                self.shutdown.set()
-                return
-        startup_cleanup: CleanupProcess | None = None
-        if self.config.cleanup_enabled and not fake_stt_enabled():
-            startup_cleanup = self._new_cleanup_process(self.config.cleanup_model)
-            self._cleanup_loading = startup_cleanup
-        self.stt_ready.set()
-        # Enforce audio retention once at startup (deletes clips > 6 months and
-        # trims the archive under its size cap).
+        model = self.stt.model_id
+        await asyncio.shield(self._queue_model_job(model, "stt", origin=_ModelJobOrigin.startup))
+        if not self.stt_ready.is_set():
+            fallback = getattr(self.stt, "fallback_model_id", None)
+            if isinstance(fallback, str) and fallback:
+                await asyncio.shield(self._queue_model_job(fallback, "stt", origin=_ModelJobOrigin.startup))
+        # A failed speech acquisition leaves control traffic connected. A
+        # later successful manual recovery resumes optional startup work.
+        await self.stt_ready.wait()
+        await self._finish_startup()
+
+    async def _finish_startup(self) -> None:
+        if self.setup_complete:
+            return
         if self.config.save_audio:
             with contextlib.suppress(Exception):
-                await asyncio.to_thread(
-                    self.audio.prune, self.config.audio_retention_days, self.config.audio_max_bytes
-                )
-        if startup_cleanup is not None:
-            engine = startup_cleanup
-            close_task: asyncio.Task[None] | None = None
-
-            async def close_startup_engine_once() -> None:
-                nonlocal close_task
-                if close_task is None:
-                    close_task = asyncio.create_task(engine.aclose())
-                # Keep the one close operation alive if serve() cancels this
-                # loader while a superseded startup worker is being reaped.
-                await asyncio.shield(close_task)
-
-            try:
-                # Dictation is already available (raw text) — but the first-run
-                # download of the cleanup LLM is multi-GB, so keep the progress
-                # UI alive for it too.
-                if not await asyncio.to_thread(models.is_cached, self.config.cleanup_model):
-                    await self._download_with_progress(self.config.cleanup_model, "writing")
-                    await self._set_loading("Preparing the writing model…")
-                # Load and adopt under the load lock. A set_model that arrives
-                # meanwhile waits, then swaps this engine out; if its own load
-                # fails, this engine keeps serving, as any working one does.
-                async with self._cleanup_load_lock:
-                    # A set_model that took the lock first already installed
-                    # its engine: loading this one would only replace it.
-                    if self.cleanup is None:
-                        await engine.load_async(STATIC_SYSTEM_PROMPT)
-                    await self._set_loading(None)
-                    adopted = self.cleanup is None
-                    if adopted:
-                        self.cleanup = engine
-                if adopted:
-                    # Only now — with a loaded, adopted replacement — is it safe
-                    # to reclaim the old weights.
-                    await self._prune_superseded_models()
-                else:
-                    await close_startup_engine_once()
-            except asyncio.CancelledError:
-                if self.cleanup is engine:
-                    self.cleanup = None
-                await close_startup_engine_once()
-                raise
-            except Exception:
-                log.exception("cleanup LLM failed to load; dictations will return raw text")
-                if self.cleanup is engine:
-                    self.cleanup = None
-                with contextlib.suppress(Exception):
-                    await close_startup_engine_once()
-                with contextlib.suppress(Exception):
-                    await self._set_loading(None)  # never leave a stale phase up
-                self._start_cleanup_retry()
-            finally:
-                if self._cleanup_loading is engine:
-                    self._cleanup_loading = None
-        # Completion means no startup work remains. The writing model is an
-        # optional enhancement: its terminal failure falls back to raw text
-        # and must not strand onboarding forever after the download stops.
+                await asyncio.to_thread(self.audio.prune, self.config.audio_retention_days,
+                                        self.config.audio_max_bytes)
+        if self.config.cleanup_enabled and not fake_stt_enabled() and self.cleanup is None:
+            # Speech finishing cannot create a newer writing selection. Await
+            # a pre-ready user job, even on failure, instead of queuing the old
+            # durable model and superseding that user's pending candidate.
+            model = self._model_targets.get("cleanup")
+            if self._model_origins.get("cleanup") in (
+                    _ModelJobOrigin.selection, _ModelJobOrigin.recovery):
+                job = self._model_jobs.get((model, "cleanup"))
+                if job is not None:
+                    await asyncio.shield(job)
+            else:
+                await asyncio.shield(self._queue_model_job(
+                    self.config.cleanup_model, "cleanup", origin=_ModelJobOrigin.startup))
         self.setup_complete = True
         await self._send_setup_complete_if_ready()
-        # First mining pass a while after startup — the loop itself re-checks
-        # every skip condition (busy, LLM missing, disabled) before doing work.
         self._schedule_mining(delay=MINE_STARTUP_DELAY_S)
 
     def _start_cleanup_retry(self) -> None:
@@ -1253,7 +1520,8 @@ class Engine:
         Meeting notes are the exception: they need the model, and wait on
         `_cleanup_loading` for the retry's load as they do for startup's.
         """
-        return self._idle_but_for_notes() and self._batch_jobs == 0
+        return (self._idle_but_for_notes() and self._batch_jobs == 0
+                and not self._adopting and not self._stt_pending)
 
     async def _wait_for_retry_idle(self) -> None:
         """Return once the retry may load and has been able to for
@@ -1278,10 +1546,10 @@ class Engine:
         Dictations return raw text meanwhile. The first retry that loads
         restores cleanup for the next dictation, with no app restart. Waits
         follow the worker respawn backoff, so a model that never loads costs
-        one attempt per five minutes rather than a hot loop:
+        at most three delayed attempts rather than an unbounded hidden loop:
 
-            startup fails → 5 s → retry 1 fails → 10 s → retry 2 → 20 s → ...
-                                                      (each wait capped at 300 s)
+            startup fails → 5 s → retry 1 → 10 s → retry 2 → 20 s → retry 3
+                                                              → explicit recovery
 
         An attempt loads only while the engine is otherwise idle, so a load
         never competes with a dictation or job for the GPU. Work that starts
@@ -1289,7 +1557,7 @@ class Engine:
         the engine is idle.
         """
         attempt = 0
-        while True:
+        while attempt < _MODEL_LOAD_RETRIES:
             attempt += 1
             await asyncio.sleep(respawn_backoff_s(attempt - 1))
             if await self._retry_cleanup_attempt(attempt):
@@ -1317,7 +1585,17 @@ class Engine:
                 # load spawns a worker.
                 if self.cleanup is not None:
                     return True
-                engine = self._new_cleanup_process(model_id)
+                result = None
+                if not fake_stt_enabled():
+                    item = next((item for item in self._downloads.snapshot()["downloads"]
+                                 if item["model"] == model_id and item["kind"] == "cleanup"), None)
+                    if item is not None and item["state"] in ("failed", "retry_wait"):
+                        await self._downloads.retry(model_id, "cleanup", item["attempt"])
+                    result = await self._downloads.ensure(model_id, "cleanup")
+                    await self._downloads.mark_loading(model_id, "cleanup", result.attempt)
+                    await self._publish_downloads()
+                engine = (self._new_cleanup_process(model_id, local_model_path=result.path)
+                          if result is not None else self._new_cleanup_process(model_id))
                 self._cleanup_loading = engine
                 try:
                     loaded = await self._load_unless_busy(engine)
@@ -1329,6 +1607,12 @@ class Engine:
                     raise
                 except Exception:
                     log.exception("writing model retry %d failed; dictations stay raw", attempt)
+                    if result is not None:
+                        await self._downloads.mark_failed(model_id, "cleanup", result.attempt, {
+                            "category": "loading", "code": "model_load_failed",
+                            "message": "Writing model could not be loaded. Retry the model.",
+                            "retryable": False})
+                        await self._publish_downloads()
                     with contextlib.suppress(Exception):
                         await engine.aclose()
                     return False
@@ -1344,6 +1628,9 @@ class Engine:
                 # Same adoption rule as startup: never clobber a newer engine.
                 if self.cleanup is None and self.config.cleanup_model == engine.model_id:
                     self.cleanup = engine
+                    if result is not None:
+                        await self._downloads.mark_ready(model_id, "cleanup", result.attempt)
+                        await self._publish_downloads()
                     log.info("writing model loaded on retry %d; cleanup restored", attempt)
                     await self._prune_superseded_models()
                     return True
@@ -1404,6 +1691,7 @@ class Engine:
 
         loader = asyncio.create_task(self._load_models())
         watchdog = asyncio.create_task(self._watch_parent())
+        download_watch = asyncio.create_task(self._watch_downloads())
         try:
             await self.shutdown.wait()
         finally:
@@ -1414,7 +1702,13 @@ class Engine:
             # `shutdown`, and asyncio.run cancels only what is left once
             # serve() has returned.
             watchdog.cancel()
+            download_watch.cancel()
             loader.cancel()
+            jobs = list(self._adoption_jobs)
+            for job in jobs:
+                job.cancel()
+            await self._downloads.close()
+            await asyncio.gather(download_watch, *jobs, return_exceptions=True)
             # Cancellation owns cleanup too: wait until _load_models has
             # reaped any cold-start sidecar before serve() can return. A bare
             # cancel left that child alive during app replacement.
@@ -1491,6 +1785,14 @@ class Engine:
             ]
             if wedged:
                 await asyncio.wait(wedged, timeout=CLEANUP_WARMUP_SETTLE_S)
+            # Executor cancellation is not thread cancellation. Settle real
+            # STT work before releasing native handles and its owning thread.
+            if self._stt_pending:
+                await asyncio.wait(self._stt_pending)
+            await self._close_stt_backend(self.stt)
+            if self._reprocess_backend is not None and self._reprocess_backend is not self.stt:
+                await self._close_stt_backend(self._reprocess_backend)
+            self._stt_executor.shutdown(wait=False)
             log.info("engine shut down")
             if retry_cancel is not None:
                 raise retry_cancel
@@ -1532,50 +1834,15 @@ class Engine:
                     await writer.wait_closed()
             return
 
+        self._model_notifications.clear()
         self._client_gen += 1
         gen = self._client_gen
         self.writer = writer
         log.info("client %d connected", gen)
+        ready_task: asyncio.Task | None = None
         try:
-            await self.stt_ready.wait()
-            # A newer client can replace this one while both handlers are
-            # waiting for the speech model. A superseded handler must not send
-            # its ready frame through the new client's writer or overwrite the
-            # generation that owns the later setup-complete event.
-            if gen != self._client_gen or self.writer is not writer:
-                return
-            setup_complete_at_ready = self.setup_complete
-            await self._send(
-                {
-                    "event": "ready",
-                    "stt_model": self.stt.model_id,
-                    "cleanup_model": self.config.cleanup_model if self.config.cleanup_enabled else None,
-                    "version": __version__,
-                    "setup_complete": setup_complete_at_ready,
-                }
-            )
-            self._ready_client_gen = gen
-            if setup_complete_at_ready:
-                # The ready frame already carried the completion snapshot; do
-                # not leave a redundant event queued behind it.
-                self._setup_complete_sent_gen = gen
-            # Current setup phase AFTER ready: the app clears its status on
-            # `ready`, so sending before would erase a post-ready writing-model
-            # phase for a client that connects mid-download (review finding).
-            # Pre-ready download phases tick every second anyway.
-            if self.loading is not None:
-                await self._send({"event": "loading", **self.loading})
-            await self._send_setup_complete_if_ready(gen)
-            pending = self.audio.pending_interrupted() if self.config.save_audio else ()
-            if self._finalizing_session_id is not None:
-                # The old socket may have gone away while finalization still
-                # owns this spool. Only a process crash makes it interrupted.
-                pending = tuple(session for session in pending
-                                if session != self._finalizing_session_id)
-            if pending:
-                task = asyncio.create_task(self._emit_interrupted(pending, gen, writer))
-                self._interrupted_tasks.add(task)
-                task.add_done_callback(self._interrupted_tasks.discard)
+            await self._publish_downloads(force=True)
+            ready_task = asyncio.create_task(self._client_ready(gen, writer))
             while True:
                 try:
                     frame_type, payload = await protocol.read_frame(reader)
@@ -1589,6 +1856,9 @@ class Engine:
         except Exception:
             log.exception("client handler error")
         finally:
+            if ready_task is not None:
+                ready_task.cancel()
+                await asyncio.gather(ready_task, return_exceptions=True)
             if self._ready_client_gen == gen:
                 self._ready_client_gen = None
             await self._client_cleanup(writer)
@@ -1597,11 +1867,53 @@ class Engine:
                 log.info("client gone and parent pid dead — exiting")
                 self.shutdown.set()
 
+    async def _client_ready(self, gen: int, writer: asyncio.StreamWriter) -> None:
+        await self.stt_ready.wait()
+        # A newer client can replace this one while both handlers are
+        # waiting for the speech model. A superseded handler must not send
+        # its ready frame through the new client's writer or overwrite the
+        # generation that owns the later setup-complete event.
+        if gen != self._client_gen or self.writer is not writer:
+            return
+        setup_complete_at_ready = self.setup_complete
+        await self._send(
+            {
+                "event": "ready",
+                "stt_model": self.stt.model_id,
+                "cleanup_model": self.config.cleanup_model if self.config.cleanup_enabled else None,
+                "version": __version__,
+                "setup_complete": setup_complete_at_ready,
+            }
+        )
+        self._ready_client_gen = gen
+        if setup_complete_at_ready:
+            # The ready frame already carried the completion snapshot; do
+            # not leave a redundant event queued behind it.
+            self._setup_complete_sent_gen = gen
+        # Current setup phase AFTER ready: the app clears its status on
+        # `ready`, so sending before would erase a post-ready writing-model
+        # phase for a client that connects mid-download (review finding).
+        # Pre-ready download phases tick every second anyway.
+        if self.loading is not None:
+            await self._send({"event": "loading", **self.loading})
+        await self._send_setup_complete_if_ready(gen)
+        pending = self.audio.pending_interrupted() if self.config.save_audio else ()
+        if self._finalizing_session_id is not None:
+            # The old socket may have gone away while finalization still
+            # owns this spool. Only a process crash makes it interrupted.
+            pending = tuple(session for session in pending
+                            if session != self._finalizing_session_id)
+        if pending:
+            task = asyncio.create_task(self._emit_interrupted(pending, gen, writer))
+            self._interrupted_tasks.add(task)
+            task.add_done_callback(self._interrupted_tasks.discard)
+
     async def _client_cleanup(self, writer: asyncio.StreamWriter) -> None:
         """Tear down one connection. Only aborts the session it still owns:
         a displaced old handler must never discard a session the new client
         started (reconnect race)."""
         if self.writer is writer:
+            self._model_notifications.clear()
             self.writer = None
             # An admitted start may still be waiting for STT. Stop that task
             # before it can publish a session owned by a closed connection.
@@ -1659,6 +1971,31 @@ class Engine:
             evt["id"] = msg.get("id")
         await self._send(evt)
 
+    async def _reject_adoption(self, msg: dict[str, Any]) -> None:
+        # A bare error leaves job consumers pending. Echo the existing job or
+        # session identity so each caller can settle its rejected request.
+        command = msg["cmd"]
+        error = "busy adopting a model"
+        if command == "start":
+            await self._error(error, msg.get("session"))
+            return
+        if command == "reprocess":
+            await self._reprocess_failed(msg, error, "busy")
+            return
+        events = {"transcribe_file": "transcribe_failed", "edit_text": "edit_failed",
+                  "action_start": "action_failed", "action_observe": "action_failed",
+                  "meeting_transcribe": "meeting_transcribe_failed",
+                  "meeting_notes": "meeting_notes_failed"}
+        event = {"event": events[command], "id": msg.get("id"), "error": error}
+        if command != "transcribe_file":
+            event["code"] = "busy"
+        if command in ("meeting_transcribe", "meeting_notes"):
+            meeting = msg.get("meeting_id")
+            event["meeting_id"] = meeting if isinstance(meeting, str) else ""
+        if command == "meeting_transcribe":
+            event["speaker"] = msg.get("speaker")
+        await self._send(event)
+
     # ---------------- dispatch ----------------
 
     async def _dispatch(self, frame_type: int, payload: bytes) -> None:
@@ -1695,10 +2032,18 @@ class Engine:
         except (ValueError, UnicodeDecodeError) as exc:
             await self._error(f"malformed control frame: {exc}")
             return
-        if self.shutdown.is_set():
-            await self._error("engine shutting down", msg.get("session"))
-            return
         cmd = msg.get("cmd")
+        if self.shutdown.is_set():
+            if cmd == "set_model":
+                await self._cmd_set_model(msg, wait=False)
+            else:
+                await self._error("engine shutting down", msg.get("session"))
+            return
+        if self._adopting and cmd in (
+                "start", "reprocess", "transcribe_file", "meeting_transcribe",
+                "edit_text", "action_start", "action_observe", "meeting_notes"):
+            await self._reject_adoption(msg)
+            return
         try:
             if cmd == "start":
                 if self._start_task is not None:
@@ -1763,8 +2108,15 @@ class Engine:
                 if hasattr(self.stt, "language"):
                     self.stt.language = self.config.language
                 await self._send({"event": "config_reloaded"})
+            elif cmd == "download_status":
+                await self._publish_downloads(force=True)
+            elif cmd in ("retry_download", "restart_download"):
+                # Retry can await worker reaping; it must not hold the reader.
+                task = asyncio.create_task(self._cmd_download_retry(msg))
+                self._adoption_jobs.add(task)
+                task.add_done_callback(self._model_job_done)
             elif cmd == "set_model":
-                await self._cmd_set_model(msg)
+                await self._cmd_set_model(msg, wait=False)
             elif cmd == "reprocess":
                 await self._cmd_reprocess(msg)
             elif cmd == "transcribe_file":
@@ -1865,6 +2217,9 @@ class Engine:
                 self._start_session_id = None
 
     async def _cmd_start(self, msg: dict[str, Any]) -> bool:
+        if not self.stt_ready.is_set() or self._adopting or self._stt_quarantined:
+            await self._error("speech model is not ready", msg.get("session"))
+            return False
         # An acknowledged Esc may still be draining a slow STT call. Reset
         # that backend before admitting a new session onto its one thread.
         if self._cancel_active_task is not None:
@@ -3881,6 +4236,7 @@ class Engine:
         await self._send(
             {
                 "event": "status",
+                "stt_ready": self.stt_ready.is_set(),
                 "state": "recording" if self.session is not None else "idle",
                 "stt_model": self.stt.model_id,
                 "cleanup_model": self.config.cleanup_model,
@@ -3896,105 +4252,63 @@ class Engine:
             }
         )
 
-    async def _cmd_set_model(self, msg: dict[str, Any]) -> None:
-        model_id = msg.get("model")
-        if not model_id or not isinstance(model_id, str):
-            await self._error("set_model: missing 'model'")
+    async def _cmd_set_model(self, msg: dict[str, Any], *, wait: bool = True) -> None:
+        model = msg.get("model")
+        request_id = msg.get("request_id")
+        valid_model = isinstance(model, str) and bool(model)
+        info = models.lookup(model) if valid_model else None
+        kind = msg.get("kind") or (info.kind if info else "stt")
+        valid_kind = kind in ("stt", "cleanup")
+        if request_id is not None and (not isinstance(request_id, str) or not request_id
+                                      or len(request_id) > _MODEL_REQUEST_ID_MAX):
+            await self._set_model_error(model if valid_model else None,
+                kind if valid_kind else None, None, "set_model: invalid 'request_id'")
+            return
+        if not valid_model:
+            await self._set_model_error(None, kind if valid_kind else None, request_id,
+                                        "set_model: missing 'model'")
+            return
+        if not valid_kind:
+            await self._set_model_error(model, None, request_id, "set_model: unknown kind")
             return
         if (self.session is not None or self._reprocessing or self._transcribing
                 or self._meeting_notes_running or self._editing or self._planning
                 or self._action_session is not None):
-            await self._error(
+            await self._set_model_error(model, kind, request_id,
                 "set_model: busy (dictation, transcription, edit, or action in progress)")
             return
-        info = models.lookup(model_id)
-        kind = msg.get("kind") or (info.kind if info else "stt")
-        if kind not in ("stt", "cleanup"):
-            await self._error(f"set_model: unknown kind {kind!r}")
+        if self.shutdown.is_set():
+            await self._set_model_error(model, kind, request_id, SET_MODEL_SHUTTING_DOWN)
             return
-        if not fake_stt_enabled():
-            await asyncio.to_thread(models.ensure_downloaded, model_id)
-        # The download/load above can take minutes; the app may have rewritten
-        # config.json (language, save_audio, …) meanwhile. Re-read before the
-        # mutate+save below so we never clobber newer settings with stale
-        # in-memory state (review finding).
-        self.config.reload()
-        if kind == "stt":
-            backend = create_backend(model_id, self.config.language)
-            await self._stt_call(backend.load)
-            # Save before publishing, so a failed save changes nothing live.
+        # Duplicate same-target requests share a job, not their reply identity.
+        # Repeated IDs are deduplicated; excess distinct IDs are rejected before
+        # queuing, so a stalled acquisition cannot retain unbounded metadata.
+        previous = self._model_jobs.get((model, kind))
+        if (self._model_targets.get(kind) == model
+                and self._model_origins.get(kind) is _ModelJobOrigin.selection
+                and previous is not None and not previous.done()):
+            replies = self._model_notifications.get((kind, self._model_generation[kind]))
+            requests = replies.requests if replies is not None else []
+            if request_id not in requests and len(requests) >= _MODEL_REQUESTS_MAX:
+                await self._set_model_error(model, kind, request_id,
+                    "set_model: too many pending selection requests")
+                return
+        task = self._queue_model_job(model, kind, client_generation=self._client_gen)
+        replies = self._model_notifications.setdefault((kind, self._model_generation[kind]),
+            _ModelReplies([], self._client_gen, self.writer))
+        if request_id not in replies.requests:
+            replies.requests.append(request_id)
+        if wait:
             try:
-                self._save_model_choice("stt_model", model_id)
-            except Exception:
-                await self._close_stt_backend(backend)
+                error = await asyncio.shield(task)
+            except asyncio.CancelledError:
+                task.cancel()
+                while not task.done():
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await asyncio.wait({task})
                 raise
-            old = self.stt
-            self.stt = backend
-            await self._close_stt_backend(old)
-        else:
-            try:
-                # A startup retry would load beside this model: stop it first,
-                # and restart it below if this load fails or is cancelled,
-                # the stop included.
-                await self._stop_cleanup_retry()
-                async with self._cleanup_load_lock:
-                    # Shutdown may have begun while the stop above waited.
-                    # Its close sweep may have run, and would miss a worker
-                    # loaded now.
-                    if self.shutdown.is_set():
-                        await self._error(SET_MODEL_SHUTTING_DOWN)
-                        return
-                    # Load-then-swap: build and fully load the replacement
-                    # FIRST, then retire the old one. A failed load (bad
-                    # download, OOM) therefore leaves the working engine intact
-                    # instead of leaving no cleanup at all. Peak memory holds
-                    # both only for the load window (rare, user-initiated);
-                    # aclose() reaps the old model process before ack.
-                    engine = self._new_cleanup_process(model_id)
-                    if not fake_stt_enabled():
-                        try:
-                            await engine.load_async(STATIC_SYSTEM_PROMPT)
-                        except Exception:
-                            await engine.aclose()
-                            raise  # keep self.cleanup pointing at the old, working engine
-                    # Shutdown may also begin during that load, and its sweep
-                    # may run before the load ends: close this worker here,
-                    # as the sweep no longer can.
-                    if self.shutdown.is_set():
-                        await engine.aclose()
-                        await self._error(SET_MODEL_SHUTTING_DOWN)
-                        return
-                    # Save before publishing: a failed save leaves the old
-                    # engine serving and the config naming it.
-                    try:
-                        self._save_model_choice("cleanup_model", model_id)
-                    except Exception:
-                        await engine.aclose()
-                        raise
-                    # The switch is done once the new engine serves, so a
-                    # failure of the old one's close, which still reaps the
-                    # old worker, is not the switch's.
-                    old = self.cleanup
-                    self.cleanup = engine
-                    if old is not None:
-                        await self._close_replaced(old)
-                    # Shutdown's sweep takes `self.cleanup` without this lock,
-                    # so it may have taken and closed the new engine while the
-                    # old one closed. The switch did not outlive it, so do not
-                    # report one.
-                    if self.cleanup is not engine:
-                        await self._error(SET_MODEL_SHUTTING_DOWN)
-                        return
-            except BaseException:
-                # No engine to keep serving: retry in the background, whether
-                # or not a retry ran before, so cleanup does not stay absent
-                # until the next launch.
-                if (self.cleanup is None and self.config.cleanup_enabled
-                        and not self.shutdown.is_set()):
-                    self._start_cleanup_retry()
-                raise
-        await self._send({"event": "model_set", "model": model_id, "kind": kind})
-        log.info("switched %s model to %s", kind, model_id)
+            if isinstance(error, Exception):
+                raise error
 
     def _save_model_choice(self, key: str, model_id: str) -> None:
         """Save `model_id` as the config's `key`.
@@ -4017,9 +4331,15 @@ class Engine:
         saved, and the close has reaped the old worker either way. A cancel
         is logged too, and raised.
         """
+        close = asyncio.create_task(old.aclose())
         try:
-            await old.aclose()
+            await asyncio.shield(close)
         except asyncio.CancelledError:
+            while not close.done():
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.wait({close})
+            if not close.cancelled():
+                close.exception()
             log.warning("replaced cleanup engine close cancelled")
             raise
         except Exception:
@@ -4037,12 +4357,32 @@ class Engine:
             if hasattr(cached, "language"):
                 cached.language = language
             return cached
+        result = None
         if not fake_stt_enabled():
-            await asyncio.to_thread(models.ensure_downloaded, model_id)
-        backend = create_backend(model_id, language)
-        await self._stt_call(backend.load)
+            result = await self._downloads.ensure(model_id, "stt")
+            await self._downloads.mark_loading(model_id, "stt", result.attempt)
+            await self._publish_downloads()
+        backend = None
+        try:
+            # Construction and loading both belong to auxiliary adoption;
+            # either failure must leave the verified item out of loading.
+            backend = create_backend(model_id, language)
+            await self._load_stt_local(backend, result.path if result else None)
+        except BaseException:
+            if result is not None:
+                await self._downloads.mark_failed(model_id, "stt", result.attempt, {
+                    "category": "loading", "code": "model_load_failed",
+                    "message": "Reprocessing model could not be loaded.", "retryable": False})
+                await self._publish_downloads()
+            if backend is not None:
+                await self._close_stt_backend(backend)
+            raise
         old = self._reprocess_backend
         self._reprocess_backend = backend
+        if result is not None:
+            # Auxiliary ready does not replace the primary serving model.
+            await self._downloads.mark_aux_ready(model_id, "stt", result.attempt)
+            await self._publish_downloads()
         if old is not None:
             await self._close_stt_backend(old)
         return backend
@@ -4105,6 +4445,10 @@ class Engine:
             # A pressure-hibernated model may take seconds to restore. Keep
             # that wait in this worker task so ping/edit_cancel stay live on
             # the socket dispatcher, and make the load itself cancellable.
+            if self.cleanup is not None and not getattr(self.cleanup, "loaded", True):
+                await self._send({"event": "edit_phase", "id": msg.get("id"),
+                                  "phase": "loading",
+                                  "stall_after_s": CleanupProcess.load_bound_s() + STALL_MARGIN_S})
             if self.cleanup is None or not await self._ensure_cleanup_loaded(
                     self._edit_cancel):
                 code = "cancelled" if self._edit_cancel.is_set() else "cleanup_unavailable"
@@ -4124,6 +4468,11 @@ class Engine:
                 max(editing.MIN_EDIT_TIMEOUT_MS,
                     len(text) * editing.EDIT_TIMEOUT_MS_PER_CHAR),
             )
+            # Reset the app watchdog after cold load, before bounded inference.
+            await self._send({"event": "edit_phase", "id": msg.get("id"),
+                              "phase": "inference",
+                              "stall_after_s": timeout_ms / 1000 + HARD_TIMEOUT_GRACE_S
+                              + QUEUE_TIMEOUT_S + STALL_MARGIN_S})
             # Explicit vocabulary and learned corrections only, as for the
             # meeting glossary: auto-mined terms are guesses from prior STT
             # output, and an edit rewrites typed text the user already spelled.
@@ -4320,6 +4669,7 @@ class Engine:
         while the same worker is still warming.
         """
         deadline = self._clock() + ACTION_MODEL_RECOVERY_WAIT_S
+        wait_limit = self._clock() + ACTION_MODEL_RECOVERY_WAIT_MAX_S
         while not self._action_cancel.is_set() and not self.shutdown.is_set():
             cleanup = self.cleanup
             if cleanup is None:
@@ -4331,9 +4681,10 @@ class Engine:
             # A crash-loop backoff or a retired worker's exit delays the
             # replacement: wait until it is due, unless that outlasts the turn.
             recovery_deadline = self._recovery_deadline(cleanup)
-            if recovery_deadline - self._clock() > ACTION_MODEL_RECOVERY_WAIT_MAX_S:
-                return False
-            deadline = max(deadline, recovery_deadline)
+            # A conservative retired-exit forecast can exceed the allowed
+            # wait even when exit happens promptly. Cap actual elapsed waiting
+            # once per request; progress never resets this absolute deadline.
+            deadline = min(wait_limit, max(deadline, recovery_deadline))
             if self._clock() >= deadline:
                 return False
             await asyncio.sleep(0.05)
@@ -5927,6 +6278,28 @@ class Engine:
             "meeting_id": meeting_id,
         })
 
+    async def _notes_cleanup(self, deadline: float) -> CleanupProcess | None:
+        # Speech-ready can precede verified writing construction. Wait only for
+        # pending startup/adoption, not a failed acquisition or a new retry:
+        # speech ready -> verification -> offline proxy -> existing load wait.
+        while not self._meeting_notes_cancel and not self.shutdown.is_set():
+            cleanup = self.cleanup or self._cleanup_loading
+            if cleanup is not None:
+                return cleanup
+            if (self.setup_complete or not self.config.cleanup_enabled
+                    or fake_stt_enabled() or self._clock() >= deadline):
+                return None
+            model = self._model_targets.get("cleanup", self.config.cleanup_model)
+            item = next((item for item in self._downloads.snapshot()["downloads"]
+                         if item["kind"] == "cleanup" and item["model"] == model), None)
+            if item is not None and item["state"] == "failed":
+                return None
+            job = self._model_jobs.get((model, "cleanup"))
+            if job is not None and job.done():
+                return None
+            await asyncio.sleep(_DOWNLOAD_POLL_S)
+        return None
+
     async def _run_meeting_notes(self, msg: dict[str, Any]) -> None:
         meeting_id = str(msg["meeting_id"])
         transcript = str(msg["transcript"])
@@ -5988,7 +6361,9 @@ class Engine:
                 # cleanup child respawned — recompute who gets demoted.
                 self._refresh_batch_priority()
                 model_ready_deadline = self._clock() + MEETING_NOTES_MODEL_READY_WAIT_S
-                cleanup = self.cleanup or self._cleanup_loading
+                cleanup = await self._notes_cleanup(model_ready_deadline)
+                if self._meeting_notes_cancel or self.shutdown.is_set():
+                    return None, "cancelled", None
                 if cleanup is None:
                     return (
                         None, "the local notes model is unavailable",

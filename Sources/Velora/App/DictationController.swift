@@ -366,9 +366,7 @@ final class DictationController: NSObject {
         }
         return "\(total)-second dictation limit reached"
     }
-    /// Edit round-trip ceiling — above the engine's own 20 s edit budget so
-    /// the engine's `edit_failed` normally arrives first; this only fires if
-    /// the reply is lost entirely.
+    /// Fallback until the first edit phase arrives; each phase then owns its receipt-based bound.
     private static let editTimeout: TimeInterval = 45
 
     weak var delegate: DictationControllerDelegate?
@@ -452,6 +450,10 @@ final class DictationController: NSObject {
     private(set) var phase: Phase = .idle {
         didSet {
             guard phase != oldValue else { return }
+            if phase != .transcribing {
+                cleanupLabelWork?.cancel()
+                cleanupLabelWork = nil
+            }
             NSLog("Velora: phase %@ → %@", oldValue.label, phase.label)
             delegate?.dictationController(self, didChangePhase: phase)
             if phase == .idle {
@@ -576,6 +578,10 @@ final class DictationController: NSObject {
     /// the dictation transcribe timer so an unrelated failure's showError
     /// never discards a valid in-flight edit.
     private var editTimer: Timer?
+    private var editDeadline = EditDeadline()
+    private var cleanupLabelWork: DispatchWorkItem?
+    private static let cleanupLabelDelay: TimeInterval = 1
+
     /// The last successful insertion, for the "scratch that" voice command —
     /// undo is only offered into the SAME app, shortly after.
     private var lastInsertion: (bundleID: String?, at: Date)?
@@ -1127,6 +1133,7 @@ final class DictationController: NSObject {
         }
         editTimer?.invalidate()
         editTimer = nil
+        editDeadline.clear()
         if phase == .editing { phase = .idle }
 
         guard phase != .idle else {
@@ -1666,17 +1673,8 @@ final class DictationController: NSObject {
                 modeName: "Proofread"))
             hud.transition(to: .transcribing)
         }
-        editTimer?.invalidate()
-        editTimer = Timer.scheduledTimer(
-            withTimeInterval: Self.editTimeout, repeats: false
-        ) { [weak self] _ in
-            guard let self, let pending = self.pendingEdit, pending.id == id else { return }
-            pending.selection.discardMutableIdentity()
-            self.pendingEdit = nil
-            self.supervisor.send(["cmd": "edit_cancel", "id": id])
-            if self.phase == .editing { self.phase = .idle }
-            self.showError("Edit timed out", retryIntent: pending.kind.retryIntent)
-        }
+        editDeadline.start(id: id, now: now(), budget: Self.editTimeout)
+        armEditWatchdog()
         supervisor.send([
             "cmd": "edit_text", "id": id,
             "text": selection.text, "instruction": instruction,
@@ -1684,6 +1682,24 @@ final class DictationController: NSObject {
         NSLog("Velora: edit_text sent — %ld chars, instruction %ld words",
               selection.text.count,
               instruction.split(separator: " ").count)
+    }
+
+    // Loading -> inference each gets a fresh bound; a cold load never spends inference's budget.
+    private func armEditWatchdog() {
+        editTimer?.invalidate()
+        guard let deadline = editDeadline.deadline, let id = editDeadline.id else { return }
+        editTimer = Timer.scheduledTimer(
+            withTimeInterval: max(0.001, deadline.timeIntervalSince(now())), repeats: false
+        ) { [weak self] _ in
+            guard let self, let pending = self.pendingEdit, pending.id == id else { return }
+            pending.selection.discardMutableIdentity()
+            self.pendingEdit = nil
+            self.editDeadline.clear()
+            self.editTimer = nil
+            self.supervisor.send(["cmd": "edit_cancel", "id": id])
+            if self.phase == .editing { self.phase = .idle }
+            self.showError("Edit timed out", retryIntent: pending.kind.retryIntent)
+        }
     }
 
     private func applyEdit(
@@ -2596,6 +2612,7 @@ final class DictationController: NSObject {
             pendingEdit = nil
             editTimer?.invalidate()
             editTimer = nil
+            editDeadline.clear()
             if phase == .editing { phase = .idle }
             hud.transition(to: .hidden(.cancel))
             return
@@ -2644,6 +2661,7 @@ final class DictationController: NSObject {
         }
         editTimer?.invalidate()
         editTimer = nil
+        editDeadline.clear()
         stopCaptureAndRestoreMedia()
         NSLog("Velora: engine cancel session=%@", sessionID)
         supervisor.send(["cmd": "cancel", "session": sessionID])
@@ -2738,6 +2756,12 @@ final class DictationController: NSObject {
             break
         }
         switch event {
+        case .editPhase(let id, let editPhase, let stallAfterS):
+            guard pendingEdit?.id == id,
+                  editDeadline.receive(id: id, phase: editPhase,
+                                       budget: stallAfterS, now: now()) else { return }
+            armEditWatchdog()
+
         case .finalizeStarted(let session, let stallAfterS):
             guard session == sessionID, phase == .transcribing,
                   session != cancelledSessionID else { return }
@@ -2748,8 +2772,20 @@ final class DictationController: NSObject {
                                let stallAfterS):
             guard session == sessionID, phase == .transcribing,
                   session != cancelledSessionID else { return }
-            if (stage == "cleanup_load" || stage == "recovery")
-                && !hud.model.showsMultiStepProgress {
+            cleanupLabelWork?.cancel()
+            cleanupLabelWork = nil
+            if stage == "cleanup_load", completed < total, !hud.model.showsMultiStepProgress {
+                // Keep quick warm loads quiet; a cold load must name what is actually waiting.
+                hud.model.transcribeProgress = "Transcribing…"
+                let work = DispatchWorkItem { [weak self] in
+                    guard let self, self.sessionID == session, self.phase == .transcribing,
+                          self.cancelledSessionID != session else { return }
+                    self.hud.model.showsMultiStepProgress = true
+                    self.hud.model.transcribeProgress = "Loading writing model…"
+                }
+                cleanupLabelWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.cleanupLabelDelay, execute: work)
+            } else if stage == "recovery", !hud.model.showsMultiStepProgress {
                 hud.model.transcribeProgress = "Transcribing…"
             } else if stage == "stt", total > 0 {
                 let percent = min(100, max(0, Int(Double(completed) / Double(total) * 100)))
@@ -3018,6 +3054,7 @@ final class DictationController: NSObject {
             pendingEdit = nil
             editTimer?.invalidate()
             editTimer = nil
+            editDeadline.clear()
             if phase == .editing { phase = .idle }
             applyEdit(pending: pending, text: text, applied: applied, ms: ms, reason: reason)
 
@@ -3028,6 +3065,7 @@ final class DictationController: NSObject {
             pendingEdit = nil
             editTimer?.invalidate()
             editTimer = nil
+            editDeadline.clear()
             if phase == .editing { phase = .idle }
             switch code {
             case "busy":
@@ -3100,6 +3138,7 @@ final class DictationController: NSObject {
         }
         editTimer?.invalidate()
         editTimer = nil
+        editDeadline.clear()
         showError(message, retryIntent: retryIntent)
     }
 

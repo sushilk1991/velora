@@ -14,8 +14,7 @@ extension Notification.Name {
     /// absent when no phase is active. Drives onboarding and the menubar line.
     static let veloraEngineLoading = Notification.Name("VeloraEngineLoading")
     /// All startup model work finished. `userInfo["complete"]` is a Bool.
-    /// Onboarding observes this stricter signal; normal dictation still uses
-    /// the earlier engine-ready state.
+    /// Retained for setup status; speech readiness alone gates dictation.
     static let veloraEngineSetupChanged = Notification.Name("VeloraEngineSetupChanged")
     /// The supervisor's `state` changed. `object` is the supervisor; read
     /// its `state`. Posted on main, after the delegate hears it. A drop
@@ -58,6 +57,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     }
 
     let client = EngineClient()
+    let downloads = DownloadState()
+    // Late onboarding uses the same supervisor-owned instance, not a second reducer.
+    private(set) static var latestDownloads: DownloadState?
+
     weak var delegate: EngineSupervisorDelegate?
 
     private(set) var state: State = .stopped {
@@ -65,6 +68,10 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             guard state != oldValue else { return }
             NSLog("Velora: engine state → \(state)")
             if state != .ready { setupComplete = false }
+            if state == .launching || state == .stopped {
+                downloads.disconnect()
+            }
+            if case .degraded = state { downloads.disconnect() }
             if state == .ready { engineUpdatePending = false }
             quietSince = Date()
             let s = state
@@ -84,9 +91,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
 
     var isReady: Bool { readyOverride?() ?? (state == .ready) }
 
-    /// True only after the engine confirms that both startup models have
-    /// finished their first-run download/load path. This is intentionally
-    /// separate from `isReady`, which unlocks raw dictation earlier.
+    /// Legacy setup completion is distinct from loaded-speech readiness.
     private(set) var setupComplete = false {
         didSet {
             guard setupComplete != oldValue else { return }
@@ -158,6 +163,8 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         self.readyOverride = readyOverride
         self.restartSink = restartSink
         super.init()
+        downloads.bind { [weak self] command in self?.send(command) }
+        Self.latestDownloads = downloads
     }
 
     override convenience init() {
@@ -344,6 +351,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     /// Test seam for the state notification sent by a process exit.
     func simulateState(_ newState: State) {
         state = newState
+        if newState == .connecting { downloads.connect() }
     }
 
     private func handleProcessExit(status: Int32) {
@@ -441,8 +449,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
         guard !isQuitting, !client.isConnected else { return }
         if client.connect(path: AppConfig.socketPath) {
             state = .connecting
-            // Nudge the engine; `pong` doubles as a ready signal for engines
-            // that came up before we connected.
+            downloads.connect()
             client.send(json: ["cmd": "ping"])
         }
     }
@@ -452,6 +459,7 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
     func engineClient(_ client: EngineClient, didReceive event: EngineEvent) {
         switch event {
         case .ready(let setupIsComplete, let activeSTTModel):
+            downloads.readiness(speech: true, writing: nil)
             if state != .ready {
                 restartAttempts = 0
                 state = .ready
@@ -471,15 +479,30 @@ final class EngineSupervisor: NSObject, EngineClientDelegate {
             }
             if setupIsComplete { setupComplete = true }
         case .pong:
-            if state != .ready {
-                restartAttempts = 0
-                state = .ready
+            break
+        case .downloadStatus(let snapshot):
+            if downloads.apply(snapshot) {
+                state = downloads.speechReady ? .ready : .connecting
             }
+        case .modelSet(let model, let kind, let requestID):
+            downloads.accept(model: model, kind: kind, requestID: requestID)
+            var acceptance: [String: Any] = ["accepted_model": model, "accepted_kind": kind.rawValue]
+            if let requestID { acceptance["accepted_request_id"] = requestID }
+            NotificationCenter.default.post(
+                name: .veloraEngineStatus, object: nil, userInfo: ["payload": acceptance])
+        case .selectionRejected(let model, let kind, let requestID, let message):
+            downloads.reject(model: model, kind: kind, requestID: requestID, message: message)
+        case .unknown(let payload):
+            if payload["event"] as? String == "download_status" { downloads.invalidate() }
         case .loading(let phase, let fraction):
             updateLoading(phase: phase, fraction: fraction)
         case .setupComplete:
             if state == .ready { setupComplete = true }
         case .status(let payload):
+            downloads.readiness(speech: payload["stt_ready"] as? Bool,
+                                writing: payload["cleanup_loaded"] as? Bool)
+            if downloads.speechReady { state = .ready }
+            if payload["stt_ready"] as? Bool == false, state == .ready { state = .connecting }
             NotificationCenter.default.post(
                 name: .veloraEngineStatus, object: nil, userInfo: ["payload": payload])
         case .reprocessed, .reprocessFailed:

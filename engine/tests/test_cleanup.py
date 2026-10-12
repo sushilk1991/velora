@@ -1289,3 +1289,141 @@ async def test_hard_watchdog_poison_rejects_followup_instead_of_queueing(monkeyp
         assert calls == ["first"]
     finally:
         engine.close()
+
+
+@pytest.fixture
+def offline_loaders(monkeypatch):
+    """Fail on acquisition, including MLX's hidden missing-path fallback."""
+    import mlx_lm
+    import mlx_lm.utils as utils
+    import mlx_lm.tokenizer_utils as tokenizer_utils
+    import huggingface_hub
+    import socket
+    from velora_engine import models
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("offline cleanup attempted acquisition")
+
+    monkeypatch.setattr(models, "ensure_downloaded", forbidden)
+    monkeypatch.setattr(mlx_lm, "load", forbidden)
+    monkeypatch.setattr(utils, "_download", forbidden)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", forbidden)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", forbidden)
+    monkeypatch.setattr(utils, "snapshot_download", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    return utils, tokenizer_utils
+
+
+@pytest.mark.parametrize("model_id", [
+    "mlx-community/Qwen3.5-4B-MLX-8bit", "logical/other-model",
+])
+def test_load_local_source(offline_loaders, monkeypatch, tmp_path, model_id):
+    """Offline loading preserves identity, EOS configuration and warm-up."""
+    utils, tokenizer_utils = offline_loaders
+    calls = []
+    model, tokenizer = object(), CharacterTokenizer()
+    monkeypatch.setattr(utils, "load_model", lambda path: (
+        calls.append(("model", path)) or (model, {"eos_token_id": [7, 8]})))
+    monkeypatch.setattr(tokenizer_utils, "load", lambda path, config, eos_token_ids: (
+        calls.append(("tokenizer", path, config, eos_token_ids)) or tokenizer))
+    engine = CleanupEngine(model_id, local_model_path=tmp_path)
+    monkeypatch.setattr(engine, "_warm", lambda prompt: calls.append(("warm", prompt)))
+    try:
+        engine.load("warm prompt")
+        assert engine.model_id == model_id
+        assert engine.loaded
+        assert engine._model is model and engine._tokenizer is tokenizer
+        assert calls == [
+            ("model", tmp_path),
+            ("tokenizer", tmp_path, {"local_files_only": True, "trust_remote_code": False}, [7, 8]),
+            ("warm", "warm prompt"),
+        ]
+
+        # Copy-draft eligibility follows the logical identity, not the path.
+        def generate(*args, **kwargs):
+            assert kwargs["copy_draft"] is (model_id in cleanup_mod.COPY_DRAFT_MODELS)
+            return cleanup_mod._GenerationResult(
+                text="raw", status="ok", ttft_ms=0, decode_ms=0,
+                prefix_tokens=0, input_tokens=3, output_tokens=3, cache_hit=False,
+                mlx_active_bytes=0, mlx_peak_bytes=0, mlx_cache_bytes=0,
+            )
+        monkeypatch.setattr(engine, "_generate_locked", generate)
+        assert engine._run("raw", "system", 1000, copy_draft=True).applied
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("source_kind", ["missing", "file", "incomplete", "disappeared"])
+def test_local_source_failure(offline_loaders, monkeypatch, tmp_path, source_kind):
+    """Bad or removed sources fail locally, never becoming repository IDs."""
+    utils, _ = offline_loaders
+    source = tmp_path / "source"
+    if source_kind == "file":
+        source.touch()
+    if source_kind in {"incomplete", "disappeared"}:
+        source.mkdir()
+    if source_kind == "disappeared":
+        def remove_source(path):
+            path.rmdir()
+            return object(), {}
+        monkeypatch.setattr(utils, "load_model", remove_source)
+    engine = CleanupEngine("logical/model", local_model_path=source)
+    try:
+        with pytest.raises(RuntimeError) as error:
+            engine.load()
+        assert str(source) in str(error.value)
+        assert "logical/model" in str(error.value)
+        assert "offline" in str(error.value).lower()
+        assert not engine.loaded
+        assert engine.model_id == "logical/model"
+    finally:
+        engine.close()
+
+
+def test_legacy_load_acquires(monkeypatch, tmp_path):
+    """Callers without an explicit source retain the existing acquisition API."""
+    import mlx_lm
+    from velora_engine import models
+
+    calls = []
+    monkeypatch.setattr(models, "ensure_downloaded", lambda model_id: (
+        calls.append(model_id) or str(tmp_path)))
+    monkeypatch.setattr(mlx_lm, "load", lambda path: (
+        calls.append(path) or (object(), CharacterTokenizer())))
+    engine = CleanupEngine("logical/model")
+    try:
+        engine.load()
+        assert calls == ["logical/model", str(tmp_path)]
+        assert engine.loaded
+    finally:
+        engine.close()
+
+
+def test_local_tokenizer_reload(offline_loaders, monkeypatch, tmp_path):
+    """A real tiny tokenizer loads locally; a removed source invalidates reload."""
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+
+    utils, _ = offline_loaders
+    tokenizer = PreTrainedTokenizerFast(
+        tokenizer_object=Tokenizer(WordLevel({"[UNK]": 0, "raw": 1}, unk_token="[UNK]")),
+        unk_token="[UNK]",
+    )
+    source = tmp_path / "tokenizer"
+    tokenizer.save_pretrained(source)
+    monkeypatch.setattr(utils, "load_model", lambda path: (object(), {"eos_token_id": 0}))
+    engine = CleanupEngine("logical/model", local_model_path=source)
+    try:
+        engine.load()
+        assert engine.loaded
+        assert engine._tokenizer.encode("raw") == [1]
+        for path in source.iterdir():
+            path.unlink()
+        source.rmdir()
+        with pytest.raises(RuntimeError, match="Offline cleanup load failed"):
+            engine.load()
+        assert not engine.loaded
+    finally:
+        engine.close()

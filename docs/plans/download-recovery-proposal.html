@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Velora · Download recovery proposal</title>
+<style>
+/* Existing brand tokens keep this approval prototype close to the Mac app. */
+:root{color-scheme:light;--canvas:#faf8f5;--card:#fff;--raised:#f3f1ee;--ink:#201d1b;--muted:#625c56;--line:#ddd8d2;--accent:#0f74c5;--on-accent:#fff;--danger:#b42318;--warm:#c06325;--s:8px;--m:12px;--l:16px;--xl:20px;--radius:12px}
+[data-theme=dark]{color-scheme:dark;--canvas:#161311;--card:#201d1b;--raised:#2c2927;--ink:#faf8f5;--muted:#c0b8af;--line:#48413c;--accent:#4dacf6;--on-accent:#161311;--danger:#ff9a90;--warm:#e78a45}
+[hidden]{display:none!important}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1120px;margin:auto;padding:32px 24px}header{display:flex;justify-content:space-between;gap:var(--xl);align-items:center}h1{font-size:30px;line-height:1.2;margin:12px 0}h2{font-size:22px}h3{font-size:15px}p{margin:8px 0 16px}.muted,small{color:var(--muted)}.layout{display:grid;grid-template-columns:minmax(0,680px) 1fr;gap:32px;margin:24px 0}button,select{font:inherit;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:14px;padding:8px 14px;cursor:pointer}button:focus-visible,select:focus-visible{outline:3px solid var(--accent);outline-offset:3px}button:active{transform:scale(.98)}button:disabled{opacity:.5;cursor:default}.primary{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}.controls,.actions{display:flex;gap:var(--s);flex-wrap:wrap}.controls{margin:16px 0}.window{border:1px solid var(--line);border-radius:18px;overflow:hidden;background:var(--canvas);min-height:520px}.chrome{padding:12px 16px;border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}.content{padding:32px}.headline{font:34px/1.15 "New York",Georgia,serif;margin:16px 0}.dot{color:var(--warm)}.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:var(--l);margin:20px 0}.row{display:flex;justify-content:space-between;gap:var(--l);align-items:center}.row+.row{border-top:1px solid var(--line);padding-top:var(--l);margin-top:var(--l)}progress{width:100%;height:8px;accent-color:var(--accent);margin:16px 0 8px}.measure{font:12px/1.6 ui-monospace,monospace}.error{color:var(--danger)}aside{padding:0 4px}aside ol{padding-left:20px}li{margin-bottom:12px}details{border-top:1px solid var(--line);padding:16px 0}summary{cursor:pointer;font-weight:600}pre{white-space:pre-wrap;font-size:12px;background:var(--raised);padding:16px;border-radius:8px}label{display:block}.tag{font-size:12px;color:var(--muted)}footer{margin-top:24px;border-top:1px solid var(--line);padding-top:16px}#notice{padding:12px;background:var(--raised);border-radius:8px;margin-top:16px}a{color:var(--accent)}@media(max-width:850px){.layout{grid-template-columns:1fr}.content{padding:24px}header{align-items:start}main{padding:20px 16px}}@media(prefers-reduced-motion:reduce){button:active{transform:none}}
+</style>
+</head>
+<body>
+<main>
+<header><div><span class="tag">Velora · Design approval only</span><h1>Recover interrupted downloads.</h1></div><button id="theme" type="button">Switch Theme</button></header>
+<p class="muted">Interactive proposal, not the shipped app. All sizes, progress and timing below are sample data.</p>
+<div class="layout">
+<section aria-label="Interactive app proposal">
+<div class="controls"><button id="onboard" type="button">Onboarding</button><button id="settings" type="button">Settings › Models</button></div>
+<label for="scenario">Preview a failure</label>
+<select id="scenario"><option value="downloading">Downloading normally</option><option value="waiting">Network interruption</option><option value="failed">Automatic retries exhausted</option><option value="disk">Disk full</option><option value="writing">Speech ready, writing failed</option><option value="verifying">Verifying downloaded files</option><option value="ready">Both models ready</option></select>
+<div class="window"><div class="chrome" id="chrome">Velora · Setup</div><div class="content">
+<div class="tag" id="step">Try it · Last setup step</div>
+<h2 class="headline" id="heading">Your first dictation<span class="dot">.</span></h2>
+<p id="intro">One download before you can dictate. Writing tools can finish later.</p>
+<div class="card" aria-live="polite" aria-atomic="true">
+<div class="row"><strong id="model">Speech model</strong><span class="tag" id="requirement">Required for Dictation</span></div>
+<h3 id="status"></h3><p id="help"></p><progress id="progress" max="100" value="42" aria-label="Speech model download progress"></progress>
+<div class="measure" id="bytes"></div><div class="actions" id="recovery" style="margin-top:16px"><button class="primary" id="retry" type="button">Retry Now</button><button id="restore" type="button">Simulate Network Restored</button><button id="restart" type="button">Restart Download…</button></div>
+</div>
+<div class="row"><div><strong id="writingTitle">Writing model</strong><br><small id="writingStatus">Queued. Needed for Proofread and Voice Edit.</small></div><button id="writingRetry" type="button">Retry Writing</button></div>
+<div class="actions" style="margin-top:24px"><button class="primary" id="try" type="button">Try Dictation</button><button id="later" type="button">Set Up Later</button></div>
+<p id="notice" role="status" hidden></p>
+</div></div>
+<p class="muted"><small>Prototype controls simulate state changes. Nothing is downloaded, deleted or sent over the network.</small></p>
+</section>
+<aside>
+<h2>Recommended flow</h2>
+<ol><li>Download while permissions and the hotkey are configured. Keep the existing seven setup steps.</li><li>If transferred bytes stop increasing, show recovery status. Heartbeats alone do not prove progress.</li><li>Retry transient failures automatically with bounded backoff. Keep Retry Now available. Never start two transfers for the same model.</li><li>Unlock Dictation once speech is loaded. A writing failure must not block it.</li><li>Keep the same state and controls in Settings › Models, including after closing setup or restarting Velora.</li></ol>
+<h3>Resume must be honest</h3><p>Reuse validated completed files. Resume partial files only if the transfer adapter safely supports byte ranges and unchanged file identity. Otherwise restart that file and explain why.</p>
+<p><strong>No indefinite spinner.</strong> Network, disk, verification and model-load failures get different messages and actions.</p>
+</aside>
+</div>
+<details open><summary>Approaches and trade-offs</summary><ol><li><strong>Recommended: one recovery coordinator.</strong> Automatic bounded retries, controlled cancellation, shared onboarding/Settings state, validated cache reuse and tested partial resume. Addresses startup and model switches.</li><li><strong>Smaller patch: expose failure and restart the engine.</strong> Faster to implement, but interrupts active work and does not solve silent model switches or persistent partial resume.</li><li><strong>Settings-only retry.</strong> Small UI change, but first-time users still encounter an unexplained setup screen. Not recommended.</li></ol></details>
+<details><summary>Audit findings and scope</summary><ol><li><code>OnboardingView.swift:9–18,523</code>: no error state; required speech failure becomes a starting spinner during supervisor retries.</li><li><code>server.py:1307</code>: uncached writing recovery stops. Setup can finish, but writing remains unavailable without a visible explanation.</li><li><code>SettingsModel.swift:929–941; server.py:3915</code>: model-switch downloads have no progress UI; errors can close the connection silently.</li><li><code>models.py:343</code>: cache progress double-counts blob/snapshot links. Replace it with per-transfer unique-byte accounting.</li><li><code>OnboardingWindowController.swift:56</code>: closing setup marks onboarding complete. Settings must remain a direct recovery route.</li></ol><p>Source inspections, not reproduced production incidents. Swift storage symlink counting and delayed hotkey handling during model switches still need runtime tests. A loading heartbeat watchdog alone cannot detect a live thread with no byte movement.</p></details>
+<details><summary>State, cancellation and validation contract</summary><pre>Queued → Downloading → Verifying → Loading → Ready
+             ↓              ↓         ↓
+         Retry wait       Failed    Load failed
+             ↓
+         Downloading → Failed (retry budget exhausted)
+
+Onboarding ─┐
+Settings ───┼→ engine coordinator → cancellable transfer worker → cache
+Reconnect ──┘        ↓
+                state snapshot</pre><p>Proposed tuning: a 60 s byte-stall threshold; retries after 2, 5 and 15 s, then explicit failure. Tune against slow links and transport tests. Manual Retry Now bypasses backoff, not cache verification. Metadata and model loading have separate deadlines.</p><p>Keep one transfer owner per model/revision. A retry first stops and joins the old worker. Publish attempt IDs so stale events cannot overwrite the new state. Persist recoverable file identity and partial state, then replay the current snapshot on reconnect.</p><p>Restart Download asks for confirmation, stops the transfer and discards only that attempt's partial file. Completed validated files and other installed models remain. Disk errors do not retry endlessly. A failed model switch keeps the previous working model.</p><p>Required tests: mid-body disconnect and recovery; open socket with no bytes; quit/relaunch; concurrent retries; ignored Range and changed ETag; disk full; corrupt snapshot; slow verification/load; writing-only failure; model-switch failure without losing the old model or blocking commands.</p></details>
+<details><summary>Release plan after approval</summary><ol><li>Implement with failing regression tests first. Run <code>make test</code> and signed-app onboarding/recovery checks.</li><li>Choose a fresh version after checking published releases. Write user-facing notes, commit and land on main.</li><li>Build from merged main using Developer ID and the Direct provisioning profile: <code>./scripts/make-dmg.sh release none</code>. Notarize, staple and verify.</li><li>Run the publisher dry-run, then <code>scripts/publish-release.sh</code>. Publish the GitHub DMG before updating the Homebrew cask with its exact checksum.</li><li>Verify GitHub's latest release, downloadable asset and <code>brew fetch --cask sushilk1991/tap/velora</code>. Follow <code>docs/RELEASING.md</code>; dry-run alone is not release verification.</li></ol></details>
+<footer>Approval requested for the shared recovery flow and UI. No app implementation, commit, push or release has happened.</footer>
+</main>
+<script>
+(() => {
+  // A local simulation separates preview state from any real download mechanics.
+  // scenario -> shared state -> onboarding or Settings
+  const SAMPLE_PERCENT = 42;
+  const $ = (id) => document.getElementById(id);
+  const states = {
+    downloading: ['Downloading speech model', 'You can finish setup later. Check progress in Settings › Models.', '672 MB of 1.6 GB · 42%', SAMPLE_PERCENT],
+    waiting: ['Connection interrupted', 'Velora will retry in 5 s. Completed files are kept. You can retry now.', '672 MB received · Waiting to retry', SAMPLE_PERCENT],
+    failed: ['Speech model could not download', 'Automatic retries did not finish the download. Check your connection and try again.', 'Dictation is unavailable until the speech model is loaded.', SAMPLE_PERCENT],
+    disk: ['Not enough disk space', 'Free disk space, then retry. Installed models will not be removed.', 'Download stopped · Completed files kept', SAMPLE_PERCENT],
+    writing: ['Speech model ready', 'You can dictate now. The writing model did not download.', 'Speech is loaded · Writing tools unavailable', 100],
+    verifying: ['Checking downloaded files', 'Download finished. Velora is checking the files before loading the model.', '1.6 GB received · Dictation is not ready yet', 100],
+    ready: ['Ready to dictate', 'Speech and writing models are loaded.', 'Setup complete', 100]
+  };
+  let surface = 'onboarding';
+
+  // Every surface uses the same snapshot so closing setup cannot hide recovery.
+  function render() {
+    const state = $('scenario').value;
+    const [title, help, bytes, percent] = states[state];
+    const speechReady = state === 'writing' || state === 'ready';
+    const recoverable = ['waiting', 'failed', 'disk'].includes(state);
+    $('status').textContent = title;
+    $('status').className = recoverable ? 'error' : '';
+    $('help').textContent = help;
+    $('bytes').textContent = bytes;
+    $('progress').value = percent;
+    $('progress').hidden = state === 'ready' || state === 'writing';
+    $('recovery').hidden = !recoverable;
+    $('restore').hidden = state !== 'waiting';
+    $('try').disabled = !speechReady;
+    $('writingRetry').hidden = state !== 'writing';
+    $('writingStatus').textContent = state === 'writing' ? 'Download failed. Dictation still works.' : state === 'ready' ? 'Ready for Proofread and Voice Edit.' : 'Queued. Needed for Proofread and Voice Edit.';
+    $('chrome').textContent = surface === 'settings' ? 'Velora · Settings › Models' : 'Velora · Setup';
+    $('step').textContent = surface === 'settings' ? 'Models · Download status' : 'Try it · Last setup step';
+    $('heading').innerHTML = (surface === 'settings' ? 'Models' : 'Your first dictation') + '<span class="dot">.</span>';
+    $('intro').textContent = surface === 'settings' ? 'Manage downloads here, even after setup has closed.' : 'One download before you can dictate. Writing tools can finish later.';
+    $('notice').hidden = true;
+  }
+
+  // Controls advance only the mock; restart confirmation demonstrates its boundary.
+  function notify(message) {
+    $('notice').textContent = message;
+    $('notice').hidden = false;
+  }
+  function recover() {
+    $('scenario').value = 'downloading';
+    render();
+    notify('Recovery requested. Reuse completed files; resume partial bytes only after server identity and range checks. Otherwise restart that file.');
+  }
+  $('scenario').addEventListener('change', render);
+  $('retry').addEventListener('click', recover);
+  $('restore').addEventListener('click', recover);
+  $('restart').addEventListener('click', () => {
+    if (!window.confirm('Restart this download? Discard its partial file only. Keep completed files and installed models.')) {
+      return;
+    }
+    recover();
+    $('progress').value = 0;
+    $('bytes').textContent = '0 MB of 1.6 GB · Restarting the incomplete file';
+  });
+  $('writingRetry').addEventListener('click', () => {
+    $('writingStatus').textContent = 'Downloading writing model: 12%. Dictation remains available.';
+    $('writingRetry').hidden = true;
+    notify('Writing recovery runs independently. Speech remains ready.');
+  });
+  $('try').addEventListener('click', () => notify('Dictation is available. The real app would open its existing try-it editor.'));
+  $('later').addEventListener('click', () => {
+    surface = 'settings';
+    render();
+    notify('Setup closed in this preview. Download status remains available here and from the menubar.');
+  });
+  $('onboard').addEventListener('click', () => { surface = 'onboarding'; render(); });
+  $('settings').addEventListener('click', () => { surface = 'settings'; render(); });
+  document.documentElement.dataset.theme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  $('theme').addEventListener('click', () => {
+    document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  });
+  render();
+})();
+</script>
+</body>
+</html>

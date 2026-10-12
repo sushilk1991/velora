@@ -121,6 +121,7 @@ enum Selftest {
         testDictionaryRowsOrderNewestFirst()
         testCorrectionDiff()
         testEventParsing()
+        testDownloadRecovery()
         testOnboardingSetup()
         testKeyboardShortcutMapping()
         testSafeVoiceEditSelection()
@@ -2401,6 +2402,721 @@ enum Selftest {
             "a refused listen-only combo emits nothing and creates no latch")
     }
 
+    // Exact schema fixtures include every nullable field and a structured terminal failure.
+    private static func recoveryItem(
+        kind: String = "stt", state: String = "failed", model: String = "example/speech"
+    ) -> [String: Any] {
+        ["model": model, "kind": kind, "revision": NSNull(), "attempt": "attempt-1",
+         "state": state, "bytes_received": 672_000_000, "bytes_total": 1_600_000_000,
+         "retry_index": 3, "retry_at": NSNull(),
+         "error": state == "failed" ? ["category": "network", "code": "byte_stall",
+                                       "message": "Connection stopped.", "retryable": true] : NSNull(),
+         "resume": "completed_files", "retry_allowed": state == "failed" || state == "retry_wait",
+         "restart_allowed": state == "failed", "active_model": NSNull()]
+    }
+
+    private static func recoveryWire(
+        _ items: [[String: Any]], boot: String = "boot", sequence: Int = 6
+    ) -> [String: Any] {
+        ["event": "download_status", "schema": 1, "engine_id": boot,
+         "sequence": sequence, "snapshot": true, "downloads": items]
+    }
+
+    private static func testDownloadRecovery() {
+        let initialChecks = checks
+        let initialFailures = failures
+        defer { print("download recovery — \(checks - initialChecks) checks, \(failures - initialFailures) failures") }
+        testCachedSelection()
+        testImportAdmission()
+        testRecoveryReapFence()
+        var commands: [[String: Any]] = []
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+        supervisor.simulateState(.connecting)
+        expect(commands.contains { $0["cmd"] as? String == "download_status" },
+               "connection requests snapshots before delayed ready")
+        supervisor.engineClient(supervisor.client, didReceive: .pong)
+        expect(supervisor.state == .connecting && !supervisor.downloads.speechReady,
+               "pong proves liveness, not loaded speech")
+        supervisor.engineClient(supervisor.client, didReceive: .setupComplete)
+        expect(!supervisor.downloads.speechReady, "setup_complete is not speech adoption")
+        let item = recoveryItem()
+        let wire = recoveryWire([item])
+        guard let snapshot = DownloadSnapshot.parse(wire) else {
+            expect(false, "exact nullable schema 1 parses"); return
+        }
+        expect(snapshot.engineID == "boot" && snapshot.sequence == 6,
+               "schema keeps engine identity and sequence")
+        expect(snapshot.downloads[0].error?.category == "network"
+               && snapshot.downloads[0].revision == nil && snapshot.downloads[0].retryAt == nil,
+               "nullable fields and errors are typed")
+        for key in ["kind", "state", "resume"] {
+            var malformed = item
+            malformed[key] = "future_value"
+            expect(DownloadSnapshot.parse(recoveryWire([malformed])) == nil,
+                   "unknown \(key) cannot authorize recovery")
+        }
+        for (key, value) in [("schema", 2 as Any), ("snapshot", false), ("sequence", -1)] {
+            var malformed = wire
+            malformed[key] = value
+            expect(DownloadSnapshot.parse(malformed) == nil, "invalid \(key) fails closed")
+        }
+        var malformed = item
+        malformed["retry_allowed"] = "yes"
+        expect(DownloadSnapshot.parse(recoveryWire([malformed])) == nil, "malformed bool fails closed")
+        malformed = item
+        malformed["bytes_total"] = 1
+        expect(DownloadSnapshot.parse(recoveryWire([malformed])) == nil, "invalid byte bounds fail closed")
+        expect(DownloadSnapshot.parse(recoveryWire([item, item])) == nil, "duplicate identities fail closed")
+        for phase in ["queued", "downloading", "verifying", "loading", "retry_wait", "ready", "failed"] {
+            expect(DownloadSnapshot.parse(recoveryWire([recoveryItem(state: phase)])) != nil,
+                   "known phase \(phase) parses")
+        }
+        for resume in ["none", "partial", "completed_files", "file_restarted"] {
+            var resumed = item
+            resumed["resume"] = resume
+            expect(DownloadSnapshot.parse(recoveryWire([resumed])) != nil,
+                   "supported resume state \(resume) parses")
+        }
+        var unknownTotal = recoveryItem(state: "downloading")
+        unknownTotal["bytes_total"] = NSNull()
+        let unknown = DownloadSnapshot.parse(recoveryWire([unknownTotal]))!
+        expect(unknown.downloads[0].fraction == nil, "unknown totals stay indeterminate")
+        let measured = DownloadSnapshot.parse(recoveryWire([recoveryItem(state: "downloading")]))!
+        expect(measured.downloads[0].fraction == 0.42, "progress uses actual received bytes")
+        expect(snapshot.downloads[0].fraction == nil, "failure is not a live download percentage")
+        let rejection = EngineEvent.parse([
+            "event": "error", "command": "set_model", "model": "example/candidate",
+            "kind": "stt", "request_id": "request-1", "message": "set_model: busy",
+        ])
+        if case .selectionRejected(let model, let kind, let id, _) = rejection {
+            expect(model == "example/candidate" && kind == .stt && id == "request-1",
+                   "identified selection rejection keeps exact request key")
+        } else { expect(false, "identified selection rejection is typed, not generic") }
+        let state = supervisor.downloads
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(snapshot))
+        expect(state.canAct(snapshot.downloads[0], .retry), "current exact attempt allows retry")
+        state.select(model: "example/candidate", kind: .stt)
+        let firstRequest = commands.last?["request_id"] as? String
+        state.select(model: "example/candidate", kind: .stt)
+        let latestRequest = commands.last?["request_id"] as? String
+        expect(firstRequest != nil && latestRequest != nil && firstRequest != latestRequest,
+               "each selection sends a fresh request_id")
+        func rejectSelection(_ requestID: Any) {
+            supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse([
+                "event": "error", "command": "set_model", "model": "example/candidate",
+                "kind": "stt", "request_id": requestID, "message": "set_model: busy",
+            ]))
+        }
+        rejectSelection(firstRequest!)
+        expect(state.pending[.stt] == "example/candidate" && state.selectionErrors.isEmpty,
+               "stale selection rejection cannot clear latest pending request")
+        rejectSelection(NSNull())
+        expect(state.pending[.stt] == "example/candidate", "legacy unscoped rejection is never guessed")
+        rejectSelection(latestRequest!)
+        expect(state.pending[.stt] == nil && state.selectionErrors[.stt] == "set_model: busy",
+               "matching rejection clears pending and shows refusal")
+        state.select(model: "example/candidate", kind: .stt)
+        state.accept(model: "example/candidate", kind: .stt, requestID: firstRequest)
+        expect(state.pending[.stt] == "example/candidate", "stale identified acceptance preserves latest request")
+        state.accept(model: "example/candidate", kind: .stt)
+        expect(state.pending[.stt] == nil, "authoritative adoption settles matching requested model")
+        state.select(model: "example/candidate", kind: .stt)
+        expect(state.pending[.stt] == "example/candidate", "selection stays pending")
+        expect(state.protectedModels.contains("example/candidate")
+               && state.protectedModels.contains("example/speech"), "pending and transfer caches are protected")
+        expect(!ModelStorage.removalAvailable, "cache removal is unavailable while engine owns acquisition")
+        state.request(snapshot.downloads[0], .retry)
+        let retry = commands.first { $0["cmd"] as? String == "retry_download" }
+        expect(retry?["model"] as? String == "example/speech"
+               && retry?["kind"] as? String == "stt" && retry?["attempt"] as? String == "attempt-1"
+               && retry?.count == 4, "retry sends exact wire key only")
+        expect(!state.canAct(snapshot.downloads[0], .restart), "request fences duplicate actions until snapshot")
+        expect(!state.apply(DownloadSnapshot.parse(recoveryWire([], sequence: 5))!), "older sequence rejected")
+        expect(state.apply(snapshot), "equal authoritative snapshot accepted")
+        expect(state.downloads.count == 1 && state.isCurrent, "equal snapshot restores authoritative actions")
+        state.request(snapshot.downloads[0], .restart)
+        expect(commands.contains { $0["cmd"] as? String == "restart_download"
+            && $0["attempt"] as? String == "attempt-1" }, "Restart is an engine command, not cache deletion")
+        state.disconnect()
+        let before = commands.count
+        state.request(snapshot.downloads[0], .retry)
+        state.select(model: "example/offline", kind: .cleanup)
+        expect(commands.count == before && !state.canAct(snapshot.downloads[0], .retry),
+               "disconnected snapshots cannot send actions or selections")
+        state.connect()
+        expect(!state.isCurrent, "connection invalidates previously cached actions")
+        expect(state.apply(snapshot), "same-boot equal reconnect accepted")
+        state.invalidate()
+        expect(!state.canAct(snapshot.downloads[0], .retry), "malformed snapshot disables recovery")
+        var readySpeech = recoveryItem(state: "ready")
+        readySpeech["active_model"] = "example/speech"
+        let readyWire = recoveryWire([readySpeech, recoveryItem(kind: "cleanup", model: "example/writing")], sequence: 7)
+        supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse(readyWire))
+        expect(state.speechReady && !state.writingReady && supervisor.state == .ready,
+               "live speech adoption unlocks dictation while writing fails")
+        let onboarding = OnboardingModel()
+        expect(onboarding.downloads === state && onboarding.setupState.canTryIt,
+               "late onboarding shares the supervisor reducer and gates speech only")
+        var nextAttempt = item
+        nextAttempt["attempt"] = "attempt-2"
+        let advanced = DownloadSnapshot.parse(recoveryWire([nextAttempt], sequence: 8))!
+        expect(state.apply(advanced) && !state.canAct(snapshot.downloads[0], .retry),
+               "a replaced attempt cannot issue a stale recovery command")
+        let reboot = DownloadSnapshot.parse(recoveryWire([item], boot: "new-boot", sequence: 0))!
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(reboot))
+        expect(state.snapshot?.sequence == 0 && !state.speechReady && state.pending.isEmpty
+               && supervisor.state == .connecting, "new boot resets ordering, pending and readiness")
+        expect(waitUntil { !onboarding.setupState.canTryIt }, "onboarding follows lost speech readiness")
+        expect(state.apply(DownloadSnapshot.parse(recoveryWire([], boot: "new-boot", sequence: 1))!),
+               "full list replacement removes obsolete items")
+        expect(state.downloads.isEmpty, "snapshot is not a delta merge")
+        var auxiliary = recoveryItem(state: "ready", model: "example/auxiliary")
+        auxiliary["active_model"] = "example/primary"
+        expect(state.apply(DownloadSnapshot.parse(recoveryWire([auxiliary], boot: "new-boot", sequence: 2))!)
+               && !state.speechReady, "auxiliary adoption cannot imply loaded primary speech")
+        testRecoverySelection(supervisor)
+        testEditPhaseTimeline()
+        testRecoveryStorage()
+    }
+
+    // Local UI notifications and repeated serving snapshots cannot acknowledge a newer request.
+    private static func testCachedSelection() {
+        let config = AppConfig.shared
+        let original = config.sttModel
+        defer { config.sttModel = original }
+        var commands: [[String: Any]] = []
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+        supervisor.simulateState(.connecting)
+        var ready = recoveryItem(state: "ready", model: original)
+        ready["active_model"] = original
+        let serving = DownloadSnapshot.parse(recoveryWire([ready], boot: "cached-serving"))!
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(serving))
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove(); supervisor.downloads.disconnect() }
+        let repository = makeSyncRepository(fixture)
+        let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                        identityURL: fixture.directory.appendingPathComponent("identity"))
+        let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+        settings.setSpeechModel("example/candidate-B")
+        settings.setSpeechModel(original)
+        let requestID = commands.last?["request_id"] as? String
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(settings.downloads.pending[.stt] == original,
+               "cached ready A cannot settle A to B to A after local queue reconciliation")
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(serving))
+        supervisor.engineClient(supervisor.client, didReceive: .status([
+            "stt_model": original, "stt_ready": true,
+        ]))
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(settings.downloads.pending[.stt] == original,
+               "unchanged serving snapshot/status cannot acknowledge newer A request")
+        supervisor.engineClient(supervisor.client, didReceive: .selectionRejected(
+            model: original, kind: .stt, requestID: requestID!, message: "set_model: busy"))
+        expect(settings.downloads.pending[.stt] == nil
+               && settings.downloads.selectionErrors[.stt] == "set_model: busy",
+               "matching rejection remains visible after cached A reconciliation")
+        settings.setSpeechModel("example/candidate-B")
+        settings.setSpeechModel(original)
+        let latestID = commands.last?["request_id"] as? String
+        supervisor.engineClient(supervisor.client, didReceive: .selectionRejected(
+            model: original, kind: .stt, requestID: requestID!, message: "old rejection"))
+        expect(settings.downloads.pending[.stt] == original,
+               "stale A rejection cannot clear the new A request")
+        supervisor.engineClient(supervisor.client, didReceive: .modelSet(
+            model: original, kind: .stt, requestID: latestID))
+        expect(settings.downloads.pending[.stt] == nil && config.sttModel == original,
+               "matching engine model_set settles already-serving A")
+        settings.setSpeechModel("example/candidate-B")
+        var adopted = recoveryItem(state: "ready", model: "example/candidate-B")
+        adopted["active_model"] = "example/candidate-B"
+        supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse(recoveryWire(
+            [adopted], boot: "cached-serving", sequence: 7)))
+        expect(waitUntil { settings.sttModel == "example/candidate-B" }
+               && settings.downloads.pending[.stt] == nil,
+               "new live adoption snapshot still settles and persists B")
+    }
+
+    // Import must reject an unavailable speech request before changing any other preference or file.
+    private static func testImportAdmission() {
+        let app = NSApplication.shared
+        let appearance = app.appearance
+        let config = AppConfig.shared
+        let original = try! AppConfig.portableSettings(from: config.exportSettingsData())
+        defer { try! config.applyPortableSettings(original); app.appearance = appearance }
+        for invalidated in [false, true] {
+            try! config.applyPortableSettings(original)
+            var commands: [[String: Any]] = []
+            let supervisor = EngineSupervisor.forSelftest(
+                commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+            supervisor.simulateState(.connecting)
+            _ = supervisor.downloads.apply(DownloadSnapshot.parse(recoveryWire([]))!)
+            if invalidated {
+                supervisor.downloads.invalidate()
+            } else {
+                supervisor.downloads.disconnect()
+            }
+            let fixture = DictionaryRepositoryFixture()
+            let repository = makeSyncRepository(fixture)
+            let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                            identityURL: fixture.directory.appendingPathComponent("identity"))
+            let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+            let settingsBefore = try! Data(contentsOf: AppConfig.settingsFileURL)
+            let engineBefore = try? Data(contentsOf: AppConfig.configFileURL)
+            let sendsBefore = commands.count
+            var imported = original
+            imported.models.speech = "example/import-speech"
+            imported.general.soundsEnabled = !original.general.soundsEnabled
+            var rejected = false
+            do {
+                try settings.importSettings(imported)
+            } catch {
+                rejected = true
+                expect(error.localizedDescription.contains("model"), "import rejection explains model admission")
+            }
+            expect(rejected, "disconnected/invalidated model-changing import is rejected atomically")
+            expect((try? Data(contentsOf: AppConfig.settingsFileURL)) == settingsBefore
+                   && (try? Data(contentsOf: AppConfig.configFileURL)) == engineBefore,
+                   "rejected import leaves settings and engine config bytes unchanged")
+            expect(config.soundsEnabled == original.general.soundsEnabled
+                   && settings.soundsEnabled == original.general.soundsEnabled
+                   && settings.sttModel == original.models.speech,
+                   "rejected import preserves non-model and model preferences")
+            expect(commands.count == sendsBefore && settings.downloads.pending.isEmpty
+                   && settings.settingsTransferResult != "Settings imported",
+                   "rejected import has no request side effects or false success")
+
+            // An unchanged speech choice needs no admission and remains safe to import offline.
+            var preferencesOnly = original
+            preferencesOnly.general.soundsEnabled = !original.general.soundsEnabled
+            try! settings.importSettings(preferencesOnly)
+            expect(config.soundsEnabled == preferencesOnly.general.soundsEnabled
+                   && config.sttModel == original.models.speech
+                   && settings.downloads.pending.isEmpty
+                   && !commands.contains { $0["cmd"] as? String == "set_model" },
+                   "offline unchanged-model import commits preferences without losing model intent")
+            fixture.remove()
+        }
+        var commands: [[String: Any]] = []
+        let supervisor = EngineSupervisor.forSelftest(
+            commandSink: { commands.append($0) }, readyOverride: { false }, restartSink: {})
+        supervisor.simulateState(.connecting)
+        _ = supervisor.downloads.apply(DownloadSnapshot.parse(recoveryWire([]))!)
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove(); supervisor.downloads.disconnect() }
+        let repository = makeSyncRepository(fixture)
+        let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                        identityURL: fixture.directory.appendingPathComponent("identity"))
+        let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+        var imported = original
+        imported.models.speech = "example/import-speech"
+        imported.general.soundsEnabled = !original.general.soundsEnabled
+        try! settings.importSettings(imported)
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(settings.downloads.pending[.stt] == imported.models.speech
+               && config.sttModel == original.models.speech
+               && config.soundsEnabled == imported.general.soundsEnabled,
+               "admitted import retains model intent without prematurely persisting it")
+        supervisor.engineClient(supervisor.client, didReceive: .modelSet(
+            model: imported.models.speech, kind: .stt,
+            requestID: commands.last { $0["cmd"] as? String == "set_model" }?["request_id"] as? String))
+        expect(config.sttModel == imported.models.speech && settings.downloads.pending[.stt] == nil,
+               "imported speech commits only on actual acceptance")
+    }
+
+    // Detached recovery cannot generate a status read while the engine's reaper is gated.
+    private static func testRecoveryReapFence() {
+        for action in [DownloadAction.retry, .restart] {
+            var commands: [[String: Any]] = []
+            var automaticRead: DownloadSnapshot?
+            var reaping = false
+            let state = DownloadState()
+            let failed = DownloadSnapshot.parse(recoveryWire([recoveryItem()]))!
+            state.bind { command in
+                commands.append(command)
+                if command["cmd"] as? String == action.rawValue { reaping = true }
+                if command["cmd"] as? String == "download_status", reaping {
+                    automaticRead = failed
+                }
+            }
+            state.connect()
+            _ = state.apply(failed)
+            commands = []
+            state.request(failed.downloads[0], action)
+            if let automaticRead { _ = state.apply(automaticRead) }
+            expect(automaticRead == nil && commands.count == 1,
+                   "recovery does not poll unchanged status during gated worker reap")
+            expect(!state.canAct(failed.downloads[0], .retry)
+                   && !state.canAct(failed.downloads[0], .restart),
+                   "gated reap keeps both recovery actions disabled without generated early snapshot")
+            let sent = commands.count
+            state.request(failed.downloads[0], action)
+            expect(commands.count == sent, "second recovery action cannot bypass pending decision fence")
+            reaping = false
+            var accepted = recoveryItem(state: "queued")
+            accepted["attempt"] = "accepted-attempt"
+            _ = state.apply(DownloadSnapshot.parse(recoveryWire([accepted], sequence: 7))!)
+            expect(state.isCurrent && state.downloads[0].attempt == "accepted-attempt",
+                   "accepted snapshot releases the recovery decision fence")
+            state.disconnect()
+            state.connect()
+            let rejected = DownloadSnapshot.parse(recoveryWire([recoveryItem()], boot: "rejected-boot"))!
+            _ = state.apply(rejected)
+            state.request(rejected.downloads[0], action)
+            // An unchanged forced snapshot is also the server's legitimate rejected-decision reply.
+            _ = state.apply(rejected)
+            expect(state.canAct(rejected.downloads[0], action),
+                   "unchanged authoritative rejection can release the fence")
+        }
+    }
+
+    private static func testRecoverySelection(_ supervisor: EngineSupervisor) {
+        let config = AppConfig.shared
+        let oldSpeech = config.sttModel
+        let oldWriting = config.cleanupModel
+        let servingWriting = oldWriting ?? "example/old-writing"
+        config.cleanupModel = servingWriting
+        defer { config.sttModel = oldSpeech; config.cleanupModel = oldWriting }
+        let fixture = DictionaryRepositoryFixture()
+        defer { fixture.remove() }
+        let repository = makeSyncRepository(fixture)
+        let sync = ICloudDictionarySync(repository: repository, transport: FakeDictionarySyncTransport(),
+                                        identityURL: fixture.directory.appendingPathComponent("identity"))
+        let settings = SettingsModel(supervisor: supervisor, dictionary: repository, dictionarySync: sync)
+        settings.setSpeechModel("example/new-speech")
+        settings.setCleanupModel("example/new-writing")
+        expect(settings.sttModel == oldSpeech && config.sttModel == oldSpeech,
+               "speech request does not persist or claim active selection")
+        settings.setSpeechModel(oldSpeech)
+        expect(settings.downloads.pending[.stt] == oldSpeech,
+               "A to B to A requests latest A even while A still serves")
+        settings.setSpeechModel("example/new-speech")
+        settings.setCleanupModel(servingWriting)
+        expect(settings.downloads.pending[.cleanup] == servingWriting,
+               "writing A to B to A is not dropped as already selected")
+        settings.setCleanupModel("example/new-writing")
+        expect(config.cleanupModel == servingWriting && settings.cleanupModel != "example/new-writing",
+               "writing request preserves durable old model")
+        supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse(recoveryWire([
+            recoveryItem(model: "example/new-speech"),
+            recoveryItem(kind: "cleanup", model: "example/new-writing"),
+        ], boot: "new-boot", sequence: 3)))
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(config.sttModel == oldSpeech && config.cleanupModel == servingWriting,
+               "failed acquisition retains both durable choices")
+        supervisor.engineClient(supervisor.client, didReceive: .status([
+            "stt_model": "example/new-speech", "stt_ready": false,
+            "cleanup_model": "example/new-writing", "cleanup_loaded": false,
+        ]))
+        expect(config.sttModel == oldSpeech && config.cleanupModel == servingWriting && !settings.cleanupLoaded,
+               "chosen model names without loaded readiness cannot commit")
+        supervisor.engineClient(supervisor.client, didReceive: .modelSet(model: "example/new-speech", kind: .stt, requestID: nil))
+        expect(settings.sttModel == "example/new-speech" && config.sttModel == "example/new-speech",
+               "model_set commits speech acceptance")
+        supervisor.engineClient(supervisor.client, didReceive: .status([
+            "cleanup_model": "example/new-writing", "cleanup_loaded": true,
+        ]))
+        expect(settings.cleanupModel == "example/new-writing" && config.cleanupModel == "example/new-writing"
+               && settings.cleanupLoaded, "loaded status commits writing acceptance")
+        var adoptedWriting = recoveryItem(kind: "cleanup", state: "ready", model: "example/new-writing")
+        adoptedWriting["active_model"] = "example/new-writing"
+        let adopted = DownloadSnapshot.parse(recoveryWire([adoptedWriting], boot: "new-boot", sequence: 4))!
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(adopted))
+        expect(waitUntil { settings.cleanupLoaded }, "ready adoption initially confirms loaded writing")
+        supervisor.engineClient(supervisor.client, didReceive: .status(["cleanup_loaded": false]))
+        expect(!settings.cleanupLoaded, "unloaded writing is not inferred from chosen model")
+        supervisor.engineClient(supervisor.client, didReceive: .downloadStatus(adopted))
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(!settings.cleanupLoaded && !settings.downloads.writingReady,
+               "equal adoption snapshot cannot override current cleanup_loaded false")
+        supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse(recoveryWire([
+            adoptedWriting, recoveryItem(model: "example/other-transfer"),
+        ], boot: "new-boot", sequence: 5)))
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(!settings.cleanupLoaded, "unrelated transfer does not claim idle-unloaded writing is loaded")
+        for _ in 0..<5 {
+            testQueuedEngineFrames(supervisor, settings: settings)
+        }
+        supervisor.simulateState(.connecting)
+        if let output = ProcessInfo.processInfo.environment["VELORA_RECOVERY_SNAPSHOTS"] {
+            renderRecoveryShots(settings: settings, supervisor: supervisor, into: output)
+        }
+    }
+
+    // Park complete framed events on main, then reconnect before allowing delegate delivery.
+    private static func testQueuedEngineFrames(
+        _ supervisor: EngineSupervisor, settings: SettingsModel
+    ) {
+        final class Probe: EngineClientDelegate {
+            let supervisor: EngineSupervisor
+            var events = 0
+            var disconnections = 0
+            init(_ supervisor: EngineSupervisor) { self.supervisor = supervisor }
+            func engineClient(_ client: EngineClient, didReceive event: EngineEvent) {
+                events += 1
+                supervisor.engineClient(client, didReceive: event)
+            }
+            func engineClientDidDisconnect(_ client: EngineClient) {
+                disconnections += 1
+                supervisor.engineClientDidDisconnect(client)
+            }
+        }
+        let path = "/tmp/velora-delivery-\(UUID().uuidString.prefix(8)).sock"
+        let listener = socket(AF_UNIX, SOCK_STREAM, 0)
+        guard listener >= 0 else { expect(false, "delivery fixture listener opens"); return }
+        defer { close(listener); try? FileManager.default.removeItem(atPath: path) }
+        let bound = UnixSocket.withAddress(path: path) { address, length in
+            Darwin.bind(listener, address, length) == 0
+        } == true
+        guard bound, listen(listener, 2) == 0 else { expect(false, "delivery fixture binds"); return }
+        let client = supervisor.client
+        let probe = Probe(supervisor)
+        client.delegate = probe
+        defer { client.disconnect(notify: false); client.delegate = nil }
+        func openPeer() -> Int32 {
+            guard client.connect(path: path) else { return -1 }
+            return accept(listener, nil, nil)
+        }
+        func writeFrame(_ wire: [String: Any], to peer: Int32) {
+            let payload = try! JSONSerialization.data(withJSONObject: wire)
+            var length = UInt32(payload.count + 1).littleEndian
+            var frame = withUnsafeBytes(of: &length) { Data($0) }
+            frame.append(EngineClient.FrameType.json.rawValue)
+            frame.append(payload)
+            UnixSocket.writeAll(frame, to: peer)
+        }
+        func waitForEOF() -> Bool {
+            let deadline = Date().addingTimeInterval(2)
+            // No run-loop pump: main must retain the queued delegate callbacks until reconnect.
+            while client.isConnected && Date() < deadline { usleep(1_000) }
+            return !client.isConnected
+        }
+        let oldChoice = settings.sttModel
+        let first = openPeer()
+        guard first >= 0 else { expect(false, "first delivery peer accepted"); return }
+        UnixSocket.disableSigpipe(first)
+        writeFrame(recoveryWire([recoveryItem()], boot: "stale-boot"), to: first)
+        writeFrame(["event": "model_set", "model": "example/stale", "kind": "stt"], to: first)
+        shutdown(first, SHUT_RDWR)
+        close(first)
+        expect(waitForEOF(), "old frame batch reached EOF before main delivery")
+        let current = openPeer()
+        guard current >= 0 else { expect(false, "current delivery peer accepted"); return }
+        UnixSocket.disableSigpipe(current)
+        supervisor.simulateState(.connecting)
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(probe.events == 0 && probe.disconnections == 0,
+               "queued old events and old disconnect are discarded after reconnect")
+        expect(!supervisor.downloads.isCurrent && settings.sttModel == oldChoice,
+               "stale download snapshot cannot reauthorize; stale model_set cannot commit")
+        expect(client.isConnected && supervisor.state == .connecting,
+               "stale disconnect cannot tear down current readiness connection")
+        writeFrame(recoveryWire([recoveryItem()], boot: "delivery-boot", sequence: 1), to: current)
+        expect(waitUntil { probe.events == 1 && supervisor.downloads.isCurrent },
+               "legitimate current snapshot still delivers")
+        writeFrame(["event": "model_set", "model": "example/live", "kind": "stt"], to: current)
+        shutdown(current, SHUT_RDWR)
+        close(current)
+        expect(waitForEOF(), "current terminal frame reaches EOF")
+        expect(waitUntil { probe.events == 2 && probe.disconnections == 1 },
+               "natural EOF preserves terminal frames and delivers disconnect once")
+        expect(settings.sttModel == "example/live" && AppConfig.shared.sttModel == "example/live",
+               "genuine terminal acceptance commits before current disconnect")
+        let failedPeer = openPeer()
+        guard failedPeer >= 0 else { expect(false, "failed reconnect fixture peer accepted"); return }
+        supervisor.simulateState(.connecting)
+        UnixSocket.disableSigpipe(failedPeer)
+        writeFrame(["event": "model_set", "model": "example/failed-reconnect", "kind": "stt"], to: failedPeer)
+        shutdown(failedPeer, SHUT_RDWR)
+        close(failedPeer)
+        expect(waitForEOF(), "failed reconnect fixture reaches terminal EOF")
+        expect(!client.connect(path: path + ".missing"), "replacement connection fails without a socket")
+        expect(waitUntil { probe.events == 3 && probe.disconnections == 2 },
+               "failed reconnect preserves queued terminal event and disconnect exactly once")
+        expect(settings.sttModel == "example/failed-reconnect",
+               "terminal model acceptance survives a failed reconnect")
+        let invalidatedPeer = openPeer()
+        guard invalidatedPeer >= 0 else { expect(false, "invalidation fixture peer accepted"); return }
+        UnixSocket.disableSigpipe(invalidatedPeer)
+        writeFrame(["event": "model_set", "model": "example/invalidated", "kind": "stt"], to: invalidatedPeer)
+        shutdown(invalidatedPeer, SHUT_RDWR)
+        close(invalidatedPeer)
+        expect(waitForEOF(), "explicit invalidation fixture reaches EOF")
+        client.disconnect(notify: false)
+        _ = waitUntil(timeout: 0.1) { false }
+        expect(probe.events == 3 && probe.disconnections == 2
+               && settings.sttModel == "example/failed-reconnect",
+               "explicit invalidation discards queued terminal delivery")
+    }
+
+    private static func testEditPhaseTimeline() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        var deadline = EditDeadline()
+        deadline.start(id: "active", now: start, budget: 45)
+        let phase = EngineEvent.parse(["event": "edit_phase", "id": "active",
+                                       "phase": "loading", "stall_after_s": 205.25])
+        if case .editPhase(let id, let phase, let budget) = phase {
+            expect(deadline.receive(id: id, phase: phase, budget: budget, now: start),
+                   "typed loading phase rearms active edit")
+        } else { expect(false, "edit_phase exact schema is typed") }
+        let loadingDeadline = deadline.deadline
+        expect(!deadline.receive(id: "stale", phase: .inference, budget: 25,
+                                 now: start.addingTimeInterval(40)) && deadline.deadline == loadingDeadline,
+               "stale edit id cannot replace loading deadline")
+        expect(deadline.receive(id: "active", phase: .inference, budget: 25,
+                                now: start.addingTimeInterval(44.9)), "cold-load inference starts its own budget")
+        expect(deadline.deadline == start.addingTimeInterval(69.9),
+               "44.9-second cold load plus 16-second edit outlives old 45-second watchdog")
+        expect(deadline.deadline! > start.addingTimeInterval(60.9), "valid slow edit is not cancelled at whole deadline")
+        expect(deadline.receive(id: "active", phase: .inference, budget: 25,
+                                now: start.addingTimeInterval(200)), "ordinary inference rearmed from receipt")
+        expect(deadline.deadline == start.addingTimeInterval(225), "loading budget is not carried into inference")
+        for terminal in ["result", "failure", "cancel", "disconnect"] {
+            deadline.clear()
+            expect(deadline.id == nil && deadline.phase == nil && deadline.deadline == nil,
+                   "\(terminal) clears phase state")
+            expect(!deadline.receive(id: "active", phase: .loading, budget: 205.25, now: start),
+                   "late phase after \(terminal) is ignored")
+            deadline.start(id: "active", now: start, budget: 45)
+        }
+        for badPhase in ["future", "", "Loading"] {
+            if case .unknown = EngineEvent.parse(["event": "edit_phase", "id": "active",
+                                                 "phase": badPhase, "stall_after_s": 25]) {} else {
+                expect(false, "unknown edit phase cannot rearm watchdog")
+            }
+        }
+        if case .unknown = EngineEvent.parse(["event": "edit_phase", "id": "active",
+                                             "phase": "loading", "stall_after_s": -1]) {} else {
+            expect(false, "negative edit bound rejected")
+        }
+    }
+
+    private static func testRecoveryStorage() {
+        let hub = ModelStorage.hubURL
+        try! FileManager.default.createDirectory(at: hub, withIntermediateDirectories: true)
+        let legacy = hub.appendingPathComponent("models--example--dedup")
+        let owned = hub.appendingPathComponent(".velora-downloads/\(ModelStorage.ownedKey("example/dedup"))")
+        for path in [legacy.appendingPathComponent("blobs"), legacy.appendingPathComponent("snapshots/rev"),
+                     owned.appendingPathComponent("manifests"), owned.appendingPathComponent("snapshots/rev")] {
+            try! FileManager.default.createDirectory(at: path, withIntermediateDirectories: true)
+        }
+        defer {
+            try? FileManager.default.removeItem(at: legacy)
+            try? FileManager.default.removeItem(at: owned)
+        }
+        let blob = legacy.appendingPathComponent("blobs/file")
+        try! Data(repeating: 7, count: 100).write(to: blob)
+        try! FileManager.default.createSymbolicLink(at: legacy.appendingPathComponent("snapshots/rev/file"),
+                                                    withDestinationURL: blob)
+        try! FileManager.default.linkItem(at: blob, to: owned.appendingPathComponent("snapshots/rev/file"))
+        let manifest = try! JSONSerialization.data(withJSONObject: ["model": "example/dedup"])
+        try! manifest.write(to: owned.appendingPathComponent("manifests/rev.json"))
+        let lock = owned.appendingPathComponent("owner.lock")
+        try! Data().write(to: lock)
+        let scanned = ModelStorage.scan(at: hub).filter { $0.id == "example/dedup" }
+        expect(scanned.count == 2, "owned SHA identity and legacy repo both accounted")
+        expect(scanned.reduce(Int64(0)) { $0 + $1.bytes } == 100 + Int64(manifest.count),
+               "hardlink and symlink snapshots count a unique storage object once")
+        guard let managed = scanned.first(where: { $0.engineManaged }),
+              let cached = scanned.first(where: { !$0.engineManaged }) else { return }
+        expect(!ModelStorage.canRemove(managed, protected: []), "owned cache never offered for Swift deletion")
+        expect(!ModelStorage.canRemove(cached, protected: [cached.id]), "active/pending legacy cache protected")
+        expect(!ModelStorage.canRemove(cached, protected: []), "even unused legacy caches cannot race acquisition")
+        expect(FileManager.default.fileExists(atPath: lock.path)
+               && (try? Data(contentsOf: blob))?.count == 100,
+               "owned owner.lock and completed bytes remain untouched")
+    }
+
+    // Scratch-home-only bitmap captures exercise production views in both themes without introducing motion.
+    private static func renderRecoveryShots(
+        settings: SettingsModel, supervisor: EngineSupervisor, into path: String
+    ) {
+        let dir = URL(fileURLWithPath: path)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let app = NSApplication.shared
+        app.setActivationPolicy(.prohibited)
+        let originalAppearance = app.appearance
+        defer {
+            app.appearance = originalAppearance
+            supervisor.downloads.disconnect()
+        }
+        var sequence = 10
+        for theme in ["light", "dark"] {
+            NSApp.appearance = NSAppearance(named: theme == "light" ? .aqua : .darkAqua)
+            for scenario in ["failed", "downloading", "retry_wait", "verifying", "loading", "writing"] {
+                var speech = recoveryItem(state: scenario == "writing" ? "ready" : scenario)
+                if scenario == "writing" { speech["active_model"] = "example/speech" }
+                if scenario == "retry_wait" { speech["retry_at"] = Date().addingTimeInterval(5).timeIntervalSince1970 }
+                supervisor.engineClient(supervisor.client, didReceive: EngineEvent.parse(recoveryWire([
+                    speech, recoveryItem(kind: "cleanup", model: "example/writing"),
+                ], boot: "new-boot", sequence: sequence)))
+                sequence += 1
+                _ = waitUntil(timeout: 0.1) { false }
+                let onboarding = OnboardingModel()
+                onboarding.step = .tryIt
+                let surfaces: [(String, AnyView, NSSize)] = [
+                    ("setup", AnyView(OnboardingView(model: onboarding)), NSSize(width: 640, height: 520)),
+                    ("models", AnyView(ModelSettingsView(model: settings)), NSSize(width: 780, height: 940)),
+                ]
+                for (name, view, size) in surfaces {
+                    let hosting = NSHostingView(rootView: view
+                        .background(VeloraPanel.canvas)
+                        .environment(\.colorScheme, theme == "light" ? .light : .dark))
+                    let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                                          styleMask: [.borderless], backing: .buffered, defer: false)
+                    window.appearance = app.appearance
+                    window.isOpaque = false
+                    window.backgroundColor = .windowBackgroundColor
+                    window.contentView = hosting
+                    hosting.frame = NSRect(origin: .zero, size: size)
+                    _ = waitUntil(timeout: 0.2) { false }
+                    hosting.layoutSubtreeIfNeeded()
+                    guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                        expect(false, "recovery screenshot bitmap unavailable"); continue
+                    }
+                    hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+                    let image = bitmap.representation(using: .png, properties: [:])
+                    try! image?.write(to: dir.appendingPathComponent("\(theme)-\(scenario)-\(name).png"))
+                    window.orderOut(nil)
+                }
+            }
+        }
+    }
+
+    // Capture the actual controller-driven warm/cold HUD labels without showing a window.
+    private static func renderWritingLoadShots(_ model: HUDModel, stage: String) {
+        guard let path = ProcessInfo.processInfo.environment["VELORA_RECOVERY_SNAPSHOTS"] else { return }
+        let app = NSApplication.shared
+        let appearance = app.appearance
+        defer { app.appearance = appearance }
+        for theme in ["light", "dark"] {
+            app.appearance = NSAppearance(named: theme == "light" ? .aqua : .darkAqua)
+            let size = HUDPanel.panelSize
+            let hosting = NSHostingView(rootView: ZStack {
+                theme == "light" ? Color(red: 0.95, green: 0.94, blue: 0.91)
+                    : Color(red: 0.10, green: 0.11, blue: 0.13)
+                HUDView(model: model)
+            }.environment(\.colorScheme, theme == "light" ? .light : .dark))
+            let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+                                  styleMask: [.borderless], backing: .buffered, defer: false)
+            window.appearance = app.appearance
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.contentView = hosting
+            hosting.frame = NSRect(origin: .zero, size: size)
+            _ = waitUntil(timeout: 0.1) { false }
+            hosting.layoutSubtreeIfNeeded()
+            guard let bitmap = hosting.bitmapImageRepForCachingDisplay(in: hosting.bounds) else {
+                expect(false, "writing HUD bitmap unavailable"); continue
+            }
+            hosting.cacheDisplay(in: hosting.bounds, to: bitmap)
+            let png = bitmap.representation(using: .png, properties: [:])
+            try! png?.write(to: URL(fileURLWithPath: path).appendingPathComponent("\(theme)-hud-\(stage).png"))
+            window.orderOut(nil)
+        }
+    }
+
     // MARK: - Onboarding setup gate
 
     private static func testOnboardingSetup() {
@@ -2416,12 +3132,12 @@ enum Selftest {
             isComplete: true,
             status: "Preparing the writing model…",
             fraction: nil)
-        expect(!staleDownload.canTryIt, "visible model work wins over a stale completion signal")
-        expect(staleDownload.primaryActionTitle == "Continue in the Background",
-               "visible setup work keeps the background-continuation action")
+        expect(staleDownload.canTryIt, "loaded speech permits dictation during writing work")
+        expect(staleDownload.primaryActionTitle == "Finish",
+               "writing work does not block the Finish action")
 
         let ready = OnboardingSetupState(isComplete: true, status: nil, fraction: nil)
-        expect(ready.canTryIt, "explicit setup completion unlocks onboarding try-it")
+        expect(ready.canTryIt, "adopted speech unlocks onboarding try-it")
         expect(ready.primaryActionTitle == "Finish",
                "ready onboarding retains the successful-dictation finish action")
 
@@ -13220,7 +13936,15 @@ enum Selftest {
                    && hud.model.transcribeProgress == "Transcribing…"
                    && HUDView.accessibilityStatus(for: hud.model) == "Transcribing",
                    "\(stage) leaves short dictation's pill and VoiceOver unchanged")
+            if stage == "cleanup_load" { renderWritingLoadShots(hud.model, stage: "warm-writing") }
         }
+        controller.handleEngineEvent(.finalizeProgress(
+            session: next, stage: "cleanup_load", completed: 0, total: 1,
+            stallAfterS: 205.25))
+        expect(waitUntil(timeout: 2) {
+            hud.model.showsMultiStepProgress && hud.model.transcribeProgress == "Loading writing model…"
+        }, "short dictation names a cold writing load after the delay")
+        renderWritingLoadShots(hud.model, stage: "cold-writing")
         let graceBeforeRetry = graceActions.count
         controller.handleEngineEvent(.finalizeProgress(
             session: next, stage: "stt_retry", completed: 1, total: 2,

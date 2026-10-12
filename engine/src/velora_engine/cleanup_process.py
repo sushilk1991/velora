@@ -19,6 +19,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from .cleanup import (
@@ -50,7 +51,9 @@ from .decisions import (
 # parent does not kill a worker at the exact instant it is reporting its own
 # bounded fallback (observed as a 23.001s notes timeout at a 20s + 3s wall).
 WORKER_RESPONSE_GRACE_S = 0.2
-LOAD_TIMEOUT_S = 20.0
+# Cold child imports, model loading and prompt warm-up share this IPC budget.
+# Allow progressing loads past 20 s, but still kill a worker stuck at 45 s.
+LOAD_TIMEOUT_S = 45.0
 
 log = logging.getLogger("velora.cleanup_process")
 
@@ -183,6 +186,7 @@ class CleanupProcess:
         self,
         model_id: str,
         *,
+        local_model_path: str | Path | None = None,
         worker_command: Sequence[str] | None = None,
         hard_timeout_grace_s: float = HARD_TIMEOUT_GRACE_S,
         queue_timeout_s: float = QUEUE_TIMEOUT_S,
@@ -190,6 +194,11 @@ class CleanupProcess:
         on_unhealthy: Callable[[], None] | None = None,
     ) -> None:
         self.model_id = model_id
+        # Pin the coordinator's source once; every respawn uses this directory
+        # while model_id remains the public identity and model-behavior key.
+        self._local_model_path = (
+            Path(local_model_path).absolute() if local_model_path is not None else None
+        )
         self.loaded = False
         # Compatibility with the server's legacy whole-engine recovery hook.
         # This proxy recovers its own killable child, so it never asks the
@@ -360,6 +369,11 @@ class CleanupProcess:
         child_fd = child_sock.fileno()
         command = list(self._worker_command or (sys.executable, "-m", WORKER_MODULE))
         command.extend(["--fd", str(child_fd), "--model", self.model_id])
+        # Source selection is child-lifetime state, not per-request IPC state:
+        # initial load -> recovery/hibernate respawn -> same offline source.
+        if self._local_model_path is not None:
+            command.extend(["--local-model-path", str(self._local_model_path)])
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
