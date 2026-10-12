@@ -287,15 +287,28 @@ def _json_valid(path: Path) -> bool:
     return _blob_valid(path) and isinstance(json.loads(path.read_text()), dict)
 
 
+def _infer_backend(config: dict) -> str:
+    if all(key in config for key in _WHISPER_DIMENSIONS):
+        return "whisper"
+    target = config.get("target", "")
+    if isinstance(target, str) and target.startswith("nemo.collections.asr.models."):
+        return "parakeet"
+    return "mlx-lm"
+
+
 def _legacy_valid(model_id: str, path: str) -> bool:
     """Backend-required artifact check for pre-manifest installed snapshots."""
     root = Path(path)
     info = lookup(model_id)
-    backend = info.backend if info else "mlx-lm"
+    backend = info.backend if info else None
     try:
         if not _json_valid(root / "config.json"):
             return False
         config = json.loads((root / "config.json").read_text())
+        # Registry selection remains authoritative. Custom snapshots identify
+        # their required speech format through config, not cleanup-model defaults.
+        if backend is None:
+            backend = _infer_backend(config)
         if backend == "whisper":
             if any(not isinstance(config.get(key), int) or config[key] <= 0 for key in _WHISPER_DIMENSIONS):
                 return False

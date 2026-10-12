@@ -291,6 +291,115 @@ def test_partial_not_completed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(download_worker, "_resolve_manifest", offline)
     events = []
-    with pytest.raises(ValueError):
+    with pytest.raises(ConnectionError) as failure:
         download_worker._run(spec.model, tmp_path, False, events.append)
+    assert _classify(failure.value)["retryable"] is True
     assert all(event.get("resume") != "completed_files" for event in events)
+
+
+@pytest.mark.parametrize("document", ["current", "manifest"])
+@pytest.mark.parametrize("restart", [False, True])
+def test_manifest_repair_scoped(tmp_path, monkeypatch, document, restart):
+    from velora_engine import models, download_worker
+
+    cache, spec, file = setup_file(tmp_path)
+    complete = cache._complete(spec, file)
+    complete.parent.mkdir(parents=True)
+    complete.write_bytes(_PAYLOAD)
+    part = cache._partial(spec, file)
+    part.parent.mkdir(parents=True)
+    part.write_bytes(_PAYLOAD[:3])
+    foreign = part.parent / "foreign.part"
+    foreign.write_bytes(b"keep")
+    path = cache._base / "current.json"
+    if document == "manifest":
+        path = cache._base / "manifests" / (spec.revision + ".json")
+    path.write_text("broken json")
+    monkeypatch.setattr(models, "_legacy_cached", lambda _: None)
+
+    def offline(*_):
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(download_worker, "_resolve_manifest", offline)
+    with pytest.raises(Exception) as failure:
+        download_worker._run(spec.model, tmp_path, restart, lambda _: None)
+    error = _classify(failure.value)
+    assert error["code"] == "manifest_invalid"
+    assert error["category"] == "verification"
+    assert "retry" in error["message"].lower()
+    assert complete.read_bytes() == _PAYLOAD
+    assert part.read_bytes() == _PAYLOAD[:3]
+    assert foreign.read_bytes() == b"keep"
+    quarantined = list((cache._base / "quarantine").glob("*.json"))
+    assert quarantined
+    assert any(path.read_text() == "broken json" for path in quarantined)
+    # A fresh worker/cache instance must retain the precise repair error offline.
+    with pytest.raises(Exception) as again:
+        download_worker._run(spec.model, tmp_path, restart, lambda _: None)
+    assert _classify(again.value)["code"] == "manifest_invalid"
+    assert len(list((cache._base / "quarantine").glob("*.json"))) == len(quarantined)
+    monkeypatch.setattr(download_worker, "_resolve_manifest", lambda *_: spec)
+    monkeypatch.setattr(download_worker, "_import_hub", lambda *_: None)
+    result, revision = download_worker._run(spec.model, tmp_path, restart, lambda _: None)
+    assert result == str(complete.parent) and revision == spec.revision
+    assert cache._manifest() == spec
+    assert not (cache._base / "repair.json").exists()
+    assert complete.read_bytes() == _PAYLOAD
+    assert foreign.read_bytes() == b"keep"
+    assert part.exists() is not restart
+
+
+def test_orphan_manifest_repair(tmp_path, monkeypatch):
+    from velora_engine import models, download_worker
+
+    cache, spec, file = setup_file(tmp_path)
+    complete = cache._complete(spec, file)
+    complete.parent.mkdir(parents=True)
+    complete.write_bytes(_PAYLOAD)
+    (cache._base / "current.json").unlink()
+    path = cache._base / "manifests" / (spec.revision + ".json")
+    path.write_text("broken json")
+    monkeypatch.setattr(models, "_legacy_cached", lambda _: None)
+    monkeypatch.setattr(download_worker, "_resolve_manifest", lambda *_: spec)
+    monkeypatch.setattr(download_worker, "_import_hub", lambda *_: None)
+    result, _ = download_worker._run(spec.model, tmp_path, False, lambda _: None)
+    assert result == str(complete.parent)
+    assert list((cache._base / "quarantine").glob("*.json"))
+    assert complete.read_bytes() == _PAYLOAD
+
+
+def test_owned_corrupt_offline(tmp_path, monkeypatch):
+    from velora_engine import models, download_worker
+
+    cache, spec, file = setup_file(tmp_path)
+    complete = cache._complete(spec, file)
+    complete.parent.mkdir(parents=True)
+    complete.write_bytes(b"corrupt!")
+    monkeypatch.setattr(models, "_legacy_cached", lambda _: None)
+
+    def offline(*_):
+        raise ConnectionError("offline")
+
+    monkeypatch.setattr(download_worker, "_resolve_manifest", offline)
+    with pytest.raises(ValueError) as failure:
+        download_worker._run(spec.model, tmp_path, False, lambda _: None)
+    error = _classify(failure.value)
+    assert error["code"] == "cache_integrity"
+    assert error["retryable"] is False
+
+
+def test_legacy_revision_nullable(tmp_path, monkeypatch):
+    from velora_engine import models, download_worker
+
+    legacy = tmp_path / "legacy"
+    legacy.mkdir()
+    (legacy / "weights.bin").write_bytes(b"abc")
+    monkeypatch.setattr(models, "_legacy_cached", lambda _: str(legacy))
+    events = []
+    result, revision = download_worker._run("custom/whisper-model", tmp_path / "owned", False, events.append)
+    assert result == str(legacy)
+    assert revision is None
+    progress = next(event for event in events if event["event"] == "progress")
+    assert progress["revision"] is None
+    assert progress["bytes_received"] == 3
+    assert progress["bytes_total"] is None

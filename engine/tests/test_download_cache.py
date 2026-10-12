@@ -123,3 +123,70 @@ def test_restart_keeps_unknowns(tmp_path):
     cache._restart()
     assert unknown.read_bytes() == b"not owned"
     assert not part.exists()
+
+
+def test_manifest_absent_invalid(tmp_path):
+    cache = _Cache(tmp_path, "example/model")
+    assert cache._manifest() is None
+    cache._base.mkdir(parents=True)
+    (cache._base / "current.json").write_text("broken json")
+    with pytest.raises(ValueError, match="manifest"):
+        cache._manifest()
+
+
+def test_corruption_vs_incomplete(tmp_path):
+    cache = _Cache(tmp_path, "example/model")
+    spec = manifest()
+    cache._save_manifest(spec)
+    assert not cache._has_corruption(spec)
+    part = cache._partial(spec, spec.files[0])
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"wei")
+    assert not cache._has_corruption(spec)
+    part.write_bytes(b"invalid")
+    assert cache._has_corruption(spec)
+    part.unlink()
+    complete = cache._complete(spec, spec.files[0])
+    complete.parent.mkdir(parents=True)
+    complete.write_bytes(b"invalid")
+    assert cache._has_corruption(spec)
+
+
+def test_quarantine_rejects_links(tmp_path):
+    from velora_engine.download_cache import _ManifestError
+
+    cache = _Cache(tmp_path / "cache", "example/model")
+    outside = tmp_path / "outside.json"
+    outside.write_text("untouched")
+    with cache._lock():
+        current = cache._base / "current.json"
+        current.symlink_to(outside)
+        with pytest.raises(ValueError, match="symlink"):
+            cache._quarantine(_ManifestError((current,)))
+    assert outside.read_text() == "untouched"
+    assert current.is_symlink()
+
+
+def test_quarantine_scope(tmp_path):
+    from velora_engine.download_cache import _ManifestError
+
+    cache = _Cache(tmp_path, "example/model")
+    with cache._lock():
+        foreign = cache._base / "foreign.json"
+        foreign.write_text("untouched")
+        with pytest.raises(ValueError, match="unowned"):
+            cache._quarantine(_ManifestError((foreign,)))
+    assert foreign.read_text() == "untouched"
+
+
+def test_valid_manifest_unchanged(tmp_path):
+    cache = _Cache(tmp_path, "example/model")
+    spec = manifest()
+    with cache._lock():
+        cache._save_manifest(spec)
+        path = cache._base / "manifests" / (spec.revision + ".json")
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="immutable"):
+            cache._save_manifest(manifest(b"different"))
+        assert path.read_bytes() == original
+        assert not (cache._base / "quarantine").exists()

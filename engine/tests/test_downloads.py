@@ -307,3 +307,118 @@ async def test_resume_survives_verify(monkeypatch, tmp_path, resume):
     await coordinator.ensure("example/model", "stt")
     assert coordinator.snapshot()["downloads"][0]["resume"] == resume
     await coordinator.close()
+
+
+@pytest.mark.parametrize("action", ["close", "fail"])
+async def test_stop_during_reap(monkeypatch, tmp_path, action):
+    import signal
+    from velora_engine.download_cache import _Cache
+
+    # Synchronize with the actual SIGTERM grace interval, not an estimated delay.
+    grace = asyncio.Event()
+    original_killpg = os.killpg
+
+    def capture_term(pid, sig):
+        original_killpg(pid, sig)
+        if sig == signal.SIGTERM:
+            grace.set()
+
+    monkeypatch.setattr(os, "killpg", capture_term)
+    monkeypatch.setattr(downloads, "_BYTE_STALL_S", .05)
+    monkeypatch.setattr(downloads, "_REAP_S", .15)
+    monkeypatch.setattr(downloads, "_BACKOFF_S", ())
+    code = f'''import signal,time,json
+from pathlib import Path
+from velora_engine.download_cache import _Cache
+signal.signal(signal.SIGTERM,signal.SIG_IGN)
+with _Cache(Path({str(tmp_path)!r}),"example/model")._lock():
+ print(json.dumps({{"event":"progress","state":"downloading","bytes_received":0,"bytes_total":9,"revision":None,"resume":"none"}}),flush=True)
+ time.sleep(60)
+'''
+    set_worker(monkeypatch, code)
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    pending = asyncio.create_task(coordinator.ensure("example/model", "stt"))
+    await asyncio.wait_for(grace.wait(), 5)
+    entry = coordinator._entries[("example/model", "stt")]
+    process = entry.process
+    try:
+        if action == "close":
+            await coordinator.close()
+        else:
+            await coordinator.mark_failed("example/model", "stt", entry.item["attempt"], {
+                "category": "loading", "code": "load_failed", "message": "Load failed.", "retryable": False})
+        await asyncio.gather(pending, return_exceptions=True)
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+        assert entry.process is None
+        with _Cache(tmp_path, "example/model")._lock():
+            pass
+    finally:
+        # The expected red run must not leave its proven orphan behind.
+        if process.returncode is None:
+            process.kill()
+        await process.wait()
+        await coordinator.close()
+
+
+async def test_partial_offline_budget(monkeypatch, tmp_path):
+    import hashlib
+    from velora_engine.download_cache import _Cache, _File, _Manifest
+
+    cache = _Cache(tmp_path, "example/model")
+    file = _File("weights.bin", 9, hashlib.sha256(b"abcdefghi").hexdigest(), "sha256")
+    spec = _Manifest("example/model", "a" * 40, (file,))
+    with cache._lock():
+        cache._save_manifest(spec)
+        partial = cache._partial(spec, file)
+        partial.parent.mkdir(parents=True)
+        partial.write_bytes(b"abc")
+        cache._save_identity(spec, file, "stable")
+    counter = tmp_path / "counter"
+    code = f'''import json
+from pathlib import Path
+from velora_engine import models,download_worker
+Path({str(counter)!r}).open("a").write("x")
+models._legacy_cached=lambda _: None
+def offline(*_):
+ raise ConnectionError("offline")
+download_worker._resolve_manifest=offline
+try:
+ download_worker._run("example/model",Path({str(tmp_path)!r}),False,lambda event: print(json.dumps(event),flush=True))
+except Exception as error:
+ print(json.dumps({{"event":"error","error":download_worker._classify(error)}}),flush=True)
+'''
+    set_worker(monkeypatch, code)
+    monkeypatch.setattr(downloads, "_BACKOFF_S", (.01, .01, .01))
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    try:
+        with pytest.raises(DownloadError) as failure:
+            await coordinator.ensure(spec.model, "stt")
+        assert failure.value.error["category"] == "network"
+        assert failure.value.error["retryable"] is True
+        assert counter.read_text() == "xxxx"
+        assert coordinator.snapshot()["downloads"][0]["retry_index"] == 3
+        assert partial.read_bytes() == b"abc"
+    finally:
+        await coordinator.close()
+
+
+async def test_snapshot_schema_exact(monkeypatch, tmp_path):
+    set_worker(monkeypatch, success_code())
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    await coordinator.ensure("example/model", "stt")
+    snapshot = coordinator.snapshot()
+    assert set(snapshot) == {"schema", "engine_id", "sequence", "snapshot", "downloads"}
+    assert snapshot["schema"] == 1 and snapshot["snapshot"] is True
+    assert isinstance(snapshot["sequence"], int)
+    item = snapshot["downloads"][0]
+    assert set(item) == {
+        "model", "kind", "revision", "attempt", "state", "bytes_received", "bytes_total",
+        "retry_index", "retry_at", "error", "resume", "retry_allowed", "restart_allowed", "active_model"}
+    assert item["state"] == "verifying"
+    assert item["active_model"] is None
+    assert item["retry_at"] is None and item["error"] is None
+    assert item["bytes_received"] == item["bytes_total"] == 9
+    item["state"] = "ready"
+    assert coordinator.snapshot()["downloads"][0]["state"] == "verifying"
+    await coordinator.close()

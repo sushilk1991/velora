@@ -49,6 +49,7 @@ class _Entry:
     item: dict
     task: asyncio.Task | None = None
     process: asyncio.subprocess.Process | None = None
+    reaping: asyncio.Task | None = None
     result: DownloadResult | None = None
     error: DownloadError | None = None
 
@@ -180,26 +181,47 @@ class DownloadCoordinator:
                 entry.item["model"], str(self._root), "restart" if restart else "keep"]
 
     async def _reap(self, entry):
-        process = entry.process
-        if process is None:
-            return
-        # A process group is owned by this worker. SIGKILL is followed by wait,
-        # including SIGTERM-ignoring fixtures; cancellation never claims thread death.
+        # Timeout cleanup and explicit stops join the same shielded task:
+        # timeout --+--> TERM -> grace -> KILL -> wait -> release handle
+        # close ----+    caller cancellation never cancels this cleanup
+        if entry.reaping is None:
+            if entry.process is None:
+                return
+            entry.reaping = asyncio.create_task(self._finish_reap(entry, entry.process))
+        reaping = entry.reaping
+        cancelled = False
         try:
-            if process.returncode is None:
+            while True:
                 try:
-                    os.killpg(process.pid, signal.SIGTERM)
+                    await asyncio.shield(reaping)
+                    break
+                except asyncio.CancelledError:
+                    if reaping.cancelled():
+                        raise
+                    cancelled = True
+        finally:
+            if reaping.done() and entry.reaping is reaping:
+                entry.reaping = None
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _finish_reap(self, entry, process):
+        # Retain ownership until wait proves exit, including SIGTERM-ignoring
+        # children. A failed cleanup retains the handle for a later stop request.
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                await asyncio.wait_for(process.wait(), _REAP_S)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                try:
-                    await asyncio.wait_for(process.wait(), _REAP_S)
-                except asyncio.TimeoutError:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-            await process.wait()
-        finally:
+        await process.wait()
+        if entry.process is process:
             entry.process = None
 
     async def _stop_entry(self, entry):

@@ -11,7 +11,7 @@ import urllib.request
 from pathlib import Path
 from http import HTTPStatus
 
-from .download_cache import _Cache, _File, _Manifest, _file_valid
+from .download_cache import _Cache, _File, _Manifest, _ManifestError, _REVISION_RE, _file_valid
 
 _METADATA_S = 60
 _READ_S = 60
@@ -40,6 +40,8 @@ def _classify(error: Exception) -> dict:
         category, code, message, retryable = "cache", "download_locked", "Another process owns this model download. Retry after it exits.", False
     elif isinstance(error, OSError) and error.errno in _DISK_ERRNOS:
         category, code, message, retryable = "disk", "disk_error", "Cannot write model files. Check free space and cache permissions.", False
+    elif isinstance(error, _ManifestError):
+        category, code, message, retryable = "verification", "manifest_invalid", "Download metadata is damaged. Reconnect and retry to rebuild it; model files are preserved.", False
     elif isinstance(error, ValueError):
         category, code, message, retryable = "verification", "cache_integrity", "Model files are missing or corrupt. Reconnect and retry to repair.", False
     return {"category": category, "code": code, "message": message, "retryable": retryable}
@@ -237,9 +239,14 @@ def _run(model: str, root: Path, restart: bool, emit):
         return str(local.resolve()), None
     cache = _Cache(root, model)
     with cache._lock():
-        if restart:
+        manifest_error = None
+        try:
+            saved = cache._manifest()
+        except _ManifestError as error:
+            manifest_error, saved = error, None
+            cache._quarantine(error)
+        if restart and saved is not None:
             cache._restart()
-        saved = cache._manifest()
         if saved:
             _progress(cache, saved, emit, state="verifying")
             cached = cache._cached()
@@ -249,27 +256,40 @@ def _run(model: str, root: Path, restart: bool, emit):
         # Existing installed models remain offline-usable after backend-required
         # artifact checks. Their legacy check is not whole-repository verification.
         emit({"event": "phase", "state": "verifying"})
-        damaged = saved is not None
+        damaged = cache._has_corruption(saved) if saved is not None else False
         try:
             legacy = _legacy_cached(model)
         except ValueError:
             damaged, legacy = True, None
         if legacy:
             path = Path(legacy)
-            revision = _SINGLE_FILE_REVISIONS.get(model, path.name)
+            # Only a known immutable commit is a revision. Legacy/custom cache
+            # adapters with another directory name must publish null, not that name.
+            revision = _SINGLE_FILE_REVISIONS.get(model)
+            if revision is None and _REVISION_RE.fullmatch(path.name):
+                revision = path.name
             emit({"event": "progress", "state": "verifying", "revision": revision,
                   "bytes_received": _local_bytes(path), "bytes_total": None, "resume": "completed_files"})
             return legacy, revision
         emit({"event": "phase", "state": "metadata"})
         try:
-            spec = _resolve_manifest(model, saved.revision if saved else None)
+            revision = saved.revision if saved else None
+            if manifest_error is not None:
+                revision = manifest_error.revision
+            spec = _resolve_manifest(model, revision)
         except Exception as error:
             # Corrupt installed artifacts plus unavailable metadata must not appear
             # as a usable offline model or an unexplained connection failure.
-            if damaged and _classify(error)["category"] == "network":
-                raise ValueError("cached model integrity failed; reconnect to repair") from None
+            if _classify(error)["category"] == "network":
+                if manifest_error is not None:
+                    raise manifest_error from None
+                if damaged:
+                    raise ValueError("cached model integrity failed; reconnect to repair") from None
             raise
         cache._save_manifest(spec)
+        if restart and saved is None:
+            # Rebuilt metadata establishes the only names safe for partial removal.
+            cache._restart()
         _progress(cache, spec, emit, state="verifying")
         _import_hub(cache, spec, emit)
         for file in spec.files:

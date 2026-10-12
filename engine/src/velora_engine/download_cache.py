@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
@@ -27,6 +28,13 @@ class _Manifest:
     model: str
     revision: str
     files: tuple[_File, ...]
+
+
+class _ManifestError(ValueError):
+    def __init__(self, paths: tuple[Path, ...], revision: str | None = None):
+        super().__init__("owned manifest invalid; reconnect and retry to rebuild metadata")
+        self.paths = paths
+        self.revision = revision
 
 
 def _cache_root() -> Path:
@@ -123,28 +131,94 @@ class _Cache:
         value = asdict(spec)
         # Round trip normalizes the tuple before comparing immutable identities.
         value = json.loads(json.dumps(value))
-        if path.exists() and json.loads(path.read_text()) != value:
-            raise ValueError("immutable manifest changed")
+        if path.exists():
+            try:
+                existing = self._read_manifest(path, spec.revision)
+            except _ManifestError as error:
+                # A malformed orphan at this exact resolved revision is repairable;
+                # a valid immutable document with different identity is not.
+                self._quarantine(error)
+                existing = None
+            if existing is not None and existing != spec:
+                raise ValueError("immutable manifest changed")
         if not path.exists():
             self._atomic_json(path, value)
         self._atomic_json(self._base / "current.json", {"revision": spec.revision})
+        self._guard(self._base / "repair.json").unlink(missing_ok=True)
 
-    def _manifest(self) -> _Manifest | None:
+    def _read_manifest(self, path: Path, revision: str) -> _Manifest:
+        self._guard(path)
         try:
-            current = self._guard(self._base / "current.json")
-            revision = json.loads(current.read_text())["revision"]
-            if not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision):
-                return None
-            path = self._guard(self._base / "manifests" / (revision + ".json"))
             value = json.loads(path.read_text())
             spec = _Manifest(value["model"], value["revision"], tuple(
                 _File(**item) for item in value["files"]))
             _check_manifest(spec)
             if spec.model != self._model or spec.revision != revision:
-                return None
+                raise ValueError("manifest identity mismatch")
             return spec
-        except (OSError, ValueError, KeyError, TypeError):
-            return None
+        except (ValueError, KeyError, TypeError, AttributeError):
+            raise _ManifestError((path,), revision) from None
+
+    def _manifest(self) -> _Manifest | None:
+        current = self._guard(self._base / "current.json")
+        if not current.exists():
+            repair = self._guard(self._base / "repair.json")
+            if not repair.exists():
+                return None
+            # Persist the repair reason across worker/engine restarts. Missing
+            # normal state is not corruption; quarantined state still needs repair.
+            try:
+                revision = json.loads(repair.read_text())["revision"]
+                if revision is not None and not _REVISION_RE.fullmatch(revision):
+                    revision = None
+            except (ValueError, KeyError, TypeError):
+                revision = None
+            raise _ManifestError((), revision)
+        try:
+            revision = json.loads(current.read_text())["revision"]
+            if not isinstance(revision, str) or not _REVISION_RE.fullmatch(revision):
+                raise ValueError("invalid current revision")
+        except (ValueError, KeyError, TypeError):
+            raise _ManifestError((current,)) from None
+        path = self._guard(self._base / "manifests" / (revision + ".json"))
+        try:
+            return self._read_manifest(path, revision)
+        except FileNotFoundError:
+            raise _ManifestError((current,), revision) from None
+        except _ManifestError as error:
+            raise _ManifestError((*error.paths, current), revision) from None
+
+    def _quarantine(self, error: _ManifestError) -> None:
+        # Caller holds the process lock. Preserve invalid named metadata documents,
+        # never model bytes or unknown files; a repair marker survives interruption.
+        self._atomic_json(self._base / "repair.json", {"revision": error.revision})
+        destination = self._guard(self._base / "quarantine")
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in error.paths:
+            allowed = path == self._base / "current.json"
+            manifest_name = re.fullmatch(r"[0-9a-f]{40}\.json", path.name)
+            if not allowed and not (path.parent == self._base / "manifests" and manifest_name):
+                raise ValueError("refusing to quarantine unowned metadata")
+            self._guard(path)
+            if not path.exists():
+                continue
+            target = self._guard(destination / (uuid.uuid4().hex + ".json"))
+            path.replace(target)
+
+    def _has_corruption(self, spec: _Manifest) -> bool:
+        # Missing files/short partials are ordinary interruption. Only invalid
+        # completed files or invalid fully received/oversized partials prove damage.
+        for file in spec.files:
+            complete = self._complete(spec, file)
+            if complete.exists() and not _file_valid(complete, file):
+                return True
+            partial = self._partial(spec, file)
+            if not partial.exists():
+                continue
+            size = partial.stat().st_size
+            if size > file.size or (size == file.size and not _file_valid(partial, file)):
+                return True
+        return False
 
     def _complete(self, spec: _Manifest, file: _File) -> Path:
         _check_manifest(spec)

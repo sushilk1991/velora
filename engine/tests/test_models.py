@@ -284,7 +284,8 @@ def _legacy_weights(path, payload=b"x"):
     path.write_bytes(struct.pack("<Q", len(header)) + header + payload)
 
 
-def test_legacy_whisper_offline(tmp_path, monkeypatch):
+@pytest.mark.parametrize("model_id", ["mlx-community/whisper-large-v3-turbo", "custom/whisper-tiny"])
+def test_legacy_whisper_offline(tmp_path, monkeypatch, model_id):
     import mlx.core as mx
     from mlx.utils import tree_flatten
     from mlx_whisper.whisper import Whisper, ModelDimensions
@@ -303,8 +304,8 @@ def test_legacy_whisper_offline(tmp_path, monkeypatch):
         return str(tmp_path)
 
     monkeypatch.setattr(huggingface_hub, "snapshot_download", offline)
-    assert models.is_cached("mlx-community/whisper-large-v3-turbo")
-    assert models.ensure_downloaded("mlx-community/whisper-large-v3-turbo") == str(tmp_path)
+    assert models.is_cached(model_id)
+    assert models.ensure_downloaded(model_id) == str(tmp_path)
     assert len(calls) == 2
     # A real backend load proves this legacy fixture is usable, not just nonempty.
     assert load_model(str(tmp_path)).dims == dimensions
@@ -353,3 +354,50 @@ def _legacy_config(path):
               "n_audio_head": 2, "n_audio_layer": 1, "n_vocab": 10,
               "n_text_ctx": 2, "n_text_state": 4, "n_text_head": 2, "n_text_layer": 1}
     (path / "config.json").write_text(json.dumps(values))
+
+
+@pytest.mark.parametrize("backend", ["whisper", "parakeet"])
+def test_custom_speech_offline(tmp_path, monkeypatch, backend):
+    import json
+
+    model_id = "custom/whisper-model" if backend == "whisper" else "custom/speech-model"
+    if backend == "whisper":
+        _legacy_config(tmp_path)
+        _legacy_weights(tmp_path / "weights.safetensors")
+    else:
+        (tmp_path / "config.json").write_text(json.dumps({
+            "target": "nemo.collections.asr.models.rnnt_bpe_models.EncDecRNNTBPEModel",
+            "encoder": {"feat_in": 2}, "preprocessor": {"features": 2}}))
+        _legacy_weights(tmp_path / "model.safetensors")
+
+    def offline(**kwargs):
+        assert kwargs.get("local_files_only"), "custom installed model went online"
+        return str(tmp_path)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", offline)
+    assert models.is_cached(model_id)
+    assert models.ensure_downloaded(model_id) == str(tmp_path)
+    assert models._legacy_cached(model_id) == str(tmp_path)
+
+
+@pytest.mark.parametrize("backend", ["whisper", "parakeet"])
+def test_custom_speech_corrupt(tmp_path, monkeypatch, backend):
+    import json
+
+    model_id = "custom/whisper-model" if backend == "whisper" else "custom/speech-model"
+    if backend == "whisper":
+        _legacy_config(tmp_path)
+        (tmp_path / "weights.safetensors").write_bytes(b"invalid")
+    else:
+        (tmp_path / "config.json").write_text(json.dumps({
+            "target": "nemo.collections.asr.models.rnnt_bpe_models.EncDecRNNTBPEModel",
+            "encoder": {"feat_in": 2}, "preprocessor": {"features": 2}}))
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **_: str(tmp_path))
+    assert not models.is_cached(model_id)
+
+
+def test_registered_kind_retained(tmp_path, monkeypatch):
+    _legacy_config(tmp_path)
+    _legacy_weights(tmp_path / "weights.safetensors")
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda **_: str(tmp_path))
+    assert not models.is_cached("mlx-community/Qwen3.5-2B-MLX-4bit")
