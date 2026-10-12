@@ -1763,7 +1763,9 @@ async def test_set_model_load_shutdown(home, monkeypatch):
         setting.result()
         eng.writer.close()
         assert await events_until_eof(client) == [
-            {"event": "error", "message": server_mod.SET_MODEL_SHUTTING_DOWN}]
+            {"event": "error", "message": server_mod.SET_MODEL_SHUTTING_DOWN,
+             "command": "set_model", "model": "fake-new", "kind": "cleanup",
+             "request_id": None}]
         assert eng.config.cleanup_model != "fake-new"
         assert Config().cleanup_model != "fake-new"  # as saved
         assert eng.cleanup is None

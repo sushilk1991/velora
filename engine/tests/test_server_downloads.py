@@ -1001,3 +1001,346 @@ async def test_cleanup_source_removed(
         client.writer.close()
         for worker in workers:
             await worker.aclose()
+
+
+@pytest.mark.parametrize("outcome", ["ready", "failed", "cancelled", "timeout"])
+async def test_notes_before_verified_proxy(
+    recovery, cleanup_sources, socket_engine, monkeypatch, outcome,
+):
+    # Submit after speech-ready, while verification has not produced a proxy.
+    entered, release = asyncio.Event(), asyncio.Event()
+    once = recovery.coordinator._once
+
+    async def verifying(entry, restart):
+        if entry.item["kind"] == "cleanup":
+            recovery.coordinator._update(entry, state="verifying")
+            entered.set()
+            await release.wait()
+        return await once(entry, restart)
+
+    monkeypatch.setattr(recovery.coordinator, "_once", verifying)
+    if outcome == "timeout":
+        monkeypatch.setattr(server, "MEETING_NOTES_MODEL_READY_WAIT_S", .15)
+    if outcome == "failed":
+        recovery.failures.add("example/cleanup-a")
+    original = server.CleanupProcess
+
+    def notes_model(model, **kwargs):
+        proxy = original(model, **kwargs)
+        proxy.cleanup = AsyncMock(return_value=SimpleNamespace(
+            applied=True, text=json.dumps({"summary": "Recovered notes.",
+                                           "decisions": [], "action_items": []})))
+        return proxy
+
+    monkeypatch.setattr(server, "CleanupProcess", notes_model)
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    try:
+        await client.event("ready")
+        await asyncio.wait_for(entered.wait(), 1)
+        assert cleanup_sources == []
+        await client.send(cmd="meeting_notes", id="pending-notes", meeting_id="m-pending",
+                          transcript="[00:00] Me: Resume these saved notes.")
+        await client.event("meeting_notes_accepted")
+        # A ping fences the reader; a short bounded absence check lets the notes
+        # task run and catches the original premature generation_failed event.
+        await client.send(cmd="ping")
+        await client.event("pong")
+        with pytest.raises(TimeoutError):
+            await client.event("meeting_notes_failed", timeout=.04)
+        assert recovery.engine._meeting_notes_running
+        if outcome in ("ready", "failed"):
+            release.set()
+        elif outcome == "cancelled":
+            await client.send(cmd="meeting_notes_cancel", id="pending-notes")
+        terminal = await client.event("meeting_notes_ready" if outcome == "ready"
+                                      else "meeting_notes_failed")
+        assert terminal["id"] == "pending-notes"
+        assert terminal["meeting_id"] == "m-pending"
+        if outcome == "ready":
+            assert terminal["summary"] == "Recovered notes."
+            cleanup_sources[0].cleanup.assert_awaited_once()
+        else:
+            assert terminal["code"] == ("cancelled" if outcome == "cancelled"
+                                        else "generation_failed")
+            assert cleanup_sources == []
+        assert not recovery.engine._meeting_notes_running
+        assert recovery.engine._meeting_notes_job_id is None
+        await client.send(cmd="ping")
+        await client.event("pong")
+    finally:
+        release.set()
+        client.writer.close()
+
+
+async def test_identified_busy_selection(recovery, socket_engine):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    recovery.engine._editing = True
+    try:
+        await client.send(cmd="set_model", model="example/selected", kind="cleanup",
+                          request_id="busy-selection")
+        error = await client.event("error")
+        assert {key: error[key] for key in ("command", "model", "kind", "request_id")} == {
+            "command": "set_model", "model": "example/selected", "kind": "cleanup",
+            "request_id": "busy-selection"}
+        await client.send(cmd="ping")
+        await client.event("pong")
+    finally:
+        recovery.engine._editing = False
+        client.writer.close()
+
+
+@pytest.mark.parametrize("phase", ["transfer", "loading"])
+async def test_identified_latest_selection(recovery, socket_engine, monkeypatch, phase):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    recovery.transfer.clear()
+    entered, settle = threading.Event(), threading.Event()
+    factory = server.create_backend
+
+    def slow(model, language):
+        backend = factory(model, language)
+        if model == "example/a":
+            backend.load.side_effect = lambda: (entered.set(), settle.wait(2))
+        return backend
+
+    if phase == "loading":
+        monkeypatch.setattr(server, "create_backend", slow)
+        recovery.transfer.set()
+    try:
+        for model, request in (("example/a", "old-a"), ("example/b", "old-b"),
+                               ("example/a", "latest-a")):
+            await client.send(cmd="set_model", model=model, kind="stt", request_id=request)
+            await client.send(cmd="ping")
+            await client.event("pong")
+            if phase == "loading" and request == "old-a":
+                async with asyncio.timeout(1):
+                    while not entered.is_set():
+                        await asyncio.sleep(.001)
+        settle.set()
+        recovery.transfer.set()
+        replies = []
+        while len(replies) < 3:
+            event = await client.recv()
+            if event["event"] in ("error", "model_set"):
+                replies.append(event)
+        assert [event["request_id"] for event in replies if event["event"] == "model_set"] == ["latest-a"]
+        errors = {event["request_id"]: event for event in replies if event["event"] == "error"}
+        assert set(errors) == {"old-a", "old-b"}
+        assert all(event["error"]["code"] == "model_selection_superseded" for event in errors.values())
+        assert errors["old-a"]["model"] == "example/a"
+        assert errors["old-b"]["model"] == "example/b"
+        assert recovery.calls.count(("example/a", False)) == 1
+        assert recovery.engine.stt.model_id == "example/a"
+    finally:
+        settle.set()
+        recovery.transfer.set()
+        client.writer.close()
+
+
+@pytest.mark.parametrize("kind", ["stt", "cleanup"])
+@pytest.mark.parametrize("failure", ["transfer", "construct", "load", "config", "cache"])
+async def test_identified_selection_failure(
+    recovery, socket_engine, monkeypatch, kind, failure,
+):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    engine = recovery.engine
+    primary = engine.stt if kind == "stt" else engine.cleanup
+    target = "example/rejected"
+    if failure == "transfer":
+        recovery.failures.add(target)
+    elif failure == "config":
+        monkeypatch.setattr(engine.config, "save", Mock(side_effect=OSError("disk full")))
+    elif failure == "cache":
+        monkeypatch.setattr(server.models, "is_cached", lambda model: False)
+    if kind == "cleanup":
+        def cleanup(model, **kwargs):
+            if failure == "construct":
+                raise RuntimeError("private constructor failure")
+            load = AsyncMock(side_effect=RuntimeError("private load failure")
+                             if failure == "load" else None)
+            return SimpleNamespace(model_id=model, loaded=True, load_async=load,
+                                   aclose=AsyncMock())
+        monkeypatch.setattr(server, "CleanupProcess", cleanup)
+    else:
+        factory = server.create_backend
+
+        def speech(model, language):
+            if failure == "construct":
+                raise RuntimeError("private constructor failure")
+            backend = factory(model, language)
+            if failure == "load":
+                backend.load.side_effect = RuntimeError("private load failure")
+            return backend
+        monkeypatch.setattr(server, "create_backend", speech)
+    try:
+        await client.send(cmd="set_model", model=target, kind=kind, request_id="failed-selection")
+        error = await client.event("error")
+        assert {key: error[key] for key in ("command", "model", "kind", "request_id")} == {
+            "command": "set_model", "model": target, "kind": kind,
+            "request_id": "failed-selection"}
+        assert "private" not in json.dumps(error)
+        assert (engine.stt if kind == "stt" else engine.cleanup) is primary
+        assert engine._model_notifications == {}
+        await client.send(cmd="ping")
+        await client.event("pong")
+    finally:
+        client.writer.close()
+
+
+async def test_identified_duplicate_ids(recovery, socket_engine, monkeypatch):
+    # Distinct IDs coalesce, identical IDs reply once, and retention is bounded.
+    monkeypatch.setattr(server, "_MODEL_REQUESTS_MAX", 3)
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    recovery.transfer.clear()
+    target = "example/coalesced"
+    try:
+        for request in ("first", "first", "second", None, "excess"):
+            await client.send(cmd="set_model", model=target, kind="stt", request_id=request)
+        error = await client.event("error")
+        assert error["request_id"] == "excess"
+        assert error["model"] == target and error["command"] == "set_model"
+        assert "too many" in error["message"]
+        recovery.transfer.set()
+        replies = [await client.event("model_set") for _ in range(3)]
+        assert {event.get("request_id") for event in replies} == {"first", "second", None}
+        assert next(event for event in replies if "request_id" not in event) == {
+            "event": "model_set", "model": target, "kind": "stt"}
+        await client.send(cmd="ping")
+        event = await client.recv()
+        while event["event"] == "download_status":
+            event = await client.recv()
+        assert event["event"] == "pong"  # No extra duplicate acknowledgment queued.
+        assert recovery.calls.count((target, False)) == 1
+        assert recovery.engine._model_notifications == {}
+    finally:
+        recovery.transfer.set()
+        client.writer.close()
+
+
+@pytest.mark.parametrize("invalid", ["", 1, [], {"secret": "object"}, "x" * 129])
+async def test_selection_invalid_id(recovery, socket_engine, invalid):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    try:
+        await client.send(cmd="set_model", model="example/rejected", kind="stt", request_id=invalid)
+        error = await client.event("error")
+        assert error["command"] == "set_model" and error["request_id"] is None
+        assert "invalid 'request_id'" in error["message"]
+        assert "secret" not in json.dumps(error)
+        assert ("example/rejected", "stt") not in recovery.engine._model_jobs
+    finally:
+        client.writer.close()
+
+
+async def test_selection_disconnect_ids(recovery, socket_engine):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    recovery.transfer.clear()
+    try:
+        await client.send(cmd="set_model", model="example/pending", kind="stt", request_id="old-client")
+        await client.send(cmd="ping")
+        await client.event("pong")
+        assert recovery.engine._model_notifications
+        client.writer.close()
+        await client.writer.wait_closed()
+        while recovery.engine.writer is not None:
+            await asyncio.sleep(.001)
+        assert recovery.engine._model_notifications == {}
+        client = await _connect(socket_engine)
+        await client.event("ready")
+        recovery.transfer.set()
+        await recovery.engine._model_jobs[("example/pending", "stt")]
+        await client.send(cmd="ping")
+        event = await client.recv()
+        while event["event"] == "download_status":
+            event = await client.recv()
+        assert event["event"] == "pong"  # Reconnect cannot inherit an old request ID.
+    finally:
+        recovery.transfer.set()
+        client.writer.close()
+
+
+async def test_selection_ids_during_reply(recovery, socket_engine, monkeypatch):
+    # Admission during a reply drain must neither lose new IDs nor re-reply old IDs.
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    send = recovery.engine._send
+    replying, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed(event):
+        await send(event)
+        if event["event"] == "model_set" and event.get("request_id") == "first":
+            replying.set()
+            await release.wait()
+
+    monkeypatch.setattr(recovery.engine, "_send", delayed)
+    try:
+        await client.send(cmd="set_model", model="example/coalesced", kind="stt", request_id="first")
+        assert (await client.event("model_set"))["request_id"] == "first"
+        await asyncio.wait_for(replying.wait(), 1)
+        for request in ("first", "second"):
+            await client.send(cmd="set_model", model="example/coalesced", kind="stt", request_id=request)
+        await client.send(cmd="ping")
+        await client.event("pong")
+        release.set()
+        assert (await client.event("model_set"))["request_id"] == "second"
+        await client.send(cmd="ping")
+        assert (await client.recv())["event"] == "pong"
+        assert recovery.calls.count(("example/coalesced", False)) == 1
+        assert recovery.engine._model_notifications == {}
+    finally:
+        release.set()
+        client.writer.close()
+
+
+@pytest.mark.parametrize("arguments", [{"model": []}, {"model": "example/a", "kind": ["invalid"]}])
+async def test_selection_invalid_arguments(recovery, socket_engine, arguments):
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    try:
+        await client.send(cmd="set_model", request_id="invalid-arguments", **arguments)
+        error = await client.event("error")
+        assert error["command"] == "set_model"
+        assert error["request_id"] == "invalid-arguments"
+        assert not recovery.engine._model_notifications
+    finally:
+        client.writer.close()
+
+
+async def test_selection_cancel_before_acquire(recovery, socket_engine):
+    # A replacement A waits on its first job; cancellation must settle its IDs
+    # without cancelling the shared predecessor's acquisition.
+    recovery.transfer.set()
+    client = await _connect(socket_engine)
+    await client.event("ready")
+    recovery.transfer.clear()
+    try:
+        for model, request in (("example/a", "old-a"), ("example/b", "old-b"),
+                               ("example/a", "cancelled-a")):
+            await client.send(cmd="set_model", model=model, kind="stt", request_id=request)
+            await client.send(cmd="ping")
+            await client.event("pong")
+        task = recovery.engine._model_jobs[("example/a", "stt")]
+        task.cancel()
+        error = await client.event("error")
+        assert error["request_id"] == "cancelled-a"
+        assert error["error"]["code"] == "model_selection_cancelled"
+        assert ("stt", recovery.engine._model_generation["stt"]) not in recovery.engine._model_notifications
+        recovery.transfer.set()
+        await asyncio.gather(*recovery.engine._adoption_jobs, return_exceptions=True)
+        assert recovery.calls.count(("example/a", False)) == 1
+    finally:
+        recovery.transfer.set()
+        client.writer.close()

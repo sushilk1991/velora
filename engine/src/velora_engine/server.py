@@ -331,6 +331,10 @@ MEETING_NOTES_SECTION_RETRY_REASONS = MEETING_NOTES_SECTION_TIMEOUT_REASONS | {"
 # an absent or unhealthy model still fails honestly instead of hanging.
 MEETING_NOTES_MODEL_READY_WAIT_S = 15.0
 
+# Bound request metadata while duplicate selections share one adoption job.
+_MODEL_REQUESTS_MAX = 64
+_MODEL_REQUEST_ID_MAX = 128
+
 # CleanupProcess replaces a wedged model child asynchronously. Action Mode is
 # already inside a 150-second app-side turn backstop, so wait for that bounded
 # replacement once instead of burning repair/rejection budgets against the
@@ -777,7 +781,7 @@ class Engine:
         self._model_generation: dict[str, int] = {}
         self._model_targets: dict[str, str] = {}
         self._model_origins: dict[str, _ModelJobOrigin] = {}
-        self._model_notifications: set[tuple[str, int]] = set()
+        self._model_notifications: dict[tuple[str, int], list[str | None]] = {}
         self._adoption_lock = asyncio.Lock()
         self._adopting = False
         self._stt_pending: set[asyncio.Future] = set()
@@ -1109,6 +1113,46 @@ class Engine:
         task.add_done_callback(self._model_job_done)
         return task
 
+    async def _set_model_error(self, model: str | None, kind: str | None,
+                               request_id: str | None, message: str,
+                               error: dict | None = None) -> None:
+        # Attribute only validated selection metadata, never arbitrary JSON IDs.
+        event = {"event": "error", "message": message, "command": "set_model",
+                 "model": model, "kind": kind, "request_id": request_id}
+        if error is not None:
+            event["error"] = error
+        await self._send(event)
+
+    async def _reply_model_selection(self, model: str, kind: str, generation: int,
+                                     message: str | None = None,
+                                     error: dict | None = None) -> None:
+        # One terminal reply per distinct ID in this generation. An old
+        # generation can reject its own IDs, but never accept a newer request.
+        key = (kind, generation)
+        while True:
+            requests = self._model_notifications.get(key)
+            if requests is None:
+                return
+            client_generation = self._client_gen
+            for request_id in requests:
+                if self._client_gen != client_generation:
+                    break
+                if error is not None and error["category"] == "cancelled" and request_id is None:
+                    continue
+                if message is not None:
+                    await self._set_model_error(model, kind, request_id, message, error)
+                    continue
+                event = {"event": "model_set", "model": model, "kind": kind}
+                if request_id is not None:
+                    event["request_id"] = request_id
+                await self._send(event)
+            # Keep the live list through sends: duplicates admitted during a
+            # drain append distinct IDs, but cannot re-add an already replied ID.
+            # Reconnect replaces the list; never discard that client's requests.
+            if self._model_notifications.get(key) is requests:
+                self._model_notifications.pop(key, None)
+                return
+
     def _model_job_done(self, task: asyncio.Task) -> None:
         self._adoption_jobs.discard(task)
         if not task.cancelled():
@@ -1116,9 +1160,18 @@ class Engine:
 
     async def _follow_model(self, previous: asyncio.Task | None, model: str,
                             kind: str, generation: int, origin: _ModelJobOrigin) -> Exception | None:
-        if previous is not None and not previous.done():
-            await asyncio.gather(asyncio.shield(previous), return_exceptions=True)
-        return await self._acquire_model(model, kind, generation, origin)
+        try:
+            if previous is not None and not previous.done():
+                await asyncio.gather(asyncio.shield(previous), return_exceptions=True)
+            return await self._acquire_model(model, kind, generation, origin)
+        except asyncio.CancelledError:
+            # Cancellation can arrive before acquisition starts, while a shared
+            # predecessor settles. That request still needs its terminal reply.
+            await self._reply_model_selection(model, kind, generation,
+                "Model selection was cancelled.", {
+                    "category": "cancelled", "code": "model_selection_cancelled",
+                    "message": "Model selection was cancelled.", "retryable": False})
+            raise
 
     def _model_idle(self, kind: str) -> bool:
         return (self._idle_but_for_notes() and (not self._meeting_notes_running
@@ -1153,7 +1206,6 @@ class Engine:
         loading_candidate = None
         failure = None
         cleanup_stop_started = False
-        notification = (kind, generation)
         startup_cleanup = kind == "cleanup" and origin is _ModelJobOrigin.startup
         try:
             if not fake_stt_enabled():
@@ -1223,9 +1275,7 @@ class Engine:
                             await self._close_replaced(old)
                     if startup_cleanup:
                         await self._prune_superseded_models()
-                    if notification in self._model_notifications:
-                        self._model_notifications.discard(notification)
-                        await self._send({"event": "model_set", "model": model, "kind": kind})
+                    await self._reply_model_selection(model, kind, generation)
                 finally:
                     self._adopting = False
         except asyncio.CancelledError:
@@ -1233,6 +1283,10 @@ class Engine:
                              and self.cleanup is None and self.config.cleanup_enabled)
             raise
         except _ModelSuperseded:
+            await self._reply_model_selection(model, kind, generation,
+                "Model selection changed before adoption.", {
+                    "category": "cancelled", "code": "model_selection_superseded",
+                    "message": "Model selection changed before adoption.", "retryable": False})
             # A -> B -> A shares A's verified result. Only fail an inactive
             # superseded entry; an obsolete job cannot poison the latest A.
             if result is not None and self._model_targets.get(kind) != model:
@@ -1270,11 +1324,10 @@ class Engine:
                     await self._close_replaced(candidate)
             if retry_cleanup and not self.shutdown.is_set():
                 self._start_cleanup_retry()
-            if failure is not None and notification in self._model_notifications:
-                self._model_notifications.discard(notification)
-                await self._error(SET_MODEL_SHUTTING_DOWN if self.shutdown.is_set()
-                                  else "set_model: Model could not be loaded. Retry or choose another model.")
-            self._model_notifications.discard(notification)
+            if failure is not None:
+                await self._reply_model_selection(model, kind, generation,
+                    SET_MODEL_SHUTTING_DOWN if self.shutdown.is_set()
+                    else "set_model: Model could not be loaded. Retry or choose another model.")
 
     async def _cmd_download_retry(self, msg: dict[str, Any]) -> None:
         model, kind, attempt = (msg.get(key) for key in ("model", "kind", "attempt"))
@@ -1733,6 +1786,7 @@ class Engine:
                     await writer.wait_closed()
             return
 
+        self._model_notifications.clear()
         self._client_gen += 1
         gen = self._client_gen
         self.writer = writer
@@ -1811,6 +1865,7 @@ class Engine:
         a displaced old handler must never discard a session the new client
         started (reconnect race)."""
         if self.writer is writer:
+            self._model_notifications.clear()
             self.writer = None
             # An admitted start may still be waiting for STT. Stop that task
             # before it can publish a session owned by a closed connection.
@@ -1929,10 +1984,13 @@ class Engine:
         except (ValueError, UnicodeDecodeError) as exc:
             await self._error(f"malformed control frame: {exc}")
             return
-        if self.shutdown.is_set():
-            await self._error("engine shutting down", msg.get("session"))
-            return
         cmd = msg.get("cmd")
+        if self.shutdown.is_set():
+            if cmd == "set_model":
+                await self._cmd_set_model(msg, wait=False)
+            else:
+                await self._error("engine shutting down", msg.get("session"))
+            return
         if self._adopting and cmd in (
                 "start", "reprocess", "transcribe_file", "meeting_transcribe",
                 "edit_text", "action_start", "action_observe", "meeting_notes"):
@@ -4148,24 +4206,48 @@ class Engine:
 
     async def _cmd_set_model(self, msg: dict[str, Any], *, wait: bool = True) -> None:
         model = msg.get("model")
-        if not isinstance(model, str) or not model:
-            await self._error("set_model: missing 'model'")
+        request_id = msg.get("request_id")
+        valid_model = isinstance(model, str) and bool(model)
+        info = models.lookup(model) if valid_model else None
+        kind = msg.get("kind") or (info.kind if info else "stt")
+        valid_kind = kind in ("stt", "cleanup")
+        if request_id is not None and (not isinstance(request_id, str) or not request_id
+                                      or len(request_id) > _MODEL_REQUEST_ID_MAX):
+            await self._set_model_error(model if valid_model else None,
+                kind if valid_kind else None, None, "set_model: invalid 'request_id'")
+            return
+        if not valid_model:
+            await self._set_model_error(None, kind if valid_kind else None, request_id,
+                                        "set_model: missing 'model'")
+            return
+        if not valid_kind:
+            await self._set_model_error(model, None, request_id, "set_model: unknown kind")
             return
         if (self.session is not None or self._reprocessing or self._transcribing
                 or self._meeting_notes_running or self._editing or self._planning
                 or self._action_session is not None):
-            await self._error("set_model: busy (dictation, transcription, edit, or action in progress)")
-            return
-        info = models.lookup(model)
-        kind = msg.get("kind") or (info.kind if info else "stt")
-        if kind not in ("stt", "cleanup"):
-            await self._error("set_model: unknown kind")
+            await self._set_model_error(model, kind, request_id,
+                "set_model: busy (dictation, transcription, edit, or action in progress)")
             return
         if self.shutdown.is_set():
-            await self._error(SET_MODEL_SHUTTING_DOWN)
+            await self._set_model_error(model, kind, request_id, SET_MODEL_SHUTTING_DOWN)
             return
+        # Duplicate same-target requests share a job, not their reply identity.
+        # Repeated IDs are deduplicated; excess distinct IDs are rejected before
+        # queuing, so a stalled acquisition cannot retain unbounded metadata.
+        previous = self._model_jobs.get((model, kind))
+        if (self._model_targets.get(kind) == model
+                and self._model_origins.get(kind) is _ModelJobOrigin.selection
+                and previous is not None and not previous.done()):
+            requests = self._model_notifications.get((kind, self._model_generation[kind]), [])
+            if request_id not in requests and len(requests) >= _MODEL_REQUESTS_MAX:
+                await self._set_model_error(model, kind, request_id,
+                    "set_model: too many pending selection requests")
+                return
         task = self._queue_model_job(model, kind)
-        self._model_notifications.add((kind, self._model_generation[kind]))
+        requests = self._model_notifications.setdefault((kind, self._model_generation[kind]), [])
+        if request_id not in requests:
+            requests.append(request_id)
         if wait:
             try:
                 error = await asyncio.shield(task)
@@ -6146,6 +6228,28 @@ class Engine:
             "meeting_id": meeting_id,
         })
 
+    async def _notes_cleanup(self, deadline: float) -> CleanupProcess | None:
+        # Speech-ready can precede verified writing construction. Wait only for
+        # pending startup/adoption, not a failed acquisition or a new retry:
+        # speech ready -> verification -> offline proxy -> existing load wait.
+        while not self._meeting_notes_cancel and not self.shutdown.is_set():
+            cleanup = self.cleanup or self._cleanup_loading
+            if cleanup is not None:
+                return cleanup
+            if (self.setup_complete or not self.config.cleanup_enabled
+                    or fake_stt_enabled() or self._clock() >= deadline):
+                return None
+            model = self._model_targets.get("cleanup", self.config.cleanup_model)
+            item = next((item for item in self._downloads.snapshot()["downloads"]
+                         if item["kind"] == "cleanup" and item["model"] == model), None)
+            if item is not None and item["state"] == "failed":
+                return None
+            job = self._model_jobs.get((model, "cleanup"))
+            if job is not None and job.done():
+                return None
+            await asyncio.sleep(_DOWNLOAD_POLL_S)
+        return None
+
     async def _run_meeting_notes(self, msg: dict[str, Any]) -> None:
         meeting_id = str(msg["meeting_id"])
         transcript = str(msg["transcript"])
@@ -6207,7 +6311,9 @@ class Engine:
                 # cleanup child respawned — recompute who gets demoted.
                 self._refresh_batch_priority()
                 model_ready_deadline = self._clock() + MEETING_NOTES_MODEL_READY_WAIT_S
-                cleanup = self.cleanup or self._cleanup_loading
+                cleanup = await self._notes_cleanup(model_ready_deadline)
+                if self._meeting_notes_cancel or self.shutdown.is_set():
+                    return None, "cancelled", None
                 if cleanup is None:
                     return (
                         None, "the local notes model is unavailable",
