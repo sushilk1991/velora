@@ -196,6 +196,142 @@ async def test_adoption_keeps_active(monkeypatch, tmp_path):
     await coordinator.close()
 
 
+@pytest.mark.parametrize("kind", ["stt", "cleanup"])
+async def test_aux_ready_keeps_primary(monkeypatch, tmp_path, kind):
+    # Auxiliary adoption completes B without replacing the serving primary A.
+    set_worker(monkeypatch, success_code())
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    try:
+        primary = await coordinator.ensure("example/primary", kind)
+        await coordinator.mark_loading("example/primary", kind, primary.attempt)
+        await coordinator.mark_ready("example/primary", kind, primary.attempt)
+        auxiliary = await coordinator.ensure("example/auxiliary", kind)
+        await coordinator.mark_loading("example/auxiliary", kind, auxiliary.attempt)
+        await coordinator.mark_aux_ready("example/auxiliary", kind, auxiliary.attempt)
+        snapshot = coordinator.snapshot()
+        items = snapshot["downloads"]
+        assert [item["state"] for item in items] == ["ready", "ready"]
+        assert all(item["active_model"] == "example/primary" for item in items)
+        assert items[1]["error"] is None and items[1]["retry_at"] is None
+        assert items[1]["retry_allowed"] is False and items[1]["restart_allowed"] is False
+        assert coordinator.snapshot() == snapshot
+        items[1]["active_model"] = "example/auxiliary"
+        assert coordinator.snapshot()["downloads"][1]["active_model"] == "example/primary"
+
+        # Later primary switches update every entry, including a reused primary.
+        latest = await coordinator.ensure("example/latest", kind)
+        await coordinator.mark_loading("example/latest", kind, latest.attempt)
+        await coordinator.mark_ready("example/latest", kind, latest.attempt)
+        assert all(item["active_model"] == "example/latest"
+                   for item in coordinator.snapshot()["downloads"])
+        await coordinator.mark_loading("example/primary", kind, primary.attempt)
+        await coordinator.mark_ready("example/primary", kind, primary.attempt)
+        await coordinator.ensure("example/next", kind)
+        assert all(item["active_model"] == "example/primary"
+                   for item in coordinator.snapshot()["downloads"])
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.parametrize("kind", ["stt", "cleanup"])
+async def test_aux_fail_keeps_primary(monkeypatch, tmp_path, kind):
+    # Failed live adoption leaves A serving and B recoverable, not loading.
+    set_worker(monkeypatch, success_code())
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    try:
+        primary = await coordinator.ensure("example/primary", kind)
+        await coordinator.mark_loading("example/primary", kind, primary.attempt)
+        await coordinator.mark_ready("example/primary", kind, primary.attempt)
+        auxiliary = await coordinator.ensure("example/auxiliary", kind)
+        await coordinator.mark_loading("example/auxiliary", kind, auxiliary.attempt)
+        error = {"category": "loading", "code": "load_failed",
+                 "message": "Load failed.", "retryable": False}
+        await coordinator.mark_failed("example/auxiliary", kind, auxiliary.attempt, error)
+        items = coordinator.snapshot()["downloads"]
+        assert all(item["active_model"] == "example/primary" for item in items)
+        assert items[1]["state"] == "failed" and items[1]["error"] == error
+        assert items[1]["retry_allowed"] is True
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.parametrize("kind", ["stt", "cleanup"])
+async def test_aux_ready_no_primary(monkeypatch, tmp_path, kind):
+    # Auxiliary readiness cannot invent a primary that has not been adopted.
+    set_worker(monkeypatch, success_code())
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    try:
+        primary = await coordinator.ensure("example/primary", kind)
+        await coordinator.mark_loading("example/primary", kind, primary.attempt)
+        auxiliary = await coordinator.ensure("example/auxiliary", kind)
+        await coordinator.mark_loading("example/auxiliary", kind, auxiliary.attempt)
+        await coordinator.mark_aux_ready("example/auxiliary", kind, auxiliary.attempt)
+        snapshot = coordinator.snapshot()
+        assert [item["state"] for item in snapshot["downloads"]] == ["loading", "ready"]
+        assert all(item["active_model"] is None for item in snapshot["downloads"])
+        assert coordinator.snapshot() == snapshot
+        await coordinator.mark_ready("example/primary", kind, primary.attempt)
+        assert all(item["active_model"] == "example/primary"
+                   for item in coordinator.snapshot()["downloads"])
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.parametrize("state", ["queued", "verifying", "failed"])
+async def test_aux_requires_loading(monkeypatch, tmp_path, state):
+    # Cache acquisition alone, or a failed adoption, cannot report live readiness.
+    set_worker(monkeypatch, success_code())
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    try:
+        if state == "queued":
+            attempt = coordinator._new_entry("example/auxiliary", "stt").item["attempt"]
+        else:
+            result = await coordinator.ensure("example/auxiliary", "stt")
+            attempt = result.attempt
+            if state == "failed":
+                await coordinator.mark_loading("example/auxiliary", "stt", attempt)
+                await coordinator.mark_failed("example/auxiliary", "stt", attempt, {
+                    "category": "loading", "code": "load_failed",
+                    "message": "Load failed.", "retryable": False})
+        snapshot = coordinator.snapshot()
+        with pytest.raises(DownloadError) as failure:
+            await coordinator.mark_aux_ready("example/auxiliary", "stt", attempt)
+        assert failure.value.code == "model_not_loading"
+        assert coordinator.snapshot() == snapshot
+    finally:
+        await coordinator.close()
+
+
+@pytest.mark.parametrize("action", ["loading", "ready", "failed"])
+async def test_aux_stale_rejected(monkeypatch, tmp_path, action):
+    # Replaced attempts cannot finish or fail the current live auxiliary load.
+    set_worker(monkeypatch, success_code())
+    coordinator = DownloadCoordinator(cache_root=tmp_path)
+    try:
+        old = await coordinator.ensure("example/auxiliary", "stt")
+        error = {"category": "loading", "code": "load_failed",
+                 "message": "Load failed.", "retryable": False}
+        await coordinator.mark_failed("example/auxiliary", "stt", old.attempt, error)
+        await coordinator.retry("example/auxiliary", "stt", old.attempt)
+        current = await coordinator.ensure("example/auxiliary", "stt")
+        await coordinator.mark_loading("example/auxiliary", "stt", current.attempt)
+        snapshot = coordinator.snapshot()
+        with pytest.raises(DownloadError) as failure:
+            if action == "loading":
+                await coordinator.mark_loading("example/auxiliary", "stt", old.attempt)
+            elif action == "ready":
+                await coordinator.mark_aux_ready("example/auxiliary", "stt", old.attempt)
+            else:
+                await coordinator.mark_failed("example/auxiliary", "stt", old.attempt, error)
+        assert failure.value.code == "stale_download_attempt"
+        assert failure.value.snapshot == snapshot
+        assert coordinator.snapshot() == snapshot
+        await coordinator.mark_aux_ready("example/auxiliary", "stt", current.attempt)
+        assert coordinator.snapshot()["downloads"][0]["state"] == "ready"
+    finally:
+        await coordinator.close()
+
+
 async def test_kind_conflict_rejected(monkeypatch, tmp_path):
     set_worker(monkeypatch, success_code())
     coordinator = DownloadCoordinator(cache_root=tmp_path)
@@ -403,10 +539,17 @@ except Exception as error:
         await coordinator.close()
 
 
-async def test_snapshot_schema_exact(monkeypatch, tmp_path):
+@pytest.mark.parametrize("adoption", ["transfer", "primary", "auxiliary"])
+async def test_snapshot_schema_exact(monkeypatch, tmp_path, adoption):
     set_worker(monkeypatch, success_code())
     coordinator = DownloadCoordinator(cache_root=tmp_path)
-    await coordinator.ensure("example/model", "stt")
+    result = await coordinator.ensure("example/model", "stt")
+    if adoption != "transfer":
+        await coordinator.mark_loading("example/model", "stt", result.attempt)
+        if adoption == "primary":
+            await coordinator.mark_ready("example/model", "stt", result.attempt)
+        else:
+            await coordinator.mark_aux_ready("example/model", "stt", result.attempt)
     snapshot = coordinator.snapshot()
     assert set(snapshot) == {"schema", "engine_id", "sequence", "snapshot", "downloads"}
     assert snapshot["schema"] == 1 and snapshot["snapshot"] is True
@@ -415,10 +558,11 @@ async def test_snapshot_schema_exact(monkeypatch, tmp_path):
     assert set(item) == {
         "model", "kind", "revision", "attempt", "state", "bytes_received", "bytes_total",
         "retry_index", "retry_at", "error", "resume", "retry_allowed", "restart_allowed", "active_model"}
-    assert item["state"] == "verifying"
-    assert item["active_model"] is None
+    expected_state = "verifying" if adoption == "transfer" else "ready"
+    assert item["state"] == expected_state
+    assert item["active_model"] == ("example/model" if adoption == "primary" else None)
     assert item["retry_at"] is None and item["error"] is None
     assert item["bytes_received"] == item["bytes_total"] == 9
-    item["state"] = "ready"
-    assert coordinator.snapshot()["downloads"][0]["state"] == "verifying"
+    item["state"] = "failed"
+    assert coordinator.snapshot()["downloads"][0]["state"] == expected_state
     await coordinator.close()

@@ -170,6 +170,15 @@ class DownloadCoordinator:
                 self._update(candidate, active_model=model_id)
         self._update(entry, state="ready", error=None, retry_at=None)
 
+    async def mark_aux_ready(self, model_id: str, kind: str, attempt: str) -> None:
+        # Call only after verified acquisition and live auxiliary adoption, e.g.
+        # a reprocessing backend. Completion leaves the serving primary unchanged.
+        entry = self._matching(model_id, kind, attempt)
+        if entry.result is None or entry.item["state"] != "loading":
+            raise _error("command", "model_not_loading", "Model has not entered live loading.")
+
+        self._update(entry, state="ready", error=None, retry_at=None)
+
     async def mark_failed(self, model_id: str, kind: str, attempt: str, error: dict) -> None:
         entry = self._matching(model_id, kind, attempt)
         await self._stop_entry(entry)
