@@ -76,6 +76,190 @@ async def wait_until(condition, failure: str, timeout_s: float = 10.0) -> None:
     raise AssertionError(failure)
 
 
+# Keep the production budget's proportion while real children serve IPC:
+# 20 s -> 1 s (too short), 30 s -> 1.5 s (cold load), 45 s -> 2.25 s.
+_LOAD_TIME_SCALE = 0.05
+_COLD_LOAD_DELAY_S = 30.0 * _LOAD_TIME_SCALE
+_FORMER_LOAD_BUDGET_S = 20.0 * _LOAD_TIME_SCALE
+_LOAD_TEST_WAIT_S = 5.0
+
+
+@pytest.fixture
+def _scaled_load_budget(monkeypatch: pytest.MonkeyPatch) -> float:
+    """Scale only the load wait; spawning, IPC, cancellation and reaps stay real."""
+    budget = cleanup_process_mod.LOAD_TIMEOUT_S * _LOAD_TIME_SCALE
+    monkeypatch.setattr(cleanup_process_mod, "LOAD_TIMEOUT_S", budget)
+    return budget
+
+
+@pytest.mark.parametrize("entrypoint", ["startup", "hibernated"])
+async def test_cold_load_full_budget(
+    _scaled_load_budget: float, entrypoint: str,
+) -> None:
+    """A progressing 30s-equivalent load must survive the former 20s cutoff."""
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        # The hibernated path exercises the threading-cancel load wait too.
+        if entrypoint == "hibernated":
+            await cleanup.load_async("warm prompt")
+            assert await cleanup.hibernate() is True
+        cleanup._worker_command = tuple([
+            *fixture_command(), "--load-delay", str(_COLD_LOAD_DELAY_S),
+        ])
+
+        if entrypoint == "hibernated":
+            assert await cleanup.ensure_loaded(cancel_event=threading.Event()) is True
+        else:
+            await cleanup.load_async("warm prompt")
+
+        assert cleanup.loaded and not cleanup.recovering
+        assert cleanup.recovery_deadline is None
+        assert (await cleanup.cleanup("cold load finished", "system")).text == (
+            "COLD LOAD FINISHED"
+        )
+    finally:
+        await cleanup.aclose()
+
+
+async def test_stuck_load_reaped(
+    monkeypatch: pytest.MonkeyPatch, _scaled_load_budget: float,
+) -> None:
+    """The larger budget still kills and reaps a native-style stuck load."""
+    spawned, _ = record_spawns(monkeypatch)
+    cleanup = CleanupProcess(
+        "fake", worker_command=[*fixture_command(), "--hang-every-load"],
+    )
+    loading = asyncio.create_task(cleanup.load_async("warm prompt"))
+    try:
+        # Do not manufacture TimeoutError by cancelling at the test's guard.
+        done, _ = await asyncio.wait(
+            {loading}, timeout=_scaled_load_budget + CALLER_WAIT_MAX_S,
+        )
+        assert loading in done, "stuck load exceeded its timeout and reap budget"
+        with pytest.raises(TimeoutError):
+            loading.result()
+
+        assert len(spawned) == 1
+        assert process_gone(spawned[0])
+        assert cleanup.pid is None and not cleanup.loaded
+        assert not cleanup.recovering
+        assert cleanup.recovery_deadline is None
+    finally:
+        loading.cancel()
+        with contextlib.suppress(asyncio.CancelledError, TimeoutError):
+            await loading
+        await cleanup.aclose()
+
+
+async def test_stuck_recovery_terminal(
+    monkeypatch: pytest.MonkeyPatch, _scaled_load_budget: float,
+) -> None:
+    """All bounded replacement failures escalate only after their children exit."""
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    escalated = asyncio.Event()
+    cleanup = CleanupProcess(
+        "fake", worker_command=fixture_command(), on_unhealthy=escalated.set,
+    )
+    try:
+        await cleanup.load_async("warm prompt")
+        cleanup._worker_command = tuple([*fixture_command(), "--hang-every-load"])
+        await cleanup.cleanup("__crash__", "system")
+        attempts = cleanup_process_mod.RECOVERY_ATTEMPTS
+        # Each timeout must finish its reap before another child can spawn.
+        await asyncio.wait_for(
+            escalated.wait(),
+            timeout=attempts * (_scaled_load_budget + CALLER_WAIT_MAX_S)
+            + _LOAD_TEST_WAIT_S,
+        )
+
+        assert cleanup.unhealthy and not cleanup.loaded
+        assert cleanup.pid is None
+        assert len(spawned) == 1 + attempts
+        assert all(process_gone(pid) for pid in spawned)
+        assert alive_at_spawn == []
+        assert cleanup.recovery_deadline is None
+        assert (await cleanup.cleanup("raw fallback", "system")).applied is False
+    finally:
+        await cleanup.aclose()
+
+
+async def test_cold_replacement_ready(
+    monkeypatch: pytest.MonkeyPatch, _scaled_load_budget: float,
+) -> None:
+    """The advertised recovery deadline covers a cold replacement's real load."""
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        cleanup._worker_command = tuple([
+            *fixture_command(), "--load-delay", str(_COLD_LOAD_DELAY_S),
+        ])
+        await cleanup.cleanup("__crash__", "system")
+        await wait_until(
+            lambda: cleanup.recovering and cleanup.pid is not None,
+            "replacement load never started", timeout_s=_LOAD_TEST_WAIT_S,
+        )
+        deadline = cleanup.recovery_deadline
+        assert deadline is not None
+        assert deadline - time.monotonic() > _COLD_LOAD_DELAY_S
+        await wait_until_loaded(cleanup, timeout_s=_LOAD_TEST_WAIT_S)
+
+        assert time.monotonic() < deadline
+        assert len(spawned) == 2
+        assert alive_at_spawn == []
+        assert process_gone(spawned[0])
+        assert cleanup.recovery_deadline is None
+        assert (await cleanup.cleanup("after cold recovery", "system")).text == (
+            "AFTER COLD RECOVERY"
+        )
+    finally:
+        await cleanup.aclose()
+        assert all(process_gone(pid) for pid in spawned)
+
+
+async def test_cold_recovery_interrupts(
+    monkeypatch: pytest.MonkeyPatch, _scaled_load_budget: float,
+) -> None:
+    """Dictation and shutdown interrupt cold recovery without waiting its budget."""
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    try:
+        await cleanup.load_async("warm prompt")
+        cleanup._worker_command = tuple([
+            *fixture_command(), "--load-delay", str(_COLD_LOAD_DELAY_S),
+        ])
+        await cleanup.cleanup("__crash__", "system")
+        await wait_until(
+            lambda: cleanup.recovering and cleanup.pid is not None,
+            "replacement load never started", timeout_s=_LOAD_TEST_WAIT_S,
+        )
+        # Interrupt after the old cutoff, while the progressing load is alive.
+        await asyncio.sleep(_FORMER_LOAD_BUDGET_S)
+        assert len(spawned) == 2 and cleanup.recovering
+        await asyncio.wait_for(cleanup.defer_recovery(), timeout=CALLER_WAIT_MAX_S)
+        assert cleanup.pid is None and not cleanup.loaded
+        assert cleanup._recovery_deferrals == 1 and not cleanup.unhealthy
+        assert all(process_gone(pid) for pid in spawned)
+
+        cleanup.resume_recovery()
+        await wait_until_loaded(cleanup, timeout_s=_LOAD_TEST_WAIT_S)
+        assert (await cleanup.cleanup("recovered", "system")).applied is True
+        await cleanup.cleanup("__crash__", "system")
+        await wait_until(
+            lambda: cleanup.recovering and cleanup.pid is not None,
+            "replacement load never started", timeout_s=_LOAD_TEST_WAIT_S,
+        )
+        await asyncio.wait_for(cleanup.aclose(), timeout=CALLER_WAIT_MAX_S)
+
+        assert cleanup.pid is None and not cleanup.loaded
+        assert cleanup._recovery_task is None
+        assert cleanup.recovery_deadline is None
+        assert alive_at_spawn == []
+        assert all(process_gone(pid) for pid in spawned)
+    finally:
+        await cleanup.aclose()
+
+
 async def test_cleanup_process_round_trip_and_prefix() -> None:
     cleanup = CleanupProcess("fake", worker_command=fixture_command())
     try:

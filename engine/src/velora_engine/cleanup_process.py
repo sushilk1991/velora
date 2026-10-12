@@ -50,7 +50,9 @@ from .decisions import (
 # parent does not kill a worker at the exact instant it is reporting its own
 # bounded fallback (observed as a 23.001s notes timeout at a 20s + 3s wall).
 WORKER_RESPONSE_GRACE_S = 0.2
-LOAD_TIMEOUT_S = 20.0
+# Cold child imports, model loading and prompt warm-up share this IPC budget.
+# Allow progressing loads past 20 s, but still kill a worker stuck at 45 s.
+LOAD_TIMEOUT_S = 45.0
 
 log = logging.getLogger("velora.cleanup_process")
 
