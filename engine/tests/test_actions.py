@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from test_server import connect, engine  # noqa: F401 — fixture reuse
+from test_server import connect, engine, local_transfers  # noqa: F401 — fixture reuse
 
 from velora_engine import action_skills, actions, server as server_module
 

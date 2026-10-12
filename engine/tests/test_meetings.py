@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock, Mock
 import numpy as np
 import pytest
 
-from test_server import AUDIO, connect, engine  # noqa: F401 — fixture reuse
+from test_server import AUDIO, connect, engine, local_transfers  # noqa: F401 — fixture reuse
 
 from velora_engine import media
 from velora_engine.media import MeetingAudio, SAMPLE_RATE
@@ -762,6 +762,7 @@ async def test_meeting_notes_wait_for_real_cleanup_startup_lifecycle(
         "cleanup_model": LoadingCleanup.model_id,
         "save_audio": False,
     })
+    config.save()
     cleanup = LoadingCleanup()
     eng = Engine(config, parent_pid=None, hard_exit=Mock())
     eng._stt_call = AsyncMock(return_value=None)
@@ -843,6 +844,7 @@ async def test_cleanup_startup_replacement_and_failure_close_only_their_worker(
             "cleanup_model": Cleanup.model_id,
             "save_audio": False,
         })
+        config.save()
         eng = Engine(config, parent_pid=None, hard_exit=Mock())
         eng._stt_call = AsyncMock(return_value=None)
         eng._prune_superseded_models = AsyncMock(return_value=None)
@@ -908,6 +910,7 @@ async def test_serve_waits_for_loading_cleanup_to_close_on_shutdown(home, monkey
         "cleanup_model": LoadingCleanup.model_id,
         "save_audio": False,
     })
+    config.save()
     cleanup = LoadingCleanup()
     eng = Engine(config, parent_pid=None, hard_exit=Mock())
     eng._stt_call = AsyncMock(return_value=None)
@@ -982,6 +985,7 @@ async def test_replaced_startup_cleanup_closes_once_when_shutdown_interrupts_clo
         "cleanup_model": StartupCleanup.model_id,
         "save_audio": False,
     })
+    config.save()
     startup = StartupCleanup()
     replacement = ReplacementCleanup()
     eng = Engine(config, parent_pid=None, hard_exit=Mock())

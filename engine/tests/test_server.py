@@ -41,6 +41,7 @@ from velora_engine.cleanup_process import CleanupProcess
 from velora_engine import formatting, protocol
 from velora_engine.config import Config
 from velora_engine.server import Engine
+from velora_engine.downloads import DownloadCoordinator, DownloadResult
 
 
 class Client:
@@ -57,9 +58,15 @@ class Client:
         await self.writer.drain()
 
     async def recv(self, timeout: float = 5.0) -> dict:
-        frame_type, payload = await asyncio.wait_for(protocol.read_frame(self.reader), timeout)
-        assert frame_type == protocol.FRAME_JSON
-        return json.loads(payload)
+        while True:
+            frame_type, payload = await asyncio.wait_for(protocol.read_frame(self.reader), timeout)
+            assert frame_type == protocol.FRAME_JSON
+            event = json.loads(payload)
+            # Recovery snapshots are covered by test_server_downloads; these
+            # older flow assertions retain their existing event expectations.
+            if event.get("event") == "download_status":
+                continue
+            return event
 
     async def recv_event(self, name: str, timeout: float = 5.0) -> dict:
         """Read events until `name` arrives (skipping partials etc.)."""
@@ -90,6 +97,19 @@ def test_config_patch_save_preserves_newer_unrelated_writer_values(home):
     assert projected["stt_model"] == "example/new-stt"
     assert projected["language"] == "hi"
     assert projected["future_app_key"] == {"keep": True}
+
+
+@pytest.fixture(autouse=True)
+def local_transfers(monkeypatch, home):
+    # Existing tests isolate backend loads, not transport. Preserve that seam
+    # with a verified local result; real coordinator framing has its own suite.
+    async def once(self, entry, restart):
+        return DownloadResult(str(home), None, entry.item["attempt"])
+
+    monkeypatch.setattr(DownloadCoordinator, "_once", once)
+    monkeypatch.setattr(server_mod, "DownloadCoordinator",
+                        lambda: DownloadCoordinator(cache_root=home / "downloads"))
+    monkeypatch.setattr(server_mod.models, "is_cached", lambda model: True)
 
 
 @pytest.fixture
@@ -1089,6 +1109,10 @@ async def test_stopping_a_retry_that_abandons_its_load_ends_it(
         monkeypatch.setattr(server_mod, "CleanupProcess", new_cleanup)
         await client.send_json({
             "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
+        await wait_for(lambda: retry.done(), timeout_s=STOP_HANG_S)
+        # Adoption now rechecks foreground ownership after transfer/reaping.
+        assert eng.cleanup is None
+        eng._starting = False
         await client.recv_event("model_set", timeout=STOP_HANG_S)
 
         assert retry.done()
@@ -1191,10 +1215,7 @@ async def test_set_model_during_the_startup_load_keeps_a_working_cleanup(
             await spawn(self)
 
         monkeypatch.setattr(CleanupProcess, "_spawn", recording_spawn)
-        # The app writes its pick to config.json, then sends set_model.
-        eng.config.data["cleanup_model"] = "fake-new"
-        eng.config.save(keys={"cleanup_model"})
-
+        # The recovery contract commits the pick only after live adoption.
         await client.send_json({
             "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
         error = await client.recv_event("error", timeout=5.0)
@@ -1836,9 +1857,10 @@ async def test_set_model_commits_first(home, fake_stt, monkeypatch, caplog):
 
         await client.send_json({
             "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
-        # The engine reads the EOF, and so closes, once set_model is done.
+        # Adoption is detached from dispatch; keep the client until its ack.
+        events = [await client.recv_event("model_set")]
         client.writer.write_eof()
-        events = await events_until_eof(client)
+        events += await events_until_eof(client)
 
         replies = [evt["event"] for evt in events if evt["event"] in {"model_set", "error"}]
         assert replies == ["model_set"]
@@ -1883,9 +1905,10 @@ async def test_set_model_save_fails(home, fake_stt, monkeypatch):
 
         await client.send_json({
             "cmd": "set_model", "kind": "cleanup", "model": "fake-new"})
-        # The engine reads the EOF, and so closes, once set_model is done.
+        # Adoption is detached from dispatch; keep the client until its error.
+        events = [await client.recv_event("error")]
         client.writer.write_eof()
-        events = await events_until_eof(client)
+        events += await events_until_eof(client)
 
         replies = [evt["event"] for evt in events if evt["event"] in {"model_set", "error"}]
         assert replies == ["error"]
@@ -1954,16 +1977,16 @@ async def test_shutdown_after_publish(home, fake_stt, monkeypatch):
         try:
             await asyncio.wait_for(closing_old.wait(), STOP_HANG_S)
             eng.shutdown.set()
-            done, _ = await asyncio.wait({serving}, timeout=SERVE_SHUTDOWN_MAX_S)
-            assert serving in done, f"serve() still running {SERVE_SHUTDOWN_MAX_S:.0f} s after shutdown"
-            assert closed == ["new"]  # the sweep took the published engine
+            await asyncio.sleep(0.05)
+            assert not serving.done()  # Shutdown owns the outstanding reap.
             release_old.set()
-            await asyncio.wait_for(setting, STOP_HANG_S)
+            await asyncio.wait_for(serving, SERVE_SHUTDOWN_MAX_S)
+            with pytest.raises(asyncio.CancelledError):
+                await setting
             eng.writer.close()
 
-            assert await events_until_eof(client) == [
-                {"event": "error", "message": server_mod.SET_MODEL_SHUTTING_DOWN}]
-            assert closed == ["new", "old"]
+            assert await events_until_eof(client) == []  # No late model_set.
+            assert closed == ["old", "new"]
             assert eng.cleanup is None
         finally:
             release_old.set()
@@ -1998,7 +2021,7 @@ async def test_action_model_wait_covers_a_delayed_recovery(home, monkeypatch):
     assert await asyncio.wait_for(waiting, 1.0) is True
 
 
-async def test_action_fails_now_when_a_recovery_outlasts_the_turn(
+async def test_action_caps_wait_when_forecast_exceeds_budget(
     home, monkeypatch
 ):
     monkeypatch.setattr(server_mod, "ACTION_MODEL_RECOVERY_WAIT_S", 0.05)
@@ -2009,8 +2032,11 @@ async def test_action_fails_now_when_a_recovery_outlasts_the_turn(
         loaded=False, unhealthy=False, recovering=True,
         recovery_deadline=clock[0] + 1.0)
 
-    # The clock never moves, so only the up-front check can end this wait.
-    assert await asyncio.wait_for(eng._wait_for_action_model_recovery(), 1.0) is False
+    waiting = asyncio.create_task(eng._wait_for_action_model_recovery())
+    await asyncio.sleep(0.05)
+    assert not waiting.done()  # Forecast alone does not reject a recoverable model.
+    clock[0] += 0.3
+    assert await asyncio.wait_for(waiting, 1.0) is False
 
 
 async def test_action_waits_out_a_retired_worker_exit(home, monkeypatch):
