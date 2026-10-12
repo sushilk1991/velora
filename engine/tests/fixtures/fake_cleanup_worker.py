@@ -28,6 +28,8 @@ PID_DIR_ENV = "VELORA_FAKE_WORKER_PID_DIR"
 ORPHAN_POLL_S = 0.2
 # A fixture worker leaked by a live pytest exits after this long.
 MAX_LIFETIME_S = 120.0
+# A gated load polls the test's release file without blocking IPC or shutdown.
+_LOAD_GATE_POLL_S = 0.01
 # A cleanup whose raw text holds "__notes__" answers with these meeting notes.
 NOTES_JSON = json.dumps({"summary": "Notes.", "decisions": [], "action_items": []})
 
@@ -115,6 +117,7 @@ async def main(
     model: str = "",
     fail_load_for: str | None = None,
     hang_marker_dir: Path | None = None,
+    load_gate: Path | None = None,
 ) -> None:
     sock = socket.socket(fileno=fd)
     sock.setblocking(False)
@@ -161,6 +164,12 @@ async def main(
                     wedge_like_native_code()
             if load_delay_s:
                 await asyncio.sleep(load_delay_s)
+            if load_gate is not None:
+                # Prove the load arrived, then hold completion for the test:
+                # load -> <gate parent>/<pid> -> wait for gate file -> response.
+                (load_gate.parent / str(os.getpid())).touch()
+                while not load_gate.exists():
+                    await asyncio.sleep(_LOAD_GATE_POLL_S)
             if fail_all_replacements is not None:
                 if fail_all_replacements.exists():
                     await respond(request_id, ok=False, error="injected persistent load failure")
@@ -328,6 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--prefix-delay", type=float, default=0.0)
     parser.add_argument("--hang-prefix", action="store_true")
     parser.add_argument("--load-delay", type=float, default=0.0)
+    parser.add_argument("--load-gate", type=Path)
     parser.add_argument("--hang-every-load", action="store_true")
     # A hung load or __hang__ cleanup touches <dir>/<pid> once it ignores
     # SIGTERM.
@@ -361,5 +371,6 @@ if __name__ == "__main__":
             args.model,
             args.fail_load_for,
             args.hang_marker_dir,
+            args.load_gate,
         )
     )

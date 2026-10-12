@@ -80,7 +80,6 @@ async def wait_until(condition, failure: str, timeout_s: float = 10.0) -> None:
 # 20 s -> 1 s (too short), 30 s -> 1.5 s (cold load), 45 s -> 2.25 s.
 _LOAD_TIME_SCALE = 0.05
 _COLD_LOAD_DELAY_S = 30.0 * _LOAD_TIME_SCALE
-_FORMER_LOAD_BUDGET_S = 20.0 * _LOAD_TIME_SCALE
 _LOAD_TEST_WAIT_S = 5.0
 
 
@@ -218,42 +217,49 @@ async def test_cold_replacement_ready(
 
 
 async def test_cold_recovery_interrupts(
-    monkeypatch: pytest.MonkeyPatch, _scaled_load_budget: float,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     """Dictation and shutdown interrupt cold recovery without waiting its budget."""
     spawned, alive_at_spawn = record_spawns(monkeypatch)
     cleanup = CleanupProcess("fake", worker_command=fixture_command())
+    load_gate = tmp_path / "load-release"
+
+    async def _wait_at_gate() -> None:
+        """The worker's pid marker proves it is serving the real load request."""
+        await wait_until(
+            lambda: cleanup.pid is not None and (tmp_path / str(cleanup.pid)).exists(),
+            "replacement load never reached its gate", timeout_s=_LOAD_TEST_WAIT_S,
+        )
+
     try:
         await cleanup.load_async("warm prompt")
         cleanup._worker_command = tuple([
-            *fixture_command(), "--load-delay", str(_COLD_LOAD_DELAY_S),
+            *fixture_command(), "--load-gate", str(load_gate),
         ])
         await cleanup.cleanup("__crash__", "system")
-        await wait_until(
-            lambda: cleanup.recovering and cleanup.pid is not None,
-            "replacement load never started", timeout_s=_LOAD_TEST_WAIT_S,
-        )
-        # Interrupt after the old cutoff, while the progressing load is alive.
-        await asyncio.sleep(_FORMER_LOAD_BUDGET_S)
+        await _wait_at_gate()
+        # The worker cannot finish before interruption, even if pytest is late.
         assert len(spawned) == 2 and cleanup.recovering
         await asyncio.wait_for(cleanup.defer_recovery(), timeout=CALLER_WAIT_MAX_S)
         assert cleanup.pid is None and not cleanup.loaded
         assert cleanup._recovery_deferrals == 1 and not cleanup.unhealthy
         assert all(process_gone(pid) for pid in spawned)
 
+        # Release only the resumed load, then gate the next one for shutdown.
         cleanup.resume_recovery()
+        await _wait_at_gate()
+        load_gate.touch()
         await wait_until_loaded(cleanup, timeout_s=_LOAD_TEST_WAIT_S)
         assert (await cleanup.cleanup("recovered", "system")).applied is True
+        load_gate.unlink()
         await cleanup.cleanup("__crash__", "system")
-        await wait_until(
-            lambda: cleanup.recovering and cleanup.pid is not None,
-            "replacement load never started", timeout_s=_LOAD_TEST_WAIT_S,
-        )
+        await _wait_at_gate()
         await asyncio.wait_for(cleanup.aclose(), timeout=CALLER_WAIT_MAX_S)
 
         assert cleanup.pid is None and not cleanup.loaded
         assert cleanup._recovery_task is None
         assert cleanup.recovery_deadline is None
+        assert len(spawned) == 4
         assert alive_at_spawn == []
         assert all(process_gone(pid) for pid in spawned)
     finally:
