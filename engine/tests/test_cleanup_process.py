@@ -2719,3 +2719,73 @@ async def test_session_cleanup_kills_only_leaked_fixture_workers(
             process.kill()
             process.wait()
         ours.close()
+
+
+def local_worker_command(record: Path) -> list[str]:
+    """Exercise production CLI/IPC and engine loading without native weights."""
+    return [sys.executable, str(Path(__file__).parent / "fixtures" /
+                               "offline_cleanup_worker.py"), str(record)]
+
+
+@pytest.mark.parametrize("entrypoint", ["startup", "recovery", "hibernate"])
+@pytest.mark.parametrize("missing", [False, True])
+async def test_process_local_source(monkeypatch, tmp_path: Path, entrypoint, missing):
+    """Every load uses one source; missing sources fail and leave no live child."""
+    import json
+
+    spawned, alive_at_spawn = record_spawns(monkeypatch)
+    monkeypatch.setattr(cleanup_process_mod, "RECOVERY_BACKOFF_S", 0.01)
+    source = tmp_path / "verified-model"
+    source.mkdir()
+    (source / "config.json").write_text('{"eos_token_id": 7}')
+    record = tmp_path / "loads.jsonl"
+    model_id = "mlx-community/Qwen3.5-4B-MLX-8bit"
+    # A cwd change after construction must not redirect any child load.
+    monkeypatch.chdir(tmp_path)
+    cleanup = CleanupProcess(model_id, local_model_path=Path(source.name),
+                             worker_command=local_worker_command(record))
+    monkeypatch.chdir(tmp_path.parent)
+    try:
+        if entrypoint != "startup":
+            await cleanup.load_async("warm prompt")
+        if entrypoint == "hibernate":
+            assert await cleanup.hibernate()
+        if missing:
+            (source / "config.json").unlink()
+            source.rmdir()
+        if entrypoint == "startup":
+            if missing:
+                with pytest.raises(RuntimeError) as error:
+                    await cleanup.load_async("warm prompt")
+                assert str(source) in str(error.value)
+                assert model_id in str(error.value)
+                assert "offline" in str(error.value).lower()
+            else:
+                await cleanup.load_async("warm prompt")
+        elif entrypoint == "hibernate":
+            assert await cleanup.ensure_loaded() is not missing
+        else:
+            cleanup._process.kill()
+            if missing:
+                await wait_until(lambda: cleanup.unhealthy,
+                                 "local recovery did not exhaust retries", timeout_s=15.0)
+            else:
+                await wait_until(lambda: len(spawned) == 2 and cleanup.loaded,
+                                 "local replacement never loaded", timeout_s=15.0)
+        assert cleanup.model_id == model_id
+        assert cleanup.loaded is not missing
+        if missing:
+            assert cleanup.pid is None
+            assert all(process_gone(pid) for pid in spawned)
+        else:
+            rows = [json.loads(row) for row in record.read_text().splitlines()]
+            expected_loads = 1 if entrypoint == "startup" else 2
+            assert rows == [item for _ in range(expected_loads) for item in [
+                {"model_id": model_id, "source": str(source)},
+                {"prompt": "warm prompt"},
+            ]]
+        assert alive_at_spawn == []
+    finally:
+        await cleanup.aclose()
+        assert cleanup.pid is None
+        assert all(process_gone(pid) for pid in spawned)

@@ -26,6 +26,7 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Iterator
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -517,8 +518,15 @@ class _PrefixCancelled(Exception):
 class CleanupEngine:
     """mlx-lm wrapper. All model access is serialized on one worker lock."""
 
-    def __init__(self, model_id: str) -> None:
+    def __init__(
+        self, model_id: str, *, local_model_path: str | Path | None = None,
+    ) -> None:
         self.model_id = model_id
+        # Explicit sources are coordinator-verified directories, never repo IDs.
+        # Pin relative paths now so later loads cannot follow a changed cwd.
+        self._local_model_path = (
+            Path(local_model_path).absolute() if local_model_path is not None else None
+        )
         self._model: Any = None
         self._tokenizer: Any = None
         # Immutable session prefix snapshot. Each generation receives a fresh
@@ -578,11 +586,31 @@ class CleanupEngine:
 
     # ---- loading -------------------------------------------------------
 
+    def _load_local_model(self, path: Path) -> tuple[Any, Any]:
+        """Bypass MLX's download-on-missing wrappers, including tokenizer loading."""
+        try:
+            if not path.is_dir():
+                raise FileNotFoundError("local model directory is missing or not a directory")
+
+            from mlx_lm.tokenizer_utils import load as load_tokenizer
+            from mlx_lm.utils import load_model
+
+            # Model -> local files; tokenizer -> local files only. Neither stage
+            # may fall back to the Hub if the verified source disappears.
+            model, config = load_model(path)
+            tokenizer = load_tokenizer(
+                path,
+                {"local_files_only": True, "trust_remote_code": False},
+                eos_token_ids=config.get("eos_token_id"),
+            )
+            return model, tokenizer
+        except Exception as exc:
+            raise RuntimeError(
+                f"Offline cleanup load failed for {self.model_id} at {path}: {exc}. "
+                "Reacquire the model before retrying."
+            ) from exc
+
     def load(self, warm_system_prompt: str | None = None) -> None:
-        from mlx_lm import load
-
-        from .models import ensure_downloaded
-
         # A load can replace the model/tokenizer on this object. Prompt-cache
         # arrays are model-specific even when two models share token IDs, so
         # never carry snapshots across a reload.
@@ -595,8 +623,15 @@ class CleanupEngine:
         self._option_label_ids = None
         self._decision_prefix = None
         t0 = time.perf_counter()
-        # Local path, not repo id: a cached model must load without network.
-        self._model, self._tokenizer = load(ensure_downloaded(self.model_id))
+        # Explicit sources never acquire; legacy callers retain model discovery.
+        if self._local_model_path is not None:
+            self.loaded = False
+            self._model, self._tokenizer = self._load_local_model(self._local_model_path)
+        else:
+            from mlx_lm import load
+            from .models import ensure_downloaded
+
+            self._model, self._tokenizer = load(ensure_downloaded(self.model_id))
         log.info("cleanup LLM loaded %s in %.2fs", self.model_id, time.perf_counter() - t0)
         if warm_system_prompt:
             t0 = time.perf_counter()
