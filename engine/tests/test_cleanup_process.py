@@ -2007,11 +2007,12 @@ async def test_respawn_backoff_reports_recovering_until_its_deadline(
     cleanup = CleanupProcess("fake", worker_command=command)
     try:
         await cleanup.load_async("warm prompt")
-        for _ in range(300):
-            if cleanup.recovery_deadline is not None:
-                break
-            await asyncio.sleep(0.01)
-        await asyncio.sleep(0.2)  # the lost worker is reaped; recovery waits
+        # The first loss reloads immediately; assert during the second loss's
+        # backoff, not a transient load deadline that clears once ready.
+        await wait_until(
+            lambda: cleanup._respawn_streak == 2 and cleanup._respawn_waiting,
+            "second worker loss did not enter respawn backoff",
+        )
         deadline = cleanup.recovery_deadline
         assert deadline is not None
         # The backoff, then the replacement's load.
